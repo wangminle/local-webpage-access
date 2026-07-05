@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -42,6 +43,19 @@ _FALLBACK_TEMPLATE = """\
 \tencode gzip
 }}
 """
+
+
+def _caddy_quote(path: str) -> str:
+    """对 Caddyfile 路径做安全引用（BUG-020）。
+
+    Caddyfile 把空白作为参数分隔符，含空格的路径（Windows 用户目录常见）
+    会被拆词导致 reload 失败。用反引号（Caddyfile 原始字符串）包裹最稳妥；
+    路径本身含反引号时回退到双引号 + 转义。
+    """
+    if "`" in path:
+        escaped = path.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return f"`{path}`"
 
 
 class StaticGateway:
@@ -95,7 +109,7 @@ class StaticGateway:
         template = self._load_template()
         content = template.format(
             host_port=host_port,
-            root=str(root).replace("\\", "/"),
+            root=_caddy_quote(str(root).replace("\\", "/")),
             site_id=instance_id,
         )
         path = self.site_config_path(instance_id)
@@ -234,11 +248,17 @@ class StaticGateway:
             )
 
     def _assemble_main_config(self) -> str:
-        """汇总所有已生成的站点配置为 Caddyfile。"""
-        lines = ["{", "\tadmin off", "}", ""]
+        """汇总所有已生成的站点配置为 Caddyfile。
+
+        不关闭 admin API：``caddy reload`` 通过 admin 端点（默认 :2019）推送
+        新配置，首次加载后关闭 admin 会让后续 enable/disable 的 reload 全部
+        失败（BUG-014）。import 路径用反引号引用，避免含空格的工作区路径被
+        拆词（BUG-020）。
+        """
+        lines: list[str] = []
         sites = sorted(self.ws.static_sites.glob("*.conf"))
         for site in sites:
-            lines.append(f"import {site.as_posix()}")
+            lines.append(f"import {_caddy_quote(site.as_posix())}")
         return "\n".join(lines) + "\n"
 
     # ---- builtin 进程管理 ---------------------------------------------------
@@ -320,8 +340,16 @@ class StaticGateway:
         pid = self._read_pid(instance_id)
         if pid is None:
             return
-        self._kill_process(pid)
-        self._clear_pid(instance_id)
+        if self._kill_process(pid):
+            self._clear_pid(instance_id)
+        else:
+            # kill 失败：保留 PID 文件，便于重试或人工排查（BUG-015）。
+            # 进程可能仍在占端口 / 锁 gateway.log，贸然清 PID 会让它成为无法追溯的孤儿。
+            log.warning(
+                "终止 %s 的静态服务 pid=%d 未成功，保留 PID 文件",
+                instance_id,
+                pid,
+            )
         write_instance_log(
             self.ws.apps,
             instance_id,
@@ -329,23 +357,52 @@ class StaticGateway:
             f"停止内置静态服务 pid={pid}",
         )
 
-    def _kill_process(self, pid: int) -> None:
+    def _kill_process(self, pid: int) -> bool:
+        """终止进程并等待其退出（BUG-015）。
+
+        成功（含"进程已经不在"）返回 True；超时未退出返回 False。不再仅凭
+        taskkill 的返回码判断——Windows 上非零退出码可能只是"进程已退出"，
+        因此以 ``_pid_alive`` 的轮询结果为准。
+        """
         try:
             if os.name == "nt":
-                subprocess.run(
+                result = subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     capture_output=True,
                     timeout=_KILL_TIMEOUT,
                 )
+                if result.returncode != 0:
+                    stderr = result.stderr.decode("utf-8", "replace").strip()
+                    log.warning(
+                        "taskkill pid=%d 返回 %d：%s",
+                        pid,
+                        result.returncode,
+                        stderr,
+                    )
+                    # 非零不一定是真失败（进程可能已退出），交给存活探测判定
             else:
                 try:
                     pgid = os.getpgid(pid)
                     os.killpg(pgid, signal.SIGTERM)
                 except ProcessLookupError:
-                    return
+                    return True  # 已经不在，视为成功
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            log.warning("终止进程 pid=%d 异常：%s", pid, exc)
+
+        if self._wait_for_exit(pid):
             log.info("已终止静态服务进程 pid=%d", pid)
-        except (ProcessLookupError, OSError):
-            pass
+            return True
+        log.warning("进程 pid=%d 未在 %ds 内退出，可能仍在运行", pid, _KILL_TIMEOUT)
+        return False
+
+    def _wait_for_exit(self, pid: int, *, timeout: float = _KILL_TIMEOUT) -> bool:
+        """轮询进程是否已真正退出。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self._pid_alive(pid):
+                return True
+            time.sleep(0.1)
+        return not self._pid_alive(pid)
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:

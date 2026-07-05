@@ -14,10 +14,15 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
+import urllib.request
 from pathlib import Path
 
+from local_web_access.compose import generate_compose, generate_env
 from local_web_access.config import Config
-from local_web_access.errors import BuildError, GatewayError, HostingError
+from local_web_access.docker_runtime import DockerRuntime
+from local_web_access.dockerfile_templates import generate_dockerfile
+from local_web_access.errors import BuildError, DockerError, GatewayError, HostingError
 from local_web_access.logging import get_logger, write_instance_log
 from local_web_access.models import (
     DesiredState,
@@ -27,7 +32,7 @@ from local_web_access.models import (
     Status,
 )
 from local_web_access.paths import Workspace
-from local_web_access.ports import PortAllocator, build_network_entry
+from local_web_access.ports import PortAllocator, build_network_entry, is_port_in_use
 from local_web_access.registry import Registry
 from local_web_access.static_gateway import StaticGateway
 
@@ -35,6 +40,9 @@ log = get_logger("hosting")
 
 _BUILD_TIMEOUT = 600
 _BUILD_OUTPUT_DIRS = ("dist", "build", "out", ".output", ".svelte-kit")
+# 容器启动后等待 HTTP 就绪的最大尝试次数与间隔（小主机性能弱，留足预热时间）
+_CONTAINER_HEALTH_ATTEMPTS = 30
+_CONTAINER_HEALTH_DELAY = 1.0
 # 同步到 public/ 时跳过的非静态文件
 _STATIC_SKIP = {
     "package.json",
@@ -60,23 +68,28 @@ def host_instance(
     registry: Registry,
     instance_id: str,
 ) -> InstanceManifest:
-    """根据 manifest 的 runtime/form 自动选择静态或前端流程。
+    """根据 manifest 的 runtime/form 自动选择静态、前端或容器流程。
 
-    Phase 2 只处理 ``shared-static`` 运行形态；容器形态留给 Phase 3。
+    * ``shared-static`` → :func:`host_static` 或 :func:`build_and_host_frontend`；
+    * ``docker-compose`` → :func:`host_container`（Phase 3）。
     """
     manifest = _load_manifest(workspace, instance_id)
-    form = _infer_form(manifest)
+    runtime = manifest.runtime.value
 
-    if manifest.runtime.value != "shared-static":
-        raise HostingError(
-            f"实例 {instance_id} 的 runtime={manifest.runtime.value} 暂不支持（Phase 2 仅支持 shared-static）",
-            instance_id=instance_id,
-            runtime=manifest.runtime.value,
-        )
+    if runtime == "shared-static":
+        form = _infer_form(manifest)
+        if form == "frontend-static":
+            return build_and_host_frontend(workspace, config, registry, instance_id)
+        return host_static(workspace, config, registry, instance_id)
 
-    if form == "frontend-static":
-        return build_and_host_frontend(workspace, config, registry, instance_id)
-    return host_static(workspace, config, registry, instance_id)
+    if runtime == "docker-compose":
+        return host_container(workspace, config, registry, instance_id)
+
+    raise HostingError(
+        f"实例 {instance_id} 的 runtime={runtime} 暂不支持",
+        instance_id=instance_id,
+        runtime=runtime,
+    )
 
 
 def stop_instance(
@@ -85,9 +98,11 @@ def stop_instance(
     registry: Registry,
     instance_id: str,
 ) -> InstanceManifest:
-    """停止（禁用）静态实例。"""
+    """停止实例：静态实例禁用网关，容器实例执行 ``docker compose stop``。"""
     manifest = _load_manifest(workspace, instance_id)
-    if manifest.runtime.value == "shared-static":
+    runtime = manifest.runtime.value
+
+    if runtime == "shared-static":
         gateway = StaticGateway(workspace, config)
         gateway.disable(instance_id)
         # 释放端口
@@ -103,14 +118,16 @@ def stop_instance(
         registry.update_status(instance_id, Status.STOPPED.value)
         registry.set_static_enabled(instance_id, False)
         registry.add_event(instance_id, "stop", "静态实例已停止")
-    else:
-        raise HostingError(
-            f"实例 {instance_id} 的 runtime={manifest.runtime.value} 暂不支持停止"
-            f"（Phase 2 仅支持 shared-static）",
-            instance_id=instance_id,
-            runtime=manifest.runtime.value,
-        )
-    return manifest
+        return manifest
+
+    if runtime == "docker-compose":
+        return stop_container(workspace, config, registry, instance_id)
+
+    raise HostingError(
+        f"实例 {instance_id} 的 runtime={runtime} 暂不支持停止",
+        instance_id=instance_id,
+        runtime=runtime,
+    )
 
 
 # ---- WBS-10 纯静态 ---------------------------------------------------------
@@ -252,6 +269,300 @@ def build_and_host_frontend(
         raise
 
 
+# ---- WBS-15 / WBS-16 容器托管（Node / Python / SQLite）---------------------
+
+
+def host_container(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> InstanceManifest:
+    """Docker Compose 容器实例托管流程（WBS-15 / WBS-16）。
+
+    流程：
+    1. 前置条件检查（Docker 可用）；
+    2. 若旧容器在跑，先 ``down`` 释放端口绑定（重建场景）；
+    3. 生成 Dockerfile（WBS-15.03 / 16.10）；
+    4. 分配/复用 host 端口（WBS-15.02 / 16.06）；
+    5. 生成 Compose + .env（WBS-15.04 / 16.08/09/11）；
+    6. ``build`` + ``up``（WBS-15.05/06 / 16.12）；
+    7. HTTP 健康检查（WBS-15.07 / 16.13）；
+    8. 观测 containerId/imageId；
+    9. 更新 manifest + registry（WBS-15.08/09 / 16.14）。
+
+    失败时标记 failed 并写诊断上下文（WBS-15.10 / 16.15）。
+    """
+    manifest = _load_manifest(workspace, instance_id)
+    if manifest.runtime.value != "docker-compose" or manifest.container is None:
+        raise HostingError(
+            f"实例 {instance_id} 不是容器实例（runtime={manifest.runtime.value}）",
+            instance_id=instance_id,
+            runtime=manifest.runtime.value,
+        )
+
+    # 1. Docker 前置条件（WBS-15.05 前置）
+    DockerRuntime.ensure_available()
+    runtime = DockerRuntime(workspace, registry)
+
+    registry.update_status(instance_id, Status.BUILDING.value)
+    build_log = workspace.app_logs(instance_id) / "build.log"
+    build_id = registry.add_build(
+        instance_id, status="running", log_path=str(build_log)
+    )
+
+    try:
+        # 2. 重建场景：先停掉旧容器，释放端口绑定
+        try:
+            if runtime.is_running(instance_id):
+                runtime.down(instance_id)
+        except DockerError as exc:  # 旧容器清理失败不阻塞重建，仅记录
+            log.warning("重建前清理旧容器失败（忽略）：%s", exc)
+
+        # 3. 生成 Dockerfile
+        generate_dockerfile(manifest, workspace)
+
+        # 4. 分配/复用端口
+        host_port = _ensure_container_port(config, registry, instance_id)
+
+        # 5. 生成 Compose + .env（含 SQLite DATABASE_URL 与 data/ 挂载）
+        generate_compose(manifest, workspace, host_port=host_port)
+        generate_env(manifest, workspace, host_port=host_port)
+
+        # 6. build + up
+        runtime.build(instance_id, build_id=build_id)
+        runtime.up(instance_id)
+    except Exception as exc:
+        # 端口回滚：build/up 失败时释放本轮回收的端口，避免 FAILED 实例长期
+        # 占住端口、连续失败耗尽端口池（BUG-016）。
+        try:
+            PortAllocator(config, registry).release_instance(instance_id)
+        except Exception:  # noqa: BLE001
+            log.warning("失败回滚释放实例 %s 端口失败", instance_id)
+        # DockerRuntime.build 成功/失败都会 finish 该 build 行；
+        # 这里只兜底"build 尚未执行就被打断"的情况（如生成文件/分配端口失败），
+        # 此时 build 行仍为 running，需要标记 failed。避免与 build() 双重 finish。
+        try:
+            latest = registry.list_builds(instance_id, limit=1)
+            if latest and latest[0]["id"] == build_id and latest[0]["status"] == "running":
+                registry.finish_build(
+                    build_id, status="failed", error_summary=str(exc)[:500]
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("兜底 finish build 失败")
+        _mark_failed(workspace, registry, instance_id, manifest, exc)
+        raise
+
+    # 7. 观测 containerId / imageId（失败不阻塞，仅记录 None）
+    container_id = _safe(lambda: runtime.container_id(instance_id))
+    image_id = _safe(lambda: runtime.image_id(instance_id))
+    manifest.container.containerId = container_id
+    manifest.container.imageId = image_id
+    manifest.container.hostPort = host_port
+
+    # 8. 更新 manifest + registry（先 upsert，再 record_health_check，
+    #    否则 upsert_from_manifest 会用 manifest 的 lastHealthCheckAt=None 覆盖 DB 时间戳）
+    entry = build_network_entry(
+        config, host_port, internal_port=manifest.container.internalPort
+    )
+    manifest.network = NetworkConfig(**entry)
+    manifest.status = Status.RUNNING
+    manifest.desiredState = DesiredState.RUNNING
+    manifest.lastError = None
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+    registry.upsert_from_manifest(manifest)
+    registry.update_status(
+        instance_id,
+        Status.RUNNING.value,
+        desired_state=DesiredState.RUNNING.value,
+    )
+    registry.record_started(instance_id)
+
+    # 9. 健康检查（best-effort，不阻塞 RUNNING 标记；放在 registry 写回之后，
+    #    避免被 upsert_from_manifest 覆盖）
+    if _wait_for_http(host_port):
+        registry.record_health_check(instance_id)
+    registry.add_event(
+        instance_id,
+        "start",
+        f"容器实例已启动（host_port={host_port}）",
+    )
+    log.info("容器实例 %s 已启动，端口 %d", instance_id, host_port)
+    return manifest
+
+
+def start_container(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> InstanceManifest:
+    """轻量启动已部署的容器实例：``docker compose start``（不重建镜像）。
+
+    与 :func:`host_container`（全量部署/重建）的区别：
+    - 不重新生成 Dockerfile/Compose/.env、不 ``build``；
+    - 仅 ``compose start`` 已存在的容器，复用已登记端口与 lanUrl。
+
+    前提：实例此前已被 :func:`host_container` 部署过（``containerId`` 已落库）。
+    若从未部署，应走 :func:`host_instance` 全量流程。
+    """
+    manifest = _load_manifest(workspace, instance_id)
+    if manifest.runtime.value != "docker-compose" or manifest.container is None:
+        raise HostingError(
+            f"实例 {instance_id} 不是容器实例（runtime={manifest.runtime.value}）",
+            instance_id=instance_id,
+            runtime=manifest.runtime.value,
+        )
+
+    DockerRuntime.ensure_available()
+    runtime = DockerRuntime(workspace, registry)
+
+    # 已在跑：直接同步状态，避免重复 start
+    if runtime.is_running(instance_id):
+        log.info("容器实例 %s 已在运行，跳过 start", instance_id)
+    else:
+        runtime.start(instance_id)
+
+    # 端口：复用此前部署登记的 hostPort
+    host_port = manifest.container.hostPort
+    if not host_port:
+        host_port = _ensure_container_port(config, registry, instance_id)
+        manifest.container.hostPort = host_port
+
+    # 观测 containerId / imageId
+    container_id = _safe(lambda: runtime.container_id(instance_id)) or manifest.container.containerId
+    image_id = _safe(lambda: runtime.image_id(instance_id)) or manifest.container.imageId
+    manifest.container.containerId = container_id
+    manifest.container.imageId = image_id
+
+    # 更新 manifest + registry
+    entry = build_network_entry(
+        config, host_port, internal_port=manifest.container.internalPort
+    )
+    manifest.network = NetworkConfig(**entry)
+    manifest.status = Status.RUNNING
+    manifest.desiredState = DesiredState.RUNNING
+    manifest.lastError = None
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+    registry.upsert_from_manifest(manifest)
+    registry.update_status(
+        instance_id,
+        Status.RUNNING.value,
+        desired_state=DesiredState.RUNNING.value,
+    )
+    registry.record_started(instance_id)
+
+    # 健康检查（best-effort，放在 registry 写回之后避免被覆盖）
+    if _wait_for_http(host_port):
+        registry.record_health_check(instance_id)
+    registry.add_event(instance_id, "start", f"容器实例已启动（start，host_port={host_port}）")
+    log.info("容器实例 %s 已 start，端口 %d", instance_id, host_port)
+    return manifest
+
+
+def stop_container(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> InstanceManifest:
+    """停止容器实例：``docker compose stop``，**不删容器、不释放端口**。
+
+    端口保留是为了 ``start`` 恢复时复用同一 lanUrl（WBS-17.09）。
+    彻底清理用 :func:`stop_instance` 之外的 ``down``/``remove``（WBS-17）。
+    """
+    manifest = _load_manifest(workspace, instance_id)
+    if manifest.runtime.value != "docker-compose":
+        raise HostingError(
+            f"实例 {instance_id} 不是容器实例",
+            instance_id=instance_id,
+            runtime=manifest.runtime.value,
+        )
+    runtime = DockerRuntime(workspace, registry)
+    runtime.stop(instance_id)
+
+    manifest.status = Status.STOPPED
+    manifest.desiredState = DesiredState.STOPPED
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+    registry.upsert_from_manifest(manifest)
+    registry.update_status(
+        instance_id,
+        Status.STOPPED.value,
+        desired_state=DesiredState.STOPPED.value,
+    )
+    # 注意：不释放端口，start 恢复时复用
+    return manifest
+
+
+# ---- 容器辅助 --------------------------------------------------------------
+
+
+def _ensure_container_port(
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> int:
+    """容器端口分配：优先复用已登记端口，否则新分配。
+
+    复用保证重建后 lanUrl 稳定；端口被外部占用时回退到新分配。复用登记用
+    :meth:`Registry.allocate_port` 的并发安全语义：若旧端口已被其他实例抢走
+    （BUG-017），返回 False，回退到全新分配。
+    """
+    allocator = PortAllocator(config, registry)
+    row = registry.get_container(instance_id)
+    existing = row.get("host_port") if row else None
+    if existing and not is_port_in_use(int(existing)):
+        if registry.allocate_port(instance_id, int(existing)):
+            log.info("复用容器实例 %s 的端口 %d", instance_id, existing)
+            return int(existing)
+        log.warning(
+            "实例 %s 的旧端口 %d 已被其他实例占用，重新分配",
+            instance_id,
+            existing,
+        )
+    # 全新分配：先清掉该实例可能残留的端口登记
+    allocator.release_instance(instance_id)
+    return allocator.allocate(instance_id)
+
+
+def _wait_for_http(
+    host_port: int,
+    *,
+    attempts: int = _CONTAINER_HEALTH_ATTEMPTS,
+    delay: float = _CONTAINER_HEALTH_DELAY,
+) -> bool:
+    """轮询 ``http://127.0.0.1:<port>/`` 直到响应或超时。
+
+    容器刚 up 时进程可能还在预热，需要等待。返回是否最终成功。
+    """
+    for _ in range(max(1, attempts)):
+        if _http_ok(host_port):
+            return True
+        time.sleep(delay)
+    return False
+
+
+def _http_ok(host_port: int, *, timeout: float = 2.0) -> bool:
+    """单次 HTTP GET 健康探测（2xx/3xx 视为成功）。"""
+    url = f"http://127.0.0.1:{host_port}/"
+    try:
+        resp = urllib.request.urlopen(url, timeout=timeout)
+        return 200 <= resp.status < 400
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _safe(fn):
+    """执行可能抛 DockerError 的观测调用，失败返回 None。"""
+    try:
+        return fn()
+    except DockerError:
+        return None
+
+
 # ---- 共享：启用静态网关 ----------------------------------------------------
 
 
@@ -275,7 +586,13 @@ def _enable_static(
     host_port = allocator.allocate(instance_id)
 
     backend = gateway.detect_backend()
-    gateway.enable(instance_id, host_port, public_dir)
+    try:
+        gateway.enable(instance_id, host_port, public_dir)
+    except Exception:
+        # 网关启用失败：释放刚分配的端口，避免连续失败耗尽端口池（BUG-016）。
+        # gateway.enable 内部已对其子进程/站点配置做了回滚，端口是唯一残留。
+        allocator.release(host_port)
+        raise
 
     manifest.static = StaticConfig(
         root="public",
@@ -460,6 +777,9 @@ __all__ = [
     "host_instance",
     "host_static",
     "build_and_host_frontend",
+    "host_container",
+    "start_container",
+    "stop_container",
     "stop_instance",
     "find_index_html",
     "find_build_output",

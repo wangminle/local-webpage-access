@@ -169,13 +169,13 @@ def scan(
 
 @app.command()
 def start(instance_id: str = typer.Argument(..., help="要启动的实例 ID")) -> None:
-    """启动实例（Phase 2 支持静态 / 前端形态）。"""
-    from local_web_access.hosting import host_instance
+    """启动实例（静态 / 前端 / 容器统一入口）。"""
+    from local_web_access.lifecycle import start_instance
 
     try:
         ws, config, reg = _open_workspace_registry()
         try:
-            manifest = host_instance(ws, config, reg, instance_id)
+            manifest = start_instance(ws, config, reg, instance_id)
         finally:
             reg.close()
         typer.secho(f"已启动实例：{instance_id}", fg=typer.colors.GREEN)
@@ -193,13 +193,13 @@ def start(instance_id: str = typer.Argument(..., help="要启动的实例 ID")) 
 
 @app.command()
 def stop(instance_id: str = typer.Argument(..., help="要停止的实例 ID")) -> None:
-    """停止实例（禁用静态路由 / 释放端口）。"""
-    from local_web_access.hosting import stop_instance
+    """停止实例（禁用静态路由 / 容器 compose stop，不删数据）。"""
+    from local_web_access.lifecycle import stop_instance_op
 
     try:
         ws, config, reg = _open_workspace_registry()
         try:
-            stop_instance(ws, config, reg, instance_id)
+            stop_instance_op(ws, config, reg, instance_id)
         finally:
             reg.close()
         typer.secho(f"已停止实例：{instance_id}", fg=typer.colors.GREEN)
@@ -207,6 +207,211 @@ def stop(instance_id: str = typer.Argument(..., help="要停止的实例 ID")) -
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+@app.command()
+def restart(instance_id: str = typer.Argument(..., help="要重启的实例 ID")) -> None:
+    """重启实例（先停再启，容器走轻量 compose start）。"""
+    from local_web_access.lifecycle import restart_instance
+
+    try:
+        ws, config, reg = _open_workspace_registry()
+        try:
+            restart_instance(ws, config, reg, instance_id)
+        finally:
+            reg.close()
+        typer.secho(f"已重启实例：{instance_id}", fg=typer.colors.GREEN)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def rebuild(instance_id: str = typer.Argument(..., help="要重建的实例 ID")) -> None:
+    """重建实例（强制重新构建镜像 / 产物，经构建队列限流）。"""
+    from local_web_access.lifecycle import rebuild_instance
+
+    try:
+        ws, config, reg = _open_workspace_registry()
+        try:
+            rebuild_instance(ws, config, reg, instance_id)
+        finally:
+            reg.close()
+        typer.secho(f"已重建实例：{instance_id}", fg=typer.colors.GREEN)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def remove(
+    instance_id: str = typer.Argument(..., help="要移除的实例 ID"),
+    purge: bool = typer.Option(False, "--purge", help="同时删除 apps/<id>/ 磁盘文件"),
+    force: bool = typer.Option(
+        False, "--force", help="purge 时强制删除非空 data/（默认保护）"
+    ),
+) -> None:
+    """移除实例（默认保留磁盘文件与 data/，仅删 registry 索引）。"""
+    from local_web_access.lifecycle import remove_instance
+
+    try:
+        ws, config, reg = _open_workspace_registry()
+        try:
+            remove_instance(ws, config, reg, instance_id, purge=purge, force=force)
+        finally:
+            reg.close()
+        if purge:
+            typer.secho(f"已移除实例（含磁盘文件）：{instance_id}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(
+                f"已移除实例（保留磁盘文件）：{instance_id}", fg=typer.colors.GREEN
+            )
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def logs(
+    instance_id: str = typer.Argument(..., help="实例 ID"),
+    category: str = typer.Option(
+        "run", "--category", "-c", help="日志分类：build/run/gateway/import/scan"
+    ),
+    tail: int = typer.Option(200, "--tail", "-n", help="显示最近 N 行"),
+) -> None:
+    """查看实例日志（默认 run，可选 build/gateway 等）。"""
+    from local_web_access.logs import list_logs, read_log
+
+    try:
+        ws, _config, reg = _open_workspace_registry()
+        try:
+            text = read_log(ws, instance_id, category, tail=tail)
+            if not text:
+                available = [i.category for i in list_logs(ws, instance_id)]
+                hint = f"（可用分类：{', '.join(available) or '无'}）" if available else ""
+                typer.secho(
+                    f"日志 {category}.log 不存在或为空{hint}", fg=typer.colors.YELLOW
+                )
+            else:
+                typer.echo(text)
+        finally:
+            reg.close()
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def status(
+    instance_id: str = typer.Argument(None, help="实例 ID（省略则显示全部）"),
+) -> None:
+    """查看实例状态（省略 ID 时显示所有实例）。"""
+    from local_web_access.status import all_statuses, instance_status, sync_status
+
+    try:
+        ws, config, reg = _open_workspace_registry()
+        try:
+            sync_status(ws, config, reg, instance_id)
+            if instance_id:
+                statuses = [instance_status(ws, config, reg, instance_id)]
+            else:
+                statuses = all_statuses(ws, config, reg)
+        finally:
+            reg.close()
+
+        if not statuses:
+            typer.echo("（暂无实例）")
+            return
+        typer.echo(
+            f"{'ID':20} {'KIND':8} {'RUNTIME':16} {'STATUS':10} {'DESIRED':10} {'PORT':6} NAME"
+        )
+        for s in statuses:
+            port = str(s.host_port) if s.host_port else "-"
+            typer.echo(
+                f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} "
+                f"{s.status:10} {s.desired_state:10} {port:6} {s.name}"
+            )
+            if s.last_error:
+                typer.secho(f"  ↳ lastError: {s.last_error}", fg=typer.colors.RED)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def stats(
+    instance_id: str = typer.Argument(None, help="实例 ID（省略则显示全部+整机）"),
+) -> None:
+    """查看资源占用（整机 + 实例目录/容器资源）。"""
+    from local_web_access.stats import (
+        all_instance_resources,
+        host_resources,
+        instance_resources,
+    )
+
+    try:
+        ws, config, reg = _open_workspace_registry()
+        try:
+            host = host_resources(root=ws.root)
+            if instance_id:
+                infos = [instance_resources(ws, config, reg, instance_id)]
+            else:
+                infos = all_instance_resources(ws, config, reg)
+        finally:
+            reg.close()
+
+        # 整机
+        typer.secho("== 整机 ==", fg=typer.colors.CYAN)
+        if host.mem_total_bytes is not None:
+            mem_used = host.mem_used_bytes or 0
+            typer.echo(
+                f"  内存：{_fmt_bytes(mem_used)} / {_fmt_bytes(host.mem_total_bytes)}"
+            )
+        else:
+            typer.echo("  内存：（非 Linux，已跳过）")
+        if host.load_avg_1m is not None:
+            typer.echo(f"  负载：1m={host.load_avg_1m:.2f} 5m={host.load_avg_5m:.2f}")
+        typer.echo(
+            f"  磁盘：{_fmt_bytes(host.disk_used_bytes or 0)} / "
+            f"{_fmt_bytes(host.disk_total_bytes or 0)}"
+        )
+
+        # 实例
+        typer.secho("== 实例 ==", fg=typer.colors.CYAN)
+        if not infos:
+            typer.echo("（暂无实例）")
+            return
+        for info in infos:
+            typer.echo(f"  {info.instance_id}")
+            typer.echo(f"    源码：{_fmt_bytes(info.source_size_bytes)}")
+            typer.echo(f"    public：{_fmt_bytes(info.public_size_bytes)}")
+            typer.echo(f"    data：{_fmt_bytes(info.data_size_bytes)}")
+            if info.image_size_bytes is not None:
+                typer.echo(f"    镜像：{_fmt_bytes(info.image_size_bytes)}")
+            if info.last_memory_bytes is not None:
+                typer.echo(f"    容器内存：{_fmt_bytes(info.last_memory_bytes)}")
+            if info.last_cpu_percent is not None:
+                typer.echo(f"    容器CPU：{info.last_cpu_percent:.2f}%")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+def _fmt_bytes(n: int | None) -> str:
+    """字节数格式化为人类可读。"""
+    if n is None:
+        return "-"
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(n) < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}PiB"
 
 
 @app.command("list")

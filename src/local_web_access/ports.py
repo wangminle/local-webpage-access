@@ -129,7 +129,12 @@ class PortAllocator:
             if probe_host and is_port_in_use(port):
                 log.debug("端口 %d 已被宿主机占用，跳过", port)
                 continue
-            self.registry.allocate_port(instance_id, port)
+            # 并发安全登记：若端口在登记前被其他实例抢走（BUG-017），
+            # allocate_port 返回 False，跳到下一个候选端口重试。
+            if not self.registry.allocate_port(instance_id, port):
+                log.debug("端口 %d 被其他实例抢先占用，跳过", port)
+                allocated.add(port)
+                continue
             log.info("为实例 %s 分配端口 %d", instance_id, port)
             return port
 

@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from local_web_access.errors import PathError
-from local_web_access.paths import Workspace, find_workspace_root, require_workspace
+from local_web_access.paths import (
+    Workspace,
+    find_workspace_root,
+    require_workspace,
+    validate_instance_id,
+)
 
 
 def test_workspace_top_level_dirs(workspace: Workspace) -> None:
@@ -83,3 +88,53 @@ def test_require_workspace_raises(tmp_path: Path) -> None:
 def test_workspace_resolves_to_absolute(tmp_path: Path) -> None:
     ws = Workspace(tmp_path / "relative" / ".." / "relative")
     assert ws.root.is_absolute()
+
+
+# ---- 回归测试：BUG-025 ----------------------------------------------------
+#
+# BUG-025：``app_dir`` / 锁路径直接用 ``instance_id`` 拼接，``..`` / ``/`` 等
+#          片段会让 ``shutil.rmtree(app_dir(".."))`` 越界删工作区根。修复后
+#          ``validate_instance_id`` 在所有路径 sink 前拦截非法 ID。
+
+
+@pytest.mark.parametrize("iid", ["demo", "my-app", "a", "inst-1", "abc123"])
+def test_validate_instance_id_accepts_slug(iid: str) -> None:
+    assert validate_instance_id(iid) == iid
+
+
+@pytest.mark.parametrize(
+    "iid",
+    [
+        "..",
+        ".",
+    "../secret",
+        "a/b",
+        "a\\b",
+        ".hidden",
+        "trailing.",
+        "double..dot",
+        "UPPER",
+        "with space",
+        "",
+        "emoji-😄",
+    ],
+)
+def test_validate_instance_id_rejects_traversal(iid: str) -> None:
+    with pytest.raises(PathError):
+        validate_instance_id(iid)
+
+
+@pytest.mark.parametrize(
+    "sink",
+    ["app_dir", "app_gateway_config", "app_data", "app_manifest_path"],
+)
+def test_app_sinks_reject_traversal_id(workspace: Workspace, sink: str) -> None:
+    """BUG-025：所有路径 sink 遇非法 ID 必抛 PathError，绝不拼接越界路径。"""
+    with pytest.raises(PathError):
+        getattr(workspace, sink)("..")
+
+
+def test_app_dir_valid_id_stays_under_apps(workspace: Workspace) -> None:
+    """BUG-025：合法 ID 解析后必须落在 apps/ 之内。"""
+    resolved = workspace.app_dir("demo").resolve()
+    assert resolved.is_relative_to(workspace.apps.resolve())

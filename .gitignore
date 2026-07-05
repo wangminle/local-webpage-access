@@ -1,0 +1,65 @@
+# ---- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 打包 / 安装产物（hatchling / pip）
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# ---- 测试与质量工具 ---------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+tmp-test/
+
+# ---- 编辑器与 IDE -----------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- 操作系统 ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地 lwa 工作区（在仓库根 init/import 测试时生成，勿提交）---------------
+/local-web.yml
+/inbox/
+/apps/
+/registry/
+/run/
+/logs/
+/static-gateway/
+/manager/
+/skills/
+/templates/
+
+# SQLite 运行时文件
+*.db-shm
+*.db-wal
+
+# ---- 敏感配置 ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.local.yml

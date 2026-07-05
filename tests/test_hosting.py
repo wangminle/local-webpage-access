@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from local_web_access.config import Config, PortPool
-from local_web_access.errors import BuildError, HostingError
+from local_web_access.errors import BuildError, DockerError, HostingError
 from local_web_access.hosting import (
     build_and_host_frontend,
     find_build_output,
@@ -260,17 +260,30 @@ def test_host_instance_dispatches_static(
     stop_instance(workspace, config, registry, "demo")
 
 
-def test_host_instance_rejects_container(
-    workspace: Workspace, registry: Registry, config: Config
+def test_host_instance_dispatches_container(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:
+    """Phase 3：host_instance 对 docker-compose 实例应派发到 host_container。
+
+    强制 Docker 不可用，前置检查会抛 DockerError（而非旧的 HostingError），
+    从而证明派发确实走进了 host_container 分支。
+    """
     from tests._helpers import make_container_manifest
+
+    def _unavailable():
+        raise DockerError("Docker 不可用")
+
+    monkeypatch.setattr(
+        "local_web_access.hosting.DockerRuntime.ensure_available", staticmethod(_unavailable)
+    )
 
     workspace.ensure_app_dirs("api")
     m = make_container_manifest("api")
     m.save(workspace.app_manifest_path("api"))
     registry.upsert_from_manifest(m)
 
-    with pytest.raises(HostingError, match="shared-static"):
+    # Docker 不可用 → 前置检查抛 DockerError（证明已派发到 host_container）
+    with pytest.raises(DockerError, match="不可用"):
         host_instance(workspace, config, registry, "api")
 
 
@@ -487,10 +500,14 @@ def test_host_static_restart_kills_old_process(
     stop_instance(workspace, config, registry, "demo")
 
 
-def test_stop_instance_rejects_container_runtime(
-    workspace: Workspace, registry: Registry, config: Config
+def test_stop_instance_dispatches_container_runtime(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:
-    """BUG-006：对容器实例 stop 应明确报错，而不是静默无操作。"""
+    """Phase 3：stop 对 docker-compose 实例派发到 compose stop。
+
+    BUG-006 原要求"对容器实例 stop 明确报错而非静默无操作"——Phase 3 起
+    容器实例已支持 stop，故断言改为：确实调用了 docker compose stop。
+    """
     from tests._helpers import make_container_manifest
 
     workspace.ensure_app_dirs("api")
@@ -498,5 +515,119 @@ def test_stop_instance_rejects_container_runtime(
     m.save(workspace.app_manifest_path("api"))
     registry.upsert_from_manifest(m)
 
-    with pytest.raises(HostingError, match="暂不支持"):
-        stop_instance(workspace, config, registry, "api")
+    stopped = {"called": False}
+
+    class _FakeRuntime:
+        def __init__(self, *a, **kw):
+            pass
+
+        def stop(self, iid, **kw):
+            stopped["called"] = True
+
+    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRuntime)
+    manifest = stop_instance(workspace, config, registry, "api")
+    assert stopped["called"] is True
+    assert manifest.status == Status.STOPPED
+    row = registry.get_instance("api")
+    assert row["status"] == "stopped"
+    assert row["desired_state"] == "stopped"
+
+
+# ---- 回归测试：BUG-016 ----------------------------------------------------
+#
+# BUG-016：网关启用失败后已分配端口未回滚。_enable_static 在 gateway.enable
+# 抛错时只往上传播异常，端口留在 registry；连续失败耗尽端口池。修复后失败
+# 路径释放刚分配的端口。host_container 在 build/up 失败时同理释放实例端口。
+
+
+def test_enable_static_releases_port_on_gateway_failure(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-016：gateway.enable 抛错时，_enable_static 应释放刚分配的端口。"""
+    from local_web_access.hosting import _enable_static
+    from local_web_access.models import EntryConfig
+    from local_web_access.static_gateway import StaticGateway
+
+    _seed_static_instance(workspace, registry, "demo")
+    public = workspace.app_public("demo")
+    public.mkdir(parents=True, exist_ok=True)
+    manifest = build_manifest_from_detection(
+        instance_id="demo",
+        display_name="Demo",
+        detection=DetectionResult(
+            kind=Kind.STATIC,
+            runtime=Runtime.SHARED_STATIC,
+            servingMode=ServingMode.SHARED_STATIC,
+            resourceProfile=ResourceProfile.TINY,
+            form="static",
+            confidence="high",
+        ),
+        workspace=workspace,
+    )
+
+    # 让 gateway.enable 模拟失败
+    def _boom(self, *a, **kw):
+        raise RuntimeError("gateway boom")
+
+    monkeypatch.setattr(StaticGateway, "enable", _boom)
+
+    with pytest.raises(RuntimeError, match="gateway boom"):
+        _enable_static(workspace, config, registry, "demo", manifest, public)
+
+    # 端口不应残留在 registry
+    assert registry.allocated_ports() == []
+
+
+def test_host_static_releases_port_when_health_check_fails(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-016 端到端：健康检查失败 → host_static 抛错 → 端口不残留。"""
+    from local_web_access.static_gateway import StaticGateway
+
+    _seed_static_instance(workspace, registry, "demo")
+
+    # 让 health_check 恒失败，触发 enable 内部回滚 + 抛错
+    monkeypatch.setattr(StaticGateway, "health_check", lambda self, port, **kw: False)
+
+    with pytest.raises(Exception):
+        host_static(workspace, config, registry, "demo")
+
+    # 失败后端口不应残留
+    assert registry.allocated_ports() == []
+
+
+def test_host_container_releases_port_on_build_failure(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-016：host_container 在 build/up 阶段失败时应释放实例端口。"""
+    from local_web_access.hosting import host_container
+    from tests._helpers import make_container_manifest
+
+    workspace.ensure_app_dirs("api")
+    m = make_container_manifest("api")
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+
+    # 让 ensure_available 通过，但 build 阶段抛错
+    class _FakeRuntime:
+        ensure_available = staticmethod(lambda: None)
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def is_running(self, iid):
+            return False
+
+        def down(self, iid, **kw):
+            pass
+
+        def build(self, iid, **kw):
+            raise DockerError("build boom")
+
+    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRuntime)
+
+    with pytest.raises(DockerError, match="build boom"):
+        host_container(workspace, config, registry, "api")
+
+    # 端口不应残留（build 失败前 _ensure_container_port 已分配）
+    assert registry.allocated_ports() == []

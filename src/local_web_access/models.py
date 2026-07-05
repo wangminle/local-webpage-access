@@ -111,6 +111,7 @@ class ContainerConfig(BaseModel):
     imageId: str | None = None
     containerId: str | None = None
     internalPort: int
+    hostPort: int | None = None
     composePath: str
     dockerfilePath: str
     resourceLimits: ResourceLimits = Field(default_factory=ResourceLimits)

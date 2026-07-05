@@ -6,10 +6,32 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 CONFIG_FILENAME = "local-web.yml"
 REGISTRY_DB_FILENAME = "local-web.db"
+
+# 合法实例 ID 即 importer.slugify 的输出：``[a-z0-9]+(-[a-z0-9]+)*``。
+# 不含 ``.`` / ``/`` / ``\\``，杜绝 ``..``、绝对路径等穿越片段（BUG-025）。
+_INSTANCE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def validate_instance_id(instance_id: str) -> str:
+    """校验实例 ID 是安全 slug，拒绝路径穿越（BUG-025）。
+
+    所有 ``app_*`` 路径与生命周期锁都从 ``instance_id`` 拼接而来；若放行
+    ``..`` / ``/`` / 绝对路径，``shutil.rmtree(app_dir(".."))`` 会越界删除
+    工作区根。合法 ID 由 :func:`importer.slugify` 生成，必匹配此正则。
+    非法 ID 抛 :class:`PathError`。
+    """
+    from local_web_access.errors import PathError
+
+    if not isinstance(instance_id, str) or not _INSTANCE_ID_RE.match(instance_id):
+        raise PathError(
+            f"非法实例 ID：{instance_id!r}（仅允许小写字母、数字与连字符）",
+        )
+    return instance_id
 
 
 class Workspace:
@@ -74,6 +96,7 @@ class Workspace:
     # ---- 实例目录 ----------------------------------------------------------
 
     def app_dir(self, instance_id: str) -> Path:
+        validate_instance_id(instance_id)
         return self.apps / instance_id
 
     def app_source(self, instance_id: str) -> Path:
@@ -110,6 +133,7 @@ class Workspace:
         return self.app_dir(instance_id) / "local-web.json"
 
     def app_gateway_config(self, instance_id: str) -> Path:
+        validate_instance_id(instance_id)
         return self.static_sites / f"{instance_id}.conf"
 
     # ---- 创建目录 ----------------------------------------------------------
@@ -173,6 +197,7 @@ __all__ = [
     "Workspace",
     "CONFIG_FILENAME",
     "REGISTRY_DB_FILENAME",
+    "validate_instance_id",
     "find_workspace_root",
     "require_workspace",
 ]

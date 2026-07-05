@@ -262,3 +262,113 @@ def test_start_builtin_does_not_keep_log_handle(
     # 此时唯一可能仍持有句柄的是父进程侧的 log_fh；修复后应已关闭，可删除
     log_file.unlink()
     assert not log_file.exists()
+
+
+# ---- 回归测试：BUG-014 / BUG-020 -----------------------------------------
+#
+# BUG-014：_assemble_main_config 此前输出 ``admin off`` 全局块，首次加载后
+#          Caddy admin 端点被关闭，后续 enable/disable 的 reload 全部失败。
+# BUG-020：import / root 路径未做 Caddyfile 引用，含空格的工作区路径被拆词。
+
+
+def test_assemble_main_config_has_no_admin_off(gateway: StaticGateway, workspace: Workspace) -> None:
+    """BUG-014：主 Caddyfile 不得包含 ``admin off``，否则后续 reload 失败。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+
+    content = gateway._assemble_main_config()
+    assert "admin off" not in content
+    assert "admin" not in content.lower().split()
+
+
+def test_assemble_main_config_quotes_import_paths(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-020：import 路径用反引号引用，含空格也不被拆词。"""
+    # 让站点配置落在含空格的路径下（workspace_root 由 tmp_path 派生，本身可能含空格）
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    site_conf = gateway.generate_site_config("demo", 18001, root)
+    assert site_conf.is_file()
+
+    content = gateway._assemble_main_config()
+    # 每行 import 的路径都被反引号包裹
+    import_line = [ln for ln in content.splitlines() if ln.startswith("import ")][0]
+    rest = import_line[len("import "):]
+    assert rest.startswith("`") and rest.endswith("`")
+    # 引号内的路径等于站点配置的 posix 路径
+    assert rest.strip("`") == site_conf.as_posix()
+
+
+def test_generate_site_config_quotes_root_path(gateway: StaticGateway, workspace: Workspace) -> None:
+    """BUG-020：站点配置 root 路径必须被反引号引用。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+    content = gateway.site_config_path("demo").read_text(encoding="utf-8")
+    # root 行形如 ``root * `.../public` ``，反引号成对出现
+    assert content.count("`") >= 2
+    root_line = [ln for ln in content.splitlines() if ln.lstrip().startswith("root")][0]
+    assert "`" in root_line
+
+
+def test_caddy_quote_wraps_in_backticks() -> None:
+    """BUG-020：普通路径用反引号包裹。"""
+    from local_web_access.static_gateway import _caddy_quote
+
+    assert _caddy_quote("/var/www/demo") == "`/var/www/demo`"
+    assert _caddy_quote("C:/Users/foo bar/site") == "`C:/Users/foo bar/site`"
+
+
+def test_caddy_quote_falls_back_for_backtick_path() -> None:
+    """BUG-020：路径本身含反引号时回退到双引号 + 转义。"""
+    from local_web_access.static_gateway import _caddy_quote
+
+    quoted = _caddy_quote('/tmp/`whoami`/site')
+    assert quoted.startswith('"') and quoted.endswith('"')
+    # 内部反引号原样保留（Caddyfile 双引号字符串不把反引号当特殊字符）
+    assert "`whoami`" in quoted
+
+
+# ---- 回归测试：BUG-015 ----------------------------------------------------
+#
+# BUG-015：_kill_process 此前不校验进程是否真的退出、_stop_builtin 无条件清 PID；
+#          Windows 上 taskkill 返回非零可能只是"进程已退出"，旧 http.server
+#          可能仍在占端口/锁 gateway.log。修复后 _kill_process 返回 bool，
+#          失败时 _stop_builtin 保留 PID 文件。
+
+
+def test_kill_process_returns_true_for_already_dead_pid(gateway: StaticGateway) -> None:
+    """BUG-015：对一个绝不存在的 PID，_kill_process 应判为已退出（True）。"""
+    # PID 0xFFFFFFFF 几乎不可能存活；_pid_alive 会返回 False → _wait_for_exit 立即 True
+    assert gateway._kill_process(0xFFFFFFFE) is True
+
+
+def test_stop_builtin_keeps_pid_when_kill_fails(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-015：_kill_process 失败时 _stop_builtin 不得清除 PID 文件。"""
+    # 预置一个 PID 文件
+    gateway._write_pid("demo", 0xFFFFFFFE)
+    assert gateway._read_pid("demo") == 0xFFFFFFFE
+
+    # 让 _kill_process 模拟"无法终止"（进程一直存活）
+    monkeypatch.setattr(gateway, "_kill_process", lambda pid: False)
+
+    gateway._stop_builtin("demo")
+
+    # PID 文件应保留，便于人工排查或重试
+    assert gateway._read_pid("demo") == 0xFFFFFFFE
+
+
+def test_stop_builtin_clears_pid_when_kill_succeeds(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-015：_kill_process 成功时 _stop_builtin 清除 PID（正常路径回归保护）。"""
+    gateway._write_pid("demo", 12345)
+    monkeypatch.setattr(gateway, "_kill_process", lambda pid: True)
+
+    gateway._stop_builtin("demo")
+
+    assert gateway._read_pid("demo") is None

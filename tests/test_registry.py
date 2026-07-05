@@ -364,3 +364,36 @@ def test_upsert_clears_container_when_switching_to_static(registry: Registry) ->
 
     assert registry.get_static_site("demo") is not None
     assert registry.get_container("demo") is None
+
+
+# ---- 回归测试：BUG-017 ----------------------------------------------------
+#
+# BUG-017：allocate_port 此前用 INSERT OR REPLACE，两个并发分配同时选中同一
+#          空闲端口时，后写者覆盖前者归属。改用 INSERT OR IGNORE + rowcount +
+#          归属校验，返回 False 告知竞争输家。
+
+
+def test_allocate_port_first_call_succeeds(registry: Registry) -> None:
+    """BUG-017：首次登记端口返回 True。"""
+    registry.upsert_from_manifest(_static_manifest("inst-a"))
+    assert registry.allocate_port("inst-a", 20010) is True
+    assert registry.port_owner(20010) == "inst-a"
+
+
+def test_allocate_port_same_instance_idempotent(registry: Registry) -> None:
+    """BUG-017：同一实例重复登记同一端口仍返回 True（幂等）。"""
+    registry.upsert_from_manifest(_static_manifest("inst-a"))
+    assert registry.allocate_port("inst-a", 20010) is True
+    # 再次登记：端口已属于 inst-a，不算冲突
+    assert registry.allocate_port("inst-a", 20010) is True
+    assert registry.port_owner(20010) == "inst-a"
+
+
+def test_allocate_port_rejects_other_instance(registry: Registry) -> None:
+    """BUG-017：端口已被其他实例占有时，新实例登记返回 False，归属不变。"""
+    registry.upsert_from_manifest(_static_manifest("inst-a"))
+    registry.upsert_from_manifest(_static_manifest("inst-b"))
+    assert registry.allocate_port("inst-a", 20010) is True
+    # inst-b 想抢同一端口：必须失败，且不能改写归属
+    assert registry.allocate_port("inst-b", 20010) is False
+    assert registry.port_owner(20010) == "inst-a"

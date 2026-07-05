@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib  # Python 3.11+ 标准库（项目要求 >=3.13）
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,12 +49,6 @@ HEAVY_DATABASES = {"psycopg2", "psycopg", "asyncpg", "pymysql", "mysqlclient", "
 SQLITE_MARKERS = {"sqlite3", "better-sqlite3", "sqlalchemy", "peewee", "tortoise-orm", "aiosqlite"}
 SQLITE_FILE_EXT = (".sqlite", ".sqlite3", ".db")
 
-# tomllib 兼容（3.11+ 内置）
-try:
-    import tomllib  # type: ignore[import-not-found]
-except ModuleNotFoundError:  # pragma: no cover
-    tomllib = None  # type: ignore[assignment]
-
 
 # ---- 文件摘要 ---------------------------------------------------------------
 
@@ -71,7 +66,7 @@ class FileSummary:
     has_pipfile: bool = False
     has_uv_lock: bool = False
     has_manage_py: bool = False
-    node_deps: dict[str, str] = field(default_factory=dict)  # 包名 -> 版本
+    node_deps: dict[str, str] = field(default_factory=dict)  # 包名 -> 版本（含 devDependencies，BUG-019）
     node_scripts: dict[str, str] = field(default_factory=dict)
     python_deps: set[str] = field(default_factory=set)
     sqlite_files: list[str] = field(default_factory=list)
@@ -116,7 +111,13 @@ def summarize(root: Path) -> FileSummary:
 
     if summary.has_package_json:
         pkg = _read_package_json(root / "package.json")
-        summary.node_deps = pkg.get("dependencies", {}) or {}
+        # 合并 dependencies 与 devDependencies（BUG-019）：Vite / Svelte / 框架
+        # 插件常放在 devDependencies，只看 dependencies 会把这类前端模板误判
+        # 为 pending。版本以 dependencies 优先（dev 多为工具链，版本无关识别）。
+        node_deps: dict[str, str] = {}
+        node_deps.update(pkg.get("devDependencies", {}) or {})
+        node_deps.update(pkg.get("dependencies", {}) or {})
+        summary.node_deps = node_deps
         summary.node_scripts = pkg.get("scripts", {}) or {}
 
     summary.python_deps = _collect_python_deps(root, summary)
@@ -175,8 +176,6 @@ def _read_pipfile(path: Path) -> set[str]:
     ``name``/``url``/``verify_ssl`` 等键误当作依赖，因此必须按 TOML 解析，
     只取 ``[packages]`` 与 ``[dev-packages]`` 段的键。
     """
-    if tomllib is None:  # pragma: no cover — 无 tomllib 时无法正确解析 TOML
-        return set()
     try:
         with path.open("rb") as fh:
             data = tomllib.load(fh)
@@ -199,7 +198,7 @@ def _collect_python_deps(root: Path, summary: FileSummary) -> set[str]:
         deps |= _read_requirements(root / "requirements.txt")
     if summary.has_pipfile:
         deps |= _read_pipfile(root / "Pipfile")
-    if summary.has_pyproject_toml and tomllib is not None:
+    if summary.has_pyproject_toml:
         try:
             with (root / "pyproject.toml").open("rb") as fh:
                 data = tomllib.load(fh)
@@ -445,6 +444,8 @@ def _python_install_command(summary: FileSummary) -> str:
         return "pip install -r requirements.txt"
     if summary.has_pyproject_toml:
         return "pip install ."
+    if summary.has_pipfile:
+        return "pip install pipenv && pipenv install --system --skip-lock"
     return "pip install -r requirements.txt"
 
 

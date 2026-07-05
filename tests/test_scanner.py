@@ -266,6 +266,21 @@ def test_summarize_pipfile_parsed_as_toml(tmp_path: Path) -> None:
     assert "verify_ssl" not in deps
 
 
+def test_detect_python_pipfile_only_uses_pipenv_install(tmp_path: Path) -> None:
+    """BUG-024：仅 Pipfile 的 Python Web 项目不应回退到 requirements.txt。"""
+    (tmp_path / "Pipfile").write_text(
+        '[packages]\n'
+        'fastapi = "*"\n'
+        'uvicorn = "*"\n'
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.PYTHON
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+    assert result.pending is False
+    assert "fastapi" in result.stack
+    assert result.entry.install == "pip install pipenv && pipenv install --system --skip-lock"
+
+
 def test_detect_django_via_manage_py_without_dep(tmp_path: Path) -> None:
     """BUG-008：有 manage.py 但依赖里没列 django 时，也应识别为 Django。"""
     (tmp_path / "requirements.txt").write_text("requests\n")  # 无 django
@@ -276,3 +291,74 @@ def test_detect_django_via_manage_py_without_dep(tmp_path: Path) -> None:
     assert result.pending is False
     assert result.confidence == "high"
     assert "manage.py" in (result.entry.start or "")
+
+
+# ---- 回归测试：BUG-018 / BUG-019 -----------------------------------------
+#
+# BUG-018：Python 3.10 没有 tomllib 时 pyproject.toml 依赖被跳过，FastAPI 等
+#          pyproject-only 项目被误判 pending。修复后 3.10 走 tomli 回退。
+# BUG-019：package.json 只读 dependencies，vite/svelte 等放在 devDependencies
+#          的前端模板识别失败。修复后合并 devDependencies。
+
+
+def test_detect_python_fastapi_from_pyproject(tmp_path: Path) -> None:
+    """BUG-018：仅 pyproject.toml 声明 fastapi 的项目应被识别（3.10 tomli 回退）。"""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\n'
+        'name = "demo"\n'
+        'dependencies = ["fastapi", "uvicorn"]\n'
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.PYTHON
+    assert "fastapi" in result.stack
+    assert result.pending is False
+    assert result.confidence == "high"
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+
+
+def test_summarize_pyproject_deps_collected(tmp_path: Path) -> None:
+    """BUG-018：summarize 应解析 pyproject.toml [project.dependencies]。"""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\n'
+        'name = "demo"\n'
+        'dependencies = ["fastapi>=0.100", "uvicorn[standard]"]\n'
+    )
+    summary = summarize(tmp_path)
+    deps = {d.lower() for d in summary.python_deps}
+    assert "fastapi" in deps
+    assert "uvicorn" in deps
+
+
+def test_detect_node_frontend_with_devdeps_only(tmp_path: Path) -> None:
+    """BUG-019：vite 放在 devDependencies 的前端模板应识别为 frontend-static。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                # 典型 Vite 模板：运行时无 dependencies，构建工具链全在 devDependencies
+                "devDependencies": {"vite": "^5.0.0", "react": "^18.0.0"},
+                "scripts": {"build": "vite build"},
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.NODE
+    assert result.form == "frontend-static"
+    assert result.runtime == Runtime.SHARED_STATIC
+    assert result.pending is False
+    assert result.confidence == "high"
+
+
+def test_summarize_merges_devdependencies(tmp_path: Path) -> None:
+    """BUG-019：node_deps 应同时包含 dependencies 与 devDependencies。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"react": "^18.0.0"},
+                "devDependencies": {"vite": "^5.0.0"},
+            }
+        )
+    )
+    summary = summarize(tmp_path)
+    deps = {d.lower() for d in summary.node_deps}
+    assert "react" in deps
+    assert "vite" in deps

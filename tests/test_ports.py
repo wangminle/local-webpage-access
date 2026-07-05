@@ -203,3 +203,39 @@ def test_allocate_skips_host_listening_port(registry: Registry) -> None:
         assert busy_port <= port <= busy_port + 10
     finally:
         s.close()
+
+
+# ---- 回归测试：BUG-017 ----------------------------------------------------
+#
+# BUG-017：并发分配时两个实例可能选中同一空闲端口，旧 INSERT OR REPLACE 让后
+# 写者覆盖前者归属。修复后 allocator 检查 allocate_port 返回值，竞争输家跳到
+# 下一个候选端口，绝不改写已归属的端口。
+
+
+def test_allocate_skips_port_lost_in_race(registry: Registry, monkeypatch) -> None:
+    """BUG-017：候选端口被其他实例抢先登记时，allocator 跳到下一个。
+
+    模拟竞争窗口：allocator 调 ``allocated_ports()`` 时 20000 还没被登记，
+    但等到 ``allocate_port("a", 20000)`` 时已被 other-inst 抢走（返回 False）。
+    修复前 allocator 不检查返回值，会把 20000 当作已分配给 a，造成归属错乱。
+    """
+    from local_web_access.config import PortPool
+
+    cfg = Config(portPool=PortPool(start=20000, end=20010))
+    registry.upsert_from_manifest(make_static_manifest("a"))
+    registry.upsert_from_manifest(make_static_manifest("other-inst"))
+    # 预先把 20000 登记给 other-inst（真实 DAO 路径）
+    assert registry.allocate_port("other-inst", 20000) is True
+
+    alloc = PortAllocator(cfg, registry)
+
+    # 让 allocator 的快照看不到 20000，迫使它对 20000 走到 allocate_port
+    monkeypatch.setattr(alloc, "allocated_ports", lambda: set())
+
+    port = alloc.allocate("a", probe_host=False)
+    # 不应拿到被抢走的 20000
+    assert port != 20000
+    assert port == 20001
+    # 归属未被覆盖：20000 仍属于 other-inst，20001 属于 a
+    assert registry.port_owner(20000) == "other-inst"
+    assert registry.port_owner(20001) == "a"

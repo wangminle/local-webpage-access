@@ -283,13 +283,28 @@ class Registry:
 
     # ---- 端口（WBS-05.12）--------------------------------------------------
 
-    def allocate_port(self, instance_id: str, port: int) -> None:
+    def allocate_port(self, instance_id: str, port: int) -> bool:
+        """登记端口占用（并发安全，BUG-017）。
+
+        返回 ``True`` 表示端口可由 ``instance_id`` 占用（首次登记或已由本实例
+        占用）；返回 ``False`` 表示端口已被**其他实例**占用，调用方应跳过该
+        端口。此前用 ``INSERT OR REPLACE``，两个并发分配会同时选中同一空闲
+        端口，后写者覆盖前者的归属记录。改用 ``INSERT OR IGNORE`` 配合
+        ``rowcount`` + 归属校验，让竞争中的输家得知并重试下一个端口。
+        """
         with self.txn() as tx:
-            tx.execute(
-                "INSERT OR REPLACE INTO ports(port, instance_id, status, created_at) "
+            cur = tx.execute(
+                "INSERT OR IGNORE INTO ports(port, instance_id, status, created_at) "
                 "VALUES (?, ?, 'allocated', ?)",
                 (port, instance_id, now_iso()),
             )
+            if cur.rowcount > 0:
+                return True
+            # 该端口已有记录但不是本次插入：判断归属
+            row = tx.execute(
+                "SELECT instance_id FROM ports WHERE port = ?", (port,)
+            ).fetchone()
+            return row is not None and row["instance_id"] == instance_id
 
     def release_port(self, port: int) -> None:
         with self.txn() as tx:

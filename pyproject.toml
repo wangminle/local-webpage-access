@@ -7,7 +7,7 @@ name = "local-web-access"
 version = "0.1.0"
 description = "Local Web Access — 面向局域网小主机的本地网页部署基座"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "fenix-wangminle" }]
 dependencies = [
@@ -39,4 +39,4 @@ addopts = "-ra -q"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py313"
