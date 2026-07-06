@@ -207,8 +207,14 @@ class BuildQueue:
         return True
 
     def in_flight(self) -> int:
-        """当前正在构建（已占用槽位）的任务数。"""
-        return self.concurrency - self._sem._value  # type: ignore[attr-defined]
+        """当前正在构建（已占用槽位）的任务数。
+
+        按任务生命周期统计 ``building`` 状态的任务，而非读取信号量私有属性
+        ``_value``（BUG-031）。``_value`` 是 CPython 实现细节，替代实现或未来
+        版本可能不再暴露；且计数语义上"已获取槽位且正在构建"恰等于 status=building。
+        """
+        with self._guard:
+            return sum(1 for t in self._tasks.values() if t.status == "building")
 
     def pending(self) -> list[str]:
         """当前排队中的实例 ID 列表。"""

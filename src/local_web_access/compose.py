@@ -86,6 +86,19 @@ def generate_compose(
         memory=limits.memory,
         cpus=limits.cpus,
     )
+    # WBS-25.03/04/05：自检生成的 compose 是否含 critical 安全问题
+    # （模板本身安全；此检查防止模板被改动或 skill 覆盖后引入风险）。
+    from local_web_access.security import audit_compose, has_critical
+
+    findings = audit_compose(content)
+    if has_critical(findings):
+        codes = ", ".join(f.code for f in findings if f.level == "critical")
+        raise RuntimeError(
+            f"生成的 compose.yaml 含 critical 安全问题（{codes}），已拒绝写出"
+        )
+    for f in findings:
+        log.warning("compose 安全审计 [%s] %s", f.code, f.message)
+
     out_path = workspace.app_compose_path(manifest.id)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(content, encoding="utf-8")

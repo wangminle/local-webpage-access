@@ -38,6 +38,23 @@
 | BUG-025 | 修复 | remove --purge 未校验 instance_id 路径边界，可能删除 apps/ 外目录 | 2026-07-05 14:42 | 2026-07-05 22:09 | 已完成 | 按倒序核查时已存在修复痕迹：Workspace.validate_instance_id 校验 slug；instance_lock/app_dir 入口拒绝非法 ID；remove_instance purge 前 resolve 并确认位于 apps/ 内；已有 BUG-025 回归测试覆盖，未重复改动 |
 | BUG-026 | 修复 | lwa status 未先观测回写，registry 状态可能长期陈旧 | 2026-07-05 21:51 | 2026-07-05 22:09 | 已完成 | cli.status 展示前调用 sync_status(ws, config, reg, instance_id)，单实例和全量状态都会先观测回写；新增 CLI 回归验证 running 陈旧状态会输出 stopped，全量 382 通过 |
 | BUG-027 | 修复 | stats 容器资源统计按 instance_id 子串匹配，可能误归属到其他实例 | 2026-07-05 21:51 | 2026-07-05 22:09 | 已完成 | _parse_container_stats 改为精确匹配 lwa-{id} / lwa-{id}-app，并去除可能的前导 /；新增 api 不误命中 api2 的回归测试，全量 382 通过 |
+| BUG-028 | 修复 | 管理页 `/api/instances` 缺少 stack/database/servingMode/容器资源字段，列表「技术栈」「数据库」「资源」永远为空 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | `InstanceStatus` 合并 registry 的 stack_json、database_type、serving_mode、resource_profile 与 resources 快照；回归覆盖列表 API 与状态序列化字段 |
+| BUG-029 | 修复 | `validate_manager_binding` 未接入 `run_manager`/CLI 启动流程，与文档承诺不符 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | `run_manager` 与 CLI `manager start` 均调用 `validate_manager_binding` + `assert_no_critical`；新增 LAN 绑定无 token 拒绝启动回归 |
+| BUG-030 | 修复 | `/api/stats` 和 `/api/pending` 未 sync_status，`/api/instances` 会 sync，前端并行 refresh 导致统计、待处理列表与实例列表不一致 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | stats/pending 读取前同步状态；`sync_status` 跳过 pending/queued/building，避免待处理实例被观测覆盖；新增 stats/pending 回归，全量通过 |
+| BUG-031 | 修复 | `doctor.check_port_pool` 仍用 SO_REUSEADDR，Windows 可能误判端口可用（BUG-002 同类） | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | 复核已修复：`_default_port_in_use` 委托 `ports.is_port_in_use` 独占 bind；现有 wildcard listener 回归保持通过 |
+| BUG-032 | 修复 | `audit_compose` 遗漏 Compose dict 格式 volumes 的宿主路径审计 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | `_audit_volume` 支持 service volumes dict 形式 target→source；新增 `/app/data: /etc/passwd` 触发 host_sensitive_mount 回归 |
+| BUG-033 | 修复 | `start_daemon` 无互斥，并发 `lwa daemon on` 可能 state.pid 与实际 watcher 不一致 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | 新增 `daemon-start.lock` 串行化启动，启动锁内二次确认运行态；并发 start 回归验证只 spawn 一次 |
+| BUG-034 | 修复 | daemon 处理失败 zip 仍写入 daemon-processed.json，无法自动重试 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | `run_watcher` 对 process_fn 返回 failed 不写 processed，保留待下轮重试；新增失败 zip 不落标记回归 |
+| BUG-035 | 修复 | 管理页实例列表「形态」列误显示 runtime，与「运行层」列重复 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | `app.js` 形态列改读 `servingMode`，运行层仍读 `runtime`；与 BUG-028 列表字段回归一并覆盖 |
+| BUG-036 | 修复 | watcher 子进程异常退出后 state 仍 enabled=True，CLI 误报 daemon 已启动 | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | `start_daemon` 等待子进程拿到 watcher 锁；启动失败/立即退出时回滚 state.enabled=False 并清理；新增回归 |
+| BUG-037 | 修复 | `_load_manifest_dict` 返回类型标注为 dict 但文件不存在时返回 None | 2026-07-06 00:46 | 2026-07-06 11:20 | 已完成 | 类型标注改为 `dict[str, Any] \| None`，语义与实现一致；compileall 与全量 pytest 通过 |
+| BUG-038 | 修复 | daemon 仅按 zip 路径去重，同名新包覆盖后会被永久跳过，无法再次自动导入 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | processed key 改为路径+大小+mtime_ns 指纹，并兼容旧路径标记；同名覆盖 zip 重新处理回归通过 |
+| BUG-039 | 修复 | `lwa doctor` 会把本系统已分配并正常使用的端口也判为冲突失败 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | `run_doctor` 读取 registry 已分配端口并传给 `check_port_pool` 排除实例端口；管理端口仍严格检查；新增两条回归 |
+| BUG-040 | 修复 | 日志接口 category 未校验，存在路径穿越读取实例日志目录外文件的风险 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | `logs.validate_log_category` 限制为 LOG_CATEGORIES，并校验 resolve 后路径仍在 app_logs；API/模块回归返回 400/PathError |
+| BUG-041 | 修复 | pnpm/yarn 锁文件项目会被误判为 npm ci，导致 Dockerfile 构建失败 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | scanner 识别 npm/pnpm/yarn 包管理器；Dockerfile 按包管理器复制对应 lock 文件并运行对应 install；新增 scanner/Dockerfile 回归 |
+| BUG-042 | 修复 | Compose 安全审计漏掉 Windows 盘符 bind mount | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | Compose 短格式 volume 解析兼容 Windows 盘符；`C:\Users:/app/host` 触发 host_sensitive_mount 回归 |
+| BUG-043 | 修复 | 管理页详情中的构建记录和事件字段名与 API 返回不匹配，时间、类型、错误摘要显示为空 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | 详情 API 返回 camelCase builds/events/resources；前端兼容 camelCase 与 snake_case；新增详情字段回归 |
+| BUG-044 | 修复 | 管理 API 遇非法实例 ID 返回 500 而不是 400 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | 复核已修复：PathError/SchemaError/ConfigError 等映射 bad_request；新增 `Bad_ID` 返回 400 回归 |
 
 ## 调整事项
 
@@ -48,6 +65,7 @@
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
+| CHK-001 | 检查 | Phase 5-7 全面代码 bug 审查（daemon/manager_api/security/doctor/管理页前端） | 2026-07-06 00:46 | 2026-07-06 09:46 | 已完成 | 全量 pytest 540 passed/4 skipped；发现 BUG-028~037 共 10 项待修复，已写入本清单 |
 
 ## 测试数据
 
@@ -83,6 +101,16 @@
 | DEV-018 | 开发 | WBS-18 日志、状态与健康检查（分类日志/轮转/HTTP 健康/状态聚合） | 2026-07-05 13:40 | 2026-07-05 14:00 | 已完成 | Phase 4；logs.py（5 分类 + tail + 轮转 rotate_all）+ health.py（http_ok + check_health 写 last_health_check_at/last_error）+ status.py（instance_status/all_statuses/sync_status）；真实 HTTPServer 健康测试，24 测试 |
 | DEV-019 | 开发 | WBS-19 资源监控与统计（整机 mem/load/disk + 实例目录/镜像/容器 stats） | 2026-07-05 13:40 | 2026-07-05 14:00 | 已完成 | Phase 4；stats.py，host_resources 读 /proc/meminfo/loadavg + disk_usage；instance_resources 量目录 + docker image inspect/stats（按 instance_id 匹配）；upsert_resources 持久化；16 测试 |
 | DEV-020 | 开发 | WBS-20 构建队列与并发限制（信号量限流 + queued 状态 + 超时/取消预留） | 2026-07-05 13:40 | 2026-07-05 14:00 | 已完成 | Phase 4；build_queue.py，BoundedSemaphore(buildConcurrency) 默认 1，拿不到立即槽位→QUEUED+事件，wait_timeout 默认 1800s，cancel V1 占位不抢占进行中构建；12 测试 |
+| DEV-021 | 开发 | WBS-21 Daemon 与 Inbox Watcher（后台守护进程/inbox 自动导入/轻量实例自动启动） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 5；daemon.py + inbox_watcher，lwa daemon on/off/status；只自动启动可确定的轻量实例（static/frontend-static），pending/container 留待人工；PID 文件 + 状态查询 |
+| DEV-022 | 开发 | WBS-22 管理页后端 API（FastAPI/token 鉴权/全部 /api 端点/统一错误格式） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 5；manager_api.py，stats/instances/detail/logs/resources/start-stop-restart-rebuild/pending/port-pool；复用 lifecycle 同 CLI 代码路径；WAL+单连接线程安全 |
+| DEV-023 | 开发 | WBS-23 管理页前端（单页应用/概览/列表/详情/操作/待处理区） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 5；manager_static/ 单页前端，token 登录，覆盖统计面板/实例列表/详情日志/生命周期操作/pending+failed 队列 |
+| DEV-024 | 开发 | WBS-24 大模型 Skills 文档（12 个 SKILL.md 协作场景） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 6；skills/ 下 12 个 SKILL.md，覆盖导入/识别/静态/前端/容器/生命周期/排障/安全等；lwa init 复制到工作区 |
+| DEV-025 | 开发 | WBS-25 安全、权限与默认保护（compose/dockerfile/zip 审计 + 管理绑定校验） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 6；security.py，critical/warn/info 三级；audit_compose/dockerfile/zip_members；validate_manager_binding（LAN 绑定必须 token）；compose 生成 critical 自检拒绝写出；pending 写风险事件；42 测试 |
+| DEV-026 | 开发 | WBS-26 lwa doctor 与排障辅助（环境检查 + 实例深度诊断） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 6；doctor.py，CheckResult/DoctorReport；python/docker/compose/port_pool/registry/static_gateway/disk/memory 检查；diagnose_instance 深度诊断；runner/port_in_use 注入式可测；lwa doctor [--json] [ID]，fail 退出码 1；28 测试 |
+| DEV-027 | 开发 | WBS-27 样例项目与测试夹具（6 个样例 dict 打包 + build_zip/build_all） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；tests/fixtures/，6 样例（static_html/vite_react/node_express/fastapi_sqlite/build_failure/pending_unknown），dict[str,str] 按需打包；EXPECTED_KIND 映射；18 测试 |
+| DEV-028 | 开发 | WBS-28 单元测试与集成测试（全模块覆盖 + Docker 双重守卫） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；conftest requires_docker marker + LWA_RUN_DOCKER_TESTS 双守卫；WBS-28.01~15 全覆盖；test_security/test_doctor/test_fixtures/test_integration_phase57；529 passed/4 skipped |
+| DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-06 01:30 | 已完成 | Phase 7；tests/test_e2e_acceptance.py（11 测试，覆盖 init/import×4/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor）；docs/acceptance-checklist.md（18 子任务，Docker 依赖项手工清单）；540 passed/4 skipped |
+| DEV-030 | 开发 | WBS-30 文档与发布准备（README 更新 + 管理/FAQ/安全/限制/发布清单） | 2026-07-06 01:30 | 2026-07-06 02:00 | 已完成 | Phase 7；README 全面更新（Phase 0~7 全完成，新增 manager/daemon/doctor/skills 章节）；docs/manager-page.md、faq.md、security-boundary.md、known-limitations.md、release-checklist.md；文档索引齐全 |
 
 ## 配置运维
 
@@ -99,20 +127,20 @@
 | PLN-003 | 规划 | Phase 2：静态路径闭环（WBS-09~WBS-11，静态网关/纯静态/前端构建） | 2026-07-04 23:49 | 2026-07-05 00:32 | 已完成 | DEV-009~011 全部完成；e2e 验证静态 HTML 与前端 SPA 构建均可经 builtin 网关访问，151 测试通过 |
 | PLN-004 | 规划 | Phase 3：Docker Compose 路径闭环（WBS-12~WBS-16，Dockerfile/Compose/Runtime/Node/Python） | 2026-07-04 23:49 | 2026-07-05 14:00 | 已完成 | DEV-012~016 全部完成；host_container 统一编排 Node/Python/SQLite 容器，fake runtime 全量 hermetic 测试，无真实 Docker 依赖 |
 | PLN-005 | 规划 | Phase 4：生命周期、日志、资源与队列（WBS-17~WBS-20） | 2026-07-04 23:49 | 2026-07-05 14:04 | 已完成 | DEV-017~020 全部完成；lifecycle 双层锁 + logs/health/status/stats/build_queue；CLI 新增 restart/rebuild/remove/logs/status/stats；328 测试通过 |
-| PLN-006 | 规划 | Phase 5：自动化与管理页（WBS-21~WBS-23，daemon/管理页 API/前端） | 2026-07-04 23:49 | - | 待开发 | 管理页端口 17800 |
-| PLN-007 | 规划 | Phase 6：Skills、安全与排障（WBS-24~WBS-26） | 2026-07-04 23:49 | - | 待开发 | skill 只生成/修复配置，最终执行交给 lwa |
-| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | - | 待开发 | V1 验收总清单见 WBS 第 7 节 |
+| PLN-006 | 规划 | Phase 5：自动化与管理页（WBS-21~WBS-23，daemon/管理页 API/前端） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-021~023 全部完成；daemon inbox 自动导入 + 管理页 FastAPI + 单页前端，管理页端口 17800 |
+| PLN-007 | 规划 | Phase 6：Skills、安全与排障（WBS-24~WBS-26） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-024~026 全部完成；12 个 SKILL.md + security.py 审计 + doctor 排障 |
+| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | 2026-07-06 02:00 | 已完成 | DEV-027~030 全部完成；6 样例夹具 + 全量测试 540 passed/4 skipped + E2E 验收 + V1 文档套件 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 27 | 27 | 0 | 100% |
+| 代码 Bug | 44 | 44 | 0 | 100% |
 | 调整事项 | 0 | 0 | 0 | 0% |
-| 检查事项 | 0 | 0 | 0 | 0% |
+| 检查事项 | 1 | 1 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
 | 文档维护 | 0 | 0 | 0 | 0% |
-| 功能开发 | 20 | 20 | 0 | 100% |
+| 功能开发 | 30 | 30 | 0 | 100% |
 | 配置运维 | 1 | 1 | 0 | 100% |
-| 规划事项 | 8 | 5 | 3 | 63% |
-| **总计** | 56 | 53 | 3 | 95% |
+| 规划事项 | 8 | 8 | 0 | 100% |
+| **总计** | 84 | 84 | 0 | 100% |

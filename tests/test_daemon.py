@@ -1,0 +1,634 @@
+"""daemon 与 inbox watcher 测试（WBS-21）。"""
+
+from __future__ import annotations
+
+import threading
+import time
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from local_web_access import daemon as daemon_mod
+from local_web_access.config import Config, PortPool
+from local_web_access.paths import Workspace
+from local_web_access.registry import Registry
+
+
+# ---- fixtures --------------------------------------------------------------
+
+
+@pytest.fixture()
+def workspace(workspace_root: Path) -> Workspace:
+    ws = Workspace(workspace_root)
+    ws.ensure_workspace_dirs()
+    # 写入最小配置让 require_workspace / load_config 工作
+    from local_web_access.config import example_config_text
+
+    if not ws.config_path.is_file():
+        ws.config_path.write_text(example_config_text(), encoding="utf-8")
+    return ws
+
+
+@pytest.fixture()
+def registry(workspace_root: Path) -> Registry:
+    workspace_root.joinpath("registry").mkdir(parents=True, exist_ok=True)
+    reg = Registry(workspace_root / "registry" / "local-web.db")
+    reg.open()
+    yield reg
+    reg.close()
+
+
+@pytest.fixture()
+def config(workspace_root: Path) -> Config:
+    return Config(portPool=PortPool(start=21000, end=21050))
+
+
+# ---- 状态持久化（WBS-21.04）------------------------------------------------
+
+
+def test_read_state_returns_none_when_absent(workspace: Workspace) -> None:
+    assert daemon_mod.read_state(workspace) is None
+
+
+def test_write_then_read_state_roundtrip(workspace: Workspace) -> None:
+    state = daemon_mod.DaemonState(
+        enabled=True, pid=12345, started_at="2026-07-05T10:00:00", poll_interval=3.0
+    )
+    daemon_mod.write_state(workspace, state)
+    got = daemon_mod.read_state(workspace)
+    assert got is not None
+    assert got.enabled is True
+    assert got.pid == 12345
+    assert got.poll_interval == 3.0
+    assert got.started_at == "2026-07-05T10:00:00"
+
+
+def test_read_state_tolerates_corrupt_json(workspace: Workspace) -> None:
+    daemon_mod.state_path(workspace).write_text("not json", encoding="utf-8")
+    assert daemon_mod.read_state(workspace) is None
+
+
+def test_clear_state_removes_file(workspace: Workspace) -> None:
+    daemon_mod.write_state(workspace, daemon_mod.DaemonState(enabled=True, pid=1))
+    assert daemon_mod.state_path(workspace).is_file()
+    daemon_mod.clear_state(workspace)
+    assert not daemon_mod.state_path(workspace).exists()
+
+
+# ---- inbox 扫描（WBS-21.05）------------------------------------------------
+
+
+def test_scan_inbox_lists_zips_sorted(workspace: Workspace) -> None:
+    inbox = workspace.inbox
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "b.zip").write_bytes(b"")
+    (inbox / "a.zip").write_bytes(b"")
+    (inbox / "not_zip.txt").write_text("x", encoding="utf-8")
+    found = daemon_mod.scan_inbox(workspace)
+    assert [p.name for p in found] == ["a.zip", "b.zip"]
+
+
+def test_scan_inbox_empty_when_missing(workspace: Workspace) -> None:
+    # inbox 存在但为空
+    workspace.inbox.mkdir(parents=True, exist_ok=True)
+    assert daemon_mod.scan_inbox(workspace) == []
+
+
+# ---- 文件稳定性（WBS-21.06）------------------------------------------------
+
+
+def test_is_file_stable_false_on_first_sight(workspace: Workspace) -> None:
+    p = workspace.inbox / "x.zip"
+    p.write_bytes(b"hello")
+    stable, fp = daemon_mod.is_file_stable(p, None, now_ts=time.time())
+    assert stable is False
+    assert fp.size == 5
+
+
+def test_is_file_stable_true_when_unchanged_across_window(workspace: Workspace) -> None:
+    p = workspace.inbox / "x.zip"
+    p.write_bytes(b"hello")
+    ts = time.time()
+    # 第一次观测
+    _, fp = daemon_mod.is_file_stable(p, None, now_ts=ts)
+    # 第二次：mtime/size 不变，且时间窗已过
+    stable, _ = daemon_mod.is_file_stable(
+        p, fp, now_ts=ts + daemon_mod.DEFAULT_STABLE_SECONDS + 0.1
+    )
+    assert stable is True
+
+
+def test_is_file_stable_false_when_size_changes(workspace: Workspace) -> None:
+    p = workspace.inbox / "x.zip"
+    p.write_bytes(b"hello")
+    _, fp = daemon_mod.is_file_stable(p, None, now_ts=time.time())
+    p.write_bytes(b"hello world")  # 变大
+    stable, _ = daemon_mod.is_file_stable(p, fp, now_ts=time.time() + 10)
+    assert stable is False
+
+
+# ---- 单实例锁（WBS-21.11）--------------------------------------------------
+
+
+def test_daemon_lock_is_exclusive(workspace: Workspace) -> None:
+    with daemon_mod.daemon_lock(workspace):
+        # 第二次获取（同进程但锁文件已存在）应失败
+        with pytest.raises(OSError):
+            with daemon_mod.daemon_lock(workspace):
+                pass
+
+
+def test_daemon_lock_released_after_context(workspace: Workspace) -> None:
+    with daemon_mod.daemon_lock(workspace):
+        pass
+    # 退出后锁文件被清理
+    assert not daemon_mod.lock_path(workspace).exists()
+    # 可以再次获取
+    with daemon_mod.daemon_lock(workspace):
+        pass
+
+
+# ---- 锁心跳超时回收（BUG-030）---------------------------------------------
+
+
+def _write_lock(workspace: Workspace, pid: int, heartbeat_ts: float) -> None:
+    """直接写一个给定 PID 与心跳时间戳的锁文件（绕过 daemon_lock）。"""
+    path = daemon_mod.lock_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{pid}\n{heartbeat_ts:.3f}\n", encoding="utf-8")
+
+
+def test_lock_is_stale_when_heartbeat_expired() -> None:
+    """BUG-030：PID 存活但心跳超时 → 锁判为陈旧。"""
+    import os
+
+    path = Path(".bug030-stale.lock")
+    try:
+        path.write_text(f"{os.getpid()}\n{time.time() - 9999:.3f}\n", encoding="utf-8")
+        assert daemon_mod._lock_is_stale(path, stale_after=60.0) is True
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_lock_is_not_stale_with_fresh_heartbeat() -> None:
+    """BUG-030：PID 存活且心跳新鲜 → 锁不陈旧。"""
+    import os
+
+    path = Path(".bug030-fresh.lock")
+    try:
+        path.write_text(f"{os.getpid()}\n{time.time():.3f}\n", encoding="utf-8")
+        assert daemon_mod._lock_is_stale(path, stale_after=60.0) is False
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_is_running_false_when_heartbeat_expired(workspace: Workspace) -> None:
+    """BUG-030：watcher 卡死（PID 存活但心跳超时）→ is_running 返回 False。"""
+    import os
+
+    _write_lock(workspace, os.getpid(), time.time() - 9999)
+    daemon_mod.write_state(
+        workspace,
+        daemon_mod.DaemonState(
+            enabled=True, pid=os.getpid(), started_at="now", poll_interval=5.0
+        ),
+    )
+    assert daemon_mod.is_running(workspace) is False
+
+
+def test_daemon_lock_reclaims_stale_heartbeat(workspace: Workspace) -> None:
+    """BUG-030：持有进程卡死时 daemon_lock 应能回收陈旧心跳锁。"""
+    import os
+
+    # 模拟一个卡死的 watcher：本进程 PID（存活）但心跳早已超时
+    _write_lock(workspace, os.getpid(), time.time() - 9999)
+    # daemon_lock 应判定陈旧、回收并重新获取（不抛 OSError）
+    with daemon_mod.daemon_lock(workspace):
+        assert daemon_mod.lock_path(workspace).exists()
+
+
+def test_touch_lock_heartbeat_updates_timestamp(workspace: Workspace) -> None:
+    """BUG-030：touch_lock_heartbeat 刷新心跳并保留 PID。"""
+    import os
+
+    old_ts = time.time() - 9999
+    _write_lock(workspace, os.getpid(), old_ts)
+    daemon_mod.touch_lock_heartbeat(workspace)
+    content = daemon_mod.lock_path(workspace).read_text(encoding="utf-8").splitlines()
+    assert int(content[0]) == os.getpid()
+    assert float(content[1]) > old_ts
+
+
+# ---- process_zip 自动启动决策（WBS-21.07/08/09）---------------------------
+
+
+def _make_zip(zip_path: Path, files: dict[str, str]) -> None:
+    """生成一个含若干文件的 zip。"""
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+
+
+def test_process_zip_pending_for_unknown_project(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """无法识别的项目导入后保持 pending，不被错误启动。"""
+    zip_path = workspace.inbox / "unknown.zip"
+    _make_zip(zip_path, {"readme.txt": "nothing to recognize here"})
+    summary = daemon_mod.process_zip(workspace, config, registry, zip_path)
+    assert summary["action"] == "pending"
+    assert summary["instance_id"] is not None
+    row = registry.get_instance(summary["instance_id"])
+    assert row is not None
+    assert row["status"] == "pending"
+
+
+def test_process_zip_starts_determinable_static(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """可确定的纯静态项目应被自动启动（tiny/small）。"""
+    zip_path = workspace.inbox / "static.zip"
+    _make_zip(zip_path, {"index.html": "<h1>hi</h1>"})
+    summary = daemon_mod.process_zip(workspace, config, registry, zip_path)
+    assert summary["action"] == "started"
+    assert summary["instance_id"] is not None
+    row = registry.get_instance(summary["instance_id"])
+    assert row is not None
+    assert row["status"] == "running"
+    # BUG：泄漏兜底——process_zip 自动 start 的内置静态服务（http.server 子进程）
+    # 在测试结束未停会成为孤儿，跨用例累积会占满端口池、使全量测试连跑即红。
+    from local_web_access.lifecycle import stop_instance_op
+
+    stop_instance_op(workspace, config, registry, summary["instance_id"])
+
+
+def test_process_zip_does_not_auto_start_heavy(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """heavy/medium 项目导入后不自动启动，等待人工确认。"""
+    zip_path = workspace.inbox / "app.zip"
+    _make_zip(zip_path, {"index.html": "<h1>x</h1>"})
+    # 通过猴子补丁把识别后的 resourceProfile 改成 heavy，验证不自动启动分支
+    real_process = daemon_mod.process_zip
+    try:
+        started: list[str] = []
+
+        def fake_start(ws, cfg, reg, iid):
+            started.append(iid)
+            return None
+
+        with patch("local_web_access.lifecycle.start_instance", side_effect=fake_start):
+            # 让 importer 走静态识别，然后 manifest 改 heavy：直接对 process_zip
+            # 注入一个把 profile 改 heavy 的 process_fn 不现实；这里改成检测 pending
+            # 分支：用一个 index.html 项目但人为 patch resourceProfile
+            import local_web_access.importer as importer_mod
+
+            orig_build = importer_mod.build_manifest_from_detection
+
+            def patched(*args, **kwargs):
+                m = orig_build(*args, **kwargs)
+                from local_web_access.models import ResourceProfile
+
+                m.resourceProfile = ResourceProfile.HEAVY
+                return m
+
+            with patch.object(importer_mod, "build_manifest_from_detection", patched):
+                summary = real_process(workspace, config, registry, zip_path)
+        assert summary["action"] == "pending"
+        assert "heavy" in (summary["note"] or "")
+        assert started == []  # 未自动启动
+    finally:
+        pass
+
+
+def test_process_zip_failure_does_not_raise(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """损坏的 zip 应返回 failed 摘要，而非冒泡打断 watcher。"""
+    zip_path = workspace.inbox / "broken.zip"
+    zip_path.write_bytes(b"not a zip")
+    summary = daemon_mod.process_zip(workspace, config, registry, zip_path)
+    assert summary["action"] == "failed"
+    assert summary["note"]
+
+
+# ---- processed 集合 --------------------------------------------------------
+
+
+def test_processed_set_roundtrip(workspace: Workspace) -> None:
+    assert daemon_mod.load_processed_set(workspace) == set()
+    daemon_mod.save_processed_set(workspace, {"/a/b.zip", "/c/d.zip"})
+    got = daemon_mod.load_processed_set(workspace)
+    assert got == {"/a/b.zip", "/c/d.zip"}
+
+
+def test_processed_set_tolerates_corrupt(workspace: Workspace) -> None:
+    daemon_mod._archive_processed_marker(workspace).write_text("garbage", encoding="utf-8")
+    assert daemon_mod.load_processed_set(workspace) == set()
+
+
+def test_processed_key_changes_when_same_path_is_overwritten(
+    workspace: Workspace,
+) -> None:
+    """BUG-038：同名新 zip 覆盖后应得到新的去重 key。"""
+    zip_path = workspace.inbox / "same.zip"
+    _make_zip(zip_path, {"index.html": "old"})
+    first = daemon_mod.processed_key(zip_path)
+    time.sleep(0.001)
+    _make_zip(zip_path, {"index.html": "new content"})
+    second = daemon_mod.processed_key(zip_path)
+    assert first != second
+
+
+# ---- watcher 主循环（WBS-21.05/06/07/10）-----------------------------------
+
+
+def test_run_watcher_in_thread_processes_and_exits_on_stop(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    zip_path = workspace.inbox / "static.zip"
+    _make_zip(zip_path, {"index.html": "<h1>hi</h1>"})
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=True, pid=0, poll_interval=0.01)
+    )
+
+    processed: list[Path] = []
+    done = threading.Event()
+
+    def fake_process(ws, cfg, reg, p):
+        processed.append(p)
+        return {"action": "started"}
+
+    stop = threading.Event()
+
+    def runner():
+        daemon_mod.run_watcher(
+            workspace,
+            config,
+            registry,
+            stop_event=stop,
+            poll_interval=0.01,
+            stable_seconds=0.0,
+            process_fn=fake_process,
+        )
+        done.set()
+
+    t = threading.Thread(target=runner)
+    t.start()
+    # 等待处理完成（最多 2s）
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not processed:
+        time.sleep(0.02)
+    assert processed, "watcher 未处理任何 zip"
+    # 置 stop，watcher 应在 poll_interval 内退出
+    stop.set()
+    assert done.wait(2.0), "watcher 未在 stop 后退出"
+    t.join(timeout=2.0)
+
+    # processed 集合已落盘
+    assert str(zip_path) in daemon_mod.load_processed_set(workspace)
+
+
+def test_run_watcher_does_not_mark_failed_zip_processed(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """BUG-034：处理失败的 zip 不应写入 processed，下一轮可自动重试。"""
+    zip_path = workspace.inbox / "bad.zip"
+    _make_zip(zip_path, {"index.html": "<h1>x</h1>"})
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=True, pid=0, poll_interval=0.01)
+    )
+
+    stop = threading.Event()
+    calls: list[Path] = []
+
+    def fake_process(ws, cfg, reg, p):
+        calls.append(p)
+        stop.set()
+        return {"action": "failed"}
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=fake_process,
+    )
+    processed = daemon_mod.load_processed_set(workspace)
+    assert calls == [zip_path]
+    assert daemon_mod.processed_key(zip_path) not in processed
+    assert str(zip_path) not in processed
+
+
+def test_run_watcher_processes_overwritten_same_path_zip(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """BUG-038：路径相同但指纹不同的 zip 应重新处理。"""
+    zip_path = workspace.inbox / "same.zip"
+    _make_zip(zip_path, {"index.html": "old"})
+    old_key = daemon_mod.processed_key(zip_path)
+    daemon_mod.save_processed_set(workspace, {old_key, str(zip_path)})
+    time.sleep(0.001)
+    _make_zip(zip_path, {"index.html": "new content is longer"})
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=True, pid=0, poll_interval=0.01)
+    )
+
+    stop = threading.Event()
+    processed_paths: list[Path] = []
+
+    def fake_process(ws, cfg, reg, p):
+        processed_paths.append(p)
+        stop.set()
+        return {"action": "started"}
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=fake_process,
+    )
+    assert processed_paths == [zip_path]
+    assert daemon_mod.processed_key(zip_path) in daemon_mod.load_processed_set(workspace)
+
+
+def test_run_watcher_exits_when_disabled(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """状态文件 enabled=False 时 watcher 立即退出，不处理任何 zip。"""
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=False, pid=0, poll_interval=0.01)
+    )
+    zip_path = workspace.inbox / "x.zip"
+    _make_zip(zip_path, {"index.html": "<h1>x</h1>"})
+
+    processed: list[Path] = []
+
+    def fake_process(ws, cfg, reg, p):
+        processed.append(p)
+
+    stop = threading.Event()
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=fake_process,
+    )
+    assert processed == []
+
+
+def test_run_watcher_skips_unstable_file(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """未通过稳定窗口的文件本轮不处理，下一轮再判断。"""
+    zip_path = workspace.inbox / "growing.zip"
+    _make_zip(zip_path, {"index.html": "<h1>x</h1>"})
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=True, pid=0, poll_interval=0.01)
+    )
+
+    call_count = {"n": 0}
+
+    def fake_process(ws, cfg, reg, p):
+        call_count["n"] += 1
+        return {"action": "started"}
+
+    stop = threading.Event()
+    done = threading.Event()
+
+    def runner():
+        daemon_mod.run_watcher(
+            workspace,
+            config,
+            registry,
+            stop_event=stop,
+            poll_interval=0.01,
+            stable_seconds=999.0,  # 永不视为稳定
+            process_fn=fake_process,
+        )
+        done.set()
+
+    t = threading.Thread(target=runner)
+    t.start()
+    time.sleep(0.2)  # 让 watcher 跑几轮
+    stop.set()
+    assert done.wait(2.0)
+    t.join(timeout=2.0)
+    assert call_count["n"] == 0  # 从未处理（一直不稳定）
+
+
+# ---- is_running / status ---------------------------------------------------
+
+
+def test_is_running_false_when_no_state(workspace: Workspace) -> None:
+    assert daemon_mod.is_running(workspace) is False
+
+
+def test_is_running_false_when_pid_dead(workspace: Workspace) -> None:
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=True, pid=999999999)
+    )
+    assert daemon_mod.is_running(workspace) is False
+
+
+def test_daemon_status_reports_disabled(workspace: Workspace) -> None:
+    info = daemon_mod.daemon_status(workspace)
+    assert info["running"] is False
+    assert info["enabled"] is False
+
+
+def test_start_daemon_serializes_concurrent_start(
+    workspace: Workspace, config: Config, monkeypatch
+) -> None:
+    """BUG-033：并发 daemon on 不应 spawn 多个 watcher。"""
+    pid = 43210
+    spawn_calls: list[float] = []
+    real_is_pid_alive = daemon_mod.is_pid_alive
+
+    def fake_is_pid_alive(candidate: int) -> bool:
+        if candidate == pid:
+            return True
+        return real_is_pid_alive(candidate)
+
+    def fake_spawn(ws, poll):
+        spawn_calls.append(time.time())
+        daemon_mod.lock_path(ws).write_text(f"{pid}\n{time.time():.3f}\n", encoding="utf-8")
+        time.sleep(0.1)
+        return pid
+
+    monkeypatch.setattr(daemon_mod, "is_pid_alive", fake_is_pid_alive)
+    monkeypatch.setattr(daemon_mod, "_spawn_watcher", fake_spawn)
+
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            results.append(daemon_mod.start_daemon(workspace, config, poll_interval=0.01))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+
+    assert errors == []
+    assert results == [pid, pid]
+    assert len(spawn_calls) == 1
+
+
+def test_start_daemon_rolls_back_state_when_child_exits(
+    workspace: Workspace, config: Config, monkeypatch
+) -> None:
+    """BUG-036：watcher 子进程立即退出后 state 不应保持 enabled=True。"""
+    pid = 54321
+    real_is_pid_alive = daemon_mod.is_pid_alive
+
+    def fake_is_pid_alive(candidate: int) -> bool:
+        if candidate == pid:
+            return False
+        return real_is_pid_alive(candidate)
+
+    monkeypatch.setattr(daemon_mod, "is_pid_alive", fake_is_pid_alive)
+    monkeypatch.setattr(daemon_mod, "_spawn_watcher", lambda ws, poll: pid)
+
+    from local_web_access.errors import LifecycleError
+
+    with pytest.raises(LifecycleError):
+        daemon_mod.start_daemon(workspace, config, poll_interval=0.01)
+    state = daemon_mod.read_state(workspace)
+    assert state is not None
+    assert state.enabled is False
+    assert state.pid == pid
+
+
+# ---- stop_daemon clears enabled -------------------------------------------
+
+
+def test_stop_daemon_sets_disabled(workspace: Workspace) -> None:
+    daemon_mod.write_state(
+        workspace,
+        daemon_mod.DaemonState(enabled=True, pid=999999999, started_at="now"),
+    )
+    assert daemon_mod.stop_daemon(workspace) is True
+    state = daemon_mod.read_state(workspace)
+    assert state is not None
+    assert state.enabled is False
+
+
+def test_stop_daemon_noop_when_never_started(workspace: Workspace) -> None:
+    assert daemon_mod.stop_daemon(workspace) is True

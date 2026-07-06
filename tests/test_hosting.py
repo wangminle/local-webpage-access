@@ -292,14 +292,60 @@ def test_stop_instance_disables_gateway(
 ) -> None:
     _seed_static_instance(workspace, registry, "demo")
     host_static(workspace, config, registry, "demo")
-    port = registry.allocated_ports()
-    assert len(port) == 1
+    ports = registry.allocated_ports()
+    assert len(ports) == 1
+    held_port = ports[0]
 
     manifest = stop_instance(workspace, config, registry, "demo")
     assert manifest.status == Status.STOPPED
-    assert registry.allocated_ports() == []
+    # BUG-028：静态实例 stop 后端口登记应保留（与容器路径一致），供 start 复用，
+    # 避免端口被重新分配给其他实例而造成跨实例内容混淆。
+    assert registry.allocated_ports() == [held_port]
+    assert registry.port_owner(held_port) == "demo"
     row = registry.get_instance("demo")
     assert row["status"] == "stopped"
+
+
+def test_stop_static_then_restart_reuses_port(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """BUG-028 回归：静态实例 stop 后再 start 复用同一端口，lanUrl 稳定。"""
+    _seed_static_instance(workspace, registry, "demo")
+    first = host_static(workspace, config, registry, "demo")
+    port = first.network.hostPort
+    assert port is not None
+
+    stop_instance(workspace, config, registry, "demo")
+    # stop 后端口登记仍在
+    assert port in registry.allocated_ports()
+
+    second = host_static(workspace, config, registry, "demo")
+    assert second.network.hostPort == port
+    # BUG：泄漏兜底——第二次 start 又起了一个 http.server 子进程，必须 stop，
+    # 否则跨用例累积孤儿进程会占满端口池（全量测试连跑即红）。
+    stop_instance(workspace, config, registry, "demo")
+
+
+def test_stopped_static_port_not_reassigned(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """BUG-028 回归：静态实例 stop 后保留的端口不会被分配给另一实例。"""
+    _seed_static_instance(workspace, registry, "demo")
+    _seed_static_instance(workspace, registry, "other")
+    host_static(workspace, config, registry, "demo")
+    demo_port = registry.allocated_ports()[0]
+
+    stop_instance(workspace, config, registry, "demo")
+    # demo 的端口仍登记在案，other 启动时不应抢到它
+    host_static(workspace, config, registry, "other")
+    ports = registry.allocated_ports()
+    assert demo_port in ports
+    assert registry.port_owner(demo_port) == "demo"
+    other_port = next(p for p in ports if p != demo_port)
+    assert registry.port_owner(other_port) == "other"
+    # BUG：泄漏兜底——other 实例的 http.server 子进程仍在跑，必须 stop，
+    # 否则跨用例累积孤儿进程会占满端口池（全量测试连跑即红）。
+    stop_instance(workspace, config, registry, "other")
 
 
 # ---- WBS-11 前端构建（mock npm）-------------------------------------------

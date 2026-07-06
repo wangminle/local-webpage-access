@@ -89,8 +89,6 @@ def import_cmd(
     name: str = typer.Option(None, "--name", "-n", help="实例显示名称（默认从文件名推导）"),
 ) -> None:
     """导入一个 zip 包：解压、识别、登记实例。"""
-    from pathlib import Path
-
     from local_web_access.importer import Importer
 
     try:
@@ -437,6 +435,185 @@ def list_cmd() -> None:
                 f"{row['id'][:20]:20} {row['kind']:8} {row['runtime']:16} "
                 f"{row['status']:10} {port:6} {row['name']}"
             )
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+# ---- daemon 子命令（WBS-21）-------------------------------------------------
+
+daemon_app = typer.Typer(help="控制 daemon 自动导入模式")
+
+
+@daemon_app.command("on")
+def daemon_on(
+    poll: float = typer.Option(
+        None,
+        "--poll",
+        "-p",
+        help="inbox 扫描间隔（秒），默认 5",
+    ),
+) -> None:
+    """开启 daemon：自动监听 inbox/，导入并启动可确定的轻量实例。"""
+    from local_web_access import daemon as daemon_mod
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        # daemon 子进程会自行打开 registry；这里只读状态
+        _reg.close()
+        pid = daemon_mod.start_daemon(ws, config, poll_interval=poll)
+        typer.secho(f"daemon 已启动（pid={pid}）", fg=typer.colors.GREEN)
+        typer.echo(f"  监听目录：{ws.inbox}")
+        typer.echo("  把 zip 放入 inbox/ 即可自动导入；uncertain/heavy 实例标记 pending。")
+        typer.echo("  停止：lwa daemon off")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@daemon_app.command("off")
+def daemon_off() -> None:
+    """关闭 daemon：停止自动监听 inbox/。"""
+    from local_web_access import daemon as daemon_mod
+    from local_web_access.paths import require_workspace
+
+    try:
+        ws = require_workspace()
+        stopped = daemon_mod.stop_daemon(ws)
+        if stopped:
+            typer.secho("daemon 已停止", fg=typer.colors.GREEN)
+        else:
+            typer.secho(
+                "daemon 已请求停止，但子进程未在超时内退出（可能需要手动 kill）",
+                fg=typer.colors.YELLOW,
+            )
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    """查看 daemon 运行状态。"""
+    from local_web_access import daemon as daemon_mod
+    from local_web_access.paths import require_workspace
+
+    try:
+        ws = require_workspace()
+        info = daemon_mod.daemon_status(ws)
+        if info["running"]:
+            typer.secho(
+                f"daemon 运行中（pid={info['pid']}, poll={info['pollInterval']}s）",
+                fg=typer.colors.GREEN,
+            )
+        elif info["enabled"]:
+            typer.secho(
+                f"daemon 已标记开启但未检测到进程（pid={info['pid']}）",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            typer.echo("daemon 未开启（lwa daemon on 启动）")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+app.add_typer(daemon_app, name="daemon")
+
+
+# ---- manager 子命令（WBS-22.13）---------------------------------------------
+
+manager_app = typer.Typer(help="控制管理页 HTTP 服务")
+
+
+@manager_app.command("start")
+def manager_start(
+    host: str = typer.Option(
+        None,
+        "--host",
+        help="监听地址（默认用配置 managerHost，通常是 0.0.0.0 即局域网可达）",
+    ),
+    port: int = typer.Option(
+        None, "--port", help="监听端口（默认用配置 managerPort，通常是 17800）"
+    ),
+) -> None:
+    """启动管理页 HTTP 服务（前台运行，Ctrl+C 退出）。"""
+    from local_web_access.manager_api import ensure_token, run_manager
+    from local_web_access.security import assert_no_critical, validate_manager_binding
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        _reg.close()  # manager 会自行打开 registry
+        token = ensure_token(ws)
+        bind_host = host or config.managerHost
+        bind_port = port if port is not None else config.managerPort
+        assert_no_critical(
+            validate_manager_binding(bind_host, has_token=bool(token), port=bind_port)
+        )
+        typer.secho(
+            f"管理页启动中：http://{bind_host}:{bind_port}", fg=typer.colors.GREEN
+        )
+        typer.echo(f"  API token：{token}")
+        typer.echo("  未带 token 的 /api/* 请求将被拒绝（401）。")
+        typer.echo("  把 zip 放进 inbox/ 或在此页面管理已导入实例。Ctrl+C 退出。")
+        run_manager(ws, config, host=bind_host, port=bind_port)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+app.add_typer(manager_app, name="manager")
+
+
+# ---- doctor 子命令（WBS-26）------------------------------------------------
+
+
+@app.command("doctor")
+def doctor_cmd(
+    instance_id: str = typer.Argument(
+        None, help="可选：对单个实例执行健康诊断"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="输出 JSON 报告（便于脚本解析）"
+    ),
+) -> None:
+    """诊断环境与实例问题（WBS-26）。
+
+    检查 Python/Docker/Compose/端口/registry/磁盘/内存；提供 instance_id 时
+    附加该实例的 manifest、状态、最近事件与日志诊断，并给出修复建议。
+    """
+    import json as json_mod
+
+    from local_web_access.doctor import format_report, run_doctor
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        _reg.close()  # doctor 自行打开 registry
+        report = run_doctor(ws, config, instance_id=instance_id)
+        if json_output:
+            typer.echo(
+                json_mod.dumps(
+                    {
+                        "overall": report.overall,
+                        "instance_id": report.instance_id,
+                        "checks": [c.to_dict() for c in report.checks],
+                        "instance_checks": [
+                            c.to_dict() for c in report.instance_checks
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            typer.echo(format_report(report))
+        if report.has_failures:
+            raise typer.Exit(code=1)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

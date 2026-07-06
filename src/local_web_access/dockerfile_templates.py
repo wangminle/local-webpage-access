@@ -85,13 +85,14 @@ def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
     build_step = ""
     if manifest.entry.build:
         build_step = f"RUN {manifest.entry.build}\n"
+    dependency_copy = _node_dependency_copy_block(install)
 
     lines = [
         header,
         f"FROM {_NODE_IMAGE}",
         "WORKDIR /app",
         "ENV NODE_ENV=production",
-        "COPY current/package*.json ./",
+        dependency_copy,
         f"RUN {install}",
         "COPY current/ ./",
         build_step,
@@ -220,6 +221,15 @@ def _database_label(manifest: InstanceManifest) -> str:
     if not manifest.hasDatabase or manifest.database is None:
         return "无"
     return manifest.database.type
+
+
+def _node_dependency_copy_block(install: str) -> str:
+    """复制与包管理器匹配的依赖声明文件。"""
+    if "pnpm install" in install:
+        return "COPY current/package.json current/pnpm-lock.yaml ./"
+    if "yarn install" in install:
+        return "COPY current/package.json current/yarn.lock ./"
+    return "COPY current/package*.json ./"
 
 
 __all__ = ["generate_dockerfile"]

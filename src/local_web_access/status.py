@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,11 +34,21 @@ class InstanceStatus:
     name: str
     kind: str
     runtime: str
+    serving_mode: str
+    resource_profile: str
     status: str
     desired_state: str
+    stack: list[str] = field(default_factory=list)
+    database: str | None = None
     host_port: int | None = None
     internal_port: int | None = None
     lan_url: str | None = None
+    source_size_bytes: int | None = None
+    public_size_bytes: int | None = None
+    data_size_bytes: int | None = None
+    image_size_bytes: int | None = None
+    last_memory_bytes: int | None = None
+    last_cpu_percent: float | None = None
     last_error: str | None = None
     last_started_at: str | None = None
     last_health_check_at: str | None = None
@@ -50,11 +61,21 @@ class InstanceStatus:
             "name": self.name,
             "kind": self.kind,
             "runtime": self.runtime,
+            "servingMode": self.serving_mode,
+            "resourceProfile": self.resource_profile,
             "status": self.status,
             "desiredState": self.desired_state,
+            "stack": self.stack,
+            "database": self.database,
             "hostPort": self.host_port,
             "internalPort": self.internal_port,
             "lanUrl": self.lan_url,
+            "sourceSizeBytes": self.source_size_bytes,
+            "publicSizeBytes": self.public_size_bytes,
+            "dataSizeBytes": self.data_size_bytes,
+            "imageSizeBytes": self.image_size_bytes,
+            "lastMemoryBytes": self.last_memory_bytes,
+            "lastCpuPercent": self.last_cpu_percent,
             "lastError": self.last_error,
             "lastStartedAt": self.last_started_at,
             "lastHealthCheckAt": self.last_health_check_at,
@@ -80,17 +101,28 @@ def instance_status(
 
     host_port, internal_port = _resolve_ports(registry, instance_id, row["runtime"])
     lan_url = _resolve_lan_url(workspace, instance_id, host_port)
+    resources = registry.get_resources(instance_id) or {}
 
     return InstanceStatus(
         id=row["id"],
         name=row["name"],
         kind=row["kind"],
         runtime=row["runtime"],
+        serving_mode=row["serving_mode"],
+        resource_profile=row["resource_profile"],
         status=row["status"],
         desired_state=row["desired_state"],
+        stack=_parse_stack(row.get("stack_json")),
+        database=row.get("database_type"),
         host_port=host_port,
         internal_port=internal_port,
         lan_url=lan_url,
+        source_size_bytes=_as_int(resources.get("source_size_bytes")),
+        public_size_bytes=_as_int(resources.get("public_size_bytes")),
+        data_size_bytes=_as_int(resources.get("data_size_bytes")),
+        image_size_bytes=_as_int(resources.get("image_size_bytes")),
+        last_memory_bytes=_as_int(resources.get("last_memory_bytes")),
+        last_cpu_percent=_as_float(resources.get("last_cpu_percent")),
         last_error=row.get("last_error"),
         last_started_at=row.get("last_started_at"),
         last_health_check_at=row.get("last_health_check_at"),
@@ -124,6 +156,12 @@ def sync_status(
     changed: dict[str, str] = {}
     for iid in ids:
         before = _registry_status(registry, iid)
+        if before in {
+            Status.PENDING.value,
+            Status.QUEUED.value,
+            Status.BUILDING.value,
+        }:
+            continue
         try:
             observed = observe_status(workspace, config, registry, iid)
         except Exception:  # noqa: BLE001 — 单实例观测失败不影响其它
@@ -189,6 +227,29 @@ def _as_int(v: Any) -> int | None:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _as_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_stack(raw: Any) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data]
 
 
 __all__ = [

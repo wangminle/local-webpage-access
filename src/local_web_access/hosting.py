@@ -105,9 +105,11 @@ def stop_instance(
     if runtime == "shared-static":
         gateway = StaticGateway(workspace, config)
         gateway.disable(instance_id)
-        # 释放端口
-        allocator = PortAllocator(config, registry)
-        allocator.release_instance(instance_id)
+        # 注意：不释放端口，start 恢复时复用（与容器路径一致，BUG-028）。
+        # 此前 stop 这里会调用 allocator.release_instance，导致 ports 表归属被清空，
+        # 但 static_sites.host_port 与 manifest.static.hostPort 仍保留旧值，
+        # 于是该端口可被重新分配给别的实例，而旧实例的网关配置/字段仍指向它，
+        # 造成跨实例内容混淆。保留端口登记即可让 _ensure_static_port 复用。
         manifest.status = Status.STOPPED
         manifest.desiredState = DesiredState.STOPPED
         if manifest.static is not None:
@@ -528,6 +530,37 @@ def _ensure_container_port(
     return allocator.allocate(instance_id)
 
 
+def _ensure_static_port(
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> int:
+    """静态端口分配：优先复用已登记端口，否则新分配。
+
+    与 :func:`_ensure_container_port` 对称（BUG-028）。``stop_instance`` 不再
+    释放静态实例的端口登记，因此重启时此处的复用路径会命中：旧端口仍归本实例
+    所有、且进程已停止（``is_port_in_use`` 为 False），:meth:`allocate_port`
+    的并发安全语义确认归属后直接复用，保持 lanUrl 稳定。
+
+    若旧端口被外部进程占用或归属已丢失（极端情况），回退到全新分配。
+    """
+    allocator = PortAllocator(config, registry)
+    row = registry.get_static_site(instance_id)
+    existing = row.get("host_port") if row else None
+    if existing and not is_port_in_use(int(existing)):
+        if registry.allocate_port(instance_id, int(existing)):
+            log.info("复用静态实例 %s 的端口 %d", instance_id, existing)
+            return int(existing)
+        log.warning(
+            "实例 %s 的旧端口 %d 已被其他实例占用，重新分配",
+            instance_id,
+            existing,
+        )
+    # 全新分配：先清掉该实例可能残留的端口登记
+    allocator.release_instance(instance_id)
+    return allocator.allocate(instance_id)
+
+
 def _wait_for_http(
     host_port: int,
     *,
@@ -575,15 +608,14 @@ def _enable_static(
     public_dir: Path,
 ) -> InstanceManifest:
     """分配端口、启用网关、更新 manifest 的 static/network 字段。"""
-    allocator = PortAllocator(config, registry)
     gateway = StaticGateway(workspace, config)
     # 重启用场景：先停掉可能仍在运行的旧静态进程，
     # 否则旧进程会成为孤儿（PID 文件被新进程覆盖）、旧端口继续被占用
     if gateway.is_enabled(instance_id):
         gateway.disable(instance_id)
-    # 若已有端口先释放，重新分配
-    allocator.release_instance(instance_id)
-    host_port = allocator.allocate(instance_id)
+    # 端口分配：优先复用已登记端口（stop 后保留），否则全新分配（BUG-028）
+    host_port = _ensure_static_port(config, registry, instance_id)
+    allocator = PortAllocator(config, registry)
 
     backend = gateway.detect_backend()
     try:

@@ -276,6 +276,9 @@ def test_start_static_dispatches_to_host_static(
     manifest = start_instance(workspace, config, registry, "demo")
     assert manifest.status == Status.RUNNING
     assert fake_runtime.calls == []  # 静态不调用 DockerRuntime
+    # BUG：泄漏兜底——host_static 真起了一个 http.server 子进程，必须 stop
+    # 掉，否则端口池在跨用例累积下会耗尽（导致全量测试连跑即红）。
+    stop_instance_op(workspace, config, registry, "demo")
 
 
 # ---- stop ------------------------------------------------------------------

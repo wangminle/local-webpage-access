@@ -12,6 +12,7 @@ import pytest
 from local_web_access.health import HealthResult, check_health, http_ok
 from local_web_access.models import (
     ContainerConfig,
+    DatabaseConfig,
     DesiredState,
     InstanceManifest,
     Kind,
@@ -59,7 +60,12 @@ def config(workspace_root: Path):
 
 
 def _seed_container(
-    workspace: Workspace, registry: Registry, iid: str = "api", *, host_port: int | None = 21000
+    workspace: Workspace,
+    registry: Registry,
+    iid: str = "api",
+    *,
+    host_port: int | None = 21000,
+    has_database: bool = False,
 ) -> InstanceManifest:
     workspace.ensure_app_dirs(iid)
     manifest = InstanceManifest(
@@ -68,6 +74,8 @@ def _seed_container(
         version="1",
         kind=Kind.PYTHON,
         stack=["fastapi"],
+        hasDatabase=has_database,
+        database=DatabaseConfig(type="sqlite", dataDir="data") if has_database else None,
         runtime=Runtime.DOCKER_COMPOSE,
         servingMode=ServingMode.CONTAINER,
         resourceProfile=ResourceProfile.SMALL,
@@ -238,6 +246,33 @@ def test_status_to_dict(workspace, registry, config) -> None:
     assert "desiredState" in d
 
 
+def test_status_to_dict_includes_manager_list_fields(
+    workspace, registry, config
+) -> None:
+    """BUG-028：管理页列表需要 stack/database/servingMode/资源字段。"""
+    _seed_container(workspace, registry, "api", has_database=True)
+    registry.upsert_resources(
+        "api",
+        source_size_bytes=100,
+        public_size_bytes=20,
+        data_size_bytes=30,
+        image_size_bytes=400,
+        last_memory_bytes=123456,
+        last_cpu_percent=7.5,
+    )
+    d = instance_status(workspace, config, registry, "api").to_dict()
+    assert d["servingMode"] == "container"
+    assert d["resourceProfile"] == "small"
+    assert d["stack"] == ["fastapi"]
+    assert d["database"] == "sqlite"
+    assert d["sourceSizeBytes"] == 100
+    assert d["publicSizeBytes"] == 20
+    assert d["dataSizeBytes"] == 30
+    assert d["imageSizeBytes"] == 400
+    assert d["lastMemoryBytes"] == 123456
+    assert d["lastCpuPercent"] == 7.5
+
+
 # ---- sync_status -----------------------------------------------------------
 
 
@@ -247,8 +282,6 @@ def test_sync_status_observes_and_reports_change(
     """sync_status 调用 observe_status，状态变化时返回映射。"""
     _seed_container(workspace, registry, "api")
     # manifest 落 running，但容器实际没跑 → observe 改写 stopped
-    from local_web_access.docker_runtime import DockerRuntime
-
     class _FakeRT:
         def __init__(self, *a, **kw):
             pass

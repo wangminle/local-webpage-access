@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from local_web_access.errors import PathError
 from local_web_access.paths import Workspace
 
 # 已知日志分类（用于校验与文档）；list_logs 不局限于此，会列出实际存在的 .log
@@ -45,7 +46,28 @@ class LogInfo:
 
 def log_path(workspace: Workspace, instance_id: str, category: str) -> Path:
     """返回实例某类日志文件路径（不保证存在）。"""
-    return workspace.app_logs(instance_id) / f"{category}.log"
+    validate_log_category(category)
+    log_dir = workspace.app_logs(instance_id).resolve()
+    path = (log_dir / f"{category}.log").resolve()
+    try:
+        path.relative_to(log_dir)
+    except ValueError as exc:
+        raise PathError(
+            f"日志路径越界：{category!r}",
+            instance_id=instance_id,
+            category=category,
+        ) from exc
+    return path
+
+
+def validate_log_category(category: str) -> str:
+    """校验日志分类，拒绝路径穿越和非预期日志文件读取。"""
+    if category not in LOG_CATEGORIES:
+        raise PathError(
+            f"非法日志分类：{category!r}（允许：{', '.join(LOG_CATEGORIES)}）",
+            category=category,
+        )
+    return category
 
 
 def read_log(
@@ -132,9 +154,9 @@ def rotate_all(
     """对实例所有日志执行滚动，返回触发滚动的分类列表。"""
     rotated: list[str] = []
     for info in list_logs(workspace, instance_id):
-        if rotate_log(
-            workspace, instance_id, info.category, max_bytes=max_bytes, keep=keep
-        ):
+        if info.category not in LOG_CATEGORIES:
+            continue
+        if rotate_log(workspace, instance_id, info.category, max_bytes=max_bytes, keep=keep):
             rotated.append(info.category)
     return rotated
 
@@ -145,6 +167,7 @@ __all__ = [
     "DEFAULT_MAX_BYTES",
     "DEFAULT_KEEP",
     "LogInfo",
+    "validate_log_category",
     "log_path",
     "read_log",
     "list_logs",

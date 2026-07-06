@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from local_web_access.models import Kind, ResourceProfile, Runtime, ServingMode
-from local_web_access.scanner import FileSummary, Scanner, summarize
+from local_web_access.scanner import Scanner, summarize
 
 
 # ---- FileSummary -----------------------------------------------------------
@@ -95,6 +93,36 @@ def test_detect_node_uses_ci_when_lockfile_present(tmp_path: Path) -> None:
     assert result.entry.install == "npm ci"
 
 
+def test_detect_node_uses_pnpm_when_pnpm_lock_present(tmp_path: Path) -> None:
+    """BUG-041：pnpm 锁文件项目不得误判为 npm ci。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "node server.js"},
+            }
+        )
+    )
+    (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    result = Scanner().detect(tmp_path)
+    assert result.entry.install == "corepack enable && pnpm install --frozen-lockfile"
+
+
+def test_detect_node_uses_yarn_when_yarn_lock_present(tmp_path: Path) -> None:
+    """BUG-041：yarn 锁文件项目不得误判为 npm ci。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "node server.js"},
+            }
+        )
+    )
+    (tmp_path / "yarn.lock").write_text("# yarn lockfile\n")
+    result = Scanner().detect(tmp_path)
+    assert result.entry.install == "corepack enable && yarn install --frozen-lockfile"
+
+
 # ---- Node backend ---------------------------------------------------------
 
 
@@ -114,6 +142,34 @@ def test_detect_node_backend_container(tmp_path: Path) -> None:
     assert result.form == "backend-container"
     assert result.internalPort == 3000
     assert result.confidence == "high"
+
+
+def test_detect_node_backend_port_from_scripts_env(tmp_path: Path) -> None:
+    """BUG-032：scripts 中 PORT=xxxx 应被识别为容器端口。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "PORT=8080 node server.js"},
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.internalPort == 8080
+
+
+def test_detect_node_backend_port_from_scripts_flag(tmp_path: Path) -> None:
+    """BUG-032：scripts 中 --port xxxx（及 --port=xxxx）应被识别。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "node server.js --port 4000"},
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.internalPort == 4000
 
 
 def test_detect_node_unknown_pending(tmp_path: Path) -> None:

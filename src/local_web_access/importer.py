@@ -165,6 +165,13 @@ class Importer:
                 else f"导入完成，sha256={zip_hash[:12]}，未识别（pending）"
             )
             self.registry.add_event(instance_id, "import", event_msg)
+            # WBS-25.09：未知 zip 来源风险提示（仅 pending 时）
+            if detection.pending:
+                from local_web_access.security import unknown_zip_risk_hint
+
+                self.registry.add_event(
+                    instance_id, "security", unknown_zip_risk_hint()
+                )
 
             log.info("导入成功：%s（%s）", instance_id, detection.form)
             return ImportResult(

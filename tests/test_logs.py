@@ -16,6 +16,7 @@ from local_web_access.logs import (
     rotate_log,
 )
 from local_web_access.paths import Workspace
+from local_web_access.errors import PathError
 
 
 @pytest.fixture()
@@ -52,6 +53,15 @@ def test_read_log_returns_last_n_lines(workspace) -> None:
 def test_read_log_tail_larger_than_file(workspace) -> None:
     _write(workspace, "api", "run", "only\n")
     assert read_log(workspace, "api", "run", tail=100) == "only"
+
+
+def test_read_log_rejects_invalid_category(workspace) -> None:
+    """BUG-040：category 不得用于路径穿越。"""
+    workspace.ensure_app_dirs("api")
+    secret = workspace.logs / "secret.log"
+    secret.write_text("secret", encoding="utf-8")
+    with pytest.raises(PathError):
+        read_log(workspace, "api", "../../logs/secret", tail=10)
 
 
 # ---- list_logs -------------------------------------------------------------

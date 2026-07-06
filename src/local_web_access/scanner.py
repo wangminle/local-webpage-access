@@ -351,7 +351,7 @@ class Scanner:
             ) else ResourceProfile.SMALL
             result.internalPort = _infer_node_port(summary)
             result.entry = EntryConfig(
-                install="npm ci" if _has_lockfile(summary) else "npm install",
+                install=_node_install_command(summary),
                 build="npm run build" if has_build else None,
                 start="npm run start" if "start" in summary.node_scripts else "node server.js",
             )
@@ -363,7 +363,7 @@ class Scanner:
             result.form = "frontend-static"
             result.resourceProfile = ResourceProfile.TINY
             result.entry = EntryConfig(
-                install="npm ci" if _has_lockfile(summary) else "npm install",
+                install=_node_install_command(summary),
                 build="npm run build",
                 start=None,
             )
@@ -414,19 +414,59 @@ class Scanner:
 
 
 def _has_lockfile(summary: FileSummary) -> bool:
-    return any(f in summary.top_files for f in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml"))
+    return any(
+        f in summary.top_files
+        for f in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")
+    )
+
+
+def _node_install_command(summary: FileSummary) -> str:
+    """根据锁文件选择包管理器，避免 pnpm/yarn 项目误走 npm ci。"""
+    files = summary.top_files
+    if "pnpm-lock.yaml" in files:
+        return "corepack enable && pnpm install --frozen-lockfile"
+    if "yarn.lock" in files:
+        return "corepack enable && yarn install --frozen-lockfile"
+    if "package-lock.json" in files:
+        return "npm ci"
+    return "npm install"
 
 
 def _infer_node_port(summary: FileSummary) -> int:
-    # 优先从 scripts/env 推断，否则用框架默认
-    deps_lower = {d.lower() for d in summary.node_deps}
-    if "next" in deps_lower:
-        return 3000
-    if "nuxt" in deps_lower:
-        return 3000
-    if "@nestjs/core" in deps_lower:
-        return 3000
+    """推断 Node 后端容器内监听端口。
+
+    优先级：
+    1. ``package.json`` scripts 中显式配置的端口（``PORT=8080``、``--port 8080``）；
+    2. Node 生态通用默认 ``3000``（Next/Nuxt/Nest 等 meta-framework 与多数
+       Express/Fastify 样例均默认 3000）。
+
+    此前本函数用 if 链"区分" next/nuxt/nest，但所有分支都返回 3000（BUG-032，
+    死代码）。Next/Nuxt/Nest 确实都默认 3000，无需分支；真正缺的是从用户脚本
+    里读取显式端口。raw Node 后端的端口由应用代码决定，无法静态可靠推断，
+    只在 scripts 显式声明时才采纳，否则回退默认，由 compose 端口映射兜底。
+    """
+    port = _extract_port_from_scripts(summary.node_scripts)
+    if port is not None:
+        return port
     return 3000
+
+
+def _extract_port_from_scripts(scripts: dict) -> int | None:
+    """从 package.json scripts 文本尽力解析端口。
+
+    仅匹配无歧义的两种写法：``PORT=8080``（环境变量内联）与 ``--port 8080``
+    （含 ``--port=8080``）。短旗 ``-p`` 含义过多（pid/print 等）不采纳。
+    """
+    if not scripts:
+        return None
+    blob = " ".join(str(v) for v in scripts.values())
+    m = re.search(r"\bPORT=(\d{2,5})\b", blob)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"--port[=\s]+(\d{2,5})", blob)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def _infer_python_port(summary: FileSummary, matched: list[str]) -> int:

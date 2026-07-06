@@ -266,6 +266,34 @@ def test_run_failure_propagates_and_releases_slot(registry, config) -> None:
     assert q.in_flight() == 0
 
 
+def test_in_flight_counts_active_build_not_semaphore_private_attr(registry, config) -> None:
+    """BUG-031：in_flight 按任务生命周期统计，不依赖 Semaphore._value。
+
+    构建进行中应返回 1，结束后回 0。这锁定新实现（计数 building 任务），
+    防止回退到读取信号量私有属性 ``_value``。
+    """
+    import threading
+
+    _seed_instance(registry, "api")
+    q = BuildQueue(config, registry, concurrency=1)
+
+    release = threading.Event()
+
+    def blocking_builder(iid):
+        release.wait(2.0)
+        return iid
+
+    t = threading.Thread(target=q.run, args=("api", blocking_builder))
+    t.start()
+    try:
+        time.sleep(0.15)  # 等待拿到槽位并进入 building
+        assert q.in_flight() == 1
+    finally:
+        release.set()
+        t.join()
+    assert q.in_flight() == 0
+
+
 # ---- 超时 -------------------------------------------------------------------
 
 

@@ -99,6 +99,28 @@ def test_init_copies_templates(tmp_path: Path) -> None:
     assert any(ws.templates.rglob("*.tpl"))
 
 
+def test_init_copies_skills(tmp_path: Path) -> None:
+    """lwa init 应把 12 个内置 skills 复制到 skills/（WBS-24）。"""
+    root = tmp_path / "ws"
+    init_workspace(root)
+    ws = Workspace(root)
+    skill_docs = list(ws.skills.rglob("SKILL.md"))
+    assert len(skill_docs) == 12
+    # 索引 README 也应存在
+    assert (ws.skills / "README.md").is_file()
+    # 关键 skill 应在列
+    names = {p.parent.name for p in skill_docs}
+    for expected in (
+        "detect-stack",
+        "dockerize-node-app",
+        "dockerize-python-app",
+        "generate-compose",
+        "fix-docker-build-failure",
+        "diagnose-health-check",
+    ):
+        assert expected in names, f"缺少 skill：{expected}"
+
+
 def test_cli_init_e2e(tmp_path: Path) -> None:
     """通过 CLI 直接调用 init 子命令做端到端验证。"""
     from typer.testing import CliRunner

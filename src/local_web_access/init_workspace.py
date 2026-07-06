@@ -20,6 +20,9 @@ log = get_logger("init")
 # 打包内置模板目录
 _BUNDLED_TEMPLATES = Path(__file__).parent / "templates"
 
+# 打包内置 skills 目录（WBS-24）
+_BUNDLED_SKILLS = Path(__file__).parent / "skills"
+
 
 def init_workspace(root: Path, *, force: bool = False) -> str:
     """初始化工作区。
@@ -43,7 +46,10 @@ def init_workspace(root: Path, *, force: bool = False) -> str:
     # 3. 复制默认模板（用于用户编辑）
     templates_written = _copy_default_templates(ws, force=force)
 
-    # 4. 初始化 SQLite registry（幂等：已存在则只跑迁移）
+    # 4. 复制内置 skills 到 skills/（WBS-24）
+    skills_written = _copy_default_skills(ws, force=force)
+
+    # 5. 初始化 SQLite registry（幂等：已存在则只跑迁移）
     reg = Registry(ws.db_path)
     reg.open()
     try:
@@ -56,6 +62,7 @@ def init_workspace(root: Path, *, force: bool = False) -> str:
         ws,
         config_written=config_written,
         templates_written=templates_written,
+        skills_written=skills_written,
         db_version=db_version,
     )
 
@@ -88,6 +95,26 @@ def _copy_default_templates(ws: Workspace, *, force: bool) -> list[str]:
     return written
 
 
+def _copy_default_skills(ws: Workspace, *, force: bool) -> list[str]:
+    """复制内置 skills 到工作区 skills/（WBS-24）。"""
+    written: list[str] = []
+    if not _BUNDLED_SKILLS.is_dir():
+        log.debug("内置 skills 目录不存在，跳过复制")
+        return written
+
+    for src in _BUNDLED_SKILLS.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(_BUNDLED_SKILLS)
+        dst = ws.skills / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists() and not force:
+            continue
+        shutil.copy2(src, dst)
+        written.append(str(rel).replace("\\", "/"))
+    return written
+
+
 def _schema_version_safe(reg: Registry) -> int:
     from local_web_access.registry.connection import CURRENT_SCHEMA_VERSION
 
@@ -104,6 +131,7 @@ def _format_summary(
     *,
     config_written: bool,
     templates_written: list[str],
+    skills_written: list[str],
     db_version: int,
 ) -> str:
     lines: list[str] = []
@@ -113,6 +141,7 @@ def _format_summary(
     lines.append(f"  apps/        {ws.apps}")
     lines.append(f"  registry/    {ws.db_path}")
     lines.append(f"  static-gateway/  {ws.static_gateway}")
+    lines.append(f"  skills/      {ws.skills}")
     lines.append("")
     lines.append("── 初始化结果 ──")
     lines.append(f"  配置文件     {'已写入' if config_written else '已存在（保留）'}  {ws.config_path}")
@@ -120,6 +149,10 @@ def _format_summary(
         lines.append(f"  默认模板     已复制 {len(templates_written)} 个文件")
     else:
         lines.append("  默认模板     已存在（保留）")
+    if skills_written:
+        lines.append(f"  内置 skills  已复制 {len(skills_written)} 个文件")
+    else:
+        lines.append("  内置 skills  已存在（保留）")
     lines.append(f"  SQLite       schema_version={db_version}  {ws.db_path}")
     return "\n".join(lines)
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from local_web_access.dockerfile_templates import generate_dockerfile
 from local_web_access.models import (
     ContainerConfig,
@@ -86,6 +84,36 @@ def test_node_dockerfile_includes_build_step_when_present(workspace: Workspace) 
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "RUN npm run build" in content
+
+
+def test_node_dockerfile_supports_pnpm_lockfile(workspace: Workspace) -> None:
+    """BUG-041：pnpm 项目应复制 pnpm-lock.yaml 并运行 pnpm install。"""
+    m = _mk_manifest(
+        kind=Kind.NODE,
+        stack=["express"],
+        install="corepack enable && pnpm install --frozen-lockfile",
+        start="npm run start",
+        internal_port=3000,
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "COPY current/package.json current/pnpm-lock.yaml ./" in content
+    assert "RUN corepack enable && pnpm install --frozen-lockfile" in content
+    assert "COPY current/package*.json ./" not in content
+
+
+def test_node_dockerfile_supports_yarn_lockfile(workspace: Workspace) -> None:
+    """BUG-041：yarn 项目应复制 yarn.lock 并运行 yarn install。"""
+    m = _mk_manifest(
+        kind=Kind.NODE,
+        stack=["express"],
+        install="corepack enable && yarn install --frozen-lockfile",
+        start="npm run start",
+        internal_port=3000,
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "COPY current/package.json current/yarn.lock ./" in content
+    assert "RUN corepack enable && yarn install --frozen-lockfile" in content
+    assert "COPY current/package*.json ./" not in content
 
 
 def test_node_dockerfile_default_start_when_missing(workspace: Workspace) -> None:
