@@ -46,8 +46,8 @@ lwa doctor --json   # 机器可读报告，便于脚本化
 [fail] docker_compose: Docker Compose 不可用
 ```
 
-V1 要求 Compose v2 插件（`docker compose` 子命令）。安装 `docker-compose-plugin`，
-或升级 Docker Desktop。检测到 v1 独立二进制时会给出 warn 建议升级。
+V1 要求 Docker Compose 插件（`docker compose` 子命令）。安装 `docker-compose-plugin`，
+或升级 Docker Desktop。检测到 v1 独立二进制时会提示改用插件。
 
 ### 磁盘空间不足
 

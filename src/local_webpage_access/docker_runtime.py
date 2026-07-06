@@ -212,7 +212,7 @@ class DockerRuntime:
         )
         if not compose_result.ok:
             raise DockerError(
-                "Docker Compose 不可用：请安装 `docker compose` v2 插件",
+                "Docker Compose 不可用：请安装 `docker compose` 插件",
             )
         compose_version = (compose_result.stdout or "").strip()
         if not version_ge(compose_version, MIN_COMPOSE_VERSION):

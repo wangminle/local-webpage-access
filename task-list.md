@@ -56,6 +56,12 @@
 | BUG-043 | 修复 | 管理页详情中的构建记录和事件字段名与 API 返回不匹配，时间、类型、错误摘要显示为空 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | 详情 API 返回 camelCase builds/events/resources；前端兼容 camelCase 与 snake_case；新增详情字段回归 |
 | BUG-044 | 修复 | 管理 API 遇非法实例 ID 返回 500 而不是 400 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | 复核已修复：PathError/SchemaError/ConfigError 等映射 bad_request；新增 `Bad_ID` 返回 400 回归 |
 | BUG-045 | 修复 | 静态实例 stop 后端口无法稳定复用：(1) stop 释放端口登记，旧端口可被重分配给别的实例（跨实例内容混淆）；(2) stop 后端口残留 TIME_WAIT，独占 bind 的 `is_port_in_use` 误判占用，复用判定恒为假，重启报健康检查失败 | 2026-07-06 09:46 | 2026-07-06 11:30 | 已完成 | (1) `stop_instance` 静态分支不再 `release_instance`，保留端口登记供 start 复用（与容器路径对称）；(2) 新增 `is_port_listening`（connect 探测，TIME_WAIT 不影响），`_ensure_static_port`/`_ensure_container_port` 复用判定改用它；分配器 `PortAllocator.allocate` 仍用严格 `is_port_in_use` 避开 TIME_WAIT；(3) `StaticGateway` 缓存 builtin 子进程 `Popen` 句柄 + `waitpid` 回收僵尸，避免 `_pid_alive` 误判存活导致 kill 失败、端口无法释放；builtin 启动后改 `_wait_until_healthy` 轮询健康检查，避免偶发误回滚。注：此前代码以 BUG-028 引用本问题，与清单 BUG-028（管理页列表字段）撞号，已统一改为 BUG-045；`static_gateway.py` 中误标 BUG-016 的注释亦已更正。回归 test_stop_static_then_restart_reuses_port/test_stopped_static_port_not_reassigned，全量 577 passed/4 skipped |
+| BUG-046 | 修复 | lifecycle 文件锁长耗时 rebuild/build 期间无心跳，30 分钟后可被误回收导致跨进程并发操作同一实例 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | 新增 `_LOCK_HEARTBEAT_INTERVAL=min(1800/3,300)=300s` 与 `_touch_lock_heartbeat`（参考 daemon BUG-030，临时文件 + os.replace 原子刷新）；`instance_lock` 持锁期间启动 daemon 后台线程按间隔刷新锁文件时间戳，`finally` 中 Event 停止并 join(5s)；持锁超过 stale 阈值后 `_lock_is_stale` 仍返回 False（心跳持续刷新）。回归：test_instance_lock_heartbeat_refreshes_timestamp / test_instance_lock_heartbeat_keeps_lock_fresh，全量 609 passed/4 skipped |
+| BUG-047 | 修复 | `remove_instance` 写入的 remove 事件被 `ON DELETE CASCADE` 级联删除，审计链断裂 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | 采用 orphan event 方案（events.instance_id 列本就 nullable，add_event 签名已支持 None）：remove 事件以 instance_id=NULL 写入，不受级联影响；message 中保留实例 ID 文本便于追溯。回归：test_remove_keeps_audit_event_as_orphan 断言 remove 事件存留且 instance_id 为 NULL，全量 609 passed/4 skipped |
+| BUG-048 | 修复 | 构建进程崩溃后实例可能永久卡在 `building`，`sync_status` 跳过 building 状态 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | `sync_status` 不再无条件跳过 building：新增 `_recover_stale_building` 检测孤儿 building（判据：最新 builds 行 status=running 且 started_at 超 `_STALE_BUILDING_SECONDS=3600s`；无 builds 行时用 instances.updated_at 兜底），超时则回写 failed + last_error + build_recover 事件 + 收尾孤儿 builds 行。pending/queued 仍跳过（构建前过渡态，不可纠正）。回归 3 条：有 builds 行回收 / 未超时保留 / 无 builds 行兜底回收，全量 609 passed/4 skipped |
+| BUG-049 | 修复 | zip 解压未防御 symlink 类 zip slip，`audit_zip_members` 未被 importer 调用 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | 三层防御：(1) `audit_zip_members` 新增 `modes` 参数 + `_is_symlink_mode`（S_ISLNK）检测符号链接成员，返回 `zip_symlink` critical 发现；(2) importer `_safe_extract` 解压前调用 `audit_zip_members`（含 modes），critical 级 `has_critical` 拒绝解压并抛 ZipImportError，WARN 级记录日志；(3) 解压后 `rglob("*")` 深度防御扫描 symlink（兜底 external_attr 未声明的异常 zip）。回归：test_import_rejects_zip_slip 改匹配 zip_slip、新增 test_import_rejects_zip_symlink；security 新增 symlink 检测 + modes 短缺边界回归，全量 609 passed/4 skipped |
+| BUG-050 | 修复 | 管理页 `building`/`queued` 时仍允许点击「启动」，易触发并发操作与锁竞争 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | `app.js` `opsHtml` 新增 `inProgress` 判定（building/queued/pending），对 start/stop/restart/rebuild 四个操作按钮在 inProgress 时统一禁用（start 保留 running 禁用，stop 保留非 running 禁用）；「打开」「日志」不受影响。顺带补 `.badge-queued` CSS（原缺失）。全量 609 passed/4 skipped |
+| BUG-051 | 修复 | 环境检查把可用 Compose v2.40 环境和无 Caddy 静态托管环境误判为失败 | 2026-07-06 18:07 | 2026-07-06 18:07 | 已完成 | Compose 拆分最低线 2.40.2 与推荐线 5.2.0：runtime 只按最低线阻断，doctor/setup 对低于推荐给 WARN；Caddy 缺失按运行时 fallback 降级 builtin 并给 WARN；同步 README/FAQ/known-limitations/setup skill/CLI 文案；新增 Compose v2.40、低版本失败、Caddy 缺失回归；全量测试 600 passed/4 skipped |
 
 ## 调整事项
 
@@ -67,6 +73,7 @@
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
 | CHK-001 | 检查 | Phase 5-7 全面代码 bug 审查（daemon/manager_api/security/doctor/管理页前端） | 2026-07-06 00:46 | 2026-07-06 09:46 | 已完成 | 全量 pytest 540 passed/4 skipped；发现 BUG-028~037 共 10 项待修复，已写入本清单 |
+| CHK-002 | 检查 | 全量代码 bug 复审（lifecycle/hosting/importer/daemon/build_queue/前端） | 2026-07-06 17:35 | 2026-07-06 17:35 | 已完成 | 全量 pytest 577 passed/4 skipped；历史 BUG-001~045 已修复；新发现 BUG-046~050 共 5 项待修复；跨进程 buildConcurrency 为 BUG-022 已知 V1 边界 |
 
 ## 测试数据
 
@@ -77,6 +84,7 @@
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
+| DOC-001 | 文档 | 统一文档命名：5 个 local-web-access-* 历史文档重命名为 local-webpage-access-*，同步更新引用 | 2026-07-06 17:46 | 2026-07-06 17:46 | 已完成 | docs/plan 2 个（v1-design/v1-wbs）+ docs/discussion 3 个（proposal/方案/设计意见）；git mv 保留历史；README/config.py/文档内交叉引用共 10 处全替换、0 残留；config 测试通过 |
 
 ## 功能开发
 
@@ -119,12 +127,13 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | OPS-001 | 运维 | 版本基线对齐预设（Python 3.13 / Node 24.16 / Docker 最新稳定版） | 2026-07-05 14:44 | 2026-07-05 14:44 | 已完成 | pyproject requires-python>=3.13、target-version=py313、移除 tomli 条件依赖；dockerfile 基线镜像改 node:24-alpine + python:3.13-slim；同步 test_dockerfile_templates/test_host_container 断言与 README；本机实测 Python 3.13.13 / Node v24.16.0 / Docker 29.5.2 / Compose v5.1.3 均匹配 |
 | OPS-002 | 运维 | 安装 task-list 维护规则与 Stop hook 保证层，并本地化 Claude 配置（不进 GitHub） | 2026-07-06 16:33 | 2026-07-06 16:33 | 已完成 | CLAUDE.md 写入中文「会话结束任务同步」规则；.claude/settings.json 注册 Stop hook + .claude/hooks/tasklist_sync_reminder.sh（session_id 守卫，每会话首次 Stop 触发一次 block 提醒）；脚本验证输出正确且守卫不重复；standardize 检测『规则已安装 + Stop hook 已安装』；.gitignore 追加 CLAUDE.md/.claude/ 不同步 GitHub；hook 需重启会话生效 |
+| OPS-003 | 运维 | .gitignore 增补 .codex/ 与 AGENTS.md（AI 工具本地配置，不同步 GitHub） | 2026-07-06 18:03 | 2026-07-06 18:03 | 已完成 | 与 CLAUDE.md/.claude/ 同类，归入「AI 工具本地配置（不同步到 GitHub）」段并将段注释由 Claude Code 泛化为 AI 工具；git check-ignore 命中 .gitignore:70/71，git status 已无未跟踪项 |
 
 ## 规划事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| PLN-001 | 规划 | Phase 0：准备与底座（WBS-00~WBS-05，CLI 骨架/配置/registry/schema） | 2026-07-04 23:49 | 2026-07-05 00:06 | 已完成 | 详见 docs/plan/local-web-access-v1-wbs-20260704.md 第 5 节；DEV-001~005 全部完成，70 测试通过 |
+| PLN-001 | 规划 | Phase 0：准备与底座（WBS-00~WBS-05，CLI 骨架/配置/registry/schema） | 2026-07-04 23:49 | 2026-07-05 00:06 | 已完成 | 详见 docs/plan/local-webpage-access-v1-wbs-20260704.md 第 5 节；DEV-001~005 全部完成，70 测试通过 |
 | PLN-002 | 规划 | Phase 1：导入、识别与端口（WBS-06~WBS-08，端口池/zip 导入/项目识别） | 2026-07-04 23:49 | 2026-07-05 00:22 | 已完成 | DEV-006~008 全部完成；e2e 验证四样例正确识别为 static/frontend-static/backend-container/fullstack-sqlite |
 | PLN-003 | 规划 | Phase 2：静态路径闭环（WBS-09~WBS-11，静态网关/纯静态/前端构建） | 2026-07-04 23:49 | 2026-07-05 00:32 | 已完成 | DEV-009~011 全部完成；e2e 验证静态 HTML 与前端 SPA 构建均可经 builtin 网关访问，151 测试通过 |
 | PLN-004 | 规划 | Phase 3：Docker Compose 路径闭环（WBS-12~WBS-16，Dockerfile/Compose/Runtime/Node/Python） | 2026-07-04 23:49 | 2026-07-05 14:00 | 已完成 | DEV-012~016 全部完成；host_container 统一编排 Node/Python/SQLite 容器，fake runtime 全量 hermetic 测试，无真实 Docker 依赖 |
@@ -137,12 +146,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 45 | 45 | 0 | 100% |
+| 代码 Bug | 51 | 51 | 0 | 100% |
 | 调整事项 | 0 | 0 | 0 | 0% |
-| 检查事项 | 1 | 1 | 0 | 100% |
+| 检查事项 | 2 | 2 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 0 | 0 | 0 | 0% |
+| 文档维护 | 1 | 1 | 0 | 100% |
 | 功能开发 | 30 | 29 | 1 | 97% |
-| 配置运维 | 2 | 2 | 0 | 100% |
+| 配置运维 | 3 | 3 | 0 | 100% |
 | 规划事项 | 8 | 7 | 1 | 88% |
-| **总计** | 86 | 84 | 2 | 98% |
+| **总计** | 95 | 93 | 2 | 98% |

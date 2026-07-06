@@ -2,7 +2,7 @@
 
 > 日期：2026-07-04  
 > 状态：V1 实施 WBS 草案  
-> 基础文档：`docs/plan/local-web-access-v1-design-20260704.md`  
+> 基础文档：`docs/plan/local-webpage-access-v1-design-20260704.md`  
 > 目标：把 V1 设计说明拆解为可执行、可验收、可排期的工作包。
 
 ## 1. WBS 使用说明
@@ -92,7 +92,7 @@
 | 优先级 | P0 |
 | 规模 | M |
 | 目标 | 明确 V1 的范围、技术约束、默认路径和不做事项 |
-| 依赖 | `local-web-access-v1-design-20260704.md` |
+| 依赖 | `local-webpage-access-v1-design-20260704.md` |
 
 任务：
 
@@ -109,7 +109,7 @@
 
 交付物：
 
-1. `docs/plan/local-web-access-v1-wbs-20260704.md`
+1. `docs/plan/local-webpage-access-v1-wbs-20260704.md`
 2. V1 决策清单。
 3. V1 风险清单。
 

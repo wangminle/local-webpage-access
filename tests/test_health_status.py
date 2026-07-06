@@ -340,3 +340,78 @@ def test_cli_status_syncs_before_display(
     assert result.exit_code == 0, result.output
     assert "stopped" in result.output
     assert registry.get_instance("api")["status"] == "stopped"
+
+
+# ---- 回归测试：BUG-048 ----------------------------------------------------
+#
+# BUG-048：构建进程崩溃后实例永久卡在 building，sync_status 又跳过 building 状态。
+#          修复后 sync_status 对 building 状态做 stale 检测：超过阈值则回写 failed。
+
+
+def test_sync_status_recovers_stale_building_with_build_row(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """building 状态且有超时的 running builds 行 → sync_status 回收为 failed（BUG-048）。"""
+    from local_webpage_access import status as status_mod
+
+    _seed_container(workspace, registry, "api")
+    registry.update_status("api", Status.BUILDING.value)
+    # 写一条 started_at 远早于现在的 builds 行
+    old_ts = "2020-01-01T00:00:00"
+    registry.add_build("api", status="running", started_at=old_ts)
+    # 压低阈值让测试快速触发
+    monkeypatch.setattr(status_mod, "_STALE_BUILDING_SECONDS", 0.0)
+
+    changed = sync_status(workspace, config, registry, "api")
+
+    assert changed == {"api": "failed"}
+    row = registry.get_instance("api")
+    assert row["status"] == "failed"
+    assert "stale building" in row["last_error"].lower()
+    # 孤儿 builds 行应被收尾为 failed
+    builds = registry.list_builds("api")
+    assert builds[0]["status"] == "failed"
+    # 回收事件
+    events = registry.list_events("api")
+    assert any(e["event_type"] == "build_recover" for e in events)
+
+
+def test_sync_status_keeps_recent_building(workspace, registry, config, monkeypatch) -> None:
+    """building 状态但 builds 行 started_at 未超时 → 不回收（BUG-048 边界）。"""
+    from local_webpage_access import status as status_mod
+    from local_webpage_access.logging import now_iso
+
+    _seed_container(workspace, registry, "api")
+    registry.update_status("api", Status.BUILDING.value)
+    # 刚开始的构建
+    registry.add_build("api", status="running", started_at=now_iso())
+    # 阈值设大，确保不触发
+    monkeypatch.setattr(status_mod, "_STALE_BUILDING_SECONDS", 999999.0)
+
+    changed = sync_status(workspace, config, registry, "api")
+
+    # building 状态保持不变，不触发 observe 也不回收
+    assert changed == {}
+    assert registry.get_instance("api")["status"] == "building"
+
+
+def test_sync_status_recovers_stale_building_no_build_row(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """building 状态但无 builds 行（如 host_static 路径）→ 用 updated_at 兜底（BUG-048）。"""
+    from local_webpage_access import status as status_mod
+
+    _seed_static(workspace, registry, "demo")
+    registry.update_status("demo", Status.BUILDING.value)
+    # 手动写入一个很久以前的 updated_at
+    with registry.conn:
+        registry.conn.execute(
+            "UPDATE instances SET updated_at = ? WHERE id = ?",
+            ("2020-01-01T00:00:00", "demo"),
+        )
+    monkeypatch.setattr(status_mod, "_STALE_BUILDING_SECONDS", 0.0)
+
+    changed = sync_status(workspace, config, registry, "demo")
+
+    assert changed == {"demo": "failed"}
+    assert registry.get_instance("demo")["status"] == "failed"

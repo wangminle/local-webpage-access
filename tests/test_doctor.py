@@ -140,20 +140,30 @@ def test_check_docker_daemon_down() -> None:
 
 def test_check_docker_compose_v2_ok() -> None:
     runner = _runner_from_map(
-        {("docker", "compose", "version"): _proc(0, stdout="5.2.0\n")}
+        {("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n")}
     )
     r = check_docker_compose(runner=runner)
     assert r.status == STATUS_OK
     assert "5.2.0" in r.message
 
 
+def test_check_docker_compose_supported_v2_warns_without_failing() -> None:
+    runner = _runner_from_map(
+        {("docker", "compose", "version"): _proc(0, stdout="v2.40.3\n")}
+    )
+    r = check_docker_compose(runner=runner)
+    assert r.status == STATUS_WARN
+    assert "推荐" in r.message
+    assert "5.2.0" in (r.suggestion or "")
+
+
 def test_check_docker_compose_version_too_low() -> None:
     runner = _runner_from_map(
-        {("docker", "compose", "version"): _proc(0, stdout="2.40.3\n")}
+        {("docker", "compose", "version"): _proc(0, stdout="2.39.9\n")}
     )
     r = check_docker_compose(runner=runner)
     assert r.status == STATUS_FAIL
-    assert "5.2.0" in r.message
+    assert "2.40.2" in r.message
 
 
 def test_check_docker_compose_unavailable() -> None:
@@ -191,6 +201,18 @@ def test_check_caddy_required_and_ok(env, monkeypatch) -> None:
     runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.11.2\n")})
     r = check_caddy(config, runner=runner)
     assert r.status == STATUS_OK
+
+
+def test_check_caddy_missing_warns_and_falls_back(env, monkeypatch) -> None:
+    """默认 caddy 缺失时运行时会降级 builtin，doctor 只能告警。"""
+    _ws, config, _reg = env
+    config.staticGateway = "caddy"
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: None)
+
+    r = check_caddy(config, runner=_failing_runner)
+
+    assert r.status == STATUS_WARN
+    assert "builtin" in r.message
 
 
 def test_check_caddy_version_too_low(env, monkeypatch) -> None:

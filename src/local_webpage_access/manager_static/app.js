@@ -220,6 +220,12 @@
   function opsHtml(i) {
     var id = esc(i.id);
     var isRunning = i.status === "running";
+    // 进行中态（BUG-050）：这些状态下点击启动/停止/重启/重建会与
+    // 正在进行的构建或导入竞争，引发锁冲突或并发构建。统一禁用。
+    var inProgress =
+      i.status === "building" ||
+      i.status === "queued" ||
+      i.status === "pending";
     var html = "";
     if (i.lanUrl) {
       html +=
@@ -228,10 +234,10 @@
         '" target="_blank" rel="noopener">打开</a>';
     }
     html += opBtn(id, "logs", "日志", false);
-    html += opBtn(id, "start", "启动", isRunning);
-    html += opBtn(id, "stop", "停止", !isRunning);
-    html += opBtn(id, "restart", "重启", false);
-    html += opBtn(id, "rebuild", "重建", false);
+    html += opBtn(id, "start", "启动", isRunning || inProgress);
+    html += opBtn(id, "stop", "停止", !isRunning || inProgress);
+    html += opBtn(id, "restart", "重启", inProgress);
+    html += opBtn(id, "rebuild", "重建", inProgress);
     return html;
   }
 

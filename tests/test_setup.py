@@ -45,7 +45,7 @@ def test_run_setup_all_ok_with_mocked_tools() -> None:
     runner = _runner_from_map(
         {
             ("docker", "version"): _proc(0, stdout="29.6.1\n"),
-            ("docker", "compose", "version"): _proc(0, stdout="5.2.0\n"),
+            ("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n"),
             ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
         }
     )
@@ -62,7 +62,7 @@ def test_run_setup_fails_when_docker_too_old() -> None:
     runner = _runner_from_map(
         {
             ("docker", "version"): _proc(0, stdout="27.0.0\n"),
-            ("docker", "compose", "version"): _proc(0, stdout="5.2.0\n"),
+            ("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n"),
             ("node", "--version"): _proc(0, stdout="v24.0.0\n"),
         }
     )
@@ -72,11 +72,42 @@ def test_run_setup_fails_when_docker_too_old() -> None:
     assert not report.ready
 
 
+def test_run_setup_supported_compose_v2_is_ready_with_warning() -> None:
+    runner = _runner_from_map(
+        {
+            ("docker", "version"): _proc(0, stdout="29.6.1\n"),
+            ("docker", "compose", "version"): _proc(0, stdout="2.40.3\n"),
+            ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
+        }
+    )
+    report = run_setup(static_gateway="builtin", runner=runner)
+    compose = next(i for i in report.items if i.name == "docker_compose")
+    assert compose.status == STATUS_WARN
+    assert report.ready
+
+
+def test_run_setup_default_caddy_missing_is_ready_with_warning(monkeypatch) -> None:
+    runner = _runner_from_map(
+        {
+            ("docker", "version"): _proc(0, stdout="29.6.1\n"),
+            ("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n"),
+            ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
+        }
+    )
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: None)
+
+    report = run_setup(static_gateway="caddy", runner=runner)
+    caddy = next(i for i in report.items if i.name == "caddy")
+
+    assert caddy.status == STATUS_WARN
+    assert report.ready
+
+
 def test_format_setup_report_mentions_next_steps() -> None:
     runner = _runner_from_map(
         {
             ("docker", "version"): _proc(0, stdout="29.6.1\n"),
-            ("docker", "compose", "version"): _proc(0, stdout="5.2.0\n"),
+            ("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n"),
             ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
         }
     )

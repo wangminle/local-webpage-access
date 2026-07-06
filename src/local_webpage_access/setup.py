@@ -32,6 +32,7 @@ from local_webpage_access.version_requirements import (
     MIN_FASTAPI_VERSION,
     MIN_NODE_VERSION,
     MIN_UVICORN_VERSION,
+    RECOMMENDED_COMPOSE_VERSION,
     version_ge,
 )
 
@@ -69,12 +70,7 @@ class SetupReport:
 
     @property
     def ready(self) -> bool:
-        return all(
-            i.status in (STATUS_OK, STATUS_SKIP)
-            or (i.optional and i.status == STATUS_WARN)
-            for i in self.items
-            if not i.optional
-        )
+        return not self.has_failures
 
     @property
     def has_failures(self) -> bool:
@@ -202,14 +198,17 @@ def run_setup(
         _from_doctor_check(
             check_docker_compose,
             name="docker_compose",
-            required=f"Docker Compose ≥ {MIN_COMPOSE_VERSION}",
+            required=(
+                f"Docker Compose ≥ {MIN_COMPOSE_VERSION}"
+                f"（推荐 ≥ {RECOMMENDED_COMPOSE_VERSION}）"
+            ),
             install_hint=_compose_install_hint(plat),
             runner=runner,
         ),
         _from_doctor_check(
             check_caddy,
             name="caddy",
-            required=f"Caddy ≥ {MIN_CADDY_VERSION}",
+            required=f"Caddy ≥ {MIN_CADDY_VERSION}（缺失时降级 builtin）",
             install_hint=_caddy_install_hint(plat),
             optional=static_gateway != "caddy",
             config=config,
@@ -254,7 +253,8 @@ def _docker_install_hint(plat: str) -> str:
 
 def _compose_install_hint(plat: str) -> str:
     return (
-        f"需要 docker/compose 项目的 Compose v2 插件（`docker compose`），版本 ≥ {MIN_COMPOSE_VERSION}。"
+        f"需要 Docker Compose 插件（`docker compose`），版本 ≥ {MIN_COMPOSE_VERSION}，"
+        f"推荐 ≥ {RECOMMENDED_COMPOSE_VERSION}。"
         f"{_docker_install_hint(plat)}（Desktop 通常已捆绑；Linux 可 `apt install docker-compose-plugin`）"
     )
 
@@ -345,13 +345,13 @@ fi
 echo "==> 安装 lwa（在项目根目录执行）"
 # pip install -e .
 
-echo "==> Docker Desktop（含 Compose 插件，需 ≥ 29.6.1 / Compose ≥ 5.2.0）"
+echo "==> Docker Desktop（含 Compose 插件，Docker 需 ≥ 29.6.1；Compose 最低 ≥ 2.40.2，推荐 ≥ 5.2.0）"
 if ! command -v docker &>/dev/null; then
   brew install --cask docker
   echo "请启动 Docker Desktop 应用"
 fi
 
-echo "==> Caddy（staticGateway=caddy 时需要，版本 ≥ 2.11.2）"
+echo "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.11.2）"
 if ! command -v caddy &>/dev/null; then
   brew install caddy
 fi
@@ -387,7 +387,7 @@ echo "==> Docker Engine + Compose 插件"
 # 示例：sudo apt install docker-ce docker-ce-cli containerd.io docker-compose-plugin
 # sudo usermod -aG docker "$USER" && newgrp docker
 
-echo "==> Caddy（staticGateway=caddy 时需要，版本 ≥ 2.11.2）"
+echo "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.11.2）"
 # 官方文档：https://caddyserver.com/docs/install#debian-ubuntu-raspbian
 
 echo "==> Node.js（前端 SPA 构建需要，推荐 ≥ 24）"
@@ -413,11 +413,11 @@ Write-Host "==> Python 3.13+"
 Write-Host "==> 安装 lwa（在项目根目录执行）"
 # pip install -e .
 
-Write-Host "==> Docker Desktop（含 Compose，需 ≥ 29.6.1 / Compose ≥ 5.2.0）"
+Write-Host "==> Docker Desktop（含 Compose，Docker 需 ≥ 29.6.1；Compose 最低 ≥ 2.40.2，推荐 ≥ 5.2.0）"
 # winget install Docker.DockerDesktop
 # 安装后启动 Docker Desktop
 
-Write-Host "==> Caddy（staticGateway=caddy 时需要，版本 ≥ 2.11.2）"
+Write-Host "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.11.2）"
 # winget install CaddyServer.Caddy
 
 Write-Host "==> Node.js（前端 SPA 构建需要，推荐 ≥ 24）"
@@ -437,7 +437,7 @@ _SCRIPT_GENERIC = """\
 # 请根据操作系统查阅：
 #   lwa setup          # 检测并查看安装指引
 #   docs/faq.md        # 排障文档
-# 组件要求：Python 3.13+、Docker ≥ 29.6.1、Compose ≥ 5.2.0、Caddy ≥ 2.11.2（可选）、Node ≥ 24（前端构建）
+# 组件要求：Python 3.13+、Docker ≥ 29.6.1、Compose ≥ 2.40.2（推荐 ≥ 5.2.0）、Caddy ≥ 2.11.2（可选）、Node ≥ 24（前端构建）
 """
 
 

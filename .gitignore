@@ -64,6 +64,8 @@ desktop.ini
 !.env.example
 *.local.yml
 
-# ---- Claude Code 本地配置（不同步到 GitHub）--------------------------------
+# ---- AI 工具本地配置（不同步到 GitHub）--------------------------------------
 CLAUDE.md
 .claude/
+.codex/
+AGENTS.md

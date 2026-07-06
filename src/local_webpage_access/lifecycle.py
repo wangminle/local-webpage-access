@@ -34,6 +34,9 @@ log = get_logger("lifecycle")
 _LOCK_TIMEOUT = 30.0  # 实例级锁默认等待上限（秒）
 # 进程崩溃未释放锁时的兜底回收阈值：超过该时长视为陈旧锁。
 _STALE_LOCK_SECONDS = 1800.0
+# 心跳刷新间隔：明显小于 _STALE_LOCK_SECONDS，确保长耗时 rebuild/build
+# 期间锁不会被误判陈旧（BUG-046）。取 staleness 的 1/3 且上限 300s。
+_LOCK_HEARTBEAT_INTERVAL = min(_STALE_LOCK_SECONDS / 3.0, 300.0)
 
 # 进程内每个实例一把可重入锁；与文件锁叠加，使同一进程的线程也互斥，
 # 避免文件锁的 PID 检查在同进程多线程下失效（PID 相同）。
@@ -53,6 +56,27 @@ def _get_thread_lock(instance_id: str) -> threading.RLock:
 # ---- 并发锁（WBS-17.12）-----------------------------------------------------
 
 
+def _touch_lock_heartbeat(lock_path: Path) -> None:
+    """刷新锁文件的心跳时间戳（BUG-046）。
+
+    用临时文件 + ``os.replace`` 原子替换，避免并发 ``_lock_is_stale`` 读到半写
+    内容。锁文件不存在或不可读时为空操作（仅在已持锁时调用，故不应发生）。
+    参考实现：``daemon.touch_lock_heartbeat``（BUG-030）。
+    """
+    try:
+        content = lock_path.read_text(encoding="utf-8").strip().splitlines()
+    except OSError:
+        return
+    pid_line = content[0] if content else str(os.getpid())
+    tmp = lock_path.with_name(lock_path.name + ".hb")
+    try:
+        tmp.write_text(f"{pid_line}\n{time.time():.3f}\n", encoding="utf-8")
+        os.replace(str(tmp), str(lock_path))
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+
+
 @contextlib.contextmanager
 def instance_lock(
     workspace: Workspace,
@@ -70,6 +94,9 @@ def instance_lock(
     :data:`_STALE_LOCK_SECONDS` 回收。超时仍拿不到锁抛
     :class:`LifecycleError`。
 
+    长耗时操作（rebuild/build）期间以独立线程周期性刷新时间戳（BUG-046），
+    避免超过 ``_STALE_LOCK_SECONDS`` 后被另一进程误回收导致跨进程并发。
+
     实例 ID 在入口校验（BUG-025），避免 ``..`` / ``/`` 等片段把锁文件
     写到 ``run/`` 之外。
     """
@@ -84,6 +111,8 @@ def instance_lock(
         )
     file_acquired = False
     lock_path = workspace.run / f"lifecycle-{instance_id}.lock"
+    heartbeat_stop: threading.Event | None = None
+    heartbeat_thread: threading.Thread | None = None
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout
@@ -106,9 +135,31 @@ def instance_lock(
             os.close(fd)
             file_acquired = True
             break
+
+        # 启动心跳线程：长耗时 rebuild/build 期间持续刷新时间戳，
+        # 避免锁被误判陈旧（BUG-046）。daemon 锁采用轮询回调刷新
+        # （watcher 本身是循环），lifecycle 的阻塞式 yield 无法轮询，
+        # 故用后台线程。
+        heartbeat_stop = threading.Event()
+
+        def _heartbeat_loop() -> None:
+            while not heartbeat_stop.wait(_LOCK_HEARTBEAT_INTERVAL):
+                _touch_lock_heartbeat(lock_path)
+
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name=f"lwa-lock-hb-{instance_id}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
         try:
             yield
         finally:
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=5.0)
             if file_acquired:
                 with contextlib.suppress(FileNotFoundError, PermissionError):
                     lock_path.unlink()
@@ -320,10 +371,15 @@ def remove_instance(
                 instance_id=instance_id,
             )
 
-        # 1. 先记事件（删除后实例行级联消失，事件无处可写）
+        # 1. 先记 remove 事件，且以 orphan event（instance_id=NULL）写入（BUG-047）。
+        #    events.instance_id 带 ON DELETE CASCADE，若关联实例行则删除时会被
+        #    级联清除、审计链断裂。列定义本就 nullable，写 NULL 后不受级联影响，
+        #    同时在 message 中保留实例 ID 文本，便于追溯。
         with contextlib.suppress(Exception):
             registry.add_event(
-                instance_id, "remove", f"移除实例（purge={purge}, force={force}）"
+                None,
+                "remove",
+                f"移除实例 {instance_id}（purge={purge}, force={force}）",
             )
 
         # 2. 停止实例（容忍缺失 manifest 或已停止）

@@ -492,3 +492,88 @@ def test_observe_status_no_change_no_event(
     observe_status(workspace, config, registry, "api")
     events_after = registry.list_events("api")
     assert len(events_after) == len(events_before)
+
+
+# ---- 回归测试：BUG-046 ----------------------------------------------------
+#
+# BUG-046：``instance_lock`` 在长耗时操作期间不刷新锁文件时间戳，
+#          超过 ``_STALE_LOCK_SECONDS``（30 分钟）后会被另一进程误回收，
+#          导致跨进程并发操作同一实例。修复后用后台心跳线程周期性刷新。
+
+
+def test_instance_lock_heartbeat_refreshes_timestamp(workspace) -> None:
+    """持锁期间心跳线程应刷新锁文件时间戳（BUG-046）。
+
+    构造一个持锁 2 个心跳间隔的场景，验证锁文件第二行（时间戳）在持锁期间
+    被刷新过（不是初始值）。
+    """
+    import os
+    import time as _t
+
+    from local_webpage_access import lifecycle
+
+    # 把心跳间隔压到很短，让测试快速验证刷新
+    monkeypatch_interval = 0.05
+    original = lifecycle._LOCK_HEARTBEAT_INTERVAL
+    lifecycle._LOCK_HEARTBEAT_INTERVAL = monkeypatch_interval
+    try:
+        lock_path = workspace.run / "lifecycle-hb.lock"
+        with instance_lock(workspace, "hb"):
+            ts_initial = lock_path.read_text(encoding="utf-8").strip().splitlines()[1]
+            # 等待至少 2 个心跳间隔，让后台线程刷新
+            _t.sleep(monkeypatch_interval * 4)
+            ts_after = lock_path.read_text(encoding="utf-8").strip().splitlines()[1]
+            # 时间戳应被刷新（增大）
+            assert float(ts_after) > float(ts_initial)
+            # 锁文件 PID 应仍是当前进程
+            pid_line = lock_path.read_text(encoding="utf-8").strip().splitlines()[0]
+            assert int(pid_line) == os.getpid()
+    finally:
+        lifecycle._LOCK_HEARTBEAT_INTERVAL = original
+
+
+def test_instance_lock_heartbeat_keeps_lock_fresh(workspace, monkeypatch) -> None:
+    """持锁超过 stale 阈值后锁仍不应被判为陈旧（BUG-046 核心）。
+
+    通过缩短 ``_STALE_LOCK_SECONDS`` + ``_LOCK_HEARTBEAT_INTERVAL``，模拟
+    长耗时 rebuild 场景：持锁时间 > stale 阈值，但因心跳刷新，
+    ``_lock_is_stale`` 返回 False。
+    """
+    import time as _t
+
+    from local_webpage_access import lifecycle
+
+    monkeypatch.setattr(lifecycle, "_STALE_LOCK_SECONDS", 0.5)
+    monkeypatch.setattr(lifecycle, "_LOCK_HEARTBEAT_INTERVAL", 0.1)
+    lock_path = workspace.run / "lifecycle-long.lock"
+    with instance_lock(workspace, "long", timeout=1):
+        # 持锁 1s（> stale 0.5s），心跳每 0.1s 刷新一次
+        _t.sleep(1.0)
+        # 锁不应被判为 stale（因为心跳在持续刷新）
+        assert lifecycle._lock_is_stale(lock_path) is False
+
+
+# ---- 回归测试：BUG-047 ----------------------------------------------------
+#
+# BUG-047：``remove_instance`` 先写 remove 事件再删除实例，但 events 表
+#          ``ON DELETE CASCADE`` 会把事件一起删掉，审计链断裂。修复后
+#          remove 事件以 orphan event（instance_id=NULL）写入，不受级联影响。
+
+
+def test_remove_keeps_audit_event_as_orphan(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """remove 后 remove 事件应作为孤儿事件保留（BUG-047）。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    remove_instance(workspace, config, registry, "api")
+
+    # 实例已删
+    assert registry.get_instance("api") is None
+    # 但 remove 事件仍在（作为 instance_id=NULL 的孤儿事件）
+    all_events = registry.list_events(None)
+    remove_events = [e for e in all_events if e["event_type"] == "remove"]
+    assert len(remove_events) >= 1
+    # 孤儿事件的 instance_id 为 NULL
+    assert remove_events[-1]["instance_id"] is None
+    # message 中保留了实例 ID 文本，便于追溯
+    assert "api" in remove_events[-1]["message"]

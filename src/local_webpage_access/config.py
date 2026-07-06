@@ -148,7 +148,7 @@ def example_config_text() -> str:
 
 CONFIG_EXAMPLE = """\
 # Local Webpage Access 配置文件
-# 由 lwa init 生成。字段含义见 docs/plan/local-web-access-v1-design-20260704.md。
+# 由 lwa init 生成。字段含义见 docs/plan/local-webpage-access-v1-design-20260704.md。
 
 # 管理页监听端口（不应落在端口池范围内）
 managerPort: 17800

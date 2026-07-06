@@ -330,6 +330,30 @@ def test_audit_zip_members_windows_backslash_traversal() -> None:
     assert "zip_slip" in _critical_codes(findings)
 
 
+def test_audit_zip_members_symlink_detected() -> None:
+    """符号链接成员应被检测为 critical（BUG-049）。
+
+    modes 参数为已从 external_attr >> 16 提取的 Unix 模式位。
+    """
+    import stat as stat_mod
+
+    symlink_mode = (stat_mod.S_IFLNK | 0o777)  # 已移位的 Unix 模式
+    findings = audit_zip_members(
+        ["index.html", "link.txt"], modes=[0, symlink_mode]
+    )
+    assert "zip_symlink" in _critical_codes(findings)
+
+
+def test_audit_zip_members_symlink_short_modes_ok() -> None:
+    """modes 短缺时仅按名称审计剩余成员，不越界（BUG-049 防御）。"""
+    # modes 长度 1，只对应第一个成员；第二项无模式信息，仅按名称审计
+    # 第一个成员 index.html 不是 symlink（mode=0），第二个按名称无发现
+    findings = audit_zip_members(
+        ["index.html", "link.txt"], modes=[0]
+    )
+    assert findings == []
+
+
 # ---- 风险提示（WBS-25.09）-------------------------------------------------
 
 

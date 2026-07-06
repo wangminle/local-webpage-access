@@ -8,8 +8,8 @@
 * **操作系统**：主要面向 Linux 小主机（树莓派、NUC、ARM 盒子等）开发与测试。
   macOS / Windows 可用于开发与静态/前端实例，容器路径在 Windows 上未充分验证。
 * **Python**：要求 3.13+，不支持更早版本。
-* **Docker**：要求 Docker + Compose v2 插件（`docker compose` 子命令）。
-  Compose v1 独立二进制仅给出 warn，不保证全部功能可用。
+* **Docker**：要求 Docker + Docker Compose 插件（`docker compose` 子命令）。
+  Compose v1 独立二进制不支持；低于推荐版本时仅告警，不阻断已满足最低线的环境。
 * **架构**：基线镜像 `node:24-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
   其他架构需用户自备镜像或调整模板。
 

@@ -171,14 +171,38 @@ def test_import_custom_name(importer: Importer, tmp_path: Path) -> None:
 
 
 def test_import_rejects_zip_slip(importer: Importer, tmp_path: Path) -> None:
-    """构造包含路径穿越成员的 zip，应被拒绝。"""
+    """构造包含路径穿越成员的 zip，应被拒绝。
+
+    BUG-049 后 audit_zip_members 在解压前集中拦截，错误消息为
+    「zip 成员安全审计未通过（zip_slip）」；运行时路径校验作为兜底，
+    仍产出「检测到路径穿越（zip slip）」消息。
+    """
     zip_path = tmp_path / "evil.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("index.html", "<html></html>")
         # 手动写入一个 ../escape.txt 成员
         info = zipfile.ZipInfo("../escape.txt")
         zf.writestr(info, "pwned")
-    with pytest.raises(ZipImportError, match="路径穿越"):
+    with pytest.raises(ZipImportError, match="zip_slip"):
+        importer.import_zip(zip_path)
+
+
+def test_import_rejects_zip_symlink(importer: Importer, tmp_path: Path) -> None:
+    """构造包含符号链接成员的 zip，应被 audit_zip_members 拦截（BUG-049）。
+
+    symlink 成员的 external_attr 高 16 位为 S_IFLNK 模式，audit_zip_members
+    检测到后以 critical 拒绝，杜绝指向解压目录外的符号链接。
+    """
+    import stat as stat_mod
+
+    zip_path = tmp_path / "symlink.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("index.html", "<html></html>")
+        info = zipfile.ZipInfo("link.txt")
+        # 设置 S_IFLNK 模式位（符号链接）
+        info.external_attr = (stat_mod.S_IFLNK | 0o777) << 16
+        zf.writestr(info, "/etc/passwd")
+    with pytest.raises(ZipImportError, match="zip_symlink"):
         importer.import_zip(zip_path)
 
 

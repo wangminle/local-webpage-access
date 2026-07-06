@@ -28,6 +28,7 @@ from pathlib import Path
 from local_webpage_access.config import Config
 from local_webpage_access.errors import ZipImportError
 from local_webpage_access.logging import get_logger, now_iso
+from local_webpage_access.security import audit_zip_members, has_critical
 from local_webpage_access.models import (
     ContainerConfig,
     DesiredState,
@@ -246,14 +247,42 @@ class Importer:
     # ---- 安全解压 -----------------------------------------------------------
 
     def _safe_extract(self, zip_path: Path, target: Path) -> None:
-        """带 zip slip 防护与单层根目录拍平的解压。"""
+        """带 zip slip / 符号链接防护与单层根目录拍平的解压（BUG-049 增强）。
+
+        安全防御三层：
+        1. ``audit_zip_members`` 集中审计：绝对路径 / 盘符 / 路径穿越 / 符号链接
+           （critical 级拒绝解压）；
+        2. 路径穿越运行时校验：每个成员 resolve 后必须落在 tmp_path 之内；
+        3. 解压后深度防御：遍历 tmp_path，若出现未在 external_attr 声明的
+           symlink（如 Windows 打包器产出的异常 zip），同样拒绝。
+        """
         target.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="lwa-import-") as tmp:
             tmp_path = Path(tmp).resolve()
 
             with zipfile.ZipFile(zip_path) as zf:
-                # zip slip 检查：每个成员必须在 tmp_path 之内
-                for member in zf.infolist():
+                members = zf.infolist()
+                # 1. 集中安全审计（BUG-049）：路径穿越 + 符号链接
+                names = [m.filename for m in members]
+                modes = [
+                    (m.external_attr >> 16) & 0xFFFF if m.external_attr else 0
+                    for m in members
+                ]
+                findings = audit_zip_members(names, modes=modes)
+                for f in findings:
+                    if f.level == "critical":
+                        log.warning("zip 成员审计 [%s] %s", f.code, f.message)
+                if has_critical(findings):
+                    codes = ", ".join(
+                        f.code for f in findings if f.level == "critical"
+                    )
+                    raise ZipImportError(
+                        f"zip 成员安全审计未通过（{codes}）",
+                        members=names,
+                    )
+
+                # 2. 运行时路径穿越校验：每个成员必须在 tmp_path 之内
+                for member in members:
                     member_target = (tmp_path / member.filename).resolve()
                     try:
                         member_target.relative_to(tmp_path)
@@ -263,6 +292,15 @@ class Importer:
                             member=member.filename,
                         )
                 zf.extractall(tmp_path)
+
+            # 3. 解压后深度防御：扫描是否产生了 symlink（即使 external_attr
+            #    未声明 S_IFLNK，也拒绝任何符号链接，杜绝 zip slip 变种）
+            for item in tmp_path.rglob("*"):
+                if item.is_symlink():
+                    raise ZipImportError(
+                        f"检测到符号链接（zip slip）：{item.relative_to(tmp_path)}",
+                        member=str(item.relative_to(tmp_path)),
+                    )
 
             # 单层根目录拍平：tmp 下只有一个目录且无散落文件时，提升一层
             entries = list(tmp_path.iterdir())

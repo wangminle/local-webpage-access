@@ -1,6 +1,6 @@
 # Local Webpage Access —— 方案讨论稿
 
-> 文件：`docs/discussion/local-web-access-proposal-20260703.md`
+> 文件：`docs/discussion/local-webpage-access-proposal-20260703.md`
 > 日期：2026-07-03
 > 状态：方案待确认（4 个决策点待拍板）
 

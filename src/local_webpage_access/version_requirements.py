@@ -6,7 +6,8 @@ import re
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 MIN_DOCKER_VERSION = "29.6.1"
-MIN_COMPOSE_VERSION = "5.2.0"
+MIN_COMPOSE_VERSION = "2.40.2"
+RECOMMENDED_COMPOSE_VERSION = "5.2.0"
 MIN_CADDY_VERSION = "2.11.2"
 MIN_FASTAPI_VERSION = "0.138.0"
 MIN_UVICORN_VERSION = "0.45.0"
@@ -68,6 +69,7 @@ __all__ = [
     "MIN_FASTAPI_VERSION",
     "MIN_NODE_VERSION",
     "MIN_UVICORN_VERSION",
+    "RECOMMENDED_COMPOSE_VERSION",
     "installed_package_version",
     "parse_version_string",
     "version_ge",

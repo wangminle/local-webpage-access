@@ -16,14 +16,24 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from local_webpage_access.config import Config
 from local_webpage_access.models import Status
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
+
+log = logging.getLogger("lwa.status")
+
+# 孤儿 building 回收阈值（BUG-048）：构建进程崩溃后实例可能永久卡在 building。
+# build_queue 默认 wait_timeout=1800s，Docker build 本身可能更长，故阈值取
+# 3600s（1 小时）以明显大于真实最长构建，避免误杀正常进行中的构建。
+_STALE_BUILDING_SECONDS = 3600.0
 
 
 @dataclass
@@ -159,8 +169,15 @@ def sync_status(
         if before in {
             Status.PENDING.value,
             Status.QUEUED.value,
-            Status.BUILDING.value,
         }:
+            continue
+        if before == Status.BUILDING.value:
+            # 孤儿 building 回收（BUG-048）：构建进程崩溃后 sync_status 会
+            # 永远跳过 building 状态，实例卡死。先判断是否 stale，是则回写
+            # failed 并清理孤儿 builds 行；未超时则保留 building（观测无法
+            # 判定仍在进行的构建，交给构建流程自己收尾）。
+            if _recover_stale_building(registry, iid):
+                changed[iid] = Status.FAILED.value
             continue
         try:
             observed = observe_status(workspace, config, registry, iid)
@@ -169,6 +186,70 @@ def sync_status(
         if observed.value != before:
             changed[iid] = observed.value
     return changed
+
+
+def _recover_stale_building(registry: Registry, instance_id: str) -> bool:
+    """检测并回收孤儿 building 状态（BUG-048）。
+
+    判据（任一满足即视为孤儿）：
+    1. 该实例最新 builds 行 status=running 且 started_at 距今超过阈值
+       （覆盖前端/容器构建——它们进入 building 时会 add_build）；
+    2. 无 builds 行（如静态托管 host_static 只写 status 不写 builds），
+       但实例 updated_at 距今超过阈值（粗略兜底）。
+
+    回收动作：把实例 status 置 failed、写 last_error、写 build_recover 事件、
+    把孤儿 running builds 行标记为 failed。返回是否执行了回收。
+    """
+    builds = registry.list_builds(instance_id, limit=1)
+    is_stale = False
+    detail = ""
+    if builds:
+        latest = builds[0]
+        if latest.get("status") == "running":
+            started_at = latest.get("started_at")
+            if started_at and _age_seconds(started_at) > _STALE_BUILDING_SECONDS:
+                is_stale = True
+                detail = f"构建已运行 {_age_seconds(started_at):.0f}s 未结束"
+                # 收尾孤儿 builds 行
+                try:
+                    registry.finish_build(
+                        latest["id"],
+                        status="failed",
+                        error_summary="构建进程疑似崩溃（stale building 回收）",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+    else:
+        # 无 builds 行：用 instances.updated_at 兜底（host_static 路径）
+        row = registry.get_instance(instance_id)
+        if row:
+            updated_at = row.get("updated_at")
+            if updated_at and _age_seconds(updated_at) > _STALE_BUILDING_SECONDS:
+                is_stale = True
+                detail = f"building 状态已停留 {_age_seconds(updated_at):.0f}s"
+
+    if not is_stale:
+        return False
+
+    error_msg = f"构建进程疑似崩溃，已自动回收 stale building（{detail}）"
+    registry.update_status(
+        instance_id, Status.FAILED.value, last_error=error_msg
+    )
+    with contextlib.suppress(Exception):
+        registry.add_event(instance_id, "build_recover", error_msg)
+    log.warning("实例 %s %s", instance_id, error_msg)
+    return True
+
+
+def _age_seconds(iso_ts: str) -> float:
+    """ISO 时间戳距今的秒数（解析失败返回 0，保守视为未超时）。"""
+    try:
+        # 兼容带/不带微秒、带/不带时区的 ISO 字符串
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0, (now - dt).total_seconds())
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def status_counts(registry: Registry) -> dict[str, int]:

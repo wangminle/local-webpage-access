@@ -6,8 +6,9 @@
   Docker socket、只允许实例自己的 ``data/``（WBS-25.03/04/05）。
 * :func:`audit_dockerfile` —— 审计 Dockerfile：检测 root 运行、远程 ADD、
   管道执行脚本等供应链风险。
-* :func:`audit_zip_members` —— zip slip / 路径穿越防御纵深（WBS-25.10）。
-  importer 已做一次拦截，此处对 skill 或外部产出的成员名再做校验。
+* :func:`audit_zip_members` —— zip slip / 路径穿越 / 符号链接防御纵深
+  （WBS-25.10，BUG-049 增强符号链接检测）。importer 解压前做 critical 级拦截，
+  此处亦可用于 skill 或外部产出的成员名二次校验。
 * :func:`unknown_zip_risk_hint` —— 未知 zip 来源的标准风险提示（WBS-25.09）。
 * :func:`validate_manager_binding` —— 管理页绑定地址安全性（WBS-25.02）。
 
@@ -16,6 +17,7 @@
 
 from __future__ import annotations
 
+import stat
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +27,16 @@ from local_webpage_access.errors import LwaError
 from local_webpage_access.logging import get_logger
 
 log = get_logger("security")
+
+
+def _is_symlink_mode(mode: int) -> bool:
+    """判断 Unix 模式位是否为符号链接（``S_IFLNK``）。
+
+    ``mode`` 应为已从 ``ZipInfo.external_attr >> 16`` 提取的 Unix 模式位
+    （调用方负责移位），本函数直接对其做 ``S_ISLNK`` 判定。
+    """
+    return bool(mode) and stat.S_ISLNK(mode & 0xFFFF)
+
 
 # ---- 数据结构 ---------------------------------------------------------------
 
@@ -388,13 +400,34 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
 # ---- zip slip 防御纵深（WBS-25.10）------------------------------------------
 
 
-def audit_zip_members(names: list[str]) -> list[SecurityFinding]:
-    """审计 zip 成员名（zip slip / 路径穿越，WBS-25.10）。
+def audit_zip_members(
+    names: list[str], *, modes: list[int] | None = None
+) -> list[SecurityFinding]:
+    """审计 zip 成员名（zip slip / 路径穿越，WBS-25.10，BUG-049 增强）。
 
-    importer 已在解压时拦截，此函数用于对 skill 产出的成员名或二次校验场景。
+    * ``names`` —— zip 成员名列表；
+    * ``modes`` —— 可选的 Unix 模式位列表（来自 ``ZipInfo.external_attr >> 16``），
+      用于检测符号链接成员（symlink zip slip）。长度应与 ``names`` 对齐；
+      短缺或缺省时仅按名称审计。
+
+    importer 在解压前调用此函数做 critical 级拦截（BUG-049），不再仅用于
+    skill 产出或二次校验。
     """
     findings: list[SecurityFinding] = []
-    for name in names:
+    for idx, name in enumerate(names):
+        # 符号链接检测（BUG-049）：zip 成员可声明 S_IFLNK 模式位，
+        # 解压后成为指向任意路径的 OS symlink，绕过路径穿越检查。
+        if modes is not None and idx < len(modes):
+            mode = modes[idx]
+            if _is_symlink_mode(mode):
+                findings.append(
+                    SecurityFinding(
+                        LEVEL_CRITICAL,
+                        "zip_symlink",
+                        f"zip 成员是符号链接，可能指向解压目录外：{name}",
+                    )
+                )
+                continue
         norm = name.replace("\\", "/")
         # 绝对路径
         if norm.startswith("/"):

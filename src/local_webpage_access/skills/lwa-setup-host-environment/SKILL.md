@@ -44,8 +44,8 @@
 | Python | ≥ 3.13 | 始终 |
 | fastapi / uvicorn | ≥ 0.138.0 / ≥ 0.45.0 | 始终（`pip install -e .`） |
 | Docker | ≥ 29.6.1 | 容器实例 |
-| Docker Compose | ≥ 5.2.0（[docker/compose](https://github.com/docker/compose)） | 容器实例 |
-| Caddy | ≥ 2.11.2 | `staticGateway=caddy` 时；`builtin` 可跳过 |
+| Docker Compose | ≥ 2.40.2，推荐 ≥ 5.2.0（[docker/compose](https://github.com/docker/compose)） | 容器实例 |
+| Caddy | ≥ 2.11.2 | Caddy 模式；缺失时 `staticGateway=caddy` 会降级 builtin |
 | Node.js | ≥ 24（推荐） | 前端 SPA 构建 |
 
 ## 处理流程

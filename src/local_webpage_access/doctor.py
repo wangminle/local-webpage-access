@@ -38,8 +38,8 @@ from local_webpage_access.version_requirements import (
     MIN_DOCKER_VERSION,
     MIN_FASTAPI_VERSION,
     MIN_UVICORN_VERSION,
+    RECOMMENDED_COMPOSE_VERSION,
     installed_package_version,
-    version_ge,
     version_ge,
 )
 
@@ -195,7 +195,7 @@ def check_docker(runner: SubprocessRunner = _default_runner) -> CheckResult:
 
 
 def check_docker_compose(runner: SubprocessRunner = _default_runner) -> CheckResult:
-    """WBS-26.04：Docker Compose v2 可用，且版本 ≥ 5.2.0。"""
+    """WBS-26.04：Docker Compose 插件可用，并区分最低线与推荐线。"""
     result = runner(["docker", "compose", "version", "--short"])
     if result.returncode != 0:
         # 回退尝试独立 compose 二进制（v1）
@@ -207,14 +207,14 @@ def check_docker_compose(runner: SubprocessRunner = _default_runner) -> CheckRes
                 f"检测到 docker-compose v1（{(result_v1.stdout or '').strip()}），"
                 "不满足最低要求",
                 suggestion=(
-                    f"升级到 `docker compose` v2 插件，版本需 ≥ {MIN_COMPOSE_VERSION}"
+                    f"升级到 `docker compose` 插件，版本需 ≥ {MIN_COMPOSE_VERSION}"
                 ),
             )
         return CheckResult(
             "docker_compose",
             STATUS_FAIL,
             "Docker Compose 不可用",
-            suggestion="安装 Docker Compose v2 插件（`docker compose plugin`）",
+            suggestion="安装 Docker Compose 插件（`docker compose`）",
         )
     compose_version = (result.stdout or "").strip()
     if not version_ge(compose_version, MIN_COMPOSE_VERSION):
@@ -224,17 +224,24 @@ def check_docker_compose(runner: SubprocessRunner = _default_runner) -> CheckRes
             f"Docker Compose {compose_version} 不满足最低要求 ≥ {MIN_COMPOSE_VERSION}",
             suggestion=f"升级 Docker Compose 至 {MIN_COMPOSE_VERSION} 或更高版本",
         )
+    if not version_ge(compose_version, RECOMMENDED_COMPOSE_VERSION):
+        return CheckResult(
+            "docker_compose",
+            STATUS_WARN,
+            f"Docker Compose {compose_version} 可用，但低于推荐版本 ≥ {RECOMMENDED_COMPOSE_VERSION}",
+            suggestion=f"建议升级 Docker Compose 至 {RECOMMENDED_COMPOSE_VERSION} 或更高版本",
+        )
     return CheckResult(
         "docker_compose",
         STATUS_OK,
-        f"Docker Compose 可用（{compose_version}，≥ {MIN_COMPOSE_VERSION}）",
+        f"Docker Compose 可用（{compose_version}，≥ {RECOMMENDED_COMPOSE_VERSION}）",
     )
 
 
 def check_caddy(
     config: Config, runner: SubprocessRunner = _default_runner
 ) -> CheckResult:
-    """Caddy 版本检查：配置为 caddy 网关时必须安装且版本 ≥ 2.11.2。"""
+    """Caddy 版本检查：缺失时与运行时一致，降级 builtin 并告警。"""
     if config.staticGateway != "caddy":
         return CheckResult(
             "caddy",
@@ -244,9 +251,12 @@ def check_caddy(
     if not shutil.which("caddy"):
         return CheckResult(
             "caddy",
-            STATUS_FAIL,
-            "配置 staticGateway=caddy 但未找到 caddy 可执行文件",
-            suggestion=f"安装 Caddy ≥ {MIN_CADDY_VERSION} 并加入 PATH",
+            STATUS_WARN,
+            "配置 staticGateway=caddy 但未找到 caddy，可降级 builtin 静态服务",
+            suggestion=(
+                f"如需 Caddy 模式，安装 Caddy ≥ {MIN_CADDY_VERSION} 并加入 PATH；"
+                "否则将使用内置静态服务"
+            ),
         )
     result = runner(["caddy", "version"])
     if result.returncode != 0:

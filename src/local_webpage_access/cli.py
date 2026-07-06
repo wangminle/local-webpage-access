@@ -582,7 +582,7 @@ def setup_cmd(
     static_gateway: str = typer.Option(
         "caddy",
         "--static-gateway",
-        help="预期静态网关（caddy 时 Caddy 为必需；builtin 时 Caddy 为可选）",
+        help="预期静态网关（caddy 优先；未安装 Caddy 时降级 builtin）",
     ),
 ) -> None:
     """检测宿主机工具环境并给出安装指引（可在 ``lwa init`` 之前运行）。

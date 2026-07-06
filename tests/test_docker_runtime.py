@@ -100,7 +100,7 @@ class _FakeExecute:
             )
         elif len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
             result = ComposeResult(
-                args=list(args), returncode=0, stdout="5.2.0\n", stderr=""
+                args=list(args), returncode=0, stdout="v5.2.0\n", stderr=""
             )
         else:
             # 命令的子命令关键字（build/up/stop/start/restart/down/logs/ps/version/inspect/images）
@@ -166,6 +166,19 @@ def test_ensure_available_passes_when_available(workspace, monkeypatch) -> None:
     ensure_available()  # 不抛异常
 
 
+def test_ensure_available_accepts_supported_compose_v2(workspace, monkeypatch) -> None:
+    class _ComposeV2Fake(_FakeExecute):
+        def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+            if len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
+                return ComposeResult(
+                    args=list(args), returncode=0, stdout="2.40.3\n", stderr=""
+                )
+            return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _ComposeV2Fake())
+    ensure_available()
+
+
 def test_ensure_available_raises_when_docker_version_too_low(workspace, monkeypatch) -> None:
     class _LowDockerFake(_FakeExecute):
         def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
@@ -185,12 +198,12 @@ def test_ensure_available_raises_when_compose_version_too_low(workspace, monkeyp
         def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
             if len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
                 return ComposeResult(
-                    args=list(args), returncode=0, stdout="2.40.3\n", stderr=""
+                    args=list(args), returncode=0, stdout="2.39.9\n", stderr=""
                 )
             return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
 
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _LowComposeFake())
-    with pytest.raises(DockerError, match="5.2.0"):
+    with pytest.raises(DockerError, match="2.40.2"):
         ensure_available()
 
 

@@ -2,8 +2,8 @@
 
 > 日期：2026-07-04  
 > 状态：V1 设计稿  
-> 基础文档：`docs/discussion/local-web-access-设计意见-20260703.md`  
-> 参考吸收：`docs/discussion/local-web-access-方案-20260703.md`、`docs/discussion/local-web-access-proposal-20260703.md`
+> 基础文档：`docs/discussion/local-webpage-access-设计意见-20260703.md`  
+> 参考吸收：`docs/discussion/local-webpage-access-方案-20260703.md`、`docs/discussion/local-webpage-access-proposal-20260703.md`
 
 ## 1. V1 目标
 
