@@ -39,8 +39,10 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号。"""
-    typer.echo(__version__)
+    """显示版本号（与 Git commit 主题 ``V0.3.1-Build...`` 对齐）。"""
+    from local_webpage_access.version_info import display_version
+
+    typer.echo(display_version())
 
 
 @app.command()
@@ -528,6 +530,82 @@ app.add_typer(daemon_app, name="daemon")
 # ---- manager 子命令（WBS-22.13）---------------------------------------------
 
 manager_app = typer.Typer(help="控制管理页 HTTP 服务")
+
+
+@manager_app.command("on")
+def manager_on() -> None:
+    """后台启动管理页（默认 init 后自动执行；managerEnabled=false 时禁用）。"""
+    from local_webpage_access.manager_api import ensure_token
+    from local_webpage_access.manager_service import start_manager
+    from local_webpage_access.ports import resolve_lan_ip
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        _reg.close()
+        pid = start_manager(ws, config)
+        token = ensure_token(ws)
+        lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+        typer.secho(f"管理页已启动（pid={pid}）", fg=typer.colors.GREEN)
+        typer.echo(f"  本机：http://127.0.0.1:{config.managerPort}/")
+        typer.echo(f"  局域网：http://{lan_ip}:{config.managerPort}/")
+        typer.echo(f"  token：{token}")
+        typer.echo("  停止：lwa manager off")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@manager_app.command("off")
+def manager_off() -> None:
+    """停止后台管理页。"""
+    from local_webpage_access.manager_service import stop_manager
+
+    try:
+        ws, _config, _reg = _open_workspace_registry()
+        _reg.close()
+        if not stop_manager(ws):
+            typer.secho(
+                "管理页停止失败，进程可能仍在运行；请检查 pid 或端口占用后重试",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.secho("管理页已停止", fg=typer.colors.GREEN)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@manager_app.command("status")
+def manager_status_cmd() -> None:
+    """查看管理页运行状态。"""
+    from local_webpage_access.manager_api import read_token
+    from local_webpage_access.manager_service import manager_status
+    from local_webpage_access.ports import resolve_lan_ip
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        _reg.close()
+        st = manager_status(ws, config)
+        lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+        running = "运行中" if st["running"] else "未运行"
+        typer.echo(f"管理页：{running}")
+        typer.echo(f"  配置启用：{st['configured']}（managerEnabled）")
+        typer.echo(f"  状态启用：{st['enabled']}")
+        if st.get("pid"):
+            typer.echo(f"  pid：{st['pid']}")
+        typer.echo(f"  地址：http://{lan_ip}:{st['port']}/")
+        token = read_token(ws)
+        if token:
+            typer.echo(f"  token：{token}")
+        if not st["running"] and st["configured"]:
+            typer.echo("  启动：lwa manager on")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
 
 
 @manager_app.command("start")

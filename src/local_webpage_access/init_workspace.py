@@ -57,13 +57,23 @@ def init_workspace(root: Path, *, force: bool = False) -> str:
     finally:
         reg.close()
 
+    # 6. 默认后台启动管理页（managerEnabled，可配置关闭）
+    manager_pid: int | None = None
+    from local_webpage_access.config import load_config
+    from local_webpage_access.manager_service import maybe_start_manager
+
+    config = load_config(ws)
+    manager_pid = maybe_start_manager(ws, config)
+
     log.info("工作区已初始化：%s", ws.root)
     return _format_summary(
         ws,
+        config=config,
         config_written=config_written,
         templates_written=templates_written,
         skills_written=skills_written,
         db_version=db_version,
+        manager_pid=manager_pid,
     )
 
 
@@ -129,10 +139,12 @@ def _schema_version_safe(reg: Registry) -> int:
 def _format_summary(
     ws: Workspace,
     *,
+    config,
     config_written: bool,
     templates_written: list[str],
     skills_written: list[str],
     db_version: int,
+    manager_pid: int | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("── 工作区目录 ──")
@@ -154,6 +166,20 @@ def _format_summary(
     else:
         lines.append("  内置 skills  已存在（保留）")
     lines.append(f"  SQLite       schema_version={db_version}  {ws.db_path}")
+    if config.managerEnabled:
+        if manager_pid:
+            lines.append(
+                f"  管理页       已后台启动（pid={manager_pid}）"
+                f"  http://127.0.0.1:{config.managerPort}/"
+            )
+            lines.append("               token 见 run/manager-token.json 或 lwa manager status")
+        else:
+            lines.append(
+                f"  管理页       已启用但未启动；执行 lwa manager on"
+                f"（端口 {config.managerPort}）"
+            )
+    else:
+        lines.append("  管理页       managerEnabled=false，未自动启动")
     return "\n".join(lines)
 
 

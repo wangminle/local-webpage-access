@@ -397,3 +397,25 @@ def test_allocate_port_rejects_other_instance(registry: Registry) -> None:
     # inst-b 想抢同一端口：必须失败，且不能改写归属
     assert registry.allocate_port("inst-b", 20010) is False
     assert registry.port_owner(20010) == "inst-a"
+
+
+def test_registry_concurrent_reads_thread_safe(registry: Registry) -> None:
+    """BUG-052：共享连接上并发只读查询不得触发 InterfaceError。"""
+    import concurrent.futures
+
+    registry.upsert_from_manifest(_static_manifest("inst-a"))
+
+    def _read_many(_: int) -> int:
+        n = 0
+        for _ in range(30):
+            row = registry.get_instance("inst-a")
+            if row and row["id"] == "inst-a":
+                n += 1
+            registry.list_instances()
+            registry.get_static_site("inst-a")
+        return n
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        counts = list(ex.map(_read_many, range(40)))
+
+    assert all(c == 30 for c in counts)

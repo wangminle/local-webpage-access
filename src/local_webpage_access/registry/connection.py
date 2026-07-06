@@ -186,6 +186,18 @@ def _get_lock(conn: sqlite3.Connection) -> threading.RLock:
         return _LOCKS[key]
 
 
+@contextmanager
+def locked_connection(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """串行化同一 SQLite 连接上的所有访问（读/写）。
+
+    ``transaction()`` 已用连接级锁保护写事务；裸 ``conn.execute`` 读操作
+    也必须走此锁，否则管理页多线程并发 ``/api/stats`` + ``/api/instances``
+    时会触发 ``InterfaceError`` 并把运行中实例误判为 stopped（BUG-052）。
+    """
+    with _get_lock(conn):
+        yield conn
+
+
 # ---- 迁移 -------------------------------------------------------------------
 
 

@@ -24,6 +24,7 @@ def test_default_config_values() -> None:
     assert cfg.staticGateway == "caddy"
     assert cfg.buildConcurrency == 1
     assert cfg.defaultResourceLimits.memory == "512m"
+    assert cfg.managerEnabled is True
 
 
 def test_port_pool_range() -> None:

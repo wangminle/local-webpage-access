@@ -10,6 +10,11 @@
   var lastInstances = [];
   var currentDetailId = null;
 
+  function isLocalhostAccess() {
+    var h = location.hostname;
+    return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+  }
+
   // ---- token（WBS-22.12 前端配合）------------------------------------------
 
   function getToken() {
@@ -30,6 +35,10 @@
   }
 
   function requireToken(onReady) {
+    if (isLocalhostAccess()) {
+      onReady(null);
+      return;
+    }
     var token = getToken();
     if (token) {
       onReady(token);
@@ -62,10 +71,16 @@
   function apiFetch(path, opts) {
     opts = opts || {};
     opts.headers = opts.headers || {};
-    opts.headers["Authorization"] = "Bearer " + getToken();
+    var token = getToken();
+    if (token) {
+      opts.headers["Authorization"] = "Bearer " + token;
+    }
     return fetch(path, opts).then(function (resp) {
       if (resp.status === 401) {
-        // token 失效，重新要求输入
+        // token 失效，重新要求输入（局域网访问）
+        if (isLocalhostAccess()) {
+          throw new Error("unauthorized");
+        }
         sessionStorage.removeItem(TOKEN_KEY);
         toast("token 无效，请重新输入", "error");
         setTimeout(function () {
@@ -143,7 +158,7 @@
     var body = document.getElementById("instances-body");
     if (!rows.length) {
       body.innerHTML =
-        '<tr class="empty-row"><td colspan="13">' +
+        '<tr class="empty-row"><td colspan="12">' +
         (lastInstances.length ? "没有匹配的实例" : "暂无实例，把 zip 放进 inbox/ 或用 lwa import 导入") +
         "</td></tr>";
       return;
@@ -169,8 +184,7 @@
       '<td class="cell-muted">' + esc(i.servingMode || "—") + "</td>" +
       "<td>" + esc(i.kind || "—") + "</td>" +
       '<td class="cell-muted">' + esc(i.runtime || "—") + "</td>" +
-      "<td>" + stackHtml(i.stack) + "</td>" +
-      '<td class="cell-muted">' + esc(i.database || "—") + "</td>" +
+      "<td>" + stackHtml(i.stack, i.database) + "</td>" +
       '<td class="cell-url">' + urlHtml(i.lanUrl) + "</td>" +
       "<td>" + portHtml(i.hostPort, i.internalPort) + "</td>" +
       '<td class="cell-muted">' + resourceHtml(i) + "</td>" +
@@ -185,14 +199,20 @@
     return '<span class="badge ' + cls + '">' + esc(status || "—") + "</span>";
   }
 
-  function stackHtml(stack) {
-    if (!stack || !stack.length) return '<span class="cell-muted">—</span>';
-    return stack
-      .slice(0, 4)
-      .map(function (s) {
-        return '<span class="stack-tag">' + esc(s) + "</span>";
-      })
-      .join("");
+  function stackHtml(stack, database) {
+    var html = "";
+    if (database) {
+      html += '<span class="stack-tag db" title="数据库">' + esc(database) + "</span>";
+    }
+    if (stack && stack.length) {
+      html += stack
+        .slice(0, 4)
+        .map(function (s) {
+          return '<span class="stack-tag">' + esc(s) + "</span>";
+        })
+        .join("");
+    }
+    return html || '<span class="cell-muted">—</span>';
   }
 
   function urlHtml(lanUrl) {
@@ -227,12 +247,7 @@
       i.status === "queued" ||
       i.status === "pending";
     var html = "";
-    if (i.lanUrl) {
-      html +=
-        '<a class="btn btn-sm btn-ghost" href="' +
-        esc(i.lanUrl) +
-        '" target="_blank" rel="noopener">打开</a>';
-    }
+    // "打开" 已由"访问地址"列承载，操作区不再重复
     html += opBtn(id, "logs", "日志", false);
     html += opBtn(id, "start", "启动", isRunning || inProgress);
     html += opBtn(id, "stop", "停止", !isRunning || inProgress);
@@ -549,7 +564,7 @@
   function start() {
     // 版本号
     apiFetch("/api/health").then(function (data) {
-      setText("version", data.version ? "v" + data.version : "");
+      setText("version", data.version || "");
     });
 
     // 绑定全局事件

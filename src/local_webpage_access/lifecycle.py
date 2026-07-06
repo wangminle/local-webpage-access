@@ -485,14 +485,22 @@ def _observe_static_status(
     if not row or not row.get("enabled"):
         return Status.STOPPED
     gateway = StaticGateway(workspace, config)
+    host_port = row.get("host_port")
+    pid_alive = False
     pid_path = workspace.run / f"static-{instance_id}.pid"
     if pid_path.is_file():
         try:
             pid = int(pid_path.read_text(encoding="utf-8").strip())
         except ValueError:
-            return Status.STOPPED
-        if gateway._pid_alive(pid):
-            return Status.RUNNING
+            pid = None
+        if pid is not None:
+            pid_alive = gateway._pid_alive(pid)
+    if pid_alive:
+        return Status.RUNNING
+    # PID 文件缺失或进程已退出时，仍以 HTTP 探测为准（BUG-052 防御）：
+    # 跨线程 registry 误读或 PID 抖动不应把仍在服务的站点标为 stopped。
+    if host_port is not None and gateway.health_check(int(host_port)):
+        return Status.RUNNING
     return Status.STOPPED
 
 

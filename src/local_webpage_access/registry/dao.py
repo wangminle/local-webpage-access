@@ -15,7 +15,7 @@ from typing import Any, Iterator
 from local_webpage_access.errors import RegistryError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.models import InstanceManifest
-from local_webpage_access.registry.connection import init_db, transaction
+from local_webpage_access.registry.connection import init_db, locked_connection, transaction
 
 log = get_logger("registry.dao")
 
@@ -70,6 +70,20 @@ class Registry:
             raise RegistryError(f"数据库完整性约束失败：{exc}") from exc
         except sqlite3.DatabaseError as exc:
             raise RegistryError(f"数据库操作失败：{exc}") from exc
+
+    def _fetchone(
+        self, sql: str, params: tuple[Any, ...] | list[Any] = ()
+    ) -> sqlite3.Row | None:
+        """线程安全的单行查询（BUG-052）。"""
+        with locked_connection(self.conn) as conn:
+            return conn.execute(sql, params).fetchone()
+
+    def _fetchall(
+        self, sql: str, params: tuple[Any, ...] | list[Any] = ()
+    ) -> list[sqlite3.Row]:
+        """线程安全的多行查询（BUG-052）。"""
+        with locked_connection(self.conn) as conn:
+            return conn.execute(sql, params).fetchall()
 
     # ---- 实例 ---------------------------------------------------------------
 
@@ -132,21 +146,21 @@ class Registry:
             self.delete_container(data["id"])
 
     def get_instance(self, instance_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
+        row = self._fetchone(
             "SELECT * FROM instances WHERE id = ?", (instance_id,)
-        ).fetchone()
+        )
         return dict(row) if row else None
 
     def list_instances(self) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
+        rows = self._fetchall(
             "SELECT * FROM instances ORDER BY created_at ASC"
-        ).fetchall()
+        )
         return [dict(r) for r in rows]
 
     def instance_exists(self, instance_id: str) -> bool:
-        row = self.conn.execute(
+        row = self._fetchone(
             "SELECT 1 FROM instances WHERE id = ?", (instance_id,)
-        ).fetchone()
+        )
         return row is not None
 
     def update_status(
@@ -228,9 +242,9 @@ class Registry:
             tx.execute(sql, tuple(row.values()))
 
     def get_container(self, instance_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
+        row = self._fetchone(
             "SELECT * FROM containers WHERE instance_id = ?", (instance_id,)
-        ).fetchone()
+        )
         return dict(row) if row else None
 
     def delete_container(self, instance_id: str) -> None:
@@ -262,9 +276,9 @@ class Registry:
             tx.execute(sql, tuple(row.values()))
 
     def get_static_site(self, instance_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
+        row = self._fetchone(
             "SELECT * FROM static_sites WHERE instance_id = ?", (instance_id,)
-        ).fetchone()
+        )
         return dict(row) if row else None
 
     def set_static_enabled(self, instance_id: str, enabled: bool) -> None:
@@ -315,13 +329,13 @@ class Registry:
             tx.execute("DELETE FROM ports WHERE instance_id = ?", (instance_id,))
 
     def allocated_ports(self) -> list[int]:
-        rows = self.conn.execute("SELECT port FROM ports ORDER BY port").fetchall()
+        rows = self._fetchall("SELECT port FROM ports ORDER BY port")
         return [int(r["port"]) for r in rows]
 
     def port_owner(self, port: int) -> str | None:
-        row = self.conn.execute(
+        row = self._fetchone(
             "SELECT instance_id FROM ports WHERE port = ?", (port,)
-        ).fetchone()
+        )
         return row["instance_id"] if row else None
 
     # ---- 事件（WBS-05.13）-------------------------------------------------
@@ -341,14 +355,14 @@ class Registry:
         self, instance_id: str | None = None, *, limit: int = 100
     ) -> list[dict[str, Any]]:
         if instance_id is None:
-            rows = self.conn.execute(
+            rows = self._fetchall(
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
+            )
         else:
-            rows = self.conn.execute(
+            rows = self._fetchall(
                 "SELECT * FROM events WHERE instance_id = ? ORDER BY id DESC LIMIT ?",
                 (instance_id, limit),
-            ).fetchall()
+            )
         return [dict(r) for r in rows]
 
     # ---- 构建记录（WBS-05.14）---------------------------------------------
@@ -386,14 +400,14 @@ class Registry:
         self, instance_id: str | None = None, *, limit: int = 50
     ) -> list[dict[str, Any]]:
         if instance_id is None:
-            rows = self.conn.execute(
+            rows = self._fetchall(
                 "SELECT * FROM builds ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
+            )
         else:
-            rows = self.conn.execute(
+            rows = self._fetchall(
                 "SELECT * FROM builds WHERE instance_id = ? ORDER BY id DESC LIMIT ?",
                 (instance_id, limit),
-            ).fetchall()
+            )
         return [dict(r) for r in rows]
 
     # ---- 资源快照（WBS-05.15）--------------------------------------------
@@ -430,21 +444,21 @@ class Registry:
             tx.execute(sql, tuple(row.values()))
 
     def get_resources(self, instance_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
+        row = self._fetchone(
             "SELECT * FROM resources WHERE instance_id = ?", (instance_id,)
-        ).fetchone()
+        )
         return dict(row) if row else None
 
     # ---- 统计（供管理页，WBS-05 观测）------------------------------------
 
     def status_counts(self) -> dict[str, int]:
-        rows = self.conn.execute(
+        rows = self._fetchall(
             "SELECT status, COUNT(*) AS n FROM instances GROUP BY status"
-        ).fetchall()
+        )
         return {r["status"]: int(r["n"]) for r in rows}
 
     def total_count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) AS n FROM instances").fetchone()
+        row = self._fetchone("SELECT COUNT(*) AS n FROM instances")
         return int(row["n"])
 
 

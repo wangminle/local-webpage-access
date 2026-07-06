@@ -136,6 +136,30 @@ def test_api_rejects_missing_token(manager_env: EnvBundle) -> None:
     assert body["error"]["code"] == "unauthorized"
 
 
+def test_api_localhost_bypass_without_token(manager_env: EnvBundle) -> None:
+    """IMP-003：本机 loopback 访问免 token。"""
+    from unittest.mock import Mock
+
+    from fastapi import HTTPException
+
+    from local_webpage_access.manager_api import _is_localhost_client, require_token
+
+    for host in ("127.0.0.1", "::1", "localhost"):
+        request = Mock()
+        request.client = Mock(host=host)
+        assert _is_localhost_client(request) is True
+        require_token(request)  # 不应抛错
+
+    request = Mock()
+    request.client = Mock(host="10.0.0.8")
+    request.app = manager_env.app
+    request.headers = Mock(get=lambda _k, default="": default)
+    request.query_params = Mock(get=lambda _k: None)
+    with pytest.raises(HTTPException) as exc:
+        require_token(request)
+    assert exc.value.status_code == 401
+
+
 def test_api_rejects_wrong_token(manager_env: EnvBundle) -> None:
     resp = manager_env.client.get(
         "/api/instances", headers={"Authorization": "Bearer wrong-token"}
@@ -166,7 +190,9 @@ def test_api_accepts_x_lwa_token_header(manager_env: EnvBundle) -> None:
 def test_health_endpoint_no_auth(manager_env: EnvBundle) -> None:
     resp = manager_env.client.get("/api/health")
     assert resp.status_code == 200
-    assert resp.json()["ok"] is True
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["workspaceRoot"] == str(manager_env.workspace.root.resolve())
 
 
 # ---- 统计（WBS-22.05/06）----------------------------------------------------

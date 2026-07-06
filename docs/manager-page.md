@@ -25,7 +25,8 @@ lwa manager start
 
 ## 鉴权
 
-* 所有 `/api/*` 路由（`/api/health` 除外）都要求请求头 `Authorization: Bearer <token>`（WBS-22.12）。
+* 所有 `/api/*` 路由（`/api/health` 除外）默认要求请求头 `Authorization: Bearer <token>`（WBS-22.12）。
+* **本机调试例外（IMP-003）**：从 `127.0.0.1` / `localhost` / `::1` 访问时免 token；从局域网 IP 访问时仍须 token。
 * 缺失或错误 token 返回 `401`，统一错误格式 `{"error": {"code": "unauthorized", "message": "..."}}`。
 * token 为一次性生成的随机串，仅在本工作区有效；重置方式：删除 `run/` 下的 token 文件后重启管理页。
 

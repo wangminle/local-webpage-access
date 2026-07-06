@@ -100,12 +100,12 @@ def test_init_copies_templates(tmp_path: Path) -> None:
 
 
 def test_init_copies_skills(tmp_path: Path) -> None:
-    """lwa init 应把 13 个内置 skills 复制到 skills/（WBS-24 + lwa-setup-host-environment）。"""
+    """lwa init 应把内置 skills 复制到 skills/（WBS-24 + lwa-setup-host-environment 等）。"""
     root = tmp_path / "ws"
     init_workspace(root)
     ws = Workspace(root)
     skill_docs = list(ws.skills.rglob("SKILL.md"))
-    assert len(skill_docs) == 13
+    assert len(skill_docs) == 14
     # 索引 README 也应存在
     assert (ws.skills / "README.md").is_file()
     # 关键 skill 应在列
@@ -118,6 +118,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
         "lwa-fix-docker-build-failure",
         "lwa-diagnose-health-check",
         "lwa-setup-host-environment",
+        "lwa-update-runtime",
     ):
         assert expected in names, f"缺少 skill：{expected}"
 

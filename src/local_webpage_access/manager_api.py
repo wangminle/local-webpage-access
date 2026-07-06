@@ -184,13 +184,28 @@ class _Ctx:
 
 # ---- token 依赖 -------------------------------------------------------------
 
+_LOCALHOST_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_localhost_client(request: Request) -> bool:
+    """请求是否来自本机 loopback（IMP-003：本机免 token）。"""
+    client = request.client
+    if client is None:
+        return False
+    return client.host in _LOCALHOST_HOSTS
+
 
 def require_token(request: Request) -> None:
     """校验 API token（WBS-22.12）。
 
     支持三种传递方式：``Authorization: Bearer <token>``、
     ``X-LWA-Token`` 头、``?token=`` 查询参数。
+
+    从 ``127.0.0.1`` / ``localhost`` / ``::1`` 访问时跳过鉴权（IMP-003），
+    便于本机调试；局域网 IP 访问仍必须携带有效 token。
     """
+    if _is_localhost_client(request):
+        return
     workspace: Workspace = request.app.state.workspace
     candidate = _extract_token(request)
     if not _verify_token(workspace, candidate):
@@ -288,7 +303,12 @@ def _register_routes(app: FastAPI) -> None:
     # ---- /api/health（无鉴权，供存活探测）----
     @app.get("/api/health", tags=["health"])
     def health() -> dict[str, Any]:
-        return {"ok": True, "version": _app_version()}
+        ws: Workspace = app.state.workspace
+        return {
+            "ok": True,
+            "version": _app_version(),
+            "workspaceRoot": str(ws.root.resolve()),
+        }
 
     # ---- 顶部统计（WBS-22.05/06）----
     @app.get("/api/stats", dependencies=[api], tags=["stats"])
@@ -547,9 +567,9 @@ def _lwa_error_code(exc: LwaError) -> str:
 
 
 def _app_version() -> str:
-    from local_webpage_access import __version__
+    from local_webpage_access.version_info import display_version
 
-    return __version__
+    return display_version()
 
 
 class _suppress_close:
@@ -648,4 +668,5 @@ __all__ = [
     "create_app",
     "run_manager",
     "require_token",
+    "_is_localhost_client",
 ]

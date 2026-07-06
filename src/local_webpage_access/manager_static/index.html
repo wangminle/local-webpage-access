@@ -55,7 +55,6 @@
               <th>族</th>
               <th>运行层</th>
               <th>技术栈</th>
-              <th>数据库</th>
               <th>访问地址</th>
               <th>端口</th>
               <th>资源</th>
@@ -64,7 +63,7 @@
             </tr>
           </thead>
           <tbody id="instances-body">
-            <tr class="empty-row"><td colspan="13">加载中…</td></tr>
+            <tr class="empty-row"><td colspan="12">加载中…</td></tr>
           </tbody>
         </table>
       </div>
@@ -83,28 +82,30 @@
 
   <!-- 日志查看（WBS-23.07）-->
   <div class="modal" id="logs-modal" hidden>
-    <div class="modal-head">
-      <h2 id="logs-title">日志</h2>
-      <div class="logs-controls">
-        <select id="logs-category">
-          <option value="run">run</option>
-          <option value="build">build</option>
-          <option value="gateway">gateway</option>
-          <option value="import">import</option>
-          <option value="scan">scan</option>
-        </select>
-        <button class="btn btn-ghost" id="logs-refresh">↻</button>
-        <button class="btn btn-ghost" id="logs-close">✕</button>
+    <div class="modal-inner">
+      <div class="modal-head">
+        <h2 id="logs-title">日志</h2>
+        <div class="logs-controls">
+          <select id="logs-category">
+            <option value="run">run</option>
+            <option value="build">build</option>
+            <option value="gateway">gateway</option>
+            <option value="import">import</option>
+            <option value="scan">scan</option>
+          </select>
+          <button class="btn btn-ghost" id="logs-refresh">↻</button>
+          <button class="btn btn-ghost" id="logs-close">✕</button>
+        </div>
       </div>
+      <pre class="logs-content" id="logs-content"></pre>
     </div>
-    <pre class="logs-content" id="logs-content"></pre>
   </div>
 
   <!-- Token 登录（WBS-22.12 前端配合）-->
   <div class="modal" id="token-modal" hidden>
     <div class="token-box">
       <h2>需要 API token</h2>
-      <p>请输入管理页 token（由 <code>lwa manager start</code> 输出）：</p>
+      <p id="token-hint-text">请输入管理页 token（由 <code>lwa manager start</code> 输出；本机 127.0.0.1 访问免 token）：</p>
       <input type="password" id="token-input" placeholder="API token" autocomplete="off" />
       <div class="token-actions">
         <button class="btn btn-primary" id="token-submit">进入</button>

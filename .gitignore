@@ -42,7 +42,8 @@ tmp-test/
 Thumbs.db
 desktop.ini
 
-# ---- 本地 lwa 工作区（在仓库根 init/import 测试时生成，勿提交）---------------
+# ---- 本地 lwa 工作区（init/import 生成；可在仓库根或 runtime/ 下，勿提交）---
+/runtime/
 /local-web.yml
 /inbox/
 /apps/

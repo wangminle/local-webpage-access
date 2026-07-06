@@ -494,6 +494,32 @@ def test_observe_status_no_change_no_event(
     assert len(events_after) == len(events_before)
 
 
+def test_observe_static_status_uses_health_when_pid_missing(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-052：PID 文件缺失但 HTTP 仍可用时，观测应为 running。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+    from local_webpage_access.models import Status
+    from tests._helpers import make_static_manifest
+
+    workspace.ensure_app_dirs("demo")
+    m = make_static_manifest("demo")
+    m.status = Status.RUNNING
+    m.static.enabled = True
+    m.static.hostPort = 21100
+    m.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(m)
+    registry.set_static_enabled("demo", True)
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway.health_check",
+        lambda self, port, **kw: port == 21100,
+    )
+
+    observed = _observe_static_status(workspace, config, registry, "demo")
+    assert observed == Status.RUNNING
+
+
 # ---- 回归测试：BUG-046 ----------------------------------------------------
 #
 # BUG-046：``instance_lock`` 在长耗时操作期间不刷新锁文件时间戳，

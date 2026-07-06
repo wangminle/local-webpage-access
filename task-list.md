@@ -62,6 +62,11 @@
 | BUG-049 | 修复 | zip 解压未防御 symlink 类 zip slip，`audit_zip_members` 未被 importer 调用 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | 三层防御：(1) `audit_zip_members` 新增 `modes` 参数 + `_is_symlink_mode`（S_ISLNK）检测符号链接成员，返回 `zip_symlink` critical 发现；(2) importer `_safe_extract` 解压前调用 `audit_zip_members`（含 modes），critical 级 `has_critical` 拒绝解压并抛 ZipImportError，WARN 级记录日志；(3) 解压后 `rglob("*")` 深度防御扫描 symlink（兜底 external_attr 未声明的异常 zip）。回归：test_import_rejects_zip_slip 改匹配 zip_slip、新增 test_import_rejects_zip_symlink；security 新增 symlink 检测 + modes 短缺边界回归，全量 609 passed/4 skipped |
 | BUG-050 | 修复 | 管理页 `building`/`queued` 时仍允许点击「启动」，易触发并发操作与锁竞争 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | `app.js` `opsHtml` 新增 `inProgress` 判定（building/queued/pending），对 start/stop/restart/rebuild 四个操作按钮在 inProgress 时统一禁用（start 保留 running 禁用，stop 保留非 running 禁用）；「打开」「日志」不受影响。顺带补 `.badge-queued` CSS（原缺失）。全量 609 passed/4 skipped |
 | BUG-051 | 修复 | 环境检查把可用 Compose v2.40 环境和无 Caddy 静态托管环境误判为失败 | 2026-07-06 18:07 | 2026-07-06 18:07 | 已完成 | Compose 拆分最低线 2.40.2 与推荐线 5.2.0：runtime 只按最低线阻断，doctor/setup 对低于推荐给 WARN；Caddy 缺失按运行时 fallback 降级 builtin 并给 WARN；同步 README/FAQ/known-limitations/setup skill/CLI 文案；新增 Compose v2.40、低版本失败、Caddy 缺失回归；全量测试 600 passed/4 skipped |
+| BUG-052 | 修复 | 管理页并行轮询可能把仍在运行的静态实例短暂误判为 stopped | 2026-07-06 20:23 | 2026-07-06 20:23 | 已完成 | registry 读路径加连接级锁；静态状态观测在 PID 缺失/抖动时补 HTTP health check；相关测试 test_registry_concurrent_reads_thread_safe/test_observe_static_status_uses_health_when_pid_missing 通过 |
+| BUG-053 | 修复 | `manager on`/`init` 在 17800 已有其他工作区管理页时会误恢复为当前工作区管理页 | 2026-07-06 20:23 | 2026-07-06 20:30 | 已完成 | `/api/health` 增加 `workspaceRoot`；`health_matches_workspace` 校验归属，`start_manager` 仅本工作区恢复状态，否则抛端口占用；`is_running` 同步校验；回归 test_start_manager_rejects_foreign_workspace_on_port 等 |
+| BUG-054 | 修复 | `manager off` 终止失败仍把状态写成 disabled，CLI 仍提示已停止 | 2026-07-06 20:23 | 2026-07-06 20:30 | 已完成 | `stop_manager` 先 `_terminate_pid` 成功后再写 `enabled=false`；`cli.manager_off` 检查返回值并 exit 1；回归 test_stop_manager_keeps_enabled_when_terminate_fails |
+| BUG-055 | 修复 | 新增 `lwa-update-runtime` 内置 skill 后测试仍硬编码 13 个 skills，导致全量 pytest 失败 | 2026-07-06 20:23 | 2026-07-06 20:30 | 已完成 | `test_init_copies_skills`/`test_e2e_init_creates_clean_workspace` 改为 14 并断言 `lwa-update-runtime`；全量 pytest 625 passed/4 skipped |
+| BUG-052 | 修复 | 管理页并发刷新时 registry 只读查询未串行化，误把运行中静态实例标为 stopped（开声纹 demo 后 demo-static 显示/感知为关闭） | 2026-07-06 20:07 | 2026-07-06 20:14 | 已完成 | 根因：`/api/stats` 与 `/api/instances` 并行 `sync_status`，共享 SQLite 连接裸 `conn.execute` 触发 `InterfaceError` 与状态抖动；`Registry._fetchone/_fetchall` + `locked_connection` 串行化读；`_observe_static_status` 增加 HTTP 健康兜底。回归 test_registry_concurrent_reads_thread_safe、test_observe_static_status_uses_health_when_pid_missing；hammer 60 并发请求 0 错误 |
 
 ## 调整事项
 
@@ -74,6 +79,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | CHK-001 | 检查 | Phase 5-7 全面代码 bug 审查（daemon/manager_api/security/doctor/管理页前端） | 2026-07-06 00:46 | 2026-07-06 09:46 | 已完成 | 全量 pytest 540 passed/4 skipped；发现 BUG-028~037 共 10 项待修复，已写入本清单 |
 | CHK-002 | 检查 | 全量代码 bug 复审（lifecycle/hosting/importer/daemon/build_queue/前端） | 2026-07-06 17:35 | 2026-07-06 17:35 | 已完成 | 全量 pytest 577 passed/4 skipped；历史 BUG-001~045 已修复；新发现 BUG-046~050 共 5 项待修复；跨进程 buildConcurrency 为 BUG-022 已知 V1 边界 |
+| CHK-003 | 检查 | 当前未提交代码 bug 审查 | 2026-07-06 20:23 | 2026-07-06 20:23 | 已完成 | 审查未提交 diff，执行 compileall、node --check、目标 pytest 与全量 pytest；发现 BUG-053~055 待修复，确认 BUG-052 相关测试通过；全量 pytest 619 passed/4 skipped/2 failed |
 
 ## 测试数据
 
@@ -85,6 +91,12 @@
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
 | DOC-001 | 文档 | 统一文档命名：5 个 local-web-access-* 历史文档重命名为 local-webpage-access-*，同步更新引用 | 2026-07-06 17:46 | 2026-07-06 17:46 | 已完成 | docs/plan 2 个（v1-design/v1-wbs）+ docs/discussion 3 个（proposal/方案/设计意见）；git mv 保留历史；README/config.py/文档内交叉引用共 10 处全替换、0 残留；config 测试通过 |
+| DOC-002 | 文档 | Runtime 工作区说明 + 待改进功能点 backlog（IMP-001~007） | 2026-07-06 19:50 | 2026-07-06 19:52 | 已完成 | docs/runtime-workspace.md；docs/plan/待改进功能点记录-20260706.md；README/manager-page 链接；IMP-003 本机免 token 已实现并重启管理页验证 |
+| DOC-003 | 文档 | IMP-006 路径别名规则：用户/CLI/Skill 显式指定才启用，默认仍端口 | 2026-07-06 19:55 | 2026-07-06 19:55 | 已完成 | 待改进功能点记录 IMP-006 更新；规划 `--path-alias` 可选参数 |
+| DOC-004 | 文档 | IMP-008 `lwa update` 工作区热重载规划 + Skill 草案 | 2026-07-06 19:58 | 2026-07-06 19:58 | 已完成 | 待改进 IMP-008；skills/lwa-update-runtime；runtime-workspace 开发期重载说明；README/setup skill 交叉引用 |
+| DOC-005 | 文档 | 检查并补充待改进功能点记录细节 | 2026-07-06 20:03 | 2026-07-06 20:03 | 已完成 | docs/plan/待改进功能点记录-20260706.md：新增维护说明；补强 IMP-001/005/006/007/008 的非目标、边界、风险、数据口径、失败处理与验收 |
+| DOC-006 | 文档 | IMP-009 实例 zip 包更新（再导入识别与原地升级）规划 | 2026-07-06 20:20 | 2026-07-06 20:20 | 已完成 | 待改进功能点记录新增 IMP-009：`--update`/reimport、hash+slug 识别、保留 id/端口/data、与 IMP-008 区分；管理页/Skill/验收口径 |
+| DEV-032 | 开发 | 应用版本号与 Git commit 主题对齐（管理页/CLI 显示 V0.3.1） | 2026-07-06 19:55 | 2026-07-06 19:56 | 已完成 | version_info.py 解析 `V0.3.1-Build...`；pyproject 0.3.1 兜底；管理页/API/lwa version 显示 V0.3.1；3 条单测 |
 
 ## 功能开发
 
@@ -120,6 +132,8 @@
 | DEV-028 | 开发 | WBS-28 单元测试与集成测试（全模块覆盖 + Docker 双重守卫） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；conftest requires_docker marker + LWA_RUN_DOCKER_TESTS 双守卫；WBS-28.01~15 全覆盖；test_security/test_doctor/test_fixtures/test_integration_phase57；529 passed/4 skipped |
 | DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-06 01:30 | 进行中 | Phase 7；tests/test_e2e_acceptance.py（11 测试，覆盖 init/import×4/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor）；docs/acceptance-checklist.md（18 子任务，Docker 依赖项手工清单）；自动化 E2E（11 测试）全通过；**Docker 手工验收（29.09/29.11/29.12，容器构建/运行/健康检查）待在具备 Docker 的 Linux 主机执行**（见 docs/acceptance-checklist.md 验收记录）；全量回归 577 passed/4 skipped |
 | DEV-030 | 开发 | WBS-30 文档与发布准备（README 更新 + 管理/FAQ/安全/限制/发布清单） | 2026-07-06 01:30 | 2026-07-06 02:00 | 已完成 | Phase 7；README 全面更新（Phase 0~7 全完成，新增 manager/daemon/doctor/skills 章节）；docs/manager-page.md、faq.md、security-boundary.md、known-limitations.md、release-checklist.md；文档索引齐全 |
+| DEV-031 | 开发 | 管理页默认后台启动（managerEnabled 配置 + lwa manager on/off/status + init 自动拉起） | 2026-07-06 19:28 | 2026-07-06 19:30 | 已完成 | config.managerEnabled 默认 true；manager_service 后台子进程；init 自动 maybe_start_manager；CLI 新增 on/off/status；保留 manager start 前台；runtime 实测 pid=79502 17800 健康 200；6 条单测通过 |
+| DEV-033 | 开发 | 管理页前端风格优化（OKLCH 双色板 + 视觉比例/信息密度重构，克制动效） | 2026-07-06 20:04 | 2026-07-06 20:04 | 已完成 | 落地 PRODUCT.md（register=product）；style.css 全量重写为 OKLCH 明暗板：移除状态卡 border-left 侧条（违反设计禁令）改状态值着色、徽章加状态点（色盲友好）、detail 区去 uppercase eyebrow、修正 logs 模态缺 .modal-inner 致内容浮在遮罩上的 bug；index.html+app.js：技术栈列合并数据库徽章、移除与"访问地址"重复的"打开"按钮（表 13→12 列）；impeccable detect 返回 [] 无 slop、node --check 通过；动效仅 0.12s hover/focus + prefers-reduced-motion 守卫 |
 
 ## 配置运维
 
@@ -146,12 +160,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 51 | 51 | 0 | 100% |
+| 代码 Bug | 55 | 52 | 3 | 95% |
 | 调整事项 | 0 | 0 | 0 | 0% |
-| 检查事项 | 2 | 2 | 0 | 100% |
+| 检查事项 | 3 | 3 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 1 | 1 | 0 | 100% |
-| 功能开发 | 30 | 29 | 1 | 97% |
+| 文档维护 | 6 | 6 | 0 | 100% |
+| 功能开发 | 33 | 32 | 1 | 97% |
 | 配置运维 | 3 | 3 | 0 | 100% |
 | 规划事项 | 8 | 7 | 1 | 88% |
-| **总计** | 95 | 93 | 2 | 98% |
+| **总计** | 108 | 103 | 5 | 95% |

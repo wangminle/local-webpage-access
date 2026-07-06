@@ -52,6 +52,7 @@ class Config(BaseModel):
 
     managerPort: int = Field(default=MANAGER_PORT_DEFAULT, ge=1, le=65535)
     managerHost: str = "0.0.0.0"
+    managerEnabled: bool = True
     portPool: PortPool = Field(default_factory=PortPool)
     staticGateway: str = "caddy"
     buildConcurrency: int = Field(default=1, ge=1, le=8)
@@ -153,6 +154,9 @@ CONFIG_EXAMPLE = """\
 # 管理页监听端口（不应落在端口池范围内）
 managerPort: 17800
 managerHost: 0.0.0.0
+
+# 是否在 lwa init 后自动后台启动管理页（false 时需手动 lwa manager on）
+managerEnabled: true
 
 # 实例端口池
 portPool:
