@@ -10,10 +10,10 @@ from unittest.mock import patch
 
 import pytest
 
-from local_web_access import daemon as daemon_mod
-from local_web_access.config import Config, PortPool
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access import daemon as daemon_mod
+from local_webpage_access.config import Config, PortPool
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 # ---- fixtures --------------------------------------------------------------
@@ -24,7 +24,7 @@ def workspace(workspace_root: Path) -> Workspace:
     ws = Workspace(workspace_root)
     ws.ensure_workspace_dirs()
     # 写入最小配置让 require_workspace / load_config 工作
-    from local_web_access.config import example_config_text
+    from local_webpage_access.config import example_config_text
 
     if not ws.config_path.is_file():
         ws.config_path.write_text(example_config_text(), encoding="utf-8")
@@ -260,7 +260,7 @@ def test_process_zip_starts_determinable_static(
     assert row["status"] == "running"
     # BUG：泄漏兜底——process_zip 自动 start 的内置静态服务（http.server 子进程）
     # 在测试结束未停会成为孤儿，跨用例累积会占满端口池、使全量测试连跑即红。
-    from local_web_access.lifecycle import stop_instance_op
+    from local_webpage_access.lifecycle import stop_instance_op
 
     stop_instance_op(workspace, config, registry, summary["instance_id"])
 
@@ -280,17 +280,17 @@ def test_process_zip_does_not_auto_start_heavy(
             started.append(iid)
             return None
 
-        with patch("local_web_access.lifecycle.start_instance", side_effect=fake_start):
+        with patch("local_webpage_access.lifecycle.start_instance", side_effect=fake_start):
             # 让 importer 走静态识别，然后 manifest 改 heavy：直接对 process_zip
             # 注入一个把 profile 改 heavy 的 process_fn 不现实；这里改成检测 pending
             # 分支：用一个 index.html 项目但人为 patch resourceProfile
-            import local_web_access.importer as importer_mod
+            import local_webpage_access.importer as importer_mod
 
             orig_build = importer_mod.build_manifest_from_detection
 
             def patched(*args, **kwargs):
                 m = orig_build(*args, **kwargs)
-                from local_web_access.models import ResourceProfile
+                from local_webpage_access.models import ResourceProfile
 
                 m.resourceProfile = ResourceProfile.HEAVY
                 return m
@@ -606,7 +606,7 @@ def test_start_daemon_rolls_back_state_when_child_exits(
     monkeypatch.setattr(daemon_mod, "is_pid_alive", fake_is_pid_alive)
     monkeypatch.setattr(daemon_mod, "_spawn_watcher", lambda ws, poll: pid)
 
-    from local_web_access.errors import LifecycleError
+    from local_webpage_access.errors import LifecycleError
 
     with pytest.raises(LifecycleError):
         daemon_mod.start_daemon(workspace, config, poll_interval=0.01)

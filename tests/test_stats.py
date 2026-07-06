@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
-from local_web_access.stats import (
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
+from local_webpage_access.stats import (
     HostResources,
     InstanceResources,
     _parse_cpu,
@@ -49,7 +49,7 @@ def registry(workspace_root: Path) -> Registry:
 
 @pytest.fixture()
 def config(workspace_root: Path):
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     return Config(portPool=PortPool(start=21000, end=21050))
 
@@ -57,7 +57,7 @@ def config(workspace_root: Path):
 def _seed_container_instance(
     workspace: Workspace, registry: Registry, iid: str = "api"
 ) -> None:
-    from local_web_access.models import (
+    from local_webpage_access.models import (
         ContainerConfig,
         DesiredState,
         InstanceManifest,
@@ -104,7 +104,7 @@ def _seed_container_instance(
 def _seed_static_instance(
     workspace: Workspace, registry: Registry, iid: str = "demo"
 ) -> None:
-    from local_web_access.models import (
+    from local_webpage_access.models import (
         DesiredState,
         InstanceManifest,
         Kind,
@@ -288,7 +288,7 @@ def test_instance_resources_with_mocked_docker(
             return _FakeCompleted(stats_json, 0)
         return _FakeCompleted("", 1)
 
-    monkeypatch.setattr("local_web_access.stats.subprocess.run", fake_run)
+    monkeypatch.setattr("local_webpage_access.stats.subprocess.run", fake_run)
 
     info = instance_resources(workspace, config, registry, "api")
     assert info.image_size_bytes == 12345678
@@ -327,7 +327,7 @@ def test_resource_collection_failure_returns_none(
     def boom(*a, **kw):
         raise OSError("docker broken")
 
-    monkeypatch.setattr("local_web_access.stats.subprocess.run", boom)
+    monkeypatch.setattr("local_webpage_access.stats.subprocess.run", boom)
     info = instance_resources(workspace, config, registry, "api")
     # 目录大小仍可用；容器/镜像指标为 None
     assert info.source_size_bytes is not None

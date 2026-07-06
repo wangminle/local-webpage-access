@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.config import Config, PortPool
-from local_web_access.errors import PortError
-from local_web_access.ports import (
+from local_webpage_access.config import Config, PortPool
+from local_webpage_access.errors import PortError
+from local_webpage_access.ports import (
     PortAllocator,
     build_health_url,
     build_lan_url,
@@ -17,7 +17,7 @@ from local_web_access.ports import (
     is_port_in_use,
     resolve_lan_ip,
 )
-from local_web_access.registry import Registry
+from local_webpage_access.registry import Registry
 from tests._helpers import make_static_manifest
 
 
@@ -192,7 +192,7 @@ def test_allocate_skips_host_listening_port(registry: Registry) -> None:
     s.listen(1)
     busy_port = s.getsockname()[1]
     try:
-        from local_web_access.config import PortPool
+        from local_webpage_access.config import PortPool
 
         # 池必须 ≥10 个端口（PortPool 校验），把 busy_port 放在池起点
         cfg = Config(portPool=PortPool(start=busy_port, end=busy_port + 10))
@@ -219,7 +219,7 @@ def test_allocate_skips_port_lost_in_race(registry: Registry, monkeypatch) -> No
     但等到 ``allocate_port("a", 20000)`` 时已被 other-inst 抢走（返回 False）。
     修复前 allocator 不检查返回值，会把 20000 当作已分配给 a，造成归属错乱。
     """
-    from local_web_access.config import PortPool
+    from local_webpage_access.config import PortPool
 
     cfg = Config(portPool=PortPool(start=20000, end=20010))
     registry.upsert_from_manifest(make_static_manifest("a"))

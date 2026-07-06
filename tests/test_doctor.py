@@ -8,8 +8,8 @@ from typing import Sequence
 
 import pytest
 
-from local_web_access.config import load_config
-from local_web_access.doctor import (
+from local_webpage_access.config import load_config
+from local_webpage_access.doctor import (
     STATUS_FAIL,
     STATUS_OK,
     STATUS_SKIP,
@@ -18,18 +18,20 @@ from local_web_access.doctor import (
     diagnose_instance,
     check_docker,
     check_docker_compose,
+    check_caddy,
     check_disk_space,
     check_memory,
     check_port_pool,
+    check_python_packages,
     check_python_version,
     check_registry,
     check_static_gateway,
     format_report,
     run_doctor,
 )
-from local_web_access.init_workspace import init_workspace
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access.init_workspace import init_workspace
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 # ---- 辅助：可注入的假 runner / port checker --------------------------------
@@ -101,11 +103,20 @@ def test_check_python_version_ok() -> None:
 
 def test_check_docker_ok() -> None:
     runner = _runner_from_map(
-        {("docker", "version"): _proc(0, stdout="24.0.7\n")}
+        {("docker", "version"): _proc(0, stdout="29.6.1\n")}
     )
     r = check_docker(runner=runner)
     assert r.status == STATUS_OK
-    assert "24.0.7" in r.message
+    assert "29.6.1" in r.message
+
+
+def test_check_docker_version_too_low() -> None:
+    runner = _runner_from_map(
+        {("docker", "version"): _proc(0, stdout="29.1.3\n")}
+    )
+    r = check_docker(runner=runner)
+    assert r.status == STATUS_FAIL
+    assert "29.6.1" in r.message
 
 
 def test_check_docker_unavailable() -> None:
@@ -129,11 +140,20 @@ def test_check_docker_daemon_down() -> None:
 
 def test_check_docker_compose_v2_ok() -> None:
     runner = _runner_from_map(
-        {("docker", "compose", "version"): _proc(0, stdout="2.24.0\n")}
+        {("docker", "compose", "version"): _proc(0, stdout="5.2.0\n")}
     )
     r = check_docker_compose(runner=runner)
     assert r.status == STATUS_OK
-    assert "2.24.0" in r.message
+    assert "5.2.0" in r.message
+
+
+def test_check_docker_compose_version_too_low() -> None:
+    runner = _runner_from_map(
+        {("docker", "compose", "version"): _proc(0, stdout="2.40.3\n")}
+    )
+    r = check_docker_compose(runner=runner)
+    assert r.status == STATUS_FAIL
+    assert "5.2.0" in r.message
 
 
 def test_check_docker_compose_unavailable() -> None:
@@ -142,7 +162,7 @@ def test_check_docker_compose_unavailable() -> None:
     assert "Compose" in r.message
 
 
-def test_check_docker_compose_v1_fallback_warns() -> None:
+def test_check_docker_compose_v1_fallback_fails() -> None:
     runner = _runner_from_map(
         {
             ("docker", "compose", "version"): _proc(1, stderr="no such command"),
@@ -150,15 +170,60 @@ def test_check_docker_compose_v1_fallback_warns() -> None:
         }
     )
     r = check_docker_compose(runner=runner)
-    assert r.status == STATUS_WARN
+    assert r.status == STATUS_FAIL
     assert "v1" in r.message
+
+
+# ---- Caddy / Python 包版本 --------------------------------------------------
+
+
+def test_check_caddy_skipped_for_builtin(env) -> None:
+    _ws, config, _reg = env
+    config.staticGateway = "builtin"
+    r = check_caddy(config, runner=_failing_runner)
+    assert r.status == STATUS_SKIP
+
+
+def test_check_caddy_required_and_ok(env, monkeypatch) -> None:
+    _ws, config, _reg = env
+    config.staticGateway = "caddy"
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: "/usr/bin/caddy")
+    runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.11.2\n")})
+    r = check_caddy(config, runner=runner)
+    assert r.status == STATUS_OK
+
+
+def test_check_caddy_version_too_low(env, monkeypatch) -> None:
+    _ws, config, _reg = env
+    config.staticGateway = "caddy"
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: "/usr/bin/caddy")
+    runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.11.1\n")})
+    r = check_caddy(config, runner=runner)
+    assert r.status == STATUS_FAIL
+
+
+def test_check_python_packages_ok() -> None:
+    from importlib.metadata import version as pkg_version
+
+    from local_webpage_access.version_requirements import (
+        MIN_FASTAPI_VERSION,
+        MIN_UVICORN_VERSION,
+        version_ge,
+    )
+
+    if not version_ge(pkg_version("fastapi"), MIN_FASTAPI_VERSION):
+        pytest.skip("fastapi 版本低于项目最低要求")
+    if not version_ge(pkg_version("uvicorn"), MIN_UVICORN_VERSION):
+        pytest.skip("uvicorn 版本低于项目最低要求")
+    r = check_python_packages()
+    assert r.status == STATUS_OK
 
 
 # ---- WBS-26.05 端口池 -----------------------------------------------------
 
 
 def test_check_port_pool_all_free() -> None:
-    from local_web_access.config import Config
+    from local_webpage_access.config import Config
 
     cfg = Config()  # 默认配置
     r = check_port_pool(cfg, port_in_use=_all_ports_free)
@@ -167,7 +232,7 @@ def test_check_port_pool_all_free() -> None:
 
 def test_check_port_pool_conflict() -> None:
     """WBS-26 验收：端口冲突时 doctor 能定位。"""
-    from local_web_access.config import Config
+    from local_webpage_access.config import Config
 
     cfg = Config()
     r = check_port_pool(cfg, port_in_use=_port_busy)
@@ -178,7 +243,7 @@ def test_check_port_pool_conflict() -> None:
 
 def test_check_port_pool_ignores_allocated_instance_ports() -> None:
     """BUG-039：当前工作区实例已登记端口不应被 doctor 判为冲突。"""
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     cfg = Config(portPool=PortPool(start=21000, end=21010))
 
@@ -192,7 +257,7 @@ def test_check_port_pool_ignores_allocated_instance_ports() -> None:
 
 
 def test_check_port_pool_still_checks_manager_port_when_busy() -> None:
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     cfg = Config(managerPort=22000, portPool=PortPool(start=21000, end=21010))
 
@@ -205,7 +270,7 @@ def test_check_port_pool_still_checks_manager_port_when_busy() -> None:
 
 
 def test_check_port_pool_custom_config() -> None:
-    from local_web_access.config import Config
+    from local_webpage_access.config import Config
 
     cfg = Config()
     cfg.portPool.start = 21000
@@ -224,7 +289,7 @@ def test_default_port_in_use_detects_wildcard_listener() -> None:
     """
     import socket
 
-    from local_web_access.doctor import _default_port_in_use
+    from local_webpage_access.doctor import _default_port_in_use
 
     s = socket.socket()
     s.bind(("0.0.0.0", 0))
@@ -320,7 +385,7 @@ def _import_static(env):
     """导入一个可识别的静态 zip，返回 instance_id。"""
     import zipfile
 
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     ws, config, reg = env
     zip_path = ws.inbox / "demo.zip"
@@ -365,18 +430,20 @@ def test_run_doctor_full_report(env) -> None:
     report = run_doctor(
         ws, config, runner=_runner_from_map(
             {
-                ("docker", "version"): _proc(0, stdout="24.0\n"),
-                ("docker", "compose", "version"): _proc(0, stdout="2.20\n"),
+                ("docker", "version"): _proc(0, stdout="29.6.1\n"),
+                ("docker", "compose", "version"): _proc(0, stdout="5.2.1\n"),
             }
         ),
         port_in_use=_all_ports_free,
     )
-    assert len(report.checks) >= 8
+    assert len(report.checks) >= 10
     # Python + registry + static_gateway + disk 应 ok
     names = [c.name for c in report.checks]
     assert "python_version" in names
+    assert "python_packages" in names
     assert "docker" in names
     assert "docker_compose" in names
+    assert "caddy" in names
     assert "port_pool" in names
     assert "registry" in names
     assert "disk_space" in names
@@ -433,7 +500,7 @@ def test_cli_doctor_command(env, monkeypatch) -> None:
     """`lwa doctor` 应可执行并返回 0（环境基本健康时）。"""
     from typer.testing import CliRunner
 
-    from local_web_access.cli import app
+    from local_webpage_access.cli import app
 
     ws, _config, _reg = env
     monkeypatch.chdir(ws.root)
@@ -448,7 +515,7 @@ def test_cli_doctor_command(env, monkeypatch) -> None:
 def test_cli_doctor_json_output(env, monkeypatch) -> None:
     from typer.testing import CliRunner
 
-    from local_web_access.cli import app
+    from local_webpage_access.cli import app
 
     ws, _config, _reg = env
     monkeypatch.chdir(ws.root)

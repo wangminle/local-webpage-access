@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.errors import PathError
-from local_web_access.paths import (
+from local_webpage_access.errors import PathError
+from local_webpage_access.paths import (
     Workspace,
     find_workspace_root,
     require_workspace,

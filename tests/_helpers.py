@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from local_web_access.models import (
+from local_webpage_access.models import (
     ContainerConfig,
     DesiredState,
     InstanceManifest,

@@ -65,13 +65,13 @@ def test_build_zip_into_dir_uses_default_name(tmp_path: Path) -> None:
 
 @pytest.fixture
 def env(tmp_path: Path):
-    from local_web_access.config import example_config_text, load_config
-    from local_web_access.importer import Importer
-    from local_web_access.paths import Workspace
-    from local_web_access.registry import Registry
+    from local_webpage_access.config import example_config_text, load_config
+    from local_webpage_access.importer import Importer
+    from local_webpage_access.paths import Workspace
+    from local_webpage_access.registry import Registry
 
     root = tmp_path / "ws"
-    from local_web_access.init_workspace import init_workspace
+    from local_webpage_access.init_workspace import init_workspace
 
     init_workspace(root)
     ws = Workspace(root)
@@ -88,7 +88,7 @@ def test_sample_detected_correctly(sample_name: str, env, tmp_path: Path) -> Non
     """每个样例的识别 kind 应与 EXPECTED_KIND 一致。"""
     ws, config, reg = env
     zp = build_zip(sample_name, tmp_path / f"{sample_name}.zip")
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     detection = result.detection
@@ -110,7 +110,7 @@ def test_pending_sample_stays_pending(env, tmp_path: Path) -> None:
     """pending_unknown 不应被 daemon/自动流程部署。"""
     ws, config, reg = env
     zp = build_zip("pending_unknown", tmp_path / "pending.zip")
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     assert result.detection.pending
@@ -124,7 +124,7 @@ def test_pending_sample_writes_risk_event(env, tmp_path: Path) -> None:
     """pending 样例应触发 WBS-25.09 风险提示事件。"""
     ws, config, reg = env
     zp = build_zip("pending_unknown", tmp_path / "pending.zip")
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     events = reg.list_events(result.instance_id)
@@ -139,7 +139,7 @@ def test_pending_sample_writes_risk_event(env, tmp_path: Path) -> None:
 def test_static_html_manifest_is_static(env, tmp_path: Path) -> None:
     ws, config, reg = env
     zp = build_zip("static_html", tmp_path)
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     manifest = result.manifest
@@ -151,7 +151,7 @@ def test_static_html_manifest_is_static(env, tmp_path: Path) -> None:
 def test_node_express_manifest_has_container(env, tmp_path: Path) -> None:
     ws, config, reg = env
     zp = build_zip("node_express", tmp_path)
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     manifest = result.manifest
@@ -161,7 +161,7 @@ def test_node_express_manifest_has_container(env, tmp_path: Path) -> None:
 def test_fastapi_manifest_is_python(env, tmp_path: Path) -> None:
     ws, config, reg = env
     zp = build_zip("fastapi_sqlite", tmp_path)
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     manifest = result.manifest
@@ -171,7 +171,7 @@ def test_fastapi_manifest_is_python(env, tmp_path: Path) -> None:
 def test_vite_react_manifest_is_node(env, tmp_path: Path) -> None:
     ws, config, reg = env
     zp = build_zip("vite_react", tmp_path)
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     manifest = result.manifest
@@ -185,7 +185,7 @@ def test_build_failure_sample_imports_as_node(env, tmp_path: Path) -> None:
     """build_failure 仍可识别为 node；failed 状态由后续构建/启动触发（WBS-27 验收 2）。"""
     ws, config, reg = env
     zp = build_zip("build_failure", tmp_path)
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     assert result.manifest.kind.value == "node"

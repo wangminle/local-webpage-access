@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.models import (
+from local_webpage_access.models import (
     ContainerConfig,
     DesiredState,
     InstanceManifest,
@@ -18,8 +18,8 @@ from local_web_access.models import (
     StaticConfig,
     Status,
 )
-from local_web_access.registry import Registry
-from local_web_access.registry.connection import get_schema_version, migrate
+from local_webpage_access.registry import Registry
+from local_webpage_access.registry.connection import get_schema_version, migrate
 
 
 @pytest.fixture()

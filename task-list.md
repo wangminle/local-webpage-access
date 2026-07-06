@@ -110,7 +110,7 @@
 | DEV-026 | 开发 | WBS-26 lwa doctor 与排障辅助（环境检查 + 实例深度诊断） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 6；doctor.py，CheckResult/DoctorReport；python/docker/compose/port_pool/registry/static_gateway/disk/memory 检查；diagnose_instance 深度诊断；runner/port_in_use 注入式可测；lwa doctor [--json] [ID]，fail 退出码 1；28 测试 |
 | DEV-027 | 开发 | WBS-27 样例项目与测试夹具（6 个样例 dict 打包 + build_zip/build_all） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；tests/fixtures/，6 样例（static_html/vite_react/node_express/fastapi_sqlite/build_failure/pending_unknown），dict[str,str] 按需打包；EXPECTED_KIND 映射；18 测试 |
 | DEV-028 | 开发 | WBS-28 单元测试与集成测试（全模块覆盖 + Docker 双重守卫） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；conftest requires_docker marker + LWA_RUN_DOCKER_TESTS 双守卫；WBS-28.01~15 全覆盖；test_security/test_doctor/test_fixtures/test_integration_phase57；529 passed/4 skipped |
-| DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-06 01:30 | 部分完成 | Phase 7；tests/test_e2e_acceptance.py（11 测试，覆盖 init/import×4/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor）；docs/acceptance-checklist.md（18 子任务，Docker 依赖项手工清单）；自动化 E2E（11 测试）全通过；**Docker 手工验收（29.09/29.11/29.12，容器构建/运行/健康检查）待在具备 Docker 的 Linux 主机执行**（见 docs/acceptance-checklist.md 验收记录）；全量回归 577 passed/4 skipped |
+| DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-06 01:30 | 进行中 | Phase 7；tests/test_e2e_acceptance.py（11 测试，覆盖 init/import×4/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor）；docs/acceptance-checklist.md（18 子任务，Docker 依赖项手工清单）；自动化 E2E（11 测试）全通过；**Docker 手工验收（29.09/29.11/29.12，容器构建/运行/健康检查）待在具备 Docker 的 Linux 主机执行**（见 docs/acceptance-checklist.md 验收记录）；全量回归 577 passed/4 skipped |
 | DEV-030 | 开发 | WBS-30 文档与发布准备（README 更新 + 管理/FAQ/安全/限制/发布清单） | 2026-07-06 01:30 | 2026-07-06 02:00 | 已完成 | Phase 7；README 全面更新（Phase 0~7 全完成，新增 manager/daemon/doctor/skills 章节）；docs/manager-page.md、faq.md、security-boundary.md、known-limitations.md、release-checklist.md；文档索引齐全 |
 
 ## 配置运维
@@ -118,6 +118,7 @@
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
 | OPS-001 | 运维 | 版本基线对齐预设（Python 3.13 / Node 24.16 / Docker 最新稳定版） | 2026-07-05 14:44 | 2026-07-05 14:44 | 已完成 | pyproject requires-python>=3.13、target-version=py313、移除 tomli 条件依赖；dockerfile 基线镜像改 node:24-alpine + python:3.13-slim；同步 test_dockerfile_templates/test_host_container 断言与 README；本机实测 Python 3.13.13 / Node v24.16.0 / Docker 29.5.2 / Compose v5.1.3 均匹配 |
+| OPS-002 | 运维 | 安装 task-list 维护规则与 Stop hook 保证层，并本地化 Claude 配置（不进 GitHub） | 2026-07-06 16:33 | 2026-07-06 16:33 | 已完成 | CLAUDE.md 写入中文「会话结束任务同步」规则；.claude/settings.json 注册 Stop hook + .claude/hooks/tasklist_sync_reminder.sh（session_id 守卫，每会话首次 Stop 触发一次 block 提醒）；脚本验证输出正确且守卫不重复；standardize 检测『规则已安装 + Stop hook 已安装』；.gitignore 追加 CLAUDE.md/.claude/ 不同步 GitHub；hook 需重启会话生效 |
 
 ## 规划事项
 
@@ -130,7 +131,7 @@
 | PLN-005 | 规划 | Phase 4：生命周期、日志、资源与队列（WBS-17~WBS-20） | 2026-07-04 23:49 | 2026-07-05 14:04 | 已完成 | DEV-017~020 全部完成；lifecycle 双层锁 + logs/health/status/stats/build_queue；CLI 新增 restart/rebuild/remove/logs/status/stats；328 测试通过 |
 | PLN-006 | 规划 | Phase 5：自动化与管理页（WBS-21~WBS-23，daemon/管理页 API/前端） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-021~023 全部完成；daemon inbox 自动导入 + 管理页 FastAPI + 单页前端，管理页端口 17800 |
 | PLN-007 | 规划 | Phase 6：Skills、安全与排障（WBS-24~WBS-26） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-024~026 全部完成；12 个 SKILL.md + security.py 审计 + doctor 排障 |
-| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | 2026-07-06 02:00 | 部分完成 | DEV-027~028、030 已完成；DEV-029 部分完成（自动化 E2E 全通过，Docker 手工验收 29.09/29.11/29.12 待 Linux 主机，见 docs/acceptance-checklist.md）；6 样例夹具 + 全量测试 577 passed/4 skipped + V1 文档套件 |
+| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | 2026-07-06 02:00 | 进行中 | DEV-027~028、030 已完成；DEV-029 进行中（自动化 E2E 全通过，Docker 手工验收 29.09/29.11/29.12 待 Linux 主机，见 docs/acceptance-checklist.md）；6 样例夹具 + 全量测试 577 passed/4 skipped + V1 文档套件 |
 
 ## 统计摘要
 
@@ -141,7 +142,7 @@
 | 检查事项 | 1 | 1 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
 | 文档维护 | 0 | 0 | 0 | 0% |
-| 功能开发 | 30 | 29 | 1 | 96.7% |
-| 配置运维 | 1 | 1 | 0 | 100% |
-| 规划事项 | 8 | 7 | 1 | 87.5% |
-| **总计** | 85 | 83 | 2 | 97.6% |
+| 功能开发 | 30 | 29 | 1 | 97% |
+| 配置运维 | 2 | 2 | 0 | 100% |
+| 规划事项 | 8 | 7 | 1 | 88% |
+| **总计** | 86 | 84 | 2 | 98% |

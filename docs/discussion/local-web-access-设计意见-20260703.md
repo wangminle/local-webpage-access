@@ -1,4 +1,4 @@
-# Local Web Access 工具设计意见：Docker 优先版 - 20260703
+# Local Webpage Access 工具设计意见：Docker 优先版 - 20260703
 
 ## 1. 背景
 
@@ -11,7 +11,7 @@
 3. Python Web 项目，例如 Flask、FastAPI、Django、Streamlit、Gradio 等，需要创建运行环境、安装依赖并启动服务。
 4. 带本地数据库、文件存储或后端逻辑的全栈项目，可能使用 Node.js、Python、SQLite、Postgres、Redis 等。
 
-用户希望有一个固定目录，例如 `local-web-access/`，每次把 zip 包放入实例库目录后，工具可以完成识别、解压、配置、运行，并在本地管理页中展示所有已安装实例。
+用户希望有一个固定目录，例如 `local-webpage-access/`，每次把 zip 包放入实例库目录后，工具可以完成识别、解压、配置、运行，并在本地管理页中展示所有已安装实例。
 
 经过进一步判断，最合理的底层运行方式应调整为：
 
@@ -27,7 +27,7 @@
 
 更具体地说：
 
-1. `local-web-access` 是一个本地管理工具。
+1. `lwa` 是一个本地管理工具。
 2. Docker / Docker Compose 是默认运行层，但不是每个 zip 都必须变成一个长期运行容器。
 3. 纯静态 HTML 和纯前端 build 产物优先由共享静态服务托管。
 4. Node/Python 后端、Next.js 服务端应用、带数据库应用，才默认生成独立 Docker Compose project。
@@ -52,7 +52,7 @@ Docker 的优势是：
 1. 每个实例的依赖封装在自己的镜像里。
 2. Node.js 版本、Python 版本、系统依赖互不干扰。
 3. 删除实例时，可以连同容器、镜像、匿名卷一起清理。
-4. 宿主机只需要稳定维护 Docker 和 `local-web-access` 自身。
+4. 宿主机只需要稳定维护 Docker 和 `lwa` 自身。
 
 这对“经常产生很多小网页”的场景尤其重要。项目数量一多，依赖隔离比单个项目的启动便利更重要。
 
@@ -97,7 +97,7 @@ ports:
 这意味着：
 
 1. 不需要强行修改所有项目内部默认端口。
-2. 宿主机端口分配由 `local-web-access` 统一管理。
+2. 宿主机端口分配由 `lwa` 统一管理。
 3. 管理页只展示宿主机访问地址，例如 `http://192.168.1.20:18023`。
 4. 容器内部端口和宿主机端口可以分开记录。
 
@@ -154,7 +154,7 @@ docker compose up -d
 Docker 优先后，systemd 只需要负责两类东西：
 
 1. Docker 自身。
-2. `local-web-access` 管理器和管理页。
+2. `lwa` 管理器和管理页。
 
 实例的保活交给 Docker Compose：
 
@@ -166,12 +166,12 @@ restart: unless-stopped
 
 ```text
 systemd / launchd
-  -> 启动 Docker 和 local-web-access 管理器
+  -> 启动 Docker 和 lwa 管理器
 
 Docker Compose
   -> 启动、停止、重启需要后端进程或数据库依赖的网页实例
 
-local-web-access
+lwa
   -> 生成配置、登记实例、管理端口、展示状态、维护共享静态托管
 ```
 
@@ -214,7 +214,7 @@ Docker 本身在原生 Linux 上并不算重。真正消耗资源的是应用进
 
 ## 4. Docker 不是全部答案
 
-虽然 Docker 应该作为默认运行层，但它不能替代 `local-web-access` 工具本身。
+虽然 Docker 应该作为默认运行层，但它不能替代 `lwa` 工具本身。
 
 Docker 不会自动解决这些问题：
 
@@ -237,7 +237,7 @@ Docker 不会自动解决这些问题：
 Docker / Compose
   负责需要容器化实例的运行时隔离、启动、网络、卷、日志基础能力
 
-local-web-access
+lwa
   负责导入、识别、生成配置、端口分配、registry、共享静态托管、管理页、资源策略
 
 大模型 skills
@@ -286,7 +286,7 @@ local-web-access
 建议项目根目录：
 
 ```text
-local-web-access/
+local-webpage-access/
   inbox/                  # zip 包入口目录
   apps/                   # 已安装实例
   static-sites/           # 共享静态托管根目录或构建产物目录
@@ -434,7 +434,7 @@ apps/
 
 推荐运行方式：
 
-1. 优先使用共享静态托管器，例如 Caddy、Nginx 或 `local-web-access` 管理器内置静态服务。
+1. 优先使用共享静态托管器，例如 Caddy、Nginx 或 `lwa` 管理器内置静态服务。
 2. 每个静态站点可以分配一个宿主机端口，也可以使用路径路由。
 3. 第一版更建议“每站一个宿主机端口、共享一个静态服务进程”，避免很多前端项目因为绝对路径 `/assets/...` 在路径路由下失效。
 4. 不建议每个纯静态 HTML 都生成一个长期运行容器；在 4G 小主机上，这种做法会浪费进程、端口配置和镜像空间。
@@ -456,7 +456,7 @@ apps/static-demo/
 
 ```text
 :18024 {
-  root * /opt/local-web-access/apps/static-demo/public
+  root * /opt/local-webpage-access/apps/static-demo/public
   file_server
 }
 ```
@@ -749,7 +749,7 @@ reload Caddy/Nginx/内置静态服务
 
 ```text
 systemd / launchd
-  -> local-web-access manager
+  -> lwa manager
   -> shared static gateway
   -> Docker Compose projects
 ```
@@ -1154,7 +1154,7 @@ MVP 暂时不强求：
 
 最终建议采用以下路线：
 
-1. `local-web-access` 使用 Python 实现 CLI 和管理页后端。
+1. `lwa` 使用 Python 实现 CLI 和管理页后端。
 2. Docker Compose 作为复杂实例和后端实例的默认运行层。
 3. 共享静态托管作为纯静态 HTML 和纯前端 build 产物的默认运行层。
 4. 不把每个 zip 都粗暴变成长期运行容器。

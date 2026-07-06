@@ -1,8 +1,8 @@
 # 管理页说明（WBS-30.06）
 
 `lwa manager start` 启动内置管理页，提供图形化的实例管理与监控能力。
-管理页由 FastAPI 后端（`src/local_web_access/manager_api.py`）与单页前端
-（`src/local_web_access/manager_static/`）组成。
+管理页由 FastAPI 后端（`src/local_webpage_access/manager_api.py`）与单页前端
+（`src/local_webpage_access/manager_static/`）组成。
 
 ## 启动
 
@@ -67,12 +67,12 @@ lwa manager start
 
 ## 与 CLI 一致性
 
-管理页的生命周期操作直接调用 `local_web_access.lifecycle` 的同名函数，
+管理页的生命周期操作直接调用 `local_webpage_access.lifecycle` 的同名函数，
 **与 CLI `lwa start/stop/restart/rebuild` 走完全相同的代码路径**（验收标准 3）。
 因此管理页展示的状态与 `lwa status` 始终一致。
 
 ## 绑定安全
 
-`managerHost` 默认 `0.0.0.0`（便于局域网访问）。`local_web_access/security.py`
+`managerHost` 默认 `0.0.0.0`（便于局域网访问）。`local_webpage_access/security.py`
 的 `validate_manager_binding` 会在启动时校验：若绑定到 LAN/通配地址，
 **必须存在 token**，否则拒绝启动。详见 [安全边界](security-boundary.md)。

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from local_web_access.dockerfile_templates import generate_dockerfile
-from local_web_access.models import (
+from local_webpage_access.dockerfile_templates import generate_dockerfile
+from local_webpage_access.models import (
     ContainerConfig,
     DatabaseConfig,
     EntryConfig,
@@ -13,7 +13,7 @@ from local_web_access.models import (
     Runtime,
     ServingMode,
 )
-from local_web_access.paths import Workspace
+from local_webpage_access.paths import Workspace
 
 
 def _mk_manifest(

@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.errors import LifecycleError
-from local_web_access.lifecycle import (
+from local_webpage_access.errors import LifecycleError
+from local_webpage_access.lifecycle import (
     _lock_is_stale,
     _pid_alive,
     instance_lock,
@@ -24,7 +24,7 @@ from local_web_access.lifecycle import (
     start_instance,
     stop_instance_op,
 )
-from local_web_access.models import (
+from local_webpage_access.models import (
     ContainerConfig,
     DesiredState,
     InstanceManifest,
@@ -34,8 +34,8 @@ from local_web_access.models import (
     ServingMode,
     Status,
 )
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 # ---- 复用 fixtures ----------------------------------------------------------
@@ -106,9 +106,9 @@ def fake_runtime(monkeypatch):
     _FakeRuntime._running = False
     # hosting 在模块顶层导入了 DockerRuntime；lifecycle 用局部 import 解析到
     # docker_runtime.DockerRuntime。两处都要替换。
-    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRuntime)
-    monkeypatch.setattr("local_web_access.docker_runtime.DockerRuntime", _FakeRuntime)
-    monkeypatch.setattr("local_web_access.hosting._http_ok", lambda port, **kw: True)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: True)
     return _FakeRuntime
 
 
@@ -215,7 +215,7 @@ def test_instance_lock_reclaims_stale(workspace, monkeypatch) -> None:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # 用一个绝对不存在的 PID
     lock_path.write_text("999999\n0.0\n", encoding="utf-8")
-    monkeypatch.setattr("local_web_access.lifecycle._STALE_LOCK_SECONDS", 999999)
+    monkeypatch.setattr("local_webpage_access.lifecycle._STALE_LOCK_SECONDS", 999999)
     with instance_lock(workspace, "api", timeout=2):
         pass  # 不抛异常即说明陈旧锁已被回收
 
@@ -417,7 +417,7 @@ def test_remove_traversal_id_rejected_before_delete(
     workspace, registry, config, fake_runtime
 ) -> None:
     """``..`` 不得越界删除：调用前在工作区根留哨兵，必须原样保留。"""
-    from local_web_access.errors import LwaError
+    from local_webpage_access.errors import LwaError
 
     sentinel = workspace.root / "DO-NOT-DELETE.txt"
     sentinel.write_text("workspace root sentinel")
@@ -469,7 +469,7 @@ def test_observe_status_container_stopped(
 ) -> None:
     _seed_container(workspace, registry, "api", deployed=True)
     # manifest 落 running，容器实际没跑 → 改写 stopped
-    from local_web_access.models import Status as S
+    from local_webpage_access.models import Status as S
 
     m = InstanceManifest.load(workspace.app_manifest_path("api"))
     m.status = S.RUNNING

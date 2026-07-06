@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.config import Config, PortPool
-from local_web_access.errors import BuildError, DockerError, HostingError
-from local_web_access.hosting import (
+from local_webpage_access.config import Config, PortPool
+from local_webpage_access.errors import BuildError, DockerError, HostingError
+from local_webpage_access.hosting import (
     build_and_host_frontend,
     find_build_output,
     find_index_html,
@@ -24,11 +24,11 @@ from local_web_access.hosting import (
     sync_dir,
     sync_static_to_public,
 )
-from local_web_access.importer import build_manifest_from_detection
-from local_web_access.models import Kind, ResourceProfile, Runtime, ServingMode, Status
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
-from local_web_access.scanner import DetectionResult
+from local_webpage_access.importer import build_manifest_from_detection
+from local_webpage_access.models import Kind, ResourceProfile, Runtime, ServingMode, Status
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
+from local_webpage_access.scanner import DetectionResult
 
 
 # ---- fixtures --------------------------------------------------------------
@@ -102,7 +102,7 @@ def _seed_frontend_instance(workspace: Workspace, registry: Registry, iid: str =
         stack=["react"],
         entry={"install": "npm ci", "build": "npm run build", "start": None},
     )
-    from local_web_access.models import EntryConfig
+    from local_webpage_access.models import EntryConfig
 
     detection.entry = EntryConfig(install="npm ci", build="npm run build")
     manifest = build_manifest_from_detection(
@@ -274,7 +274,7 @@ def test_host_instance_dispatches_container(
         raise DockerError("Docker 不可用")
 
     monkeypatch.setattr(
-        "local_web_access.hosting.DockerRuntime.ensure_available", staticmethod(_unavailable)
+        "local_webpage_access.hosting.DockerRuntime.ensure_available", staticmethod(_unavailable)
     )
 
     workspace.ensure_app_dirs("api")
@@ -362,10 +362,10 @@ def test_build_and_host_frontend_success(
             dist = Path(cwd) / "dist"
             dist.mkdir(exist_ok=True)
             (dist / "index.html").write_text("<html>built</html>")
-        from local_web_access.hosting import subprocess as _sp
+        from local_webpage_access.hosting import subprocess as _sp
 
         return _subprocess_completed(0)
-    monkeypatch.setattr("local_web_access.hosting.run_command", fake_run)
+    monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
 
     manifest = build_and_host_frontend(workspace, config, registry, "spa")
     assert manifest.status == Status.RUNNING
@@ -386,7 +386,7 @@ def test_build_and_host_frontend_build_failure(
 
     def fake_run(cmd, *, cwd, log_path, **kw):
         raise BuildError("npm run build 失败", command=cmd, exit_code=1)
-    monkeypatch.setattr("local_web_access.hosting.run_command", fake_run)
+    monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
 
     with pytest.raises(BuildError):
         build_and_host_frontend(workspace, config, registry, "spa")
@@ -414,7 +414,7 @@ def test_build_and_host_frontend_no_artifact(
     def fake_run(cmd, *, cwd, log_path, **kw):
         # 不创建 dist/
         return _subprocess_completed(0)
-    monkeypatch.setattr("local_web_access.hosting.run_command", fake_run)
+    monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
 
     with pytest.raises(BuildError, match="产物"):
         build_and_host_frontend(workspace, config, registry, "spa")
@@ -517,7 +517,7 @@ def test_host_static_restart_kills_old_process(
     workspace: Workspace, registry: Registry, config: Config
 ) -> None:
     """BUG-002：再次 start 应停掉旧进程，不产生孤儿/端口泄漏。"""
-    from local_web_access.static_gateway import StaticGateway
+    from local_webpage_access.static_gateway import StaticGateway
 
     _seed_static_instance(workspace, registry, "demo")
     host_static(workspace, config, registry, "demo")
@@ -570,7 +570,7 @@ def test_stop_instance_dispatches_container_runtime(
         def stop(self, iid, **kw):
             stopped["called"] = True
 
-    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
     manifest = stop_instance(workspace, config, registry, "api")
     assert stopped["called"] is True
     assert manifest.status == Status.STOPPED
@@ -590,9 +590,9 @@ def test_enable_static_releases_port_on_gateway_failure(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:
     """BUG-016：gateway.enable 抛错时，_enable_static 应释放刚分配的端口。"""
-    from local_web_access.hosting import _enable_static
-    from local_web_access.models import EntryConfig
-    from local_web_access.static_gateway import StaticGateway
+    from local_webpage_access.hosting import _enable_static
+    from local_webpage_access.models import EntryConfig
+    from local_webpage_access.static_gateway import StaticGateway
 
     _seed_static_instance(workspace, registry, "demo")
     public = workspace.app_public("demo")
@@ -628,7 +628,7 @@ def test_host_static_releases_port_when_health_check_fails(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:
     """BUG-016 端到端：健康检查失败 → host_static 抛错 → 端口不残留。"""
-    from local_web_access.static_gateway import StaticGateway
+    from local_webpage_access.static_gateway import StaticGateway
 
     _seed_static_instance(workspace, registry, "demo")
 
@@ -646,7 +646,7 @@ def test_host_container_releases_port_on_build_failure(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:
     """BUG-016：host_container 在 build/up 阶段失败时应释放实例端口。"""
-    from local_web_access.hosting import host_container
+    from local_webpage_access.hosting import host_container
     from tests._helpers import make_container_manifest
 
     workspace.ensure_app_dirs("api")
@@ -670,7 +670,7 @@ def test_host_container_releases_port_on_build_failure(
         def build(self, iid, **kw):
             raise DockerError("build boom")
 
-    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
 
     with pytest.raises(DockerError, match="build boom"):
         host_container(workspace, config, registry, "api")

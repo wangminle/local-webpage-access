@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.config import Config
-from local_web_access.errors import GatewayError
-from local_web_access.paths import Workspace
-from local_web_access.static_gateway import StaticGateway
+from local_webpage_access.config import Config
+from local_webpage_access.errors import GatewayError
+from local_webpage_access.paths import Workspace
+from local_webpage_access.static_gateway import StaticGateway
 
 
 @pytest.fixture()
@@ -77,7 +77,7 @@ def test_detect_backend_builtin_config_forces_builtin(
 ) -> None:
     """BUG-003：staticGateway=builtin 时即使环境装了 caddy 也必须用 builtin。"""
     # 假装 caddy 存在
-    monkeypatch.setattr("local_web_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy")
+    monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy")
     gw = StaticGateway(workspace, Config(staticGateway="builtin"))
     assert gw.detect_backend() == "builtin"
 
@@ -86,7 +86,7 @@ def test_detect_backend_caddy_config_falls_back_when_missing(
     workspace: Workspace, monkeypatch
 ) -> None:
     """BUG-003：配置 caddy 但环境无 caddy → 降级 builtin，不报错。"""
-    monkeypatch.setattr("local_web_access.static_gateway.shutil.which", lambda name: None)
+    monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: None)
     gw = StaticGateway(workspace, Config(staticGateway="caddy"))
     assert gw.detect_backend() == "builtin"
 
@@ -95,7 +95,7 @@ def test_detect_backend_caddy_config_uses_caddy_when_present(
     workspace: Workspace, monkeypatch
 ) -> None:
     """BUG-003：配置 caddy 且 caddy 存在 → caddy。"""
-    monkeypatch.setattr("local_web_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy")
+    monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy")
     gw = StaticGateway(workspace, Config(staticGateway="caddy"))
     assert gw.detect_backend() == "caddy"
 
@@ -315,7 +315,7 @@ def test_generate_site_config_quotes_root_path(gateway: StaticGateway, workspace
 
 def test_caddy_quote_wraps_in_backticks() -> None:
     """BUG-020：普通路径用反引号包裹。"""
-    from local_web_access.static_gateway import _caddy_quote
+    from local_webpage_access.static_gateway import _caddy_quote
 
     assert _caddy_quote("/var/www/demo") == "`/var/www/demo`"
     assert _caddy_quote("C:/Users/foo bar/site") == "`C:/Users/foo bar/site`"
@@ -323,7 +323,7 @@ def test_caddy_quote_wraps_in_backticks() -> None:
 
 def test_caddy_quote_falls_back_for_backtick_path() -> None:
     """BUG-020：路径本身含反引号时回退到双引号 + 转义。"""
-    from local_web_access.static_gateway import _caddy_quote
+    from local_webpage_access.static_gateway import _caddy_quote
 
     quoted = _caddy_quote('/tmp/`whoami`/site')
     assert quoted.startswith('"') and quoted.endswith('"')

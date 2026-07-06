@@ -1,4 +1,4 @@
-# Local Web Access V1 WBS 分解计划
+# Local Webpage Access V1 WBS 分解计划
 
 > 日期：2026-07-04  
 > 状态：V1 实施 WBS 草案  
@@ -7,7 +7,7 @@
 
 ## 1. WBS 使用说明
 
-本 WBS 面向 Local Web Access V1 的 MVP 实施，覆盖从工程底座、CLI、实例导入、静态托管、Docker Compose 托管、管理页、daemon、skills 到端到端验证的完整闭环。
+本 WBS 面向 Local Webpage Access V1 的 MVP 实施，覆盖从工程底座、CLI、实例导入、静态托管、Docker Compose 托管、管理页、daemon、skills 到端到端验证的完整闭环。
 
 每个工作包包含：
 
@@ -130,7 +130,7 @@
 
 任务：
 
-1. WBS-01.01 设计仓库源码目录，例如 `src/local_web_access/`。
+1. WBS-01.01 设计仓库源码目录，例如 `src/local_webpage_access/`。
 2. WBS-01.02 建立 CLI 入口，例如 `lwa`。
 3. WBS-01.03 选择 CLI 框架，优先 Typer 或 Click。
 4. WBS-01.04 建立核心模块边界：config、paths、registry、importer、scanner、runtime、static_gateway、manager。
@@ -194,7 +194,7 @@
 | --- | --- |
 | 优先级 | P0 |
 | 规模 | M |
-| 目标 | 初始化 Local Web Access 工作区 |
+| 目标 | 初始化 Local Webpage Access 工作区 |
 | 依赖 | WBS-01、WBS-02 |
 
 任务：
@@ -1503,4 +1503,4 @@ V1 总体验收需要满足：
 7. **切片 G：skills 与验收**  
    `skills docs -> failed diagnosis -> examples -> E2E -> release docs`
 
-这个切片顺序能在早期就验证核心产品方向：Local Web Access 不是通用服务器面板，而是围绕“本地 zip 实例库 + AI 辅助识别部署”的轻量部署基座。
+这个切片顺序能在早期就验证核心产品方向：Local Webpage Access 不是通用服务器面板，而是围绕“本地 zip 实例库 + AI 辅助识别部署”的轻量部署基座。

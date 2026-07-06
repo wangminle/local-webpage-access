@@ -1,6 +1,6 @@
 # 测试运行指南
 
-本文档说明 `lwa`（Local Web Access）的测试体系、运行方式与跳过条件（WBS-28）。
+本文档说明 `lwa`（Local Webpage Access）的测试体系、运行方式与跳过条件（WBS-28）。
 
 ## 快速开始
 

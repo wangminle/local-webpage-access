@@ -34,7 +34,7 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 
 | WBS | 项 | 自动化 | 手工步骤 | 通过标准 |
 | --- | --- | --- | --- | --- |
-| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（12 个 SKILL.md） |
+| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（13 个 SKILL.md） |
 | 29.02 | 导入静态 HTML | ✓ `test_e2e_static_html_import_and_structure` | `lwa import inbox/static_html.zip` | `apps/static-html/` 出现，`local-web.json` 的 `kind=static` |
 | 29.03 | 静态目录结构 | ✓ 同上 | 检查 `apps/static-html/{source,current,logs,data}/` | 四个子目录齐全，`current/index.html` 存在 |
 | 29.04 | 静态 HTTP 可访问 | ✓ `test_e2e_static_html_accessible_via_http` | `lwa start static-html`，浏览器访问分配端口 | 返回 HTML 内容，`lwa status` 显示 `running` |

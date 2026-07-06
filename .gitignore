@@ -63,3 +63,7 @@ desktop.ini
 .env.*
 !.env.example
 *.local.yml
+
+# ---- Claude Code 本地配置（不同步到 GitHub）--------------------------------
+CLAUDE.md
+.claude/

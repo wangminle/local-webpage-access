@@ -35,11 +35,11 @@ from tests.fixtures import build_zip
 
 @pytest.fixture
 def ws_env(tmp_path: Path):
-    from local_web_access.config import example_config_text, load_config
-    from local_web_access.importer import Importer
-    from local_web_access.init_workspace import init_workspace
-    from local_web_access.paths import Workspace
-    from local_web_access.registry import Registry
+    from local_webpage_access.config import example_config_text, load_config
+    from local_webpage_access.importer import Importer
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.paths import Workspace
+    from local_webpage_access.registry import Registry
 
     root = tmp_path / "e2e-ws"
     init_workspace(root)
@@ -79,8 +79,8 @@ def _wait_port_ready(port: int, timeout: float = 10.0) -> None:
 
 
 def test_e2e_init_creates_clean_workspace(tmp_path: Path) -> None:
-    from local_web_access.init_workspace import init_workspace
-    from local_web_access.paths import Workspace
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.paths import Workspace
 
     root = tmp_path / "fresh"
     init_workspace(root)
@@ -90,8 +90,8 @@ def test_e2e_init_creates_clean_workspace(tmp_path: Path) -> None:
     assert ws.inbox.is_dir()
     assert ws.apps.is_dir()
     assert ws.skills.is_dir()
-    # 12 个内置 skills
-    assert len(list(ws.skills.rglob("SKILL.md"))) == 12
+    # 13 个内置 skills
+    assert len(list(ws.skills.rglob("SKILL.md"))) == 13
 
 
 # ---- WBS-29.02~04 静态 HTML 全链路 ----------------------------------------
@@ -121,8 +121,8 @@ def test_e2e_static_html_accessible_via_http(ws_env, tmp_path: Path) -> None:
     ws_env["config"].portPool.start = 21100
     ws_env["config"].portPool.end = 21150
 
-    from local_web_access.lifecycle import start_instance, stop_instance_op
-    from local_web_access.status import sync_status
+    from local_webpage_access.lifecycle import start_instance, stop_instance_op
+    from local_webpage_access.status import sync_status
 
     ws = ws_env["ws"]
     reg = ws_env["reg"]
@@ -169,7 +169,7 @@ def test_e2e_node_express_detected_and_compose_generated(
     assert result.detection.form == "backend-container"
     assert not result.detection.pending
 
-    from local_web_access.compose import generate_compose
+    from local_webpage_access.compose import generate_compose
 
     ws = ws_env["ws"]
     manifest = result.manifest
@@ -191,7 +191,7 @@ def test_e2e_fastapi_sqlite_detected_and_compose_generated(
     assert result.detection.kind.value == "python"
     assert not result.detection.pending
 
-    from local_web_access.compose import generate_compose
+    from local_webpage_access.compose import generate_compose
 
     ws = ws_env["ws"]
     manifest = result.manifest
@@ -209,12 +209,12 @@ def test_e2e_start_stop_restart_static(ws_env, tmp_path: Path) -> None:
     ws_env["config"].portPool.start = 21200
     ws_env["config"].portPool.end = 21250
 
-    from local_web_access.lifecycle import (
+    from local_webpage_access.lifecycle import (
         restart_instance,
         start_instance,
         stop_instance_op,
     )
-    from local_web_access.status import sync_status
+    from local_webpage_access.status import sync_status
 
     result = _import(ws_env, "static_html", tmp_path, name="lifecycle")
     ws = ws_env["ws"]
@@ -239,8 +239,8 @@ def test_e2e_start_stop_restart_static(ws_env, tmp_path: Path) -> None:
 
 
 def test_e2e_logs_status_stats_queryable(ws_env, tmp_path: Path) -> None:
-    from local_web_access.logs import list_logs
-    from local_web_access.status import all_statuses, status_counts
+    from local_webpage_access.logs import list_logs
+    from local_webpage_access.status import all_statuses, status_counts
 
     result = _import(ws_env, "static_html", tmp_path, name="queryable")
     reg = ws_env["reg"]
@@ -268,8 +268,8 @@ def test_e2e_logs_status_stats_queryable(ws_env, tmp_path: Path) -> None:
 def test_e2e_manager_api_matches_cli_status(ws_env, tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
 
-    from local_web_access.manager_api import create_app, ensure_token
-    from local_web_access.status import all_statuses
+    from local_webpage_access.manager_api import create_app, ensure_token
+    from local_webpage_access.status import all_statuses
 
     _import(ws_env, "static_html", tmp_path, name="mgr")
     _import(ws_env, "pending_unknown", tmp_path, name="mgr-pending")
@@ -296,7 +296,7 @@ def test_e2e_manager_api_matches_cli_status(ws_env, tmp_path: Path) -> None:
 def test_e2e_failed_and_pending_display(ws_env, tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
 
-    from local_web_access.manager_api import create_app, ensure_token
+    from local_webpage_access.manager_api import create_app, ensure_token
 
     _import(ws_env, "pending_unknown", tmp_path, name="e2e-pending")
 
@@ -334,19 +334,29 @@ def test_e2e_failed_and_pending_display(ws_env, tmp_path: Path) -> None:
 # ---- WBS-29.16 doctor 可对实例诊断 ----------------------------------------
 
 
-def test_e2e_doctor_diagnoses_instance(ws_env, tmp_path: Path) -> None:
+def test_e2e_doctor_diagnoses_instance(ws_env, tmp_path: Path, monkeypatch) -> None:
     import subprocess
 
-    from local_web_access.doctor import run_doctor
+    from local_webpage_access.doctor import CheckResult, STATUS_OK, run_doctor
 
     result = _import(ws_env, "static_html", tmp_path, name="doctor-target")
     ws = ws_env["ws"]
     config = ws_env["config"]
+    config.staticGateway = "builtin"
+
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.check_python_packages",
+        lambda: CheckResult("python_packages", STATUS_OK, "mocked ok"),
+    )
 
     # 注入一个让 docker / docker compose 检查通过的 runner，
     # 使本测试不依赖宿主机真实 Docker（实例诊断本身不需要 Docker）。
     def _ok_runner(args):
-        return subprocess.CompletedProcess(args, 0, stdout="27.0.0\n", stderr="")
+        if len(args) >= 2 and args[0] == "docker" and args[1] == "version":
+            return subprocess.CompletedProcess(args, 0, stdout="29.6.1\n", stderr="")
+        if len(args) >= 3 and args[:3] == ["docker", "compose", "version"]:
+            return subprocess.CompletedProcess(args, 0, stdout="5.2.0\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
 
     def _all_ports_free(port: int) -> bool:
         return False

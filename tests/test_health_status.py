@@ -9,8 +9,8 @@ from threading import Thread
 
 import pytest
 
-from local_web_access.health import HealthResult, check_health, http_ok
-from local_web_access.models import (
+from local_webpage_access.health import HealthResult, check_health, http_ok
+from local_webpage_access.models import (
     ContainerConfig,
     DatabaseConfig,
     DesiredState,
@@ -22,9 +22,9 @@ from local_web_access.models import (
     StaticConfig,
     Status,
 )
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
-from local_web_access.status import (
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
+from local_webpage_access.status import (
     InstanceStatus,
     all_statuses,
     instance_status,
@@ -54,7 +54,7 @@ def registry(workspace_root: Path) -> Registry:
 
 @pytest.fixture()
 def config(workspace_root: Path):
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     return Config(portPool=PortPool(start=21000, end=21050))
 
@@ -218,7 +218,7 @@ def test_instance_status_static(workspace, registry, config) -> None:
 
 
 def test_instance_status_missing_raises(workspace, registry, config) -> None:
-    from local_web_access.errors import LifecycleError
+    from local_webpage_access.errors import LifecycleError
 
     with pytest.raises(LifecycleError):
         instance_status(workspace, config, registry, "nope")
@@ -289,8 +289,8 @@ def test_sync_status_observes_and_reports_change(
         def is_running(self, iid):
             return False
 
-    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRT)
-    monkeypatch.setattr("local_web_access.docker_runtime.DockerRuntime", _FakeRT)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRT)
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRT)
 
     changed = sync_status(workspace, config, registry, "api")
     assert changed == {"api": "stopped"}
@@ -308,8 +308,8 @@ def test_sync_status_all_instances(workspace, registry, config, monkeypatch) -> 
         def is_running(self, iid):
             return False
 
-    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRT)
-    monkeypatch.setattr("local_web_access.docker_runtime.DockerRuntime", _FakeRT)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRT)
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRT)
     # 静态实例没在跑（无 pid 文件），也应被观测为 stopped
     changed = sync_status(workspace, config, registry)
     assert "api" in changed
@@ -321,7 +321,7 @@ def test_cli_status_syncs_before_display(
     """BUG-026：lwa status 输出前应先 observe/sync，避免显示陈旧 running。"""
     from typer.testing import CliRunner
 
-    from local_web_access.cli import app
+    from local_webpage_access.cli import app
 
     _seed_container(workspace, registry, "api")
     workspace.config_path.write_text(config.to_yaml(), encoding="utf-8")
@@ -333,7 +333,7 @@ def test_cli_status_syncs_before_display(
         def is_running(self, iid):
             return False
 
-    monkeypatch.setattr("local_web_access.docker_runtime.DockerRuntime", _FakeRT)
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRT)
     monkeypatch.chdir(workspace.root)
 
     result = CliRunner().invoke(app, ["status", "api"])

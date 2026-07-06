@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from local_web_access.models import Kind, ResourceProfile, Runtime, ServingMode
-from local_web_access.scanner import Scanner, summarize
+from local_webpage_access.models import Kind, ResourceProfile, Runtime, ServingMode
+from local_webpage_access.scanner import Scanner, summarize
 
 
 # ---- FileSummary -----------------------------------------------------------

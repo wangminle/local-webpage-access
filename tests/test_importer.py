@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.config import Config
-from local_web_access.errors import ZipImportError
-from local_web_access.importer import Importer, slugify, titleize
-from local_web_access.models import Kind, Runtime, ServingMode, Status
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access.config import Config
+from local_webpage_access.errors import ZipImportError
+from local_webpage_access.importer import Importer, slugify, titleize
+from local_webpage_access.models import Kind, Runtime, ServingMode, Status
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 # ---- fixtures --------------------------------------------------------------

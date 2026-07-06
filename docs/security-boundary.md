@@ -3,7 +3,7 @@
 `lwa` 在小主机上以"导入即用"为目标，但同时对潜在风险做了多层防御。
 本文说明 V1 的安全边界、默认保护策略，以及哪些操作会**被拒绝**、哪些只会**告警**。
 
-> 安全审计的集中实现见 `src/local_web_access/security.py`（WBS-25）。
+> 安全审计的集中实现见 `src/local_webpage_access/security.py`（WBS-25）。
 
 ## 审计分级
 

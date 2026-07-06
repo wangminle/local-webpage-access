@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.paths import Workspace
+from local_webpage_access.paths import Workspace
 
 
 # ---- Docker 可用性判定（WBS-28.15）----------------------------------------
@@ -59,7 +59,7 @@ def workspace(workspace_root: Path) -> Workspace:
 @pytest.fixture()
 def registry(workspace_root: Path):
     """打开一个临时 registry，测试结束自动关闭。"""
-    from local_web_access.registry import Registry
+    from local_webpage_access.registry import Registry
 
     workspace_root.joinpath("registry").mkdir(parents=True, exist_ok=True)
     reg = Registry(workspace_root / "registry" / "local-web.db")
@@ -70,7 +70,7 @@ def registry(workspace_root: Path):
 
 @pytest.fixture()
 def config(workspace_root: Path):
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     return Config(portPool=PortPool(start=21000, end=21050))
 

@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.config import (
+from local_webpage_access.config import (
     Config,
     PortPool,
     default_config,
     load_config,
 )
-from local_web_access.errors import ConfigError
-from local_web_access.paths import Workspace
+from local_webpage_access.errors import ConfigError
+from local_webpage_access.paths import Workspace
 
 
 def test_default_config_values() -> None:

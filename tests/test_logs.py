@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.logs import (
+from local_webpage_access.logs import (
     DEFAULT_MAX_BYTES,
     LogInfo,
     list_logs,
@@ -15,8 +15,8 @@ from local_web_access.logs import (
     rotate_all,
     rotate_log,
 )
-from local_web_access.paths import Workspace
-from local_web_access.errors import PathError
+from local_webpage_access.paths import Workspace
+from local_webpage_access.errors import PathError
 
 
 @pytest.fixture()

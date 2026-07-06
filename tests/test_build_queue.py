@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.build_queue import (
+from local_webpage_access.build_queue import (
     BuildQueue,
     BuildTask,
     _reset_global_queue,
     get_build_queue,
 )
-from local_web_access.errors import LifecycleError
-from local_web_access.models import Status
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access.errors import LifecycleError
+from local_webpage_access.models import Status
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 # ---- fixtures --------------------------------------------------------------
@@ -41,7 +41,7 @@ def registry(workspace_root: Path) -> Registry:
 
 @pytest.fixture()
 def config(workspace_root: Path):
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     return Config(portPool=PortPool(start=21000, end=21050))
 
@@ -55,7 +55,7 @@ def _isolate_global_queue():
 
 
 def _seed_instance(registry: Registry, iid: str = "api") -> None:
-    from local_web_access.logging import now_iso
+    from local_webpage_access.logging import now_iso
 
     registry.upsert_instance(
         {
@@ -428,7 +428,7 @@ def test_get_build_queue_returns_same_singleton(registry, config) -> None:
 
 def test_get_build_queue_rebuilds_on_concurrency_change(registry, config) -> None:
     """buildConcurrency 变化时按新值重建单例。"""
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     q1 = get_build_queue(config, registry)
     assert q1.concurrency == 1

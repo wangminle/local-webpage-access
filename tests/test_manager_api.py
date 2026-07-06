@@ -13,22 +13,22 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from local_web_access.config import Config, PortPool
-from local_web_access.manager_api import (
+from local_webpage_access.config import Config, PortPool
+from local_webpage_access.manager_api import (
     create_app,
     ensure_token,
     read_token,
     token_path,
 )
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 # ---- 夹具 -------------------------------------------------------------------
 
 
 def _write_config(ws: Workspace) -> None:
-    from local_web_access.config import example_config_text
+    from local_webpage_access.config import example_config_text
 
     if not ws.config_path.is_file():
         ws.config_path.write_text(example_config_text(), encoding="utf-8")
@@ -55,7 +55,7 @@ def manager_env(workspace_root: Path):
     reg.open()
 
     # 导入一个静态实例
-    from local_web_access.importer import Importer
+    from local_webpage_access.importer import Importer
 
     zip_path = ws.inbox / "static.zip"
     _make_static_zip(zip_path)
@@ -346,7 +346,7 @@ def test_pending_list(manager_env: EnvBundle) -> None:
 
 def test_stats_syncs_status_before_counting(manager_env: EnvBundle, monkeypatch) -> None:
     """BUG-030：/api/stats 读取前应先 sync_status。"""
-    from local_web_access.models import Status
+    from local_webpage_access.models import Status
 
     manager_env.registry.update_status(manager_env.instance_id, "running")
 
@@ -354,7 +354,7 @@ def test_stats_syncs_status_before_counting(manager_env: EnvBundle, monkeypatch)
         reg.update_status(iid, "stopped")
         return Status.STOPPED
 
-    monkeypatch.setattr("local_web_access.lifecycle.observe_status", fake_observe)
+    monkeypatch.setattr("local_webpage_access.lifecycle.observe_status", fake_observe)
     resp = manager_env.client.get("/api/stats", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     assert resp.json()["counts"]["stopped"] >= 1
@@ -364,7 +364,7 @@ def test_pending_syncs_status_before_listing(
     manager_env: EnvBundle, monkeypatch
 ) -> None:
     """BUG-030：/api/pending 读取前应先 sync_status。"""
-    from local_web_access.models import Status
+    from local_webpage_access.models import Status
 
     manager_env.registry.update_status(manager_env.instance_id, "running")
 
@@ -372,7 +372,7 @@ def test_pending_syncs_status_before_listing(
         reg.update_status(iid, "failed")
         return Status.FAILED
 
-    monkeypatch.setattr("local_web_access.lifecycle.observe_status", fake_observe)
+    monkeypatch.setattr("local_webpage_access.lifecycle.observe_status", fake_observe)
     resp = manager_env.client.get("/api/pending", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     body = resp.json()
@@ -405,11 +405,11 @@ def test_start_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
 
         def fake_start(ws, cfg, reg, iid):
             called.append(iid)
-            from local_web_access.models import InstanceManifest
+            from local_webpage_access.models import InstanceManifest
 
             return InstanceManifest.load(ws.app_manifest_path(iid))
 
-        mp.setattr("local_web_access.lifecycle.start_instance", fake_start)
+        mp.setattr("local_webpage_access.lifecycle.start_instance", fake_start)
         resp = manager_env.client.post(
             f"/api/instances/{manager_env.instance_id}/start",
             headers=manager_env.auth_headers(),
@@ -423,7 +423,7 @@ def test_stop_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
     with pytest.MonkeyPatch.context() as mp:
         called: list[str] = []
         mp.setattr(
-            "local_web_access.lifecycle.stop_instance_op",
+            "local_webpage_access.lifecycle.stop_instance_op",
             lambda ws, cfg, reg, iid: called.append(iid),
         )
         resp = manager_env.client.post(
@@ -438,7 +438,7 @@ def test_restart_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
     with pytest.MonkeyPatch.context() as mp:
         called: list[str] = []
         mp.setattr(
-            "local_web_access.lifecycle.restart_instance",
+            "local_webpage_access.lifecycle.restart_instance",
             lambda ws, cfg, reg, iid: called.append(iid),
         )
         resp = manager_env.client.post(
@@ -453,7 +453,7 @@ def test_rebuild_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
     with pytest.MonkeyPatch.context() as mp:
         called: list[str] = []
         mp.setattr(
-            "local_web_access.lifecycle.rebuild_instance",
+            "local_webpage_access.lifecycle.rebuild_instance",
             lambda ws, cfg, reg, iid: called.append(iid),
         )
         resp = manager_env.client.post(
@@ -478,7 +478,7 @@ def test_root_serves_index(manager_env: EnvBundle) -> None:
     """``/`` 返回管理页前端 ``index.html``（WBS-23）。"""
     resp = manager_env.client.get("/")
     assert resp.status_code == 200
-    assert "Local Web Access" in resp.text
+    assert "Local Webpage Access" in resp.text
     assert "<html" in resp.text.lower()
 
 
@@ -501,14 +501,14 @@ def test_unknown_api_path_returns_401_or_404(manager_env: EnvBundle) -> None:
 
 def test_lwa_error_code_maps_client_errors_to_4xx() -> None:
     """BUG-033：客户端输入/配置类异常不得映射成 500。"""
-    from local_web_access.errors import (
+    from local_webpage_access.errors import (
         ConfigError,
         PathError,
         RecognitionError,
         SchemaError,
         ZipImportError,
     )
-    from local_web_access.manager_api import _lwa_error_code
+    from local_webpage_access.manager_api import _lwa_error_code
 
     for exc in (
         ConfigError("bad config"),
@@ -523,8 +523,8 @@ def test_lwa_error_code_maps_client_errors_to_4xx() -> None:
 
 def test_lwa_error_code_maps_unavailable_to_503() -> None:
     """BUG-033：端口池耗尽 / Docker 不可用应映射 503，而非 500。"""
-    from local_web_access.errors import DockerError, PortError
-    from local_web_access.manager_api import _ERROR_STATUS, _lwa_error_code
+    from local_webpage_access.errors import DockerError, PortError
+    from local_webpage_access.manager_api import _ERROR_STATUS, _lwa_error_code
 
     for exc in (PortError("pool exhausted"), DockerError("docker down")):
         code = _lwa_error_code(exc)
@@ -534,14 +534,14 @@ def test_lwa_error_code_maps_unavailable_to_503() -> None:
 
 def test_lwa_error_code_maps_server_errors_to_500() -> None:
     """BUG-033：服务端处理失败仍为 500。"""
-    from local_web_access.errors import (
+    from local_webpage_access.errors import (
         BuildError,
         GatewayError,
         HostingError,
         LifecycleError,
         RegistryError,
     )
-    from local_web_access.manager_api import _lwa_error_code
+    from local_webpage_access.manager_api import _lwa_error_code
 
     for exc in (
         RegistryError("db error"),
@@ -555,7 +555,7 @@ def test_lwa_error_code_maps_server_errors_to_500() -> None:
 
 def test_error_response_http_status_matches_code() -> None:
     """BUG-033：error_response 按错误码选 HTTP 状态，覆盖 4xx/5xx 全档。"""
-    from local_web_access.manager_api import error_response
+    from local_webpage_access.manager_api import error_response
 
     assert error_response("bad_request", "x").status_code == 400
     assert error_response("not_found", "x").status_code == 404
@@ -571,14 +571,14 @@ def test_cli_manager_start_rejects_lan_binding_without_token(
     """BUG-029：CLI 启动流程必须接入 validate_manager_binding。"""
     from typer.testing import CliRunner
 
-    from local_web_access.cli import app
-    from local_web_access.init_workspace import init_workspace
+    from local_webpage_access.cli import app
+    from local_webpage_access.init_workspace import init_workspace
 
     init_workspace(workspace_root)
     monkeypatch.chdir(workspace_root)
-    monkeypatch.setattr("local_web_access.manager_api.ensure_token", lambda ws: "")
+    monkeypatch.setattr("local_webpage_access.manager_api.ensure_token", lambda ws: "")
     monkeypatch.setattr(
-        "local_web_access.manager_api.run_manager",
+        "local_webpage_access.manager_api.run_manager",
         lambda *args, **kwargs: None,
     )
 

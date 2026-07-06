@@ -1,4 +1,4 @@
-# Local Web Access —— 方案讨论稿
+# Local Webpage Access —— 方案讨论稿
 
 > 文件：`docs/discussion/local-web-access-proposal-20260703.md`
 > 日期：2026-07-03
@@ -55,7 +55,7 @@ daemon **不试图变聪明**，它遇到"判断不了"的 zip，就把它标成
 ## 三、目录结构（建在本仓库根目录下）
 
 ```
-local-web-access/                  # 固定根目录（即本仓库）
+local-webpage-access/                  # 固定根目录（即本仓库）
 ├── AGENTS.md                      # 告诉大模型：这是什么、有哪些 skill、lwactl 怎么用
 ├── README.md
 ├── lwactl                         # 主 CLI（Python）

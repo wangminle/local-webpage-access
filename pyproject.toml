@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "local-web-access"
+name = "local-webpage-access"
 version = "0.1.0"
-description = "Local Web Access — 面向局域网小主机的本地网页部署基座"
+description = "Local Webpage Access — 面向局域网小主机的本地网页部署基座"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
@@ -15,8 +15,8 @@ dependencies = [
     "pydantic>=2.6.0",
     "pyyaml>=6.0",
     "rich>=13.0.0",
-    "fastapi>=0.110.0",
-    "uvicorn>=0.27.0",
+    "fastapi>=0.138.0",
+    "uvicorn>=0.45.0",
     "httpx>=0.27.0",
 ]
 
@@ -28,15 +28,10 @@ dev = [
 ]
 
 [project.scripts]
-lwa = "local_web_access.cli:app"
+lwa = "local_webpage_access.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/local_web_access"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/local_web_access/templates" = "local_web_access/templates"
-"src/local_web_access/manager_static" = "local_web_access/manager_static"
-"src/local_web_access/skills" = "local_web_access/skills"
+packages = ["src/local_webpage_access"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

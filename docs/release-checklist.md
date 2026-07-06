@@ -5,7 +5,7 @@
 ## 代码与版本
 
 - [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `1.0.0`）。
-- [ ] `src/local_web_access/cli.py` 的 `version` 命令读取该版本号。
+- [ ] `src/local_webpage_access/cli.py` 的 `version` 命令读取该版本号。
 - [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。
 

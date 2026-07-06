@@ -1,4 +1,4 @@
-# Local Web Access V1 设计说明
+# Local Webpage Access V1 设计说明
 
 > 日期：2026-07-04  
 > 状态：V1 设计稿  
@@ -7,7 +7,7 @@
 
 ## 1. V1 目标
 
-Local Web Access 是一个面向局域网小主机的本地网页部署基座，用来集中导入、运行、管理 AI coding 过程中产生的小网页、小工具和小型 Web 应用。
+Local Webpage Access 是一个面向局域网小主机的本地网页部署基座，用来集中导入、运行、管理 AI coding 过程中产生的小网页、小工具和小型 Web 应用。
 
 V1 的核心目标是建立一个可闭环运行的最小系统：
 
@@ -22,7 +22,7 @@ V1 的核心目标是建立一个可闭环运行的最小系统：
 
 一句话定位：
 
-**Local Web Access V1 是一个 Docker 优先、静态轻量托管、由确定性工具执行、大模型 skill 辅助识别与修复的本地小型 PaaS。**
+**Local Webpage Access V1 是一个 Docker 优先、静态轻量托管、由确定性工具执行、大模型 skill 辅助识别与修复的本地小型 PaaS。**
 
 运行环境假设：
 
@@ -179,7 +179,7 @@ hub.192.168.1.20.nip.io
 V1 推荐目录结构：
 
 ```text
-local-web-access/
+local-webpage-access/
   AGENTS.md
   local-web.yml
   inbox/
@@ -1018,7 +1018,7 @@ V2：
 
 ## 23. 竞品与参考项目
 
-Local Web Access 和宝塔面板、1Panel、Coolify、Dockge、Runtipi 等项目处在相邻赛道，但产品入口和目标边界不同。
+Local Webpage Access 和宝塔面板、1Panel、Coolify、Dockge、Runtipi 等项目处在相邻赛道，但产品入口和目标边界不同。
 
 我们的需求更像是 1Panel、Coolify、Dokploy、Dockge、Runtipi、CasaOS 的交叉点，但多了一个很特殊的入口：
 
@@ -1026,14 +1026,14 @@ Local Web Access 和宝塔面板、1Panel、Coolify、Dockge、Runtipi 等项目
 
 ### 23.1 赛道判断
 
-| 项目 | 调研时 star 约数 | 核心定位 | 和 Local Web Access 的关系 |
+| 项目 | 调研时 star 约数 | 核心定位 | 和 Local Webpage Access 的关系 |
 | --- | ---: | --- | --- |
 | [Coolify](https://github.com/coollabsio/coolify) | 57.8k | 自托管 PaaS，部署应用、静态站、数据库和服务 | 很接近，可参考应用部署生命周期、构建日志、环境变量、反向代理和健康检查 |
 | [Portainer](https://github.com/portainer/portainer) | 37.9k | Docker/Kubernetes 管理面板 | 可参考容器状态、日志、资源和操作入口，但 V1 不做通用 Docker 管理面板 |
 | [1Panel](https://github.com/1Panel-dev/1Panel) | 36.1k | 现代服务器运维面板，覆盖网站、Docker、应用和主机管理 | 可参考服务器管理页体验，但不扩展到完整 VPS 面板 |
 | [CasaOS](https://github.com/IceWhaleTech/CasaOS) | 36.2k | 家庭服务器系统和应用体验 | 可参考轻量应用目录、小主机友好界面和家庭服务器使用心智 |
 | [Dokploy](https://github.com/Dokploy/dokploy) | 35.3k | 自托管 PaaS，类似轻量 Vercel/Netlify/Heroku | 可参考部署流水线、路由、日志、应用状态和服务编排 |
-| [Dokku](https://github.com/dokku/dokku) | 32.0k | Docker-powered mini-Heroku，偏 git push 部署 | 可参考小型 PaaS 边界，但入口不同，Local Web Access 不是 git push-first |
+| [Dokku](https://github.com/dokku/dokku) | 32.0k | Docker-powered mini-Heroku，偏 git push 部署 | 可参考小型 PaaS 边界，但入口不同，Local Webpage Access 不是 git push-first |
 | [Nginx Proxy Manager](https://github.com/NginxProxyManager/nginx-proxy-manager) | 33.5k | 反向代理、域名和证书管理 | 可参考代理配置 UI，但 V1 只做本地访问入口，不做完整证书平台 |
 | [Dockge](https://github.com/louislam/dockge) | 23.7k | Docker Compose stack 管理 | 和 Compose 层高度相关，可参考 stack 生命周期、compose 文件管理和日志体验 |
 | [CapRover](https://github.com/caprover/caprover) | 15.1k | Docker + nginx 的自托管 PaaS | 可参考一键部署和应用路由，但 V1 不做多租户 PaaS |
@@ -1059,7 +1059,7 @@ star 数只作为调研时的热度参考，不作为功能优先级依据。V1 
 
 1. 不做完整服务器运维面板。
 2. 不管理 LNMP/LAMP、系统防火墙、软件商店、计划任务、传统数据库面板。
-3. 不把 Local Web Access 扩展成通用 VPS 管理工具。
+3. 不把 Local Webpage Access 扩展成通用 VPS 管理工具。
 
 落到本设计：
 
@@ -1098,7 +1098,7 @@ star 数只作为调研时的热度参考，不作为功能优先级依据。V1 
 不照搬：
 
 1. V1 不做通用 Docker 主机管理器。
-2. V1 不允许用户在界面里任意管理非 Local Web Access 创建的容器。
+2. V1 不允许用户在界面里任意管理非 Local Webpage Access 创建的容器。
 3. V1 不把 Docker Compose 编辑器作为第一优先级，先保证自动生成和可读。
 
 落到本设计：
@@ -1147,7 +1147,7 @@ star 数只作为调研时的热度参考，不作为功能优先级依据。V1 
 
 ### 23.3 我们的差异化边界
 
-Local Web Access 不应该被设计成“另一个 1Panel/宝塔”，也不应该一开始就复制 Coolify 的完整 PaaS 能力。
+Local Webpage Access 不应该被设计成“另一个 1Panel/宝塔”，也不应该一开始就复制 Coolify 的完整 PaaS 能力。
 
 核心差异化是：
 

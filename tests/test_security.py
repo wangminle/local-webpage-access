@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.security import (
+from local_webpage_access.security import (
     LEVEL_CRITICAL,
     LEVEL_INFO,
     LEVEL_WARN,
@@ -410,8 +410,8 @@ def test_generated_compose_passes_audit(tmp_path: Path) -> None:
     """generate_compose 产出的 compose.yaml 不得含 critical 安全问题。"""
     from tests._helpers import make_container_manifest
 
-    from local_web_access.compose import generate_compose
-    from local_web_access.paths import Workspace
+    from local_webpage_access.compose import generate_compose
+    from local_webpage_access.paths import Workspace
 
     ws = Workspace(tmp_path / "ws")
     ws.ensure_workspace_dirs()
@@ -428,10 +428,10 @@ def test_generated_compose_passes_audit(tmp_path: Path) -> None:
 
 def test_importer_writes_risk_hint_for_pending(tmp_path: Path, monkeypatch) -> None:
     """detection.pending 时应额外写一条 security 事件，含风险提示。"""
-    from local_web_access.config import example_config_text, load_config
-    from local_web_access.importer import Importer
-    from local_web_access.paths import Workspace
-    from local_web_access.registry import Registry
+    from local_webpage_access.config import example_config_text, load_config
+    from local_webpage_access.importer import Importer
+    from local_webpage_access.paths import Workspace
+    from local_webpage_access.registry import Registry
 
     ws = Workspace(tmp_path / "ws")
     ws.ensure_workspace_dirs()

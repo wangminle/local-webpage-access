@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.errors import SchemaError
-from local_web_access.models import (
+from local_webpage_access.errors import SchemaError
+from local_webpage_access.models import (
     SCHEMA_VERSION,
     ContainerConfig,
     DesiredState,

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.compose import generate_compose, generate_env, service_name
-from local_web_access.models import (
+from local_webpage_access.compose import generate_compose, generate_env, service_name
+from local_webpage_access.models import (
     ContainerConfig,
     DatabaseConfig,
     EntryConfig,
@@ -18,7 +18,7 @@ from local_web_access.models import (
     Runtime,
     ServingMode,
 )
-from local_web_access.paths import Workspace
+from local_webpage_access.paths import Workspace
 
 
 def _mk_manifest(

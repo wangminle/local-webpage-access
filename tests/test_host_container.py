@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from local_web_access.compose import generate_compose, generate_env
-from local_web_access.dockerfile_templates import generate_dockerfile
-from local_web_access.errors import DockerError, HostingError
-from local_web_access.hosting import (
+from local_webpage_access.compose import generate_compose, generate_env
+from local_webpage_access.dockerfile_templates import generate_dockerfile
+from local_webpage_access.errors import DockerError, HostingError
+from local_webpage_access.hosting import (
     _ensure_container_port,
     _http_ok,
     _wait_for_http,
@@ -23,7 +23,7 @@ from local_web_access.hosting import (
     stop_container,
     stop_instance,
 )
-from local_web_access.models import (
+from local_webpage_access.models import (
     ContainerConfig,
     DesiredState,
     InstanceManifest,
@@ -33,8 +33,8 @@ from local_web_access.models import (
     ServingMode,
     Status,
 )
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 # ---- fixtures ----------------------------------------------------------------
@@ -58,7 +58,7 @@ def registry(workspace_root: Path) -> Registry:
 
 @pytest.fixture()
 def config(workspace_root: Path):
-    from local_web_access.config import Config, PortPool
+    from local_webpage_access.config import Config, PortPool
 
     return Config(portPool=PortPool(start=21000, end=21050))
 
@@ -169,12 +169,12 @@ def fake_runtime(monkeypatch):
     """替换 hosting.DockerRuntime 为 _FakeRuntime，并重置运行状态。"""
     _FakeRuntime._running_state = False
     _FakeRuntime.calls = []
-    monkeypatch.setattr("local_web_access.hosting.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
     # 健康检查直接成功，避免真实 HTTP 等待
-    monkeypatch.setattr("local_web_access.hosting._http_ok", lambda port, **kw: True)
+    monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: True)
     # 端口探测恒返回"未占用"，使分配确定性地取池首端口（避免宿主机真实占用干扰）
-    monkeypatch.setattr("local_web_access.ports.is_port_in_use", lambda *a, **kw: False)
-    monkeypatch.setattr("local_web_access.hosting.is_port_listening", lambda *a, **kw: False)
+    monkeypatch.setattr("local_webpage_access.ports.is_port_in_use", lambda *a, **kw: False)
+    monkeypatch.setattr("local_webpage_access.hosting.is_port_listening", lambda *a, **kw: False)
     return _FakeRuntime
 
 
@@ -258,7 +258,7 @@ def test_host_container_health_check_failure_does_not_block(
     workspace, registry, config, fake_runtime, monkeypatch
 ) -> None:
     """健康检查失败不阻塞 RUNNING 标记（best-effort）。"""
-    monkeypatch.setattr("local_web_access.hosting._http_ok", lambda port, **kw: False)
+    monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: False)
     _seed_container_instance(workspace, registry, "api")
     manifest = host_container(workspace, config, registry, "api")
     assert manifest.status == Status.RUNNING
@@ -464,7 +464,7 @@ def test_http_ok_returns_true_on_success(monkeypatch) -> None:
     def fake_urlopen(url, timeout=None):
         return _FakeResp()
 
-    import local_web_access.hosting as h
+    import local_webpage_access.hosting as h
 
     monkeypatch.setattr(h.urllib.request, "urlopen", fake_urlopen)
     assert _http_ok(9999) is True
@@ -474,7 +474,7 @@ def test_http_ok_returns_false_on_exception(monkeypatch) -> None:
     def fake_urlopen(url, timeout=None):
         raise ConnectionError("no")
 
-    import local_web_access.hosting as h
+    import local_webpage_access.hosting as h
 
     monkeypatch.setattr(h.urllib.request, "urlopen", fake_urlopen)
     assert _http_ok(9999) is False
@@ -488,13 +488,13 @@ def test_wait_for_http_polls_until_success(monkeypatch) -> None:
         calls["n"] += 1
         return calls["n"] >= 3
 
-    monkeypatch.setattr("local_web_access.hosting._http_ok", eventually_ok)
-    monkeypatch.setattr("local_web_access.hosting.time.sleep", lambda s: None)
+    monkeypatch.setattr("local_webpage_access.hosting._http_ok", eventually_ok)
+    monkeypatch.setattr("local_webpage_access.hosting.time.sleep", lambda s: None)
     assert _wait_for_http(9999, attempts=5, delay=0) is True
     assert calls["n"] == 3
 
 
 def test_wait_for_http_returns_false_after_timeout(monkeypatch) -> None:
-    monkeypatch.setattr("local_web_access.hosting._http_ok", lambda port, **kw: False)
-    monkeypatch.setattr("local_web_access.hosting.time.sleep", lambda s: None)
+    monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: False)
+    monkeypatch.setattr("local_webpage_access.hosting.time.sleep", lambda s: None)
     assert _wait_for_http(9999, attempts=3, delay=0) is False

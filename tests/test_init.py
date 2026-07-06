@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_web_access.config import load_config
-from local_web_access.init_workspace import init_workspace
-from local_web_access.paths import Workspace
-from local_web_access.registry import Registry
+from local_webpage_access.config import load_config
+from local_webpage_access.init_workspace import init_workspace
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 
 
 def test_init_creates_full_layout(tmp_path: Path) -> None:
@@ -100,23 +100,24 @@ def test_init_copies_templates(tmp_path: Path) -> None:
 
 
 def test_init_copies_skills(tmp_path: Path) -> None:
-    """lwa init 应把 12 个内置 skills 复制到 skills/（WBS-24）。"""
+    """lwa init 应把 13 个内置 skills 复制到 skills/（WBS-24 + lwa-setup-host-environment）。"""
     root = tmp_path / "ws"
     init_workspace(root)
     ws = Workspace(root)
     skill_docs = list(ws.skills.rglob("SKILL.md"))
-    assert len(skill_docs) == 12
+    assert len(skill_docs) == 13
     # 索引 README 也应存在
     assert (ws.skills / "README.md").is_file()
     # 关键 skill 应在列
     names = {p.parent.name for p in skill_docs}
     for expected in (
-        "detect-stack",
-        "dockerize-node-app",
-        "dockerize-python-app",
-        "generate-compose",
-        "fix-docker-build-failure",
-        "diagnose-health-check",
+        "lwa-detect-stack",
+        "lwa-dockerize-node-app",
+        "lwa-dockerize-python-app",
+        "lwa-generate-compose",
+        "lwa-fix-docker-build-failure",
+        "lwa-diagnose-health-check",
+        "lwa-setup-host-environment",
     ):
         assert expected in names, f"缺少 skill：{expected}"
 
@@ -125,7 +126,7 @@ def test_cli_init_e2e(tmp_path: Path) -> None:
     """通过 CLI 直接调用 init 子命令做端到端验证。"""
     from typer.testing import CliRunner
 
-    from local_web_access.cli import app
+    from local_webpage_access.cli import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["init", "--workspace", str(tmp_path / "cli-ws")])

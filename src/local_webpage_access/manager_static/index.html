@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local Webpage Access</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-title">
+      <h1>Local Webpage Access</h1>
+      <span class="version" id="version"></span>
+    </div>
+    <div class="topbar-actions">
+      <button id="refresh-btn" class="btn btn-ghost" title="立即刷新">↻ 刷新</button>
+    </div>
+  </header>
+
+  <!-- 顶部统计区（WBS-23.02）-->
+  <section class="stats" id="stats" aria-label="整机与实例统计">
+    <div class="stat-cards" id="stat-cards">
+      <div class="stat-card"><span class="stat-label">实例</span><span class="stat-value" id="stat-total">-</span></div>
+      <div class="stat-card stat-running"><span class="stat-label">运行中</span><span class="stat-value" id="stat-running">-</span></div>
+      <div class="stat-card stat-stopped"><span class="stat-label">已停止</span><span class="stat-value" id="stat-stopped">-</span></div>
+      <div class="stat-card stat-pending"><span class="stat-label">待处理</span><span class="stat-value" id="stat-pending">-</span></div>
+      <div class="stat-card stat-failed"><span class="stat-label">失败</span><span class="stat-value" id="stat-failed">-</span></div>
+      <div class="stat-card"><span class="stat-label">数据库实例</span><span class="stat-value" id="stat-db">-</span></div>
+    </div>
+    <div class="stat-detail" id="stat-detail">
+      <div class="stat-line"><span>端口池</span><span id="stat-ports">-</span></div>
+      <div class="stat-line"><span>类型分布</span><span id="stat-types">-</span></div>
+      <div class="stat-line"><span>整机内存</span><span id="stat-mem">-</span></div>
+      <div class="stat-line"><span>整机磁盘</span><span id="stat-disk">-</span></div>
+    </div>
+  </section>
+
+  <!-- 实例列表（WBS-23.03/04）-->
+  <main class="main">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>实例</h2>
+        <div class="filter">
+          <label><input type="checkbox" id="filter-pending" /> 仅待处理/失败</label>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="instances" id="instances-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>状态</th>
+              <th>期望</th>
+              <th>形态</th>
+              <th>族</th>
+              <th>运行层</th>
+              <th>技术栈</th>
+              <th>数据库</th>
+              <th>访问地址</th>
+              <th>端口</th>
+              <th>资源</th>
+              <th>更新时间</th>
+              <th class="col-ops">操作</th>
+            </tr>
+          </thead>
+          <tbody id="instances-body">
+            <tr class="empty-row"><td colspan="13">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- 实例详情抽屉（WBS-23.08~11）-->
+  <aside class="drawer" id="drawer" hidden aria-hidden="true">
+    <div class="drawer-head">
+      <h2 id="drawer-title">实例详情</h2>
+      <button class="btn btn-ghost" id="drawer-close" title="关闭">✕</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+  <div class="drawer-mask" id="drawer-mask" hidden></div>
+
+  <!-- 日志查看（WBS-23.07）-->
+  <div class="modal" id="logs-modal" hidden>
+    <div class="modal-head">
+      <h2 id="logs-title">日志</h2>
+      <div class="logs-controls">
+        <select id="logs-category">
+          <option value="run">run</option>
+          <option value="build">build</option>
+          <option value="gateway">gateway</option>
+          <option value="import">import</option>
+          <option value="scan">scan</option>
+        </select>
+        <button class="btn btn-ghost" id="logs-refresh">↻</button>
+        <button class="btn btn-ghost" id="logs-close">✕</button>
+      </div>
+    </div>
+    <pre class="logs-content" id="logs-content"></pre>
+  </div>
+
+  <!-- Token 登录（WBS-22.12 前端配合）-->
+  <div class="modal" id="token-modal" hidden>
+    <div class="token-box">
+      <h2>需要 API token</h2>
+      <p>请输入管理页 token（由 <code>lwa manager start</code> 输出）：</p>
+      <input type="password" id="token-input" placeholder="API token" autocomplete="off" />
+      <div class="token-actions">
+        <button class="btn btn-primary" id="token-submit">进入</button>
+      </div>
+      <p class="token-hint">token 保存在浏览器 sessionStorage，关闭标签页即清除。</p>
+    </div>
+  </div>
+
+  <!-- 错误提示（WBS-23.15 配合）-->
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
