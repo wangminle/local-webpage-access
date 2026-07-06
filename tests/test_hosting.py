@@ -298,7 +298,7 @@ def test_stop_instance_disables_gateway(
 
     manifest = stop_instance(workspace, config, registry, "demo")
     assert manifest.status == Status.STOPPED
-    # BUG-028：静态实例 stop 后端口登记应保留（与容器路径一致），供 start 复用，
+    # BUG-045：静态实例 stop 后端口登记应保留（与容器路径一致），供 start 复用，
     # 避免端口被重新分配给其他实例而造成跨实例内容混淆。
     assert registry.allocated_ports() == [held_port]
     assert registry.port_owner(held_port) == "demo"
@@ -309,7 +309,7 @@ def test_stop_instance_disables_gateway(
 def test_stop_static_then_restart_reuses_port(
     workspace: Workspace, registry: Registry, config: Config
 ) -> None:
-    """BUG-028 回归：静态实例 stop 后再 start 复用同一端口，lanUrl 稳定。"""
+    """BUG-045 回归：静态实例 stop 后再 start 复用同一端口，lanUrl 稳定。"""
     _seed_static_instance(workspace, registry, "demo")
     first = host_static(workspace, config, registry, "demo")
     port = first.network.hostPort
@@ -329,7 +329,7 @@ def test_stop_static_then_restart_reuses_port(
 def test_stopped_static_port_not_reassigned(
     workspace: Workspace, registry: Registry, config: Config
 ) -> None:
-    """BUG-028 回归：静态实例 stop 后保留的端口不会被分配给另一实例。"""
+    """BUG-045 回归：静态实例 stop 后保留的端口不会被分配给另一实例。"""
     _seed_static_instance(workspace, registry, "demo")
     _seed_static_instance(workspace, registry, "other")
     host_static(workspace, config, registry, "demo")

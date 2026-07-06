@@ -174,7 +174,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr("local_web_access.hosting._http_ok", lambda port, **kw: True)
     # 端口探测恒返回"未占用"，使分配确定性地取池首端口（避免宿主机真实占用干扰）
     monkeypatch.setattr("local_web_access.ports.is_port_in_use", lambda *a, **kw: False)
-    monkeypatch.setattr("local_web_access.hosting.is_port_in_use", lambda *a, **kw: False)
+    monkeypatch.setattr("local_web_access.hosting.is_port_listening", lambda *a, **kw: False)
     return _FakeRuntime
 
 

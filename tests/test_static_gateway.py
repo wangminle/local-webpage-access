@@ -353,8 +353,8 @@ def test_stop_builtin_keeps_pid_when_kill_fails(
     gateway._write_pid("demo", 0xFFFFFFFE)
     assert gateway._read_pid("demo") == 0xFFFFFFFE
 
-    # 让 _kill_process 模拟"无法终止"（进程一直存活）
-    monkeypatch.setattr(gateway, "_kill_process", lambda pid: False)
+    # 让 _kill_process 模拟"无法终止"（进程一直存活）；接受 proc= 以匹配新签名
+    monkeypatch.setattr(gateway, "_kill_process", lambda pid, **kw: False)
 
     gateway._stop_builtin("demo")
 
@@ -367,7 +367,7 @@ def test_stop_builtin_clears_pid_when_kill_succeeds(
 ) -> None:
     """BUG-015：_kill_process 成功时 _stop_builtin 清除 PID（正常路径回归保护）。"""
     gateway._write_pid("demo", 12345)
-    monkeypatch.setattr(gateway, "_kill_process", lambda pid: True)
+    monkeypatch.setattr(gateway, "_kill_process", lambda pid, **kw: True)
 
     gateway._stop_builtin("demo")
 

@@ -64,6 +64,9 @@ class StaticGateway:
     def __init__(self, workspace: Workspace, config: Config) -> None:
         self.ws = workspace
         self.config = config
+        # builtin 子进程的 Popen 句柄：_kill_process 必须用它回收僵尸，
+        # 否则 os.kill(pid, 0) 对已退出但未回收的子进程恒返回 True（BUG-045）。
+        self._procs: dict[str, subprocess.Popen] = {}
 
     # ---- 后端探测 -----------------------------------------------------------
 
@@ -151,7 +154,7 @@ class StaticGateway:
         backend = self.detect_backend()
         if backend == "builtin":
             self._start_builtin(instance_id, host_port, root)
-            if wait_health and not self.health_check(host_port):
+            if wait_health and not self._wait_until_healthy(host_port):
                 # 回滚
                 self._stop_builtin(instance_id)
                 self.remove_site_config(instance_id)
@@ -201,6 +204,23 @@ class StaticGateway:
             return 200 <= resp.status < 400
         except Exception:  # noqa: BLE001
             return False
+
+    def _wait_until_healthy(
+        self, host_port: int, *, timeout: float = _START_WAIT
+    ) -> bool:
+        """启动后轮询健康检查（BUG-045）。
+
+        ``subprocess.Popen`` 返回时 ``http.server`` 已 fork 但仍在导入 / 绑定
+        端口，立即一次性探测会偶发失败并触发误回滚。此前模块级 ``_START_WAIT``
+        定义后从未被使用，builtin 启动后只做了一次 ``health_check``。
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.health_check(host_port):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
 
     # ---- Caddy reload + 回滚 ------------------------------------------------
 
@@ -328,6 +348,7 @@ class StaticGateway:
             # 子进程已通过继承拿到 stdout 句柄，父进程侧必须关闭自己的副本，
             # 否则会锁住 gateway.log（Windows 下导致实例目录/gateway.log 无法删除，BUG-006）。
             log_fh.close()
+        self._procs[instance_id] = proc
         self._write_pid(instance_id, proc.pid)
         write_instance_log(
             self.ws.apps,
@@ -337,10 +358,14 @@ class StaticGateway:
         )
 
     def _stop_builtin(self, instance_id: str) -> None:
+        proc = self._procs.pop(instance_id, None)
         pid = self._read_pid(instance_id)
         if pid is None:
+            # PID 文件缺失时从句柄兜底取 pid，确保仍能终止并回收本网关启动的子进程
+            pid = proc.pid if proc is not None else None
+        if pid is None:
             return
-        if self._kill_process(pid):
+        if self._kill_process(pid, proc=proc):
             self._clear_pid(instance_id)
         else:
             # kill 失败：保留 PID 文件，便于重试或人工排查（BUG-015）。
@@ -357,12 +382,19 @@ class StaticGateway:
             f"停止内置静态服务 pid={pid}",
         )
 
-    def _kill_process(self, pid: int) -> bool:
-        """终止进程并等待其退出（BUG-015）。
+    def _kill_process(
+        self, pid: int, *, proc: subprocess.Popen | None = None
+    ) -> bool:
+        """终止进程并等待其退出（BUG-015 / BUG-045）。
 
         成功（含"进程已经不在"）返回 True；超时未退出返回 False。不再仅凭
         taskkill 的返回码判断——Windows 上非零退出码可能只是"进程已退出"，
-        因此以 ``_pid_alive`` 的轮询结果为准。
+        因此以轮询结果为准。
+
+        若调用方持有该进程的 ``Popen`` 句柄（本网关自己启动的 builtin 子进程），
+        必须传入 ``proc``：``_wait_for_exit`` 会用 ``proc.poll()`` 回收僵尸，
+        而 ``os.kill(pid, 0)`` 对僵尸恒返回 True，会把已退出的子进程误判为
+        存活，进而误报 kill 失败并保留 PID 文件（BUG-045）。
         """
         try:
             if os.name == "nt":
@@ -384,25 +416,43 @@ class StaticGateway:
                 try:
                     pgid = os.getpgid(pid)
                     os.killpg(pgid, signal.SIGTERM)
-                except ProcessLookupError:
-                    return True  # 已经不在，视为成功
+                except (ProcessLookupError, OverflowError):
+                    # 进程已不存在，或 pid 超出 pid_t 范围（不可能存活）→ 视为成功
+                    return True
         except (subprocess.TimeoutExpired, OSError) as exc:
             log.warning("终止进程 pid=%d 异常：%s", pid, exc)
 
-        if self._wait_for_exit(pid):
+        if self._wait_for_exit(pid, proc=proc):
             log.info("已终止静态服务进程 pid=%d", pid)
             return True
         log.warning("进程 pid=%d 未在 %ds 内退出，可能仍在运行", pid, _KILL_TIMEOUT)
         return False
 
-    def _wait_for_exit(self, pid: int, *, timeout: float = _KILL_TIMEOUT) -> bool:
-        """轮询进程是否已真正退出。"""
+    def _wait_for_exit(
+        self,
+        pid: int,
+        *,
+        proc: subprocess.Popen | None = None,
+        timeout: float = _KILL_TIMEOUT,
+    ) -> bool:
+        """轮询进程是否已真正退出。
+
+        持有 ``Popen`` 句柄时用 ``proc.poll()`` 判活——它会回收僵尸并给出
+        退出码；``os.kill(pid, 0)`` 对僵尸进程恒返回 True（BUG-045），不能
+        用来判定本网关自己启动的 builtin 子进程是否已退出。
+        """
+
+        def _exited() -> bool:
+            if proc is not None:
+                return proc.poll() is not None
+            return not self._pid_alive(pid)
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not self._pid_alive(pid):
+            if _exited():
                 return True
             time.sleep(0.1)
-        return not self._pid_alive(pid)
+        return _exited()
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -421,6 +471,18 @@ class StaticGateway:
                 return False
             except Exception:  # noqa: BLE001
                 return False
+        # POSIX：先尝试回收本进程 fork 出但未 wait 的僵尸子进程。僵尸会让
+        # os.kill(pid, 0) 恒返回 True（BUG-045），导致刚被 SIGTERM 杀掉的
+        # builtin 子进程被误判存活，进而误报 kill 失败、端口无法释放（BUG-045）。
+        # 跨 gateway 实例（hosting/daemon 每次新建 gateway）时拿不到 Popen 句柄，
+        # 但子进程的父进程仍是本进程，waitpid 可正常回收；非子进程抛 ChildProcessError。
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                return False  # 已回收 → 确已退出
+        except ChildProcessError:
+            pass
+        except OverflowError:
+            return False  # pid 超出 pid_t 范围，不可能存活
         try:
             os.kill(pid, 0)
             return True
@@ -428,7 +490,8 @@ class StaticGateway:
             return False
         except PermissionError:
             return True
-        except OSError:
+        except (OSError, OverflowError):
+            # OverflowError：pid 超出 pid_t 范围，绝不可能是存活进程
             return False
 
 

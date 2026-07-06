@@ -44,6 +44,31 @@ def is_port_in_use(port: int, *, host: str = "0.0.0.0") -> bool:
         sock.close()
 
 
+def is_port_listening(
+    port: int, *, host: str = "127.0.0.1", timeout: float = 0.3
+) -> bool:
+    """端口上是否有进程正在监听（可接受连接）。
+
+    用 ``connect`` 探测：连得上说明有活跃监听者；连不上（如 ECONNREFUSED）
+    说明无监听者。与 :func:`is_port_in_use`（独占 bind）的关键区别在于
+    TIME_WAIT 残留——刚被停止的服务，其 health-check 连接会在端口上留下
+    TIME_WAIT，让 bind 失败但 *不影响* connect。因此**端口复用判定**（BUG-045）
+    应使用本函数：stop 后端口无活跃监听者即可复用，不被 TIME_WAIT 误判占用。
+
+    分配器 :meth:`PortAllocator.allocate` 仍用 :func:`is_port_in_use`，因为那里
+    需要"此刻能否真正绑定"的严格语义（要避开 TIME_WAIT）。
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
 def detect_lan_ip() -> str | None:
     """推断本机局域网 IP。
 
@@ -181,6 +206,7 @@ def build_network_entry(
 __all__ = [
     "PortAllocator",
     "is_port_in_use",
+    "is_port_listening",
     "detect_lan_ip",
     "resolve_lan_ip",
     "build_lan_url",

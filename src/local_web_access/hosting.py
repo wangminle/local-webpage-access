@@ -32,7 +32,7 @@ from local_web_access.models import (
     Status,
 )
 from local_web_access.paths import Workspace
-from local_web_access.ports import PortAllocator, build_network_entry, is_port_in_use
+from local_web_access.ports import PortAllocator, build_network_entry, is_port_listening
 from local_web_access.registry import Registry
 from local_web_access.static_gateway import StaticGateway
 
@@ -105,7 +105,7 @@ def stop_instance(
     if runtime == "shared-static":
         gateway = StaticGateway(workspace, config)
         gateway.disable(instance_id)
-        # 注意：不释放端口，start 恢复时复用（与容器路径一致，BUG-028）。
+        # 注意：不释放端口，start 恢复时复用（与容器路径一致，BUG-045）。
         # 此前 stop 这里会调用 allocator.release_instance，导致 ports 表归属被清空，
         # 但 static_sites.host_port 与 manifest.static.hostPort 仍保留旧值，
         # 于是该端口可被重新分配给别的实例，而旧实例的网关配置/字段仍指向它，
@@ -516,7 +516,7 @@ def _ensure_container_port(
     allocator = PortAllocator(config, registry)
     row = registry.get_container(instance_id)
     existing = row.get("host_port") if row else None
-    if existing and not is_port_in_use(int(existing)):
+    if existing and not is_port_listening(int(existing)):
         if registry.allocate_port(instance_id, int(existing)):
             log.info("复用容器实例 %s 的端口 %d", instance_id, existing)
             return int(existing)
@@ -537,9 +537,9 @@ def _ensure_static_port(
 ) -> int:
     """静态端口分配：优先复用已登记端口，否则新分配。
 
-    与 :func:`_ensure_container_port` 对称（BUG-028）。``stop_instance`` 不再
+    与 :func:`_ensure_container_port` 对称（BUG-045）。``stop_instance`` 不再
     释放静态实例的端口登记，因此重启时此处的复用路径会命中：旧端口仍归本实例
-    所有、且进程已停止（``is_port_in_use`` 为 False），:meth:`allocate_port`
+    所有、且无活跃监听者（``is_port_listening`` 为 False），:meth:`allocate_port`
     的并发安全语义确认归属后直接复用，保持 lanUrl 稳定。
 
     若旧端口被外部进程占用或归属已丢失（极端情况），回退到全新分配。
@@ -547,7 +547,7 @@ def _ensure_static_port(
     allocator = PortAllocator(config, registry)
     row = registry.get_static_site(instance_id)
     existing = row.get("host_port") if row else None
-    if existing and not is_port_in_use(int(existing)):
+    if existing and not is_port_listening(int(existing)):
         if registry.allocate_port(instance_id, int(existing)):
             log.info("复用静态实例 %s 的端口 %d", instance_id, existing)
             return int(existing)
@@ -613,7 +613,7 @@ def _enable_static(
     # 否则旧进程会成为孤儿（PID 文件被新进程覆盖）、旧端口继续被占用
     if gateway.is_enabled(instance_id):
         gateway.disable(instance_id)
-    # 端口分配：优先复用已登记端口（stop 后保留），否则全新分配（BUG-028）
+    # 端口分配：优先复用已登记端口（stop 后保留），否则全新分配（BUG-045）
     host_port = _ensure_static_port(config, registry, instance_id)
     allocator = PortAllocator(config, registry)
 

@@ -20,7 +20,7 @@
 | BUG-007 | 修复 | scanner.summarize 的 total_files 双重计数顶层文件 | 2026-07-05 10:30 | 2026-07-05 10:42 | 已完成 | summarize 遍历时跳过 path.parent==root 的顶层项；实测 3 顶层文件 total_files=3、sqlite_files 不重复（对应用户走查 bug #4） |
 | BUG-008 | 修复 | 导入把 zip 文件大小写进 data_size_bytes（该列语义为 data/ 目录大小，WBS-19.08），管理页数据目录大小显示错误 | 2026-07-05 10:42 | 2026-07-05 10:42 | 已完成 | importer 改为写 data/ 目录真实大小（导入时为 0），不再塞 zip 体积（用户走查 bug #3） |
 | BUG-009 | 修复 | Pipfile 用 requirements 行解析器解析（Pipfile 实为 TOML），[[source]] 的 name/url/verify_ssl 被误当依赖，可能污染框架识别 | 2026-07-05 10:42 | 2026-07-05 10:42 | 已完成 | 新增 _read_pipfile 按 TOML 解析 [packages]/[dev-packages] 段键名（用户走查 bug #5） |
-| BUG-010 | 修复 | stop_instance 对容器实例静默无操作，CLI 仍打印已停止，用户误以为成功 | 2026-07-05 10:42 | 2026-07-05 10:42 | 已完成 | Phase 3 起改为派发到 stop_container（docker compose stop），不再静默无操作；静态实例仍走 gateway.disable + 释放端口。原「抛 HostingError」方案已被容器 stop 实现取代（用户走查 bug #6） |
+| BUG-010 | 修复 | stop_instance 对容器实例静默无操作，CLI 仍打印已停止，用户误以为成功 | 2026-07-05 10:42 | 2026-07-05 10:42 | 已完成 | Phase 3 起改为派发到 stop_container（docker compose stop），不再静默无操作；静态实例走 gateway.disable，端口登记保留供 start 复用（BUG-045 后不再 release_instance）。原「抛 HostingError」方案已被容器 stop 实现取代（用户走查 bug #6） |
 | BUG-011 | 修复 | reload_all 首次无旧配置且 reload 失败时，坏的新 Caddyfile 残留原地，影响后续 reload | 2026-07-05 10:42 | 2026-07-05 10:42 | 已完成 | previous is None 分支失败时 unlink 主配置；新增两条 reload 回归测试（用户走查 bug #7） |
 | BUG-012 | 修复 | has_manage_py 已采集但从未参与 Django 识别（仅靠依赖判断），信号被浪费 | 2026-07-05 10:42 | 2026-07-05 10:42 | 已完成 | _detect_python 在依赖未命中 django 时据 has_manage_py 补识别（用户走查 bug #8） |
 | BUG-013 | 修复 | 嵌套 index.html + 根目录同级资源（如 current/shared.css 与 current/site/index.html 同级）会丢失 sibling | 2026-07-05 11:15 | 2026-07-05 11:20 | 已完成 | host_static 改为同步整个 current/，再把 index 所在子目录内容提升到 public/ 根（新增 _copy_item/_promote_to_root）；e2e 验证 GET /shared.css、/style.css、/site/style.css 均可访问，169 测试通过（BUG-004 边界，用户批准方案） |
@@ -55,6 +55,7 @@
 | BUG-042 | 修复 | Compose 安全审计漏掉 Windows 盘符 bind mount | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | Compose 短格式 volume 解析兼容 Windows 盘符；`C:\Users:/app/host` 触发 host_sensitive_mount 回归 |
 | BUG-043 | 修复 | 管理页详情中的构建记录和事件字段名与 API 返回不匹配，时间、类型、错误摘要显示为空 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | 详情 API 返回 camelCase builds/events/resources；前端兼容 camelCase 与 snake_case；新增详情字段回归 |
 | BUG-044 | 修复 | 管理 API 遇非法实例 ID 返回 500 而不是 400 | 2026-07-06 09:47 | 2026-07-06 11:20 | 已完成 | 复核已修复：PathError/SchemaError/ConfigError 等映射 bad_request；新增 `Bad_ID` 返回 400 回归 |
+| BUG-045 | 修复 | 静态实例 stop 后端口无法稳定复用：(1) stop 释放端口登记，旧端口可被重分配给别的实例（跨实例内容混淆）；(2) stop 后端口残留 TIME_WAIT，独占 bind 的 `is_port_in_use` 误判占用，复用判定恒为假，重启报健康检查失败 | 2026-07-06 09:46 | 2026-07-06 11:30 | 已完成 | (1) `stop_instance` 静态分支不再 `release_instance`，保留端口登记供 start 复用（与容器路径对称）；(2) 新增 `is_port_listening`（connect 探测，TIME_WAIT 不影响），`_ensure_static_port`/`_ensure_container_port` 复用判定改用它；分配器 `PortAllocator.allocate` 仍用严格 `is_port_in_use` 避开 TIME_WAIT；(3) `StaticGateway` 缓存 builtin 子进程 `Popen` 句柄 + `waitpid` 回收僵尸，避免 `_pid_alive` 误判存活导致 kill 失败、端口无法释放；builtin 启动后改 `_wait_until_healthy` 轮询健康检查，避免偶发误回滚。注：此前代码以 BUG-028 引用本问题，与清单 BUG-028（管理页列表字段）撞号，已统一改为 BUG-045；`static_gateway.py` 中误标 BUG-016 的注释亦已更正。回归 test_stop_static_then_restart_reuses_port/test_stopped_static_port_not_reassigned，全量 577 passed/4 skipped |
 
 ## 调整事项
 
@@ -109,7 +110,7 @@
 | DEV-026 | 开发 | WBS-26 lwa doctor 与排障辅助（环境检查 + 实例深度诊断） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 6；doctor.py，CheckResult/DoctorReport；python/docker/compose/port_pool/registry/static_gateway/disk/memory 检查；diagnose_instance 深度诊断；runner/port_in_use 注入式可测；lwa doctor [--json] [ID]，fail 退出码 1；28 测试 |
 | DEV-027 | 开发 | WBS-27 样例项目与测试夹具（6 个样例 dict 打包 + build_zip/build_all） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；tests/fixtures/，6 样例（static_html/vite_react/node_express/fastapi_sqlite/build_failure/pending_unknown），dict[str,str] 按需打包；EXPECTED_KIND 映射；18 测试 |
 | DEV-028 | 开发 | WBS-28 单元测试与集成测试（全模块覆盖 + Docker 双重守卫） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；conftest requires_docker marker + LWA_RUN_DOCKER_TESTS 双守卫；WBS-28.01~15 全覆盖；test_security/test_doctor/test_fixtures/test_integration_phase57；529 passed/4 skipped |
-| DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-06 01:30 | 已完成 | Phase 7；tests/test_e2e_acceptance.py（11 测试，覆盖 init/import×4/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor）；docs/acceptance-checklist.md（18 子任务，Docker 依赖项手工清单）；540 passed/4 skipped |
+| DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-06 01:30 | 部分完成 | Phase 7；tests/test_e2e_acceptance.py（11 测试，覆盖 init/import×4/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor）；docs/acceptance-checklist.md（18 子任务，Docker 依赖项手工清单）；自动化 E2E（11 测试）全通过；**Docker 手工验收（29.09/29.11/29.12，容器构建/运行/健康检查）待在具备 Docker 的 Linux 主机执行**（见 docs/acceptance-checklist.md 验收记录）；全量回归 577 passed/4 skipped |
 | DEV-030 | 开发 | WBS-30 文档与发布准备（README 更新 + 管理/FAQ/安全/限制/发布清单） | 2026-07-06 01:30 | 2026-07-06 02:00 | 已完成 | Phase 7；README 全面更新（Phase 0~7 全完成，新增 manager/daemon/doctor/skills 章节）；docs/manager-page.md、faq.md、security-boundary.md、known-limitations.md、release-checklist.md；文档索引齐全 |
 
 ## 配置运维
@@ -129,18 +130,18 @@
 | PLN-005 | 规划 | Phase 4：生命周期、日志、资源与队列（WBS-17~WBS-20） | 2026-07-04 23:49 | 2026-07-05 14:04 | 已完成 | DEV-017~020 全部完成；lifecycle 双层锁 + logs/health/status/stats/build_queue；CLI 新增 restart/rebuild/remove/logs/status/stats；328 测试通过 |
 | PLN-006 | 规划 | Phase 5：自动化与管理页（WBS-21~WBS-23，daemon/管理页 API/前端） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-021~023 全部完成；daemon inbox 自动导入 + 管理页 FastAPI + 单页前端，管理页端口 17800 |
 | PLN-007 | 规划 | Phase 6：Skills、安全与排障（WBS-24~WBS-26） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-024~026 全部完成；12 个 SKILL.md + security.py 审计 + doctor 排障 |
-| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | 2026-07-06 02:00 | 已完成 | DEV-027~030 全部完成；6 样例夹具 + 全量测试 540 passed/4 skipped + E2E 验收 + V1 文档套件 |
+| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | 2026-07-06 02:00 | 部分完成 | DEV-027~028、030 已完成；DEV-029 部分完成（自动化 E2E 全通过，Docker 手工验收 29.09/29.11/29.12 待 Linux 主机，见 docs/acceptance-checklist.md）；6 样例夹具 + 全量测试 577 passed/4 skipped + V1 文档套件 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 44 | 44 | 0 | 100% |
+| 代码 Bug | 45 | 45 | 0 | 100% |
 | 调整事项 | 0 | 0 | 0 | 0% |
 | 检查事项 | 1 | 1 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
 | 文档维护 | 0 | 0 | 0 | 0% |
-| 功能开发 | 30 | 30 | 0 | 100% |
+| 功能开发 | 30 | 29 | 1 | 96.7% |
 | 配置运维 | 1 | 1 | 0 | 100% |
-| 规划事项 | 8 | 8 | 0 | 100% |
-| **总计** | 84 | 84 | 0 | 100% |
+| 规划事项 | 8 | 7 | 1 | 87.5% |
+| **总计** | 85 | 83 | 2 | 97.6% |
