@@ -108,6 +108,23 @@ def build_health_url(port: int, *, host: str = _HEALTH_HOST) -> str:
     return f"http://{host}:{port}"
 
 
+def build_route_url(
+    lan_ip: str | None,
+    gateway_port: int | None,
+    alias: str,
+) -> str | None:
+    """生成路径别名的统一入口 URL（IMP-006）。
+
+    形如 ``http://<lan_ip>:8080/<alias>/``。``lan_ip`` 无法确定或
+    ``gateway_port`` 为 ``None``（别名入口关闭）时返回 ``None``——此时只能
+    通过 hostPort 访问。端口为 80 时省略显式端口，输出干净的 ``http://ip/<alias>/``。
+    """
+    if not lan_ip or gateway_port is None:
+        return None
+    port_part = "" if gateway_port == 80 else f":{gateway_port}"
+    return f"http://{lan_ip}{port_part}/{alias}/"
+
+
 class PortAllocator:
     """端口池分配器。
 
@@ -185,19 +202,34 @@ def build_network_entry(
     *,
     internal_port: int | None = None,
     lan_ip: str | None = None,
+    path_alias: str | None = None,
 ) -> dict:
     """构造 ``local-web.json`` 的 ``network`` 字段。
 
-    对应 WBS-06.07~09。
+    对应 WBS-06.07~09。``path_alias`` 非 ``None`` 时（IMP-006）写入
+    ``routeMode="name"`` + ``routeHost=<alias>`` + ``routeUrl``（统一入口 URL）。
     """
     if lan_ip is None:
         lan_ip = resolve_lan_ip(config)
+    if path_alias is not None:
+        route_url = build_route_url(lan_ip, config.staticGatewayPort, path_alias)
+        return {
+            "host": "0.0.0.0",
+            "internalPort": internal_port,
+            "hostPort": host_port,
+            "routeMode": "name",
+            "routeHost": path_alias,
+            "routeUrl": route_url,
+            "lanUrl": build_lan_url(lan_ip, host_port),
+            "healthUrl": build_health_url(host_port),
+        }
     return {
         "host": "0.0.0.0",
         "internalPort": internal_port,
         "hostPort": host_port,
         "routeMode": "port",
         "routeHost": None,
+        "routeUrl": None,
         "lanUrl": build_lan_url(lan_ip, host_port),
         "healthUrl": build_health_url(host_port),
     }
@@ -211,5 +243,6 @@ __all__ = [
     "resolve_lan_ip",
     "build_lan_url",
     "build_health_url",
+    "build_route_url",
     "build_network_entry",
 ]

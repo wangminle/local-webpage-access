@@ -104,3 +104,34 @@ def test_to_yaml_is_valid_yaml(workspace: Workspace) -> None:
     parsed = yaml.safe_load(cfg.to_yaml())
     assert isinstance(parsed, dict)
     assert parsed["managerPort"] == 17800
+
+
+# ---- IMP-006：staticGatewayPort 校验 --------------------------------------
+
+
+def test_static_gateway_port_default() -> None:
+    from local_webpage_access.config import STATIC_GATEWAY_PORT_DEFAULT
+
+    cfg = Config()
+    assert cfg.staticGatewayPort == STATIC_GATEWAY_PORT_DEFAULT == 8080
+
+
+def test_static_gateway_port_none_allowed() -> None:
+    """设为 None 表示关闭别名入口。"""
+    cfg = Config(staticGatewayPort=None)
+    assert cfg.staticGatewayPort is None
+
+
+def test_static_gateway_port_conflicts_with_manager() -> None:
+    with pytest.raises(ValueError):
+        Config(managerPort=17800, staticGatewayPort=17800)
+
+
+def test_static_gateway_port_conflicts_with_pool() -> None:
+    with pytest.raises(ValueError):
+        Config(staticGatewayPort=18050)  # 落在默认端口池 [18000, 19999] 内
+
+
+def test_static_gateway_port_outside_pool_ok() -> None:
+    cfg = Config(staticGatewayPort=8081)
+    assert cfg.staticGatewayPort == 8081

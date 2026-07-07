@@ -34,6 +34,8 @@ _START_WAIT = 3.0
 _KILL_TIMEOUT = 10
 
 # builtin 模式回退用的 Caddy 配置模板（也用于 Caddy 模式渲染）
+# {rate_limit_block} 占位符由 _rate_limit_directive 填充（IMP-005）；
+# 未启用限流时为空串，留下一行空行（Caddyfile 忽略）。
 _FALLBACK_TEMPLATE = """\
 # Local Webpage Access — Caddy 静态站点配置
 # 由 lwa 自动生成，请勿手动编辑。
@@ -41,6 +43,7 @@ _FALLBACK_TEMPLATE = """\
 \troot * {root}
 \tfile_server
 \tencode gzip
+{rate_limit_block}
 }}
 """
 
@@ -67,6 +70,8 @@ class StaticGateway:
         # builtin 子进程的 Popen 句柄：_kill_process 必须用它回收僵尸，
         # 否则 os.kill(pid, 0) 对已退出但未回收的子进程恒返回 True（BUG-045）。
         self._procs: dict[str, subprocess.Popen] = {}
+        # IMP-005：Caddy rate_limit 模块能力探测缓存（None=未探测）。
+        self._supports_rate_limit: bool | None = None
 
     # ---- 后端探测 -----------------------------------------------------------
 
@@ -83,6 +88,88 @@ class StaticGateway:
         # nginx 等尚未实现的网关：暂降级 builtin
         log.warning("staticGateway=%s 尚未实现，降级 builtin", configured)
         return "builtin"
+
+    # ---- IMP-005：频率限制能力探测与指令生成 ---------------------------------
+
+    def supports_rate_limit(self) -> bool:
+        """探测 Caddy 是否含 ``http.handlers.rate_limit`` 模块（IMP-005）。
+
+        结果在 :class:`StaticGateway` 实例生命周期内缓存。非 Caddy 后端、
+        ``caddy`` 不在 PATH、或探测超时/失败时返回 ``False``。
+        """
+        if self._supports_rate_limit is not None:
+            return self._supports_rate_limit
+        self._supports_rate_limit = self._probe_rate_limit_module()
+        return self._supports_rate_limit
+
+    def _probe_rate_limit_module(self) -> bool:
+        """执行 ``caddy list-modules`` 查找 rate_limit handler。"""
+        try:
+            result = subprocess.run(
+                ["caddy", "list-modules"],
+                capture_output=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+        if result.returncode != 0:
+            return False
+        text = result.stdout.decode("utf-8", "replace")
+        return "http.handlers.rate_limit" in text
+
+    def _rate_limit_directive(self, site_id: str) -> str:
+        """构造 Caddy ``rate_limit`` 指令文本（IMP-005）。
+
+        返回适合直接插入站点块（缩进一级 = 一个制表符）的指令；未启用、
+        builtin 后端、或能力不可用时返回空串。
+
+        令牌桶语义：``events=burst``（桶容量 / 瞬时突发上限），
+        ``window=burst/rps`` 秒（补充速率 = ``rps``/秒）。默认 ``rps=3, burst=6``
+        → ``events 6`` / ``window 2s``，即平均 3 次/秒、瞬时最多 6 次。
+
+        能力不可用（Caddy 未装 rate_limit 模块）时记 WARN，站点仍正常访问、
+        仅限流不生效——绝不因限流配置让静态站点整体下线（IMP-005 风险约束）。
+        """
+        rl = self.config.staticRateLimit
+        if not rl.enabled:
+            return ""
+        backend = self.detect_backend()
+        if backend != "caddy":
+            # builtin / nginx 等不支持 Caddy 指令；首次注入时提示一次
+            log.info(
+                "staticRateLimit 已启用，但当前静态后端为 %s，限流未生效"
+                "（builtin 模式暂不支持，需在反向代理层补充）",
+                backend,
+            )
+            return ""
+        if not self.supports_rate_limit():
+            log.warning(
+                "staticRateLimit 已启用，但 Caddy 不含 http.handlers.rate_limit "
+                "模块；站点保持可访问，限流未生效。建议安装 caddy-ratelimit 插件"
+                "（如 github.com/mholt/caddy-ratelimit）后重启 Caddy。"
+            )
+            return ""
+        rps = max(1, rl.rps)
+        burst = max(1, rl.burst)
+        events = burst
+        window_s = burst / rps
+        if window_s >= 1 and abs(window_s - round(window_s)) < 1e-9:
+            window_str = f"{round(window_s)}s"
+        else:
+            window_str = f"{max(1, round(window_s * 1000))}ms"
+        # zone 名不含连字符（Caddy 标识符惯例）
+        zone = f"lwa_{site_id.replace('-', '_')}"
+        # {remote_host} 是 Caddy 占位符，作为字面值插入；str.format 不会处理
+        # 替换值中的花括号，因此安全。
+        return (
+            f"\trate_limit {{\n"
+            f"\t\tzone {zone} {{\n"
+            f"\t\t\tkey {{remote_host}}\n"
+            f"\t\t\tevents {events}\n"
+            f"\t\t\twindow {window_str}\n"
+            f"\t\t}}\n"
+            f"\t}}"
+        )
 
     # ---- 站点配置路径 -------------------------------------------------------
 
@@ -114,6 +201,7 @@ class StaticGateway:
             host_port=host_port,
             root=_caddy_quote(str(root).replace("\\", "/")),
             site_id=instance_id,
+            rate_limit_block=self._rate_limit_directive(instance_id),
         )
         path = self.site_config_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +214,57 @@ class StaticGateway:
         if path.exists():
             path.unlink()
 
+    # ---- IMP-006：路径别名路由片段 -----------------------------------------
+
+    def generate_alias_config(self, instance_id: str, alias: str, host_port: int) -> Path:
+        """渲染路径别名路由片段，写入 ``aliases/<id>.conf``（IMP-006）。
+
+        片段被主 Caddyfile 的统一入口块 ``import`` 进 ``:{staticGatewayPort}`` 站点。
+        ``handle_path`` 自动去前缀——upstream 收到的是去掉 ``/<alias>`` 后的路径，
+        避免应用看到 ``/alias/index.html`` 找不到资源；``handle /<alias>`` 处理
+        无尾斜杠访问，301 到 ``/<alias>/``。
+
+        alias slug 已由 :func:`paths.validate_path_alias` 校验为
+        ``[a-z0-9-]+``，host_port 为 int，均可安全内插 Caddyfile。
+
+        .. note:: SPA 绝对资源路径限制（IMP-006 验收项）
+
+            ``handle_path`` 去掉 ``/<alias>`` 前缀后转发给 upstream，因此
+            **相对路径资源**（``./assets/app.js``、``assets/logo.png``）能正确
+            解析为 ``/<alias>/assets/...``。但**绝对路径资源**
+            （``/assets/app.js``、以 ``/`` 开头的 ``src``/``href``）会绕过别名，
+            直接打到统一入口根 ``/assets/...`` → 404。
+
+            这意味着：纯静态 HTML 站点（相对路径或无外部资源）开箱即用；
+            Vue/React 等 SPA 的构建产物若使用绝对 ``base: '/'``，资源会 404。
+            受影响的项目应在构建时设置 ``base: './'``（Vite）或等价的相对基址，
+            或继续使用 hostPort 端口直达（资源路径不受别名前缀影响）。
+            ``import_zip`` 已把别名限制为 ``shared-static`` 纯静态形态，前端
+            SPA 构建形态（``build_and_host_frontend``）当前不强制注入别名。
+        """
+        content = (
+            f"# IMP-006 路径别名：/{alias}/ → 127.0.0.1:{host_port}"
+            f"（实例 {instance_id}，handle_path 去前缀）\n"
+            f"handle_path /{alias}/* {{\n"
+            f"\treverse_proxy 127.0.0.1:{host_port}\n"
+            f"}}\n"
+            f"handle /{alias} {{\n"
+            f"\tredir /{alias}/ permanent\n"
+            f"}}\n"
+        )
+        path = self.ws.app_alias_config(instance_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        log.info("已生成路径别名路由：/%s/ → 127.0.0.1:%d", alias, host_port)
+        return path
+
+    def remove_alias_config(self, instance_id: str) -> None:
+        """删除实例的路径别名片段（IMP-006）。不存在时为空操作。"""
+        path = self.ws.app_alias_config(instance_id)
+        if path.exists():
+            path.unlink()
+            log.info("已删除路径别名路由：%s", instance_id)
+
     # ---- enable / disable ---------------------------------------------------
 
     def enable(
@@ -135,12 +274,16 @@ class StaticGateway:
         root: Path,
         *,
         wait_health: bool = True,
+        alias: str | None = None,
     ) -> None:
         """启用静态站点（WBS-09.04/05/06/07）。
 
         builtin 模式：启动 http.server 子进程，随后做健康检查；
         健康检查失败时回滚（停掉进程、删除配置）。
         Caddy 模式：生成站点配置并 reload，reload 失败回滚。
+
+        ``alias`` 非 ``None`` 时（IMP-006）在 Caddy 模式下额外生成路径别名
+        路由片段。builtin 模式不支持别名入口，仅记 WARN 提示用户仍只走端口。
         """
         root = Path(root)
         if not root.is_dir():
@@ -152,39 +295,55 @@ class StaticGateway:
         self.generate_site_config(instance_id, host_port, root)
 
         backend = self.detect_backend()
+        # IMP-006：别名片段仅在 Caddy 模式下生成；builtin 多端口模式无统一入口。
+        if alias is not None and backend == "caddy":
+            self.generate_alias_config(instance_id, alias, host_port)
+        elif alias is not None:
+            log.warning(
+                "实例 %s 配置了路径别名 %s，但当前静态后端为 %s，别名入口未启用"
+                "（builtin 模式暂不支持，仅通过端口 %d 访问）",
+                instance_id, alias, backend, host_port,
+            )
+
         if backend == "builtin":
             self._start_builtin(instance_id, host_port, root)
             if wait_health and not self._wait_until_healthy(host_port):
                 # 回滚
                 self._stop_builtin(instance_id)
                 self.remove_site_config(instance_id)
+                if alias is not None:
+                    self.remove_alias_config(instance_id)
                 raise GatewayError(
                     f"静态站点启动后健康检查失败（端口 {host_port}）",
                     instance_id=instance_id,
                     host_port=host_port,
                 )
         else:
-            # Caddy 模式：reload 主配置，失败则回滚站点配置
+            # Caddy 模式：reload 主配置，失败则回滚站点配置与别名片段
             try:
                 self.reload_all()
             except GatewayError:
                 self.remove_site_config(instance_id)
+                if alias is not None:
+                    self.remove_alias_config(instance_id)
                 raise
         log.info("静态站点已启用：%s（%s，端口 %d）", instance_id, backend, host_port)
 
     def disable(self, instance_id: str) -> None:
-        """禁用静态站点（WBS-09.07）。"""
+        """禁用静态站点（WBS-09.07）。IMP-006：同时清理路径别名片段。"""
         backend = self.detect_backend()
         if backend == "builtin":
             self._stop_builtin(instance_id)
         else:
             self.remove_site_config(instance_id)
+            self.remove_alias_config(instance_id)
             try:
                 self.reload_all()
             except GatewayError as exc:
                 log.warning("禁用 %s 后 Caddy reload 失败：%s", instance_id, exc)
-        # builtin 模式也清理配置
+        # builtin 模式也清理配置（含可能的别名片段）
         self.remove_site_config(instance_id)
+        self.remove_alias_config(instance_id)
         log.info("静态站点已禁用：%s", instance_id)
 
     def is_enabled(self, instance_id: str) -> bool:
@@ -274,11 +433,32 @@ class StaticGateway:
         新配置，首次加载后关闭 admin 会让后续 enable/disable 的 reload 全部
         失败（BUG-014）。import 路径用反引号引用，避免含空格的工作区路径被
         拆词（BUG-020）。
+
+        IMP-006：当存在路径别名片段且 ``staticGatewayPort`` 已配置时，追加
+        一个统一入口站点块（``:<port>``），把所有别名片段 ``import`` 进去。
+        别名片段用 Python 端 glob 展开为逐条 import，避免 Caddy 引号内 glob
+        的歧义。无别名或端口关闭时不追加该块，保持端口不被占用。
         """
         lines: list[str] = []
         sites = sorted(self.ws.static_sites.glob("*.conf"))
         for site in sites:
             lines.append(f"import {_caddy_quote(site.as_posix())}")
+
+        aliases = sorted(self.ws.static_aliases.glob("*.conf"))
+        port = self.config.staticGatewayPort
+        if aliases and port is not None:
+            lines.append("")
+            lines.append(f"# IMP-006 路径别名统一入口（端口 {port}，去前缀反向代理）")
+            lines.append(f":{port} {{")
+            for alias_conf in aliases:
+                lines.append(f"\timport {_caddy_quote(alias_conf.as_posix())}")
+            lines.append("}")
+        elif aliases and port is None:
+            log.warning(
+                "存在 %d 个路径别名片段，但 staticGatewayPort=None，别名入口未启用"
+                "（仅 hostPort 可达）；请在 local-web.yml 设置 staticGatewayPort",
+                len(aliases),
+            )
         return "\n".join(lines) + "\n"
 
     # ---- builtin 进程管理 ---------------------------------------------------

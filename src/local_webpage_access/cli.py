@@ -10,7 +10,7 @@ import sys
 
 import typer
 
-from local_webpage_access import PRODUCT_NAME, __version__
+from local_webpage_access import PRODUCT_NAME
 from local_webpage_access.errors import LwaError
 from local_webpage_access.logging import get_logger, setup_logging
 
@@ -39,7 +39,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.3.1-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.4.0-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -89,33 +89,198 @@ def _open_workspace_registry():
 def import_cmd(
     zip_path: str = typer.Argument(..., help="要导入的 zip 文件路径"),
     name: str = typer.Option(None, "--name", "-n", help="实例显示名称（默认从文件名推导）"),
+    path_alias: str = typer.Option(
+        None,
+        "--path-alias",
+        help="路径别名 slug（IMP-006，仅静态站点）；启用后可通过 http://<LAN-IP>:<staticGatewayPort>/<alias>/ 访问",
+    ),
+    update: str = typer.Option(
+        None,
+        "--update",
+        "-u",
+        help="更新已有实例（IMP-009）：原地覆盖 current/、保留 id/hostPort/data/，而非新建",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="非交互确认（CI / daemon 调用）"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="仅预演：展示 hash 差异与形态变化，不写盘"
+    ),
+    no_restart: bool = typer.Option(
+        False,
+        "--no-restart",
+        help="更新后不自动 restart（维护窗口；默认：若原 running 则 restart）",
+    ),
+    no_keep_data: bool = typer.Option(
+        False,
+        "--no-keep-data",
+        help="更新时清空 data/（默认保留 data/）",
+    ),
+    force_kind_change: bool = typer.Option(
+        False,
+        "--force-kind-change",
+        help="允许新 zip 的 kind/runtime 与原实例不同（默认拒绝；确认迁移时仍保留 hostPort 登记）",
+    ),
 ) -> None:
-    """导入一个 zip 包：解压、识别、登记实例。"""
+    """导入一个 zip 包：解压、识别、登记实例。
+
+    加 ``--update <id>``（IMP-009）则改为原地更新已有实例：保留 instance_id、
+    hostPort、data/、desiredState 与路径别名，仅覆盖业务源码并按需 restart。
+    """
     from local_webpage_access.importer import Importer
 
     try:
         ws, config, reg = _open_workspace_registry()
         try:
             importer = Importer(ws, config, reg)
-            result = importer.import_zip(zip_path, name=name)
+            if update is not None:
+                _do_update(
+                    importer,
+                    ws,
+                    config,
+                    reg,
+                    zip_path=zip_path,
+                    instance_id=update,
+                    restart=not no_restart,
+                    keep_data=not no_keep_data,
+                    yes=yes,
+                    dry_run=dry_run,
+                    force_kind_change=force_kind_change,
+                )
+            else:
+                # IMP-009：CLI 路径下 slug 冲突不再 silent 建 -2，提示 --update
+                result = importer.import_zip(
+                    zip_path,
+                    name=name,
+                    path_alias=path_alias,
+                    on_conflict="error",
+                )
+                _print_import_result(result, config)
         finally:
             reg.close()
-
-        typer.secho(f"已导入实例：{result.instance_id}", fg=typer.colors.GREEN)
-        typer.echo(f"  名称：{result.manifest.name}")
-        typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
-        typer.echo(f"  类型：{result.manifest.kind} / {result.manifest.runtime}")
-        typer.echo(f"  目录：{result.app_dir}")
-        typer.echo(f"  sha256：{result.zip_hash}")
-        if result.detection.pending:
-            typer.secho(
-                f"  注意：{result.manifest.lastError}（已标记 pending，需人工或 skill 介入）",
-                fg=typer.colors.YELLOW,
-            )
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _print_import_result(result, config) -> None:
+    """渲染 :class:`ImportResult`（导入与更新共用）。"""
+    typer.secho(f"已导入实例：{result.instance_id}", fg=typer.colors.GREEN)
+    typer.echo(f"  名称：{result.manifest.name}")
+    typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
+    typer.echo(f"  类型：{result.manifest.kind} / {result.manifest.runtime}")
+    typer.echo(f"  目录：{result.app_dir}")
+    typer.echo(f"  sha256：{result.zip_hash}")
+    # IMP-006：导入时登记了路径别名则提示（实际 URL 在 start 后生成）
+    if (
+        result.manifest.static is not None
+        and result.manifest.static.routeMode == "name"
+        and result.manifest.static.routeHost
+    ):
+        typer.secho(
+            f"  路径别名：/{result.manifest.static.routeHost}/"
+            f"（lwa start 后生效，入口端口 {config.staticGatewayPort}）",
+            fg=typer.colors.CYAN,
+        )
+    # IMP-001：剥离摘要（仅当实际剥离了冗余成员时显示）
+    if result.sanitized and result.sanitized.stripped_names:
+        san = result.sanitized
+        parts = ", ".join(
+            f"{rule}×{n}"
+            for rule, n in sorted(san.categories.items(), key=lambda kv: -kv[1])
+        )
+        typer.secho(
+            f"  已剥离冗余成员 {len(san.stripped_names)} 项"
+            f"（含 symlink {san.stripped_symlink_count}）：{parts}",
+            fg=typer.colors.CYAN,
+        )
+    if result.detection.pending:
+        typer.secho(
+            f"  注意：{result.manifest.lastError}（已标记 pending，需人工或 skill 介入）",
+            fg=typer.colors.YELLOW,
+        )
+
+
+def _do_update(
+    importer,
+    ws,
+    config,
+    reg,
+    *,
+    zip_path: str,
+    instance_id: str,
+    restart: bool,
+    keep_data: bool,
+    yes: bool,
+    dry_run: bool,
+    force_kind_change: bool,
+) -> None:
+    """IMP-009：``lwa import --update <id>`` 的编排（数据层 + 可选 restart）。"""
+    result = importer.update_zip(
+        zip_path,
+        instance_id,
+        restart=restart,
+        keep_data=keep_data,
+        yes=yes,
+        dry_run=dry_run,
+        force_kind_change=force_kind_change,
+    )
+
+    prev_short = result.prev_hash[:12] if result.prev_hash else "∅"
+    new_short = result.zip_hash[:12]
+
+    if result.skipped:
+        typer.secho(
+            f"实例 {instance_id} 的 zip 未变化（sha256 {new_short}），已跳过更新。",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    if result.dry_run:
+        typer.secho(
+            f"[dry-run] 实例 {instance_id}：sha256 {prev_short} → {new_short}",
+            fg=typer.colors.CYAN,
+        )
+        if result.detection is not None:
+            typer.echo(f"  新形态：{result.detection.form}")
+        if result.kind_changed:
+            typer.secho(
+                "  ⚠ 形态将变化，需 --force-kind-change 才能实际更新",
+                fg=typer.colors.YELLOW,
+            )
+        if result.was_running:
+            typer.echo("  原状态：running（实际更新后将 restart）")
+        if result.sanitized and result.sanitized.stripped_names:
+            typer.echo(
+                f"  将剥离冗余成员 {len(result.sanitized.stripped_names)} 项"
+            )
+        return
+
+    typer.secho(f"已更新实例：{instance_id}", fg=typer.colors.GREEN)
+    typer.echo(f"  sha256：{prev_short} → {new_short}")
+    if result.detection is not None:
+        typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
+    typer.echo(f"  目录：{result.app_dir}")
+    if result.sanitized and result.sanitized.stripped_names:
+        san = result.sanitized
+        parts = ", ".join(
+            f"{rule}×{n}"
+            for rule, n in sorted(san.categories.items(), key=lambda kv: -kv[1])
+        )
+        typer.secho(
+            f"  已剥离冗余成员 {len(san.stripped_names)} 项"
+            f"（含 symlink {san.stripped_symlink_count}）：{parts}",
+            fg=typer.colors.CYAN,
+        )
+
+    # needs_restart=True：调用方执行 restart（hostPort 由 hosting 复用，不变）
+    if result.needs_restart:
+        from local_webpage_access.lifecycle import restart_instance
+
+        typer.secho("  正在 restart…", fg=typer.colors.CYAN)
+        restart_instance(ws, config, reg, instance_id)
+        typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
 
 
 @app.command()
@@ -184,6 +349,20 @@ def start(instance_id: str = typer.Argument(..., help="要启动的实例 ID")) 
             typer.echo(f"  端口：{manifest.network.hostPort}")
         if manifest.network.lanUrl:
             typer.echo(f"  局域网：{manifest.network.lanUrl}")
+        # IMP-006：路径别名入口 URL（routeMode=name 时填充）
+        if manifest.network.routeUrl:
+            typer.secho(f"  路径：{manifest.network.routeUrl}", fg=typer.colors.CYAN)
+        elif (
+            manifest.static is not None
+            and manifest.static.routeMode == "name"
+            and manifest.static.routeHost
+        ):
+            # 别名已登记但入口端口未配置或 LAN IP 未探测到
+            typer.secho(
+                f"  路径别名 /{manifest.static.routeHost}/ 已登记，但入口未就绪"
+                f"（检查 local-web.yml 的 staticGatewayPort 与 LAN IP）",
+                fg=typer.colors.YELLOW,
+            )
         typer.echo(f"  健康：{manifest.network.healthUrl}")
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
@@ -335,6 +514,12 @@ def status(
                 f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} "
                 f"{s.status:10} {s.desired_state:10} {port:6} {s.name}"
             )
+            # IMP-007：容器实例展示端口映射（internalPort→hostPort）
+            if s.port_mapping_label:
+                typer.echo(f"  ↳ 映射：{s.port_mapping_label}")
+            # IMP-006：路径别名入口 URL
+            if s.route_url:
+                typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
             if s.last_error:
                 typer.secho(f"  ↳ lastError: {s.last_error}", fg=typer.colors.RED)
     except LwaError as exc:
@@ -417,26 +602,27 @@ def _fmt_bytes(n: int | None) -> str:
 @app.command("list")
 def list_cmd() -> None:
     """列出所有实例及其状态。"""
+    from local_webpage_access.status import all_statuses
+
     try:
-        ws, _config, reg = _open_workspace_registry()
+        ws, config, reg = _open_workspace_registry()
         try:
-            rows = reg.list_instances()
-            # 构造 instance_id -> port 映射
-            port_map: dict[str, int] = {}
-            for port in reg.allocated_ports():
-                port_map[reg.port_owner(port) or ""] = port
+            statuses = all_statuses(ws, config, reg)
         finally:
             reg.close()
-        if not rows:
+        if not statuses:
             typer.echo("（暂无实例）")
             return
         typer.echo(f"{'ID':20} {'KIND':8} {'RUNTIME':16} {'STATUS':10} {'PORT':6} NAME")
-        for row in rows:
-            port = str(port_map.get(row["id"], "")) or "-"
+        for s in statuses:
+            port = str(s.host_port) if s.host_port else "-"
             typer.echo(
-                f"{row['id'][:20]:20} {row['kind']:8} {row['runtime']:16} "
-                f"{row['status']:10} {port:6} {row['name']}"
+                f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} "
+                f"{s.status:10} {port:6} {s.name}"
             )
+            # IMP-007：容器实例展示端口映射（internalPort→hostPort）
+            if s.port_mapping_label:
+                typer.echo(f"  ↳ 映射：{s.port_mapping_label}")
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -738,6 +924,109 @@ def doctor_cmd(
                     ensure_ascii=False,
                     indent=2,
                 )
+            )
+        else:
+            typer.echo(format_report(report))
+        if report.has_failures:
+            raise typer.Exit(code=1)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+# ---- update 子命令（IMP-008：工作区热重载）----------------------------------
+
+
+@app.command("update")
+def update_cmd(
+    workspace: str = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="工作区根（默认自动识别 local-web.yml）",
+    ),
+    repo: str = typer.Option(
+        None,
+        "--repo",
+        help="lwa 源码根（默认识别 editable 安装路径或 git 根）",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="仅展示计划，不执行 pip/同步/重启"
+    ),
+    skip_pip: bool = typer.Option(
+        False, "--skip-pip", help="跳过 pip install -e .（已手动装过）"
+    ),
+    sync_templates: bool = typer.Option(
+        False,
+        "--sync-templates",
+        help="同步 templates/（默认关，避免覆盖用户改过的模板）",
+    ),
+    no_doctor: bool = typer.Option(
+        False, "--no-doctor", help="结束后不跑 lwa doctor"
+    ),
+    restart_instances: bool = typer.Option(
+        False,
+        "--restart-instances",
+        help="对所有可重启实例执行 restart（默认关，耗时长）",
+    ),
+    no_sync_skills: bool = typer.Option(
+        False, "--no-sync-skills", help="跳过同步 skills/（默认同步）"
+    ),
+    no_restart_manager: bool = typer.Option(
+        False, "--no-restart-manager", help="跳过重启管理页"
+    ),
+    no_restart_daemon: bool = typer.Option(
+        False, "--no-restart-daemon", help="跳过重启 daemon"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="输出机器可读的 JSON 摘要"
+    ),
+) -> None:
+    """刷新 lwa 安装、同步工作区附属物、重启自有服务（IMP-008）。
+
+    ``git pull`` / 改代码后一条命令收敛运行态。默认**不动**已导入的实例
+    （apps/）；变更涉及托管逻辑时加 ``--restart-instances``。仅当 manager /
+    daemon 原本 running 时才重启，原本 stopped 不会被自动开启。
+    """
+    import json as json_mod
+    from pathlib import Path
+
+    from local_webpage_access.paths import require_workspace
+    from local_webpage_access.updater import UpdateOptions, format_report, run_update
+
+    try:
+        ws = (
+            require_workspace(Path(workspace))
+            if workspace
+            else require_workspace()
+        )
+        from local_webpage_access.config import load_config
+
+        config = load_config(ws)
+        from local_webpage_access.registry import Registry
+
+        reg = Registry(ws.db_path)
+        reg.open()
+        try:
+            options = UpdateOptions(
+                dry_run=dry_run,
+                skip_pip=skip_pip,
+                sync_skills=not no_sync_skills,
+                sync_templates=sync_templates,
+                restart_manager=not no_restart_manager,
+                restart_daemon=not no_restart_daemon,
+                restart_instances=restart_instances,
+                run_doctor=not no_doctor,
+                repo=repo,
+            )
+            report = run_update(ws, config, reg, options=options)
+        finally:
+            reg.close()
+
+        if json_output:
+            typer.echo(
+                json_mod.dumps(report.to_dict(), ensure_ascii=False, indent=2)
             )
         else:
             typer.echo(format_report(report))

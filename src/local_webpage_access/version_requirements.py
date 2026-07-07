@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
-MIN_DOCKER_VERSION = "29.6.1"
+MIN_DOCKER_VERSION = "29.0.0"
 MIN_COMPOSE_VERSION = "2.40.2"
 RECOMMENDED_COMPOSE_VERSION = "5.2.0"
 MIN_CADDY_VERSION = "2.11.2"

@@ -9,6 +9,9 @@
 * :func:`audit_zip_members` —— zip slip / 路径穿越 / 符号链接防御纵深
   （WBS-25.10，BUG-049 增强符号链接检测）。importer 解压前做 critical 级拦截，
   此处亦可用于 skill 或外部产出的成员名二次校验。
+* :func:`sanitize_zip_members` —— 导入前剥离冗余包与缓存目录（IMP-001），
+  在 ``audit_zip_members`` 之前运行：被剥离的成员（含其 symlink）不落盘、
+  不参与审计，从源头消除 ``node_modules/.bin/*`` 这类良性 symlink 触发的拒绝。
 * :func:`unknown_zip_risk_hint` —— 未知 zip 来源的标准风险提示（WBS-25.09）。
 * :func:`validate_manager_binding` —— 管理页绑定地址安全性（WBS-25.02）。
 
@@ -397,6 +400,121 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
     return findings
 
 
+# ---- zip 成员剥离（IMP-001）-------------------------------------------------
+
+# 可剥离的目录段：任意层级出现即剥离该成员及其树下所有成员。
+# 取自 docs/plan/待改进功能点记录-20260706.md IMP-001 清理规则。
+# 注意：裸 ``env/`` 不在此列 —— 它与「保留配置文件」规则冲突（应用常用
+# ``env/`` 存放环境配置/示例），误剥会丢数据。venv 用 ``.venv`` / ``venv``
+# 两个惯用名覆盖；裸 ``env`` 需要用户自行从 ``source/original.zip`` 手工处理。
+_STRIPPABLE_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".venv",
+        "venv",
+        ".git",
+        "__MACOSX",
+        ".tox",
+        ".cache",
+        ".eggs",
+        ".idea",
+        ".vscode",
+        ".next",
+        ".nuxt",
+        ".turbo",
+        ".gradle",
+        "build/dependencies",
+    }
+)
+# 可剥离的文件名（任意层级，按文件名精确匹配）
+_STRIPPABLE_FILES: frozenset[str] = frozenset(
+    {".DS_Store", "Thumbs.db", ".npmrc", "yarn-error.log"}
+)
+
+
+@dataclass(frozen=True)
+class ZipSanitizeResult:
+    """zip 成员剥离分类结果（IMP-001）。
+
+    ``keep_indices`` 指向原 ``names`` 列表的下标，调用方据此只解压保留成员。
+    ``categories`` 汇总每条剥离规则命中的成员数，供 CLI 输出与事件审计。
+    """
+
+    keep_indices: tuple[int, ...]
+    stripped_names: tuple[str, ...]
+    stripped_symlink_count: int
+    categories: dict[str, int]
+
+
+def _strip_rule_for(name: str) -> str | None:
+    """返回该成员命中的剥离规则名（目录段或文件名）；不需剥离返回 ``None``。"""
+    norm = name.replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    if not parts:
+        return None
+    # 目录段：逐级前缀匹配（如 a/b/node_modules/c → node_modules）
+    # 兼容 build/dependencies 这类「目录/子目录」规则：把累计前缀拼回去比对
+    acc = ""
+    for part in parts[:-1]:
+        acc = f"{acc}{part}/" if acc else f"{part}/"
+        if part in _STRIPPABLE_SEGMENTS:
+            return part
+        if acc.rstrip("/") in _STRIPPABLE_SEGMENTS:
+            return acc.rstrip("/")
+    # 最后一段：既是潜在目录也是潜在文件
+    last = parts[-1]
+    if last in _STRIPPABLE_SEGMENTS:
+        return last
+    if last in _STRIPPABLE_FILES:
+        return last
+    return None
+
+
+def sanitize_zip_members(
+    names: list[str], *, modes: list[int] | None = None
+) -> ZipSanitizeResult:
+    """按 IMP-001 规则把 zip 成员分成「保留 / 剥离」两类。
+
+    * 被 **剥离** 的成员（``node_modules/``、``__pycache__/``、``.venv/``、
+      ``.git/``、``__MACOSX/``、``.DS_Store`` 等）不落盘、不参与后续
+      ``audit_zip_members`` 审计 —— 包括其中的 symlink 成员（如
+      ``node_modules/.bin/*``，本是 npm 正常产物，不应触发 zip_symlink 拒绝）；
+    * 被 **保留** 的成员继续走 :func:`audit_zip_members` 与路径穿越校验：
+      ``src/evil → /etc/passwd`` 这类业务源码目录的恶意 symlink 仍会被拒绝。
+
+    Args:
+        names: zip 成员名列表。
+        modes: 可选的 Unix 模式位列表（与 ``names`` 对齐），用于统计被剥离的
+            symlink 成员数。短缺或缺省时仅按名称分类。
+
+    Returns:
+        :class:`ZipSanitizeResult`，``keep_indices`` 保持原列表顺序。
+    """
+    keep_idx: list[int] = []
+    stripped: list[str] = []
+    stripped_symlink = 0
+    categories: dict[str, int] = {}
+    for idx, name in enumerate(names):
+        rule = _strip_rule_for(name)
+        if rule is None:
+            keep_idx.append(idx)
+            continue
+        stripped.append(name)
+        categories[rule] = categories.get(rule, 0) + 1
+        if modes is not None and idx < len(modes) and _is_symlink_mode(modes[idx]):
+            stripped_symlink += 1
+    return ZipSanitizeResult(
+        keep_indices=tuple(keep_idx),
+        stripped_names=tuple(stripped),
+        stripped_symlink_count=stripped_symlink,
+        categories=dict(categories),
+    )
+
+
 # ---- zip slip 防御纵深（WBS-25.10）------------------------------------------
 
 
@@ -553,6 +671,8 @@ __all__ = [
     "audit_compose",
     "audit_dockerfile",
     "audit_zip_members",
+    "sanitize_zip_members",
+    "ZipSanitizeResult",
     "unknown_zip_risk_hint",
     "trusted_zip_hint",
     "validate_manager_binding",

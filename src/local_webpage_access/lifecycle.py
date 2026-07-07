@@ -25,7 +25,7 @@ from typing import Iterator
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LifecycleError, LwaError
 from local_webpage_access.logging import get_logger
-from local_webpage_access.models import DesiredState, InstanceManifest, Status
+from local_webpage_access.models import InstanceManifest, Status
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 

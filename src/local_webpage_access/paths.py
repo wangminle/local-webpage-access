@@ -16,6 +16,27 @@ REGISTRY_DB_FILENAME = "local-web.db"
 # 不含 ``.`` / ``/`` / ``\\``，杜绝 ``..``、绝对路径等穿越片段（BUG-025）。
 _INSTANCE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
+# IMP-006：路径别名 slug 与实例 ID 同形（小写字母 / 数字 / 连字符）。
+_PATH_ALIAS_RE = _INSTANCE_ID_RE
+_PATH_ALIAS_MAX_LEN = 63  # DNS 标签上限，路径别名同理
+
+# IMP-006：保留字——会被网关入口、管理页 API 路由或工作区顶层目录占用。
+# 即使别名入口（staticGatewayPort）与管理页（managerPort）端口不同，
+# 仍拒绝这些别名，避免用户混淆并预留未来端口合并的余地。
+_PATH_ALIAS_RESERVED = frozenset({
+    "api",
+    "static-gateway",
+    "inbox",
+    "apps",
+    "registry",
+    "run",
+    "manager",
+    "logs",
+    "skills",
+    "templates",
+    "health",
+})
+
 
 def validate_instance_id(instance_id: str) -> str:
     """校验实例 ID 是安全 slug，拒绝路径穿越（BUG-025）。
@@ -32,6 +53,45 @@ def validate_instance_id(instance_id: str) -> str:
             f"非法实例 ID：{instance_id!r}（仅允许小写字母、数字与连字符）",
         )
     return instance_id
+
+
+def validate_path_alias(
+    alias: str,
+    *,
+    existing_aliases: set[str] | None = None,
+) -> str:
+    """校验路径别名 slug（IMP-006）。
+
+    规则：
+    - 格式：``^[a-z0-9]+(-[a-z0-9]+)*$``（与实例 ID 同形），长度 ≤ 63；
+    - 保留字：见 :data:`_PATH_ALIAS_RESERVED`，拒绝以避免与网关入口、管理页
+      API 路由、工作区顶层目录冲突；
+    - 全局唯一：``existing_aliases`` 为已占用的别名集合（通常由 registry
+      扫描得出），命中即拒。``existing_aliases`` 为 ``None`` 时跳过唯一性检查
+      （调用方需自行保证）。
+
+    校验通过返回原值；失败抛 :class:`PathError`。本函数为纯函数（无 I/O），
+    唯一性数据由调用方注入，避免 paths ↔ registry 的循环依赖。
+    """
+    from local_webpage_access.errors import PathError
+
+    if not isinstance(alias, str) or not _PATH_ALIAS_RE.match(alias):
+        raise PathError(
+            f"非法路径别名：{alias!r}（仅允许小写字母、数字与连字符）",
+        )
+    if len(alias) > _PATH_ALIAS_MAX_LEN:
+        raise PathError(
+            f"路径别名过长：{len(alias)} > {_PATH_ALIAS_MAX_LEN}",
+        )
+    if alias in _PATH_ALIAS_RESERVED:
+        raise PathError(
+            f"路径别名 {alias!r} 是保留字，请换一个",
+        )
+    if existing_aliases is not None and alias in existing_aliases:
+        raise PathError(
+            f"路径别名 {alias!r} 已被其他实例占用",
+        )
+    return alias
 
 
 class Workspace:
@@ -90,6 +150,15 @@ class Workspace:
         return self.static_gateway / "sites"
 
     @property
+    def static_aliases(self) -> Path:
+        """IMP-006：路径别名路由片段目录（``static-gateway/aliases/``）。
+
+        每个有 path-alias 的实例对应一个 ``<id>.conf`` 片段，由主 Caddyfile
+        的统一入口块 ``import`` 进去。无别名时该目录可为空。
+        """
+        return self.static_gateway / "aliases"
+
+    @property
     def manager(self) -> Path:
         return self.root / "manager"
 
@@ -135,6 +204,11 @@ class Workspace:
     def app_gateway_config(self, instance_id: str) -> Path:
         validate_instance_id(instance_id)
         return self.static_sites / f"{instance_id}.conf"
+
+    def app_alias_config(self, instance_id: str) -> Path:
+        """IMP-006：实例路径别名路由片段路径（``static-gateway/aliases/<id>.conf``）。"""
+        validate_instance_id(instance_id)
+        return self.static_aliases / f"{instance_id}.conf"
 
     # ---- 创建目录 ----------------------------------------------------------
 
@@ -198,6 +272,7 @@ __all__ = [
     "CONFIG_FILENAME",
     "REGISTRY_DB_FILENAME",
     "validate_instance_id",
+    "validate_path_alias",
     "find_workspace_root",
     "require_workspace",
 ]

@@ -217,6 +217,51 @@ def test_instance_status_static(workspace, registry, config) -> None:
     assert st.host_port == 21100
 
 
+# ---- IMP-007：端口映射标签 ------------------------------------------------
+
+
+def test_port_mapping_label_container(workspace, registry, config) -> None:
+    """容器实例 internalPort≠hostPort 时生成 ``internalPort→hostPort`` 标签。"""
+    _seed_container(workspace, registry, "api", host_port=21000)
+    st = instance_status(workspace, config, registry, "api")
+    assert st.port_mapping_label == "8000→21000"
+
+
+def test_port_mapping_label_static_is_none(workspace, registry, config) -> None:
+    """静态实例不展示误导性的端口映射（internalPort 缺失）。"""
+    _seed_static(workspace, registry, "demo", host_port=21100)
+    st = instance_status(workspace, config, registry, "demo")
+    assert st.port_mapping_label is None
+
+
+def test_port_mapping_label_same_port_is_none(workspace, registry, config) -> None:
+    """internalPort==hostPort 时映射冗余，标签为 None。"""
+    _seed_container(workspace, registry, "api", host_port=8000)
+    st = instance_status(workspace, config, registry, "api")
+    # internalPort=8000, hostPort=8000 → 无需展示映射
+    assert st.port_mapping_label is None
+
+
+def test_port_mapping_label_in_to_dict(workspace, registry, config) -> None:
+    """to_dict() 暴露 portMappingLabel 字段供 API 使用。"""
+    _seed_container(workspace, registry, "api", host_port=21000)
+    st = instance_status(workspace, config, registry, "api")
+    d = st.to_dict()
+    assert d["portMappingLabel"] == "8000→21000"
+    assert d["internalPort"] == 8000
+    assert d["hostPort"] == 21000
+
+
+def test_port_mapping_label_none_in_to_dict_for_static(
+    workspace, registry, config
+) -> None:
+    """静态实例 to_dict() 的 portMappingLabel 为 None。"""
+    _seed_static(workspace, registry, "demo", host_port=21100)
+    st = instance_status(workspace, config, registry, "demo")
+    d = st.to_dict()
+    assert d["portMappingLabel"] is None
+
+
 def test_instance_status_missing_raises(workspace, registry, config) -> None:
     from local_webpage_access.errors import LifecycleError
 

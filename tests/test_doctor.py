@@ -112,11 +112,11 @@ def test_check_docker_ok() -> None:
 
 def test_check_docker_version_too_low() -> None:
     runner = _runner_from_map(
-        {("docker", "version"): _proc(0, stdout="29.1.3\n")}
+        {("docker", "version"): _proc(0, stdout="28.9.9\n")}
     )
     r = check_docker(runner=runner)
     assert r.status == STATUS_FAIL
-    assert "29.6.1" in r.message
+    assert "29.0.0" in r.message
 
 
 def test_check_docker_unavailable() -> None:

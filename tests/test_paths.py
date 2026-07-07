@@ -138,3 +138,62 @@ def test_app_dir_valid_id_stays_under_apps(workspace: Workspace) -> None:
     """BUG-025：合法 ID 解析后必须落在 apps/ 之内。"""
     resolved = workspace.app_dir("demo").resolve()
     assert resolved.is_relative_to(workspace.apps.resolve())
+
+
+# ---- IMP-006：路径别名校验 -------------------------------------------------
+
+
+def test_validate_path_alias_accepts_valid_slugs() -> None:
+    from local_webpage_access.paths import validate_path_alias
+
+    for alias in ("demo", "voiceprint-app-demo", "app2", "a-b-c-123"):
+        assert validate_path_alias(alias) == alias
+
+
+def test_validate_path_alias_rejects_bad_format() -> None:
+    from local_webpage_access.paths import validate_path_alias
+
+    # 大写、下划线、空格、点、斜杠、首尾连字符均非法
+    for bad in ("Demo", "demo_app", "demo app", "demo.app", "demo/app", "-demo", "demo-", ""):
+        with pytest.raises(PathError):
+            validate_path_alias(bad)
+
+
+def test_validate_path_alias_rejects_reserved_words() -> None:
+    from local_webpage_access.paths import _PATH_ALIAS_RESERVED, validate_path_alias
+
+    # 全部保留字均被拒
+    assert "api" in _PATH_ALIAS_RESERVED
+    assert "static-gateway" in _PATH_ALIAS_RESERVED
+    for reserved in ("api", "static-gateway", "inbox", "apps", "registry",
+                     "run", "manager", "logs", "skills", "templates", "health"):
+        with pytest.raises(PathError):
+            validate_path_alias(reserved)
+
+
+def test_validate_path_alias_rejects_too_long() -> None:
+    from local_webpage_access.paths import validate_path_alias
+
+    with pytest.raises(PathError):
+        validate_path_alias("a" * 64)
+
+
+def test_validate_path_alias_rejects_duplicates() -> None:
+    from local_webpage_access.paths import validate_path_alias
+
+    with pytest.raises(PathError):
+        validate_path_alias("demo", existing_aliases={"demo", "other"})
+
+
+def test_validate_path_alias_allows_when_excluded() -> None:
+    """existing_aliases 为 None 时跳过唯一性检查（调用方自行保证）。"""
+    from local_webpage_access.paths import validate_path_alias
+
+    assert validate_path_alias("demo") == "demo"
+    assert validate_path_alias("demo", existing_aliases=None) == "demo"
+
+
+def test_app_alias_config_under_gateway(workspace: Workspace) -> None:
+    """别名片段落在 static-gateway/aliases/ 下。"""
+    assert workspace.app_alias_config("demo") == workspace.static_aliases / "demo.conf"
+    assert workspace.static_aliases == workspace.static_gateway / "aliases"

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import ZipImportError
+from local_webpage_access.errors import PathError, ZipImportError
 from local_webpage_access.importer import Importer, slugify, titleize
 from local_webpage_access.models import Kind, Runtime, ServingMode, Status
 from local_webpage_access.paths import Workspace
@@ -312,3 +312,653 @@ def test_import_data_size_is_data_dir_not_zip(
     # data/ 导入时尚为空 → data_size_bytes 应为 0，绝不能等于 zip 文件大小
     assert resources["data_size_bytes"] == 0
     assert resources["data_size_bytes"] != zip_size
+
+
+# ---- IMP-001：zip 导入前自动剥离冗余包与缓存 ------------------------------
+
+
+def _make_zip_with_symlink_members(
+    zip_path: Path, plain: dict[str, str], symlinks: dict[str, str]
+) -> Path:
+    """创建含符号链接成员的 zip。
+
+    plain: {成员路径: 文本内容}
+    symlinks: {成员路径: symlink 目标}（external_attr 设为 S_IFLNK）
+    """
+    import stat as stat_mod
+
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for member, content in plain.items():
+            zf.writestr(member, content)
+        for member, target in symlinks.items():
+            info = zipfile.ZipInfo(member)
+            info.external_attr = (stat_mod.S_IFLNK | 0o777) << 16
+            zf.writestr(info, target)
+    return zip_path
+
+
+def test_import_strips_node_modules_with_bin_symlink(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """含 node_modules/.bin 符号链接的 zip 应一键导入成功（IMP-001）。
+
+    剥离前：node_modules/.bin/vite 是 symlink → audit_zip_members 会判 zip_symlink
+    拒绝。剥离后该成员不落盘、不参与审计，导入通过。
+    """
+    zip_path = _make_zip_with_symlink_members(
+        tmp_path / "nodeapp.zip",
+        plain={
+            "package.json": '{"dependencies":{"vite":"^5.0.0"}}',
+            "package-lock.json": '{"lockfileVersion":3}',
+            "src/index.ts": "export const x = 1;",
+            "node_modules/react/index.js": "module.exports={};",
+        },
+        symlinks={"node_modules/.bin/vite": "../react/bin/vite.js"},
+    )
+    result = importer.import_zip(zip_path)
+
+    # 导入成功，sanitized 摘要存在且记录了剥离
+    assert result.sanitized is not None
+    assert len(result.sanitized.stripped_names) > 0
+    assert "node_modules" in result.sanitized.categories
+    assert result.sanitized.stripped_symlink_count >= 1
+
+    # 关键保留文件落盘
+    current = workspace.app_current(result.instance_id)
+    assert (current / "package.json").is_file()
+    assert (current / "package-lock.json").is_file()
+    assert (current / "src" / "index.ts").is_file()
+    # node_modules 不落盘
+    assert not (current / "node_modules").exists()
+
+    # security 事件记录了剥离摘要
+    events = registry.list_events(result.instance_id)
+    security_events = [e for e in events if e["event_type"] == "security"]
+    strip_events = [e for e in security_events if "剥离" in e["message"]]
+    assert strip_events, [e["message"] for e in events]
+
+
+def test_import_preserves_lockfile_after_strip(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """剥离冗余包后 lockfile 与源码必须保留（IMP-001）。"""
+    zip_path = _make_zip(
+        tmp_path / "nodeapp.zip",
+        {
+            "package.json": '{"dependencies":{}}',
+            "package-lock.json": '{"lockfileVersion":3}',
+            "pnpm-lock.yaml": "lockfileVersion: '6.0'",
+            "node_modules/react/index.js": "x",
+            "__pycache__/app.pyc": "x",
+            ".DS_Store": "x",
+            "src/app.ts": "export {}",
+        },
+    )
+    result = importer.import_zip(zip_path)
+    current = workspace.app_current(result.instance_id)
+    assert (current / "package-lock.json").is_file()
+    assert (current / "pnpm-lock.yaml").is_file()
+    assert (current / "src" / "app.ts").is_file()
+    assert (current / "package.json").is_file()
+    assert not (current / "node_modules").exists()
+    assert not (current / "__pycache__").exists()
+
+
+def test_import_still_rejects_source_symlink_after_strip(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """剥离后业务源码目录的恶意 symlink 仍被拒绝（IMP-001 不削弱安全）。
+
+    src/evil → /etc/passwd 不属于可剥离段，保留后由 audit_zip_members 拒绝。
+    """
+    zip_path = _make_zip_with_symlink_members(
+        tmp_path / "evil.zip",
+        plain={"index.html": "<html></html>"},
+        symlinks={"src/evil": "/etc/passwd"},
+    )
+    with pytest.raises(ZipImportError, match="zip_symlink"):
+        importer.import_zip(zip_path)
+
+
+def test_import_strip_regression_zip_slip(importer: Importer, tmp_path: Path) -> None:
+    """IMP-001 剥离后，zip slip 仍被拒绝（回归不退化）。"""
+    zip_path = tmp_path / "evil.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("index.html", "<html></html>")
+        info = zipfile.ZipInfo("../escape.txt")
+        zf.writestr(info, "pwned")
+    with pytest.raises(ZipImportError, match="zip_slip"):
+        importer.import_zip(zip_path)
+
+
+def test_import_strip_regression_absolute_path(importer: Importer, tmp_path: Path) -> None:
+    """IMP-001 剥离后，绝对路径成员仍被拒绝（回归不退化）。"""
+    zip_path = tmp_path / "evil.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("index.html", "<html></html>")
+        zf.writestr("/etc/passwd", "stolen")
+    with pytest.raises(ZipImportError, match="zip_absolute_path"):
+        importer.import_zip(zip_path)
+
+
+def test_import_clean_zip_has_empty_sanitized(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """无冗余成员的 zip，sanitized 非空但 stripped_names 为空。"""
+    zip_path = _make_zip(
+        tmp_path / "clean.zip",
+        {"index.html": "<html></html>", "style.css": "body{}"},
+    )
+    result = importer.import_zip(zip_path)
+    assert result.sanitized is not None
+    assert result.sanitized.stripped_names == ()
+
+
+# ---- IMP-006：路径别名导入 -------------------------------------------------
+
+
+def _make_static_zip(zip_path: Path, body: str = "hi") -> Path:
+    return _make_zip(
+        zip_path,
+        {"index.html": f"<html><body>{body}</body></html>", "style.css": "body{}"},
+    )
+
+
+def test_import_with_path_alias_writes_route_mode(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """--path-alias 写入 static.routeMode=name + routeHost；默认行为保持 port。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    result = importer.import_zip(zip_path, path_alias="voiceprint-app-demo")
+
+    static = result.manifest.static
+    assert static is not None
+    assert static.routeMode == "name"
+    assert static.routeHost == "voiceprint-app-demo"
+    # registry 静态站点行也应记录
+    row = importer.registry.get_static_site(result.instance_id)
+    assert row["route_mode"] == "name"
+    assert row["route_host"] == "voiceprint-app-demo"
+
+
+def test_import_without_path_alias_keeps_port_mode(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """不传别名时 routeMode 仍为 port（默认行为不变）。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    result = importer.import_zip(zip_path)
+    static = result.manifest.static
+    assert static is not None
+    assert static.routeMode == "port"
+    assert static.routeHost is None
+
+
+def test_import_path_alias_rejects_reserved(
+    importer: Importer, tmp_path: Path
+) -> None:
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    with pytest.raises(PathError):
+        importer.import_zip(zip_path, path_alias="api")
+
+
+def test_import_path_alias_rejects_bad_format(
+    importer: Importer, tmp_path: Path
+) -> None:
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    with pytest.raises(PathError):
+        importer.import_zip(zip_path, path_alias="Bad_Alias!")
+
+
+def test_import_path_alias_rejects_duplicate(
+    importer: Importer, registry: Registry, tmp_path: Path
+) -> None:
+    """两个实例不能用同一个别名。"""
+    z1 = _make_static_zip(tmp_path / "a.zip")
+    importer.import_zip(z1, path_alias="shared-alias")
+
+    z2 = _make_static_zip(tmp_path / "b.zip")
+    with pytest.raises(PathError):
+        importer.import_zip(z2, path_alias="shared-alias")
+
+
+def test_import_path_alias_rejects_container(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """路径别名当前仅支持静态站点；容器实例明确拒绝并清理半成品。"""
+    zip_path = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n"},
+    )
+    with pytest.raises(ZipImportError):
+        importer.import_zip(zip_path, path_alias="api-alias")
+    # 容器+别名被拒后，半成品目录应已清理
+    assert not workspace.app_dir("api").exists()
+
+
+def test_import_path_alias_validates_before_write(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """别名校验在写盘前完成，非法别名不留半成品目录。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    with pytest.raises(PathError):
+        importer.import_zip(zip_path, path_alias="health")  # 保留字
+    # 校验在 ensure_app_dirs 之前 → 不应创建 apps/demo/
+    assert not workspace.app_dir("demo").exists()
+
+
+# ---- IMP-009：实例 zip 原地更新 --------------------------------------------
+
+
+def _set_desired_running(workspace: Workspace, instance_id: str) -> None:
+    """直接改盘上 manifest 的 desiredState=running（模拟已启动实例）。"""
+    from local_webpage_access.models import DesiredState, InstanceManifest
+
+    path = workspace.app_manifest_path(instance_id)
+    m = InstanceManifest.load(path)
+    m.desiredState = DesiredState.RUNNING
+    m.save(path)
+
+
+def test_import_conflict_error_mode(importer: Importer, tmp_path: Path) -> None:
+    """on_conflict='error'：slug 冲突不再 silent 建 -2，而是报错并建议 --update。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    importer.import_zip(zip_path)  # 建 demo
+    with pytest.raises(ZipImportError, match="--update"):
+        importer.import_zip(zip_path, on_conflict="error")
+
+
+def test_import_conflict_rename_still_default(importer: Importer, tmp_path: Path) -> None:
+    """默认 on_conflict='rename' 仍走 -2（daemon 依赖，不能回归）。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    importer.import_zip(zip_path)
+    r2 = importer.import_zip(zip_path)  # 默认 rename
+    assert r2.instance_id == "demo-2"
+
+
+def test_update_replaces_content_and_hash(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """更新后 current/ 内容为新版，sourceZipHash 刷新，id/目录不变。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    old_hash = r1.zip_hash
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    result = importer.update_zip(v2, iid, restart=False)
+
+    assert result.skipped is False
+    assert result.rebuilt is True
+    assert result.instance_id == iid
+    assert result.zip_hash != old_hash
+    assert result.prev_hash == old_hash
+    body = (workspace.app_current(iid) / "index.html").read_text()
+    assert "v2" in body
+
+    from local_webpage_access.models import InstanceManifest
+
+    m = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert getattr(m, "sourceZipHash", None) == result.zip_hash
+
+
+def test_update_same_hash_skips(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """相同 hash 再次更新 → skipped，不 rebuild。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(zip_path)
+    iid = r1.instance_id
+
+    result = importer.update_zip(zip_path, iid, restart=False)
+    assert result.skipped is True
+    assert result.rebuilt is False
+    assert result.needs_restart is False
+
+
+def test_update_kind_change_rejected(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """新 zip 形态从 static → container：拒绝，current/ 原封不动。"""
+    static_zip = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(static_zip)
+    iid = r1.instance_id
+    original_body = (workspace.app_current(iid) / "index.html").read_text()
+
+    container_zip = _make_zip(
+        tmp_path / "demo-api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "print('hi')"},
+    )
+    with pytest.raises(ZipImportError, match="形态发生变化"):
+        importer.update_zip(container_zip, iid, restart=False)
+
+    assert (workspace.app_current(iid) / "index.html").read_text() == original_body
+
+
+def test_update_kind_change_forced(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """--force-kind-change 允许跨形态更新。"""
+    static_zip = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(static_zip)
+    iid = r1.instance_id
+
+    container_zip = _make_zip(
+        tmp_path / "demo-api.zip",
+        {"requirements.txt": "fastapi\n", "main.py": "x = 1"},
+    )
+    result = importer.update_zip(
+        container_zip, iid, restart=False, force_kind_change=True
+    )
+    assert result.rebuilt is True
+
+
+def test_update_failure_rolls_back(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    """更新过程中扫描抛错 → current/ 与 manifest hash 回滚到更新前。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    original_body = (workspace.app_current(iid) / "index.html").read_text()
+
+    from local_webpage_access.models import InstanceManifest
+
+    original_hash = getattr(
+        InstanceManifest.load(workspace.app_manifest_path(iid)), "sourceZipHash", None
+    )
+
+    # 让 scanner.detect 仅在更新路径（暂存区 .new）触发异常
+    from local_webpage_access import importer as importer_mod
+
+    original_detect = importer_mod.Scanner.detect
+
+    def boom_detect(self, path):
+        if ".new" in str(path):
+            raise RuntimeError("scan boom")
+        return original_detect(self, path)
+
+    monkeypatch.setattr(importer_mod.Scanner, "detect", boom_detect)
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(ZipImportError, match="scan boom"):
+        importer.update_zip(v2, iid, restart=False)
+
+    # current/ 内容未变
+    assert (workspace.app_current(iid) / "index.html").read_text() == original_body
+    # manifest hash 未变
+    post_hash = getattr(
+        InstanceManifest.load(workspace.app_manifest_path(iid)), "sourceZipHash", None
+    )
+    assert post_hash == original_hash
+    # 暂存区 / 备份目录已清理
+    parent = workspace.app_current(iid).parent
+    assert not (parent / "current.new").exists()
+    assert not (parent / "current.old").exists()
+
+
+def test_update_failure_after_current_swap_rolls_back(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    """current/ 换入后若 manifest 写入失败，也必须回滚到旧 current/。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    original_body = (workspace.app_current(iid) / "index.html").read_text()
+
+    from local_webpage_access import importer as importer_mod
+    from local_webpage_access.models import InstanceManifest
+
+    original_hash = getattr(
+        InstanceManifest.load(workspace.app_manifest_path(iid)), "sourceZipHash", None
+    )
+    original_save = importer_mod.InstanceManifest.save
+
+    def fail_update_manifest_save(self, path):
+        if getattr(self, "sourceZipHash", None) != original_hash:
+            raise OSError("manifest write boom")
+        return original_save(self, path)
+
+    monkeypatch.setattr(
+        importer_mod.InstanceManifest, "save", fail_update_manifest_save
+    )
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(ZipImportError, match="manifest write boom"):
+        importer.update_zip(v2, iid, restart=False)
+
+    assert (workspace.app_current(iid) / "index.html").read_text() == original_body
+    post_hash = getattr(
+        InstanceManifest.load(workspace.app_manifest_path(iid)), "sourceZipHash", None
+    )
+    assert post_hash == original_hash
+    assert workspace.app_original_zip(iid).read_bytes() == v1.read_bytes()
+
+
+def test_update_preserves_data(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """keep_data=True（默认）：data/ 内文件在更新后仍在。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+
+    data_dir = workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.db").write_bytes(b"SQLite-format-3\x00seed")
+    (data_dir / "uploads").mkdir()
+    (data_dir / "uploads" / "logo.png").write_bytes(b"\x89PNG")
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    importer.update_zip(v2, iid, restart=False)
+
+    assert (data_dir / "app.db").read_bytes().startswith(b"SQLite-format-3")
+    assert (data_dir / "uploads" / "logo.png").read_bytes() == b"\x89PNG"
+
+
+def test_update_no_keep_data_clears_data(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """keep_data=False：data/ 被清空，registry 资源统计同步归零。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    data_dir = workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.db").write_bytes(b"old-data")
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    importer.update_zip(v2, iid, restart=False, keep_data=False)
+
+    assert not (data_dir / "app.db").exists()
+    resources = registry.get_resources(iid)
+    assert resources is not None
+    assert resources["data_size_bytes"] == 0
+
+
+def test_update_preserves_path_alias(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """IMP-006 路径别名在更新后保留（别名是用户选择，不从 zip 推导）。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1, path_alias="voiceprint")
+    iid = r1.instance_id
+    assert r1.manifest.static.routeMode == "name"
+    assert r1.manifest.static.routeHost == "voiceprint"
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    result = importer.update_zip(v2, iid, restart=False)
+    assert result.manifest.static is not None
+    assert result.manifest.static.routeMode == "name"
+    assert result.manifest.static.routeHost == "voiceprint"
+
+
+def test_update_preserves_hostport_registration(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """更新不触碰 registry 的端口登记（hostPort 复用靠 hosting，登记必须不动）。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+
+    registry.upsert_static_site(iid, {"hostPort": 18001})
+    assert registry.get_static_site(iid)["host_port"] == 18001
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    importer.update_zip(v2, iid, restart=False)
+
+    assert registry.get_static_site(iid)["host_port"] == 18001
+
+
+def test_update_force_kind_change_preserves_hostport_across_static_to_container(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """强制跨形态更新时，也从旧形态登记里迁移 hostPort。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    registry.upsert_static_site(iid, {"hostPort": 18001})
+
+    container_zip = _make_zip(
+        tmp_path / "demo-api.zip",
+        {"requirements.txt": "fastapi\n", "main.py": "x = 1"},
+    )
+    result = importer.update_zip(
+        container_zip, iid, restart=False, force_kind_change=True
+    )
+
+    assert result.manifest.container is not None
+    assert result.manifest.container.hostPort == 18001
+    row = registry.get_container(iid)
+    assert row is not None
+    assert row["host_port"] == 18001
+    assert registry.get_static_site(iid) is None
+
+
+def test_update_needs_restart_when_running(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """原 desiredState=running + restart=True → needs_restart=True（不实际重启）。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    _set_desired_running(workspace, iid)
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    result = importer.update_zip(v2, iid, restart=True)
+    assert result.was_running is True
+    assert result.needs_restart is True
+
+    # restart=False（--no-restart）：即使原 running 也不要求重启
+    v3 = _make_static_zip(tmp_path / "demo-v3.zip", "v3")
+    result2 = importer.update_zip(v3, iid, restart=False)
+    assert result2.was_running is True
+    assert result2.needs_restart is False
+
+
+def test_update_dry_run_no_writes(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """--dry-run：不写 current/、不生成 .bak、manifest hash 不变。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    original_body = (workspace.app_current(iid) / "index.html").read_text()
+
+    from local_webpage_access.models import InstanceManifest
+
+    pre_hash = getattr(
+        InstanceManifest.load(workspace.app_manifest_path(iid)), "sourceZipHash", None
+    )
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    result = importer.update_zip(v2, iid, restart=False, dry_run=True)
+    assert result.dry_run is True
+    assert result.rebuilt is False
+    assert result.kind_changed is False
+
+    assert (workspace.app_current(iid) / "index.html").read_text() == original_body
+    post_hash = getattr(
+        InstanceManifest.load(workspace.app_manifest_path(iid)), "sourceZipHash", None
+    )
+    assert post_hash == pre_hash
+    assert not workspace.app_original_zip(iid).with_suffix(".zip.bak").exists()
+
+
+def test_update_backs_up_original_zip(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """更新时备份 original.zip → original.zip.bak。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    bak = workspace.app_original_zip(iid).with_suffix(".zip.bak")
+    assert not bak.exists()
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    importer.update_zip(v2, iid, restart=False)
+    assert bak.is_file()
+    # .bak 内容是旧 zip（v1）的二进制
+    assert bak.read_bytes() == v1.read_bytes()
+
+
+def test_update_nonexistent_instance_errors(importer: Importer, tmp_path: Path) -> None:
+    """更新不存在的实例 → 报错并建议去掉 --update。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip", "v1")
+    with pytest.raises(ZipImportError, match="不存在"):
+        importer.update_zip(zip_path, "no-such-id", restart=False)
+
+
+def test_update_event_recorded(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """更新成功后 registry 写入 update 事件。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    importer.update_zip(v2, iid, restart=False)
+
+    events = registry.list_events(iid)
+    update_events = [e for e in events if e.get("event_type") == "update"]
+    assert update_events, "应至少记录一条 update 事件"
+    msg = update_events[-1].get("message", "")
+    assert "sha256" in msg or "已更新" in msg
+
+
+def test_kind_changed_helper() -> None:
+    """_kind_changed：pending 不算变化；kind/runtime 不同算变化。"""
+    from local_webpage_access.importer import Importer
+    from local_webpage_access.models import InstanceManifest, Kind, Runtime
+    from local_webpage_access.scanner import DetectionResult
+
+    m = InstanceManifest(
+        id="x",
+        name="x",
+        version="1",
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+    )
+    # pending（未识别）→ 不算变化
+    pending_dr = DetectionResult(form="未知", pending=True, notes=["未识别"])
+    assert Importer._kind_changed(m, pending_dr) is False
+
+    # static → static：不变
+    same_dr = DetectionResult(
+        form="静态站点",
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+    )
+    assert Importer._kind_changed(m, same_dr) is False
+
+    # static → docker（python）：变化
+    diff_dr = DetectionResult(
+        form="后端容器",
+        kind=Kind.PYTHON,
+        runtime=Runtime.DOCKER_COMPOSE,
+        servingMode=ServingMode.CONTAINER,
+    )
+    assert Importer._kind_changed(m, diff_dr) is True

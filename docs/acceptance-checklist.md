@@ -42,10 +42,10 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 | 29.06 | 前端构建产物 | — | `lwa start vite-react` | 容器内执行 `npm run build`，`dist/` 生成，静态托管可访问 |
 | 29.07 | 前端形态正确 | ✓ 同 29.05 | 检查 `local-web.json` | `servingMode=shared-static`，有 build 命令 |
 | 29.08 | 导入 Node/Express | ✓ `test_e2e_node_express_detected_and_compose_generated` | `lwa import inbox/node_express.zip` | 识别为 `node` + `backend-container`，`docker/compose.yaml` 生成 |
-| 29.09 | Node 容器构建启动 | **手工** | `lwa start node-express` | `docker compose up` 成功，`lwa status` 显示 `running`，HTTP 可访问 |
+| 29.09 | Node 容器构建启动 | ✓ 手工验收（2026-07-07） | `lwa start node-express` | `docker compose up` 成功，`lwa status` 显示 `running`，HTTP 可访问 |
 | 29.10 | 导入 FastAPI+SQLite | ✓ `test_e2e_fastapi_sqlite_detected_and_compose_generated` | `lwa import inbox/fastapi_sqlite.zip` | 识别为 `python`，`docker/compose.yaml` 含 `../data:/app/data` |
-| 29.11 | FastAPI 容器构建启动 | **手工** | `lwa start fastapi-sqlite` | 容器构建并启动，HTTP 可访问 |
-| 29.12 | 数据持久化 | **手工** | 写入数据 → `lwa stop` → `lwa start` → 再读 | 数据不丢失（`data/` 卷保留） |
+| 29.11 | FastAPI 容器构建启动 | ✓ 手工验收（2026-07-07） | `lwa start fastapi-sqlite` | 容器构建并启动，HTTP 可访问 |
+| 29.12 | 数据持久化 | ✓ 手工验收（2026-07-07） | 写入数据 → `lwa stop` → `lwa start` → 再读 | 数据不丢失（`data/` 卷保留） |
 | 29.13 | start/stop/restart | ✓ `test_e2e_start_stop_restart_static` | `lwa stop`、`lwa restart` | 状态在 `running`/`stopped` 间正确切换 |
 | 29.14 | logs/status/stats | ✓ `test_e2e_logs_status_stats_queryable` | `lwa status`、`lwa logs <id>`、`lwa stats` | 三类信息均可查询且非空 |
 | 29.15 | 管理页与 CLI 一致 | ✓ `test_e2e_manager_api_matches_cli_status` | `lwa manager` 打开管理页，对比 `lwa status` | 实例列表与状态一致 |
@@ -64,12 +64,12 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 
 | 字段 | 值 |
 | --- | --- |
-| 验收日期 | 2026-07-06 |
+| 验收日期 | 2026-07-07 |
 | 验收人 | fenix-wangminle |
-| 环境 | Windows 11 Pro，Python 3.13.13 |
+| 环境 | macOS 26.6，Python 3.13.13，Node 24.16.0，Docker Desktop 4.55.0 / Engine 29.1.3，Docker Compose 2.40.3 |
 | 自动化结果 | `tests/test_e2e_acceptance.py` 全部通过（11/11） |
-| 全量回归 | `python -m pytest`：见 `docs/testing.md` 最新统计 |
-| Docker 手工验收 | 待在具备 Docker 的 Linux 主机上执行 29.09 / 29.11 / 29.12 |
+| 全量回归 | `python3 -m pytest`：734 passed / 4 skipped；`LWA_RUN_DOCKER_TESTS=1 python3 -m pytest tests/test_docker_integration.py -q`：4 passed |
+| Docker 手工验收 | 已通过 29.09 / 29.11 / 29.12；临时工作区 `/tmp/lwa-acceptance-oMtPaK`；Node 端口 18002，FastAPI 端口 18003，容器内 `/app/data/persist.txt` stop/start 后仍为 `persisted` |
 
 ## 问题清单
 

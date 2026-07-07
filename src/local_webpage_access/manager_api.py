@@ -33,7 +33,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -452,6 +452,87 @@ def _register_routes(app: FastAPI) -> None:
         from local_webpage_access.lifecycle import rebuild_instance
 
         return _lifecycle_op(instance_id, rebuild_instance, label="rebuild")
+
+    @app.post(
+        "/api/instances/{instance_id}/update",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def update_op(instance_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """IMP-009：用新 zip 原地更新实例（保留 id/hostPort/data/）。
+
+        Body: ``{"zipPath": "inbox/foo.zip", "restart": true, "keepData": true,
+        "forceKindChange": false}``。``zipPath`` 相对路径以 ``inbox/`` 为根。
+        """
+        from local_webpage_access.importer import Importer
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+
+        raw_zip = str(payload.get("zipPath") or "").strip()
+        if not raw_zip:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "bad_request",
+                        "message": "缺少 zipPath",
+                    }
+                },
+            )
+        zip_path = Path(raw_zip)
+        if not zip_path.is_absolute():
+            # 相对路径以 inbox/ 为根（管理页选择 inbox 内文件）
+            zip_path = ctx.workspace.inbox / raw_zip
+        zip_path = zip_path.resolve()
+        inbox_root = ctx.workspace.inbox.resolve()
+        try:
+            zip_path.relative_to(inbox_root)
+        except ValueError as exc:
+            raise PathError(
+                "zipPath 必须位于工作区 inbox/ 目录内",
+                path=str(zip_path),
+                inbox=str(inbox_root),
+            ) from exc
+
+        restart = bool(payload.get("restart", True))
+        keep_data = bool(payload.get("keepData", True))
+        force_kind_change = bool(payload.get("forceKindChange", False))
+
+        importer = Importer(ctx.workspace, ctx.config, ctx.registry)
+        result = importer.update_zip(
+            zip_path,
+            instance_id,
+            restart=restart,
+            keep_data=keep_data,
+            yes=True,  # API 路径非交互
+            dry_run=False,
+            force_kind_change=force_kind_change,
+        )
+
+        restarted = False
+        if result.needs_restart:
+            from local_webpage_access.lifecycle import restart_instance
+
+            restart_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id
+            )
+            restarted = True
+
+        sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        snap = instance_status(
+            ctx.workspace, ctx.config, ctx.registry, instance_id
+        )
+        return {
+            "instanceId": instance_id,
+            "action": "update",
+            "skipped": result.skipped,
+            "rebuilt": result.rebuilt,
+            "restarted": restarted,
+            "prevHash": result.prev_hash,
+            "zipHash": result.zip_hash,
+            "instance": snap.to_dict(),
+        }
 
     # ---- pending 列表（WBS-22.09）----
     @app.get("/api/pending", dependencies=[api], tags=["instances"])

@@ -184,12 +184,12 @@ def test_ensure_available_raises_when_docker_version_too_low(workspace, monkeypa
         def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
             if tuple(args[:2]) == ("docker", "version"):
                 return ComposeResult(
-                    args=list(args), returncode=0, stdout="29.1.0\n", stderr=""
+                    args=list(args), returncode=0, stdout="28.9.9\n", stderr=""
                 )
             return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
 
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _LowDockerFake())
-    with pytest.raises(DockerError, match="29.6.1"):
+    with pytest.raises(DockerError, match="29.0.0"):
         ensure_available()
 
 

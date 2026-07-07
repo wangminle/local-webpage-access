@@ -121,7 +121,7 @@ def _resolve_host_port(manifest: InstanceManifest, registry: Registry) -> int | 
         return int(port)
     # 回退到 registry
     if manifest.runtime.value == "docker-compose":
-        row = registry.get_container(instance_id := manifest.id)
+        row = registry.get_container(manifest.id)
         if row and row.get("host_port"):
             return int(row["host_port"])
     else:

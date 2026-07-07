@@ -372,3 +372,294 @@ def test_stop_builtin_clears_pid_when_kill_succeeds(
     gateway._stop_builtin("demo")
 
     assert gateway._read_pid("demo") is None
+
+
+# ---- IMP-005：Caddy 静态频率限制 ------------------------------------------
+
+
+def _caddy_present(workspace, monkeypatch, *, modules: str = "") -> StaticGateway:
+    """构造一个 Caddy 后端可用、模块清单可控的 gateway。
+
+    ``modules`` 为 ``caddy list-modules`` 的模拟 stdout；含
+    ``http.handlers.rate_limit`` 即视为具备限流能力。
+    """
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy"
+    )
+
+    import subprocess as sp
+
+    class _FakeResult:
+        returncode = 0
+        stdout = modules.encode("utf-8")
+        stderr = b""
+
+    def fake_run(cmd, **kw):
+        return _FakeResult()
+
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.run", fake_run)
+    return StaticGateway(workspace, Config(staticGateway="caddy"))
+
+
+def test_static_rate_limit_defaults() -> None:
+    from local_webpage_access.config import StaticRateLimit
+
+    rl = StaticRateLimit()
+    assert rl.enabled is False
+    assert rl.rps == 3
+    assert rl.burst == 6
+
+
+def test_static_rate_limit_rejects_invalid_ranges() -> None:
+    import pytest as _pytest
+
+    from local_webpage_access.config import StaticRateLimit
+
+    with _pytest.raises(Exception):
+        StaticRateLimit(rps=0)
+    with _pytest.raises(Exception):
+        StaticRateLimit(burst=0)
+
+
+def test_rate_limit_directive_disabled_returns_empty(gateway: StaticGateway) -> None:
+    """未启用时限流指令为空串（默认配置）。"""
+    assert gateway._rate_limit_directive("demo") == ""
+
+
+def test_rate_limit_directive_builtin_returns_empty(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """builtin 后端不支持限流，指令为空。"""
+    from local_webpage_access.config import StaticRateLimit
+
+    gw = StaticGateway(
+        workspace,
+        Config(staticGateway="builtin", staticRateLimit=StaticRateLimit(enabled=True)),
+    )
+    assert gw._rate_limit_directive("demo") == ""
+
+
+def test_rate_limit_directive_caddy_without_module_warns(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """Caddy 后端但无 rate_limit 模块 → 指令为空（站点仍可访问）。"""
+    gw = _caddy_present(workspace, monkeypatch, modules="http.handlers.file_server\n")
+    from local_webpage_access.config import StaticRateLimit
+
+    gw.config = Config(
+        staticGateway="caddy", staticRateLimit=StaticRateLimit(enabled=True)
+    )
+    # 重新探测前清缓存
+    gw._supports_rate_limit = None
+    assert gw._rate_limit_directive("demo") == ""
+
+
+def test_rate_limit_directive_injected_when_capable(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """Caddy + rate_limit 模块 → 注入指令，令牌桶参数正确。"""
+    from local_webpage_access.config import StaticRateLimit
+
+    gw = _caddy_present(
+        workspace,
+        monkeypatch,
+        modules="http.handlers.file_server\nhttp.handlers.rate_limit\n",
+    )
+    gw.config = Config(
+        staticGateway="caddy",
+        staticRateLimit=StaticRateLimit(enabled=True, rps=3, burst=6),
+    )
+    gw._supports_rate_limit = None
+    directive = gw._rate_limit_directive("demo")
+    assert "rate_limit" in directive
+    assert "zone lwa_demo" in directive
+    # rps=3, burst=6 → events=6, window=2s
+    assert "events 6" in directive
+    assert "window 2s" in directive
+    # {remote_host} 是 Caddy 占位符，作为字面值保留
+    assert "{remote_host}" in directive
+
+
+def test_rate_limit_window_fractional_uses_millis(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """burst < rps 时窗口小于 1 秒，用毫秒表示（如 rps=10, burst=5 → 500ms）。"""
+    from local_webpage_access.config import StaticRateLimit
+
+    gw = _caddy_present(
+        workspace,
+        monkeypatch,
+        modules="http.handlers.rate_limit\n",
+    )
+    gw.config = Config(
+        staticGateway="caddy",
+        staticRateLimit=StaticRateLimit(enabled=True, rps=10, burst=5),
+    )
+    gw._supports_rate_limit = None
+    directive = gw._rate_limit_directive("demo")
+    assert "events 5" in directive
+    assert "window 500ms" in directive
+
+
+def test_rate_limit_directive_generated_into_site_config(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """generate_site_config 把指令写入站点 .conf。"""
+    from local_webpage_access.config import StaticRateLimit
+
+    gw = _caddy_present(
+        workspace,
+        monkeypatch,
+        modules="http.handlers.rate_limit\n",
+    )
+    gw.config = Config(
+        staticGateway="caddy",
+        staticRateLimit=StaticRateLimit(enabled=True, rps=3, burst=6),
+    )
+    gw._supports_rate_limit = None
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    path = gw.generate_site_config("demo", 18001, root)
+    content = path.read_text(encoding="utf-8")
+    assert "rate_limit" in content
+    assert "zone lwa_demo" in content
+
+
+def test_rate_limit_not_injected_when_disabled_in_site_config(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """默认配置（限流关闭）生成的 .conf 不含 rate_limit 指令。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    path = gateway.generate_site_config("demo", 18001, root)
+    content = path.read_text(encoding="utf-8")
+    # 检查指令语法（避免与测试路径名中的 rate_limit 子串混淆）
+    assert "rate_limit {" not in content
+    assert "zone lwa_" not in content
+    assert "file_server" in content
+
+
+def test_supports_rate_limit_caches_result(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """supports_rate_limit 在实例生命周期内缓存，不重复探测。"""
+    call_count = {"n": 0}
+
+    import subprocess as sp
+
+    class _FakeResult:
+        returncode = 0
+        stdout = b"http.handlers.rate_limit\n"
+        stderr = b""
+
+    def fake_run(cmd, **kw):
+        call_count["n"] += 1
+        return _FakeResult()
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy"
+    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.run", fake_run)
+    gw = StaticGateway(workspace, Config(staticGateway="caddy"))
+    assert gw.supports_rate_limit() is True
+    assert gw.supports_rate_limit() is True
+    assert call_count["n"] == 1  # 第二次命中缓存
+
+
+# ---- IMP-006：路径别名路由片段与统一入口 -----------------------------------
+
+
+def test_generate_alias_config_writes_strip_prefix_route(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """别名片段含 handle_path（去前缀）+ handle（无尾斜杠 301）。"""
+    path = gateway.generate_alias_config("demo", "voiceprint-app-demo", 18001)
+    assert path.is_file()
+    assert path == workspace.app_alias_config("demo")
+    content = path.read_text(encoding="utf-8")
+    # 去前缀反向代理到本机 hostPort
+    assert "handle_path /voiceprint-app-demo/* {" in content
+    assert "reverse_proxy 127.0.0.1:18001" in content
+    # 无尾斜杠 → 301 到 /voiceprint-app-demo/
+    assert "handle /voiceprint-app-demo {" in content
+    assert "redir /voiceprint-app-demo/ permanent" in content
+
+
+def test_remove_alias_config_idempotent(gateway: StaticGateway) -> None:
+    """删除不存在的别名片段不应报错。"""
+    gateway.remove_alias_config("never-existed")  # 不抛
+
+
+def test_assemble_main_config_emits_alias_entry_block(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """存在别名片段且端口已配置时，主 Caddyfile 追加统一入口块。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+    gateway.generate_alias_config("demo", "voiceprint", 18001)
+
+    content = gateway._assemble_main_config()
+    # 站点 import 仍在
+    assert any(ln.startswith("import ") for ln in content.splitlines())
+    # 统一入口块
+    assert ":8080 {" in content  # 默认 staticGatewayPort=8080
+    assert "# IMP-006 路径别名统一入口" in content
+    # 别名片段被 import 进块（缩进一级）
+    alias_conf = workspace.app_alias_config("demo").as_posix()
+    assert f"\timport `{alias_conf}`" in content
+
+
+def test_assemble_main_config_no_alias_block_without_fragments(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """无别名片段时不追加统一入口块（端口不被占用）。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+
+    content = gateway._assemble_main_config()
+    assert ":8080" not in content
+    assert "IMP-006" not in content
+
+
+def test_assemble_main_config_no_alias_block_when_port_none(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """staticGatewayPort=None 时即便有别名片段也不注入块（入口关闭）。"""
+    gw = StaticGateway(workspace, Config(staticGatewayPort=None))
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gw.generate_site_config("demo", 18001, root)
+    gw.generate_alias_config("demo", "voiceprint", 18001)
+
+    content = gw._assemble_main_config()
+    assert ":8080" not in content
+    assert "IMP-006" not in content
+
+
+def test_assemble_main_config_alias_block_uses_configured_port(
+    workspace: Workspace
+) -> None:
+    """统一入口端口跟随 config.staticGatewayPort。"""
+    gw = StaticGateway(workspace, Config(staticGatewayPort=9090))
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gw.generate_alias_config("demo", "voiceprint", 18001)
+
+    content = gw._assemble_main_config()
+    assert ":9090 {" in content
+    assert ":8080" not in content
+
+
+def test_disable_removes_alias_fragment(gateway: StaticGateway, workspace: Workspace, monkeypatch) -> None:
+    """disable 同时清理站点配置与别名片段（builtin 模式也清）。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "builtin")
+    monkeypatch.setattr(gateway, "_stop_builtin", lambda iid: None)
+    # 预置别名片段
+    gateway.generate_alias_config("demo", "voiceprint", 18001)
+    assert workspace.app_alias_config("demo").exists()
+
+    gateway.disable("demo")
+    assert not workspace.app_alias_config("demo").exists()
+    assert not gateway.site_config_path("demo").exists()

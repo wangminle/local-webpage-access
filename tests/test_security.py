@@ -354,6 +354,142 @@ def test_audit_zip_members_symlink_short_modes_ok() -> None:
     assert findings == []
 
 
+# ---- sanitize_zip_members（IMP-001）--------------------------------------
+
+
+def test_sanitize_strips_node_modules_tree() -> None:
+    """node_modules/ 下所有成员（任意深度）应整体剥离。"""
+    from local_webpage_access.security import sanitize_zip_members
+
+    names = [
+        "index.html",
+        "node_modules/react/index.js",
+        "node_modules/.bin/vite",
+        "node_modules/react/package.json",
+        "package.json",
+    ]
+    result = sanitize_zip_members(names)
+    kept = [names[i] for i in result.keep_indices]
+    assert kept == ["index.html", "package.json"]
+    assert "node_modules" in result.categories
+    assert result.categories["node_modules"] == 3
+
+
+def test_sanitize_strips_cache_dirs_and_ds_store() -> None:
+    """__pycache__ / .pytest_cache / .DS_Store / __MACOSX 均剥离。"""
+    from local_webpage_access.security import sanitize_zip_members
+
+    names = [
+        "app.py",
+        "__pycache__/app.cpython-313.pyc",
+        ".pytest_cache/v/cache/lastfailed",
+        ".DS_Store",
+        "__MACOSX/._index.html",
+        "src/main.py",
+    ]
+    result = sanitize_zip_members(names)
+    kept = [names[i] for i in result.keep_indices]
+    assert kept == ["app.py", "src/main.py"]
+    assert result.categories["__pycache__"] == 1
+    assert result.categories[".pytest_cache"] == 1
+    assert result.categories[".DS_Store"] == 1
+    assert result.categories["__MACOSX"] == 1
+
+
+def test_sanitize_preserves_lockfiles_source_dist_config() -> None:
+    """lockfile / 源码 / dist/ / build/ / 配置文件必须保留。"""
+    from local_webpage_access.security import sanitize_zip_members
+
+    names = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "requirements.txt",
+        "src/index.ts",
+        "dist/bundle.js",
+        "build/output.js",
+        "public/favicon.ico",
+        ".env.example",
+        "config.yaml",
+    ]
+    result = sanitize_zip_members(names)
+    kept = [names[i] for i in result.keep_indices]
+    # 全部保留，无剥离
+    assert kept == names
+    assert result.stripped_names == ()
+
+
+def test_sanitize_preserves_bare_env_dir() -> None:
+    """裸 env/ 不剥离（与「保留配置文件」规则冲突，IMP-001 刻意排除）。"""
+    from local_webpage_access.security import sanitize_zip_members
+
+    names = ["env/config.py", ".venv/bin/python", "venv/bin/python"]
+    result = sanitize_zip_members(names)
+    kept = [names[i] for i in result.keep_indices]
+    # 裸 env/ 保留；.venv / venv 仍剥离
+    assert "env/config.py" in kept
+    assert ".venv/bin/python" not in kept
+    assert "venv/bin/python" not in kept
+
+
+def test_sanitize_counts_stripped_symlinks() -> None:
+    """被剥离成员中的 symlink（如 node_modules/.bin/*）应被计数。"""
+    import stat as stat_mod
+
+    from local_webpage_access.security import sanitize_zip_members
+
+    symlink_mode = (stat_mod.S_IFLNK | 0o777) << 16  # 原始 external_attr
+    # sanitize 接收的是 >> 16 之后的模式位
+    names = [
+        "node_modules/.bin/vite",
+        "node_modules/.bin/esbuild",
+        "index.html",
+    ]
+    modes = [
+        (symlink_mode >> 16) & 0xFFFF,
+        (symlink_mode >> 16) & 0xFFFF,
+        0,
+    ]
+    result = sanitize_zip_members(names, modes=modes)
+    assert result.stripped_symlink_count == 2
+    assert [names[i] for i in result.keep_indices] == ["index.html"]
+
+
+def test_sanitize_keep_indices_preserve_order() -> None:
+    """keep_indices 保持原列表顺序，调用方据此顺序解压。"""
+    from local_webpage_access.security import sanitize_zip_members
+
+    names = ["z.txt", "node_modules/a", "a.txt", "__pycache__/b", "m.txt"]
+    result = sanitize_zip_members(names)
+    assert result.keep_indices == (0, 2, 4)
+    assert result.keep_indices == tuple(sorted(result.keep_indices))
+
+
+def test_sanitize_empty_input() -> None:
+    from local_webpage_access.security import sanitize_zip_members
+
+    result = sanitize_zip_members([])
+    assert result.keep_indices == ()
+    assert result.stripped_names == ()
+    assert result.stripped_symlink_count == 0
+    assert result.categories == {}
+
+
+def test_sanitize_nested_strippable_under_source() -> None:
+    """源码目录下的 __pycache__ / node_modules 也要剥离（任意层级）。"""
+    from local_webpage_access.security import sanitize_zip_members
+
+    names = [
+        "backend/app.py",
+        "backend/__pycache__/app.pyc",
+        "frontend/src/App.tsx",
+        "frontend/node_modules/react/index.js",
+    ]
+    result = sanitize_zip_members(names)
+    kept = [names[i] for i in result.keep_indices]
+    assert kept == ["backend/app.py", "frontend/src/App.tsx"]
+
+
 # ---- 风险提示（WBS-25.09）-------------------------------------------------
 
 

@@ -127,6 +127,8 @@ class NetworkConfig(BaseModel):
     hostPort: int | None = None
     routeMode: str = RouteMode.PORT.value
     routeHost: str | None = None
+    # IMP-006：路径别名统一入口 URL（``routeMode="name"`` 时填充）。
+    routeUrl: str | None = None
     lanUrl: str | None = None
     healthUrl: str | None = None
 

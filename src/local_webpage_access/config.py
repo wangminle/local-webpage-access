@@ -12,11 +12,15 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from local_webpage_access.errors import ConfigError
-from local_webpage_access.paths import CONFIG_FILENAME, Workspace
+from local_webpage_access.paths import Workspace
 
 MANAGER_PORT_DEFAULT = 17800
 PORT_POOL_START_DEFAULT = 18000
 PORT_POOL_END_DEFAULT = 19999
+# IMP-006：路径别名统一入口端口默认值。8080 避开端口池（18000-19999）与
+# 管理页（17800），且无需特权绑定（80 需要 root/cap_net_bind_service）。
+# 该端口仅在存在已启用别名时才被 Caddy 占用。
+STATIC_GATEWAY_PORT_DEFAULT = 8080
 
 
 class PortPool(BaseModel):
@@ -47,6 +51,22 @@ class ResourceLimits(BaseModel):
     cpus: str = "0.75"
 
 
+class StaticRateLimit(BaseModel):
+    """静态站点访问频率限制（IMP-005，内网防护）。
+
+    默认关闭；仅在 Caddy 含 ``http.handlers.rate_limit`` 模块时生效。
+    builtin 模式不支持限流。
+
+    * ``rps`` —— 每客户端每秒平均请求数（稳态补充速率）；
+    * ``burst`` —— 令牌桶容量（允许的瞬时突发请求数）。
+    两者映射为 Caddy ``rate_limit`` 指令的 ``events=burst`` / ``window=burst/rps``。
+    """
+
+    enabled: bool = False
+    rps: int = Field(default=3, ge=1, le=10000)
+    burst: int = Field(default=6, ge=1, le=100000)
+
+
 class Config(BaseModel):
     """``local-web.yml`` 的完整配置模型。"""
 
@@ -55,8 +75,13 @@ class Config(BaseModel):
     managerEnabled: bool = True
     portPool: PortPool = Field(default_factory=PortPool)
     staticGateway: str = "caddy"
+    # IMP-006：路径别名统一入口端口。仅当存在已启用的别名时，Caddy 才会在该
+    # 端口上监听并按 ``/<alias>/*`` 反向代理到各实例 hostPort；无别名时该端口
+    # 不被占用。``None`` 表示彻底关闭别名入口（即便实例配置了 alias 也只走端口）。
+    staticGatewayPort: int | None = Field(default=STATIC_GATEWAY_PORT_DEFAULT, ge=1, le=65535)
     buildConcurrency: int = Field(default=1, ge=1, le=8)
     defaultResourceLimits: ResourceLimits = Field(default_factory=ResourceLimits)
+    staticRateLimit: StaticRateLimit = Field(default_factory=StaticRateLimit)
     lanIpStrategy: str = "auto"
     manualLanIp: str | None = None
     logLevel: str = "INFO"
@@ -95,6 +120,19 @@ class Config(BaseModel):
             )
         if self.lanIpStrategy == "manual" and not self.manualLanIp:
             raise ValueError("lanIpStrategy=manual 时必须提供 manualLanIp")
+        # IMP-006：别名入口端口不能与管理页或端口池冲突，否则 Caddy 会与
+        # 已有监听者抢端口导致 reload 失败。
+        if self.staticGatewayPort is not None:
+            if self.staticGatewayPort == self.managerPort:
+                raise ValueError(
+                    f"staticGatewayPort({self.staticGatewayPort}) 不能与管理页端口"
+                    f"({self.managerPort}) 相同",
+                )
+            if self.portPool.start <= self.staticGatewayPort <= self.portPool.end:
+                raise ValueError(
+                    f"staticGatewayPort({self.staticGatewayPort}) 不能落在端口池 "
+                    f"[{self.portPool.start}, {self.portPool.end}] 内",
+                )
         return self
 
     # ---- 加载 / 序列化 -----------------------------------------------------
@@ -166,6 +204,10 @@ portPool:
 # 静态网关实现：caddy | nginx | builtin
 staticGateway: caddy
 
+# 路径别名统一入口端口（IMP-006）。仅当存在已启用的 --path-alias 时，Caddy
+# 才在此端口监听并按 /<alias>/ 反向代理到各实例 hostPort。设为 null 关闭别名入口。
+staticGatewayPort: 8080
+
 # 构建并发数（小主机建议保持 1）
 buildConcurrency: 1
 
@@ -173,6 +215,13 @@ buildConcurrency: 1
 defaultResourceLimits:
   memory: 512m
   cpus: "0.75"
+
+# 静态站点访问频率限制（IMP-005，内网防护；默认关闭）
+# 仅在 Caddy 含 http.handlers.rate_limit 模块时生效；builtin 模式不支持。
+staticRateLimit:
+  enabled: false
+  rps: 3        # 每客户端每秒平均请求数
+  burst: 6      # 令牌桶容量（瞬时突发上限）
 
 # 局域网 IP 获取策略：auto（自动探测）| manual（手动指定）
 lanIpStrategy: auto
@@ -187,6 +236,7 @@ __all__ = [
     "Config",
     "PortPool",
     "ResourceLimits",
+    "StaticRateLimit",
     "default_config",
     "load_config",
     "example_config_text",
@@ -194,4 +244,5 @@ __all__ = [
     "MANAGER_PORT_DEFAULT",
     "PORT_POOL_START_DEFAULT",
     "PORT_POOL_END_DEFAULT",
+    "STATIC_GATEWAY_PORT_DEFAULT",
 ]

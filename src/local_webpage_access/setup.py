@@ -15,7 +15,6 @@ from local_webpage_access import PRODUCT_NAME, __version__
 from local_webpage_access.doctor import (
     STATUS_FAIL,
     STATUS_OK,
-    STATUS_SKIP,
     STATUS_WARN,
     SubprocessRunner,
     _default_runner,
@@ -248,7 +247,7 @@ def _docker_install_hint(plat: str) -> str:
             "安装 Docker Desktop for Windows："
             "https://docs.docker.com/desktop/setup/install/windows-install/"
         )
-    return "安装 Docker ≥ 29.6.1 并启动 dockerd"
+    return f"安装 Docker ≥ {MIN_DOCKER_VERSION} 并启动 dockerd"
 
 
 def _compose_install_hint(plat: str) -> str:
@@ -345,7 +344,7 @@ fi
 echo "==> 安装 lwa（在项目根目录执行）"
 # pip install -e .
 
-echo "==> Docker Desktop（含 Compose 插件，Docker 需 ≥ 29.6.1；Compose 最低 ≥ 2.40.2，推荐 ≥ 5.2.0）"
+echo "==> Docker Desktop（含 Compose 插件，Docker 需 ≥ 29.0.0；Compose 最低 ≥ 2.40.2，推荐 ≥ 5.2.0）"
 if ! command -v docker &>/dev/null; then
   brew install --cask docker
   echo "请启动 Docker Desktop 应用"
@@ -413,7 +412,7 @@ Write-Host "==> Python 3.13+"
 Write-Host "==> 安装 lwa（在项目根目录执行）"
 # pip install -e .
 
-Write-Host "==> Docker Desktop（含 Compose，Docker 需 ≥ 29.6.1；Compose 最低 ≥ 2.40.2，推荐 ≥ 5.2.0）"
+Write-Host "==> Docker Desktop（含 Compose，Docker 需 ≥ 29.0.0；Compose 最低 ≥ 2.40.2，推荐 ≥ 5.2.0）"
 # winget install Docker.DockerDesktop
 # 安装后启动 Docker Desktop
 
@@ -437,7 +436,7 @@ _SCRIPT_GENERIC = """\
 # 请根据操作系统查阅：
 #   lwa setup          # 检测并查看安装指引
 #   docs/faq.md        # 排障文档
-# 组件要求：Python 3.13+、Docker ≥ 29.6.1、Compose ≥ 2.40.2（推荐 ≥ 5.2.0）、Caddy ≥ 2.11.2（可选）、Node ≥ 24（前端构建）
+# 组件要求：Python 3.13+、Docker ≥ 29.0.0、Compose ≥ 2.40.2（推荐 ≥ 5.2.0）、Caddy ≥ 2.11.2（可选）、Node ≥ 24.0.0（前端构建）
 """
 
 

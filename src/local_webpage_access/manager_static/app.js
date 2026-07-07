@@ -186,7 +186,7 @@
       '<td class="cell-muted">' + esc(i.runtime || "—") + "</td>" +
       "<td>" + stackHtml(i.stack, i.database) + "</td>" +
       '<td class="cell-url">' + urlHtml(i.lanUrl) + "</td>" +
-      "<td>" + portHtml(i.hostPort, i.internalPort) + "</td>" +
+      "<td>" + portHtml(i) + "</td>" +
       '<td class="cell-muted">' + resourceHtml(i) + "</td>" +
       '<td class="cell-muted">' + esc(i.updatedAt || "—") + "</td>" +
       '<td class="col-ops"><div class="ops">' + opsHtml(i) + "</div></td>" +
@@ -222,12 +222,20 @@
     );
   }
 
-  function portHtml(hostPort, internalPort) {
-    if (!hostPort) return '<span class="cell-muted">—</span>';
-    if (internalPort && String(internalPort) !== String(hostPort)) {
-      return esc(hostPort + "→" + internalPort);
+  function portHtml(i) {
+    // IMP-007：主显示 hostPort，副信息为后端格式化的 portMappingLabel
+    // （internalPort→hostPort，仅容器实例且二者不同时存在）。
+    if (!i.hostPort) return '<span class="cell-muted">—</span>';
+    var main = esc(String(i.hostPort));
+    if (i.portMappingLabel) {
+      return (
+        '<span class="port-cell">' +
+        '<span class="port-main">' + main + "</span>" +
+        '<span class="port-sub">映射 ' + esc(i.portMappingLabel) + "</span>" +
+        "</span>"
+      );
     }
-    return esc(String(hostPort));
+    return main;
   }
 
   function resourceHtml(i) {
@@ -347,6 +355,7 @@
       ["lanUrl", "访问地址"],
       ["hostPort", "宿主端口"],
       ["internalPort", "内部端口"],
+      ["portMappingLabel", "端口映射"],
       ["lastError", "最近错误"],
       ["lastHealthCheckAt", "最近健康检查"],
       ["updatedAt", "更新时间"],

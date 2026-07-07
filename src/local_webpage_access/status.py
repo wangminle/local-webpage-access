@@ -53,6 +53,9 @@ class InstanceStatus:
     host_port: int | None = None
     internal_port: int | None = None
     lan_url: str | None = None
+    # IMP-006：路径别名（routeMode=name 时从 manifest.network 读取）
+    route_host: str | None = None
+    route_url: str | None = None
     source_size_bytes: int | None = None
     public_size_bytes: int | None = None
     data_size_bytes: int | None = None
@@ -64,6 +67,24 @@ class InstanceStatus:
     last_health_check_at: str | None = None
     updated_at: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def port_mapping_label(self) -> str | None:
+        """IMP-007：端口映射的人类可读标签（列表与详情统一口径）。
+
+        * 容器实例同时有 internalPort 与 hostPort 且不同 → ``"8000→18100"``；
+        * 二者相同、或 internalPort 缺失（静态托管）→ ``None``，前端只显示 hostPort，
+          避免给静态站点展示误导性的 ``80→hostPort``。
+
+        数据口径：``hostPort``=宿主访问端口；``internalPort``=容器/应用内部监听端口。
+        """
+        if (
+            self.internal_port is not None
+            and self.host_port is not None
+            and self.internal_port != self.host_port
+        ):
+            return f"{self.internal_port}→{self.host_port}"
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,7 +100,10 @@ class InstanceStatus:
             "database": self.database,
             "hostPort": self.host_port,
             "internalPort": self.internal_port,
+            "portMappingLabel": self.port_mapping_label,
             "lanUrl": self.lan_url,
+            "routeHost": self.route_host,
+            "routeUrl": self.route_url,
             "sourceSizeBytes": self.source_size_bytes,
             "publicSizeBytes": self.public_size_bytes,
             "dataSizeBytes": self.data_size_bytes,
@@ -111,6 +135,7 @@ def instance_status(
 
     host_port, internal_port = _resolve_ports(registry, instance_id, row["runtime"])
     lan_url = _resolve_lan_url(workspace, instance_id, host_port)
+    route_host, route_url = _resolve_route(workspace, instance_id)
     resources = registry.get_resources(instance_id) or {}
 
     return InstanceStatus(
@@ -127,6 +152,8 @@ def instance_status(
         host_port=host_port,
         internal_port=internal_port,
         lan_url=lan_url,
+        route_host=route_host,
+        route_url=route_url,
         source_size_bytes=_as_int(resources.get("source_size_bytes")),
         public_size_bytes=_as_int(resources.get("public_size_bytes")),
         data_size_bytes=_as_int(resources.get("data_size_bytes")),
@@ -294,6 +321,25 @@ def _resolve_lan_url(
     if manifest.network and manifest.network.lanUrl:
         return manifest.network.lanUrl
     return None
+
+
+def _resolve_route(
+    workspace: Workspace, instance_id: str
+) -> tuple[str | None, str | None]:
+    """IMP-006：读取路径别名与统一入口 URL（``routeMode=name`` 时）。"""
+    manifest_path = workspace.app_manifest_path(instance_id)
+    if not manifest_path.is_file():
+        return None, None
+    from local_webpage_access.models import InstanceManifest
+
+    try:
+        manifest = InstanceManifest.load(manifest_path)
+    except Exception:  # noqa: BLE001
+        return None, None
+    net = manifest.network
+    if net and net.routeMode == "name":
+        return net.routeHost, net.routeUrl
+    return None, None
 
 
 def _registry_status(registry: Registry, instance_id: str) -> str | None:

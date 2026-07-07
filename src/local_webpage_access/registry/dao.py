@@ -281,6 +281,26 @@ class Registry:
         )
         return dict(row) if row else None
 
+    def list_route_hosts(
+        self, *, exclude_instance: str | None = None
+    ) -> dict[str, str]:
+        """IMP-006：返回 ``{route_host: instance_id}`` 映射（仅 route_mode='name'）。
+
+        用于路径别名全局唯一性校验。``exclude_instance`` 指定的实例被跳过，
+        便于实例更新自身别名时不与自身冲突。
+        """
+        rows = self._fetchall(
+            "SELECT instance_id, route_host FROM static_sites "
+            "WHERE route_mode = 'name' AND route_host IS NOT NULL"
+        )
+        result: dict[str, str] = {}
+        for row in rows:
+            iid = row["instance_id"]
+            if exclude_instance is not None and iid == exclude_instance:
+                continue
+            result[row["route_host"]] = iid
+        return result
+
     def set_static_enabled(self, instance_id: str, enabled: bool) -> None:
         with self.txn() as tx:
             tx.execute(

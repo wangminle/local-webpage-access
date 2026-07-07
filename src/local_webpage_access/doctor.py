@@ -170,7 +170,7 @@ def check_python_version() -> CheckResult:
 
 
 def check_docker(runner: SubprocessRunner = _default_runner) -> CheckResult:
-    """WBS-26.03：Docker 守护进程可用，且 server 版本 ≥ 29.6.1。"""
+    """WBS-26.03：Docker 守护进程可用，且 server 版本 ≥ 29.0.0。"""
     result = runner(["docker", "version", "--format", "{{.Server.Version}}"])
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()

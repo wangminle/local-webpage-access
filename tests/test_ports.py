@@ -239,3 +239,65 @@ def test_allocate_skips_port_lost_in_race(registry: Registry, monkeypatch) -> No
     # 归属未被覆盖：20000 仍属于 other-inst，20001 属于 a
     assert registry.port_owner(20000) == "other-inst"
     assert registry.port_owner(20001) == "a"
+
+
+# ---- IMP-006：build_route_url / build_network_entry with alias ------------
+
+
+def test_build_route_url_basic() -> None:
+    from local_webpage_access.ports import build_route_url
+
+    assert build_route_url("10.0.0.5", 8080, "demo") == "http://10.0.0.5:8080/demo/"
+
+
+def test_build_route_url_port_80_omits_port() -> None:
+    from local_webpage_access.ports import build_route_url
+
+    assert build_route_url("10.0.0.5", 80, "demo") == "http://10.0.0.5/demo/"
+
+
+def test_build_route_url_none_when_no_ip_or_port() -> None:
+    from local_webpage_access.ports import build_route_url
+
+    assert build_route_url(None, 8080, "demo") is None
+    assert build_route_url("10.0.0.5", None, "demo") is None
+
+
+def test_build_network_entry_with_alias() -> None:
+    from local_webpage_access.config import Config
+    from local_webpage_access.ports import build_network_entry
+
+    cfg = Config(lanIpStrategy="manual", manualLanIp="10.0.0.5", staticGatewayPort=8080)
+    entry = build_network_entry(cfg, 18001, path_alias="demo")
+    assert entry["routeMode"] == "name"
+    assert entry["routeHost"] == "demo"
+    assert entry["routeUrl"] == "http://10.0.0.5:8080/demo/"
+    assert entry["hostPort"] == 18001
+    assert entry["lanUrl"] == "http://10.0.0.5:18001"
+
+
+def test_build_network_entry_without_alias_is_port_mode() -> None:
+    from local_webpage_access.config import Config
+    from local_webpage_access.ports import build_network_entry
+
+    cfg = Config(lanIpStrategy="manual", manualLanIp="10.0.0.5", staticGatewayPort=8080)
+    entry = build_network_entry(cfg, 18001)
+    assert entry["routeMode"] == "port"
+    assert entry["routeHost"] is None
+    assert entry["routeUrl"] is None
+
+
+def test_build_network_entry_alias_route_url_none_when_port_disabled() -> None:
+    """staticGatewayPort=None 时即便有别名，routeUrl 也为 None。"""
+    from local_webpage_access.config import Config
+    from local_webpage_access.ports import build_network_entry
+
+    cfg = Config(
+        lanIpStrategy="manual",
+        manualLanIp="10.0.0.5",
+        staticGatewayPort=None,
+    )
+    entry = build_network_entry(cfg, 18001, path_alias="demo")
+    assert entry["routeMode"] == "name"
+    assert entry["routeHost"] == "demo"
+    assert entry["routeUrl"] is None  # 入口未启用，只能走端口

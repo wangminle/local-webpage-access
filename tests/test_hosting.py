@@ -677,3 +677,129 @@ def test_host_container_releases_port_on_build_failure(
 
     # 端口不应残留（build 失败前 _ensure_container_port 已分配）
     assert registry.allocated_ports() == []
+
+
+# ---- IMP-006 路径别名端到端 ------------------------------------------------
+#
+# 覆盖 WBS 006.06 的"端口 + 路径并存"流程：带 path_alias 的静态实例经
+# host_static 后，hostPort 仍正常分配（端口可达），同时 network.routeMode=name
+# / routeUrl 写入（路径可达）。并验证 Caddy 模式下别名片段落盘、stop 后清理。
+
+
+def _seed_static_instance_with_alias(
+    workspace: Workspace, registry: Registry, iid: str, alias: str
+) -> None:
+    """构造一个带路径别名的已导入静态实例。"""
+    workspace.ensure_app_dirs(iid)
+    current = workspace.app_current(iid)
+    (current / "index.html").write_text("<html><body>hello</body></html>")
+    detection = DetectionResult(
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.TINY,
+        form="static",
+        confidence="high",
+    )
+    manifest = build_manifest_from_detection(
+        instance_id=iid,
+        display_name="Demo",
+        detection=detection,
+        workspace=workspace,
+        path_alias=alias,
+    )
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+
+
+def test_host_static_with_alias_port_and_path_coexist(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """IMP-006：带别名的静态实例托管后端口与路径并存（builtin 模式）。
+
+    builtin 模式无统一入口，别名片段不落盘，但 manifest 层的 routeMode/routeUrl
+    仍正确写入——这是后端无关的纯数据层断言。hostPort 照常分配保证端口可达。
+    """
+    # 固定 lanIp + staticGatewayPort，使 routeUrl 可确定断言
+    config.lanIpStrategy = "manual"
+    config.manualLanIp = "192.168.1.100"
+    config.staticGatewayPort = 8080
+
+    _seed_static_instance_with_alias(workspace, registry, "demo", "voiceprint")
+    manifest = host_static(workspace, config, registry, "demo")
+
+    # 端口侧：hostPort 已分配（端口可达）
+    assert manifest.network.hostPort is not None
+    assert manifest.network.hostPort in registry.allocated_ports()
+    # 路径侧：routeMode=name，routeUrl 指向统一入口
+    assert manifest.network.routeMode == "name"
+    assert manifest.network.routeHost == "voiceprint"
+    assert manifest.network.routeUrl == "http://192.168.1.100:8080/voiceprint/"
+    # lanUrl 仍保留（端口直达）
+    assert manifest.network.lanUrl is not None
+    # static 配置保留别名
+    assert manifest.static is not None
+    assert manifest.static.routeMode == "name"
+    assert manifest.static.routeHost == "voiceprint"
+
+    stop_instance(workspace, config, registry, "demo")
+
+
+def test_host_static_without_alias_keeps_port_mode(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """IMP-006：不传别名时默认行为不变（routeMode=port，无 routeUrl）。"""
+    _seed_static_instance(workspace, registry, "demo")
+    manifest = host_static(workspace, config, registry, "demo")
+
+    assert manifest.network.routeMode == "port"
+    assert manifest.network.routeHost is None
+    assert manifest.network.routeUrl is None
+    assert manifest.network.hostPort is not None
+    assert manifest.static is not None
+    assert manifest.static.routeMode == "port"
+    assert manifest.static.routeHost is None
+
+    stop_instance(workspace, config, registry, "demo")
+
+
+def test_host_static_alias_writes_caddy_fragment(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """IMP-006：Caddy 模式下 host_static 应写出别名片段，stop 后清理。
+
+    monkeypatch detect_backend→caddy 并 stub reload_all（无真实 caddy 二进制），
+    验证 generate_alias_config 的落盘内容：handle_path 去前缀 + reverse_proxy +
+    无尾斜杠 301。
+    """
+    from local_webpage_access.static_gateway import StaticGateway
+
+    config.staticGateway = "caddy"
+    config.lanIpStrategy = "manual"
+    config.manualLanIp = "192.168.1.100"
+    config.staticGatewayPort = 8080
+
+    _seed_static_instance_with_alias(workspace, registry, "demo", "voiceprint")
+
+    # 探测不到真实 caddy 时 detect_backend 会降级 builtin；强制走 caddy 路径
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
+    monkeypatch.setattr(StaticGateway, "reload_all", lambda self: None)
+
+    manifest = host_static(workspace, config, registry, "demo")
+
+    # 别名片段已落盘
+    fragment = workspace.app_alias_config("demo")
+    assert fragment.is_file()
+    text = fragment.read_text(encoding="utf-8")
+    assert "handle_path /voiceprint/*" in text
+    assert "reverse_proxy 127.0.0.1:" in text
+    assert "handle /voiceprint" in text
+    assert "redir /voiceprint/ permanent" in text
+
+    # manifest 仍正确
+    assert manifest.network.routeMode == "name"
+    assert manifest.network.routeUrl == "http://192.168.1.100:8080/voiceprint/"
+
+    stop_instance(workspace, config, registry, "demo")
+    # stop 后别名片段已清理（disable 在 caddy 路径删除片段 + reload）
+    assert not fragment.exists()

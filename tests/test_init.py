@@ -105,7 +105,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
     init_workspace(root)
     ws = Workspace(root)
     skill_docs = list(ws.skills.rglob("SKILL.md"))
-    assert len(skill_docs) == 14
+    assert len(skill_docs) == 15
     # 索引 README 也应存在
     assert (ws.skills / "README.md").is_file()
     # 关键 skill 应在列
@@ -119,6 +119,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
         "lwa-diagnose-health-check",
         "lwa-setup-host-environment",
         "lwa-update-runtime",
+        "lwa-import-zip",
     ):
         assert expected in names, f"缺少 skill：{expected}"
 

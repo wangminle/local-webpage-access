@@ -10,7 +10,6 @@ import shutil
 from pathlib import Path
 
 from local_webpage_access.config import example_config_text
-from local_webpage_access.errors import LwaError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry

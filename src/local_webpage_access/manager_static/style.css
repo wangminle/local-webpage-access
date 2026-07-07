@@ -319,6 +319,19 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 .cell-url a { color: var(--primary); text-decoration: none; }
 .cell-url a:hover { text-decoration: underline; }
 .cell-muted { color: var(--text-muted); }
+
+/* IMP-007：端口列主显示 hostPort，副信息为端口映射标签 */
+.port-cell {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.port-main { font-variant-numeric: tabular-nums; }
+.port-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
 .ops { display: flex; gap: 4px; flex-wrap: wrap; }
 
 .stack-tag {

@@ -62,16 +62,27 @@
 | BUG-049 | 修复 | zip 解压未防御 symlink 类 zip slip，`audit_zip_members` 未被 importer 调用 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | 三层防御：(1) `audit_zip_members` 新增 `modes` 参数 + `_is_symlink_mode`（S_ISLNK）检测符号链接成员，返回 `zip_symlink` critical 发现；(2) importer `_safe_extract` 解压前调用 `audit_zip_members`（含 modes），critical 级 `has_critical` 拒绝解压并抛 ZipImportError，WARN 级记录日志；(3) 解压后 `rglob("*")` 深度防御扫描 symlink（兜底 external_attr 未声明的异常 zip）。回归：test_import_rejects_zip_slip 改匹配 zip_slip、新增 test_import_rejects_zip_symlink；security 新增 symlink 检测 + modes 短缺边界回归，全量 609 passed/4 skipped |
 | BUG-050 | 修复 | 管理页 `building`/`queued` 时仍允许点击「启动」，易触发并发操作与锁竞争 | 2026-07-06 17:35 | 2026-07-06 18:35 | 已完成 | `app.js` `opsHtml` 新增 `inProgress` 判定（building/queued/pending），对 start/stop/restart/rebuild 四个操作按钮在 inProgress 时统一禁用（start 保留 running 禁用，stop 保留非 running 禁用）；「打开」「日志」不受影响。顺带补 `.badge-queued` CSS（原缺失）。全量 609 passed/4 skipped |
 | BUG-051 | 修复 | 环境检查把可用 Compose v2.40 环境和无 Caddy 静态托管环境误判为失败 | 2026-07-06 18:07 | 2026-07-06 18:07 | 已完成 | Compose 拆分最低线 2.40.2 与推荐线 5.2.0：runtime 只按最低线阻断，doctor/setup 对低于推荐给 WARN；Caddy 缺失按运行时 fallback 降级 builtin 并给 WARN；同步 README/FAQ/known-limitations/setup skill/CLI 文案；新增 Compose v2.40、低版本失败、Caddy 缺失回归；全量测试 600 passed/4 skipped |
-| BUG-052 | 修复 | 管理页并行轮询可能把仍在运行的静态实例短暂误判为 stopped | 2026-07-06 20:23 | 2026-07-06 20:23 | 已完成 | registry 读路径加连接级锁；静态状态观测在 PID 缺失/抖动时补 HTTP health check；相关测试 test_registry_concurrent_reads_thread_safe/test_observe_static_status_uses_health_when_pid_missing 通过 |
 | BUG-053 | 修复 | `manager on`/`init` 在 17800 已有其他工作区管理页时会误恢复为当前工作区管理页 | 2026-07-06 20:23 | 2026-07-06 20:30 | 已完成 | `/api/health` 增加 `workspaceRoot`；`health_matches_workspace` 校验归属，`start_manager` 仅本工作区恢复状态，否则抛端口占用；`is_running` 同步校验；回归 test_start_manager_rejects_foreign_workspace_on_port 等 |
 | BUG-054 | 修复 | `manager off` 终止失败仍把状态写成 disabled，CLI 仍提示已停止 | 2026-07-06 20:23 | 2026-07-06 20:30 | 已完成 | `stop_manager` 先 `_terminate_pid` 成功后再写 `enabled=false`；`cli.manager_off` 检查返回值并 exit 1；回归 test_stop_manager_keeps_enabled_when_terminate_fails |
 | BUG-055 | 修复 | 新增 `lwa-update-runtime` 内置 skill 后测试仍硬编码 13 个 skills，导致全量 pytest 失败 | 2026-07-06 20:23 | 2026-07-06 20:30 | 已完成 | `test_init_copies_skills`/`test_e2e_init_creates_clean_workspace` 改为 14 并断言 `lwa-update-runtime`；全量 pytest 625 passed/4 skipped |
 | BUG-052 | 修复 | 管理页并发刷新时 registry 只读查询未串行化，误把运行中静态实例标为 stopped（开声纹 demo 后 demo-static 显示/感知为关闭） | 2026-07-06 20:07 | 2026-07-06 20:14 | 已完成 | 根因：`/api/stats` 与 `/api/instances` 并行 `sync_status`，共享 SQLite 连接裸 `conn.execute` 触发 `InterfaceError` 与状态抖动；`Registry._fetchone/_fetchall` + `locked_connection` 串行化读；`_observe_static_status` 增加 HTTP 健康兜底。回归 test_registry_concurrent_reads_thread_safe、test_observe_static_status_uses_health_when_pid_missing；hammer 60 并发请求 0 错误 |
+| BUG-056 | 修复 | update_zip 在 current 已换入后若 manifest/registry/original.zip 写入失败，不会回滚到旧 current | 2026-07-06 23:26 | 2026-07-07 00:10 | 已完成 | current 换入后异常时恢复旧 current、manifest、original.zip，并尽力恢复 registry 资源；新增 test_update_failure_after_current_swap_rolls_back；目标回归通过 |
+| BUG-057 | 修复 | 管理页实例更新 API 的相对 zipPath 可通过 ../ 逃出 inbox，且绝对路径未限制来源 | 2026-07-06 23:26 | 2026-07-07 00:10 | 已完成 | update API 对相对/绝对 zipPath resolve 后强制 relative_to(workspace.inbox)，越界返回 400；新增相对 ../ 与绝对路径越界回归；目标回归通过 |
+| BUG-058 | 修复 | 版本解析测试仍断言 0.3.1，但当前最新 Git commit 主题为 V0.3.2，导致全量 pytest 失败 | 2026-07-06 23:26 | 2026-07-07 00:10 | 已完成 | tests/test_version_info.py 改为断言 0.3.2；pyproject、version_info fallback 与 CLI 说明同步到 V0.3.2；目标回归通过 |
+| BUG-059 | 修复 | update_zip --no-keep-data 先写资源统计再清空 data，管理页 dataSizeBytes 可能显示旧值 | 2026-07-06 23:26 | 2026-07-07 00:10 | 已完成 | keep_data=False 时先清空 data/ 再 upsert_resources，data_size_bytes 归零；test_update_no_keep_data_clears_data 增加 registry 断言；目标回归通过 |
+| BUG-060 | 修复 | Docker Engine 最低版本门槛过高，误挡 Docker Desktop 4.55.0 / Engine 29.1.3 的真实容器验收 | 2026-07-07 00:10 | 2026-07-07 00:10 | 已完成 | MIN_DOCKER_VERSION 调整为 29.0.0；同步 README/setup/skill 文案；新增 Docker Desktop 4.55 Engine 29.1.3 回归；真实 Docker 自检 4/4 与 WBS-29.09/29.11/29.12 手工验收通过 |
+| BUG-061 | 修复 | daemon_start_lock 只有文件锁没有进程内互斥，同进程并发 daemon on 可重复 spawn watcher | 2026-07-07 00:15 | 2026-07-07 00:15 | 已完成 | 新增模块级 threading.Lock 包裹 daemon_start_lock 文件锁；test_start_daemon_serializes_concurrent_start 通过 |
+| BUG-062 | 修复 | update_zip 暂存区清理测试断言路径错误，且 --force-kind-change 静态转容器时旧 hostPort 未迁移 | 2026-07-07 08:48 | 2026-07-07 08:48 | 已完成 | test_update_failure_rolls_back 改查 current.new/current.old；_preserve_hostport 新形态子表查不到时回退旧形态子表，静态→容器迁移保留 hostPort；同步 CLI/Skill 文案；全量 pytest 通过，compileall 与 node --check 通过 |
+| BUG-063 | 修复 | `updater.migrate_config_defaults` 对嵌套字段做浅合并，旧配置只写了部分子键（如 `portPool.start`）时整体覆盖默认，缺失子键（如 `end`）在写回文件中丢失（代码审查发现） | 2026-07-07 08:52 | 2026-07-07 08:52 | 已完成 | 新增 `_deep_merge_defaults` 深层合并（同为 dict 的键递归补齐 defaults 子键，用户值优先）；`portPool`/`defaultResourceLimits`/`staticRateLimit` 等嵌套字段不再被整体覆盖；新增回归 `test_migrate_config_deep_merges_nested_dict`（用户 start 保留 + end 从默认补齐）；全量 pytest 通过 |
+| BUG-064 | 优化 | pyflakes 报 8 处问题：`health.py` 冗余海象运算符 + 7 处未使用导入（代码审查发现） | 2026-07-07 08:52 | 2026-07-07 08:52 | 已完成 | `health.py` 移除 `instance_id :=` 未用海象；清理 `hosting`(GatewayError)/`config`(CONFIG_FILENAME)/`importer`(now_iso)/`setup`(STATUS_SKIP)/`init_workspace`(LwaError)/`cli`(__version__)/`lifecycle`(DesiredState) 共 7 处未使用导入；`python3 -m pyflakes src/local_webpage_access/` 退出码 0 全清；全量 pytest 通过 |
 
 ## 调整事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
+| ADJ-001 | 调整 | task-list.md 存在重复 BUG-052，导致任务清单校验失败 | 2026-07-06 23:26 | 2026-07-06 23:35 | 已完成 | 删除行 65 简略重复项，保留行 69 含根因与回归的 BUG-052；DEV-032 移入功能开发；DEV-029/PLN-008 进行中项完成时间改 -；task-list check 通过 |
+| ADJ-002 | 调整 | 待改进功能计划文档状态仍为待规划，与代码和 task-list 完成记录不一致 | 2026-07-06 23:27 | 2026-07-06 23:35 | 已完成 | docs/plan/待改进功能点记录-20260706.md 中 IMP-001/005/006/007/008/009 状态已同步为已完成（DEV-034~039） |
+| ADJ-003 | 调整 | IMP-001 计划要求剥离 env/，实现中明确排除裸 env，验收口径需统一 | 2026-07-06 23:27 | 2026-07-06 23:35 | 已完成 | 计划文档清理规则移除裸 env/，注明保留原因（环境配置目录）；与 security.py _STRIPPABLE_SEGMENTS 及注释一致 |
 
 ## 检查事项
 
@@ -80,6 +91,8 @@
 | CHK-001 | 检查 | Phase 5-7 全面代码 bug 审查（daemon/manager_api/security/doctor/管理页前端） | 2026-07-06 00:46 | 2026-07-06 09:46 | 已完成 | 全量 pytest 540 passed/4 skipped；发现 BUG-028~037 共 10 项待修复，已写入本清单 |
 | CHK-002 | 检查 | 全量代码 bug 复审（lifecycle/hosting/importer/daemon/build_queue/前端） | 2026-07-06 17:35 | 2026-07-06 17:35 | 已完成 | 全量 pytest 577 passed/4 skipped；历史 BUG-001~045 已修复；新发现 BUG-046~050 共 5 项待修复；跨进程 buildConcurrency 为 BUG-022 已知 V1 边界 |
 | CHK-003 | 检查 | 当前未提交代码 bug 审查 | 2026-07-06 20:23 | 2026-07-06 20:23 | 已完成 | 审查未提交 diff，执行 compileall、node --check、目标 pytest 与全量 pytest；发现 BUG-053~055 待修复，确认 BUG-052 相关测试通过；全量 pytest 619 passed/4 skipped/2 failed |
+| CHK-004 | 检查 | 待改进功能开发完成性与待提交代码 bug 审查 | 2026-07-06 23:26 | 2026-07-06 23:26 | 已完成 | 对照 docs/plan/待改进功能点记录-20260706.md 与 WBS，审阅待提交 diff；执行 compileall、node --check、pytest、task-list check；发现 update_zip 回滚窗口、管理 API zipPath 越界、版本断言失败、task-list 重复 ID 等问题 |
+| CHK-005 | 检查 | 未提交代码 bug 复审（IMP-001~009 / updater / 全量回归） | 2026-07-07 08:26 | 2026-07-07 08:31 | 已完成 | 全量 pytest 738 passed/4 skipped；compileall + node --check 通过；未发现新的 critical bug；遗留：test_update_failure_rolls_back 暂存区断言路径错误（应 current.new 非 {id}.current.new）、force_kind_change 跨形态 hostPort 迁移未覆盖 |
 
 ## 测试数据
 
@@ -96,7 +109,6 @@
 | DOC-004 | 文档 | IMP-008 `lwa update` 工作区热重载规划 + Skill 草案 | 2026-07-06 19:58 | 2026-07-06 19:58 | 已完成 | 待改进 IMP-008；skills/lwa-update-runtime；runtime-workspace 开发期重载说明；README/setup skill 交叉引用 |
 | DOC-005 | 文档 | 检查并补充待改进功能点记录细节 | 2026-07-06 20:03 | 2026-07-06 20:03 | 已完成 | docs/plan/待改进功能点记录-20260706.md：新增维护说明；补强 IMP-001/005/006/007/008 的非目标、边界、风险、数据口径、失败处理与验收 |
 | DOC-006 | 文档 | IMP-009 实例 zip 包更新（再导入识别与原地升级）规划 | 2026-07-06 20:20 | 2026-07-06 20:20 | 已完成 | 待改进功能点记录新增 IMP-009：`--update`/reimport、hash+slug 识别、保留 id/端口/data、与 IMP-008 区分；管理页/Skill/验收口径 |
-| DEV-032 | 开发 | 应用版本号与 Git commit 主题对齐（管理页/CLI 显示 V0.3.1） | 2026-07-06 19:55 | 2026-07-06 19:56 | 已完成 | version_info.py 解析 `V0.3.1-Build...`；pyproject 0.3.1 兜底；管理页/API/lwa version 显示 V0.3.1；3 条单测 |
 
 ## 功能开发
 
@@ -130,10 +142,17 @@
 | DEV-026 | 开发 | WBS-26 lwa doctor 与排障辅助（环境检查 + 实例深度诊断） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 6；doctor.py，CheckResult/DoctorReport；python/docker/compose/port_pool/registry/static_gateway/disk/memory 检查；diagnose_instance 深度诊断；runner/port_in_use 注入式可测；lwa doctor [--json] [ID]，fail 退出码 1；28 测试 |
 | DEV-027 | 开发 | WBS-27 样例项目与测试夹具（6 个样例 dict 打包 + build_zip/build_all） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；tests/fixtures/，6 样例（static_html/vite_react/node_express/fastapi_sqlite/build_failure/pending_unknown），dict[str,str] 按需打包；EXPECTED_KIND 映射；18 测试 |
 | DEV-028 | 开发 | WBS-28 单元测试与集成测试（全模块覆盖 + Docker 双重守卫） | 2026-07-05 22:30 | 2026-07-06 00:30 | 已完成 | Phase 7；conftest requires_docker marker + LWA_RUN_DOCKER_TESTS 双守卫；WBS-28.01~15 全覆盖；test_security/test_doctor/test_fixtures/test_integration_phase57；529 passed/4 skipped |
-| DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-06 01:30 | 进行中 | Phase 7；tests/test_e2e_acceptance.py（11 测试，覆盖 init/import×4/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor）；docs/acceptance-checklist.md（18 子任务，Docker 依赖项手工清单）；自动化 E2E（11 测试）全通过；**Docker 手工验收（29.09/29.11/29.12，容器构建/运行/健康检查）待在具备 Docker 的 Linux 主机执行**（见 docs/acceptance-checklist.md 验收记录）；全量回归 577 passed/4 skipped |
+| DEV-029 | 开发 | WBS-29 端到端验收（E2E 自动化 + 手工验收清单） | 2026-07-06 00:30 | 2026-07-07 00:10 | 已完成 | Phase 7；自动化 E2E 11/11 已覆盖 init/import/静态 HTTP/start-stop-restart/logs-status-stats/管理页一致/failed-pending/doctor；真实 Docker 手工验收 29.09/29.11/29.12 通过（Node 18002、FastAPI 18003、/app/data/persist.txt stop/start 后仍为 persisted）；详见 docs/acceptance-checklist.md |
 | DEV-030 | 开发 | WBS-30 文档与发布准备（README 更新 + 管理/FAQ/安全/限制/发布清单） | 2026-07-06 01:30 | 2026-07-06 02:00 | 已完成 | Phase 7；README 全面更新（Phase 0~7 全完成，新增 manager/daemon/doctor/skills 章节）；docs/manager-page.md、faq.md、security-boundary.md、known-limitations.md、release-checklist.md；文档索引齐全 |
 | DEV-031 | 开发 | 管理页默认后台启动（managerEnabled 配置 + lwa manager on/off/status + init 自动拉起） | 2026-07-06 19:28 | 2026-07-06 19:30 | 已完成 | config.managerEnabled 默认 true；manager_service 后台子进程；init 自动 maybe_start_manager；CLI 新增 on/off/status；保留 manager start 前台；runtime 实测 pid=79502 17800 健康 200；6 条单测通过 |
+| DEV-032 | 开发 | 应用版本号与 Git commit 主题对齐（管理页/CLI 显示 V0.3.1） | 2026-07-06 19:55 | 2026-07-06 19:56 | 已完成 | version_info.py 解析 `V0.3.1-Build...`；pyproject 0.3.1 兜底；管理页/API/lwa version 显示 V0.3.1；3 条单测 |
 | DEV-033 | 开发 | 管理页前端风格优化（OKLCH 双色板 + 视觉比例/信息密度重构，克制动效） | 2026-07-06 20:04 | 2026-07-06 20:04 | 已完成 | 落地 PRODUCT.md（register=product）；style.css 全量重写为 OKLCH 明暗板：移除状态卡 border-left 侧条（违反设计禁令）改状态值着色、徽章加状态点（色盲友好）、detail 区去 uppercase eyebrow、修正 logs 模态缺 .modal-inner 致内容浮在遮罩上的 bug；index.html+app.js：技术栈列合并数据库徽章、移除与"访问地址"重复的"打开"按钮（表 13→12 列）；impeccable detect 返回 [] 无 slop、node --check 通过；动效仅 0.12s hover/focus + prefers-reduced-motion 守卫 |
+| DEV-034 | 开发 | IMP-001 zip 导入前自动剥离冗余包与缓存（node_modules/__pycache__/.venv/.git/__MACOSX 等） | 2026-07-06 20:03 | 2026-07-06 20:35 | 已完成 | importer.sanitize_zip_members 在解压前按「可剥离前缀」分类剔除可重建依赖目录与平台 junk（被剥离成员不落盘），保留成员继续走 audit_zip_members 的 zip slip/symlink 防御；CLI 输出剥离摘要；含 node_modules/.bin symlink 的原版 zip 可一键 import+start；安全回归（源码目录恶意 symlink/zip slip）仍拒绝 |
+| DEV-035 | 开发 | IMP-005 Caddy 静态站点简易访问频率限制（内网防护，约 3 次/秒/客户端） | 2026-07-06 20:03 | 2026-07-06 20:50 | 已完成 | config.staticRateLimit {enabled,rps,burst} 默认关；Caddy 模式经 caddy_site.conf.tpl 注入 rate_limit directive，能力不可用时 WARN 降级保持站点可访问（不因插件缺失下线）；builtin 模式输出「暂不支持」说明；reload 失败回滚旧 Caddyfile |
+| DEV-036 | 开发 | IMP-006 路径别名路由（--path-alias 可选，默认仍仅端口访问） | 2026-07-06 19:55 | 2026-07-06 21:05 | 已完成 | lwa import --path-alias <slug>；manifest pathAlias 写入 registry 索引；Caddy 反向代理 /<alias>/ → upstream 去前缀转发，/<alias> 301 到带尾斜杠；slug 格式 + 全局唯一 + reserved 路径（/api 等）冲突拒绝；remove 清理别名路由；不传别名时输出与 V1 完全一致 |
+| DEV-037 | 开发 | IMP-007 管理页展示端口映射关系（原端口 → hostPort） | 2026-07-06 20:03 | 2026-07-06 21:20 | 已完成 | InstanceStatus 与 /api/instances、/api/instances/{id} 统一返回 hostPort + internalPort + portMappingLabel；前端列表/详情端口列主显示 hostPort、副标「internalPort → hostPort」；静态实例不显示误导性内部端口；scanner 无法确定 internalPort 时不报错不空白 |
+| DEV-038 | 开发 | IMP-008 lwa update 工作区热重载（pip 刷新 + skills 同步 + 重启 lwa 自有服务） | 2026-07-06 19:58 | 2026-07-06 21:40 | 已完成 | updater.py：pip install -e . → 同步包内 skills/ → 工作区 → 重启 manager/daemon 子进程（解决 git pull 后旧子进程仍持旧代码）；--dry-run/--skip-pip/--sync-skills/--sync-templates/--restart-instances；默认不重建 apps/ 用户实例；配套 lwa-update-runtime skill |
+| DEV-039 | 开发 | IMP-009 实例 zip 包更新（再导入识别与原地升级） | 2026-07-06 20:20 | 2026-07-06 22:20 | 已完成 | importer.update_zip 原子换入（解压到 current.new → os.replace 双段交换，失败自动回滚 current/）；sourceZipHash 相同则跳过不 rebuild；kind/runtime 形态变化默认拒绝（--force-kind-change 显式确认）；保留 instance_id/hostPort（端口登记不动重启复用）/data/路径别名/desiredState；CLI import --update/-u + --dry-run/--no-restart/--no-keep-data；管理 API POST /api/instances/{id}/update；新增 lwa-import-zip skill；importer 16 + manager_api 5 单测 |
 
 ## 配置运维
 
@@ -142,6 +161,7 @@
 | OPS-001 | 运维 | 版本基线对齐预设（Python 3.13 / Node 24.16 / Docker 最新稳定版） | 2026-07-05 14:44 | 2026-07-05 14:44 | 已完成 | pyproject requires-python>=3.13、target-version=py313、移除 tomli 条件依赖；dockerfile 基线镜像改 node:24-alpine + python:3.13-slim；同步 test_dockerfile_templates/test_host_container 断言与 README；本机实测 Python 3.13.13 / Node v24.16.0 / Docker 29.5.2 / Compose v5.1.3 均匹配 |
 | OPS-002 | 运维 | 安装 task-list 维护规则与 Stop hook 保证层，并本地化 Claude 配置（不进 GitHub） | 2026-07-06 16:33 | 2026-07-06 16:33 | 已完成 | CLAUDE.md 写入中文「会话结束任务同步」规则；.claude/settings.json 注册 Stop hook + .claude/hooks/tasklist_sync_reminder.sh（session_id 守卫，每会话首次 Stop 触发一次 block 提醒）；脚本验证输出正确且守卫不重复；standardize 检测『规则已安装 + Stop hook 已安装』；.gitignore 追加 CLAUDE.md/.claude/ 不同步 GitHub；hook 需重启会话生效 |
 | OPS-003 | 运维 | .gitignore 增补 .codex/ 与 AGENTS.md（AI 工具本地配置，不同步 GitHub） | 2026-07-06 18:03 | 2026-07-06 18:03 | 已完成 | 与 CLAUDE.md/.claude/ 同类，归入「AI 工具本地配置（不同步到 GitHub）」段并将段注释由 Claude Code 泛化为 AI 工具；git check-ignore 命中 .gitignore:70/71，git status 已无未跟踪项 |
+| OPS-004 | 运维 | 应用版本号提升至 V0.4.0 | 2026-07-07 09:52 | 2026-07-07 09:52 | 已完成 | pyproject.toml、version_info fallback/docstring、cli.py 说明、test_version_info 与 IMP-008 文档示例同步为 0.4.0 / V0.4.0 |
 
 ## 规划事项
 
@@ -154,18 +174,18 @@
 | PLN-005 | 规划 | Phase 4：生命周期、日志、资源与队列（WBS-17~WBS-20） | 2026-07-04 23:49 | 2026-07-05 14:04 | 已完成 | DEV-017~020 全部完成；lifecycle 双层锁 + logs/health/status/stats/build_queue；CLI 新增 restart/rebuild/remove/logs/status/stats；328 测试通过 |
 | PLN-006 | 规划 | Phase 5：自动化与管理页（WBS-21~WBS-23，daemon/管理页 API/前端） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-021~023 全部完成；daemon inbox 自动导入 + 管理页 FastAPI + 单页前端，管理页端口 17800 |
 | PLN-007 | 规划 | Phase 6：Skills、安全与排障（WBS-24~WBS-26） | 2026-07-04 23:49 | 2026-07-06 00:30 | 已完成 | DEV-024~026 全部完成；12 个 SKILL.md + security.py 审计 + doctor 排障 |
-| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | 2026-07-06 02:00 | 进行中 | DEV-027~028、030 已完成；DEV-029 进行中（自动化 E2E 全通过，Docker 手工验收 29.09/29.11/29.12 待 Linux 主机，见 docs/acceptance-checklist.md）；6 样例夹具 + 全量测试 577 passed/4 skipped + V1 文档套件 |
+| PLN-008 | 规划 | Phase 7：测试、验收与发布（WBS-27~WBS-30，样例/单测集成/E2E/文档发布） | 2026-07-04 23:49 | 2026-07-07 00:10 | 已完成 | DEV-027~030 全部完成；6 样例夹具、单测集成、自动化 E2E、真实 Docker 容器验收与 V1 文档套件均已同步；Docker 手工验收见 docs/acceptance-checklist.md |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 55 | 52 | 3 | 95% |
-| 调整事项 | 0 | 0 | 0 | 0% |
-| 检查事项 | 3 | 3 | 0 | 100% |
+| 代码 Bug | 64 | 64 | 0 | 100% |
+| 调整事项 | 3 | 3 | 0 | 100% |
+| 检查事项 | 4 | 4 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
 | 文档维护 | 6 | 6 | 0 | 100% |
-| 功能开发 | 33 | 32 | 1 | 97% |
+| 功能开发 | 39 | 39 | 0 | 100% |
 | 配置运维 | 3 | 3 | 0 | 100% |
-| 规划事项 | 8 | 7 | 1 | 88% |
-| **总计** | 108 | 103 | 5 | 95% |
+| 规划事项 | 8 | 8 | 0 | 100% |
+| **总计** | 127 | 127 | 0 | 100% |

@@ -497,6 +497,140 @@ def test_operation_not_found(manager_env: EnvBundle) -> None:
     assert resp.status_code == 404
 
 
+# ---- IMP-009：实例 zip 原地更新（管理页 API）----------------------------------
+
+
+def test_update_endpoint_replaces_content(manager_env: EnvBundle) -> None:
+    """POST /api/instances/{id}/update：原地覆盖 current/，返回 rebuilt=True。"""
+    iid = manager_env.instance_id
+    # 在 inbox 放一个 v2 zip
+    v2_zip = manager_env.workspace.inbox / "v2.zip"
+    _make_static_zip(v2_zip, html="<h1>v2 from api</h1>")
+
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/update",
+        headers=manager_env.auth_headers(),
+        json={"zipPath": "v2.zip"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["action"] == "update"
+    assert body["skipped"] is False
+    assert body["rebuilt"] is True
+    assert body["restarted"] is False  # 实例未 running，无需 restart
+    # current/ 内容已更新
+    idx = manager_env.workspace.app_current(iid) / "index.html"
+    assert "v2 from api" in idx.read_text()
+
+
+def test_update_endpoint_same_hash_skips(manager_env: EnvBundle) -> None:
+    """相同 hash 的 zip → skipped=True，不 rebuild。"""
+    iid = manager_env.instance_id
+    # 用与导入时相同的 zip 内容（inbox/static.zip 已存在）
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/update",
+        headers=manager_env.auth_headers(),
+        json={"zipPath": "static.zip"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["skipped"] is True
+    assert body["rebuilt"] is False
+
+
+def test_update_endpoint_missing_zippath_400(manager_env: EnvBundle) -> None:
+    """缺少 zipPath → 400。"""
+    iid = manager_env.instance_id
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/update",
+        headers=manager_env.auth_headers(),
+        json={},
+    )
+    assert resp.status_code == 400
+
+
+def test_update_endpoint_rejects_relative_path_escape(
+    manager_env: EnvBundle,
+) -> None:
+    """相对 zipPath 只能解析到 inbox/ 内，../ 逃逸应返回 400。"""
+    iid = manager_env.instance_id
+    outside_inbox = manager_env.workspace.root / "escape.zip"
+    _make_static_zip(outside_inbox, html="<h1>escaped</h1>")
+
+    before = (manager_env.workspace.app_current(iid) / "index.html").read_text()
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/update",
+        headers=manager_env.auth_headers(),
+        json={"zipPath": "../escape.zip"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+    assert (manager_env.workspace.app_current(iid) / "index.html").read_text() == before
+
+
+def test_update_endpoint_rejects_absolute_path_outside_inbox(
+    manager_env: EnvBundle, tmp_path: Path
+) -> None:
+    """绝对 zipPath 也必须位于 inbox/ 内，不能更新任意本机 zip。"""
+    iid = manager_env.instance_id
+    external_zip = tmp_path / "outside.zip"
+    _make_static_zip(external_zip, html="<h1>absolute outside</h1>")
+
+    before = (manager_env.workspace.app_current(iid) / "index.html").read_text()
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/update",
+        headers=manager_env.auth_headers(),
+        json={"zipPath": str(external_zip)},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+    assert (manager_env.workspace.app_current(iid) / "index.html").read_text() == before
+
+
+def test_update_endpoint_not_found(manager_env: EnvBundle) -> None:
+    """更新不存在的实例 → 404。"""
+    v2_zip = manager_env.workspace.inbox / "v2.zip"
+    _make_static_zip(v2_zip, html="<h1>v2</h1>")
+    resp = manager_env.client.post(
+        "/api/instances/no-such-id/update",
+        headers=manager_env.auth_headers(),
+        json={"zipPath": "v2.zip"},
+    )
+    assert resp.status_code == 404
+
+
+def test_update_endpoint_restart_when_running(manager_env: EnvBundle) -> None:
+    """实例 running 时更新 → API 自动 restart（restarted=True）。"""
+    from local_webpage_access.models import DesiredState, InstanceManifest
+
+    iid = manager_env.instance_id
+    # 模拟已启动：manifest desiredState=running
+    mpath = manager_env.workspace.app_manifest_path(iid)
+    m = InstanceManifest.load(mpath)
+    m.desiredState = DesiredState.RUNNING
+    m.save(mpath)
+
+    v2_zip = manager_env.workspace.inbox / "v2.zip"
+    _make_static_zip(v2_zip, html="<h1>v2 running</h1>")
+
+    with pytest.MonkeyPatch.context() as mp:
+        restarted: list[str] = []
+        mp.setattr(
+            "local_webpage_access.lifecycle.restart_instance",
+            lambda ws, cfg, reg, _iid: restarted.append(_iid),
+        )
+        resp = manager_env.client.post(
+            f"/api/instances/{iid}/update",
+            headers=manager_env.auth_headers(),
+            json={"zipPath": "v2.zip"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["restarted"] is True
+    assert restarted == [iid]
+
+
 # ---- 静态资源托管（WBS-22.02 / WBS-23 前端）----------------------------------
 
 

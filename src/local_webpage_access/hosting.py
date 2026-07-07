@@ -22,12 +22,13 @@ from local_webpage_access.compose import generate_compose, generate_env
 from local_webpage_access.config import Config
 from local_webpage_access.docker_runtime import DockerRuntime
 from local_webpage_access.dockerfile_templates import generate_dockerfile
-from local_webpage_access.errors import BuildError, DockerError, GatewayError, HostingError
+from local_webpage_access.errors import BuildError, DockerError, HostingError
 from local_webpage_access.logging import get_logger, write_instance_log
 from local_webpage_access.models import (
     DesiredState,
     InstanceManifest,
     NetworkConfig,
+    RouteMode,
     StaticConfig,
     Status,
 )
@@ -609,6 +610,16 @@ def _enable_static(
 ) -> InstanceManifest:
     """分配端口、启用网关、更新 manifest 的 static/network 字段。"""
     gateway = StaticGateway(workspace, config)
+    # IMP-006：从既有 manifest 读取路径别名（import 时写入 static.routeHost）。
+    # 重启用场景下 routeMode/routeHost 已落盘，需在重建 StaticConfig 时保留。
+    existing_static = manifest.static
+    path_alias: str | None = None
+    if (
+        existing_static is not None
+        and existing_static.routeMode == RouteMode.NAME.value
+        and existing_static.routeHost
+    ):
+        path_alias = existing_static.routeHost
     # 重启用场景：先停掉可能仍在运行的旧静态进程，
     # 否则旧进程会成为孤儿（PID 文件被新进程覆盖）、旧端口继续被占用
     if gateway.is_enabled(instance_id):
@@ -619,7 +630,7 @@ def _enable_static(
 
     backend = gateway.detect_backend()
     try:
-        gateway.enable(instance_id, host_port, public_dir)
+        gateway.enable(instance_id, host_port, public_dir, alias=path_alias)
     except Exception:
         # 网关启用失败：释放刚分配的端口，避免连续失败耗尽端口池（BUG-016）。
         # gateway.enable 内部已对其子进程/站点配置做了回滚，端口是唯一残留。
@@ -629,11 +640,13 @@ def _enable_static(
     manifest.static = StaticConfig(
         root="public",
         gateway=backend,
+        routeMode=(RouteMode.NAME.value if path_alias else RouteMode.PORT.value),
+        routeHost=path_alias,
         hostPort=host_port,
         gatewayConfigPath=str(gateway.site_config_path(instance_id)),
         enabled=True,
     )
-    entry = build_network_entry(config, host_port)
+    entry = build_network_entry(config, host_port, path_alias=path_alias)
     manifest.network = NetworkConfig(**entry)
     registry.set_static_enabled(instance_id, True)
     return manifest
