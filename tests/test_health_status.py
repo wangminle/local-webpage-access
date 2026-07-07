@@ -228,10 +228,39 @@ def test_port_mapping_label_container(workspace, registry, config) -> None:
 
 
 def test_port_mapping_label_static_is_none(workspace, registry, config) -> None:
-    """静态实例不展示误导性的端口映射（internalPort 缺失）。"""
+    """纯静态 HTML（manifest 无 internalPort）不展示误导性映射。"""
     _seed_static(workspace, registry, "demo", host_port=21100)
     st = instance_status(workspace, config, registry, "demo")
     assert st.port_mapping_label is None
+
+
+def test_port_mapping_label_static_from_manifest_internal_port(
+    workspace, registry, config
+) -> None:
+    """前端/静态项目：manifest.network.internalPort 与 hostPort 不同时展示映射。"""
+    workspace.ensure_app_dirs("voiceprint")
+    manifest = InstanceManifest(
+        id="voiceprint",
+        name="声纹演示",
+        version="1",
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.TINY,
+        status=Status.RUNNING,
+        desiredState=DesiredState.RUNNING,
+        static=StaticConfig(hostPort=18001, routeMode="name", routeHost="voiceprint"),
+    )
+    manifest.network.internalPort = 33001
+    manifest.network.routeMode = "name"
+    manifest.network.routeHost = "voiceprint"
+    manifest.save(workspace.app_manifest_path("voiceprint"))
+    registry.upsert_from_manifest(manifest)
+    st = instance_status(workspace, config, registry, "voiceprint")
+    assert st.host_port == 18001
+    assert st.internal_port == 33001
+    assert st.port_mapping_label == "33001→18001"
+    assert st.route_host == "voiceprint"
 
 
 def test_port_mapping_label_same_port_is_none(workspace, registry, config) -> None:

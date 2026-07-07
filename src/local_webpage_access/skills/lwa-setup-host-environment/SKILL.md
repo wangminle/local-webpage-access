@@ -58,7 +58,7 @@
 5. 初始化工作区：lwa init
 6. 完整诊断：lwa doctor（含端口池、registry、磁盘）
 7. 导入样例：lwa import inbox/xxx.zip → lwa start
-8. **升级 lwa 源码后**：见 [lwa-update-runtime](../lwa-update-runtime/SKILL.md) 或 `lwa update`（IMP-008 规划中）
+8. **升级 lwa 源码后**：优先运行 `lwa update`；需要 AI 协助时见 [lwa-update-runtime](../lwa-update-runtime/SKILL.md)
 ```
 
 若用户**只做静态 HTML**、不用容器：

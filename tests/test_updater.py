@@ -354,6 +354,44 @@ def test_manager_restart_skipped_when_not_running(
     assert started["count"] == 0
 
 
+def test_manager_restart_runs_for_legacy_health_without_workspace_root(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-065：旧版 health 无 workspaceRoot 时 update 仍应 restart manager。"""
+    from local_webpage_access.manager_service import ManagerState, write_state
+
+    write_state(
+        workspace,
+        ManagerState(
+            enabled=True, pid=4242, host="0.0.0.0", port=config.managerPort
+        ),
+    )
+    calls = {"stop": 0, "start": 0}
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._fetch_health",
+        lambda *a, **k: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_pid_alive", lambda pid: True
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.stop_manager",
+        lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.start_manager",
+        lambda ws, cfg: calls.__setitem__("start", calls["start"] + 1) or 888,
+    )
+
+    report = run_update(workspace, config, registry, options=_opts(restart_manager=True))
+
+    step = report.step("restartManager")
+    assert step.status == "ok"
+    assert calls["stop"] == 1
+    assert calls["start"] == 1
+
+
 def test_manager_restart_failure_captured(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:

@@ -39,7 +39,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.4.0-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.4.1-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -368,6 +368,66 @@ def start(instance_id: str = typer.Argument(..., help="要启动的实例 ID")) 
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+alias_app = typer.Typer(help="管理实例路径别名（IMP-006）")
+
+
+@alias_app.command("set")
+def alias_set(
+    instance_id: str = typer.Argument(..., help="实例 ID"),
+    slug: str = typer.Argument(..., help="路径别名 slug"),
+) -> None:
+    """为静态实例设置路径别名。"""
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    try:
+        ws, config, reg = _open_workspace_registry()
+        try:
+            result = set_instance_path_alias(ws, config, reg, instance_id, slug)
+        finally:
+            reg.close()
+        if result.unchanged:
+            typer.echo(f"实例 {instance_id} 路径别名未变化：{slug}")
+            return
+        typer.secho(f"已设置路径别名：/{slug}/", fg=typer.colors.GREEN)
+        if result.route_url:
+            typer.echo(f"  入口：{result.route_url}")
+        elif slug and not result.alias_entry_enabled:
+            typer.secho(
+                "  别名已登记，但当前静态后端非 Caddy，仅端口可达",
+                fg=typer.colors.YELLOW,
+            )
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@alias_app.command("clear")
+def alias_clear(
+    instance_id: str = typer.Argument(..., help="实例 ID"),
+) -> None:
+    """清除静态实例的路径别名。"""
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    try:
+        ws, config, reg = _open_workspace_registry()
+        try:
+            result = set_instance_path_alias(ws, config, reg, instance_id, None)
+        finally:
+            reg.close()
+        if result.unchanged:
+            typer.echo(f"实例 {instance_id} 本无路径别名")
+            return
+        typer.secho(f"已清除实例 {instance_id} 的路径别名", fg=typer.colors.GREEN)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+app.add_typer(alias_app, name="alias")
 
 
 @app.command()

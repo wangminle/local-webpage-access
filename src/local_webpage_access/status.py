@@ -73,8 +73,10 @@ class InstanceStatus:
         """IMP-007：端口映射的人类可读标签（列表与详情统一口径）。
 
         * 容器实例同时有 internalPort 与 hostPort 且不同 → ``"8000→18100"``；
-        * 二者相同、或 internalPort 缺失（静态托管）→ ``None``，前端只显示 hostPort，
-          避免给静态站点展示误导性的 ``80→hostPort``。
+        * 二者相同、或 internalPort 缺失 → ``None``，前端只显示 hostPort，
+          避免给纯静态 HTML 展示误导性的 ``80→hostPort``；
+        * 前端/静态项目 scanner 写入的 ``manifest.network.internalPort``（如
+          33001）与 hostPort 不同时也会生成映射（IMP-007 扩展）。
 
         数据口径：``hostPort``=宿主访问端口；``internalPort``=容器/应用内部监听端口。
         """
@@ -133,7 +135,9 @@ def instance_status(
             f"实例 {instance_id} 不存在", instance_id=instance_id
         )
 
-    host_port, internal_port = _resolve_ports(registry, instance_id, row["runtime"])
+    host_port, internal_port = _resolve_ports(
+        workspace, registry, instance_id, row["runtime"]
+    )
     lan_url = _resolve_lan_url(workspace, instance_id, host_port)
     route_host, route_url = _resolve_route(workspace, instance_id)
     resources = registry.get_resources(instance_id) or {}
@@ -288,20 +292,47 @@ def status_counts(registry: Registry) -> dict[str, int]:
 
 
 def _resolve_ports(
-    registry: Registry, instance_id: str, runtime: str
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    runtime: str,
 ) -> tuple[int | None, int | None]:
+    host_port: int | None = None
+    internal_port: int | None = None
     if runtime == "docker-compose":
         row = registry.get_container(instance_id)
         if row:
-            return (
-                _as_int(row.get("host_port")),
-                _as_int(row.get("internal_port")),
-            )
+            host_port = _as_int(row.get("host_port"))
+            internal_port = _as_int(row.get("internal_port"))
     else:
         row = registry.get_static_site(instance_id)
         if row:
-            return _as_int(row.get("host_port")), None
-    return None, None
+            host_port = _as_int(row.get("host_port"))
+    # IMP-007：internalPort 也可能只在 manifest（静态/前端 scanner 识别结果），
+    # static_sites 表无 internal_port 列；registry 缺失时从 manifest 补齐。
+    if internal_port is None:
+        internal_port = _resolve_internal_port_from_manifest(workspace, instance_id)
+    return host_port, internal_port
+
+
+def _resolve_internal_port_from_manifest(
+    workspace: Workspace, instance_id: str
+) -> int | None:
+    """从 ``local-web.json`` 读取 ``network.internalPort``（或 container 段兜底）。"""
+    manifest_path = workspace.app_manifest_path(instance_id)
+    if not manifest_path.is_file():
+        return None
+    from local_webpage_access.models import InstanceManifest
+
+    try:
+        manifest = InstanceManifest.load(manifest_path)
+    except Exception:  # noqa: BLE001
+        return None
+    if manifest.network and manifest.network.internalPort is not None:
+        return _as_int(manifest.network.internalPort)
+    if manifest.container and manifest.container.internalPort is not None:
+        return _as_int(manifest.container.internalPort)
+    return None
 
 
 def _resolve_lan_url(

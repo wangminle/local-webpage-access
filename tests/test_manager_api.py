@@ -631,6 +631,159 @@ def test_update_endpoint_restart_when_running(manager_env: EnvBundle) -> None:
     assert restarted == [iid]
 
 
+# ---- 路径别名 API（IMP-006 / WBS-006.08~006.10）----------------------------
+
+
+def test_path_alias_set_and_clear(manager_env: EnvBundle) -> None:
+    """PATCH path-alias：设置与清除别名，写入 manifest 与 API 响应。"""
+    from local_webpage_access.models import InstanceManifest, RouteMode
+
+    iid = manager_env.instance_id
+    resp = manager_env.client.patch(
+        f"/api/instances/{iid}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "demo-alias"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["alias"] == "demo-alias"
+    assert body["action"] == "path-alias"
+    assert body["instance"]["routeHost"] == "demo-alias"
+
+    manifest = InstanceManifest.load(manager_env.workspace.app_manifest_path(iid))
+    assert manifest.static is not None
+    assert manifest.static.routeMode == RouteMode.NAME.value
+    assert manifest.static.routeHost == "demo-alias"
+    assert manifest.network is not None
+    assert manifest.network.routeHost == "demo-alias"
+
+    resp2 = manager_env.client.patch(
+        f"/api/instances/{iid}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": None},
+    )
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["alias"] is None
+    manifest = InstanceManifest.load(manager_env.workspace.app_manifest_path(iid))
+    assert manifest.static.routeMode == RouteMode.PORT.value
+    assert manifest.static.routeHost is None
+
+
+def test_path_alias_rejects_reserved_slug(manager_env: EnvBundle) -> None:
+    resp = manager_env.client.patch(
+        f"/api/instances/{manager_env.instance_id}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "api"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+
+
+def test_path_alias_rejects_duplicate_slug(manager_env: EnvBundle) -> None:
+    from local_webpage_access.importer import Importer
+
+    zip2 = manager_env.workspace.inbox / "static2.zip"
+    _make_static_zip(zip2, html="<h1>two</h1>")
+    importer = Importer(manager_env.workspace, manager_env.config, manager_env.registry)
+    second_id = importer.import_zip(str(zip2)).instance_id
+
+    resp1 = manager_env.client.patch(
+        f"/api/instances/{manager_env.instance_id}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "shared-slug"},
+    )
+    assert resp1.status_code == 200
+
+    resp2 = manager_env.client.patch(
+        f"/api/instances/{second_id}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "shared-slug"},
+    )
+    assert resp2.status_code == 400
+    assert "占用" in resp2.json()["error"]["message"]
+
+
+def test_path_alias_rejects_non_static_instance(manager_env: EnvBundle) -> None:
+    from tests._helpers import make_container_manifest
+
+    ws = manager_env.workspace
+    cid = "api-alias-test"
+    ws.ensure_app_dirs(cid)
+    manifest = make_container_manifest(cid)
+    manifest.save(ws.app_manifest_path(cid))
+    manager_env.registry.upsert_from_manifest(manifest)
+
+    resp = manager_env.client.patch(
+        f"/api/instances/{cid}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "should-fail"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+
+
+def test_path_alias_missing_field(manager_env: EnvBundle) -> None:
+    resp = manager_env.client.patch(
+        f"/api/instances/{manager_env.instance_id}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={},
+    )
+    assert resp.status_code == 400
+
+
+def test_path_alias_running_triggers_gateway_reload(
+    manager_env: EnvBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """running 实例改别名应 regenerate 别名片段并 reload（mock gateway）。"""
+    from local_webpage_access.models import (
+        DesiredState,
+        InstanceManifest,
+        NetworkConfig,
+        StaticConfig,
+    )
+
+    iid = manager_env.instance_id
+    mpath = manager_env.workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(mpath)
+    manifest.desiredState = DesiredState.RUNNING
+    manifest.static = StaticConfig(hostPort=21001, enabled=True)
+    manifest.network = NetworkConfig(hostPort=21001)
+    manifest.save(mpath)
+
+    reloaded: list[bool] = []
+    generated: list[tuple[str, str, int]] = []
+
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.is_enabled",
+        lambda self, instance_id: instance_id == iid,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.detect_backend",
+        lambda self: "caddy",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.generate_alias_config",
+        lambda self, instance_id, alias, host_port: generated.append(
+            (instance_id, alias, host_port)
+        ),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.reload_all",
+        lambda self: reloaded.append(True),
+    )
+
+    resp = manager_env.client.patch(
+        f"/api/instances/{iid}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "live-alias"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["gatewayReloaded"] is True
+    assert resp.json()["aliasEntryEnabled"] is True
+    assert generated == [(iid, "live-alias", 21001)]
+    assert reloaded == [True]
+
+
 # ---- 静态资源托管（WBS-22.02 / WBS-23 前端）----------------------------------
 
 

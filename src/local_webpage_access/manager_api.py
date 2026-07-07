@@ -534,6 +534,68 @@ def _register_routes(app: FastAPI) -> None:
             "instance": snap.to_dict(),
         }
 
+    @app.patch(
+        "/api/instances/{instance_id}/path-alias",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def path_alias_op(
+        instance_id: str,
+        payload: dict[str, Any] = Body(default={}),
+    ) -> dict[str, Any]:
+        """IMP-006：设置或清除路径别名。
+
+        Body: ``{"alias": "my-slug"}`` 或 ``{"alias": null}`` 清除。
+        """
+        from local_webpage_access.path_alias import set_instance_path_alias
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+
+        if "alias" not in payload:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "bad_request",
+                        "message": "缺少 alias 字段",
+                    }
+                },
+            )
+
+        raw_alias = payload.get("alias")
+        if raw_alias is not None and not isinstance(raw_alias, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "bad_request",
+                        "message": "alias 必须为字符串或 null",
+                    }
+                },
+            )
+
+        alias = raw_alias.strip() if isinstance(raw_alias, str) else None
+        if alias == "":
+            alias = None
+
+        result = set_instance_path_alias(
+            ctx.workspace,
+            ctx.config,
+            ctx.registry,
+            instance_id,
+            alias,
+        )
+
+        sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        snap = instance_status(
+            ctx.workspace, ctx.config, ctx.registry, instance_id
+        )
+        body = result.to_dict()
+        body["action"] = "path-alias"
+        body["instance"] = snap.to_dict()
+        return body
+
     # ---- pending 列表（WBS-22.09）----
     @app.get("/api/pending", dependencies=[api], tags=["instances"])
     def list_pending() -> dict[str, Any]:

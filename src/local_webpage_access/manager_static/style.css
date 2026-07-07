@@ -403,6 +403,17 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 }
 .detail-kv dt { color: var(--text-muted); }
 .detail-kv dd { margin: 0; word-break: break-all; }
+.detail-hint {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.detail-hint code {
+  font-size: 12px;
+  background: var(--gray-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
 .detail-pre {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -462,6 +473,50 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   margin-bottom: 12px;
 }
 .logs-controls { display: flex; gap: 6px; align-items: center; }
+
+.path-alias-box {
+  max-width: 480px;
+}
+.path-alias-hint {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.path-alias-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.path-alias-field span {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.path-alias-field input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+.path-alias-error {
+  margin: 0 0 12px;
+  color: oklch(0.55 0.2 28);
+  font-size: 0.9rem;
+}
+.path-alias-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.path-alias-actions-main {
+  display: flex;
+  gap: 8px;
+}
 
 .logs-content {
   flex: 1;

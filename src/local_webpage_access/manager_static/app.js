@@ -185,10 +185,10 @@
       "<td>" + esc(i.kind || "—") + "</td>" +
       '<td class="cell-muted">' + esc(i.runtime || "—") + "</td>" +
       "<td>" + stackHtml(i.stack, i.database) + "</td>" +
-      '<td class="cell-url">' + urlHtml(i.lanUrl) + "</td>" +
+      '<td class="cell-url">' + urlHtml(i) + "</td>" +
       "<td>" + portHtml(i) + "</td>" +
       '<td class="cell-muted">' + resourceHtml(i) + "</td>" +
-      '<td class="cell-muted">' + esc(i.updatedAt || "—") + "</td>" +
+      '<td class="cell-muted">' + esc(formatLocalDateTime(i.updatedAt)) + "</td>" +
       '<td class="col-ops"><div class="ops">' + opsHtml(i) + "</div></td>" +
       "</tr>"
     );
@@ -215,21 +215,36 @@
     return html || '<span class="cell-muted">—</span>';
   }
 
-  function urlHtml(lanUrl) {
-    if (!lanUrl) return '<span class="cell-muted">—</span>';
-    return (
-      '<a href="' + esc(lanUrl) + '" target="_blank" rel="noopener">打开</a>'
-    );
+  function urlHtml(i) {
+    var parts = [];
+    if (i.lanUrl) {
+      parts.push(
+        '<a href="' +
+          esc(i.lanUrl) +
+          '" target="_blank" rel="noopener" title="宿主端口访问">端口</a>'
+      );
+    }
+    if (i.routeUrl) {
+      parts.push(
+        '<a href="' +
+          esc(i.routeUrl) +
+          '" target="_blank" rel="noopener" title="路径别名入口">/' +
+          esc(i.routeHost || "") +
+          "/</a>"
+      );
+    }
+    if (!parts.length) return '<span class="cell-muted">—</span>';
+    return parts.join('<span class="cell-muted"> · </span>');
   }
 
   function portHtml(i) {
     // IMP-007：主显示 hostPort，副信息为后端格式化的 portMappingLabel
-    // （internalPort→hostPort，仅容器实例且二者不同时存在）。
+    // （internalPort→hostPort，容器/前端项目且二者不同时存在）。
     if (!i.hostPort) return '<span class="cell-muted">—</span>';
     var main = esc(String(i.hostPort));
     if (i.portMappingLabel) {
       return (
-        '<span class="port-cell">' +
+        '<span class="port-cell" title="应用内部端口 → 宿主访问端口">' +
         '<span class="port-main">' + main + "</span>" +
         '<span class="port-sub">映射 ' + esc(i.portMappingLabel) + "</span>" +
         "</span>"
@@ -254,9 +269,17 @@
       i.status === "building" ||
       i.status === "queued" ||
       i.status === "pending";
+    var isStatic = i.runtime === "shared-static";
     var html = "";
     // "打开" 已由"访问地址"列承载，操作区不再重复
     html += opBtn(id, "logs", "日志", false);
+    html += opBtn(
+      id,
+      "path-alias",
+      "路径别名",
+      !isStatic || inProgress,
+      !isStatic ? "路径别名仅支持静态站点" : ""
+    );
     html += opBtn(id, "start", "启动", isRunning || inProgress);
     html += opBtn(id, "stop", "停止", !isRunning || inProgress);
     html += opBtn(id, "restart", "重启", inProgress);
@@ -264,7 +287,7 @@
     return html;
   }
 
-  function opBtn(id, op, label, disabled) {
+  function opBtn(id, op, label, disabled, title) {
     return (
       '<button class="btn btn-sm" data-op="' +
       op +
@@ -272,6 +295,7 @@
       id +
       '"' +
       (disabled ? " disabled" : "") +
+      (title ? ' title="' + esc(title) + '"' : "") +
       ">" +
       label +
       "</button>"
@@ -287,6 +311,10 @@
     var id = btn.getAttribute("data-id");
     if (op === "logs") {
       openLogs(id);
+      return;
+    }
+    if (op === "path-alias") {
+      openPathAlias(id);
       return;
     }
     doOperation(id, op);
@@ -356,6 +384,8 @@
       ["hostPort", "宿主端口"],
       ["internalPort", "内部端口"],
       ["portMappingLabel", "端口映射"],
+      ["routeHost", "路径别名"],
+      ["routeUrl", "路径入口"],
       ["lastError", "最近错误"],
       ["lastHealthCheckAt", "最近健康检查"],
       ["updatedAt", "更新时间"],
@@ -399,9 +429,34 @@
             ["root", "根目录"],
             ["gateway", "网关"],
             ["hostPort", "宿主端口"],
+            ["routeMode", "路由模式"],
+            ["routeHost", "路径别名"],
           ])
         );
       }
+    }
+
+    // IMP-006：路径别名说明
+    if (inst.runtime === "shared-static" && !inst.routeHost) {
+      html += section(
+        "路径别名",
+        '<p class="detail-hint">当前未启用路径别名，仅可通过宿主端口访问。</p>' +
+          '<p class="detail-hint">可在列表操作区点击「路径别名」设置，或导入时在 CLI 指定：<code>lwa import inbox/foo.zip --path-alias my-slug</code></p>'
+      );
+    } else if (inst.routeHost) {
+      html += section(
+        "路径别名",
+        '<p class="detail-hint">已启用 <code>/' +
+          esc(inst.routeHost) +
+          "/</code>" +
+          (inst.routeUrl
+            ? ' · <a href="' +
+              esc(inst.routeUrl) +
+              '" target="_blank" rel="noopener">打开路径入口</a>'
+            : "") +
+          "</p>" +
+          '<p class="detail-hint cell-muted">可在操作区「路径别名」在线修改；原地更新 zip 会保留当前别名。</p>'
+      );
     }
 
     // 构建记录（WBS-23.11）
@@ -414,7 +469,7 @@
             .map(function (b) {
               return (
                 "<li><time>" +
-                esc(b.startedAt || b.started_at || "") +
+                esc(formatLocalDateTime(b.startedAt || b.started_at)) +
                 "</time>" +
                 esc(b.status || "") +
                 (b.errorSummary || b.error_summary
@@ -438,7 +493,7 @@
             .map(function (ev) {
               return (
                 "<li><time>" +
-                esc(ev.createdAt || ev.created_at || "") +
+                esc(formatLocalDateTime(ev.createdAt || ev.created_at)) +
                 "</time>[" +
                 esc(ev.eventType || ev.event_type || "") +
                 "] " +
@@ -471,6 +526,7 @@
       var label = p[1];
       var val = obj ? obj[key] : null;
       if (val === null || val === undefined || val === "") val = "—";
+      else if (isDateTimeKey(key)) val = formatLocalDateTime(val);
       dl += "<dt>" + esc(label) + "</dt><dd>" + esc(String(val)) + "</dd>";
     });
     return dl + "</dl>";
@@ -507,6 +563,78 @@
 
   function closeLogs() {
     document.getElementById("logs-modal").hidden = true;
+  }
+
+  // ---- 路径别名（IMP-006 / WBS-006.07）-------------------------------------
+
+  var pathAliasInstanceId = null;
+
+  function openPathAlias(id) {
+    pathAliasInstanceId = id;
+    var modal = document.getElementById("path-alias-modal");
+    var input = document.getElementById("path-alias-input");
+    var errEl = document.getElementById("path-alias-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    document.getElementById("path-alias-title").textContent =
+      "路径别名 · " + id;
+    var inst = lastInstances.find(function (x) {
+      return x.id === id;
+    });
+    input.value = (inst && inst.routeHost) || "";
+    modal.hidden = false;
+    input.focus();
+  }
+
+  function closePathAlias() {
+    pathAliasInstanceId = null;
+    document.getElementById("path-alias-modal").hidden = true;
+    document.getElementById("path-alias-error").hidden = true;
+  }
+
+  function showPathAliasError(msg) {
+    var errEl = document.getElementById("path-alias-error");
+    errEl.textContent = msg;
+    errEl.hidden = false;
+  }
+
+  function submitPathAlias(alias) {
+    if (!pathAliasInstanceId) return;
+    var savedId = pathAliasInstanceId;
+    var errEl = document.getElementById("path-alias-error");
+    errEl.hidden = true;
+    apiFetch(
+      "/api/instances/" + encodeURIComponent(savedId) + "/path-alias",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alias: alias }),
+      }
+    )
+      .then(function (data) {
+        closePathAlias();
+        if (data.aliasEntryEnabled === false && data.alias) {
+          toast("别名已保存（builtin 模式仅端口可达）", "success");
+        } else {
+          toast("路径别名已更新", "success");
+        }
+        refresh();
+        if (currentDetailId === savedId) {
+          openDetail(savedId);
+        }
+      })
+      .catch(function (e) {
+        showPathAliasError(e.message);
+      });
+  }
+
+  function savePathAlias() {
+    var raw = document.getElementById("path-alias-input").value.trim();
+    submitPathAlias(raw || null);
+  }
+
+  function clearPathAlias() {
+    submitPathAlias(null);
   }
 
   // ---- 轮询与刷新（WBS-23.13）----------------------------------------------
@@ -547,6 +675,75 @@
     return n.toFixed(1) + "PiB";
   }
 
+  function isDateTimeKey(key) {
+    return (
+      key === "createdAt" ||
+      key === "updatedAt" ||
+      key === "lastHealthCheckAt" ||
+      key === "lastStartedAt" ||
+      key === "startedAt" ||
+      key === "finishedAt"
+    );
+  }
+
+  function formatLocalDateTime(value) {
+    if (value == null) return "—";
+    var text = String(value).trim();
+    if (!text) return "—";
+
+    var match = text.match(
+      /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:(Z)|([+-])(\d{2}):?(\d{2}))?$/
+    );
+    if (match && (match[3] || match[4])) {
+      return (
+        match[1] +
+        " " +
+        match[2] +
+        "(" +
+        (match[3] ? "UTC" : formatUtcOffset(match[4], match[5], match[6])) +
+        ")"
+      );
+    }
+
+    var d = new Date(text);
+    if (isNaN(d.getTime())) return text;
+    return (
+      d.getFullYear() +
+      "-" +
+      pad2(d.getMonth() + 1) +
+      "-" +
+      pad2(d.getDate()) +
+      " " +
+      pad2(d.getHours()) +
+      ":" +
+      pad2(d.getMinutes()) +
+      ":" +
+      pad2(d.getSeconds()) +
+      "(" +
+      formatOffsetMinutes(-d.getTimezoneOffset()) +
+      ")"
+    );
+  }
+
+  function formatUtcOffset(sign, hours, minutes) {
+    var h = String(Number(hours));
+    var m = Number(minutes);
+    return "UTC" + sign + h + (m ? ":" + pad2(m) : "");
+  }
+
+  function formatOffsetMinutes(totalMinutes) {
+    if (totalMinutes === 0) return "UTC";
+    var sign = totalMinutes >= 0 ? "+" : "-";
+    var abs = Math.abs(totalMinutes);
+    var hours = Math.floor(abs / 60);
+    var minutes = abs % 60;
+    return "UTC" + sign + hours + (minutes ? ":" + pad2(minutes) : "");
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
   function esc(s) {
     if (s == null) return "";
     return String(s)
@@ -566,6 +763,10 @@
     toastTimer = setTimeout(function () {
       el.hidden = true;
     }, 3000);
+  }
+
+  if (typeof window !== "undefined" && window.__LWA_TEST_HOOKS__) {
+    window.__LWA_TEST_HOOKS__.formatLocalDateTime = formatLocalDateTime;
   }
 
   // ---- 启动 ----------------------------------------------------------------
@@ -596,8 +797,17 @@
     document.onkeydown = function (e) {
       if (e.key === "Escape") {
         closeLogs();
+        closePathAlias();
         closeDetail();
       }
+    };
+
+    document.getElementById("path-alias-close").onclick = closePathAlias;
+    document.getElementById("path-alias-cancel").onclick = closePathAlias;
+    document.getElementById("path-alias-save").onclick = savePathAlias;
+    document.getElementById("path-alias-clear").onclick = clearPathAlias;
+    document.getElementById("path-alias-input").onkeydown = function (e) {
+      if (e.key === "Enter") savePathAlias();
     };
 
     refresh();

@@ -114,6 +114,29 @@
     </div>
   </div>
 
+  <!-- 路径别名（IMP-006 / WBS-006.07）-->
+  <div class="modal" id="path-alias-modal" hidden>
+    <div class="modal-inner path-alias-box">
+      <div class="modal-head">
+        <h2 id="path-alias-title">路径别名</h2>
+        <button class="btn btn-ghost" id="path-alias-close" type="button">✕</button>
+      </div>
+      <p class="path-alias-hint">设置后可通过统一入口 <code>http://&lt;LAN-IP&gt;:&lt;staticGatewayPort&gt;/&lt;slug&gt;/</code> 访问（Caddy 模式）。</p>
+      <label class="path-alias-field" for="path-alias-input">
+        <span>别名 slug</span>
+        <input type="text" id="path-alias-input" placeholder="my-app-demo" autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="path-alias-error" id="path-alias-error" hidden></p>
+      <div class="path-alias-actions">
+        <button class="btn btn-ghost" id="path-alias-clear" type="button">清除别名</button>
+        <div class="path-alias-actions-main">
+          <button class="btn btn-ghost" id="path-alias-cancel" type="button">取消</button>
+          <button class="btn btn-primary" id="path-alias-save" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 错误提示（WBS-23.15 配合）-->
   <div class="toast" id="toast" hidden></div>
 

@@ -38,7 +38,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
 ### `inbox/`
 
 - **用途**：放置待导入的 `.zip`；`lwa import inbox/foo.zip` 或 daemon 自动导入。
-- **注意**：zip 内尽量避免打包 `node_modules`（当前版本会因 symlink 安全审计失败；见 [待改进 IMP-001](plan/待改进功能点记录-20260706.md)）。
+- **注意**：zip 内若含 `node_modules` 等大目录，导入时会按 [IMP-001](plan/待改进功能点记录-20260706.md) **自动剥离**可重建依赖；仍保留 zip slip / 符号链接安全审计。
 
 ### `apps/<instance-id>/`
 
@@ -61,8 +61,9 @@ runtime/                      ← 工作区根（Runtime 根目录）
 
 ### `static-gateway/`
 
-- **用途**：共享静态网关配置；Caddy 模式下 `sites/<id>.conf` 按实例生成。
-- **builtin 模式**：每个静态实例仍占独立 hostPort，由内置 `http.server` 子进程服务。
+- **用途**：共享静态网关配置。
+- **Caddy 模式**：`sites/<id>.conf` 按实例生成；`aliases/<id>.conf` 为路径别名路由片段（IMP-006），由主 Caddyfile 在 `staticGatewayPort` 统一入口 import。
+- **builtin 模式**：每个静态实例仍占独立 hostPort，由内置 `http.server` 子进程服务；**不支持**路径别名统一入口（别名可登记，仅 hostPort 可达）。
 
 ### `logs/`
 
@@ -87,10 +88,27 @@ runtime/                      ← 工作区根（Runtime 根目录）
 | 服务 | 默认端口 | 说明 |
 | --- | --- | --- |
 | 管理页 | 17800 | `local-web.yml` → `managerPort` |
+| 路径别名统一入口 | 17880 | `staticGatewayPort`（Caddy 模式；与 managerPort 错开） |
 | 实例 | 18000–19999 | `portPool` 内分配，每实例一个 hostPort |
-| 实例访问 | `http://<LAN-IP>:<hostPort>/` | `lwa start` 后输出的 `lanUrl` |
+| 实例端口访问 | `http://<LAN-IP>:<hostPort>/` | `lwa start` 后输出的 `lanUrl` |
+| 实例路径访问 | `http://<LAN-IP>:<staticGatewayPort>/<alias>/` | 显式启用路径别名时（IMP-006，Caddy 模式） |
 
-每个实例端口**独立**，可同时 running（见 IMP-004）。下一阶段可能支持路径别名（IMP-006）以减少记端口负担。
+每个实例 hostPort **独立**，可同时 running（见 IMP-004）。路径别名（IMP-006，V0.4.1 管理页可在线修改）为**可选**：未设置时行为与 V1 一致，仍只用 hostPort；设置后可通过统一入口 `/<slug>/` 访问，与 hostPort **并存**。
+
+设置方式：
+
+```bash
+# 导入时指定
+lwa import inbox/foo.zip --path-alias my-demo
+
+# 导入后修改
+lwa alias set my-demo new-slug
+lwa alias clear my-demo
+
+# 或在管理页实例列表 → 操作区「路径别名」
+```
+
+详见 [管理页说明](manager-page.md)。
 
 ---
 
@@ -108,9 +126,12 @@ runtime/                      ← 工作区根（Runtime 根目录）
 
 ## 开发期：lwa 源码更新后如何重载
 
-V1 尚无 `lwa update` 命令（见 [IMP-008](plan/待改进功能点记录-20260706.md)）。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon 等后台子进程仍跑旧代码，需手动重启：
+V0.4.0 起优先运行 `lwa update`（见 [IMP-008](plan/待改进功能点记录-20260706.md)）。当前版本 **V0.4.1** 已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon 等后台子进程仍跑旧代码；下面命令仅作为手动兜底：
 
 ```bash
+# 推荐：一条命令完成工作区热重载
+lwa update
+
 # 仓库根：刷新 editable 安装
 pip install -e .
 
@@ -125,7 +146,7 @@ lwa restart <instance-id>
 lwa version && lwa doctor
 ```
 
-AI 助手可参照 Skill **`lwa-update-runtime`**（`lwa init` 后会复制到工作区 `skills/`）。规划中的 `lwa update` 将把上述步骤自动化。
+AI 助手可参照 Skill **`lwa-update-runtime`**（`lwa init` 后会复制到工作区 `skills/`）。V0.4.0 起优先使用 `lwa update` 自动完成上述步骤；升级到 V0.4.1 后请确认管理页 `/api/health` 的 `version` 为 `V0.4.1` 且实例列表可见「路径别名」按钮。手动命令仅作为排障兜底。
 
 ---
 

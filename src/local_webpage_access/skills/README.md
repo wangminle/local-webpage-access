@@ -6,13 +6,14 @@
 "判断不准"或"需要修复"的环节。每个 skill 只负责**判断、生成、修复配置**，
 最终执行（构建、启动、停端口）仍由 `lwa` 完成（设计 §18）。
 
-**命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 14 个），避免与其他项目的 skill 撞名。
+**命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 15 个），避免与其他项目的 skill 撞名。
 
 ## 总览
 
 | Skill | 触发场景 | 输出 |
 | --- | --- | --- |
 | [`lwa-import-zip`](lwa-import-zip/SKILL.md) | 拿到 zip 要部署 / 同项目出新版本 | 判断 import vs `--update`，避免重复新建 |
+| [`lwa-update-runtime`](lwa-update-runtime/SKILL.md) | git pull / 代码升级后刷新 runtime | 优先 `lwa update`，手动兜底重启 manager/daemon |
 | [`lwa-detect-stack`](lwa-detect-stack/SKILL.md) | 识别项目技术栈 | 修改 `local-web.json` 的 `stack`/`kind` |
 | [`lwa-detect-internal-port`](lwa-detect-internal-port/SKILL.md) | 找不到应用监听端口 | 修改 `local-web.json` 的 `internalPort` |
 | [`lwa-build-frontend-static`](lwa-build-frontend-static/SKILL.md) | 前端 SPA 需构建为静态产物 | 修改 `local-web.json` + 构建脚本 |

@@ -75,6 +75,8 @@
 | BUG-062 | 修复 | update_zip 暂存区清理测试断言路径错误，且 --force-kind-change 静态转容器时旧 hostPort 未迁移 | 2026-07-07 08:48 | 2026-07-07 08:48 | 已完成 | test_update_failure_rolls_back 改查 current.new/current.old；_preserve_hostport 新形态子表查不到时回退旧形态子表，静态→容器迁移保留 hostPort；同步 CLI/Skill 文案；全量 pytest 通过，compileall 与 node --check 通过 |
 | BUG-063 | 修复 | `updater.migrate_config_defaults` 对嵌套字段做浅合并，旧配置只写了部分子键（如 `portPool.start`）时整体覆盖默认，缺失子键（如 `end`）在写回文件中丢失（代码审查发现） | 2026-07-07 08:52 | 2026-07-07 08:52 | 已完成 | 新增 `_deep_merge_defaults` 深层合并（同为 dict 的键递归补齐 defaults 子键，用户值优先）；`portPool`/`defaultResourceLimits`/`staticRateLimit` 等嵌套字段不再被整体覆盖；新增回归 `test_migrate_config_deep_merges_nested_dict`（用户 start 保留 + end 从默认补齐）；全量 pytest 通过 |
 | BUG-064 | 优化 | pyflakes 报 8 处问题：`health.py` 冗余海象运算符 + 7 处未使用导入（代码审查发现） | 2026-07-07 08:52 | 2026-07-07 08:52 | 已完成 | `health.py` 移除 `instance_id :=` 未用海象；清理 `hosting`(GatewayError)/`config`(CONFIG_FILENAME)/`importer`(now_iso)/`setup`(STATUS_SKIP)/`init_workspace`(LwaError)/`cli`(__version__)/`lifecycle`(DesiredState) 共 7 处未使用导入；`python3 -m pyflakes src/local_webpage_access/` 退出码 0 全清；全量 pytest 通过 |
+| BUG-065 | 修复 | lwa update 跨 BUG-053 边界时无法自动重启旧版管理页，导致 CLI 已升级但管理页仍运行旧代码 | 2026-07-07 10:04 | 2026-07-07 10:12 | 已完成 | health_matches_workspace 在 health 缺 workspaceRoot 时，若 state.enabled 且 pid 存活则视为本工作区（BUG-065 旧版兼容）；is_running/start_manager 传入 state；新增 manager/updater 回归；全量 pytest 通过 |
+| BUG-066 | 修复 | IMP-007 静态/前端实例端口映射不显示；IMP-006 路径别名在管理页无展示 | 2026-07-07 10:25 | 2026-07-07 10:25 | 已完成 | status 从 manifest.network.internalPort 补齐映射；管理页列表展示 portMappingLabel 与 routeUrl；详情增加路径别名说明（V1 导入时 CLI 指定）；回归 test_port_mapping_label_static_from_manifest_internal_port |
 
 ## 调整事项
 
@@ -83,6 +85,7 @@
 | ADJ-001 | 调整 | task-list.md 存在重复 BUG-052，导致任务清单校验失败 | 2026-07-06 23:26 | 2026-07-06 23:35 | 已完成 | 删除行 65 简略重复项，保留行 69 含根因与回归的 BUG-052；DEV-032 移入功能开发；DEV-029/PLN-008 进行中项完成时间改 -；task-list check 通过 |
 | ADJ-002 | 调整 | 待改进功能计划文档状态仍为待规划，与代码和 task-list 完成记录不一致 | 2026-07-06 23:27 | 2026-07-06 23:35 | 已完成 | docs/plan/待改进功能点记录-20260706.md 中 IMP-001/005/006/007/008/009 状态已同步为已完成（DEV-034~039） |
 | ADJ-003 | 调整 | IMP-001 计划要求剥离 env/，实现中明确排除裸 env，验收口径需统一 | 2026-07-06 23:27 | 2026-07-06 23:35 | 已完成 | 计划文档清理规则移除裸 env/，注明保留原因（环境配置目录）；与 security.py _STRIPPABLE_SEGMENTS 及注释一致 |
+| ADJ-004 | 调整 | 管理页时间字段显示为本地主机标准时间格式 | 2026-07-07 10:37 | 2026-07-07 10:37 | 已完成 | manager_static/app.js 新增 formatLocalDateTime，将 updatedAt/lastHealthCheckAt/构建 startedAt/事件 createdAt 从 ISO 字符串显示为 YYYY-MM-DD HH:mm:ss(UTC+8) 等格式；新增 tests/test_manager_static_app.py 覆盖 +08:00/+05:30/空值；pytest 全量通过，compileall 与 node --check 通过 |
 
 ## 检查事项
 
@@ -109,6 +112,9 @@
 | DOC-004 | 文档 | IMP-008 `lwa update` 工作区热重载规划 + Skill 草案 | 2026-07-06 19:58 | 2026-07-06 19:58 | 已完成 | 待改进 IMP-008；skills/lwa-update-runtime；runtime-workspace 开发期重载说明；README/setup skill 交叉引用 |
 | DOC-005 | 文档 | 检查并补充待改进功能点记录细节 | 2026-07-06 20:03 | 2026-07-06 20:03 | 已完成 | docs/plan/待改进功能点记录-20260706.md：新增维护说明；补强 IMP-001/005/006/007/008 的非目标、边界、风险、数据口径、失败处理与验收 |
 | DOC-006 | 文档 | IMP-009 实例 zip 包更新（再导入识别与原地升级）规划 | 2026-07-06 20:20 | 2026-07-06 20:20 | 已完成 | 待改进功能点记录新增 IMP-009：`--update`/reimport、hash+slug 识别、保留 id/端口/data、与 IMP-008 区分；管理页/Skill/验收口径 |
+| DOC-007 | 文档 | 同步 README 与 lwa update 相关 skill 文档，移除 IMP-008 规划中残留表述 | 2026-07-07 10:27 | 2026-07-07 10:27 | 已完成 | README 命令参考改为 V0.4.0 已实现 lwa update；docs/runtime-workspace.md 改为优先使用 lwa update；src/runtime 两份 lwa-update-runtime skill 改为推荐流程 + 手动兜底；setup skill 交叉引用同步；rg 检查目标范围无 规划中/尚未实现/实现前 残留 |
+| DOC-008 | 文档 | IMP-006 WBS 增补管理页「路径别名」按钮与在线修改 API | 2026-07-07 10:49 | 2026-07-07 10:49 | 已完成 | docs/plan/待改进功能-WBS-20260706.md 新增 006.07~006.10：操作区按钮、PATCH path-alias API、可选 CLI、验收口径；校验规则与 CLI 一致 |
+| DOC-009 | 文档 | 同步 manager-page 与 runtime-workspace，移除 IMP-006 下一阶段等旧表述 | 2026-07-07 10:59 | 2026-07-07 10:59 | 已完成 | manager-page 补 update/path-alias API、列表字段、路径别名对话框与 CLI 一致性；runtime-workspace 补 staticGatewayPort/aliases、路径别名设置方式、IMP-001 剥离说明、V0.4.1 升级提示 |
 
 ## 功能开发
 
@@ -153,6 +159,7 @@
 | DEV-037 | 开发 | IMP-007 管理页展示端口映射关系（原端口 → hostPort） | 2026-07-06 20:03 | 2026-07-06 21:20 | 已完成 | InstanceStatus 与 /api/instances、/api/instances/{id} 统一返回 hostPort + internalPort + portMappingLabel；前端列表/详情端口列主显示 hostPort、副标「internalPort → hostPort」；静态实例不显示误导性内部端口；scanner 无法确定 internalPort 时不报错不空白 |
 | DEV-038 | 开发 | IMP-008 lwa update 工作区热重载（pip 刷新 + skills 同步 + 重启 lwa 自有服务） | 2026-07-06 19:58 | 2026-07-06 21:40 | 已完成 | updater.py：pip install -e . → 同步包内 skills/ → 工作区 → 重启 manager/daemon 子进程（解决 git pull 后旧子进程仍持旧代码）；--dry-run/--skip-pip/--sync-skills/--sync-templates/--restart-instances；默认不重建 apps/ 用户实例；配套 lwa-update-runtime skill |
 | DEV-039 | 开发 | IMP-009 实例 zip 包更新（再导入识别与原地升级） | 2026-07-06 20:20 | 2026-07-06 22:20 | 已完成 | importer.update_zip 原子换入（解压到 current.new → os.replace 双段交换，失败自动回滚 current/）；sourceZipHash 相同则跳过不 rebuild；kind/runtime 形态变化默认拒绝（--force-kind-change 显式确认）；保留 instance_id/hostPort（端口登记不动重启复用）/data/路径别名/desiredState；CLI import --update/-u + --dry-run/--no-restart/--no-keep-data；管理 API POST /api/instances/{id}/update；新增 lwa-import-zip skill；importer 16 + manager_api 5 单测 |
+| DEV-040 | 开发 | IMP-006 WBS 006.07~006.10 管理页在线修改路径别名 | 2026-07-07 10:49 | 2026-07-07 10:54 | 已完成 | path_alias.py + PATCH /api/instances/{id}/path-alias；管理页操作区「路径别名」按钮与对话框；lwa alias set/clear；running 实例 Caddy reload；校验与 import 一致；manager_api 6 条单测；744 passed |
 
 ## 配置运维
 
@@ -162,6 +169,9 @@
 | OPS-002 | 运维 | 安装 task-list 维护规则与 Stop hook 保证层，并本地化 Claude 配置（不进 GitHub） | 2026-07-06 16:33 | 2026-07-06 16:33 | 已完成 | CLAUDE.md 写入中文「会话结束任务同步」规则；.claude/settings.json 注册 Stop hook + .claude/hooks/tasklist_sync_reminder.sh（session_id 守卫，每会话首次 Stop 触发一次 block 提醒）；脚本验证输出正确且守卫不重复；standardize 检测『规则已安装 + Stop hook 已安装』；.gitignore 追加 CLAUDE.md/.claude/ 不同步 GitHub；hook 需重启会话生效 |
 | OPS-003 | 运维 | .gitignore 增补 .codex/ 与 AGENTS.md（AI 工具本地配置，不同步 GitHub） | 2026-07-06 18:03 | 2026-07-06 18:03 | 已完成 | 与 CLAUDE.md/.claude/ 同类，归入「AI 工具本地配置（不同步到 GitHub）」段并将段注释由 Claude Code 泛化为 AI 工具；git check-ignore 命中 .gitignore:70/71，git status 已无未跟踪项 |
 | OPS-004 | 运维 | 应用版本号提升至 V0.4.0 | 2026-07-07 09:52 | 2026-07-07 09:52 | 已完成 | pyproject.toml、version_info fallback/docstring、cli.py 说明、test_version_info 与 IMP-008 文档示例同步为 0.4.0 / V0.4.0 |
+| OPS-005 | 运维 | runtime 工作区执行 lwa update 升级至 V0.4.0 并手动重启管理页 | 2026-07-07 10:04 | 2026-07-07 10:10 | 已完成 | pip install -e 安装 local-webpage-access 0.4.0；syncSkills 后 runtime skills 为 15 个；migrateConfig 补齐 staticGatewayPort/staticRateLimit 并备份 local-web.yml.bak；旧 V0.3.1 管理页 pid 54615 已停止，新 V0.4.0 管理页 pid 67642 运行，health 返回 version=V0.4.0 且包含 workspaceRoot；doctor 仍有 Docker 未启和 17800 占用两个既有环境 FAIL |
+| OPS-006 | 运维 | 清理 runtime 工作区未使用顶层目录 | 2026-07-07 10:56 | 2026-07-07 10:56 | 已完成 | 核对 registry 仅有 demo-static 与 voiceprint-v3-demo 两个 running 实例，apps 目录均被引用；删除不属于 Workspace 标准目录且为空的 runtime/data；保留 runtime/logs 与 runtime/manager（ensure_workspace_dirs 标准保留目录）；find 复核 runtime/data 已不存在 |
+| OPS-007 | 运维 | 应用版本号提升至 V0.4.1 | 2026-07-07 10:57 | 2026-07-07 10:57 | 已完成 | pyproject.toml、version_info fallback/docstring、cli.py 说明、test_version_info 同步为 0.4.1 / V0.4.1；README 补 path-alias/alias/update 命令与 15 skills；skills README 补 lwa-update-runtime、lwa-import-zip 补 alias set/clear 与管理页入口 |
 
 ## 规划事项
 
@@ -180,12 +190,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 64 | 64 | 0 | 100% |
-| 调整事项 | 3 | 3 | 0 | 100% |
-| 检查事项 | 4 | 4 | 0 | 100% |
+| 代码 Bug | 66 | 66 | 0 | 100% |
+| 调整事项 | 4 | 4 | 0 | 100% |
+| 检查事项 | 5 | 5 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 6 | 6 | 0 | 100% |
-| 功能开发 | 39 | 39 | 0 | 100% |
-| 配置运维 | 3 | 3 | 0 | 100% |
+| 文档维护 | 9 | 9 | 0 | 100% |
+| 功能开发 | 40 | 40 | 0 | 100% |
+| 配置运维 | 7 | 7 | 0 | 100% |
 | 规划事项 | 8 | 8 | 0 | 100% |
-| **总计** | 127 | 127 | 0 | 100% |
+| **总计** | 139 | 139 | 0 | 100% |

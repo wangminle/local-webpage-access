@@ -2,22 +2,45 @@
 
 from __future__ import annotations
 
+import pytest
+
 from local_webpage_access import version_info
 
 
-def test_resolve_version_from_git_in_repo() -> None:
+@pytest.fixture(autouse=True)
+def _clear_version_cache() -> None:
     version_info.resolve_version.cache_clear()
-    ver = version_info.resolve_version()
-    assert ver == "0.4.0"
+    yield
+    version_info.resolve_version.cache_clear()
 
 
-def test_display_version_prefix() -> None:
-    version_info.resolve_version.cache_clear()
-    assert version_info.display_version() == "V0.4.0"
+def test_resolve_version_prefers_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.4.1")
+    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: "0.4.0")
+    assert version_info.resolve_version() == "0.4.1"
+
+
+def test_resolve_version_uses_metadata_when_git_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: None)
+    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: "0.4.1")
+    assert version_info.resolve_version() == "0.4.1"
+
+
+def test_resolve_version_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: None)
+    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: None)
+    assert version_info.resolve_version() == "0.4.1"
+
+
+def test_display_version_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.4.1")
+    assert version_info.display_version() == "V0.4.1"
 
 
 def test_version_from_git_subject() -> None:
     assert version_info._version_from_git(None) is None
-    root = version_info._repo_root()
-    assert root is not None
-    assert version_info._version_from_git(root) == "0.4.0"
+    match = version_info._VERSION_PREFIX.match("V0.4.1-Build0567-20260707")
+    assert match is not None
+    assert match.group(1) == "0.4.1"

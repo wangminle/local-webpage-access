@@ -121,18 +121,33 @@ def health_matches_workspace(
     workspace_root: Path,
     *,
     timeout: float = 1.0,
+    state: ManagerState | None = None,
 ) -> bool:
-    """端口上的管理页是否属于指定工作区（依赖 ``/api/health`` 的 ``workspaceRoot``）。"""
+    """端口上的管理页是否属于指定工作区（依赖 ``/api/health`` 的 ``workspaceRoot``）。
+
+    若 health 未带 ``workspaceRoot``（BUG-053 之前的管理页），在 ``state`` 表明
+    本工作区已启用且记录的 ``pid`` 仍存活时，视为本工作区进程（BUG-065），以便
+    ``lwa update`` 能重启旧版管理页。foreign 占用场景勿传可证明归属的 ``state``，
+    仍会由 ``start_manager`` 的 ``health_ok`` 分支拒绝。
+    """
     data = _fetch_health(host, port, timeout=timeout)
     if not data or not data.get("ok"):
         return False
     remote = data.get("workspaceRoot")
-    if not remote:
-        return False
-    try:
-        return Path(str(remote)).resolve() == Path(workspace_root).resolve()
-    except (OSError, ValueError):
-        return False
+    if remote:
+        try:
+            return Path(str(remote)).resolve() == Path(workspace_root).resolve()
+        except (OSError, ValueError):
+            return False
+    # BUG-065：旧版 health 无 workspaceRoot —— 仅当 state 证明 pid 仍存活
+    if (
+        state is not None
+        and state.enabled
+        and state.pid is not None
+        and is_pid_alive(state.pid)
+    ):
+        return True
+    return False
 
 
 def is_running(workspace: Workspace, config: Config) -> bool:
@@ -142,7 +157,7 @@ def is_running(workspace: Workspace, config: Config) -> bool:
         return False
     port = state.port or config.managerPort
     host = state.host or config.managerHost
-    if not health_matches_workspace(host, port, workspace.root):
+    if not health_matches_workspace(host, port, workspace.root, state=state):
         return False
     if state.pid is None:
         return True
@@ -238,13 +253,14 @@ def start_manager(workspace: Workspace, config: Config) -> int:
     bind_port = config.managerPort
 
     with manager_start_lock(workspace):
+        state = read_state(workspace)
         if is_running(workspace, config):
             state = read_state(workspace)
             log.info("管理页已在运行（pid=%s），不重复启动", state.pid if state else "?")
             return int(state.pid) if state and state.pid else 0
 
         # 端口已被占用：仅当健康端点确认属于本工作区时才恢复状态
-        if health_matches_workspace(bind_host, bind_port, workspace.root):
+        if health_matches_workspace(bind_host, bind_port, workspace.root, state=state):
             state = ManagerState(
                 enabled=True,
                 pid=None,

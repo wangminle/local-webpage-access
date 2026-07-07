@@ -31,6 +31,14 @@ lwa import inbox/foo.zip --path-alias myapp
 lwa import inbox/foo.zip --name "My App"
 ```
 
+导入后也可在线修改路径别名（V0.4.1 起）：
+
+```bash
+lwa alias set myapp demo-slug    # 静态实例
+lwa alias clear myapp
+# 或在管理页实例列表操作区点击「路径别名」
+```
+
 - IMP-001：导入时会**自动剥离** `node_modules/`、`__pycache__/`、`.venv/`、
   `.git/`、`__MACOSX/`、`.DS_Store` 等冗余成员，并做 zip slip / 符号链接防护。
   无需手动清理 zip。
