@@ -335,6 +335,11 @@ def _register_routes(app: FastAPI) -> None:
                 Status.PENDING.value: counts.get(Status.PENDING.value, 0),
                 Status.FAILED.value: counts.get(Status.FAILED.value, 0),
                 Status.BUILDING.value: counts.get(Status.BUILDING.value, 0),
+                # DEV-043：可恢复的异常态也纳入统计（BUG-081）
+                Status.GATEWAY_DOWN.value: counts.get(Status.GATEWAY_DOWN.value, 0),
+                Status.CONFIG_INVALID.value: counts.get(
+                    Status.CONFIG_INVALID.value, 0
+                ),
             },
             "typeDistribution": type_dist,
             "databaseCount": db_count,
@@ -452,6 +457,20 @@ def _register_routes(app: FastAPI) -> None:
         from local_webpage_access.lifecycle import rebuild_instance
 
         return _lifecycle_op(instance_id, rebuild_instance, label="rebuild")
+
+    @app.post(
+        "/api/instances/{instance_id}/recover",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def recover_op(instance_id: str) -> dict[str, Any]:
+        """DEV-043：恢复 gateway_down / config_invalid / 掉线实例（一键 recover）。
+
+        静态实例先尝试拉起 Caddy master，再 restart 重新托管；容器实例等价 restart。
+        """
+        from local_webpage_access.lifecycle import recover_instance
+
+        return _lifecycle_op(instance_id, recover_instance, label="recover")
 
     @app.post(
         "/api/instances/{instance_id}/update",

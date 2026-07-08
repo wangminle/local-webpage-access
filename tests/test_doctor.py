@@ -580,14 +580,14 @@ def test_cli_doctor_json_valid_when_caddy_hidden(env, monkeypatch) -> None:
 # ---- IMP-020：Caddy 健康探针 -------------------------------------------------
 
 
-def _patch_static_gateway(monkeypatch, ws, *, backend="caddy", admin_alive=True):
+def _patch_static_gateway(monkeypatch, ws, *, backend="caddy", admin_alive=True, health=None):
     """把 doctor 内 lazy import 的 StaticGateway 换成可控替身，返回共享状态。
 
     同时把 ``doctor.shutil.which`` 桩为 caddy 存在，使 ok/fail/validate/stale
     用例确定性地越过 check_caddy_health 的 caddy-缺失 WARN 分支（不依赖机器是否
-    装了 caddy）。
+    装了 caddy）。``health`` 为 ``port -> bool``，控制 IMP-020 站点/入口探测结果。
     """
-    state = {"backend": backend, "admin_alive": admin_alive}
+    state = {"backend": backend, "admin_alive": admin_alive, "health": health}
 
     class _Fake:
         def __init__(self, w, c):
@@ -598,6 +598,10 @@ def _patch_static_gateway(monkeypatch, ws, *, backend="caddy", admin_alive=True)
 
         def _admin_alive(self, **kw):
             return state["admin_alive"]
+
+        def health_check(self, port, *, timeout=1.0, path="/", **kw):
+            fn = state["health"]
+            return bool(fn(port, path)) if fn else True
 
         def main_config_path(self):
             return ws.static_gateway / "Caddyfile"
@@ -681,4 +685,126 @@ def test_check_caddy_health_warn_on_stale_pid(env, monkeypatch) -> None:
     pid_path.write_text("999999999")  # 几乎不可能存活的 pid
     r = check_caddy_health(ws, config, runner=runner)
     assert r.status == STATUS_WARN
+
+
+# ---- IMP-020：master 在线时的站点/入口可达性探测 -----------------------------
+
+
+def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None):
+    """落一个 enabled 静态实例到 registry，供 check_caddy_health 站点探测。"""
+    from local_webpage_access.models import (
+        DesiredState,
+        InstanceManifest,
+        Kind,
+        ResourceProfile,
+        Runtime,
+        ServingMode,
+        StaticConfig,
+        Status,
+    )
+
+    ws.ensure_app_dirs(iid)
+    static = StaticConfig(hostPort=host_port, enabled=True)
+    if alias:
+        static.routeMode = "name"
+        static.routeHost = alias
+    m = InstanceManifest(
+        id=iid,
+        name=iid,
+        version="1",
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.TINY,
+        desiredState=DesiredState.RUNNING,
+        status=Status.RUNNING,
+        static=static,
+    )
+    m.save(ws.app_manifest_path(iid))
+    reg.upsert_from_manifest(m)
+    reg.set_static_enabled(iid, True)
+
+
+def test_check_caddy_health_warns_on_unreachable_site(env, monkeypatch) -> None:
+    """IMP-020：master 在线但 enabled 站点 hostPort 不可达 → WARN。"""
+    ws, config, reg = env
+    config.staticGateway = "caddy"
+    _seed_static_for_doctor(ws, reg, "demo", host_port=21100)
+    _patch_static_gateway(
+        monkeypatch, ws, backend="caddy", admin_alive=True, health=lambda p, path: False
+    )
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(":8080 {}\n")
+    runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
+    r = check_caddy_health(ws, config, runner=runner, registry=reg)
+    assert r.status == STATUS_WARN
+    assert "21100" in r.message
+
+
+def test_check_caddy_health_warns_on_unreachable_alias_entry(env, monkeypatch) -> None:
+    """IMP-020：有别名但 :staticGatewayPort 入口不可达 → WARN。"""
+    ws, config, reg = env
+    config.staticGateway = "caddy"
+    _seed_static_for_doctor(ws, reg, "demo", host_port=21100, alias="myapp")
+    # 站点 hostPort 可达，但别名入口端口不可达（任何路径都不通）
+    entry_port = config.staticGatewayPort
+
+    def _health(port, path="/"):
+        return port != entry_port
+
+    _patch_static_gateway(
+        monkeypatch, ws, backend="caddy", admin_alive=True, health=_health
+    )
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(":8080 {}\n")
+    runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
+    r = check_caddy_health(ws, config, runner=runner, registry=reg)
+    assert r.status == STATUS_WARN
+    assert str(entry_port) in r.message
+
+
+def test_check_caddy_health_entry_probe_uses_alias_path(env, monkeypatch) -> None:
+    """BUG-080：入口探测应打 /<alias>/ 而非 /（根路径无路由会 404 误报 WARN）。"""
+    ws, config, reg = env
+    config.staticGateway = "caddy"
+    _seed_static_for_doctor(ws, reg, "demo", host_port=21100, alias="myapp")
+    entry_port = config.staticGatewayPort
+    seen: list[str] = []
+
+    def _health(port, path="/"):
+        seen.append(path)
+        # 站点 hostPort(21100) 正常服务；入口端口仅 /myapp/ 可达（模拟别名路由），
+        # 根 / 返回 404——BUG-080 正是要求入口探测打 /myapp/ 而非 /
+        if port == 21100:
+            return True
+        return path == "/myapp/"
+
+    _patch_static_gateway(
+        monkeypatch, ws, backend="caddy", admin_alive=True, health=_health
+    )
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(":8080 {}\n")
+    runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
+    r = check_caddy_health(ws, config, runner=runner, registry=reg)
+    assert r.status == STATUS_OK  # 不因根路径 404 误报
+    assert "/myapp/" in seen
+
+
+def test_check_caddy_health_ok_when_all_sites_reachable(env, monkeypatch) -> None:
+    """IMP-020：master 在线 + 站点/入口均可达 → OK。"""
+    ws, config, reg = env
+    config.staticGateway = "caddy"
+    _seed_static_for_doctor(ws, reg, "demo", host_port=21100)
+    _patch_static_gateway(
+        monkeypatch, ws, backend="caddy", admin_alive=True, health=lambda p, path: True
+    )
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(":8080 {}\n")
+    runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
+    r = check_caddy_health(ws, config, runner=runner, registry=reg)
+    assert r.status == STATUS_OK
 

@@ -67,6 +67,17 @@
 - 将 `local-web.yml` 的 `staticGateway` 设为 `builtin` 可跳过 Caddy；
 - Node 仅在前端 SPA 时需要。
 
+## 开机自启（可选）
+
+工作区就绪后，用户希望开机/登录自动拉起 daemon + manager（+ 可选 Caddy）：
+
+- **macOS**：在工作区目录执行 `lwa setup --autostart [--with-caddy]`，生成
+  `~/Library/LaunchAgents/com.fenix.lwa.{daemon,manager[,gateway]}.plist`，再按提示
+  `launchctl load <plist>` 启用（OPS-025）。plist 登录时幂等执行对应 `on` 命令，
+  不与 `lwa X off` 冲突。
+- **Linux / Windows**：`lwa setup --autostart` 会报错并指引；参考 [开机自启文档](../../../docs/autostart.md)
+  的 systemd user service / 任务计划程序模板自行配置。
+
 ## 示例对话
 
 用户：「我刚 clone 下来，怎么开始？」

@@ -522,6 +522,172 @@ def test_observe_static_status_uses_health_when_pid_missing(
     assert observed == Status.RUNNING
 
 
+# ---- DEV-043 / BUG-071：状态模型区分 gateway_down / config_invalid ------------
+
+
+def _patch_gateway_for_observe(
+    monkeypatch,
+    *,
+    backend: str = "caddy",
+    admin_alive: bool = False,
+    health_ok: bool = False,
+    pid_alive: bool = False,
+) -> None:
+    """桩 StaticGateway 探测方法，供 _observe_static_status 的 Caddy 区分测试。"""
+    from local_webpage_access import static_gateway
+
+    class _FakeGW:
+        def __init__(self, *a, **kw):
+            pass
+
+        def detect_backend(self):
+            return backend
+
+        def _admin_alive(self, **kw):
+            return admin_alive
+
+        def health_check(self, port, **kw):
+            return health_ok
+
+        def _pid_alive(self, pid):
+            return pid_alive
+
+    monkeypatch.setattr(static_gateway, "StaticGateway", _FakeGW)
+
+
+def _seed_enabled_static(workspace, registry, iid="demo", host_port=21100):
+    from local_webpage_access.models import StaticConfig
+    from tests._helpers import make_static_manifest
+
+    workspace.ensure_app_dirs(iid)
+    m = make_static_manifest(
+        iid,
+        desiredState=DesiredState.RUNNING,
+        status=Status.RUNNING,
+        static=StaticConfig(hostPort=host_port),
+    )
+    m.static.enabled = True
+    m.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(m)
+    registry.set_static_enabled(iid, True)
+    return m
+
+
+def test_observe_distinguishes_gateway_down(workspace, registry, config, monkeypatch) -> None:
+    """BUG-071/DEV-043：Caddy master 挂掉时 enabled 实例标 gateway_down，不再误标 stopped。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    _patch_gateway_for_observe(
+        monkeypatch, backend="caddy", admin_alive=False, health_ok=False
+    )
+    assert (
+        _observe_static_status(workspace, config, registry, "demo")
+        == Status.GATEWAY_DOWN
+    )
+
+
+def test_observe_config_invalid_when_master_up_but_site_unreachable(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """DEV-043：master 在线但站点 hostPort 不通 → config_invalid（路由/配置问题）。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    _patch_gateway_for_observe(
+        monkeypatch, backend="caddy", admin_alive=True, health_ok=False
+    )
+    assert (
+        _observe_static_status(workspace, config, registry, "demo")
+        == Status.CONFIG_INVALID
+    )
+
+
+def test_observe_health_first_keeps_running_even_if_admin_down(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """健康优先：即便 admin 探测失败，只要 hostPort HTTP 可达仍判 running（向后兼容）。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    _patch_gateway_for_observe(
+        monkeypatch, backend="caddy", admin_alive=False, health_ok=True
+    )
+    assert (
+        _observe_static_status(workspace, config, registry, "demo") == Status.RUNNING
+    )
+
+
+def test_recover_instance_brings_up_gateway_then_restarts(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """DEV-043 recover：Caddy 静态 + master 离线时，先 maybe_start_gateway 再 restart。"""
+    from local_webpage_access import gateway_service, lifecycle
+    from local_webpage_access import static_gateway as sg
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+
+    calls: list[str] = []
+
+    class _FakeGW:
+        def __init__(self, *a, **kw):
+            pass
+
+        def detect_backend(self):
+            return "caddy"
+
+        def _admin_alive(self, **kw):
+            return False
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(
+        gateway_service,
+        "maybe_start_gateway",
+        lambda *a, **kw: calls.append("gateway"),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "restart_instance",
+        lambda *a, **kw: calls.append("restart") or _seed_enabled_static(
+            workspace, registry, "demo"
+        ),
+    )
+
+    lifecycle.recover_instance(workspace, config, registry, "demo")
+    assert calls == ["gateway", "restart"]
+
+
+def test_recover_instance_skips_gateway_when_admin_already_up(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """recover：master 已在线时不重复拉网关，直接 restart。"""
+    from local_webpage_access import gateway_service, lifecycle
+    from local_webpage_access import static_gateway as sg
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    calls: list[str] = []
+
+    class _FakeGW:
+        def __init__(self, *a, **kw):
+            pass
+
+        def detect_backend(self):
+            return "caddy"
+
+        def _admin_alive(self, **kw):
+            return True
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(
+        gateway_service, "maybe_start_gateway", lambda *a, **kw: calls.append("gateway")
+    )
+    monkeypatch.setattr(
+        lifecycle, "restart_instance", lambda *a, **kw: calls.append("restart")
+    )
+    lifecycle.recover_instance(workspace, config, registry, "demo")
+    assert calls == ["restart"]
+
+
 # ---- 回归测试：BUG-046 ----------------------------------------------------
 #
 # BUG-046：``instance_lock`` 在长耗时操作期间不刷新锁文件时间戳，

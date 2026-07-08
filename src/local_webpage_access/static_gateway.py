@@ -375,7 +375,15 @@ class StaticGateway:
         log.info("静态站点已禁用：%s", instance_id)
 
     def is_enabled(self, instance_id: str) -> bool:
-        """站点是否处于启用状态（PID 存在且端口在监听）。"""
+        """站点是否处于启用状态。
+
+        * builtin：per-instance pid（``run/static-<id>.pid``）存活；
+        * Caddy：站点配置文件 ``sites/<id>.conf`` 存在——Caddy 由 master 统一服务，
+          无 per-instance 进程/pid，此前仅查 pid 致 Caddy 静态站点恒判未启用
+          （BUG-078：在线改路径别名因此被跳过 reload）。
+        """
+        if self.detect_backend() == "caddy":
+            return self.site_config_path(instance_id).is_file()
         pid = self._read_pid(instance_id)
         if pid is None:
             return False
@@ -383,9 +391,15 @@ class StaticGateway:
 
     # ---- 健康检查 -----------------------------------------------------------
 
-    def health_check(self, host_port: int, *, timeout: float = _HEALTH_TIMEOUT) -> bool:
-        """HTTP GET ``/`` 检查站点是否在服务（WBS-09.08）。"""
-        url = f"http://127.0.0.1:{host_port}/"
+    def health_check(
+        self, host_port: int, *, timeout: float = _HEALTH_TIMEOUT, path: str = "/"
+    ) -> bool:
+        """HTTP GET ``path`` 检查站点是否在服务（WBS-09.08）。
+
+        默认探 ``/``；别名统一入口端口（:staticGatewayPort）的根路径不提供服务
+        （仅 ``/<alias>/`` 有路由），探测入口时应传 ``path="/<alias>/"``（BUG-080）。
+        """
+        url = f"http://127.0.0.1:{host_port}{path}"
         try:
             resp = urllib.request.urlopen(url, timeout=timeout)
             return 200 <= resp.status < 400

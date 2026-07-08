@@ -16,7 +16,7 @@
 | `lwa init` | **首次**创建工作区（目录、registry、配置） |
 | **`lwa update`（V0.4.0 起）** | 已有工作区 + **lwa 包升级** + skills/config 同步 + 重启 manager/daemon |
 
-当前已实现 `lwa update` CLI（V0.4.2 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
+当前已实现 `lwa update` CLI（V0.4.3 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
 执行失败、需要定位具体步骤，或用户明确要求手动处理时，才使用下方手动兜底步骤。
 
 ## 输入

@@ -225,20 +225,34 @@ def start_gateway(workspace: Workspace, config: Config) -> int:
 def stop_gateway(workspace: Workspace, config: Config) -> bool:
     """``lwa gateway off``：停止 Caddy master 并清服务态。
 
-    backend 非 caddy 时（如已切 builtin）：清理可能残留的 stale 态文件后视为
-    成功停止。返回是否成功停止（master 真正退出）。
+    backend 非 caddy 时（如已切 builtin）：清理可能残留的 stale 态文件。但若
+    admin :2019 仍在线（旧 master 还在跑——典型场景：刚把 staticGateway 从 caddy
+    切到 builtin 但未关 master），仍要 :meth:`caddy_stop` 关掉，兑现
+    ``cli.gateway_off`` "切 builtin 后也能关 master" 的承诺（BUG-077）。
+
+    返回是否成功停止（master 真正退出；无 master 在线时返回 True）。
     """
     gateway = StaticGateway(workspace, config)
     backend = gateway.detect_backend()
     if backend != "caddy":
-        # 切走 caddy 后服务态文件可能残留：清掉避免 status 误报 enabled。
+        # 先清服务态，避免 status 误报 enabled
         state = read_state(workspace)
         if state is not None:
             state.enabled = False
             state.pid = None
             write_state(workspace, state)
-        log.info("staticGateway=%s，无 Caddy master 需停止，已清理服务态", backend)
-        return True
+        # BUG-077：backend 非 caddy 但 admin 仍在线 → 仍有残留 master，需关停
+        if not gateway._admin_alive():
+            log.info("staticGateway=%s 且无 Caddy master 在线，已清理服务态", backend)
+            return True
+        log.info(
+            "staticGateway=%s 但检测到 Caddy master 仍在运行（admin :2019），尝试停止",
+            backend,
+        )
+        stopped = gateway.caddy_stop()
+        if not stopped:
+            log.warning("Caddy master 停止失败（admin :2019 仍可能在线）")
+        return stopped
 
     stopped = gateway.caddy_stop()
     state = read_state(workspace)

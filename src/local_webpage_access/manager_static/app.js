@@ -113,6 +113,8 @@
     setText("stat-stopped", c.stopped || 0);
     setText("stat-pending", c.pending || 0);
     setText("stat-failed", c.failed || 0);
+    // BUG-081：网关不可达 + 配置无效合并为"需恢复"
+    setText("stat-needs-recover", (c.gateway_down || 0) + (c.config_invalid || 0));
     setText("stat-db", data.databaseCount || 0);
 
     var pp = data.portPool || {};
@@ -146,13 +148,23 @@
 
   // ---- 渲染：实例表格（WBS-23.03/04/12）-----------------------------------
 
+  // BUG-081：可恢复/待处理的异常态统一纳入"仅待处理/失败"筛选视图
+  function isActionableStatus(status) {
+    return (
+      status === "pending" ||
+      status === "failed" ||
+      status === "gateway_down" ||
+      status === "config_invalid"
+    );
+  }
+
   function renderInstances(instances) {
     lastInstances = instances || [];
     var filterPending = document.getElementById("filter-pending").checked;
     var rows = lastInstances;
     if (filterPending) {
       rows = rows.filter(function (i) {
-        return i.status === "pending" || i.status === "failed";
+        return isActionableStatus(i.status);
       });
     }
     var body = document.getElementById("instances-body");
@@ -176,6 +188,8 @@
     var rowClass = "";
     if (i.status === "failed") rowClass = "row-failed";
     else if (i.status === "pending") rowClass = "row-pending";
+    else if (i.status === "gateway_down" || i.status === "config_invalid")
+      rowClass = "row-warn";
     return (
       '<tr class="' + rowClass + '">' +
       '<td class="cell-name" data-detail="' + esc(i.id) + '">' + esc(i.name || i.id) + "</td>" +
@@ -194,9 +208,28 @@
     );
   }
 
+  // DEV-043：状态中文标签（含 gateway_down / config_invalid）
+  var STATUS_LABELS = {
+    running: "运行中",
+    stopped: "已停止",
+    pending: "待识别",
+    building: "构建中",
+    failed: "失败",
+    queued: "排队中",
+    gateway_down: "网关不可达",
+    config_invalid: "配置无效",
+  };
+
+  function statusLabel(status) {
+    return STATUS_LABELS[status] || status || "—";
+  }
+
   function badgeHtml(status) {
-    var cls = "badge-" + (status || "pending");
-    return '<span class="badge ' + cls + '">' + esc(status || "—") + "</span>";
+    // class 用连字符（gateway_down → badge-gateway-down），文本用中文标签
+    var cls = "badge-" + String(status || "pending").replace(/_/g, "-");
+    return (
+      '<span class="badge ' + cls + '">' + esc(statusLabel(status)) + "</span>"
+    );
   }
 
   function stackHtml(stack, database) {
@@ -280,6 +313,18 @@
       !isStatic || inProgress,
       !isStatic ? "路径别名仅支持静态站点" : ""
     );
+    // DEV-043：网关不可达 / 配置无效时给一键 recover（先拉 master 再 restart）
+    if (i.status === "gateway_down" || i.status === "config_invalid") {
+      html += opBtn(
+        id,
+        "recover",
+        "恢复",
+        inProgress,
+        i.status === "gateway_down"
+          ? "Caddy master 不可达，点此拉起网关并重启实例"
+          : "站点路由/配置疑似异常，点此重启并重新加载配置"
+      );
+    }
     html += opBtn(id, "start", "启动", isRunning || inProgress);
     html += opBtn(id, "stop", "停止", !isRunning || inProgress);
     html += opBtn(id, "restart", "重启", inProgress);
@@ -336,7 +381,13 @@
 
   function opLabel(op) {
     return (
-      { start: "启动", stop: "停止", restart: "重启", rebuild: "重建" }[op] || op
+      {
+        start: "启动",
+        stop: "停止",
+        restart: "重启",
+        rebuild: "重建",
+        recover: "恢复",
+      }[op] || op
     );
   }
 
@@ -767,6 +818,9 @@
 
   if (typeof window !== "undefined" && window.__LWA_TEST_HOOKS__) {
     window.__LWA_TEST_HOOKS__.formatLocalDateTime = formatLocalDateTime;
+    window.__LWA_TEST_HOOKS__.statusLabel = statusLabel;
+    window.__LWA_TEST_HOOKS__.badgeHtml = badgeHtml;
+    window.__LWA_TEST_HOOKS__.isActionableStatus = isActionableStatus;
   }
 
   // ---- 启动 ----------------------------------------------------------------

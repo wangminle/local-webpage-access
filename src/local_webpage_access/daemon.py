@@ -51,6 +51,9 @@ log = get_logger("daemon")
 
 DEFAULT_POLL_INTERVAL = 5.0  # 秒：inbox 扫描周期
 DEFAULT_STABLE_SECONDS = 2.0  # 秒：文件 mtime/size 稳定窗口（防半写文件）
+# DEV-042：周期自愈间隔——watcher 每隔该秒数跑一次 reconcile，恢复掉线的
+# desired=running 实例（builtin 静态进程存活监管 + 容器轻量拉起）。
+DEFAULT_SUPERVISE_INTERVAL = 60.0
 STATE_FILENAME = "daemon.json"
 LOCK_FILENAME = "daemon.lock"
 START_LOCK_FILENAME = "daemon-start.lock"
@@ -506,6 +509,100 @@ def process_zip(
         return summary
 
 
+# ---- DEV-042：开机/守护自愈 reconcile ---------------------------------------
+
+
+# 这些态不应被 reconcile 强拉（进行中或人工介入中），交给对应流程收尾
+_RECONCILE_SKIP_STATUSES = {"pending", "queued", "building"}
+
+
+def reconcile(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    *,
+    restarter: Callable[[Workspace, Config, Registry, str], None] | None = None,
+) -> list[str]:
+    """DEV-042 / BUG-079：开机/守护自愈——恢复 ``desired=running`` 但实际未在跑的实例。
+
+    扫描 registry，对期望运行却掉线的实例逐一调用 ``restarter``（默认
+    :func:`~local_webpage_access.lifecycle.start_instance`，幂等——已 running 则无操作，
+    builtin 静态进程死了会重新 spawn，容器走轻量 ``compose start``）。返回被尝试恢复的
+    instance_id 列表（成功与否各实例独立处理，单实例失败不中断整体）。
+
+    跳过条件：
+
+    * ``desired_state≠running``（用户已停止，不该被拉起）；
+    * ``status ∈ {pending, queued, building}``（过渡态，交给对应流程收尾）；
+    * registry 标 ``running`` 且 :func:`~local_webpage_access.lifecycle.observe_status`
+      仍判定为 running（含 BUG-079：陈旧 running 经观测验证后才恢复）；
+    * Caddy 后端且网关被显式关闭（``run/gateway.json enabled=false``）——此时静态
+      实例呈 ``gateway_down`` 是网关层决策，重启实例会触发 ``ensure_caddy_running``
+      把 master 拉起，与用户的 ``lwa gateway off`` 冲突，故跳过。
+
+    builtin 静态进程存活监管由本函数在 watcher 周期调用实现：进程死了 → observe 偏离 →
+    下一轮 reconcile 重新 spawn。
+    """
+    from local_webpage_access.lifecycle import observe_status, start_instance
+
+    restarter = restarter or start_instance
+
+    # Caddy 后端：判断网关是否被显式关闭（避免与 lwa gateway off 冲突）
+    caddy_gateway_off = False
+    try:
+        from local_webpage_access.static_gateway import StaticGateway
+
+        if StaticGateway(workspace, config).detect_backend() == "caddy":
+            from local_webpage_access.gateway_service import read_state as _read_gw
+
+            gw = _read_gw(workspace)
+            if gw is not None and not gw.enabled:
+                caddy_gateway_off = True
+    except Exception:  # noqa: BLE001 — 探测失败不影响主流程，按可恢复处理
+        pass
+
+    restarted: list[str] = []
+    for row in registry.list_instances():
+        if row.get("desired_state") != "running":
+            continue
+        iid = row["id"]
+        runtime = row.get("runtime")
+        registry_status = row.get("status")
+        # pending/queued/building：过渡态，交给对应流程收尾，不 observe 不强拉
+        if registry_status in _RECONCILE_SKIP_STATUSES:
+            continue
+        # BUG-079：registry 标 running 可能陈旧（宿主机重启/进程异常退出后未刷新），
+        # observe 验证真实状态——若实际已掉线则按偏离处理；其余非 running 态
+        # （stopped/failed/gateway_down/config_invalid）本就是已知未运行，直接恢复。
+        actual_status = registry_status
+        if registry_status == "running":
+            try:
+                actual_status = observe_status(workspace, config, registry, iid).value
+            except Exception as exc:  # noqa: BLE001 — 观测失败保守视为仍 running，跳过
+                log.debug("daemon reconcile: 观测 %s 失败，保守跳过：%s", iid, exc)
+                continue
+        if actual_status == "running":
+            continue
+        if caddy_gateway_off and runtime == "shared-static":
+            log.debug("daemon reconcile: 网关被显式关闭，跳过 caddy 静态实例 %s", iid)
+            continue
+        try:
+            restarter(workspace, config, registry, iid)
+            restarted.append(iid)
+            log.info(
+                "daemon reconcile: 恢复实例 %s（%s → running）", iid, actual_status or "?"
+            )
+            with contextlib.suppress(Exception):
+                registry.add_event(
+                    iid,
+                    "reconcile",
+                    f"daemon 自愈：desired=running 但状态偏离（{actual_status}），已自动恢复",
+                )
+        except Exception as exc:  # noqa: BLE001 — 单实例恢复失败不中断
+            log.warning("daemon reconcile: 恢复 %s 失败：%s", iid, exc)
+    return restarted
+
+
 # ---- watcher 主循环（WBS-21.05~10）-----------------------------------------
 
 
@@ -522,12 +619,18 @@ def run_watcher(
     clock: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
     heartbeat: Callable[[], None] | None = None,
+    supervise: Callable[[Workspace, Config, Registry], Any] | None = None,
+    supervise_interval: float = DEFAULT_SUPERVISE_INTERVAL,
 ) -> None:
-    """watcher 主循环（可注入 stop_event/process_fn/heartbeat，便于单测）。
+    """watcher 主循环（可注入 stop_event/process_fn/heartbeat/supervise，便于单测）。
 
     退出条件：``stop_event`` 被置位，或状态文件 ``enabled`` 被外部置为 False
     （``lwa daemon off`` 设置）。每轮起始调用 ``heartbeat``（若提供），刷新
     锁心跳以供 :func:`_lock_is_stale` 超时回收判定（BUG-030）。
+
+    DEV-042：``supervise`` 每隔 ``supervise_interval`` 秒调用一次（默认
+    :func:`reconcile`），周期恢复 ``desired=running`` 但掉线的实例，实现
+    builtin 静态进程存活监管。
     """
     stop_event = stop_event or threading.Event()
     poll_interval = (
@@ -537,6 +640,7 @@ def run_watcher(
     fingerprints: dict[str, _FileFingerprint] = {}
 
     log.info("daemon watcher 启动（poll=%.1fs）", poll_interval)
+    last_supervise = clock()
     while not stop_event.is_set():
         # 每轮起始刷新心跳，让卡死可被 _lock_is_stale 探测
         if heartbeat is not None:
@@ -546,6 +650,14 @@ def run_watcher(
         if state is not None and not state.enabled:
             log.info("daemon 状态为 disabled，退出 watcher")
             break
+
+        # DEV-042：周期自愈——定期恢复 desired=running 但掉线的实例
+        if supervise is not None and (clock() - last_supervise) >= supervise_interval:
+            last_supervise = clock()
+            try:
+                supervise(workspace, config, registry)
+            except Exception:  # noqa: BLE001 — 自愈失败不中断 watcher
+                log.exception("daemon supervise（reconcile）失败")
 
         processed = load_processed_set(workspace)
         for zip_path in scan_inbox(workspace):
@@ -793,12 +905,21 @@ def _main() -> int:
             reg = Registry(workspace.db_path)
             reg.open()
             try:
+                # DEV-042：启动即自愈一次——恢复上次退出/重启期间掉线的
+                # desired=running 实例（builtin 静态进程 + 容器）。
+                try:
+                    recovered = reconcile(workspace, config, reg)
+                    if recovered:
+                        log.info("daemon 启动自愈：恢复 %d 个实例 %s", len(recovered), recovered)
+                except Exception:  # noqa: BLE001 — 自愈失败不阻断 watcher
+                    log.exception("daemon 启动 reconcile 失败")
                 run_watcher(
                     workspace,
                     config,
                     reg,
                     poll_interval=args.poll,
                     heartbeat=lambda: touch_lock_heartbeat(workspace),
+                    supervise=reconcile,
                 )
             finally:
                 reg.close()
@@ -816,6 +937,7 @@ __all__ = [
     "DaemonState",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_STABLE_SECONDS",
+    "DEFAULT_SUPERVISE_INTERVAL",
     "read_state",
     "write_state",
     "clear_state",
@@ -835,6 +957,7 @@ __all__ = [
     "save_processed_set",
     "processed_key",
     "process_zip",
+    "reconcile",
     "run_watcher",
     "start_daemon",
     "stop_daemon",

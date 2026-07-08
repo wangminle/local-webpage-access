@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-webpage-access"
-version = "0.4.2"
+version = "0.4.3"
 description = "Local Webpage Access — 面向局域网小主机的本地网页部署基座"
 readme = "README.md"
 requires-python = ">=3.13"

@@ -147,3 +147,81 @@ def test_cli_setup_json() -> None:
     assert result.exit_code in (0, 1)
     assert '"platform"' in result.output
     assert '"items"' in result.output
+
+
+# ---- OPS-022/025：launchd 开机自启 plist 生成 ---------------------------------
+
+
+def test_generate_launchd_plists_macos(tmp_path, monkeypatch) -> None:
+    """macOS 下生成 daemon + manager（+ caddy）plist，内容含正确的 Label/命令/RunAtLoad。"""
+    import plistlib
+
+    from local_webpage_access.config import Config, PortPool
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.setup import generate_launchd_plists
+    from local_webpage_access.paths import Workspace
+
+    monkeypatch.setattr("local_webpage_access.setup.detect_platform", lambda: "macos")
+    root = tmp_path / "ws"
+    init_workspace(root)
+    ws = Workspace(root)
+    ws.ensure_workspace_dirs()
+    cfg = Config(
+        staticGateway="caddy",
+        portPool=PortPool(start=21000, end=21050),
+        managerEnabled=True,
+    )
+    dest = tmp_path / "LaunchAgents"
+    written = generate_launchd_plists(
+        root, cfg, include_caddy=True, dest_dir=dest, python_exe="/usr/local/bin/python3"
+    )
+    names = {name for name, _ in written}
+    assert names == {"daemon", "manager", "gateway"}
+    # 校验 daemon plist 内容
+    daemon_plist = dict(written)["daemon"]
+    data = plistlib.loads(daemon_plist.read_bytes())
+    assert data["Label"] == "com.fenix.lwa.daemon"
+    assert data["RunAtLoad"] is True
+    assert data["ProgramArguments"] == [
+        "/usr/local/bin/python3",
+        "-m",
+        "local_webpage_access",
+        "daemon",
+        "on",
+    ]
+    assert data["WorkingDirectory"] == str(root)
+    # KeepAlive 必须未设置（避免与 lwa X off 冲突）
+    assert "KeepAlive" not in data
+
+
+def test_generate_launchd_plists_omits_manager_when_disabled(tmp_path, monkeypatch) -> None:
+    """managerEnabled=false 时不生成 manager plist。"""
+    from local_webpage_access.config import Config, PortPool
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.setup import generate_launchd_plists
+
+    monkeypatch.setattr("local_webpage_access.setup.detect_platform", lambda: "macos")
+    root = tmp_path / "ws"
+    init_workspace(root)
+    cfg = Config(
+        portPool=PortPool(start=21000, end=21050), managerEnabled=False
+    )
+    written = generate_launchd_plists(
+        root, cfg, dest_dir=tmp_path / "LA", python_exe="/usr/bin/python3"
+    )
+    assert {n for n, _ in written} == {"daemon"}
+
+
+def test_generate_launchd_plists_rejects_non_macos(tmp_path, monkeypatch) -> None:
+    """非 macOS 抛 LifecycleError。"""
+    from local_webpage_access.config import Config, PortPool
+    from local_webpage_access.errors import LifecycleError
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.setup import generate_launchd_plists
+
+    monkeypatch.setattr("local_webpage_access.setup.detect_platform", lambda: "linux")
+    root = tmp_path / "ws"
+    init_workspace(root)
+    cfg = Config(portPool=PortPool(start=21000, end=21050))
+    with pytest.raises(LifecycleError):
+        generate_launchd_plists(root, cfg, dest_dir=tmp_path / "LA")

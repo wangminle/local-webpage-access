@@ -145,6 +145,78 @@ def test_disable_stops_builtin(gateway: StaticGateway, workspace: Workspace) -> 
     assert not gateway.site_config_path("demo").exists()
 
 
+# ---- BUG-078：is_enabled 在 Caddy 模式按站点配置判定 --------------------------
+
+
+def _caddy_gateway(workspace: Workspace, monkeypatch) -> StaticGateway:
+    """构造确定性的 Caddy 后端 gateway（不依赖机器是否装 caddy）。"""
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.shutil.which",
+        lambda name: "/usr/bin/caddy",
+    )
+    return StaticGateway(workspace, Config(staticGateway="caddy"))
+
+
+def test_is_enabled_caddy_true_when_site_config_exists(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-078：Caddy 模式下站点配置存在即视为 enabled（无 per-instance pid）。"""
+    gw = _caddy_gateway(workspace, monkeypatch)
+    site = gw.site_config_path("demo")
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_text(f":21100 {{ root */public }}\n", encoding="utf-8")
+    assert gw.is_enabled("demo") is True
+
+
+def test_is_enabled_caddy_false_when_no_site_config(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-078：Caddy 模式下无站点配置 → 未启用。"""
+    gw = _caddy_gateway(workspace, monkeypatch)
+    assert gw.is_enabled("demo") is False
+
+
+def test_apply_gateway_alias_reloads_when_caddy_site_enabled(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-078 回归：Caddy 静态站点 enabled 时，在线改别名应触发 reload_all。
+
+    修复前 is_enabled() 仅查 pid，Caddy 站点恒判未启用 → _apply_gateway_alias
+    提前 return，generate_alias_config/reload_all 不被调用。
+    """
+    from local_webpage_access.path_alias import _apply_gateway_alias
+
+    gw = _caddy_gateway(workspace, monkeypatch)
+    # 站点配置存在 → is_enabled True
+    site = gw.site_config_path("demo")
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_text(":21100 {}\n", encoding="utf-8")
+
+    calls: dict[str, int] = {"reload": 0, "gen_alias": 0}
+
+    monkeypatch.setattr(
+        StaticGateway, "reload_all", lambda self: calls.__setitem__("reload", calls["reload"] + 1)
+    )
+    monkeypatch.setattr(
+        StaticGateway,
+        "generate_alias_config",
+        lambda self, iid, alias, hp: calls.__setitem__("gen_alias", calls["gen_alias"] + 1),
+    )
+
+    alias_enabled, reloaded = _apply_gateway_alias(
+        workspace,
+        Config(staticGateway="caddy"),
+        "demo",
+        "myapp",
+        21100,
+        previous_alias=None,
+    )
+    assert alias_enabled is True
+    assert reloaded is True
+    assert calls["gen_alias"] == 1
+    assert calls["reload"] == 1
+
+
 def test_enable_rolls_back_on_missing_root(gateway: StaticGateway, workspace: Workspace) -> None:
     port = _free_port()
     with pytest.raises(Exception):

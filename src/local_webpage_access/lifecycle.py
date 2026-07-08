@@ -301,6 +301,39 @@ def restart_instance(
         return host_instance(workspace, config, registry, instance_id)
 
 
+def recover_instance(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> InstanceManifest:
+    """DEV-043 配套：恢复处于 ``gateway_down`` / ``config_invalid`` / 掉线的实例。
+
+    针对管理页"一键 recover"：对静态实例，若 Caddy master 离线，先
+    :func:`~local_webpage_access.gateway_service.maybe_start_gateway` 拉起 master
+    （失败不阻断，可降级 builtin），再 :func:`restart_instance` 重新托管——后者
+    的 reload 会把站点/别名片段重新注入主配置。容器实例等价于 restart。
+    最终 ``desiredState=running``。
+    """
+    from local_webpage_access.gateway_service import maybe_start_gateway
+
+    manifest = _load(workspace, instance_id)
+    if manifest.runtime.value == "shared-static":
+        try:
+            from local_webpage_access.static_gateway import StaticGateway
+
+            gw = StaticGateway(workspace, config)
+            if gw.detect_backend() == "caddy" and not gw._admin_alive():
+                log.info(
+                    "recover %s: Caddy master 离线，先 maybe_start_gateway",
+                    instance_id,
+                )
+                maybe_start_gateway(workspace, config)
+        except Exception as exc:  # noqa: BLE001 — 网关拉起失败不阻断 restart
+            log.warning("recover %s: 拉起网关失败（继续 restart）：%s", instance_id, exc)
+    return restart_instance(workspace, config, registry, instance_id)
+
+
 def rebuild_instance(
     workspace: Workspace,
     config: Config,
@@ -562,6 +595,21 @@ def _observe_container_status(
 def _observe_static_status(
     workspace: Workspace, config: Config, registry: Registry, instance_id: str
 ) -> Status:
+    """观测静态实例真实状态（WBS-17.07；BUG-071 / DEV-043 修复）。
+
+    判定优先级（**健康优先**，保证向后兼容）：
+
+    1. 未启用 → ``STOPPED``；
+    2. pid 存活 或 hostPort HTTP 可达 → ``RUNNING``（BUG-052 防御：pid 抖动/缺失但
+       服务在跑时按 HTTP 兜底）；
+    3. 既未 pid 存活也不可达时，按后端细化（DEV-043）：
+
+       * Caddy 后端 + admin :2019 不可达 → ``GATEWAY_DOWN``（master 挂了，
+         enabled 站点实际不可达——BUG-071：不再误标普通 stopped）；
+       * Caddy 后端 + master 在线但站点端口不通 → ``CONFIG_INVALID``
+         （路由/配置问题，BUG-069 类悬空 import 征兆）；
+       * builtin 后端 → ``STOPPED``（进程已死，由 daemon reconcile 自愈）。
+    """
     from local_webpage_access.static_gateway import StaticGateway
 
     row = registry.get_static_site(instance_id)
@@ -569,6 +617,8 @@ def _observe_static_status(
         return Status.STOPPED
     gateway = StaticGateway(workspace, config)
     host_port = row.get("host_port")
+
+    # 1) pid 存活 → running
     pid_alive = False
     pid_path = workspace.run / f"static-{instance_id}.pid"
     if pid_path.is_file():
@@ -580,10 +630,15 @@ def _observe_static_status(
             pid_alive = gateway._pid_alive(pid)
     if pid_alive:
         return Status.RUNNING
-    # PID 文件缺失或进程已退出时，仍以 HTTP 探测为准（BUG-052 防御）：
-    # 跨线程 registry 误读或 PID 抖动不应把仍在服务的站点标为 stopped。
+    # 2) hostPort HTTP 可达 → running（BUG-052：pid 缺失/抖动时 HTTP 兜底）
     if host_port is not None and gateway.health_check(int(host_port)):
         return Status.RUNNING
+
+    # 3) 既无 pid 也不可达：Caddy 模式下区分"网关不可达"与"配置无效"（DEV-043）
+    if gateway.detect_backend() == "caddy":
+        if not gateway._admin_alive():
+            return Status.GATEWAY_DOWN
+        return Status.CONFIG_INVALID
     return Status.STOPPED
 
 
@@ -592,6 +647,7 @@ __all__ = [
     "start_instance",
     "stop_instance_op",
     "restart_instance",
+    "recover_instance",
     "rebuild_instance",
     "remove_instance",
     "observe_status",

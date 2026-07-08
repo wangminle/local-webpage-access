@@ -213,6 +213,28 @@ def test_stats_returns_counts_and_host(manager_env: EnvBundle) -> None:
     assert pp["end"] == 21050
 
 
+def test_stats_includes_recoverable_status_counts(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-081：/api/stats counts 应含 gateway_down / config_invalid 可恢复态。"""
+    from local_webpage_access.models import Status
+
+    # 先置为非 pending/queued，确保 sync_status 会调用 observe_status
+    manager_env.registry.update_status(manager_env.instance_id, "stopped")
+
+    def fake_observe(ws, cfg, reg, iid):
+        reg.update_status(iid, "gateway_down")
+        return Status.GATEWAY_DOWN
+
+    monkeypatch.setattr("local_webpage_access.lifecycle.observe_status", fake_observe)
+    resp = manager_env.client.get(
+        "/api/stats", headers=manager_env.auth_headers()
+    )
+    body = resp.json()
+    assert body["counts"]["gateway_down"] >= 1
+    assert "config_invalid" in body["counts"]
+
+
 # ---- 实例列表（WBS-22.03）---------------------------------------------------
 
 
@@ -488,6 +510,23 @@ def test_rebuild_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
         )
     assert resp.status_code == 200
     assert called == [manager_env.instance_id]
+
+
+def test_recover_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
+    """DEV-043：recover API 应调用 lifecycle.recover_instance（一键恢复网关不可达实例）。"""
+    with pytest.MonkeyPatch.context() as mp:
+        called: list[str] = []
+        mp.setattr(
+            "local_webpage_access.lifecycle.recover_instance",
+            lambda ws, cfg, reg, iid: called.append(iid),
+        )
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/recover",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 200, resp.text
+    assert called == [manager_env.instance_id]
+    assert resp.json()["action"] == "recover"
 
 
 def test_operation_not_found(manager_env: EnvBundle) -> None:

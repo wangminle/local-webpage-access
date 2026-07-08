@@ -736,3 +736,221 @@ def test_run_watcher_keeps_failed_zip_in_inbox(
     assert zip_path.exists()  # 仍在 inbox
     assert list(workspace.inbox_processed.glob("*.zip")) == []  # 未归档
 
+
+# ---- DEV-042：reconcile 自愈 -------------------------------------------------
+
+
+def _seed_instance(
+    registry: Registry,
+    workspace: Workspace,
+    iid: str,
+    *,
+    runtime: str = "shared-static",
+    desired: str = "running",
+    status: str = "stopped",
+) -> None:
+    """在 registry 落一个实例（含 static_sites 行），用于 reconcile 测试。"""
+    from local_webpage_access.models import (
+        ContainerConfig,
+        DesiredState,
+        InstanceManifest,
+        Kind,
+        ResourceProfile,
+        Runtime,
+        ServingMode,
+        StaticConfig,
+        Status,
+    )
+
+    workspace.ensure_app_dirs(iid)
+    if runtime == "shared-static":
+        m = InstanceManifest(
+            id=iid,
+            name=iid,
+            version="1",
+            kind=Kind.STATIC,
+            runtime=Runtime.SHARED_STATIC,
+            servingMode=ServingMode.SHARED_STATIC,
+            resourceProfile=ResourceProfile.TINY,
+            desiredState=DesiredState(desired),
+            status=Status(status),
+            static=StaticConfig(hostPort=21100, enabled=True),
+        )
+    else:
+        m = InstanceManifest(
+            id=iid,
+            name=iid,
+            version="1",
+            kind=Kind.PYTHON,
+            runtime=Runtime.DOCKER_COMPOSE,
+            servingMode=ServingMode.CONTAINER,
+            resourceProfile=ResourceProfile.SMALL,
+            desiredState=DesiredState(desired),
+            status=Status(status),
+            container=ContainerConfig(
+                projectName=f"lwa-{iid}",
+                internalPort=8000,
+                composePath="docker/compose.yaml",
+                dockerfilePath="docker/Dockerfile",
+            ),
+        )
+    m.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(m)
+
+
+def test_reconcile_restarts_desired_running_offline(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """DEV-042：desired=running ∧ status≠running 的实例被逐一恢复。"""
+    _seed_instance(registry, workspace, "a", desired="running", status="stopped")
+    _seed_instance(registry, workspace, "b", desired="running", status="failed")
+    _seed_instance(registry, workspace, "c", desired="stopped", status="stopped")
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert sorted(restarted) == ["a", "b"]
+    # 成功恢复写 reconcile 事件
+    assert registry.list_events("a", limit=1)[0]["event_type"] == "reconcile"
+
+
+def test_reconcile_skips_in_progress_and_truly_running(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """pending/queued/building 跳过；running 经 observe 确认真实运行中也跳过。"""
+    from local_webpage_access.models import Status
+
+    for iid, st in [
+        ("p", "pending"),
+        ("q", "queued"),
+        ("bld", "building"),
+        ("r", "running"),
+    ]:
+        _seed_instance(registry, workspace, iid, status=st)
+    # "r" 经 observe 确认真实运行中 → 不恢复
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.observe_status",
+        lambda ws, cfg, reg, iid: Status.RUNNING,
+    )
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert restarted == []
+
+
+def test_reconcile_recovers_stale_running(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-079：registry 标 running 但 observe 发现实际掉线 → 仍恢复。"""
+    from local_webpage_access.models import Status
+
+    _seed_instance(registry, workspace, "demo", status="running")
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.observe_status",
+        lambda ws, cfg, reg, iid: Status.STOPPED,
+    )
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert restarted == ["demo"]
+
+
+def test_reconcile_continues_on_individual_failure(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """单实例恢复失败不中断整体。"""
+
+    def flaky(ws, cfg, reg, iid):
+        if iid == "boom":
+            raise RuntimeError("simulated")
+        restarted.append(iid)
+
+    restarted: list[str] = []
+    _seed_instance(registry, workspace, "boom", status="stopped")
+    _seed_instance(registry, workspace, "ok", status="stopped")
+    daemon_mod.reconcile(workspace, config, registry, restarter=flaky)
+    assert restarted == ["ok"]
+
+
+def test_reconcile_skips_caddy_static_when_gateway_disabled(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """Caddy 后端 + gateway.json enabled=false（用户 lwa gateway off）→ 跳过 caddy 静态。"""
+    # builtin 实例应仍被恢复；caddy 静态被跳过
+    _seed_instance(registry, workspace, "caddy-static", status="stopped")
+    _seed_instance(
+        registry, workspace, "container", runtime="docker-compose", status="stopped"
+    )
+
+    class _FakeGW:
+        def __init__(self, *a, **kw):
+            pass
+
+        def detect_backend(self):
+            return "caddy"
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway", _FakeGW
+    )
+    # gateway.json enabled=false
+    from local_webpage_access.gateway_service import GatewayState, write_state
+
+    write_state(workspace, GatewayState(enabled=False))
+
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert restarted == ["container"]  # caddy-static 被跳过
+
+
+def test_run_watcher_invokes_supervise_periodically(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """DEV-042：watcher 主循环按 supervise_interval 周期调用 supervise 回调。"""
+    import time as _time
+
+    calls: list[float] = []
+    clock = [_time.monotonic()]
+    # 让 clock 随调用推进，确保越过 supervise_interval 触发一次后停止
+    base = [_time.monotonic()]
+
+    def fake_clock():
+        base[0] += 100  # 每次读 clock 推进 100s，必然越过 supervise_interval
+        return base[0]
+
+    stop = threading.Event()
+
+    def fake_supervise(ws, cfg, reg):
+        calls.append(fake_clock())
+        stop.set()
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=lambda *a: {"action": "skipped"},
+        clock=fake_clock,
+        sleep=lambda *_a: None,
+        supervise=fake_supervise,
+        supervise_interval=60.0,
+    )
+    assert len(calls) >= 1
+

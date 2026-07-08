@@ -7,11 +7,15 @@
 from __future__ import annotations
 
 import platform
+import plistlib
 import shutil
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from local_webpage_access import PRODUCT_NAME, __version__
+from local_webpage_access.config import Config
 from local_webpage_access.doctor import (
     STATUS_FAIL,
     STATUS_OK,
@@ -440,11 +444,120 @@ _SCRIPT_GENERIC = """\
 """
 
 
+# ---- 开机自启（OPS-022 / OPS-025：launchd plist 生成）-----------------------
+
+LAUNCHD_LABEL_PREFIX = "com.fenix.lwa"
+
+
+def _launchd_plist_dict(
+    label: str,
+    program_args: list[str],
+    workspace_root: Path,
+    log_name: str,
+) -> dict[str, Any]:
+    """构造单个 launchd agent 的 plist 字典。
+
+    ``RunAtLoad=true`` 登录即触发；不设 ``KeepAlive``——daemon/manager/gateway 的
+    ``on`` 命令本身幂等且自管理 detached 子进程，KeepAlive 会在 ``lwa X off`` 后
+    把进程重新拉起，与显式停止冲突。
+    """
+    logs = workspace_root / "logs"
+    return {
+        "Label": label,
+        "ProgramArguments": program_args,
+        "WorkingDirectory": str(workspace_root),
+        "RunAtLoad": True,
+        "StandardOutPath": str(logs / f"launchd-{log_name}.out"),
+        "StandardErrorPath": str(logs / f"launchd-{log_name}.err"),
+    }
+
+
+def generate_launchd_plists(
+    workspace_root: Path,
+    config: Config,
+    *,
+    python_exe: str | None = None,
+    include_caddy: bool = False,
+    dest_dir: Path | None = None,
+) -> list[tuple[str, Path]]:
+    """OPS-022/025：生成 macOS launchd plist，登录时自启 daemon + manager（+ 可选 caddy）。
+
+    返回 ``[(服务名, plist 路径)]``。非 macOS 抛错；dest_dir 默认
+    ``~/Library/LaunchAgents/``。生成的 plist 用绝对 python 路径 + ``-m
+    local_webpage_access <daemon|manager|gateway> on``，幂等命令登录即拉起，
+    不与 ``lwa X off`` 冲突（无 KeepAlive）。
+    """
+    from local_webpage_access.errors import LifecycleError
+
+    if detect_platform() != "macos":
+        raise LifecycleError(
+            "launchd 开机自启仅支持 macOS；Linux 请用 systemd user service，"
+            "Windows 请用任务计划程序（参考 docs/autostart.md）",
+        )
+    python = python_exe or sys.executable
+    dest = dest_dir or (Path.home() / "Library" / "LaunchAgents")
+    dest.mkdir(parents=True, exist_ok=True)
+    # launchd 写 stdout/stderr 到 logs/，确保目录存在
+    (workspace_root / "logs").mkdir(parents=True, exist_ok=True)
+
+    plans: list[tuple[str, str]] = [
+        ("daemon", [python, "-m", "local_webpage_access", "daemon", "on"]),
+    ]
+    if config.managerEnabled:
+        plans.append(
+            ("manager", [python, "-m", "local_webpage_access", "manager", "on"])
+        )
+    if include_caddy and config.staticGateway == "caddy":
+        plans.append(
+            ("gateway", [python, "-m", "local_webpage_access", "gateway", "on"])
+        )
+
+    written: list[tuple[str, Path]] = []
+    for name, args in plans:
+        label = f"{LAUNCHD_LABEL_PREFIX}.{name}"
+        plist = _launchd_plist_dict(label, args, workspace_root, name)
+        path = dest / f"{label}.plist"
+        path.write_bytes(
+            plistlib.dumps(plist, fmt=plistlib.FMT_XML, sort_keys=False)
+        )
+        written.append((name, path))
+    return written
+
+
+def format_autostart_report(
+    written: list[tuple[str, Path]],
+    *,
+    skipped_caddy: bool = False,
+) -> str:
+    """渲染开机自启报告（生成的 plist + launchctl load/unload 指引）。"""
+    lines: list[str] = ["── 开机自启（macOS launchd）──"]
+    for name, path in written:
+        lines.append(f"  · {name}: {path}")
+    if skipped_caddy:
+        lines.append("  （未生成 caddy 自启：staticGateway 非 caddy；如需请先切换后重跑）")
+    lines.append("")
+    lines.append("启用（登录后或立即生效）：")
+    for _name, path in written:
+        lines.append(f"  launchctl load {path}")
+    lines.append("取消自启：")
+    for _name, path in written:
+        lines.append(f"  launchctl unload {path}")
+    lines.append("")
+    lines.append(
+        "提示：plist 登录时幂等执行 `lwa daemon/manager/gateway on`，不会与 "
+        "`lwa X off` 冲突；进程崩溃恢复由 daemon 自愈（reconcile）与心跳锁保证。"
+    )
+    return "\n".join(lines)
+
+
 __all__ = [
     "SetupItem",
     "SetupReport",
+    "LAUNCHD_LABEL_PREFIX",
     "detect_platform",
     "format_setup_report",
+    "format_autostart_report",
+    "generate_launchd_plists",
     "render_setup_script",
     "run_setup",
 ]

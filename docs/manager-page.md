@@ -44,6 +44,7 @@ lwa manager start
 | POST | `/api/instances/{id}/stop` | 停止实例 |
 | POST | `/api/instances/{id}/restart` | 重启实例 |
 | POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流） |
+| POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid` 实例（DEV-043）：先拉起 Caddy master 再 restart |
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除静态实例路径别名（IMP-006） |
 | GET | `/api/pending` | pending 与 failed 实例队列 |
@@ -114,8 +115,10 @@ Content-Type: application/json
 单页前端（`/`）提供：
 
 * **概览面板**：实例总数、各状态计数、类型分布、主机 CPU/内存/磁盘、端口池占用。
-* **实例列表**：每行显示 ID、名称、形态、状态、端口映射、访问地址（hostPort 与路径别名入口），附带日志 / **路径别名** / start / stop / restart / rebuild 操作。
+* **实例列表**：每行显示 ID、名称、形态、状态、端口映射、访问地址（hostPort 与路径别名入口），附带日志 / **路径别名** / start / stop / restart / rebuild 操作；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043）。
 * **路径别名对话框**（V0.4.1）：静态实例操作区「路径别名」按钮；输入 slug 保存或清除；校验错误在对话框内展示；容器实例与 pending/building/queued 态置灰。
+
+> **状态说明（DEV-043 / BUG-071）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例。
 * **实例详情**：manifest、构建记录、事件流、资源占用、分类日志查看器；含路径别名说明与 CLI 等价命令提示。
 * **待处理区**：pending 实例（可重扫 `lwa scan`）与 failed 实例（显示 `lastError`）。
 

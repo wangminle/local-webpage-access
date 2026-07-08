@@ -39,6 +39,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
 
 - **用途**：放置待导入的 `.zip`；`lwa import inbox/foo.zip` 或 daemon 自动导入。
 - **注意**：zip 内若含 `node_modules` 等大目录，导入时会 **自动剥离**可重建依赖；仍保留 zip slip / 符号链接安全审计。
+- **归档（IMP-011）**：daemon 导入成功（started/pending/conflict 终态）后会把 zip 物理移入 `inbox/processed/`（同名加时间戳），从扫描视野移除，避免重复导入与 `-2/-3` 冗余实例；slug 冲突时不再自动改名，而是记事件并提示用 `lwa import <zip> --update <slug>`。
 
 ### `apps/<instance-id>/`
 
@@ -75,6 +76,22 @@ runtime/                      ← 工作区根（Runtime 根目录）
   - `manager-token.json` — 管理页 API token
   - `manager.json` — 管理页后台进程状态
   - `daemon.json` / `daemon.lock` — daemon 开关与 watcher 锁
+  - `gateway.json` — Caddy 网关后台服务态（IMP-010）
+  - `caddy.pid` — Caddy master pid（`caddy start --pidfile` 写入）
+
+## 网关与开机自启
+
+- **Caddy 网关生命周期（IMP-010）**：`lwa gateway on/off/status` 管理 Caddy master
+  （admin :2019 探活为存活信据）；`lwa manager on` 成功后会联动 `maybe_start_gateway`
+  拉起网关，失败只降级 builtin 不阻断业务。
+- **daemon 自愈（DEV-042）**：watcher 启动时与每 `DEFAULT_SUPERVISE_INTERVAL`（60s）
+  执行一次 `reconcile()`，恢复 `desired=running` 但状态偏离（stopped/failed/gateway_down
+  等）的实例——builtin 静态进程死了重新 spawn、容器走轻量 start。Caddy 后端且网关被
+  显式关闭（`lwa gateway off`）时跳过 caddy 静态实例，避免与手动停止冲突。
+- **开机自启（OPS-025，macOS）**：`lwa setup --autostart [--with-caddy]` 在
+  `~/Library/LaunchAgents/` 生成 `com.fenix.lwa.{daemon,manager[,gateway]}.plist`，
+  登录时幂等执行对应 `on` 命令；随后按提示 `launchctl load <plist>` 启用、`unload` 取消。
+  Linux/Windows 见对应平台文档（systemd user service / 任务计划程序）。
 
 ### `templates/`、`skills/`
 

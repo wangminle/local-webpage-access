@@ -61,6 +61,12 @@ class Status(str, Enum):
     STOPPED = "stopped"
     FAILED = "failed"
     QUEUED = "queued"
+    # DEV-043 / BUG-071：Caddy 模式下区分"网关不可达"与"配置无效"，
+    # 避免把 enabled 但 master 挂掉的实例误标普通 stopped（BUG-071 根因）。
+    # * gateway_down：enabled ∧ Caddy master（admin :2019）不可达；
+    # * config_invalid：master 在线但站点 hostPort 不通（路由/配置问题，BUG-069 类）。
+    GATEWAY_DOWN = "gateway_down"
+    CONFIG_INVALID = "config_invalid"
 
 
 class RouteMode(str, Enum):

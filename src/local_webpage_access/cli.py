@@ -39,7 +39,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.4.2-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.4.3-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -1092,22 +1092,56 @@ def setup_cmd(
         "--static-gateway",
         help="预期静态网关（caddy 优先；未安装 Caddy 时降级 builtin）",
     ),
+    autostart: bool = typer.Option(
+        False,
+        "--autostart",
+        help="OPS-025：生成 macOS launchd plist，登录自启 daemon + manager（需已初始化工作区）",
+    ),
+    with_caddy: bool = typer.Option(
+        False,
+        "--with-caddy",
+        help="与 --autostart 配合：额外生成 caddy 网关自启（仅 staticGateway=caddy）",
+    ),
 ) -> None:
     """检测宿主机工具环境并给出安装指引（可在 ``lwa init`` 之前运行）。
 
     检查 Python、lwa 包、Docker、Compose、Caddy、Node；不依赖工作区。
     工作区就绪后用 ``lwa doctor`` 做完整诊断（含端口池与 registry）。
+
+    ``--autostart``（OPS-025）：基于当前工作区生成 launchd plist，开机自启
+    daemon + manager（``--with-caddy`` 额外含 caddy）。
     """
     import json as json_mod
 
     from local_webpage_access.setup import (
+        format_autostart_report,
         format_setup_report,
+        generate_launchd_plists,
         render_setup_script,
         run_setup,
     )
 
     if script:
         typer.echo(render_setup_script())
+        return
+
+    if autostart:
+        # 自启需要已初始化的工作区（daemon/manager 依赖 local-web.yml）
+        try:
+            ws, config, _reg = _open_workspace_registry()
+        except LwaError as exc:
+            log.error(str(exc), extra=exc.context)
+            typer.secho(
+                "开机自启需要已初始化的工作区，请先在目标目录执行 `lwa init`",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+        skipped_caddy = with_caddy and config.staticGateway != "caddy"
+        written = generate_launchd_plists(
+            ws.root, config, include_caddy=with_caddy
+        )
+        typer.echo(format_autostart_report(written, skipped_caddy=skipped_caddy))
         return
 
     report = run_setup(static_gateway=static_gateway)

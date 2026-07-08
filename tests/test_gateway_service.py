@@ -289,6 +289,21 @@ def test_stop_gateway_builtin_clears_stale_state(
     assert st is not None and st.enabled is False
 
 
+def test_stop_gateway_builtin_still_stops_alive_master(
+    workspace: Workspace, config: Config, fake_gateway
+) -> None:
+    """BUG-077：staticGateway=builtin 但 admin :2019 仍在线（旧 master 残留）时，
+    lwa gateway off 仍要 caddy_stop 关掉，兑现 cli 注释承诺。"""
+    write_state(workspace, GatewayState(enabled=True, pid=12345, started_at="t", port=8080))
+    fake_gateway["backend"] = "builtin"
+    fake_gateway["admin_alive"] = True  # 旧 master 仍在跑
+    fake_gateway["stop_ok"] = True
+    assert stop_gateway(workspace, config) is True
+    assert fake_gateway["stop_calls"] == 1  # 关掉残留 master
+    st = read_state(workspace)
+    assert st is not None and st.enabled is False
+
+
 # ---- gateway_status ---------------------------------------------------------
 
 

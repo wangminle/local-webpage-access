@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import shutil
@@ -432,18 +433,23 @@ def _pid_alive_local(pid: int) -> bool:
 
 
 def check_caddy_health(
-    ws: Workspace, config: Config, *, runner: SubprocessRunner = _default_runner
+    ws: Workspace,
+    config: Config,
+    *,
+    runner: SubprocessRunner = _default_runner,
+    registry: Registry | None = None,
 ) -> CheckResult:
-    """IMP-020：Caddy 模式下的 master/admin/配置健康探针。
+    """IMP-020：Caddy 模式下的 master/admin/配置/可达性健康探针。
 
     仅 ``staticGateway=caddy`` 时探测（其他后端跳过）：
 
     1. admin :2019 是否在线（master 是否在跑）——不在线 FAIL，提示 ``lwa gateway on``；
     2. 主 Caddyfile ``caddy validate`` 是否通过——失败 FAIL，提示悬空 import（BUG-069）；
-    3. ``run/caddy.pid`` 是否指向已死进程——stale 给 WARN，提示重启网关清理。
+    3. ``run/caddy.pid`` 是否指向已死进程——stale 给 WARN（BUG-070）；
+    4. master 在线时（提供 registry）：别名入口 ``:8080`` 与各 enabled 站点 hostPort
+       可达性——不可达 WARN，提示 reload/核对站点配置。
 
-    master 在线且配置有效时返回 OK。:8080 别名入口与各站点 hostPort 可达性依赖
-    实例/别名状态，不在此处探测（由 ``diagnose_instance`` 单实例诊断覆盖）。
+    master 在线、配置有效、入口与站点均可达时返回 OK。
     """
     if config.staticGateway != "caddy":
         return CheckResult(
@@ -494,6 +500,48 @@ def check_caddy_health(
         if pid is not None and not _pid_alive_local(pid):
             stale_pid = True
 
+    # IMP-020：master 在线时探测别名入口 :8080 与各 enabled 站点 hostPort
+    entry_unreachable = False
+    site_unreachable: list[str] = []
+    if admin_ok and registry is not None:
+        # 别名入口 :staticGatewayPort——仅当存在路径别名时才应监听（无别名时该端口空闲）
+        try:
+            aliases = registry.list_route_hosts()
+        except Exception:  # noqa: BLE001 — registry 不可用则跳过入口/站点探测
+            aliases = {}
+        entry_port = config.staticGatewayPort
+        if aliases and entry_port is not None:
+            # BUG-080：入口根路径 / 无路由（仅 /<alias>/ 有），必须探别名子路径，
+            # 否则恒 404 误报 WARN。取任一别名的 /<alias>/ 探测。
+            probe_alias = next(iter(aliases))
+            if not gateway.health_check(
+                int(entry_port), path=f"/{probe_alias}/"
+            ):
+                entry_unreachable = True
+                findings.append(
+                    f"别名入口 :{entry_port}/{probe_alias}/ 不可达"
+                    f"（已配置 {len(aliases)} 个别名，入口未就绪或 reload 未生效）"
+                )
+        # 各 enabled 静态站点 hostPort
+        try:
+            rows = registry.list_instances()
+        except Exception:  # noqa: BLE001
+            rows = []
+        for row in rows:
+            if row.get("runtime") != "shared-static":
+                continue
+            iid = row["id"]
+            site = registry.get_static_site(iid)
+            if not site or not site.get("enabled"):
+                continue
+            hp = site.get("host_port")
+            if hp and not gateway.health_check(int(hp)):
+                site_unreachable.append(f"{iid}:{hp}")
+        if site_unreachable:
+            preview = ", ".join(site_unreachable[:5])
+            more = f" 等 {len(site_unreachable)} 个" if len(site_unreachable) > 5 else ""
+            findings.append(f"enabled 站点 hostPort 不可达：{preview}{more}")
+
     if not admin_ok:
         return CheckResult(
             "caddy_health",
@@ -509,6 +557,14 @@ def check_caddy_health(
             "；".join(findings),
             suggestion="主 Caddyfile 非法：执行 `lwa gateway off` 再 `lwa gateway on`，"
             "或核对 sites/ 与主配置 import 一致性",
+        )
+    if entry_unreachable or site_unreachable:
+        return CheckResult(
+            "caddy_health",
+            STATUS_WARN,
+            "；".join(findings),
+            suggestion="master 在线但部分入口/站点不可达：执行 `lwa gateway off` 再 "
+            "`lwa gateway on`，或对不可达实例 `lwa restart <id>` 触发 reload",
         )
     if stale_pid:
         return CheckResult(
@@ -788,21 +844,36 @@ def run_doctor(
     """运行全部环境检查；若提供 instance_id 则附加实例诊断。"""
     report = DoctorReport()
     allocated_ports = _allocated_ports_for_workspace(ws)
-    report.checks = [
-        check_python_version(),
-        check_python_packages(),
-        check_docker(runner=runner),
-        check_docker_compose(runner=runner),
-        check_caddy(config, runner=runner),
-        check_port_pool(
-            config, port_in_use=port_in_use, allocated_ports=allocated_ports
-        ),
-        check_registry(ws),
-        check_static_gateway(ws),
-        check_caddy_health(ws, config, runner=runner),
-        check_disk_space(ws),
-        check_memory(),
-    ]
+    # IMP-020：打开一个 registry 供 caddy 健康探针探测站点/别名入口可达性；
+    # 打开失败不阻断整体诊断（check_caddy_health 内部对 None registry 安全降级）。
+    caddy_probe_registry: Registry | None = None
+    try:
+        caddy_probe_registry = Registry(ws.db_path)
+        caddy_probe_registry.open()
+    except Exception:  # noqa: BLE001
+        caddy_probe_registry = None
+    try:
+        report.checks = [
+            check_python_version(),
+            check_python_packages(),
+            check_docker(runner=runner),
+            check_docker_compose(runner=runner),
+            check_caddy(config, runner=runner),
+            check_port_pool(
+                config, port_in_use=port_in_use, allocated_ports=allocated_ports
+            ),
+            check_registry(ws),
+            check_static_gateway(ws),
+            check_caddy_health(
+                ws, config, runner=runner, registry=caddy_probe_registry
+            ),
+            check_disk_space(ws),
+            check_memory(),
+        ]
+    finally:
+        if caddy_probe_registry is not None:
+            with contextlib.suppress(Exception):
+                caddy_probe_registry.close()
     if instance_id:
         report.instance_id = instance_id
         try:

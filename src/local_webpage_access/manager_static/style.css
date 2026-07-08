@@ -207,6 +207,7 @@ select:focus-visible,
 .stat-running .stat-value { color: var(--green); }
 .stat-pending .stat-value { color: var(--amber); }
 .stat-failed  .stat-value { color: var(--red); }
+.stat-warn .stat-value { color: var(--amber); }
 
 /* 汇总条：去框、轻量，避免「卡片下叠卡片」 */
 .stat-detail {
@@ -301,12 +302,17 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 .badge-failed   { background: var(--red-bg);   color: var(--red); }
 .badge-building { background: var(--blue-bg);  color: var(--primary); }
 .badge-queued   { background: var(--amber-bg); color: var(--amber); }
+/* DEV-043：网关不可达（橙，需 action）/ 配置无效（红，错误） */
+.badge-gateway-down    { background: var(--amber-bg); color: var(--amber); }
+.badge-config-invalid  { background: var(--red-bg);   color: var(--red); }
 
 /* 行级状态：极淡底色，不与徽章争色 */
 .row-pending { background: var(--row-pending-bg); }
 .row-failed { background: var(--row-failed-bg); }
+.row-warn { background: var(--row-pending-bg); }
 .row-pending:hover { background: var(--amber-bg); }
 .row-failed:hover { background: var(--red-bg); }
+.row-warn:hover { background: var(--amber-bg); }
 
 .cell-name {
   font-weight: 500;
