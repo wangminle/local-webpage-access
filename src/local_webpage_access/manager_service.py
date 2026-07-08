@@ -24,6 +24,7 @@ from typing import Any, Iterator
 
 from local_webpage_access.config import Config
 from local_webpage_access.daemon import is_pid_alive
+from local_webpage_access.gateway_service import maybe_start_gateway
 from local_webpage_access.errors import LifecycleError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
@@ -297,6 +298,16 @@ def start_manager(workspace: Workspace, config: Config) -> int:
                 pid=pid,
             )
         log.info("管理页已启动（pid=%s, port=%s）", pid, bind_port)
+        # IMP-010 / DEV-041（WBS 0.8）：管理页成功启动后联动启动 Caddy 网关，
+        # 使 :8080 别名入口随管理页一起就绪。maybe_start_gateway 已吞 LifecycleError
+        # 并降级 builtin；此处仅兜底意外异常，绝不阻断管理页启动。
+        # 注意 stop_manager 不联动停网关——业务入口优先，避免关管理页连带断别名。
+        try:
+            maybe_start_gateway(workspace, config)
+        except LifecycleError:
+            pass  # maybe_start_gateway 内部已记日志
+        except Exception:  # noqa: BLE001 — 联动启网关不得拖垮管理页
+            log.exception("联动启动 Caddy 网关时发生意外异常（已忽略）")
         return pid
 
 

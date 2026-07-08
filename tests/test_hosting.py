@@ -52,7 +52,10 @@ def registry(workspace_root: Path) -> Registry:
 
 @pytest.fixture()
 def config(workspace_root: Path) -> Config:
-    return Config(portPool=PortPool(start=21000, end=21050))
+    # 强制 builtin：host_static 用例依赖真实 builtin 静态子进程（pid/health/port
+    # 回滚）。默认 staticGateway=caddy 在装了 caddy 的机器上会走 reload 路径使
+    # 这些用例非确定性失败。caddy 专属行为（如别名片段）由各用例自设 config 覆盖。
+    return Config(staticGateway="builtin", portPool=PortPool(start=21000, end=21050))
 
 
 def _free_port() -> int:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import RecognitionError
+from local_webpage_access.errors import GatewayError, RecognitionError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import (
     InstanceManifest,
@@ -86,9 +86,6 @@ def _apply_manifest_alias(
         manifest.network = NetworkConfig(**entry)
         return
 
-    if manifest.network is None:
-        return
-
     if alias is None:
         manifest.network = manifest.network.model_copy(
             update={
@@ -107,25 +104,67 @@ def _apply_manifest_alias(
         )
 
 
+def _rollback_alias_config(
+    gateway: StaticGateway,
+    instance_id: str,
+    *,
+    previous_alias: str | None,
+    host_port: int | None,
+    had_fragment: bool,
+    previous_fragment: str | None,
+) -> None:
+    """Caddy reload 失败后恢复别名片段文件到变更前状态。"""
+    path = gateway.ws.app_alias_config(instance_id)
+    if had_fragment and previous_fragment is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(previous_fragment, encoding="utf-8")
+    elif path.exists():
+        path.unlink()
+    elif previous_alias and host_port is not None:
+        gateway.generate_alias_config(instance_id, previous_alias, host_port)
+
+
 def _apply_gateway_alias(
     workspace: Workspace,
     config: Config,
     instance_id: str,
     alias: str | None,
     host_port: int | None,
+    *,
+    previous_alias: str | None,
 ) -> tuple[bool, bool]:
-    """运行中实例同步 Caddy 别名片段。返回 (alias_entry_enabled, gateway_reloaded)。"""
+    """运行中实例同步 Caddy 别名片段。返回 (alias_entry_enabled, gateway_reloaded)。
+
+    须在 manifest/registry 落盘**之前**调用：reload 失败时回滚别名片段并抛
+    :class:`GatewayError`，调用方不得持久化新别名。
+    """
     gateway = StaticGateway(workspace, config)
     backend = gateway.detect_backend()
     if not gateway.is_enabled(instance_id) or host_port is None:
         return False, False
 
     if backend == "caddy":
-        if alias:
-            gateway.generate_alias_config(instance_id, alias, host_port)
-        else:
-            gateway.remove_alias_config(instance_id)
-        gateway.reload_all()
+        fragment_path = gateway.ws.app_alias_config(instance_id)
+        had_fragment = fragment_path.is_file()
+        previous_fragment = (
+            fragment_path.read_text(encoding="utf-8") if had_fragment else None
+        )
+        try:
+            if alias:
+                gateway.generate_alias_config(instance_id, alias, host_port)
+            else:
+                gateway.remove_alias_config(instance_id)
+            gateway.reload_all()
+        except GatewayError:
+            _rollback_alias_config(
+                gateway,
+                instance_id,
+                previous_alias=previous_alias,
+                host_port=host_port,
+                had_fragment=had_fragment,
+                previous_fragment=previous_fragment,
+            )
+            raise
         return bool(alias), True
 
     if alias:
@@ -178,6 +217,17 @@ def set_instance_path_alias(
         validate_path_alias(alias, existing_aliases=existing)
 
     host_port, _ = _resolve_host_port(manifest)
+
+    # 运行中 + Caddy：先网关重载，成功后再落盘，避免「manifest 已改但入口未生效」
+    alias_entry_enabled, gateway_reloaded = _apply_gateway_alias(
+        workspace,
+        config,
+        instance_id,
+        alias,
+        host_port,
+        previous_alias=current,
+    )
+
     _apply_manifest_alias(manifest, config, alias)
     manifest.save(mpath)
 
@@ -189,9 +239,6 @@ def set_instance_path_alias(
         f"路径别名：{current or '(无)'} → {alias or '(无)'}",
     )
 
-    alias_entry_enabled, gateway_reloaded = _apply_gateway_alias(
-        workspace, config, instance_id, alias, host_port
-    )
     route_url = manifest.network.routeUrl if manifest.network else None
 
     return PathAliasResult(

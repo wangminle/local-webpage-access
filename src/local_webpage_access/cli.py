@@ -39,7 +39,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.4.1-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.4.2-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -486,18 +486,70 @@ def rebuild(instance_id: str = typer.Argument(..., help="要重建的实例 ID")
 
 @app.command()
 def remove(
-    instance_id: str = typer.Argument(..., help="要移除的实例 ID"),
+    instance_id: str = typer.Argument(None, help="要移除的实例 ID"),
     purge: bool = typer.Option(False, "--purge", help="同时删除 apps/<id>/ 磁盘文件"),
     force: bool = typer.Option(
         False, "--force", help="purge 时强制删除非空 data/（默认保护）"
     ),
+    redundant: bool = typer.Option(
+        False,
+        "--redundant",
+        help="IMP-012：批量移除冗余实例（按原始 zip 指纹去重，保留每组最早者）",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="非交互确认（CI / 脚本调用）"
+    ),
 ) -> None:
-    """移除实例（默认保留磁盘文件与 data/，仅删 registry 索引）。"""
-    from local_webpage_access.lifecycle import remove_instance
+    """移除实例（默认保留磁盘文件与 data/，仅删 registry 索引）。
+
+    ``--redundant``（IMP-012）：批量清理冗余实例——由同一原始 zip 重复导入产生，
+    按其 sha256 指纹分组，保留每组 createdAt 最早者，其余移除。执行前打印待删
+    列表与指纹供确认。
+    """
+    from local_webpage_access.lifecycle import (
+        list_redundant_instances,
+        remove_instance,
+        remove_redundant,
+    )
 
     try:
         ws, config, reg = _open_workspace_registry()
         try:
+            if redundant:
+                targets = list_redundant_instances(ws, reg)
+                if not targets:
+                    typer.secho(
+                        "没有冗余实例（所有实例的原始 zip 指纹均唯一）",
+                        fg=typer.colors.GREEN,
+                    )
+                    return
+                typer.secho(
+                    f"发现 {len(targets)} 个冗余实例（将保留每组最早者）：",
+                    fg=typer.colors.YELLOW,
+                )
+                for desc in targets:
+                    typer.echo(
+                        f"  {desc['id']:<24} {desc['name']:<16} "
+                        f"sha256:{desc['sourceZipHash'][:12]} ({desc['createdAt']})"
+                    )
+                if not yes:
+                    if not typer.confirm("确认移除以上冗余实例？", default=False):
+                        typer.echo("已取消")
+                        return
+                removed = remove_redundant(ws, config, reg, purge=purge, force=force)
+                typer.secho(
+                    f"已移除 {len(removed)} 个冗余实例",
+                    fg=typer.colors.GREEN,
+                )
+                return
+
+            if not instance_id:
+                typer.secho(
+                    "请提供实例 ID，或使用 --redundant 批量清理冗余实例",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(code=1)
             remove_instance(ws, config, reg, instance_id, purge=purge, force=force)
         finally:
             reg.close()
@@ -892,6 +944,138 @@ def manager_start(
 
 
 app.add_typer(manager_app, name="manager")
+
+
+# ---- gateway 子命令（IMP-010 / DEV-041，WBS 0.7）---------------------------
+
+gateway_app = typer.Typer(help="控制 Caddy 网关（master 生命周期与 :8080 别名入口）")
+
+
+def _require_caddy_version(config) -> None:
+    """``lwa gateway on/off`` 前置：校验 ``staticGateway=caddy`` 且 Caddy 满足最低版本。
+
+    与 ``doctor.check_caddy`` 同源判定，不满足时抛 :class:`LwaError` 由 CLI 统一格式化。
+    """
+    import shutil
+    import subprocess
+
+    from local_webpage_access.version_requirements import MIN_CADDY_VERSION, version_ge
+
+    if config.staticGateway != "caddy":
+        raise LwaError(
+            f"staticGateway={config.staticGateway}，网关命令仅适用于 caddy 后端",
+            code="GATEWAY_BACKEND_MISMATCH",
+            suggestion="在 local-web.yml 设置 staticGateway: caddy",
+        )
+    if not shutil.which("caddy"):
+        raise LwaError(
+            "未找到 caddy 可执行文件",
+            code="GATEWAY_CADDY_MISSING",
+            suggestion=f"安装 Caddy ≥ {MIN_CADDY_VERSION} 并加入 PATH",
+        )
+    try:
+        result = subprocess.run(
+            ["caddy", "version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LwaError(
+            f"无法获取 Caddy 版本：{exc}",
+            code="GATEWAY_VERSION_UNKNOWN",
+            suggestion=f"确认 caddy 可执行且版本 ≥ {MIN_CADDY_VERSION}",
+        ) from exc
+    if result.returncode != 0 or not version_ge(
+        (result.stdout or "").strip() or (result.stderr or "").strip(),
+        MIN_CADDY_VERSION,
+    ):
+        raise LwaError(
+            "Caddy 版本不满足要求",
+            code="GATEWAY_VERSION_TOO_LOW",
+            suggestion=f"升级 Caddy 至 ≥ {MIN_CADDY_VERSION}",
+        )
+
+
+@gateway_app.command("on")
+def gateway_on() -> None:
+    """启动 Caddy 网关（master + admin :2019，别名入口随配置就绪）。"""
+    from local_webpage_access.gateway_service import start_gateway
+    from local_webpage_access.ports import resolve_lan_ip
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        _reg.close()
+        _require_caddy_version(config)
+        pid = start_gateway(ws, config)
+        lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+        typer.secho(f"网关已启动（pid={pid}）", fg=typer.colors.GREEN)
+        typer.echo("  admin：http://127.0.0.1:2019/")
+        port = config.staticGatewayPort
+        if port:
+            typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
+        typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@gateway_app.command("off")
+def gateway_off() -> None:
+    """停止 Caddy 网关（master 优雅关闭）。
+
+    不做 ``MIN_CADDY_VERSION`` 校验：``stop_gateway`` 自身按 ``detect_backend``
+    分支处理（caddy 走 admin API 优雅关闭；builtin 仅清残留服务态），即使当前
+    ``staticGateway=builtin``（如刚从 caddy 切走）也能关掉仍在跑的 master 并清
+    ``run/gateway.json``，避免"切 builtin 后无法用 CLI 关 Caddy"的死局。
+    """
+    from local_webpage_access.gateway_service import stop_gateway
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        _reg.close()
+        if not stop_gateway(ws, config):
+            typer.secho(
+                "网关停止失败，Caddy master 可能仍在运行；请检查 admin :2019 后重试",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.secho("网关已停止", fg=typer.colors.GREEN)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@gateway_app.command("status")
+def gateway_status_cmd() -> None:
+    """查看 Caddy 网关运行状态。"""
+    from local_webpage_access.gateway_service import gateway_status
+    from local_webpage_access.ports import resolve_lan_ip
+
+    try:
+        ws, config, _reg = _open_workspace_registry()
+        _reg.close()
+        st = gateway_status(ws, config)
+        running = "运行中" if st["running"] else "未运行"
+        typer.echo(f"网关：{running}")
+        typer.echo(f"  后端：{st['backend']}（staticGateway={st['configured']}）")
+        typer.echo(f"  状态启用：{st['enabled']}")
+        if st.get("pid"):
+            typer.echo(f"  pid：{st['pid']}")
+        typer.echo(f"  admin：http://127.0.0.1:{st['adminPort']}/")
+        port = st["port"]
+        if port:
+            lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+            typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
+        if not st["running"] and st["backend"] == "caddy":
+            typer.echo("  启动：lwa gateway on")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+app.add_typer(gateway_app, name="gateway")
 
 
 # ---- setup 子命令（宿主机环境）----------------------------------------------

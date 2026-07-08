@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -39,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import LifecycleError
+from local_webpage_access.errors import LifecycleError, ZipImportError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
@@ -396,6 +397,27 @@ def processed_key(path: Path) -> str:
     return f"{path}|{st.st_size}|{st.st_mtime_ns}"
 
 
+def _archive_processed_zip(workspace: Workspace, zip_path: Path) -> Path | None:
+    """IMP-011：把处理完成的 zip 移入 ``inbox/processed/``（同名加时间戳）。
+
+    物理移出 inbox 扫描视野，替代旧"留 inbox + 指纹表去重"机制，杜绝归档后
+    按旧指纹重复导入。返回归档目标路径；源文件已不存在或移动失败时返回 None。
+    """
+    if not zip_path.is_file():
+        return None
+    dest_dir = workspace.inbox_processed
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = dest_dir / f"{zip_path.stem}-{stamp}{zip_path.suffix}"
+    # 极端：同一秒归档两个同名 zip → 追加 pid 防覆盖
+    if dest.exists():
+        dest = dest_dir / f"{zip_path.stem}-{stamp}-{os.getpid()}{zip_path.suffix}"
+    try:
+        return shutil.move(str(zip_path), str(dest))
+    except OSError:
+        return None
+
+
 def process_zip(
     workspace: Workspace,
     config: Config,
@@ -418,7 +440,9 @@ def process_zip(
     }
     try:
         importer = Importer(workspace, config, registry)
-        result = importer.import_zip(str(zip_path))
+        # IMP-011：daemon 用 on_conflict="error"——slug 冲突时不再 silent 建 -2/-3，
+        # 而是抛 ZipImportError（携带 instance_id），由下方专属分支记事件并归档。
+        result = importer.import_zip(str(zip_path), on_conflict="error")
         iid = result.instance_id
         summary["instance_id"] = iid
         manifest = result.manifest
@@ -450,6 +474,30 @@ def process_zip(
         summary["action"] = "started"
         summary["note"] = f"已自动启动（profile={profile}）"
         log.info("daemon: %s → 自动启动（profile=%s）", iid, profile)
+        return summary
+    except ZipImportError as exc:
+        # IMP-011：区分"slug 冲突"（携带 instance_id）与"zip 校验/解压失败"。
+        if exc.context.get("instance_id"):
+            conflict_id = exc.context["instance_id"]
+            summary["action"] = "conflict"
+            summary["instance_id"] = conflict_id
+            summary["note"] = str(exc)
+            # 对已存在的实例记事件，提示用户走 --update；写事件失败不影响归档
+            with contextlib.suppress(Exception):
+                registry.add_event(
+                    conflict_id,
+                    "import_conflict",
+                    f"inbox 重复导入：{exc.message or str(exc)}",
+                )
+            log.warning(
+                "daemon: %s 与已有实例 %s 冲突，跳过（提示 --update）",
+                zip_path.name, conflict_id,
+            )
+            return summary
+        # 无 instance_id → 校验/解压类失败，归入 failed（watcher 下轮重试）
+        summary["action"] = "failed"
+        summary["note"] = f"处理失败：{exc}"
+        log.warning("daemon 处理 %s 失败：%s", zip_path.name, exc)
         return summary
     except Exception as exc:  # noqa: BLE001 — watcher 不能因单个 zip 崩溃
         summary["action"] = "failed"
@@ -520,6 +568,10 @@ def run_watcher(
                 processed.add(key)
                 processed.add(str(zip_path))
                 save_processed_set(workspace, processed)
+                # IMP-011：终态（started/pending/conflict）后把 zip 物理移入
+                # inbox/processed/，从扫描视野移除，避免重复导入与 -2/-3 冗余。
+                if _archive_processed_zip(workspace, zip_path) is not None:
+                    log.info("daemon: %s 已归档至 inbox/processed/", zip_path.name)
             # 处理完成后从指纹表移除，避免无界增长
             fingerprints.pop(str(zip_path), None)
 

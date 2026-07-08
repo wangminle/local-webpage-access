@@ -19,6 +19,7 @@ from local_webpage_access.doctor import (
     check_docker,
     check_docker_compose,
     check_caddy,
+    check_caddy_health,
     check_disk_space,
     check_memory,
     check_port_pool,
@@ -198,7 +199,7 @@ def test_check_caddy_required_and_ok(env, monkeypatch) -> None:
     _ws, config, _reg = env
     config.staticGateway = "caddy"
     monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: "/usr/bin/caddy")
-    runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.11.2\n")})
+    runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.10.0\n")})
     r = check_caddy(config, runner=runner)
     assert r.status == STATUS_OK
 
@@ -219,7 +220,7 @@ def test_check_caddy_version_too_low(env, monkeypatch) -> None:
     _ws, config, _reg = env
     config.staticGateway = "caddy"
     monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: "/usr/bin/caddy")
-    runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.11.1\n")})
+    runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.9.9\n")})
     r = check_caddy(config, runner=runner)
     assert r.status == STATUS_FAIL
 
@@ -551,3 +552,133 @@ def test_cli_doctor_json_output(env, monkeypatch) -> None:
     assert "checks" in data
     assert isinstance(data["checks"], list)
     assert len(data["checks"]) >= 8
+
+
+def test_cli_doctor_json_valid_when_caddy_hidden(env, monkeypatch) -> None:
+    """BUG-075：caddy 缺失时 check_caddy_health 不得 log.warning 污染 --json 输出。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+
+    ws, _config, _reg = env
+    # 默认配置即 staticGateway=caddy；隐藏 caddy 使 check_caddy_health 走"降级 builtin"WARN
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.shutil.which", lambda name: None
+    )
+    monkeypatch.chdir(ws.root)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["doctor", "--json"])
+    import json
+
+    data = json.loads(result.output)  # 不应 JSONDecodeError（无 warning 污染 stdout）
+    assert "checks" in data
+    names = {c["name"]: c["status"] for c in data["checks"]}
+    assert names.get("caddy_health") == "warn"
+
+
+# ---- IMP-020：Caddy 健康探针 -------------------------------------------------
+
+
+def _patch_static_gateway(monkeypatch, ws, *, backend="caddy", admin_alive=True):
+    """把 doctor 内 lazy import 的 StaticGateway 换成可控替身，返回共享状态。
+
+    同时把 ``doctor.shutil.which`` 桩为 caddy 存在，使 ok/fail/validate/stale
+    用例确定性地越过 check_caddy_health 的 caddy-缺失 WARN 分支（不依赖机器是否
+    装了 caddy）。
+    """
+    state = {"backend": backend, "admin_alive": admin_alive}
+
+    class _Fake:
+        def __init__(self, w, c):
+            self._ws = w
+
+        def detect_backend(self):
+            return state["backend"]
+
+        def _admin_alive(self, **kw):
+            return state["admin_alive"]
+
+        def main_config_path(self):
+            return ws.static_gateway / "Caddyfile"
+
+        def caddy_pid_path(self):
+            return ws.run / "caddy.pid"
+
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _Fake)
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.shutil.which", lambda name: "/usr/bin/caddy"
+    )
+    return state
+
+
+def test_check_caddy_health_skip_for_builtin(env, monkeypatch) -> None:
+    ws, config, _reg = env
+    config.staticGateway = "builtin"
+    r = check_caddy_health(ws, config, runner=_failing_runner)
+    assert r.status == STATUS_SKIP
+
+
+def test_check_caddy_health_warns_when_caddy_missing(env, monkeypatch) -> None:
+    """staticGateway=caddy 但 PATH 无 caddy（shutil.which=None）→ WARN，不污染 stdout。"""
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda name: None)
+    r = check_caddy_health(ws, config, runner=_failing_runner)
+    assert r.status == STATUS_WARN
+    assert "builtin" in r.message
+
+
+def test_check_caddy_health_ok_when_admin_up_and_validate_passes(
+    env, monkeypatch
+) -> None:
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True)
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(":8080 {}\n")
+    runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
+    r = check_caddy_health(ws, config, runner=runner)
+    assert r.status == STATUS_OK
+
+
+def test_check_caddy_health_fail_when_admin_down(env, monkeypatch) -> None:
+    """admin :2019 不可达 → FAIL，suggestion 提示 lwa gateway on。"""
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=False)
+    runner = _runner_from_map({("caddy", "validate"): _proc(0)})
+    r = check_caddy_health(ws, config, runner=runner)
+    assert r.status == STATUS_FAIL
+    assert "gateway on" in (r.suggestion or "")
+
+
+def test_check_caddy_health_fail_when_validate_fails(env, monkeypatch) -> None:
+    """主 Caddyfile validate 失败 → FAIL，提示悬空 import（BUG-069）。"""
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True)
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text("bad config")
+    runner = _runner_from_map(
+        {("caddy", "validate"): _proc(1, stderr="Caddyfile:3 invalid directive")}
+    )
+    r = check_caddy_health(ws, config, runner=runner)
+    assert r.status == STATUS_FAIL
+    assert "validate" in r.message
+
+
+def test_check_caddy_health_warn_on_stale_pid(env, monkeypatch) -> None:
+    """admin 在线、validate 通过，但 caddy.pid 指向已死进程 → WARN（BUG-070）。"""
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True)
+    runner = _runner_from_map({("caddy", "validate"): _proc(0)})
+    pid_path = ws.run / "caddy.pid"
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("999999999")  # 几乎不可能存活的 pid
+    r = check_caddy_health(ws, config, runner=runner)
+    assert r.status == STATUS_WARN
+

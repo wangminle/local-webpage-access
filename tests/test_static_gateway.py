@@ -6,6 +6,7 @@ builtin 模式会真实启动 ``python -m http.server`` 子进程，
 
 from __future__ import annotations
 
+import os
 import socket
 import time
 from pathlib import Path
@@ -27,7 +28,11 @@ def workspace(workspace_root: Path) -> Workspace:
 
 @pytest.fixture()
 def gateway(workspace: Workspace) -> StaticGateway:
-    return StaticGateway(workspace, Config())
+    # 强制 builtin 后端：builtin enable/disable/health 用例依赖真实 http.server
+    # 子进程与 pid/gateway.log。默认 Config() 的 staticGateway=caddy，在装了
+    # caddy 的机器上 detect_backend() 会返回 caddy 走 reload 路径，使这些用例
+    # 非确定性地失败。caddy 专属行为由各用例自建 Config 或 monkeypatch 覆盖。
+    return StaticGateway(workspace, Config(staticGateway="builtin"))
 
 
 def _free_port() -> int:
@@ -663,3 +668,293 @@ def test_disable_removes_alias_fragment(gateway: StaticGateway, workspace: Works
     gateway.disable("demo")
     assert not workspace.app_alias_config("demo").exists()
     assert not gateway.site_config_path("demo").exists()
+
+
+# ---- 回归测试：BUG-069（悬空 import 死锁）---------------------------------
+#
+# BUG-069：enable/disable 删除 site/alias 片段后，主 Caddyfile 若仍 import 已删
+# 文件，caddy validate/start 失败 → "恢复→失败→回滚"死锁。修复：删片段后由
+# _sync_main_config 按磁盘实际文件无条件重组主 Caddyfile。
+
+
+def test_enable_failure_leaves_no_dangling_import(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-069 核心：已启用实例再次 enable 且 reload 失败时，主 Caddyfile 不得残留悬空 import。
+
+    场景：demo 此前已成功启用（main 含 ``import sites/demo.conf``，文件存在）；
+    再次 enable 时 reload 失败 → enable catch 删片段 + ``_sync_main_config`` 重组。
+    重组后主 Caddyfile 基于磁盘实际文件（demo.conf 已删）→ 不再 import 它。
+    """
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    # 预置"已启用"状态
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    (root / "index.html").write_text("hi")
+    gateway.generate_site_config("demo", 18001, root)
+    main = gateway.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(gateway._assemble_main_config(), encoding="utf-8")  # 含 import demo.conf
+    assert "demo.conf" in main.read_text()
+
+    # reload 全部失败（master 不可达）——_sync_main_config 仍会按实际文件重写主配置
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "caddy_start", lambda: False)
+
+    class _Fail:
+        returncode = 1
+        stderr = b"reload error"
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run",
+        lambda *a, **kw: _Fail(),
+    )
+
+    with pytest.raises(GatewayError):
+        gateway.enable("demo", 18001, root)
+
+    # 主 Caddyfile 不再 import 已删除的 demo.conf（无悬空 import）
+    assert not gateway.site_config_path("demo").exists()
+    assert "demo.conf" not in main.read_text()
+
+
+def test_disable_leaves_no_dangling_import(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-069：Caddy 模式 disable 后主 Caddyfile 不再 import 已删站点。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+    main = gateway.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(gateway._assemble_main_config(), encoding="utf-8")
+    assert "demo.conf" in main.read_text()
+
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "caddy_start", lambda: False)
+
+    class _Fail:
+        returncode = 1
+        stderr = b"err"
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run",
+        lambda *a, **kw: _Fail(),
+    )
+
+    gateway.disable("demo")
+
+    assert not gateway.site_config_path("demo").exists()
+    assert "demo.conf" not in main.read_text()
+
+
+def test_sync_main_config_writes_assembled_content(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """_sync_main_config 按磁盘实际文件重写主 Caddyfile（BUG-069）。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    monkeypatch.setattr(gateway, "_reload_with_self_heal", lambda: (True, ""))
+    main = gateway.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text("# stale\nimport `/nope/missing.conf`\n", encoding="utf-8")
+
+    gateway._sync_main_config()
+
+    # 无任何 site/alias 片段 → 主配置为空组装（无悬空 import）
+    content = main.read_text(encoding="utf-8")
+    assert "missing.conf" not in content
+    assert "import" not in content
+
+
+# ---- 回归测试：IMP-010（Caddy master 生命周期 + reload 自愈）--------------
+
+_DEAD_PID = 0xFFFFFFFE  # 几乎不可能存活的 pid，用于 stale pid 测试
+
+
+def test_reload_with_self_heal_retries_after_failure(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """IMP-010/0.4：reload 首次失败、ensure 成功后应再 reload 一次并成功。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    state = {"n": 0}
+
+    def fake_reload_once():
+        state["n"] += 1
+        return (False, "err") if state["n"] == 1 else (True, "")
+
+    monkeypatch.setattr(gateway, "_reload_once", fake_reload_once)
+    monkeypatch.setattr(gateway, "ensure_caddy_running", lambda: True)
+
+    ok, stderr = gateway._reload_with_self_heal()
+    assert ok is True
+    assert state["n"] == 2  # 失败一次后自愈再 reload 成功
+
+
+def test_reload_with_self_heal_gives_up_when_start_fails(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """IMP-010/0.4：reload 失败且 master 无法拉起时放弃，返回 False。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    monkeypatch.setattr(gateway, "_reload_once", lambda: (False, "err"))
+    monkeypatch.setattr(gateway, "ensure_caddy_running", lambda: False)
+
+    ok, stderr = gateway._reload_with_self_heal()
+    assert ok is False
+
+
+def test_reload_all_invokes_ensure_caddy_running(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """IMP-010/0.3：reload_all 在 reload 前必须 ensure_caddy_running。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    called = {"ensure": False}
+
+    def fake_ensure():
+        called["ensure"] = True
+        return True
+
+    monkeypatch.setattr(gateway, "ensure_caddy_running", fake_ensure)
+    monkeypatch.setattr(gateway, "_reload_once", lambda: (True, ""))
+
+    gateway.reload_all()
+    assert called["ensure"] is True
+
+
+def test_ensure_caddy_running_starts_when_admin_down(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """IMP-010/0.3：admin 不在线时调 caddy_start 拉起。"""
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "caddy_start", lambda: True)
+    assert gateway.ensure_caddy_running() is True
+
+
+def test_ensure_caddy_running_returns_true_when_admin_up(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """IMP-010/0.3：admin 已在线时直接返回 True，不重复 start。"""
+    started = {"n": 0}
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "caddy_start", lambda: started.__setitem__("n", started["n"] + 1) or True)
+    assert gateway.ensure_caddy_running() is True
+    assert started["n"] == 0  # admin 在线，不触发 start
+
+
+def test_ensure_caddy_running_returns_false_when_start_fails(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "caddy_start", lambda: False)
+    assert gateway.ensure_caddy_running() is False
+
+
+def test_caddy_start_uses_main_when_present(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """IMP-010：主 Caddyfile 存在且非空时，caddy start 用它（并带 --pidfile）。"""
+    main = gateway.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text("# real config\n", encoding="utf-8")
+    captured = {}
+
+    class _OK:
+        returncode = 0
+        stderr = b""
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _OK()
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run", fake_run
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+
+    assert gateway.caddy_start() is True
+    cmd_str = " ".join(captured["cmd"])
+    assert str(main) in cmd_str
+    assert "--pidfile" in cmd_str
+
+
+def test_caddy_start_falls_back_to_bootstrap_when_no_main(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """IMP-010：无主 Caddyfile时写最小 bootstrap 并用它启动。"""
+    main = gateway.main_config_path()
+    assert not main.exists()
+    captured = {}
+
+    class _OK:
+        returncode = 0
+        stderr = b""
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _OK()
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run", fake_run
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+
+    assert gateway.caddy_start() is True
+    assert gateway._bootstrap_config_path().is_file()
+    assert str(gateway._bootstrap_config_path()) in " ".join(captured["cmd"])
+
+
+def test_caddy_start_returns_false_on_cmd_failure(gateway: StaticGateway, monkeypatch) -> None:
+    """IMP-010：caddy start 命令本身失败时立即返回 False，不轮询 admin。"""
+    class _Fail:
+        returncode = 1
+        stderr = b"boom"
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run",
+        lambda *a, **kw: _Fail(),
+    )
+    polled = {"n": 0}
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: polled.__setitem__("n", polled["n"] + 1) or True)
+    assert gateway.caddy_start() is False
+    assert polled["n"] == 0  # 命令失败，不轮询 admin（避免拖慢失败路径）
+
+
+def test_caddy_stop_clears_pid_when_admin_down(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """IMP-010/BUG-070：admin 不在线时 caddy_stop 视为已停并清理 stale caddy pid。"""
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    caddy_pid = gateway.caddy_pid_path()
+    caddy_pid.parent.mkdir(parents=True, exist_ok=True)
+    caddy_pid.write_text(str(_DEAD_PID), encoding="utf-8")
+    assert gateway.caddy_stop() is True
+    assert not caddy_pid.exists()
+
+
+# ---- 回归测试：BUG-070（stale pid 清理）----------------------------------
+
+
+def test_clear_stale_static_pid_removes_dead_pid(gateway: StaticGateway) -> None:
+    gateway._write_pid("demo", _DEAD_PID)
+    assert gateway._pid_path("demo").is_file()
+    gateway._clear_stale_static_pid("demo")
+    assert not gateway._pid_path("demo").exists()
+
+
+def test_clear_stale_static_pid_keeps_alive_pid(gateway: StaticGateway) -> None:
+    gateway._write_pid("demo", os.getpid())  # 当前进程存活
+    gateway._clear_stale_static_pid("demo")
+    assert gateway._read_pid("demo") == os.getpid()
+
+
+def test_clear_stale_static_pid_noop_when_absent(gateway: StaticGateway) -> None:
+    gateway._clear_stale_static_pid("never-existed")  # 不抛
+
+
+def test_clear_stale_caddy_pid_removes_dead_pid(gateway: StaticGateway) -> None:
+    path = gateway.caddy_pid_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(_DEAD_PID), encoding="utf-8")
+    gateway._clear_stale_caddy_pid()
+    assert not path.exists()
+

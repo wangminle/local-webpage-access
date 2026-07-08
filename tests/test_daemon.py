@@ -632,3 +632,107 @@ def test_stop_daemon_sets_disabled(workspace: Workspace) -> None:
 
 def test_stop_daemon_noop_when_never_started(workspace: Workspace) -> None:
     assert daemon_mod.stop_daemon(workspace) is True
+
+
+# ---- IMP-011：inbox 防污染（on_conflict=error + processed 归档）-------------
+
+
+def test_process_zip_conflict_no_rename(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """IMP-011：slug 已占用时 process_zip 应 action=conflict，不建 -2，记事件。"""
+    from local_webpage_access.importer import Importer
+
+    zip_path = workspace.inbox / "static.zip"
+    _make_zip(zip_path, {"index.html": "<h1>hi</h1>"})
+    # 先直接导入占住 slug "static"（不走 process_zip 的自动启动，不拉起服务）
+    Importer(workspace, config, registry).import_zip(str(zip_path))
+    assert registry.get_instance("static") is not None
+
+    # 再次经 daemon process_zip 导入同名 → 冲突
+    summary = daemon_mod.process_zip(workspace, config, registry, zip_path)
+    assert summary["action"] == "conflict"
+    assert summary["instance_id"] == "static"
+    # 不应自动改名建冗余实例
+    assert registry.get_instance("static-2") is None
+    # 已存在的实例上应记录 import_conflict 事件（提示 --update）
+    events = registry.list_events("static")
+    assert any(e["event_type"] == "import_conflict" for e in events)
+
+
+def test_archive_processed_zip_moves_with_timestamp(workspace: Workspace) -> None:
+    """IMP-011：归档 helper 把 zip 移入 inbox/processed/ 并加时间戳。"""
+    src = workspace.inbox / "app.zip"
+    _make_zip(src, {"index.html": "x"})
+    dest = daemon_mod._archive_processed_zip(workspace, src)
+    assert dest is not None
+    assert not src.exists()  # 已移走
+    assert Path(dest).is_file()
+    assert Path(dest).parent == workspace.inbox_processed
+    assert "app-" in Path(dest).name  # 带时间戳前缀
+
+
+def test_archive_processed_zip_handles_missing_source(workspace: Workspace) -> None:
+    assert daemon_mod._archive_processed_zip(workspace, workspace.inbox / "nope.zip") is None
+
+
+def test_scan_inbox_ignores_processed_subdir(workspace: Workspace) -> None:
+    """IMP-011：inbox/processed/ 下的 zip 不被 scan_inbox 扫到。"""
+    workspace.inbox.mkdir(parents=True, exist_ok=True)
+    (workspace.inbox / "top.zip").write_bytes(b"")
+    workspace.inbox_processed.mkdir(parents=True, exist_ok=True)
+    (workspace.inbox_processed / "done.zip").write_bytes(b"")
+    names = [p.name for p in daemon_mod.scan_inbox(workspace)]
+    assert names == ["top.zip"]
+
+
+def test_run_watcher_archives_terminal_zip(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """IMP-011：watcher 对终态（非 failed）zip 移入 inbox/processed/。"""
+    zip_path = workspace.inbox / "static.zip"
+    _make_zip(zip_path, {"index.html": "x"})
+    stop = threading.Event()
+
+    def fake_process(ws, cfg, reg, zp):
+        stop.set()  # 处理完即令 watcher 退出
+        return {"action": "started", "instance_id": "static", "note": None, "zip": str(zp)}
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=fake_process,
+    )
+    assert not zip_path.exists()  # 已从 inbox 移走
+    archived = list(workspace.inbox_processed.glob("*.zip"))
+    assert len(archived) == 1
+
+
+def test_run_watcher_keeps_failed_zip_in_inbox(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """IMP-011：failed 的 zip 保留在 inbox 等下轮重试，不归档。"""
+    zip_path = workspace.inbox / "broken.zip"
+    _make_zip(zip_path, {"index.html": "x"})
+    stop = threading.Event()
+
+    def fake_process(ws, cfg, reg, zp):
+        stop.set()
+        return {"action": "failed", "instance_id": None, "note": "boom", "zip": str(zp)}
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=fake_process,
+    )
+    assert zip_path.exists()  # 仍在 inbox
+    assert list(workspace.inbox_processed.glob("*.zip")) == []  # 未归档
+

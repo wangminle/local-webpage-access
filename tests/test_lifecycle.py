@@ -17,9 +17,11 @@ from local_webpage_access.lifecycle import (
     _lock_is_stale,
     _pid_alive,
     instance_lock,
+    list_redundant_instances,
     observe_status,
     rebuild_instance,
     remove_instance,
+    remove_redundant,
     restart_instance,
     start_instance,
     stop_instance_op,
@@ -603,3 +605,67 @@ def test_remove_keeps_audit_event_as_orphan(
     assert remove_events[-1]["instance_id"] is None
     # message 中保留了实例 ID 文本，便于追溯
     assert "api" in remove_events[-1]["message"]
+
+
+# ---- IMP-012：冗余实例批量清理 --------------------------------------------
+
+
+def _seed_redundant(workspace, registry, iid: str, zip_bytes: bytes, created_at: str):
+    """构造一个带 original.zip 的实例，并固定 created_at 用于冗余排序判定。"""
+    _seed_container(workspace, registry, iid)
+    zip_path = workspace.app_original_zip(iid)
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    zip_path.write_bytes(zip_bytes)
+    row = registry.get_instance(iid)
+    row["created_at"] = created_at
+    registry.upsert_instance(row)
+    return row
+
+
+_SAME_ZIP = b"identical-zip-bytes-for-grouping"
+_OTHER_ZIP = b"different-content"
+
+
+def test_list_redundant_keeps_oldest(workspace, registry, config) -> None:
+    """IMP-012：同指纹分组保留 createdAt 最早者，其余为冗余。"""
+    _seed_redundant(workspace, registry, "oldest", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "newer", _SAME_ZIP, "2026-07-02T10:00:00")
+    _seed_redundant(workspace, registry, "unique", _OTHER_ZIP, "2026-07-03T10:00:00")
+
+    redundant = list_redundant_instances(workspace, registry)
+    ids = [r["id"] for r in redundant]
+    assert ids == ["newer"]  # oldest 保留；unique 唯一不参与
+    assert redundant[0]["sourceZipHash"]  # 带指纹
+
+
+def test_redundant_ignores_empty_hash(workspace, registry, config) -> None:
+    """IMP-012：无 original.zip 的实例不参与分组（空 hash 不参与）。"""
+    _seed_redundant(workspace, registry, "a", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "b", _SAME_ZIP, "2026-07-02T10:00:00")
+    # c 无 original.zip
+    _seed_container(workspace, registry, "c")
+    assert not workspace.app_original_zip("c").exists()
+
+    redundant = list_redundant_instances(workspace, registry)
+    assert [r["id"] for r in redundant] == ["b"]  # c 被排除
+
+
+def test_remove_redundant_keeps_oldest_and_purges(workspace, registry, config) -> None:
+    """IMP-012：remove_redundant 移除冗余、保留最早者并清理磁盘（purge）。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "drop", _SAME_ZIP, "2026-07-02T10:00:00")
+
+    removed = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert removed == ["drop"]
+    assert registry.get_instance("drop") is None
+    assert registry.get_instance("keep") is not None  # 最早者保留
+    assert not workspace.app_dir("drop").exists()  # purge 删了磁盘
+
+
+def test_remove_redundant_none_when_all_unique(workspace, registry, config) -> None:
+    """IMP-012：所有实例指纹唯一时无冗余可删。"""
+    _seed_redundant(workspace, registry, "a", b"aaa", "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "b", b"bbb", "2026-07-02T10:00:00")
+    assert list_redundant_instances(workspace, registry) == []
+    assert remove_redundant(workspace, config, registry) == []
+

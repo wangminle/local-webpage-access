@@ -15,32 +15,32 @@ def _clear_version_cache() -> None:
 
 
 def test_resolve_version_prefers_git(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.4.1")
-    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: "0.4.0")
-    assert version_info.resolve_version() == "0.4.1"
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.4.2")
+    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: "0.4.1")
+    assert version_info.resolve_version() == "0.4.2"
 
 
 def test_resolve_version_uses_metadata_when_git_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(version_info, "_version_from_git", lambda root: None)
-    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: "0.4.1")
-    assert version_info.resolve_version() == "0.4.1"
+    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: "0.4.2")
+    assert version_info.resolve_version() == "0.4.2"
 
 
 def test_resolve_version_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(version_info, "_version_from_git", lambda root: None)
     monkeypatch.setattr(version_info, "_version_from_metadata", lambda: None)
-    assert version_info.resolve_version() == "0.4.1"
+    assert version_info.resolve_version() == "0.4.2"
 
 
 def test_display_version_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.4.1")
-    assert version_info.display_version() == "V0.4.1"
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.4.2")
+    assert version_info.display_version() == "V0.4.2"
 
 
 def test_version_from_git_subject() -> None:
     assert version_info._version_from_git(None) is None
-    match = version_info._VERSION_PREFIX.match("V0.4.1-Build0567-20260707")
+    match = version_info._VERSION_PREFIX.match("V0.4.2-Build0567-20260707")
     assert match is not None
-    assert match.group(1) == "0.4.1"
+    assert match.group(1) == "0.4.2"

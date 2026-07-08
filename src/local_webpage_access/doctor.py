@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -419,6 +420,110 @@ def check_static_gateway(ws: Workspace) -> CheckResult:
     )
 
 
+def _pid_alive_local(pid: int) -> bool:
+    """跨平台 pid 存活探测（os.kill 0 探测，不依赖 psutil）。"""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def check_caddy_health(
+    ws: Workspace, config: Config, *, runner: SubprocessRunner = _default_runner
+) -> CheckResult:
+    """IMP-020：Caddy 模式下的 master/admin/配置健康探针。
+
+    仅 ``staticGateway=caddy`` 时探测（其他后端跳过）：
+
+    1. admin :2019 是否在线（master 是否在跑）——不在线 FAIL，提示 ``lwa gateway on``；
+    2. 主 Caddyfile ``caddy validate`` 是否通过——失败 FAIL，提示悬空 import（BUG-069）；
+    3. ``run/caddy.pid`` 是否指向已死进程——stale 给 WARN，提示重启网关清理。
+
+    master 在线且配置有效时返回 OK。:8080 别名入口与各站点 hostPort 可达性依赖
+    实例/别名状态，不在此处探测（由 ``diagnose_instance`` 单实例诊断覆盖）。
+    """
+    if config.staticGateway != "caddy":
+        return CheckResult(
+            "caddy_health",
+            STATUS_SKIP,
+            f"staticGateway={config.staticGateway}，跳过 Caddy 健康探针",
+        )
+    from local_webpage_access.static_gateway import StaticGateway
+
+    # 不调 gateway.detect_backend()：caddy 缺失时它会 log.warning，经 RichHandler
+    # 写入 stdout，污染 `lwa doctor --json` 的输出导致 JSON 不可解析（BUG-075）。
+    # 此处静默判定 caddy 是否在 PATH，结果与 detect_backend 的 caddy/builtin 分支一致。
+    if not shutil.which("caddy"):
+        return CheckResult(
+            "caddy_health",
+            STATUS_WARN,
+            "配置 staticGateway=caddy 但未找到 caddy，已降级 builtin",
+            suggestion=f"安装 Caddy ≥ {MIN_CADDY_VERSION} 并加入 PATH 后执行 lwa gateway on",
+        )
+    gateway = StaticGateway(ws, config)
+
+    findings: list[str] = []
+    admin_ok = gateway._admin_alive()
+    if not admin_ok:
+        findings.append("admin :2019 不可达（master 未运行）")
+
+    validate_ok = True
+    main = gateway.main_config_path()
+    if main.is_file():
+        result = runner(
+            ["caddy", "validate", "--config", str(main), "--adapter", "caddyfile"]
+        )
+        validate_ok = result.returncode == 0
+        if not validate_ok:
+            stderr = (result.stderr or "").strip().splitlines()
+            findings.append(
+                "主 Caddyfile validate 失败（可能悬空 import）"
+                + (f"：{stderr[0][:160]}" if stderr else "")
+            )
+
+    stale_pid = False
+    pid_path = gateway.caddy_pid_path()
+    if pid_path.is_file():
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            pid = None
+        if pid is not None and not _pid_alive_local(pid):
+            stale_pid = True
+
+    if not admin_ok:
+        return CheckResult(
+            "caddy_health",
+            STATUS_FAIL,
+            "；".join(findings),
+            suggestion="执行 `lwa gateway on` 启动 Caddy master；"
+            "若反复失败，检查 static-gateway/sites 与主 Caddyfile 是否含悬空 import（BUG-069）",
+        )
+    if not validate_ok:
+        return CheckResult(
+            "caddy_health",
+            STATUS_FAIL,
+            "；".join(findings),
+            suggestion="主 Caddyfile 非法：执行 `lwa gateway off` 再 `lwa gateway on`，"
+            "或核对 sites/ 与主配置 import 一致性",
+        )
+    if stale_pid:
+        return CheckResult(
+            "caddy_health",
+            STATUS_WARN,
+            "Caddy master 在线、配置有效，但 run/caddy.pid 指向已死进程（stale）",
+            suggestion="执行 `lwa gateway off` 后 `lwa gateway on` 清理 stale pid（BUG-070）",
+        )
+    return CheckResult(
+        "caddy_health",
+        STATUS_OK,
+        "Caddy master 在线（admin :2019），主配置 validate 通过",
+    )
+
+
 def check_disk_space(ws: Workspace, *, min_gb: float = 1.0) -> CheckResult:
     """WBS-26.08：工作区所在磁盘剩余空间。"""
     try:
@@ -694,6 +799,7 @@ def run_doctor(
         ),
         check_registry(ws),
         check_static_gateway(ws),
+        check_caddy_health(ws, config, runner=runner),
         check_disk_space(ws),
         check_memory(),
     ]
@@ -775,6 +881,7 @@ __all__ = [
     "check_port_pool",
     "check_registry",
     "check_static_gateway",
+    "check_caddy_health",
     "check_disk_space",
     "check_memory",
     "diagnose_instance",

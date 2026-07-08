@@ -8,7 +8,7 @@ from importlib.metadata import PackageNotFoundError, version as pkg_version
 MIN_DOCKER_VERSION = "29.0.0"
 MIN_COMPOSE_VERSION = "2.40.2"
 RECOMMENDED_COMPOSE_VERSION = "5.2.0"
-MIN_CADDY_VERSION = "2.11.2"
+MIN_CADDY_VERSION = "2.10.0"
 MIN_FASTAPI_VERSION = "0.138.0"
 MIN_UVICORN_VERSION = "0.45.0"
 MIN_NODE_VERSION = "24.0.0"  # 前端 SPA 构建基线（OPS-001）

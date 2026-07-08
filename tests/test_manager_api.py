@@ -784,6 +784,67 @@ def test_path_alias_running_triggers_gateway_reload(
     assert reloaded == [True]
 
 
+def test_path_alias_reload_failure_does_not_persist(
+    manager_env: EnvBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caddy reload 失败 → API 500，manifest/registry 保持旧别名状态。"""
+    from local_webpage_access.errors import GatewayError
+    from local_webpage_access.models import (
+        DesiredState,
+        InstanceManifest,
+        NetworkConfig,
+        StaticConfig,
+    )
+
+    iid = manager_env.instance_id
+    mpath = manager_env.workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(mpath)
+    manifest.desiredState = DesiredState.RUNNING
+    manifest.static = StaticConfig(
+        hostPort=21001,
+        enabled=True,
+        routeMode="name",
+        routeHost="keep-me",
+    )
+    manifest.network = NetworkConfig(hostPort=21001, routeHost="keep-me")
+    manifest.save(mpath)
+    manager_env.registry.upsert_static_site(
+        iid,
+        manifest.static.model_dump(),
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.is_enabled",
+        lambda self, instance_id: instance_id == iid,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.detect_backend",
+        lambda self: "caddy",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.generate_alias_config",
+        lambda self, instance_id, alias, host_port: None,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.StaticGateway.reload_all",
+        lambda self: (_ for _ in ()).throw(GatewayError("Caddy reload 失败")),
+    )
+
+    resp = manager_env.client.patch(
+        f"/api/instances/{iid}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "should-not-stick"},
+    )
+    assert resp.status_code == 500
+
+    saved = InstanceManifest.load(mpath)
+    assert saved.static is not None
+    assert saved.static.routeHost == "keep-me"
+    site = manager_env.registry.get_static_site(iid)
+    assert site is not None
+    assert site["route_host"] == "keep-me"
+
+
 # ---- 静态资源托管（WBS-22.02 / WBS-23 前端）----------------------------------
 
 

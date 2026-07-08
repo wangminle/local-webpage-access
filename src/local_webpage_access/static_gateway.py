@@ -33,6 +33,23 @@ _HEALTH_TIMEOUT = 5
 _START_WAIT = 3.0
 _KILL_TIMEOUT = 10
 
+# ---- Caddy master 生命周期（IMP-010 / BUG-069 / BUG-070）-------------------
+# admin API 固定走 IPv4 loopback（macOS 上 localhost 常解析为 ::1，而 Caddy admin
+# 仅监听 IPv4，见 BUG-068）。reload/start/stop 全部显式使用 127.0.0.1。
+_ADMIN_BASE = "http://127.0.0.1:2019"
+_ADMIN_CONFIG_URL = f"{_ADMIN_BASE}/config/"
+_ADMIN_STOP_URL = f"{_ADMIN_BASE}/stop"
+_ADMIN_PROBE_TIMEOUT = 1.0
+_ADMIN_STARTUP_WAIT = 5.0
+_CADDY_OP_TIMEOUT = 15
+_CADDY_START_TIMEOUT = 20
+# 仅保证 Caddy admin 在线的最小 bootstrap 配置（无任何站点；真实站点由 reload_all 注入）。
+# 不含 ``admin off``（BUG-014：首次加载后关闭 admin 会让后续 reload 全部失败）；
+# Caddy 默认即在 :2019 暴露 admin。仅注释行 → 等价空配置。
+_MIN_CADDYFILE = (
+    "# lwa bootstrap：仅保证 Caddy admin 在线，真实站点由 reload_all 注入\n"
+)
+
 # builtin 模式回退用的 Caddy 配置模板（也用于 Caddy 模式渲染）
 # {rate_limit_block} 占位符由 _rate_limit_directive 填充（IMP-005）；
 # 未启用限流时为空串，留下一行空行（Caddyfile 忽略）。
@@ -292,6 +309,8 @@ class StaticGateway:
                 instance_id=instance_id,
                 root=str(root),
             )
+        # BUG-070：清理切换 builtin↔caddy 或上次崩溃遗留的死 pid，避免状态误判。
+        self._clear_stale_static_pid(instance_id)
         self.generate_site_config(instance_id, host_port, root)
 
         backend = self.detect_backend()
@@ -326,24 +345,33 @@ class StaticGateway:
                 self.remove_site_config(instance_id)
                 if alias is not None:
                     self.remove_alias_config(instance_id)
+                # BUG-069：删片段后按磁盘实际文件重组主 Caddyfile，杜绝悬空 import。
+                # reload_all 回滚到的 previous 仍含 ``import sites/<id>.conf``，若不
+                # 重组，主配置会引用刚刚被删除的文件，导致后续 caddy validate/start
+                # 全部失败（7/8 事故根因）。_sync_main_config 无条件按实际文件重写。
+                self._sync_main_config()
                 raise
         log.info("静态站点已启用：%s（%s，端口 %d）", instance_id, backend, host_port)
 
     def disable(self, instance_id: str) -> None:
-        """禁用静态站点（WBS-09.07）。IMP-006：同时清理路径别名片段。"""
+        """禁用静态站点（WBS-09.07）。
+
+        IMP-006：同时清理路径别名片段。BUG-069：Caddy 模式下删片段后用
+        :meth:`_sync_main_config` 按磁盘实际文件重组主 Caddyfile（而非回滚到
+        可能含悬空 import 的旧版本），保证主配置永不 import 已删文件。
+        BUG-070：清理可能残留的 builtin 静态服务 pid。
+        """
         backend = self.detect_backend()
         if backend == "builtin":
             self._stop_builtin(instance_id)
-        else:
-            self.remove_site_config(instance_id)
-            self.remove_alias_config(instance_id)
-            try:
-                self.reload_all()
-            except GatewayError as exc:
-                log.warning("禁用 %s 后 Caddy reload 失败：%s", instance_id, exc)
-        # builtin 模式也清理配置（含可能的别名片段）
+        # 两种后端都删除站点配置与别名片段
         self.remove_site_config(instance_id)
         self.remove_alias_config(instance_id)
+        if backend == "caddy":
+            # BUG-069：删片段后无条件按磁盘实际文件重组主 Caddyfile。
+            self._sync_main_config()
+        # BUG-070：清理切换后端或崩溃遗留的死 pid
+        self._clear_stale_static_pid(instance_id)
         log.info("静态站点已禁用：%s", instance_id)
 
     def is_enabled(self, instance_id: str) -> bool:
@@ -384,46 +412,107 @@ class StaticGateway:
     # ---- Caddy reload + 回滚 ------------------------------------------------
 
     def reload_all(self) -> None:
-        """组装主 Caddyfile 并 reload（WBS-09.05/06）。
+        """组装主 Caddyfile 并 reload（WBS-09.05/06；BUG-069 / IMP-010 修复）。
 
-        builtin 模式下为空操作。Caddy 模式下失败会回滚到上一份主配置。
+        builtin 模式下为空操作。Caddy 模式下：
+
+        1. :meth:`ensure_caddy_running`：admin :2019 不在线则 ``caddy start`` 拉起（IMP-010/0.3）；
+        2. 组装新主配置并写盘；
+        3. ``caddy reload``，失败时自愈（再 ensure + reload 一次，IMP-010/0.4）；
+        4. 仍失败则回滚主 Caddyfile 到上一份并抛 :class:`GatewayError`。
+
+        本方法仅在**新增内容**（enable）路径调用；**删除**片段后的主配置重组请用
+        :meth:`_sync_main_config`——后者无条件按磁盘实际文件重写，杜绝主 Caddyfile
+        import 已删文件的悬空 import（BUG-069）。
         """
         if self.detect_backend() != "caddy":
             return
 
+        # IMP-010/0.3：reload 前确保 master/admin 在线，否则 reload 必失败。
+        self.ensure_caddy_running()
+
         main = self.main_config_path()
         main.parent.mkdir(parents=True, exist_ok=True)
-        backup = main.with_suffix(".bak")
         previous = main.read_text(encoding="utf-8") if main.exists() else None
         new_content = self._assemble_main_config()
 
         if previous is not None:
+            backup = main.with_suffix(".bak")
             backup.write_text(previous, encoding="utf-8")
         main.write_text(new_content, encoding="utf-8")
 
-        result = subprocess.run(
-            ["caddy", "reload", "--config", str(main)],
-            capture_output=True,
-            timeout=15,
+        ok, stderr = self._reload_with_self_heal()
+        if ok:
+            return
+        # reload 失败：回滚主 Caddyfile
+        if previous is not None:
+            main.write_text(previous, encoding="utf-8")
+            self._reload_once()  # 尽力把旧配置 reload 回去（忽略结果）
+        else:
+            # 首次生成即失败：删除坏配置，避免残留非法 Caddyfile 影响后续 reload（BUG-007）
+            try:
+                main.unlink()
+            except OSError:
+                pass
+        raise GatewayError("Caddy reload 失败", stderr=stderr)
+
+    def _reload_once(self) -> tuple[bool, str]:
+        """执行一次 ``caddy reload``，返回 (是否成功, stderr 文本)。"""
+        cmd = [
+            "caddy",
+            "reload",
+            "--config",
+            str(self.main_config_path()),
+            "--adapter",
+            "caddyfile",
+            # macOS 上 localhost 常解析为 ::1，而 Caddy admin 仅监听 IPv4 loopback（BUG-068）
+            "--address",
+            "127.0.0.1:2019",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=_CADDY_OP_TIMEOUT)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return False, str(exc)
+        return result.returncode == 0, result.stderr.decode("utf-8", "replace")
+
+    def _reload_with_self_heal(self) -> tuple[bool, str]:
+        """reload 主配置；失败时探测 admin 并 (re)start 后再 reload 一次（IMP-010/0.4）。
+
+        master 在 reload 间隙退出会让 ``caddy reload`` 报错；此时先
+        :meth:`ensure_caddy_running` 拉起 master 再 reload 一次。仍失败才放弃。
+        """
+        ok, stderr = self._reload_once()
+        if ok:
+            return True, ""
+        log.warning(
+            "caddy reload 失败，尝试自愈（ensure_caddy_running + reload）：%s",
+            stderr.strip(),
         )
-        if result.returncode != 0:
-            # 回滚
-            if previous is not None:
-                main.write_text(previous, encoding="utf-8")
-                subprocess.run(
-                    ["caddy", "reload", "--config", str(main)],
-                    capture_output=True,
-                    timeout=15,
-                )
-            else:
-                # 首次生成即失败：删除坏配置，避免残留的非法 Caddyfile 影响后续 reload
-                try:
-                    main.unlink()
-                except OSError:
-                    pass
-            raise GatewayError(
-                "Caddy reload 失败",
-                stderr=result.stderr.decode("utf-8", "replace"),
+        if self.ensure_caddy_running():
+            ok2, stderr2 = self._reload_once()
+            if ok2:
+                return True, ""
+            return False, stderr2
+        return False, stderr
+
+    def _sync_main_config(self) -> None:
+        """按磁盘实际存在的 site/alias 片段重组主 Caddyfile 并尽力 reload（BUG-069）。
+
+        在 :meth:`enable` 失败回滚或 :meth:`disable` 删除片段后调用。
+        :meth:`_assemble_main_config` 基于磁盘真实文件生成内容，因此**无条件写回**
+        （不回滚到可能含悬空 import 的旧版本），保证主 Caddyfile 永不 import 已删文件。
+        reload 失败仅记 WARN：配置已正确落盘，下次 ``caddy start``/reload 会加载它。
+        """
+        if self.detect_backend() != "caddy":
+            return
+        main = self.main_config_path()
+        main.parent.mkdir(parents=True, exist_ok=True)
+        main.write_text(self._assemble_main_config(), encoding="utf-8")
+        ok, stderr = self._reload_with_self_heal()
+        if not ok:
+            log.warning(
+                "主 Caddyfile 已按磁盘实际文件重组，但 reload 暂未成功：%s",
+                stderr.strip(),
             )
 
     def _assemble_main_config(self) -> str:
@@ -460,6 +549,140 @@ class StaticGateway:
                 len(aliases),
             )
         return "\n".join(lines) + "\n"
+
+    # ---- Caddy master 生命周期（IMP-010 / BUG-070）--------------------------
+
+    def caddy_pid_path(self) -> Path:
+        """Caddy master 的 pid 文件路径（``run/caddy.pid``）。"""
+        return self.ws.run / "caddy.pid"
+
+    def _admin_alive(self, *, timeout: float = _ADMIN_PROBE_TIMEOUT) -> bool:
+        """探测 Caddy admin API（127.0.0.1:2019）是否在线。"""
+        try:
+            urllib.request.urlopen(_ADMIN_CONFIG_URL, timeout=timeout)
+            return True
+        except Exception:  # noqa: BLE001 — 探测失败即视为不在线
+            return False
+
+    def _bootstrap_config_path(self) -> Path:
+        """最小 bootstrap 配置路径（admin 不依赖主 Caddyfile 时使用）。"""
+        return self.ws.static_gateway / ".caddy-bootstrap"
+
+    def caddy_start(self) -> bool:
+        """启动 Caddy master（IMP-010）。
+
+        优先用当前主 Caddyfile（若存在且非空）；否则写入最小 bootstrap 配置
+        （仅保证 admin :2019 在线），真实站点由随后的 :meth:`reload_all` 注入。
+        成功返回 True。``caddy start`` 命令本身失败时立即返回 False，不轮询 admin。
+        """
+        main = self.main_config_path()
+        if main.is_file() and main.read_text(encoding="utf-8").strip():
+            config_path = main
+        else:
+            boot = self._bootstrap_config_path()
+            boot.parent.mkdir(parents=True, exist_ok=True)
+            boot.write_text(_MIN_CADDYFILE, encoding="utf-8")
+            config_path = boot
+        cmd = [
+            "caddy",
+            "start",
+            "--config",
+            str(config_path),
+            "--adapter",
+            "caddyfile",
+            "--pidfile",
+            str(self.caddy_pid_path()),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=_CADDY_START_TIMEOUT)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.warning("caddy start 执行异常：%s", exc)
+            return False
+        if result.returncode != 0:
+            log.warning(
+                "caddy start 失败：%s",
+                result.stderr.decode("utf-8", "replace").strip(),
+            )
+            return False
+        # start 成功：轮询 admin 直到在线（或超时）
+        deadline = time.monotonic() + _ADMIN_STARTUP_WAIT
+        while time.monotonic() < deadline:
+            if self._admin_alive(timeout=0.5):
+                return True
+            time.sleep(0.2)
+        return self._admin_alive(timeout=0.5)
+
+    def caddy_stop(self) -> bool:
+        """停止 Caddy master（IMP-010）。通过 admin API ``POST /stop`` 优雅关闭。
+
+        显式走 IPv4（``127.0.0.1:2019``），规避 macOS 上 ``caddy stop`` 默认连
+        ``localhost``→``::1`` 的 IPv6 问题（与 BUG-068 同源）。
+        """
+        if not self._admin_alive():
+            self._clear_stale_caddy_pid()
+            return True
+        try:
+            req = urllib.request.Request(_ADMIN_STOP_URL, method="POST")
+            urllib.request.urlopen(req, timeout=_CADDY_OP_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — POST /stop 响应后常立即断连，属正常
+            log.debug("POST /stop 返回异常（通常正常）：%s", exc)
+        deadline = time.monotonic() + _ADMIN_STARTUP_WAIT
+        while time.monotonic() < deadline:
+            if not self._admin_alive(timeout=0.5):
+                break
+            time.sleep(0.2)
+        stopped = not self._admin_alive()
+        if stopped:
+            self._clear_stale_caddy_pid()
+        else:
+            log.warning("Caddy master 未在预期时间内退出")
+        return stopped
+
+    def ensure_caddy_running(self) -> bool:
+        """确保 Caddy admin 在线；不可达则尝试 ``caddy start``（IMP-010/0.3）。
+
+        reload 前调用：master 缺失时 reload 必失败，故先拉起。start 失败返回 False，
+        调用方（如 :meth:`reload_all` 的自愈路径）可据此决定是否再试。
+        """
+        if self._admin_alive():
+            return True
+        self._clear_stale_caddy_pid()
+        log.warning("Caddy admin 不在线，尝试拉起 master")
+        return self.caddy_start()
+
+    def _clear_stale_caddy_pid(self) -> None:
+        """清理指向已死进程的 Caddy master pid 文件（BUG-070）。"""
+        path = self.caddy_pid_path()
+        if not path.is_file():
+            return
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            pid = None
+        if pid is None or not self._pid_alive(pid):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _clear_stale_static_pid(self, instance_id: str) -> None:
+        """清理指向已死进程的 builtin 静态服务 pid 文件（BUG-070）。
+
+        切换 builtin↔caddy 或上次崩溃后，``run/static-<id>.pid`` 可能指向已退出的
+        ``http.server`` 进程；及时清理避免状态误判与人工排障干扰。
+        """
+        path = self._pid_path(instance_id)
+        if not path.is_file():
+            return
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            pid = None
+        if pid is None or not self._pid_alive(pid):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     # ---- builtin 进程管理 ---------------------------------------------------
 

@@ -34,7 +34,7 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 
 | WBS | 项 | 自动化 | 手工步骤 | 通过标准 |
 | --- | --- | --- | --- | --- |
-| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（13 个 SKILL.md） |
+| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（15 个 SKILL.md） |
 | 29.02 | 导入静态 HTML | ✓ `test_e2e_static_html_import_and_structure` | `lwa import inbox/static_html.zip` | `apps/static-html/` 出现，`local-web.json` 的 `kind=static` |
 | 29.03 | 静态目录结构 | ✓ 同上 | 检查 `apps/static-html/{source,current,logs,data}/` | 四个子目录齐全，`current/index.html` 存在 |
 | 29.04 | 静态 HTTP 可访问 | ✓ `test_e2e_static_html_accessible_via_http` | `lwa start static-html`，浏览器访问分配端口 | 返回 HTML 内容，`lwa status` 显示 `running` |
@@ -48,7 +48,7 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 | 29.12 | 数据持久化 | ✓ 手工验收（2026-07-07） | 写入数据 → `lwa stop` → `lwa start` → 再读 | 数据不丢失（`data/` 卷保留） |
 | 29.13 | start/stop/restart | ✓ `test_e2e_start_stop_restart_static` | `lwa stop`、`lwa restart` | 状态在 `running`/`stopped` 间正确切换 |
 | 29.14 | logs/status/stats | ✓ `test_e2e_logs_status_stats_queryable` | `lwa status`、`lwa logs <id>`、`lwa stats` | 三类信息均可查询且非空 |
-| 29.15 | 管理页与 CLI 一致 | ✓ `test_e2e_manager_api_matches_cli_status` | `lwa manager` 打开管理页，对比 `lwa status` | 实例列表与状态一致 |
+| 29.15 | 管理页与 CLI 一致 | ✓ `test_e2e_manager_api_matches_cli_status` | `lwa manager on` 或 `lwa manager start` 打开管理页，对比 `lwa status` | 实例列表与状态一致 |
 | 29.16 | doctor 排障 | ✓ `test_e2e_doctor_diagnoses_instance` | `lwa doctor`、`lwa doctor <id>` | 环境检查全 ok/warn；实例诊断无 fail |
 | 29.17 | failed/pending 展示 | ✓ `test_e2e_failed_and_pending_display` | 导入 `build_failure.zip`、`pending_unknown.zip`，查管理页 | failed 显示错误原因；pending 显示在待处理区 |
 | 29.18 | 记录结果与问题 | — | 填写下表 | 完成本清单 |

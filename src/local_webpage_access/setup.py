@@ -350,7 +350,7 @@ if ! command -v docker &>/dev/null; then
   echo "请启动 Docker Desktop 应用"
 fi
 
-echo "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.11.2）"
+echo "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.10.0）"
 if ! command -v caddy &>/dev/null; then
   brew install caddy
 fi
@@ -386,7 +386,7 @@ echo "==> Docker Engine + Compose 插件"
 # 示例：sudo apt install docker-ce docker-ce-cli containerd.io docker-compose-plugin
 # sudo usermod -aG docker "$USER" && newgrp docker
 
-echo "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.11.2）"
+echo "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.10.0）"
 # 官方文档：https://caddyserver.com/docs/install#debian-ubuntu-raspbian
 
 echo "==> Node.js（前端 SPA 构建需要，推荐 ≥ 24）"
@@ -416,7 +416,7 @@ Write-Host "==> Docker Desktop（含 Compose，Docker 需 ≥ 29.0.0；Compose �
 # winget install Docker.DockerDesktop
 # 安装后启动 Docker Desktop
 
-Write-Host "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.11.2）"
+Write-Host "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.10.0）"
 # winget install CaddyServer.Caddy
 
 Write-Host "==> Node.js（前端 SPA 构建需要，推荐 ≥ 24）"
@@ -436,7 +436,7 @@ _SCRIPT_GENERIC = """\
 # 请根据操作系统查阅：
 #   lwa setup          # 检测并查看安装指引
 #   docs/faq.md        # 排障文档
-# 组件要求：Python 3.13+、Docker ≥ 29.0.0、Compose ≥ 2.40.2（推荐 ≥ 5.2.0）、Caddy ≥ 2.11.2（可选）、Node ≥ 24.0.0（前端构建）
+# 组件要求：Python 3.13+、Docker ≥ 29.0.0、Compose ≥ 2.40.2（推荐 ≥ 5.2.0）、Caddy ≥ 2.10.0（可选）、Node ≥ 24.0.0（前端构建）
 """
 
 

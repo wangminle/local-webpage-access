@@ -14,13 +14,14 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import shutil
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LifecycleError, LwaError
@@ -415,6 +416,88 @@ def remove_instance(
             log.info("实例 %s 已移除（含磁盘文件）", instance_id)
         else:
             log.info("实例 %s 已从 registry 移除（保留 apps/ 目录）", instance_id)
+
+
+# ---- IMP-012：冗余实例批量清理 --------------------------------------------
+
+
+def _instance_zip_fingerprint(workspace: Workspace, instance_id: str) -> str | None:
+    """IMP-012：计算实例原始 zip 的 sha256 作为去重指纹；无 zip/读取失败返回 None。
+
+    由同一 zip 导入的实例得到相同指纹，等价于 ``sourceZipHash``，但运行时从
+    已落盘的原始 zip（``apps/<id>/original.zip``）重算，无需 registry 新增列。
+    """
+    zip_path = workspace.app_original_zip(instance_id)
+    if not zip_path.is_file():
+        return None
+    digest = hashlib.sha256()
+    try:
+        with zip_path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def list_redundant_instances(
+    workspace: Workspace, registry: Registry
+) -> list[dict[str, Any]]:
+    """IMP-012：列出冗余实例（按原始 zip 指纹分组，保留 createdAt 最早者）。
+
+    返回每个冗余实例的描述字典（``id`` / ``name`` / ``sourceZipHash`` /
+    ``createdAt``），按 createdAt 升序。空指纹（无原始 zip 或读取失败）的实例
+    不参与分组，避免误删无法证明同源的实例。每组保留最早者，其余视为冗余。
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in registry.list_instances():  # 已按 created_at ASC
+        fp = _instance_zip_fingerprint(workspace, row["id"])
+        if not fp:
+            continue  # 空 hash 不参与
+        groups.setdefault(fp, []).append(row)
+    redundant: list[dict[str, Any]] = []
+    for fp, members in groups.items():
+        if len(members) < 2:
+            continue
+        # members 已按 created_at ASC：首个为最早者保留，其余冗余
+        for row in members[1:]:
+            redundant.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "sourceZipHash": fp,
+                    "createdAt": row["created_at"],
+                }
+            )
+    redundant.sort(key=lambda r: r["createdAt"] or "")
+    return redundant
+
+
+def remove_redundant(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    *,
+    purge: bool = False,
+    force: bool = False,
+) -> list[str]:
+    """IMP-012：批量移除冗余实例，返回被移除的 instance_id 列表。
+
+    先 :func:`list_redundant_instances` 取目标，逐个调 :func:`remove_instance`
+    （共享 stop + registry 清理 + 可选 purge 流程）。单实例移除失败不中断整体，
+    仅记 warning；返回实际成功移除的 id。
+    """
+    targets = list_redundant_instances(workspace, registry)
+    removed: list[str] = []
+    for desc in targets:
+        iid = desc["id"]
+        try:
+            remove_instance(workspace, config, registry, iid, purge=purge, force=force)
+            removed.append(iid)
+        except LwaError as exc:
+            log.warning("移除冗余实例 %s 失败（跳过）：%s", iid, exc)
+    log.info("冗余清理完成：移除 %d / 目标 %d", len(removed), len(targets))
+    return removed
 
 
 # ---- status 观测与回写（WBS-17.07）-----------------------------------------

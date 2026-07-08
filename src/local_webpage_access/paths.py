@@ -114,6 +114,16 @@ class Workspace:
         return self.root / "inbox"
 
     @property
+    def inbox_processed(self) -> Path:
+        """IMP-011：daemon 处理成功的 zip 归档目录（``inbox/processed/``）。
+
+        import 成功后 zip 移入此处（同名加时间戳），从扫描视野中物理移除，
+        替代旧"留在 inbox + 指纹表去重"机制，杜绝归档后按旧指纹重复导入。
+        位于 ``inbox/`` 下，但 :func:`scan_inbox` 用非递归 glob 不会扫到它。
+        """
+        return self.inbox / "processed"
+
+    @property
     def apps(self) -> Path:
         return self.root / "apps"
 
@@ -216,6 +226,7 @@ class Workspace:
         """创建所有顶层工作区目录（幂等）。"""
         for directory in (
             self.inbox,
+            self.inbox_processed,
             self.apps,
             self.registry_dir,
             self.logs,
