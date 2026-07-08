@@ -135,7 +135,7 @@ def test_python_fastapi_dockerfile(workspace: Workspace) -> None:
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "FROM python:3.13-slim" in content
-    assert "COPY current/requirements.txt ./" in content
+    assert "COPY current/requirements.txt requirements.txt" in content
     assert "RUN pip install --no-cache-dir -r requirements.txt" in content
     assert "ENV PORT=8000" in content
     assert '["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]' in content
@@ -266,3 +266,88 @@ def test_dockerfile_header_records_summary(workspace: Workspace) -> None:
     assert "由 lwa 自动生成" in content
     assert "内部端口：8000" in content
     assert "模板：dockerfile_templates.py" in content
+
+
+# ---- IMP-016 / IMP-017：Python 全栈 Node + 生产依赖分离 --------------------
+
+
+def test_dockerfile_python_with_node(workspace: Workspace) -> None:
+    """IMP-016：Python 项目源码含 package.json → Dockerfile 追加 nodejs/npm。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "package.json").write_text(
+        '{"name":"pi-agent","dependencies":{}}'
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    # base 仍为 python
+    assert "FROM python:3.13-slim" in content
+    # 追加 Node 工具链
+    assert "nodejs npm" in content
+    assert "npm ci --omit=dev" in content
+
+
+def test_dockerfile_python_without_node_omits_node_toolchain(
+    workspace: Workspace,
+) -> None:
+    """IMP-016：无 package.json 的纯 Python 项目不加 Node（回归边界）。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "nodejs npm" not in content
+    assert "npm ci" not in content
+
+
+def test_dockerfile_strips_pytest(workspace: Workspace) -> None:
+    """IMP-017：仅 requirements.txt（无 prod 清单）→ 构建期 sed 剔除 pytest*。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "sed -i -E" in content
+    assert "pytest" in content
+    # 仍从 requirements.txt 安装（剥离后）
+    assert "pip install --no-cache-dir -r requirements.txt" in content
+
+
+def test_dockerfile_prefers_requirements_prod(workspace: Workspace) -> None:
+    """IMP-017：requirements-prod.txt 路径 → 直接装 prod 清单，不剥离 pytest。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements-prod.txt").write_text("fastapi\n")
+    m = _mk_manifest(
+        install="pip install -r requirements-prod.txt", start="uvicorn main:app"
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "COPY current/requirements-prod.txt requirements-prod.txt" in content
+    assert "pip install --no-cache-dir -r requirements-prod.txt" in content
+    # prod 清单无需剥离
+    assert "sed -i" not in content
+
+
+# ---- BUG-083：嵌套 requirements 路径 COPY/RUN 一致 ------------------------
+
+
+def test_dockerfile_nested_requirements_path_consistent(workspace: Workspace) -> None:
+    """BUG-083：pip install -r requirements/prod.txt → COPY 保留嵌套路径 + mkdir 父目录。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements/prod.txt", start="uvicorn main:app"
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    # COPY 目标保留嵌套路径（不再平铺到 ./），且预先 mkdir 父目录
+    assert "RUN mkdir -p requirements" in content
+    assert "COPY current/requirements/prod.txt requirements/prod.txt" in content
+    # RUN 安装路径与 COPY 落点一致
+    assert "pip install --no-cache-dir -r requirements/prod.txt" in content
+    # 不应出现平铺到根的旧写法（BUG-083 根因）
+    assert "COPY current/requirements/prod.txt ./" not in content
+
+
+def test_dockerfile_flat_requirements_no_mkdir(workspace: Workspace) -> None:
+    """BUG-083：扁平 requirements.txt → COPY 到同名文件，无需 mkdir 父目录。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt", start="uvicorn main:app"
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "COPY current/requirements.txt requirements.txt" in content
+    # 扁平路径无父目录，不应插入 mkdir
+    assert "mkdir -p requirements\n" not in content

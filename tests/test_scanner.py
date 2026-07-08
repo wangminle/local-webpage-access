@@ -418,3 +418,84 @@ def test_summarize_merges_devdependencies(tmp_path: Path) -> None:
     deps = {d.lower() for d in summary.node_deps}
     assert "react" in deps
     assert "vite" in deps
+
+
+# ---- IMP-013：辅助 package.json 优先 Python --------------------------------
+
+
+def test_detect_prefers_python_when_package_json_is_auxiliary(tmp_path: Path) -> None:
+    """IMP-013：package.json 仅含辅助工具（非框架）+ requirements.txt → 识别为
+    Python/docker-compose，而非误判 pending 或 static（prd-workflow 类）。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "prd-workflow",
+                "devDependencies": {"concurrently": "^8.0.0", "husky": "^9.0.0"},
+                "scripts": {"dev": "concurrently ..."},
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.PYTHON
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+    assert result.servingMode == ServingMode.CONTAINER
+    assert "fastapi" in result.stack
+    assert result.pending is False
+    assert result.confidence == "high"
+
+
+def test_detect_real_node_still_wins_over_python(tmp_path: Path) -> None:
+    """IMP-013：真 Node（命中 NODE_BACKEND）即使同时有 Python 工程文件也优先 Node。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\n")
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": {"express": "^4.0.0"}, "scripts": {"start": "node ."}})
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.NODE
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+
+
+# ---- IMP-018：重依赖自动升 medium -----------------------------------------
+
+
+def test_detect_heavy_deps_upgrade_profile(tmp_path: Path) -> None:
+    """IMP-018：命中 lancedb/pyarrow/torch/openai 等重运行时依赖 → 自动升 medium。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nlancedb\n")
+    result = Scanner().detect(tmp_path)
+    assert result.resourceProfile == ResourceProfile.MEDIUM
+    assert result.pending is False
+    assert any("lancedb" in n for n in result.notes)
+
+
+def test_detect_heavy_deps_does_not_downgrade(tmp_path: Path) -> None:
+    """IMP-018：已 medium（streamlit）不因重依赖判定而降级（仅向上提升）。"""
+    (tmp_path / "requirements.txt").write_text("streamlit\nlancedb\n")
+    result = Scanner().detect(tmp_path)
+    assert result.resourceProfile == ResourceProfile.MEDIUM
+
+
+# ---- BUG-082：仅 requirements-prod.txt 也应识别为 Python ------------------
+
+
+def test_detect_requirements_prod_only_is_python(tmp_path: Path) -> None:
+    """BUG-082：目录仅含 requirements-prod.txt（无 requirements.txt/pyproject/Pipfile）
+    时应识别为 Python，而非误判 pending。"""
+    (tmp_path / "requirements-prod.txt").write_text("fastapi\nuvicorn\n")
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.PYTHON
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+    assert result.servingMode == ServingMode.CONTAINER
+    assert "fastapi" in result.stack
+    assert result.pending is False
+    # 安装命令优先 prod 清单
+    assert result.entry.install == "pip install -r requirements-prod.txt"
+
+
+def test_detect_requirements_prod_not_treated_as_static(tmp_path: Path) -> None:
+    """BUG-082：requirements-prod.txt + index.html 不应判为纯静态（仍是 Python 信号）。"""
+    (tmp_path / "requirements-prod.txt").write_text("flask\n")
+    (tmp_path / "index.html").write_text("<html></html>")
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.PYTHON
+    assert result.pending is False

@@ -835,3 +835,254 @@ def test_remove_redundant_none_when_all_unique(workspace, registry, config) -> N
     assert list_redundant_instances(workspace, registry) == []
     assert remove_redundant(workspace, config, registry) == []
 
+
+
+# ---- IMP-014：容器实例路径别名 --------------------------------------------
+
+
+def test_container_path_alias(workspace, registry, config, monkeypatch) -> None:
+    """IMP-014：容器实例可设路径别名；_apply_gateway_alias 对容器跳过 is_enabled 守卫。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    _seed_container(workspace, registry, "api", deployed=True)  # hostPort=21000
+    calls = {"gen": 0, "reload": 0}
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def is_enabled(self, iid):
+            return False  # 容器无 static site conf；验证容器路径不依赖此守卫
+
+        def generate_alias_config(self, iid, alias, hp):
+            calls["gen"] += 1
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            calls["reload"] += 1
+
+        def remove_alias_config(self, iid):
+            p = self.ws.app_alias_config(iid)
+            if p.is_file():
+                p.unlink()
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+
+    result = set_instance_path_alias(workspace, config, registry, "api", "api-alias")
+    assert result.alias == "api-alias"
+    assert result.gateway_reloaded is True  # 容器别名触发了 reload
+    assert calls["gen"] == 1
+    assert calls["reload"] == 1
+
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert reloaded.container.routeMode == "name"
+    assert reloaded.container.routeHost == "api-alias"
+    # registry 容器表也记录了别名（IMP-014）
+    crow = registry.get_container("api")
+    assert crow["route_host"] == "api-alias"
+    assert crow["route_mode"] == "name"
+
+
+# ---- IMP-021：端口漂移同步别名片段 ----------------------------------------
+
+
+def test_sync_alias_port_rewrites_when_drifted(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """IMP-021：别名片段端口与当前 hostPort 不一致 → 重写 + reload。"""
+    from local_webpage_access import static_gateway as sg
+    from local_webpage_access.lifecycle import _sync_alias_port
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.container.hostPort = 21001  # 模拟漂移后的新端口
+    manifest.save(workspace.app_manifest_path("api"))
+
+    # 旧别名片段仍指向 21000
+    alias_conf = workspace.app_alias_config("api")
+    alias_conf.parent.mkdir(parents=True, exist_ok=True)
+    alias_conf.write_text("reverse_proxy 127.0.0.1:21000\n", encoding="utf-8")
+
+    calls = {"reload": 0, "gen": 0}
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, iid, alias, hp):
+            calls["gen"] += 1
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            calls["reload"] += 1
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+
+    assert _sync_alias_port(workspace, config, "api", manifest) is True
+    new_conf = workspace.app_alias_config("api").read_text(encoding="utf-8")
+    assert "127.0.0.1:21001" in new_conf
+    assert "127.0.0.1:21000" not in new_conf
+    assert calls["gen"] == 1
+    assert calls["reload"] == 1
+
+
+def test_sync_alias_port_noop_when_unchanged(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """IMP-021：别名片段端口与 hostPort 一致 → 不重写、不 reload。"""
+    from local_webpage_access import static_gateway as sg
+    from local_webpage_access.lifecycle import _sync_alias_port
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+
+    host_port = manifest.container.hostPort  # 21000
+    alias_conf = workspace.app_alias_config("api")
+    alias_conf.parent.mkdir(parents=True, exist_ok=True)
+    alias_conf.write_text(f"reverse_proxy 127.0.0.1:{host_port}\n", encoding="utf-8")
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            pass
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, *a, **kw):
+            raise AssertionError("端口未漂移不应重写别名片段")
+
+        def reload_all(self):
+            raise AssertionError("端口未漂移不应 reload")
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    assert _sync_alias_port(workspace, config, "api", manifest) is False
+
+
+def test_rebuild_syncs_drifted_alias_port(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """IMP-021：rebuild（host_container 重新分配端口）后别名片段跟随漂移。"""
+    from local_webpage_access import hosting
+    from local_webpage_access import static_gateway as sg
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    # 旧别名片段指向 21000（漂移前）
+    alias_conf = workspace.app_alias_config("api")
+    alias_conf.parent.mkdir(parents=True, exist_ok=True)
+    alias_conf.write_text("reverse_proxy 127.0.0.1:21000\n", encoding="utf-8")
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, iid, alias, hp):
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            pass
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    # 模拟端口漂移：rebuild 时 host_container 分配到新端口 21001
+    monkeypatch.setattr(hosting, "_ensure_container_port", lambda *a, **kw: 21001)
+
+    rebuild_instance(workspace, config, registry, "api")
+
+    new_conf = workspace.app_alias_config("api").read_text(encoding="utf-8")
+    assert "127.0.0.1:21001" in new_conf
+    assert "127.0.0.1:21000" not in new_conf
+
+
+# ---- BUG-084：容器别名在 start/restart 后保留 + 首启生成片段 ---------------
+
+
+def _caddy_gateway_fake(monkeypatch, record):
+    """注册一个记录 generate/reload 的 Caddy StaticGateway 替身。"""
+    from local_webpage_access import static_gateway as sg
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, iid, alias, hp):
+            record["gen"].append((alias, hp))
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            record["reload"] += 1
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+
+
+def test_start_container_preserves_alias_in_network(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-084：已部署容器 restart（轻量 start）后 network 仍保留别名，状态/API 可见。"""
+    record = {"gen": [], "reload": 0}
+    _caddy_gateway_fake(monkeypatch, record)
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    registry.upsert_container("api", manifest.container.model_dump())
+
+    fake_runtime._running = True
+    result = restart_instance(workspace, config, registry, "api")
+    # BUG-084：network 保留别名（不再被 build_network_entry 覆盖为 port）
+    assert result.network.routeMode == "name"
+    assert result.network.routeHost == "api-alias"
+    assert result.network.routeUrl is not None
+    # 状态层 _resolve_route 经 network 也能读到别名
+    from local_webpage_access.status import _resolve_route
+
+    alias, _url = _resolve_route(workspace, "api")
+    assert alias == "api-alias"
+
+
+def test_start_generates_alias_fragment_when_set_before_deploy(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-084：别名在首次启动前设置（无 hostPort）→ start 时生成别名片段。"""
+    record = {"gen": [], "reload": 0}
+    _caddy_gateway_fake(monkeypatch, record)
+
+    manifest = _seed_container(workspace, registry, "api", deployed=False)  # 无 hostPort
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    registry.upsert_container("api", manifest.container.model_dump())
+
+    result = start_instance(workspace, config, registry, "api")  # 首次部署
+    # network 保留别名
+    assert result.network.routeMode == "name"
+    assert result.network.routeHost == "api-alias"
+    # 别名片段已生成（start_instance 收尾 _sync_alias_port 触发）
+    assert record["gen"], "首次启动应生成别名片段"
+    assert workspace.app_alias_config("api").is_file()

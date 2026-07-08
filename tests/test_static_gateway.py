@@ -210,6 +210,7 @@ def test_apply_gateway_alias_reloads_when_caddy_site_enabled(
         "myapp",
         21100,
         previous_alias=None,
+        runtime="shared-static",
     )
     assert alias_enabled is True
     assert reloaded is True

@@ -48,6 +48,12 @@ PYTHON_WEB = {
 HEAVY_DATABASES = {"psycopg2", "psycopg", "asyncpg", "pymysql", "mysqlclient", "redis", "aiomysql", "aioredis"}
 SQLITE_MARKERS = {"sqlite3", "better-sqlite3", "sqlalchemy", "peewee", "tortoise-orm", "aiosqlite"}
 SQLITE_FILE_EXT = (".sqlite", ".sqlite3", ".db")
+# IMP-018（WBS-20260708 阶段2.3）：命中即把资源档位自动升 medium（已 medium/heavy 不降）。
+# 这些库运行时常驻较重内存（向量库/张量/嵌入缓存），恒 512m 易 OOM（runtime §4.2-P8）。
+HEAVY_RUNTIMES = {
+    "lancedb", "pyarrow", "torch", "transformers", "tensorflow",
+    "openai", "anthropic", "chromadb", "pymilvus",
+}
 
 
 # ---- 文件摘要 ---------------------------------------------------------------
@@ -62,6 +68,7 @@ class FileSummary:
     has_index_html: bool = False
     has_package_json: bool = False
     has_requirements_txt: bool = False
+    has_requirements_prod: bool = False
     has_pyproject_toml: bool = False
     has_pipfile: bool = False
     has_uv_lock: bool = False
@@ -89,6 +96,9 @@ def summarize(root: Path) -> FileSummary:
                 summary.has_package_json = True
             elif name == "requirements.txt":
                 summary.has_requirements_txt = True
+            elif name == "requirements-prod.txt":
+                # IMP-017：生产依赖分离文件（含依赖、剔除测试包），优先于 requirements.txt
+                summary.has_requirements_prod = True
             elif name == "pyproject.toml":
                 summary.has_pyproject_toml = True
             elif name == "pipfile":
@@ -196,6 +206,10 @@ def _collect_python_deps(root: Path, summary: FileSummary) -> set[str]:
     deps: set[str] = set()
     if summary.has_requirements_txt:
         deps |= _read_requirements(root / "requirements.txt")
+    # IMP-017：requirements-prod.txt 是 requirements.txt 的生产子集（剔除测试包），
+    # 同样参与依赖识别（重依赖/数据库探测需要看到其中包名）。
+    if summary.has_requirements_prod:
+        deps |= _read_requirements(root / "requirements-prod.txt")
     if summary.has_pipfile:
         deps |= _read_pipfile(root / "Pipfile")
     if summary.has_pyproject_toml:
@@ -261,10 +275,23 @@ class Scanner:
         self._detect_sqlite(summary, result)
 
         # 3. 识别主类型
-        if summary.has_package_json:
+        # IMP-013（WBS-20260708 阶段2.1）：判定顺序改为「真 Node → Python → static」。
+        # 仅当 package.json 命中 NODE_FRONTEND/NODE_BACKEND 才视为真 Node 项目；
+        # 辅助 package.json（如 pi-agent 仅含 dev 工具链）落到 Python 分支，
+        # 避免 prd-workflow 这类"Python + 辅助 Node"项目被误判 pending/static。
+        has_python_signal = (
+            summary.has_pyproject_toml
+            or summary.has_requirements_txt
+            or summary.has_requirements_prod
+            or summary.has_pipfile
+        )
+        if summary.has_package_json and self._is_real_node(summary):
             self._detect_node(summary, result)
-        elif summary.has_pyproject_toml or summary.has_requirements_txt or summary.has_pipfile:
+        elif has_python_signal:
             self._detect_python(summary, result)
+        elif summary.has_package_json and not has_python_signal:
+            # package.json 存在但既非真 Node 也无 Python 工程文件：仍按 Node 兜底尝试
+            self._detect_node(summary, result)
         elif summary.has_index_html:
             self._detect_static(summary, result)
         else:
@@ -283,8 +310,23 @@ class Scanner:
     def _fill_language(self, summary: FileSummary, result: DetectionResult) -> None:
         if summary.has_package_json:
             result.kind = Kind.NODE
-        elif summary.has_pyproject_toml or summary.has_requirements_txt:
+        elif (
+            summary.has_pyproject_toml
+            or summary.has_requirements_txt
+            or summary.has_requirements_prod
+        ):
             result.kind = Kind.PYTHON
+
+    def _is_real_node(self, summary: FileSummary) -> bool:
+        """IMP-013：package.json 是否代表真正的 Node 应用。
+
+        仅当依赖命中 :data:`NODE_FRONTEND`（Vite/React/Vue …）或
+        :data:`NODE_BACKEND`（Express/Nest/Next …）才视为真 Node 项目。仅含
+        ``lodash``/``concurrently``/``husky`` 等辅助工具链的 package.json
+        （如 pi-agent 这类 Python 项目的脚手架）返回 False，让识别落到 Python。
+        """
+        deps_lower = {d.lower() for d in summary.node_deps}
+        return bool(deps_lower & NODE_FRONTEND or deps_lower & NODE_BACKEND)
 
     # ---- 重型数据库 --------------------------------------------------------
 
@@ -298,6 +340,22 @@ class Scanner:
             if base in HEAVY_DATABASES:
                 found.add(base)
         return found
+
+    def _detect_heavy_deps(self, summary: FileSummary, result: DetectionResult) -> None:
+        """IMP-018：命中重运行时依赖（lancedb/torch/openai …）自动升 medium。
+
+        仅向上提升：已为 medium/heavy 的不降级（避免把 streamlit 这类本就 medium
+        的项目误降回 small）。命中即记一条 note，便于 skill/管理页展示原因。
+        """
+        deps_lower = {d.lower().split("[")[0] for d in summary.python_deps}
+        hit = deps_lower & HEAVY_RUNTIMES
+        if not hit:
+            return
+        if result.resourceProfile in (ResourceProfile.TINY, ResourceProfile.SMALL):
+            result.resourceProfile = ResourceProfile.MEDIUM
+            result.notes.append(
+                f"检测到重运行时依赖：{', '.join(sorted(hit))}，资源档位升 medium"
+            )
 
     # ---- SQLite ------------------------------------------------------------
 
@@ -320,7 +378,12 @@ class Scanner:
 
     def _detect_static(self, summary: FileSummary, result: DetectionResult) -> None:
         # 纯静态：有 index.html，没有后端工程文件
-        backend_markers = summary.has_package_json or summary.has_requirements_txt or summary.has_pyproject_toml
+        backend_markers = (
+            summary.has_package_json
+            or summary.has_requirements_txt
+            or summary.has_requirements_prod
+            or summary.has_pyproject_toml
+        )
         if backend_markers:
             return
         result.kind = Kind.STATIC
@@ -398,6 +461,8 @@ class Scanner:
             result.resourceProfile = (
                 ResourceProfile.MEDIUM if set(matched) & heavy_frameworks else ResourceProfile.SMALL
             )
+            # IMP-018：重运行时依赖（lancedb/pyarrow/torch/openai …）自动升 medium。
+            self._detect_heavy_deps(summary, result)
             result.entry = EntryConfig(
                 install=_python_install_command(summary),
                 build=None,
@@ -480,6 +545,9 @@ def _infer_python_port(summary: FileSummary, matched: list[str]) -> int:
 def _python_install_command(summary: FileSummary) -> str:
     if summary.has_uv_lock:
         return "uv sync"
+    # IMP-017：优先 requirements-prod.txt（已剔除测试包的生产依赖清单）。
+    if summary.has_requirements_prod:
+        return "pip install -r requirements-prod.txt"
     if summary.has_requirements_txt:
         return "pip install -r requirements.txt"
     if summary.has_pyproject_toml:

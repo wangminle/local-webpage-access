@@ -39,7 +39,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.4.3-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.4.4-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -181,6 +181,13 @@ def _print_import_result(result, config) -> None:
         typer.secho(
             f"  路径别名：/{result.manifest.static.routeHost}/"
             f"（lwa start 后生效，入口端口 {config.staticGatewayPort}）",
+            fg=typer.colors.CYAN,
+        )
+    # IMP-015：检测到业务 .env.example 时提示用户部署后填写密钥（不自动填）。
+    if (result.app_dir / "current" / ".env.example").is_file():
+        typer.secho(
+            "  检测到 .env.example：部署后会复制为 docker/.env.example；"
+            "业务密钥请填入 docker/.env.local（compose 自动注入，缺失不报错）",
             fg=typer.colors.CYAN,
         )
     # IMP-001：剥离摘要（仅当实际剥离了冗余成员时显示）

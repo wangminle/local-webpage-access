@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import shlex
 from pathlib import Path
 
@@ -55,11 +56,14 @@ def generate_dockerfile(manifest: InstanceManifest, workspace: Workspace) -> Pat
     internal_port = container.internalPort
     out_path = workspace.app_dockerfile_path(manifest.id)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # 构建上下文是 apps/<id>/，业务源码在 current/（IMP-016/017 据此探测
+    # package.json / requirements-prod.txt，决定是否追加 Node 工具链与剥离 pytest）。
+    source_dir = workspace.app_current(manifest.id)
 
     if manifest.kind == Kind.NODE:
         content = _render_node(manifest, internal_port)
     elif manifest.kind == Kind.PYTHON:
-        content = _render_python(manifest, internal_port)
+        content = _render_python(manifest, internal_port, source_dir)
     else:
         # 容器实例只可能是 node/python；兜底用通用 shell 启动
         content = _render_generic(manifest, internal_port)
@@ -107,7 +111,9 @@ def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
 # ---- Python -----------------------------------------------------------------
 
 
-def _render_python(manifest: InstanceManifest, internal_port: int) -> str:
+def _render_python(
+    manifest: InstanceManifest, internal_port: int, source_dir: Path | None = None
+) -> str:
     install = (manifest.entry.install or "pip install -r requirements.txt").strip()
     start = (manifest.entry.start or _PYTHON_DEFAULT_START).strip()
     header = _HEADER.format(
@@ -144,13 +150,49 @@ def _render_python(manifest: InstanceManifest, internal_port: int) -> str:
             f"RUN {install_cmd.replace('pip install', 'pip install --no-cache-dir', 1)}\n"
             "COPY current/ ./"
         )
+    elif install.startswith("pip install -r"):
+        # requirements 路径（默认 / requirements-prod.txt，IMP-017）。
+        # 从 install 命令解析目标文件名，使 COPY 与 RUN 始终一致。
+        req_file = _extract_requirements_file(install)
+        # BUG-083：COPY 目标必须保留 requirements 文件的相对路径，否则嵌套路径
+        # （如 requirements/prod.txt）会被平铺到工作目录根，pip 按原路径安装时找不到。
+        # 显式 mkdir 父目录，保证 COPY 落点与 ``-r <req_file>`` 一致（不依赖 Docker
+        # 对 dest 父目录的隐式创建行为，跨版本可预期）。
+        req_dir = posixpath.dirname(req_file)
+        copy_lines = [f"RUN mkdir -p {req_dir}"] if req_dir else []
+        copy_lines.append(f"COPY current/{req_file} {req_file}")
+        req_copy = "\n".join(copy_lines)
+        if req_file == "requirements.txt":
+            # IMP-017：无独立生产清单时，构建期就地剔除 pytest*（pytest/pytest-cov/
+            # pytest-xdist 等含版本号或 extras 的行），让镜像不含测试包。
+            # python:3.13-slim（Debian）自带 GNU sed，-E 用扩展正则。
+            strip_step = (
+                f"RUN sed -i -E '/^pytest([-_]|[<>=!~]|$)/d' {req_file}\n"
+            )
+            install_run = f"RUN pip install --no-cache-dir -r {req_file}"
+        else:
+            # requirements-prod.txt 已是生产子集，无需剥离。
+            strip_step = ""
+            install_run = f"RUN pip install --no-cache-dir -r {req_file}"
+        install_block = f"{req_copy}\n{strip_step}{install_run}\nCOPY current/ ./"
     else:
-        # requirements.txt 路径（默认）
-        req_copy = "COPY current/requirements.txt ./"
+        # 兜底（无法解析的 install）：按 requirements.txt 处理
         install_block = (
-            f"{req_copy}\n"
+            "COPY current/requirements.txt ./\n"
             f"RUN {install.replace('pip install', 'pip install --no-cache-dir', 1)}"
             + "\nCOPY current/ ./"
+        )
+
+    # IMP-016（WBS-20260708 阶段2.5）：Python 全栈镜像含 Node 运行时。
+    # 源码含 package.json（如 Pi Agent 这类 Python + 辅助 Node 项目）时，追加
+    # nodejs/npm 与 Node 依赖安装，base 仍为 python:3.13-slim。
+    node_block = ""
+    if source_dir is not None and (source_dir / "package.json").is_file():
+        node_block = (
+            "RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm"
+            " && rm -rf /var/lib/apt/lists/*\n"
+            "COPY current/package*.json ./\n"
+            "RUN npm ci --omit=dev || npm install --omit=dev\n"
         )
 
     sqlite_mkdir = ""
@@ -162,6 +204,7 @@ def _render_python(manifest: InstanceManifest, internal_port: int) -> str:
         f"FROM {_PYTHON_IMAGE}",
         "WORKDIR /app",
         install_block,
+        node_block,
         sqlite_mkdir,
         "ENV HOST=0.0.0.0",
         f"ENV PORT={internal_port}",
@@ -169,6 +212,18 @@ def _render_python(manifest: InstanceManifest, internal_port: int) -> str:
         f"CMD {_to_exec_form(start)}",
     ]
     return "\n".join(line for line in lines if line) + "\n"
+
+
+def _extract_requirements_file(install: str) -> str:
+    """从 ``pip install -r <file>`` 命令解析 requirements 文件名（IMP-017）。
+
+    返回 ``requirements.txt`` / ``requirements-prod.txt`` 等；解析失败回退
+    ``requirements.txt``。文件名仅含字母数字与连字符/点，直接内插 Dockerfile 安全。
+    """
+    import re
+
+    m = re.search(r"-r\s+([A-Za-z0-9_./-]+)", install)
+    return m.group(1) if m else "requirements.txt"
 
 
 # ---- 通用兜底 ----------------------------------------------------------------

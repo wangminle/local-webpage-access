@@ -130,7 +130,8 @@ def test_compose_yaml_is_docker_compose_parseable(workspace: Workspace) -> None:
     assert svc["container_name"] == "lwa-api"
     # 端口串含 ${} 插值（解析后是字符串，未被 YAML 误处理）
     assert svc["ports"] == ["${HOST_PORT}:${INTERNAL_PORT}"]
-    assert svc["env_file"] == [".env"]
+    # IMP-015：env_file 含可选 .env.local（对象形式 required:false，缺失不报错）
+    assert svc["env_file"] == [".env", {"path": ".env.local", "required": False}]
     assert svc["volumes"] == ["../data:/app/data"]
     assert svc["mem_limit"] == "${MEMORY_LIMIT:-256m}"
     assert svc["cpus"] == "${CPU_LIMIT:-0.5}"
@@ -219,3 +220,47 @@ def test_compose_and_env_consistent_ports(workspace: Workspace) -> None:
     )
     assert env_vars["HOST_PORT"] == "19500"
     assert env_vars["INTERNAL_PORT"] == "3000"
+
+
+# ---- IMP-015：业务 .env.example 合并 + 多层 env_file ------------------------
+
+
+def test_env_example_copied_to_docker(workspace: Workspace) -> None:
+    """IMP-015：current/.env.example 存在 → 复制为 docker/.env.example。"""
+    workspace.ensure_app_dirs("api")
+    env_example = workspace.app_current("api") / ".env.example"
+    env_example.write_text("API_KEY=changeme\nDB_URL=sqlite:///app.db\n", encoding="utf-8")
+
+    m = _mk_manifest(internal_port=8000)
+    generate_env(m, workspace, host_port=18000)
+
+    copied = workspace.app_env_path("api").parent / ".env.example"
+    assert copied.is_file()
+    assert "API_KEY=changeme" in copied.read_text(encoding="utf-8")
+
+
+def test_env_example_not_overwritten_if_exists(workspace: Workspace) -> None:
+    """IMP-015：docker/.env.example 已存在时不覆盖（保留用户改动）。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / ".env.example").write_text(
+        "SOURCE=upstream\n", encoding="utf-8"
+    )
+    target = workspace.app_env_path("api").parent / ".env.example"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("USER_EDITED=keep\n", encoding="utf-8")
+
+    m = _mk_manifest(internal_port=8000)
+    generate_env(m, workspace, host_port=18000)
+
+    assert target.read_text(encoding="utf-8") == "USER_EDITED=keep\n"
+
+
+def test_env_local_in_compose_env_file(workspace: Workspace) -> None:
+    """IMP-015：compose env_file 含可选 .env.local（required:false，缺失不报错）。"""
+    m = _mk_manifest(internal_port=8000)
+    path = generate_compose(m, workspace, host_port=18000)
+    content = path.read_text(encoding="utf-8")
+    assert "path: .env.local" in content
+    assert "required: false" in content
+    # .env 仍是必需的第一层
+    assert "- .env" in content

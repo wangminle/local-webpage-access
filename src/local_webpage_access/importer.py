@@ -245,6 +245,14 @@ class Importer:
                 else f"导入完成，sha256={zip_hash[:12]}，未识别（pending）"
             )
             self.registry.add_event(instance_id, "import", event_msg)
+            # IMP-015：检测到业务 .env.example 时登记事件，提示用户在部署后填写密钥。
+            if (current_dir / ".env.example").is_file():
+                self.registry.add_event(
+                    instance_id,
+                    "env_example_detected",
+                    "检测到 .env.example：部署后复制为 docker/.env.example，"
+                    "业务密钥请填入 docker/.env.local（compose 自动注入）",
+                )
             # IMP-001：剥离摘要登记为可审计事件（仅当实际剥离了成员时）
             if sanitized is not None and sanitized.stripped_names:
                 parts = ", ".join(
@@ -930,11 +938,17 @@ def build_manifest_from_detection(
             static_kwargs["routeHost"] = path_alias
         kwargs["static"] = StaticConfig(**static_kwargs)
     elif runtime == Runtime.DOCKER_COMPOSE:
+        # IMP-018（WBS-20260708 阶段2.4）：resourceProfile → mem/cpus 映射注入
+        # container.resourceLimits，compose 的 ${MEMORY_LIMIT}/${CPU_LIMIT} 据此生效，
+        # 不再恒为默认 512m（runtime §4.2-P8）。
+        from local_webpage_access.resource_profiles import profile_to_limits
+
         kwargs["container"] = ContainerConfig(
             projectName=f"lwa-{instance_id}",
             internalPort=detection.internalPort or 8000,
             composePath=str(workspace.app_compose_path(instance_id)),
             dockerfilePath=str(workspace.app_dockerfile_path(instance_id)),
+            resourceLimits=profile_to_limits(resource_profile),
         )
 
     manifest = InstanceManifest(**kwargs)

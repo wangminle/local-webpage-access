@@ -44,20 +44,32 @@ class PathAliasResult:
 
 
 def _current_alias(manifest: InstanceManifest) -> str | None:
+    """读取当前别名（静态站点或容器实例，IMP-014 放开容器别名后两者共用）。"""
     static = manifest.static
     if static is not None and static.routeMode == RouteMode.NAME.value and static.routeHost:
         return static.routeHost
+    container = manifest.container
+    if (
+        container is not None
+        and container.routeMode == RouteMode.NAME.value
+        and container.routeHost
+    ):
+        return container.routeHost
     return None
 
 
 def _resolve_host_port(manifest: InstanceManifest) -> tuple[int | None, int | None]:
+    """解析实例对外 hostPort / internalPort（静态站点或容器实例共用）。"""
     host_port: int | None = None
     internal_port: int | None = None
     if manifest.static is not None and manifest.static.hostPort is not None:
         host_port = manifest.static.hostPort
+    if manifest.container is not None and manifest.container.hostPort is not None:
+        host_port = host_port or manifest.container.hostPort
+        internal_port = manifest.container.internalPort
     if manifest.network is not None:
         host_port = host_port or manifest.network.hostPort
-        internal_port = manifest.network.internalPort
+        internal_port = internal_port or manifest.network.internalPort
     return host_port, internal_port
 
 
@@ -66,14 +78,23 @@ def _apply_manifest_alias(
     config: Config,
     alias: str | None,
 ) -> None:
-    """写入 manifest.static / manifest.network（不持久化）。"""
-    static = manifest.static or StaticConfig()
-    manifest.static = static.model_copy(
-        update={
-            "routeMode": (RouteMode.NAME.value if alias else RouteMode.PORT.value),
-            "routeHost": alias,
-        }
-    )
+    """写入 manifest.static（静态站点）或 manifest.container（容器，IMP-014）
+    与 manifest.network（不持久化）。"""
+    new_mode = RouteMode.NAME.value if alias else RouteMode.PORT.value
+    if manifest.runtime == Runtime.DOCKER_COMPOSE:
+        # IMP-014：容器别名写入 container.routeMode/routeHost，registry 容器表据此联动。
+        if manifest.container is not None:
+            manifest.container = manifest.container.model_copy(
+                update={"routeMode": new_mode, "routeHost": alias}
+            )
+    else:
+        static = manifest.static or StaticConfig()
+        manifest.static = static.model_copy(
+            update={
+                "routeMode": new_mode,
+                "routeHost": alias,
+            }
+        )
 
     host_port, internal_port = _resolve_host_port(manifest)
     if host_port is not None:
@@ -132,15 +153,23 @@ def _apply_gateway_alias(
     host_port: int | None,
     *,
     previous_alias: str | None,
+    runtime: str,
 ) -> tuple[bool, bool]:
     """运行中实例同步 Caddy 别名片段。返回 (alias_entry_enabled, gateway_reloaded)。
 
     须在 manifest/registry 落盘**之前**调用：reload 失败时回滚别名片段并抛
     :class:`GatewayError`，调用方不得持久化新别名。
+
+    静态站点（``runtime=shared-static``）仅在 ``gateway.is_enabled`` 时同步，
+    与既有行为一致；容器实例（``runtime=docker-compose``，IMP-014）由 Docker
+    托管进程、不经过 StaticGateway.enable，因此无 ``is_enabled`` 语义，只要
+    Caddy 后端在线且 ``host_port`` 已知即生成别名片段（reverse_proxy hostPort）。
     """
     gateway = StaticGateway(workspace, config)
     backend = gateway.detect_backend()
-    if not gateway.is_enabled(instance_id) or host_port is None:
+    if host_port is None:
+        return False, False
+    if runtime == Runtime.SHARED_STATIC.value and not gateway.is_enabled(instance_id):
         return False, False
 
     if backend == "caddy":
@@ -187,16 +216,17 @@ def set_instance_path_alias(
     instance_id: str,
     alias: str | None,
 ) -> PathAliasResult:
-    """设置或清除 shared-static 实例的路径别名 slug。"""
+    """设置或清除实例的路径别名 slug（IMP-006 静态站点 / IMP-014 容器实例）。"""
     if alias is not None:
         alias = alias.strip() or None
 
     mpath = workspace.app_manifest_path(instance_id)
     manifest = InstanceManifest.load(mpath)
 
-    if manifest.runtime != Runtime.SHARED_STATIC:
+    runtime = manifest.runtime
+    if runtime not in (Runtime.SHARED_STATIC, Runtime.DOCKER_COMPOSE):
         raise RecognitionError(
-            f"路径别名仅支持 shared-static 实例，当前为 {manifest.runtime.value}",
+            f"路径别名仅支持 shared-static / docker-compose 实例，当前为 {runtime.value}",
             instance_id=instance_id,
         )
 
@@ -226,13 +256,18 @@ def set_instance_path_alias(
         alias,
         host_port,
         previous_alias=current,
+        runtime=runtime.value,
     )
 
     _apply_manifest_alias(manifest, config, alias)
     manifest.save(mpath)
 
-    static_dump = manifest.static.model_dump() if manifest.static else {}
-    registry.upsert_static_site(instance_id, static_dump)
+    # 持久化别名到对应子表：静态站点 / 容器实例（IMP-014 容器别名落 containers 表）
+    if runtime == Runtime.DOCKER_COMPOSE and manifest.container is not None:
+        registry.upsert_container(instance_id, manifest.container.model_dump())
+    else:
+        static_dump = manifest.static.model_dump() if manifest.static else {}
+        registry.upsert_static_site(instance_id, static_dump)
     registry.add_event(
         instance_id,
         "path-alias",

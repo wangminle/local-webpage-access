@@ -962,3 +962,76 @@ def test_kind_changed_helper() -> None:
         servingMode=ServingMode.CONTAINER,
     )
     assert Importer._kind_changed(m, diff_dr) is True
+
+
+# ---- IMP-018：build_manifest 注入资源档位限制 ------------------------------
+
+
+def test_build_manifest_injects_profile_limits(workspace: Workspace) -> None:
+    """IMP-018：medium 档位 → container.resourceLimits = 1g/1.5。"""
+    from local_webpage_access.importer import build_manifest_from_detection
+    from local_webpage_access.models import EntryConfig, ResourceProfile
+    from local_webpage_access.scanner import DetectionResult
+
+    detection = DetectionResult(
+        kind=Kind.PYTHON,
+        runtime=Runtime.DOCKER_COMPOSE,
+        servingMode=ServingMode.CONTAINER,
+        resourceProfile=ResourceProfile.MEDIUM,
+        internalPort=8000,
+        entry=EntryConfig(install="pip install -r requirements.txt", start="uvicorn main:app"),
+        confidence="high",
+    )
+    manifest = build_manifest_from_detection(
+        instance_id="api",
+        display_name="api",
+        detection=detection,
+        workspace=workspace,
+    )
+    assert manifest.container is not None
+    assert manifest.container.resourceLimits.memory == "1g"
+    assert manifest.container.resourceLimits.cpus == "1.5"
+
+
+def test_build_manifest_small_profile_uses_small_limits(workspace: Workspace) -> None:
+    """IMP-018：small 档位 → 256m/0.5（不再是恒定默认 512m）。"""
+    from local_webpage_access.importer import build_manifest_from_detection
+    from local_webpage_access.models import EntryConfig, ResourceProfile
+    from local_webpage_access.scanner import DetectionResult
+
+    detection = DetectionResult(
+        kind=Kind.PYTHON,
+        runtime=Runtime.DOCKER_COMPOSE,
+        servingMode=ServingMode.CONTAINER,
+        resourceProfile=ResourceProfile.SMALL,
+        internalPort=8000,
+        entry=EntryConfig(install="pip install -r requirements.txt", start="uvicorn main:app"),
+        confidence="high",
+    )
+    manifest = build_manifest_from_detection(
+        instance_id="api",
+        display_name="api",
+        detection=detection,
+        workspace=workspace,
+    )
+    assert manifest.container.resourceLimits.memory == "256m"
+
+
+# ---- IMP-015：导入检测 .env.example 登记事件 ------------------------------
+
+
+def test_import_env_example_records_event(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """IMP-015：zip 含 .env.example → 导入后登记 env_example_detected 事件。"""
+    zip_path = _make_zip(
+        tmp_path / "demo.zip",
+        {
+            "requirements.txt": "fastapi\n",
+            ".env.example": "API_KEY=changeme\n",
+        },
+    )
+    result = importer.import_zip(zip_path)
+    events = importer.registry.list_events(result.instance_id)
+    types = [e.get("event_type") for e in events]
+    assert "env_example_detected" in types

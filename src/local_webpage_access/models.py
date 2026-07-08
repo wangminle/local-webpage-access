@@ -121,6 +121,10 @@ class ContainerConfig(BaseModel):
     composePath: str
     dockerfilePath: str
     resourceLimits: ResourceLimits = Field(default_factory=ResourceLimits)
+    # IMP-014（WBS-20260708 阶段3.1）：容器实例路径别名，镜像 static 的 routeMode/routeHost，
+    # 让 registry containers 表与别名统一入口（reverse_proxy hostPort）联动。
+    routeMode: str = RouteMode.PORT.value
+    routeHost: str | None = None
 
 
 class NetworkConfig(BaseModel):

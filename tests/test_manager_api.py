@@ -742,23 +742,31 @@ def test_path_alias_rejects_duplicate_slug(manager_env: EnvBundle) -> None:
     assert "占用" in resp2.json()["error"]["message"]
 
 
-def test_path_alias_rejects_non_static_instance(manager_env: EnvBundle) -> None:
+def test_path_alias_accepts_container_instance(manager_env: EnvBundle) -> None:
+    """IMP-014：容器实例（docker-compose）也可设置路径别名，写入 container.routeHost。"""
+    from local_webpage_access.models import InstanceManifest
     from tests._helpers import make_container_manifest
 
     ws = manager_env.workspace
     cid = "api-alias-test"
     ws.ensure_app_dirs(cid)
     manifest = make_container_manifest(cid)
+    # 容器需有 hostPort，别名 reverse_proxy 才有目标端口
+    manifest.container.hostPort = 21100
     manifest.save(ws.app_manifest_path(cid))
     manager_env.registry.upsert_from_manifest(manifest)
 
     resp = manager_env.client.patch(
         f"/api/instances/{cid}/path-alias",
         headers=manager_env.auth_headers(),
-        json={"alias": "should-fail"},
+        json={"alias": "api-alias"},
     )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "bad_request"
+    assert resp.status_code == 200
+    # 别名已落 manifest.container.routeMode/routeHost（IMP-014）
+    reloaded = InstanceManifest.load(ws.app_manifest_path(cid))
+    assert reloaded.container is not None
+    assert reloaded.container.routeMode == "name"
+    assert reloaded.container.routeHost == "api-alias"
 
 
 def test_path_alias_missing_field(manager_env: EnvBundle) -> None:

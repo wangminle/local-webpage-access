@@ -31,11 +31,14 @@ log = get_logger("compose")
 _SERVICE_NAME = "app"
 _DATA_VOLUME = "../data:/app/data"
 _SQLITE_DB_URL = "sqlite:////app/data/app.sqlite"
+# IMP-015：业务密钥可选注入文件（用户按 docker/.env.example 填写后放入 docker/.env.local）。
+# 用 Compose env_file 的对象形式 required:false，缺失时不报错（WBS-20260708 阶段3.2 决策）。
+_ENV_LOCAL_BLOCK = "      - path: .env.local\n        required: false\n"
 
 _COMPOSE_TEMPLATE = """\
 # 由 lwa 自动生成，请勿手动编辑。
 # 实例：{instance_id}（host_port={host_port}, internal_port={internal_port}）
-# 端口/资源/DATABASE_URL 来自同目录 .env。
+# 端口/资源/DATABASE_URL 来自同目录 .env；业务密钥可放 .env.local（可选，缺失不报错）。
 name: {project_name}
 services:
   {service}:
@@ -47,7 +50,7 @@ services:
       - "${{HOST_PORT}}:${{INTERNAL_PORT}}"
     env_file:
       - .env
-    volumes:
+{env_local_block}    volumes:
       - {data_volume}
     mem_limit: ${{MEMORY_LIMIT:-{memory}}}
     cpus: "${{CPU_LIMIT:-{cpus}}}"
@@ -85,6 +88,7 @@ def generate_compose(
         data_volume=_DATA_VOLUME,
         memory=limits.memory,
         cpus=limits.cpus,
+        env_local_block=_ENV_LOCAL_BLOCK,
     )
     # WBS-25.03/04/05：自检生成的 compose 是否含 critical 安全问题
     # （模板本身安全；此检查防止模板被改动或 skill 覆盖后引入风险）。
@@ -136,6 +140,20 @@ def generate_env(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     log.info("已生成 .env：%s", out_path)
+
+    # IMP-015（WBS-20260708 阶段3.2）：业务 .env.example 复制为 docker/.env.example。
+    # 用户据此填写 docker/.env.local（由 compose env_file 的 required:false 可选注入）。
+    # 不覆盖已存在的 .env.example（避免吞掉用户改动）；不自动填密钥。
+    import shutil
+
+    source_env_example = workspace.app_current(manifest.id) / ".env.example"
+    target_env_example = out_path.parent / ".env.example"
+    if source_env_example.is_file() and not target_env_example.exists():
+        try:
+            shutil.copy2(source_env_example, target_env_example)
+            log.info("已复制业务 .env.example → %s", target_env_example)
+        except OSError as exc:
+            log.warning("复制 .env.example 失败（忽略）：%s", exc)
     return out_path
 
 

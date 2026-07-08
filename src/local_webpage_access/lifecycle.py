@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 import shutil
 import sys
 import threading
@@ -251,8 +252,14 @@ def start_instance(
         manifest = _load(workspace, instance_id)
         if _is_deployed_container(manifest):
             log.info("实例 %s 已部署，使用轻量 start", instance_id)
-            return start_container(workspace, config, registry, instance_id)
-        return host_instance(workspace, config, registry, instance_id)
+            manifest = start_container(workspace, config, registry, instance_id)
+        else:
+            manifest = host_instance(workspace, config, registry, instance_id)
+        # BUG-084 / IMP-021：首次启动前设置的容器别名此时才拿到 hostPort，
+        # 同步生成别名片段（端口漂移时也会重写）；静态别名由 _enable_static 处理，
+        # 此处对其为 no-op（conf 已是正确端口）。
+        _sync_alias_port(workspace, config, instance_id, manifest)
+        return manifest
 
 
 def stop_instance_op(
@@ -280,6 +287,7 @@ def restart_instance(
     """重启实例（WBS-17.03）：先 stop 再 start。
 
     在同一把锁内完成，保证原子性。已部署的容器走轻量 start，不重建镜像。
+    IMP-021：重启后若实例有路径别名且 hostPort 发生漂移，重写别名片段并 reload。
     """
     from local_webpage_access.hosting import (
         host_instance,
@@ -297,8 +305,12 @@ def restart_instance(
             log.warning("restart 前停止失败（忽略并继续启动）：%s", exc)
 
         if deployed_container:
-            return start_container(workspace, config, registry, instance_id)
-        return host_instance(workspace, config, registry, instance_id)
+            manifest = start_container(workspace, config, registry, instance_id)
+        else:
+            manifest = host_instance(workspace, config, registry, instance_id)
+        # IMP-021：容器别名入口 reverse_proxy 到 hostPort，端口漂移时同步别名片段。
+        _sync_alias_port(workspace, config, instance_id, manifest)
+        return manifest
 
 
 def recover_instance(
@@ -366,7 +378,10 @@ def rebuild_instance(
             return host_instance(workspace, config, registry, iid)
 
         queue = get_build_queue(config, registry)
-        return queue.run(instance_id, _builder)
+        manifest = queue.run(instance_id, _builder)
+        # IMP-021：重建后端口可能漂移，同步别名片段（容器别名 reverse_proxy hostPort）。
+        _sync_alias_port(workspace, config, instance_id, manifest)
+        return manifest
 
 
 def remove_instance(
@@ -531,6 +546,56 @@ def remove_redundant(
             log.warning("移除冗余实例 %s 失败（跳过）：%s", iid, exc)
     log.info("冗余清理完成：移除 %d / 目标 %d", len(removed), len(targets))
     return removed
+
+
+# ---- IMP-021：端口漂移时同步别名片段 ----------------------------------------
+
+
+def _sync_alias_port(
+    workspace: Workspace,
+    config: Config,
+    instance_id: str,
+    manifest: InstanceManifest,
+) -> bool:
+    """IMP-021（WBS-20260708 阶段3.4）：容器/静态实例重启后若 hostPort 漂移，
+    重写路径别名片段并 reload，避免别名入口 reverse_proxy 到已失效的旧端口。
+
+    仅在 Caddy 后端、实例已配置别名、且别名片段记录的端口与当前 hostPort 不一致
+    （或片段缺失）时触发；端口未变化为空操作（避免无谓 reload）。reload 失败仅记
+    WARN——别名片段已按正确端口落盘，下次 ``caddy start``/reload 会加载它。
+    """
+    from local_webpage_access.path_alias import _current_alias, _resolve_host_port
+    from local_webpage_access.static_gateway import StaticGateway
+
+    gateway = StaticGateway(workspace, config)
+    if gateway.detect_backend() != "caddy":
+        return False
+    alias = _current_alias(manifest)
+    host_port, _ = _resolve_host_port(manifest)
+    if not alias or host_port is None:
+        return False
+
+    conf_path = workspace.app_alias_config(instance_id)
+    if conf_path.is_file():
+        try:
+            text = conf_path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        m = re.search(r"127\.0\.0\.1:(\d+)", text)
+        if m and int(m.group(1)) == host_port:
+            return False  # 端口未漂移，别名片段仍有效
+    try:
+        gateway.generate_alias_config(instance_id, alias, host_port)
+        gateway.reload_all()
+        log.info(
+            "实例 %s 别名片段已按新端口 %d 重写并 reload（IMP-021）",
+            instance_id,
+            host_port,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — 别名同步失败不阻断主流程
+        log.warning("同步实例 %s 别名端口失败：%s", instance_id, exc)
+        return False
 
 
 # ---- status 观测与回写（WBS-17.07）-----------------------------------------

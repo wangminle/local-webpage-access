@@ -365,8 +365,12 @@ def host_container(
 
     # 8. 更新 manifest + registry（先 upsert，再 record_health_check，
     #    否则 upsert_from_manifest 会用 manifest 的 lastHealthCheckAt=None 覆盖 DB 时间戳）
+    # BUG-084：写回 network 时保留容器已配置的路径别名，否则别名入口对状态/API 不可见。
     entry = build_network_entry(
-        config, host_port, internal_port=manifest.container.internalPort
+        config,
+        host_port,
+        internal_port=manifest.container.internalPort,
+        path_alias=_container_path_alias(manifest),
     )
     manifest.network = NetworkConfig(**entry)
     manifest.status = Status.RUNNING
@@ -440,8 +444,12 @@ def start_container(
     manifest.container.imageId = image_id
 
     # 更新 manifest + registry
+    # BUG-084：写回 network 时保留容器路径别名（与 host_container 一致）。
     entry = build_network_entry(
-        config, host_port, internal_port=manifest.container.internalPort
+        config,
+        host_port,
+        internal_port=manifest.container.internalPort,
+        path_alias=_container_path_alias(manifest),
     )
     manifest.network = NetworkConfig(**entry)
     manifest.status = Status.RUNNING
@@ -501,6 +509,19 @@ def stop_container(
 
 
 # ---- 容器辅助 --------------------------------------------------------------
+
+
+def _container_path_alias(manifest: InstanceManifest) -> str | None:
+    """读取容器实例已配置的路径别名（IMP-014）。
+
+    host_container / start_container 写回 ``manifest.network`` 时据此保留
+    ``routeMode=name`` + ``routeHost`` + ``routeUrl``，避免重建 network 后别名
+    丢失（BUG-084：状态/API 经 network 读别名，丢失后入口不可见）。
+    """
+    c = manifest.container
+    if c is not None and c.routeMode == RouteMode.NAME.value and c.routeHost:
+        return c.routeHost
+    return None
 
 
 def _ensure_container_port(
