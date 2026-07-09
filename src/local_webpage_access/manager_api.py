@@ -8,8 +8,12 @@
 * ``GET  /api/instances/{id}/logs?category=&tail=``（WBS-22.07）
 * ``GET  /api/instances/{id}/resources``
 * ``POST /api/instances/{id}/{start|stop|restart|rebuild}``（WBS-22.08）
+* ``POST /api/instances/{id}/recover``             —— 一键恢复（DEV-043）
+* ``POST /api/instances/{id}/remove``              —— 移除实例（IMP-019）
 * ``GET  /api/pending``          —— pending / 导入队列（WBS-22.09）
 * ``GET  /api/port-pool``        —— 端口池占用（WBS-22.10）
+* ``GET  /api/redundant``        —— 冗余实例列表（IMP-019 / WBS-22.13）
+* ``POST /api/redundant/remove`` —— 批量移除冗余实例（IMP-019 / WBS-22.13）
 
 所有 ``/api/*`` 路由（除 ``/api/health`` 外）都要求 API token（WBS-22.12）。
 静态资源（管理页前端）由 ``/`` 托管（WBS-22.02），前端实现在 WBS-23。
@@ -261,6 +265,7 @@ def create_app(
     app.state.config = config
     app.state.registry = registry
     app.state.token = token
+    app.state.pageview_store = None  # IMP-024：懒加载的 PageviewStore 单例
 
     # ---- 异常处理器：LwaError → 统一错误格式 ----
     @app.exception_handler(LwaError)
@@ -350,11 +355,24 @@ def _register_routes(app: FastAPI) -> None:
     # ---- 实例列表（WBS-22.03）----
     @app.get("/api/instances", dependencies=[api], tags=["instances"])
     def list_instances() -> dict[str, Any]:
+        from local_webpage_access.lifecycle import list_redundant_instances
+
         ctx = _Ctx(app)
         # 先观测回写，再取快照（状态尽量新鲜）
         sync_status(ctx.workspace, ctx.config, ctx.registry)
         statuses = all_statuses(ctx.workspace, ctx.config, ctx.registry)
-        return {"instances": [s.to_dict() for s in statuses]}
+        # IMP-019（WBS-22.13）：标注冗余实例（同 zip 指纹分组中非最早者），
+        # 前端据此显示冗余徽章 / 黄色边框 / 行内删除。
+        redundant_ids = {
+            r["id"]
+            for r in list_redundant_instances(ctx.workspace, ctx.registry)
+        }
+        items: list[dict[str, Any]] = []
+        for snap in statuses:
+            data = snap.to_dict()
+            data["redundant"] = snap.id in redundant_ids
+            items.append(data)
+        return {"instances": items}
 
     # ---- 实例详情（WBS-22.04）----
     @app.get("/api/instances/{instance_id}", dependencies=[api], tags=["instances"])
@@ -471,6 +489,35 @@ def _register_routes(app: FastAPI) -> None:
         from local_webpage_access.lifecycle import recover_instance
 
         return _lifecycle_op(instance_id, recover_instance, label="recover")
+
+    @app.post(
+        "/api/instances/{instance_id}/remove",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def remove_op(
+        instance_id: str,
+        purge: bool = Query(False, description="同时删除实例磁盘数据"),
+        force: bool = Query(False, description="强制移除（跳过 data/ 非空检查）"),
+    ) -> dict[str, Any]:
+        """IMP-019：移除单个实例（管理页行内删除 / 冗余清理）。
+
+        默认仅停服 + 清 registry，保留 ``apps/<id>/``；``purge=true`` 额外删磁盘，
+        data/ 非空时须同时 ``force=true``。
+        """
+        from local_webpage_access.lifecycle import remove_instance
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+        remove_instance(
+            ctx.workspace,
+            ctx.config,
+            ctx.registry,
+            instance_id,
+            purge=purge,
+            force=force,
+        )
+        return {"instanceId": instance_id, "action": "remove"}
 
     @app.post(
         "/api/instances/{instance_id}/update",
@@ -631,8 +678,93 @@ def _register_routes(app: FastAPI) -> None:
         ctx = _Ctx(app)
         return {"portPool": _port_pool_summary(ctx)}
 
+    # ---- 浏览量统计（IMP-024 / DEV-061）----
+    @app.get("/api/pageviews", dependencies=[api], tags=["pageviews"])
+    def get_pageviews() -> dict[str, Any]:
+        """IMP-024：所有实例浏览量汇总。惰性摄入最新日志后返回。"""
+        from local_webpage_access.pageviews import ingest_all
+
+        ctx = _Ctx(app)
+        store = _pageview_store(app)
+        try:
+            ingest_all(ctx.workspace, ctx.config, ctx.registry, store)
+        except Exception as exc:  # noqa: BLE001 — 摄入失败不阻断，返回已聚合数据
+            log.debug("浏览量摄入失败：%s", exc)
+        return {"instances": store.summary()}
+
+    @app.get(
+        "/api/instances/{instance_id}/pageviews",
+        dependencies=[api],
+        tags=["pageviews"],
+    )
+    def get_instance_pageviews(
+        instance_id: str, limit: int = Query(50, ge=1, le=500)
+    ) -> dict[str, Any]:
+        """IMP-024：单实例浏览量详情（按天分布 + 最近命中明细）。"""
+        from local_webpage_access.pageviews import ingest_all
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+        store = _pageview_store(app)
+        try:
+            ingest_all(ctx.workspace, ctx.config, ctx.registry, store)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("浏览量摄入失败（%s）：%s", instance_id, exc)
+        return store.detail(instance_id, limit=limit)
+
+    # ---- 冗余实例（IMP-019 / WBS-22.13）----
+    @app.get("/api/redundant", dependencies=[api], tags=["instances"])
+    def list_redundant() -> dict[str, Any]:
+        """IMP-019：列出冗余实例（同 zip 指纹分组中非最早者）。
+
+        返回 ``{"instances": [...], "count": N}``，每项含
+        ``id`` / ``name`` / ``sourceZipHash`` / ``createdAt``，按 createdAt 升序。
+        """
+        from local_webpage_access.lifecycle import list_redundant_instances
+
+        ctx = _Ctx(app)
+        redundant = list_redundant_instances(ctx.workspace, ctx.registry)
+        return {
+            "instances": [_camelize_keys(r) for r in redundant],
+            "count": len(redundant),
+        }
+
+    @app.post("/api/redundant/remove", dependencies=[api], tags=["instances"])
+    def remove_redundant_op(
+        purge: bool = Query(False, description="同时删除实例磁盘数据"),
+        force: bool = Query(False, description="强制移除（跳过 data/ 非空检查）"),
+    ) -> dict[str, Any]:
+        """IMP-019：批量移除冗余实例（保留每组最早者），返回被移除的 id 列表。"""
+        from local_webpage_access.lifecycle import remove_redundant
+
+        ctx = _Ctx(app)
+        removed = remove_redundant(
+            ctx.workspace,
+            ctx.config,
+            ctx.registry,
+            purge=purge,
+            force=force,
+        )
+        return {
+            "action": "remove-redundant",
+            "removed": removed,
+            "count": len(removed),
+        }
+
 
 # ---- 辅助 -------------------------------------------------------------------
+
+
+def _pageview_store(app: FastAPI) -> Any:
+    """IMP-024：懒加载并复用管理页进程内的 :class:`PageviewStore` 单例。"""
+    store = app.state.pageview_store
+    if store is None:
+        from local_webpage_access.pageviews import PageviewStore
+
+        ws: Workspace = app.state.workspace
+        store = PageviewStore.for_workspace(ws)
+        app.state.pageview_store = store
+    return store
 
 
 def _port_pool_summary(ctx: _Ctx) -> dict[str, Any]:

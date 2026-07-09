@@ -8,6 +8,8 @@
 
 **命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 15 个），避免与其他项目的 skill 撞名。
 
+日常运维（网关选型、冗余清理、容器别名、浏览量）见仓库 [`docs/operations-playbook.md`](../../../../docs/operations-playbook.md)。
+
 ## 总览
 
 | Skill | 触发场景 | 输出 |
@@ -20,7 +22,7 @@
 | [`lwa-dockerize-node-app`](lwa-dockerize-node-app/SKILL.md) | Node 后端容器化 | 生成 `Dockerfile` |
 | [`lwa-dockerize-python-app`](lwa-dockerize-python-app/SKILL.md) | Python 后端容器化 | 生成 `Dockerfile` |
 | [`lwa-dockerize-fullstack-sqlite`](lwa-dockerize-fullstack-sqlite/SKILL.md) | 全栈 + SQLite 容器化 | 生成 `Dockerfile` + `docker-compose.yml` |
-| [`lwa-generate-static-gateway-config`](lwa-generate-static-gateway-config/SKILL.md) | 静态实例需网关 | 生成 Caddy/nginx 配置 |
+| [`lwa-generate-static-gateway-config`](lwa-generate-static-gateway-config/SKILL.md) | 静态实例需网关 | 核对/触发生成 `sites/<id>.conf`（主 Caddyfile 由 lwa 组装） |
 | [`lwa-generate-compose`](lwa-generate-compose/SKILL.md) | 多服务需编排 | 生成 `docker-compose.yml` |
 | [`lwa-fix-docker-build-failure`](lwa-fix-docker-build-failure/SKILL.md) | 构建失败 | 诊断 + 修复 `Dockerfile`/依赖 |
 | [`lwa-fix-container-startup-failure`](lwa-fix-container-startup-failure/SKILL.md) | 容器启动失败 | 诊断 + 修复启动配置 |

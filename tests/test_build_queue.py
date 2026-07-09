@@ -481,3 +481,85 @@ def test_reset_global_queue_clears_singleton(registry, config) -> None:
     _reset_global_queue()
     q2 = get_build_queue(config, registry)
     assert q1 is not q2
+
+
+# ---- DEV-047：跨进程互斥 ----------------------------------------------------
+#
+# 进程内 BoundedSemaphore 只在单进程生效；CLI/管理页/daemon 三个独立进程触发
+# rebuild 时必须靠 CrossProcessBuildGate（共享 SQLite DB）串行化。
+
+
+def test_cross_process_gate_serializes_two_processes(tmp_path) -> None:
+    """两个独立进程连同一闸门 DB：一方持槽位时另一方拿不到（跨进程互斥）。"""
+    import subprocess
+    import sys
+
+    from local_webpage_access.build_queue import CrossProcessBuildGate
+
+    db = tmp_path / "build-locks.db"
+    gate = CrossProcessBuildGate(db, 1)
+    parent_slot = gate.acquire("parent", 2.0)
+    assert parent_slot == 0
+
+    # 子进程尝试以短超时获取 → 必须超时失败（父进程占着唯一槽位）
+    child_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from local_webpage_access.build_queue import CrossProcessBuildGate\n"
+        f"db = Path({str(db)!r})\n"
+        "g = CrossProcessBuildGate(db, 1)\n"
+        "slot = g.acquire('child', 0.6)\n"
+        "sys.stdout.write('SLOT=' + str(slot) + '\\n')\n"
+        "if slot is not None:\n"
+        "    g.release(slot)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child_script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert "SLOT=None" in result.stdout, (
+        f"子进程不应在父进程持槽时获取到：{result.stdout!r} {result.stderr!r}"
+    )
+
+    # 父进程释放后，子进程应能获取
+    gate.release(parent_slot)
+    result2 = subprocess.run(
+        [sys.executable, "-c", child_script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert "SLOT=0" in result2.stdout, (
+        f"释放后子进程应获取槽位 0：{result2.stdout!r} {result2.stderr!r}"
+    )
+    gate.close()
+
+
+def test_cross_process_gate_reclaims_dead_holder_slot(tmp_path) -> None:
+    """持有槽位的进程崩溃（未 release）后，槽位应被按 pid 存活性回收。"""
+    import subprocess
+    import sys
+
+    from local_webpage_access.build_queue import CrossProcessBuildGate
+
+    db = tmp_path / "build-locks.db"
+    # 子进程获取槽位后立即退出（不 release）→ 模拟崩溃
+    leak_script = (
+        "from pathlib import Path\n"
+        "from local_webpage_access.build_queue import CrossProcessBuildGate\n"
+        f"g = CrossProcessBuildGate(Path({str(db)!r}), 1)\n"
+        "g.acquire('leaker', 2.0)\n"
+        # 进程退出，slot 行残留
+    )
+    subprocess.run(
+        [sys.executable, "-c", leak_script], capture_output=True, timeout=15, check=True
+    )
+
+    gate = CrossProcessBuildGate(db, 1)
+    # acquire 时应回收死进程的槽位并获取成功
+    slot = gate.acquire("after", 2.0)
+    assert slot == 0
+    gate.release(slot)
+    gate.close()

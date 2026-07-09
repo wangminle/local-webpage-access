@@ -245,6 +245,18 @@ def set_instance_path_alias(
     if alias is not None:
         existing = set(registry.list_route_hosts(exclude_instance=instance_id).keys())
         validate_path_alias(alias, existing_aliases=existing)
+        # IMP-022（WBS-20260708 阶段4.1）：路径别名依赖 Caddy 统一入口
+        # （:{staticGatewayPort} 的 import 块），builtin 多端口模式无统一入口，
+        # 别名设置了也访问不到。显式拦截，不再无声写元数据造成「设置成功但访问失败」。
+        # 清除别名（alias=None）在 builtin 下仍允许（清除恒安全）。
+        backend = StaticGateway(workspace, config).detect_backend()
+        if backend != "caddy":
+            raise RecognitionError(
+                f"路径别名需要 Caddy 网关统一入口，当前静态后端为 {backend}（无 "
+                f":{config.staticGatewayPort} 别名入口）。请先 `lwa gateway on` 启用 "
+                f"Caddy（或安装 caddy 可执行文件），或继续通过 hostPort 端口直达。",
+                instance_id=instance_id,
+            )
 
     host_port, _ = _resolve_host_port(manifest)
 

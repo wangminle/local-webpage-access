@@ -45,7 +45,7 @@
 | fastapi / uvicorn | ≥ 0.138.0 / ≥ 0.45.0 | 始终（`pip install -e .`） |
 | Docker | ≥ 29.0.0 | 容器实例 |
 | Docker Compose | ≥ 2.40.2，推荐 ≥ 5.2.0（[docker/compose](https://github.com/docker/compose)） | 容器实例 |
-| Caddy | ≥ 2.10.0 | Caddy 模式；缺失时 `staticGateway=caddy` 会降级 builtin |
+| Caddy | ≥ 2.10.0 | **路径别名 / 统一入口 / 别名入口浏览量（IMP-024）** 的硬依赖：需 `staticGateway=caddy`、Caddy 在 PATH、并 `lwa gateway on`。仅临时预览、不用别名时，缺失会降级 `builtin`（每实例独立 hostPort；`lwa alias set` 会被 IMP-022 拦截） |
 | Node.js | ≥ 24（推荐） | 前端 SPA 构建 |
 
 ## 处理流程
@@ -64,8 +64,10 @@
 若用户**只做静态 HTML**、不用容器：
 
 - Docker / Compose 可暂不装；
-- 将 `local-web.yml` 的 `staticGateway` 设为 `builtin` 可跳过 Caddy；
+- 将 `local-web.yml` 的 `staticGateway` 设为 `builtin` 可跳过 Caddy——但**不能使用路径别名**，也无 Caddy 别名入口浏览量；需要 `/<slug>/` 统一入口时请安装 Caddy 并 `lwa gateway on`；
 - Node 仅在前端 SPA 时需要。
+
+选型细节见 [运维手册](../../../../docs/operations-playbook.md)。
 
 ## 开机自启（可选）
 
@@ -75,7 +77,7 @@
   `~/Library/LaunchAgents/com.fenix.lwa.{daemon,manager[,gateway]}.plist`，再按提示
   `launchctl load <plist>` 启用（OPS-025）。plist 登录时幂等执行对应 `on` 命令，
   不与 `lwa X off` 冲突。
-- **Linux / Windows**：`lwa setup --autostart` 会报错并指引；参考 [开机自启文档](../../../docs/autostart.md)
+- **Linux / Windows**：`lwa setup --autostart` 会报错并指引；参考 [开机自启文档](../../../../docs/autostart.md)
   的 systemd user service / 任务计划程序模板自行配置。
 
 ## 示例对话

@@ -57,3 +57,23 @@ Vite + React 项目：
   "entry": { "install": "npm ci", "build": "npm run build" }
 }
 ```
+
+## IMP-023：路径别名下的 SPA 资源 base（V0.4.4 起）
+
+若该前端实例会配置**路径别名**（`http://<LAN-IP>:<gatewayPort>/<alias>/`），
+**必须在构建时设置正确的 base**，否则子路径下绝对资源路径会 404 白屏：
+
+- 别名 `reverse_proxy` 会去掉 `/<alias>/` 前缀转发到 upstream，因此
+  **相对路径资源**（`./assets/...`、`assets/...`）能正确解析为 `/<alias>/assets/...`；
+- 但 **绝对路径资源**（`/assets/...`，即 `base: '/'`）会绕过别名直接打到入口根 → 404。
+
+按框架设置（构建产物里资源引用变为相对路径或带 `/<alias>/` 前缀）：
+
+- **Vite**：`vite.config.js` 设 `base: './'`（相对，推荐，别名无关），或
+  `base: '/<alias>/'`（绑定特定别名）。
+- **CRA**：不支持相对 base，需 `PUBLIC_URL=/<alias>` 构建。
+- **Next 静态导出**：`next.config.js` 设 `assetPrefix: '/<alias>/'` +
+  `trailingSlash: true`。
+
+纯静态 HTML（相对路径或无外部资源）不受影响，无需调整。
+`lwa alias set` 成功后会输出此提示；如已用绝对 base 托管，改用 hostPort 端口直达可绕过该限制。

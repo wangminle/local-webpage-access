@@ -84,10 +84,18 @@ status: pending
 处理：`lwa scan <id>` 重新识别；仍 pending 时检查 `local-web.json` 的 `lastError`，
 或手工补特征文件后重扫。pending 实例会写入「未知 zip 来源」风险提示事件。
 
-### slug 冲突
+### slug 冲突与冗余实例
 
-同名 zip 重复导入时，`lwa` 自动追加序号（`my-site`、`my-site-2`、`my-site-3`），
-不会覆盖既有实例。如需替换，先 `lwa remove <旧实例> --purge`。
+* **手动 `lwa import`**：同名 slug 已存在时会**报错**，提示使用 `lwa import <zip> --update <id>` 原地升级；不会静默覆盖，也不会自动建 `my-site-2`。
+* **daemon 自动导入（IMP-011）**：slug 冲突时记 `import_conflict` 事件并提示 `--update`，**不再**自动追加 `-2/-3`；导入成功后 zip 会移入 `inbox/processed/`。
+* **同包重复导入**：同一 zip 指纹（`sourceZipHash`）会产生冗余实例。清理：
+
+  ```bash
+  lwa remove --redundant          # 预览并清理（保留每组最早者）
+  lwa remove --redundant --purge  # 连磁盘一起清
+  ```
+
+  或在管理页勾选「仅冗余」后行内删除 /「批量删除冗余」。详见 [运维手册](operations-playbook.md)。
 
 ## 容器类问题
 

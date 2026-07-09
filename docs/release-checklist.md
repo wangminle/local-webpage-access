@@ -4,9 +4,9 @@
 
 ## 代码与版本
 
-- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `1.0.0`）。
-- [ ] `src/local_webpage_access/cli.py` 的 `version` 命令读取该版本号。
-- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」）。
+- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.5.0` / `1.0.0`）。
+- [ ] `src/local_webpage_access/cli/` 包入口（`cli/__init__.py` 的 `version` 命令 / `version_info.py`）读取该版本号；`python -m local_webpage_access` 与 `python -m local_webpage_access.cli` 均可调用。
+- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册索引）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。
 
 ## 测试
@@ -19,12 +19,13 @@
 
 ## 文档
 
-- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、skills）。
-- [ ] [docs/manager-page.md](manager-page.md) API 端点表与实际路由一致。
-- [ ] [docs/faq.md](faq.md) 覆盖导入/容器/管理页/端口/磁盘各类排障。
+- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、skills、浏览量、冗余、运维手册索引）。
+- [ ] [docs/manager-page.md](manager-page.md) API 端点表与实际路由一致（含 pageviews / redundant / remove / path-alias IMP-022）。
+- [ ] [docs/operations-playbook.md](operations-playbook.md) 与网关选型 / 冗余 / 容器别名 / Caddy 排障一致。
+- [ ] [docs/faq.md](faq.md) 覆盖导入/容器/管理页/端口/磁盘各类排障（含 slug 冲突与 `--update`，不再写自动 `-2/-3`）。
 - [ ] [docs/security-boundary.md](security-boundary.md) 审计项与 `security.py` 实现一致。
-- [ ] [docs/known-limitations.md](known-limitations.md) 明确 V1 不支持范围。
-- [ ] [docs/testing.md](testing.md) 测试分层与跳过条件准确。
+- [ ] [docs/known-limitations.md](known-limitations.md) 明确 V1 不支持范围（含 `.env.local`、冗余批量例外）。
+- [ ] [docs/testing.md](testing.md) 测试分层与跳过条件准确（含 pageviews / build_queue / zip_processor）。
 - [ ] [docs/acceptance-checklist.md](acceptance-checklist.md) 18 个子任务有结论。
 
 ## 安装与冒烟

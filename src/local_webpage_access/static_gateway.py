@@ -553,6 +553,18 @@ class StaticGateway:
             lines.append("")
             lines.append(f"# IMP-006 路径别名统一入口（端口 {port}，去前缀反向代理）")
             lines.append(f":{port} {{")
+            # IMP-024：统一入口块开启 JSON access log，供浏览量统计
+            # （pageviews.py）按 ``/<alias>/`` 前缀归属到实例。仅别名入口流量
+            # 计入浏览量；直连 hostPort 的访问不计（hostPort 多用于本机预览）。
+            access_log = self.ws.logs / "static-access.log"
+            access_log.parent.mkdir(parents=True, exist_ok=True)
+            lines.append("\tlog {")
+            lines.append(f"\t\toutput file {_caddy_quote(access_log.as_posix())} {{")
+            lines.append("\t\t\troll_size 10mb")
+            lines.append("\t\t\troll_keep 3")
+            lines.append("\t\t}")
+            lines.append("\t\tformat json")
+            lines.append("\t}")
             for alias_conf in aliases:
                 lines.append(f"\timport {_caddy_quote(alias_conf.as_posix())}")
             lines.append("}")

@@ -1,6 +1,6 @@
 # V1 验收清单（WBS-29）
 
-本清单覆盖 `lwa` V1 端到端验收的 18 个子任务（WBS-29.01~18）。
+本清单覆盖 `lwa` V1 端到端验收的核心子任务（WBS-29.01~18），并增补浏览量 / 冗余清理抽查项（29.19~20）。
 其中**不依赖 Docker 守护进程**的部分已由自动化测试
 `tests/test_e2e_acceptance.py` 覆盖（见下表「自动化」列）；
 **依赖真实 Docker** 的容器构建/启动部分需按本清单手工验收。
@@ -52,6 +52,8 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 | 29.16 | doctor 排障 | ✓ `test_e2e_doctor_diagnoses_instance` | `lwa doctor`、`lwa doctor <id>` | 环境检查全 ok/warn；实例诊断无 fail |
 | 29.17 | failed/pending 展示 | ✓ `test_e2e_failed_and_pending_display` | 导入 `build_failure.zip`、`pending_unknown.zip`，查管理页 | failed 显示错误原因；pending 显示在待处理区 |
 | 29.18 | 记录结果与问题 | — | 填写下表 | 完成本清单 |
+| 29.19 | 浏览量 API/UI（IMP-024） | ✓ `test_pageviews.py` / `test_manager_api.py` | 管理页列表见浏览量列；`GET /api/pageviews` 有汇总 | 有 hits/source；详情弹窗可打开 |
+| 29.20 | 冗余清理（IMP-019） | ✓ `test_lifecycle.py` / `test_manager_api.py` | 重复导入同 zip 后 `lwa remove --redundant` 或管理页批量删除 | 每组仅保留最早者 |
 
 ## 验收标准（来自 WBS-29）
 

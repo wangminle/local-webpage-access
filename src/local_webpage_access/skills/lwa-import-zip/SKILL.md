@@ -34,10 +34,39 @@ lwa import inbox/foo.zip --name "My App"
 导入后也可在线修改路径别名（V0.4.1 起）：
 
 ```bash
-lwa alias set myapp demo-slug    # 静态实例
-lwa alias clear myapp
-# 或在管理页实例列表操作区点击「路径别名」
+# 静态 / 前端：import 时可 --path-alias；之后也可改
+lwa alias set <static-id> demo-slug
+
+# 容器（docker-compose，IMP-014）：须先 lwa start 拿到 hostPort，再设别名
+# import 时对非 static 传 --path-alias 会被拒绝
+lwa start <container-id>
+lwa alias set <container-id> demo-slug
+
+lwa alias clear <id>
+# 或在管理页实例列表操作区点击「路径别名」（容器按钮已可用）
 ```
+
+> **IMP-022 / IMP-023 路径别名约束（V0.4.4 起）**
+>
+> - **需要 Caddy 网关**：别名统一入口依赖 Caddy 的 `:<gatewayPort>` 站点块。
+>   `lwa alias set` 在 `staticGateway=builtin`（或 caddy 未安装）时会**明确报错**，
+>   不再无声写元数据造成"设置成功但访问失败"。先 `lwa gateway on` 启用 Caddy。
+> - **SPA 子路径资源（IMP-023）**：别名 `reverse_proxy` 会去掉 `/<alias>/` 前缀，
+>   **相对路径资源**（`./assets/...`）正常；但 **绝对路径资源**（`/assets/...`，
+>   Vue/React 默认 `base: '/'`）会绕过别名打到入口根 → 404 白屏。受影响项目应在
+>   构建时设相对 base（Vite `base: './'`）或显式 `--base=/<alias>/`。纯静态 HTML
+>   （相对路径或无外部资源）不受影响。详见 `lwa-build-frontend-static`。
+
+## 误重复导入与冗余清理（IMP-012 / IMP-019）
+
+同一 zip 指纹重复 import 会产生冗余实例。优先用 `--update` 防新建；已产生冗余时：
+
+```bash
+lwa remove --redundant          # 预览并清理（每组保留最早者）
+lwa remove --redundant --purge  # 连磁盘一起清
+```
+
+管理页：勾选「仅冗余」→ 行内删除，或顶部「批量删除冗余」。详见 `docs/operations-playbook.md`。
 
 - IMP-001：导入时会**自动剥离** `node_modules/`、`__pycache__/`、`.venv/`、
   `.git/`、`__MACOSX/`、`.DS_Store` 等冗余成员，并做 zip slip / 符号链接防护。

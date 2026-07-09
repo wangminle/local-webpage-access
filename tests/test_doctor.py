@@ -808,3 +808,24 @@ def test_check_caddy_health_ok_when_all_sites_reachable(env, monkeypatch) -> Non
     r = check_caddy_health(ws, config, runner=runner, registry=reg)
     assert r.status == STATUS_OK
 
+
+# ---- BUG-093：cli 包 -m 执行入口 ------------------------------------------
+
+
+def test_cli_dash_m_executable() -> None:
+    """BUG-093：``python3 -m local_webpage_access.cli`` 必须可执行。
+
+    DEV-044 把单文件 ``cli.py`` 拆成 ``cli/`` 包后缺少 ``__main__.py``，``-m`` 执行
+    报 ``No module named local_webpage_access.cli.__main__``。
+    """
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "local_webpage_access.cli", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0
+    # typer --help 输出包含根 app 用法
+    assert "Usage:" in result.stdout or "Usage:" in result.stderr

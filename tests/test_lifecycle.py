@@ -362,6 +362,25 @@ def test_remove_default_keeps_files_and_data(
     assert (data_dir / "app.sqlite").is_file()
 
 
+def test_remove_clears_pageviews(workspace, registry, config, fake_runtime) -> None:
+    """BUG-090：删除实例应清空其浏览量，避免残留 / 同 ID 复用串数据。"""
+    from local_webpage_access.pageviews import AccessHit, PageviewStore
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    store = PageviewStore.for_workspace(workspace)
+    store.record_hits(
+        "api", "container", [AccessHit("2026-07-09T10:00:00+08:00", "GET", "/", 200, "1.1.1.1")]
+    )
+    assert store.summary().get("api", {}).get("hits") == 1
+    store.close()
+
+    remove_instance(workspace, config, registry, "api")
+
+    store2 = PageviewStore.for_workspace(workspace)
+    assert store2.summary().get("api") is None  # 浏览量已随实例删除清空
+    store2.close()
+
+
 def test_remove_purge_deletes_files(
     workspace, registry, config, fake_runtime
 ) -> None:
@@ -1086,3 +1105,61 @@ def test_start_generates_alias_fragment_when_set_before_deploy(
     # 别名片段已生成（start_instance 收尾 _sync_alias_port 触发）
     assert record["gen"], "首次启动应生成别名片段"
     assert workspace.app_alias_config("api").is_file()
+
+
+# ---- IMP-022：builtin 后端设别名被拦截 ------------------------------------
+
+
+def test_alias_set_blocks_builtin(workspace, registry, config, monkeypatch) -> None:
+    """IMP-022：builtin 后端设置别名应明确报错，不再无声写元数据。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.errors import RecognitionError
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    _seed_container(workspace, registry, "api", deployed=True)
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            pass
+
+        def detect_backend(self):
+            return "builtin"
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+
+    with pytest.raises(RecognitionError):
+        set_instance_path_alias(workspace, config, registry, "api", "api-alias")
+    # 别名未写入 manifest（未无声落盘）
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert reloaded.container.routeHost is None
+    assert reloaded.container.routeMode == "port"
+
+
+def test_alias_clear_allows_builtin(workspace, registry, config, monkeypatch) -> None:
+    """IMP-022：清除别名（alias=None）在 builtin 下仍允许（清除恒安全）。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    registry.upsert_container("api", manifest.container.model_dump())
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            pass
+
+        def detect_backend(self):
+            return "builtin"
+
+        def remove_alias_config(self, iid):
+            pass
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+
+    result = set_instance_path_alias(workspace, config, registry, "api", None)
+    assert result.alias is None
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert reloaded.container.routeHost is None
+    assert reloaded.container.routeMode == "port"

@@ -673,7 +673,43 @@ def test_update_endpoint_restart_when_running(manager_env: EnvBundle) -> None:
 # ---- 路径别名 API（IMP-006 / WBS-006.08~006.10）----------------------------
 
 
-def test_path_alias_set_and_clear(manager_env: EnvBundle) -> None:
+@pytest.fixture
+def caddy_alias_gateway(monkeypatch):
+    """用 Caddy 替身替换 ``path_alias.StaticGateway``（IMP-022）。
+
+    别名设置类用例不依赖本机已安装/运行 caddy——无 caddy 的 CI 上
+    ``detect_backend()`` 会回 builtin 触发 400，使本应成功的用例误报失败。
+    此 fixture 强制走 caddy 分支并桩掉 reload，保持用例可移植。
+    """
+    from local_webpage_access import path_alias
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def is_enabled(self, iid):
+            return False
+
+        def generate_alias_config(self, iid, alias, hp):
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            return None
+
+        def remove_alias_config(self, iid):
+            p = self.ws.app_alias_config(iid)
+            if p.is_file():
+                p.unlink()
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+
+
+def test_path_alias_set_and_clear(manager_env: EnvBundle, caddy_alias_gateway) -> None:
     """PATCH path-alias：设置与清除别名，写入 manifest 与 API 响应。"""
     from local_webpage_access.models import InstanceManifest, RouteMode
 
@@ -718,7 +754,9 @@ def test_path_alias_rejects_reserved_slug(manager_env: EnvBundle) -> None:
     assert resp.json()["error"]["code"] == "bad_request"
 
 
-def test_path_alias_rejects_duplicate_slug(manager_env: EnvBundle) -> None:
+def test_path_alias_rejects_duplicate_slug(
+    manager_env: EnvBundle, caddy_alias_gateway
+) -> None:
     from local_webpage_access.importer import Importer
 
     zip2 = manager_env.workspace.inbox / "static2.zip"
@@ -742,7 +780,9 @@ def test_path_alias_rejects_duplicate_slug(manager_env: EnvBundle) -> None:
     assert "占用" in resp2.json()["error"]["message"]
 
 
-def test_path_alias_accepts_container_instance(manager_env: EnvBundle) -> None:
+def test_path_alias_accepts_container_instance(
+    manager_env: EnvBundle, caddy_alias_gateway
+) -> None:
     """IMP-014：容器实例（docker-compose）也可设置路径别名，写入 container.routeHost。"""
     from local_webpage_access.models import InstanceManifest
     from tests._helpers import make_container_manifest
@@ -892,6 +932,55 @@ def test_path_alias_reload_failure_does_not_persist(
     assert site["route_host"] == "keep-me"
 
 
+# ---- 浏览量统计 API（IMP-024 / DEV-061）--------------------------------------
+
+
+def test_pageviews_summary_returns_dict(manager_env: EnvBundle) -> None:
+    """GET /api/pageviews 返回 200 与 instances 映射（即便无数据也不报错）。"""
+    resp = manager_env.client.get("/api/pageviews", headers=manager_env.auth_headers())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "instances" in data
+    assert isinstance(data["instances"], dict)
+
+
+def test_pageviews_ingests_builtin_gateway_log(manager_env: EnvBundle) -> None:
+    """builtin 模式：写入 gateway.log CLF 后，浏览量汇总与详情都应计数。"""
+    # 切到 builtin 后端，使摄入读取 per-instance gateway.log
+    manager_env.config.staticGateway = "builtin"
+    iid = manager_env.instance_id
+    log_path = manager_env.workspace.app_logs(iid) / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        '127.0.0.1 - - [09/Jul/2026 10:00:00] "GET / HTTP/1.1" 200 -\n'
+        '192.168.1.7 - - [09/Jul/2026 10:01:00] "GET /about HTTP/1.1" 200 -\n',
+        encoding="utf-8",
+    )
+
+    resp = manager_env.client.get("/api/pageviews", headers=manager_env.auth_headers())
+    assert resp.status_code == 200
+    pv = resp.json()["instances"].get(iid, {})
+    assert pv.get("hits") == 2
+
+    # 详情端点
+    resp2 = manager_env.client.get(
+        f"/api/instances/{iid}/pageviews", headers=manager_env.auth_headers()
+    )
+    assert resp2.status_code == 200
+    detail = resp2.json()
+    assert detail["instanceId"] == iid
+    assert any(d["hits"] == 2 for d in detail["byDay"])
+    assert len(detail["recent"]) == 2
+
+
+def test_pageviews_detail_404_for_unknown_instance(manager_env: EnvBundle) -> None:
+    """未知实例的详情端点返回 404（与实例详情一致）。"""
+    resp = manager_env.client.get(
+        "/api/instances/no-such-id/pageviews", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 404
+
+
 # ---- 静态资源托管（WBS-22.02 / WBS-23 前端）----------------------------------
 
 
@@ -1006,3 +1095,117 @@ def test_cli_manager_start_rejects_lan_binding_without_token(
     result = CliRunner().invoke(app, ["manager", "start"])
     assert result.exit_code == 1
     assert "lan_bind_no_token" in result.output or "critical" in result.output
+
+
+# ---- IMP-019：冗余实例 API + 管理页筛选（WBS-22.13）-------------------------
+
+
+def _seed_redundant_duplicate(manager_env: EnvBundle) -> str:
+    """导入第二个静态实例，并把它 original.zip 覆盖为首个实例同字节，
+    使二者同指纹 → 第二个（更晚 created_at）成为冗余。"""
+    from local_webpage_access.importer import Importer
+
+    ws = manager_env.workspace
+    zip2 = ws.inbox / "static-dup.zip"
+    _make_static_zip(zip2, html="<h1>duplicate</h1>")
+    importer = Importer(ws, manager_env.config, manager_env.registry)
+    second_id = importer.import_zip(str(zip2)).instance_id
+    # 覆盖 original.zip → 与首个实例同指纹
+    first_zip = ws.app_original_zip(manager_env.instance_id)
+    ws.app_original_zip(second_id).write_bytes(first_zip.read_bytes())
+    return second_id
+
+
+def test_instances_redundant_flag_false_when_unique(manager_env: EnvBundle) -> None:
+    """IMP-019：唯一实例 redundant=false。"""
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
+    assert resp.status_code == 200
+    items = resp.json()["instances"]
+    assert len(items) == 1
+    assert items[0]["redundant"] is False
+
+
+def test_api_redundant_empty_when_unique(manager_env: EnvBundle) -> None:
+    """IMP-019：无冗余时 GET /api/redundant 返回空。"""
+    resp = manager_env.client.get("/api/redundant", headers=manager_env.auth_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 0
+    assert body["instances"] == []
+
+
+def test_api_redundant_lists_duplicate(manager_env: EnvBundle) -> None:
+    """IMP-019：同指纹的第二个实例被列为冗余（保留最早者）。"""
+    dup_id = _seed_redundant_duplicate(manager_env)
+    resp = manager_env.client.get("/api/redundant", headers=manager_env.auth_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 1
+    ids = [i["id"] for i in body["instances"]]
+    assert ids == [dup_id]
+    assert manager_env.instance_id not in ids  # 最早者保留
+
+
+def test_api_redundant_item_has_camel_case_keys(manager_env: EnvBundle) -> None:
+    """IMP-019：冗余项字段为 camelCase（sourceZipHash / createdAt）。"""
+    _seed_redundant_duplicate(manager_env)
+    resp = manager_env.client.get("/api/redundant", headers=manager_env.auth_headers())
+    item = resp.json()["instances"][0]
+    assert set(item.keys()) == {"id", "name", "sourceZipHash", "createdAt"}
+    assert item["sourceZipHash"]  # 带指纹
+
+
+def test_instances_redundant_flag_true_for_duplicate(manager_env: EnvBundle) -> None:
+    """IMP-019：/api/instances 对冗余实例标记 redundant=true，最早者仍 false。"""
+    dup_id = _seed_redundant_duplicate(manager_env)
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
+    assert resp.status_code == 200
+    by_id = {i["id"]: i for i in resp.json()["instances"]}
+    assert by_id[manager_env.instance_id]["redundant"] is False
+    assert by_id[dup_id]["redundant"] is True
+
+
+def test_api_remove_single_instance(manager_env: EnvBundle) -> None:
+    """IMP-019：POST /api/instances/{id}/remove 移除单个实例（保留 apps/ 目录）。"""
+    ws = manager_env.workspace
+    iid = manager_env.instance_id
+    assert ws.app_dir(iid).is_dir()
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/remove", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 200
+    assert resp.json()["action"] == "remove"
+    # registry 已清，但 apps/ 目录保留（purge 默认 false）
+    resp2 = manager_env.client.get(
+        "/api/instances", headers=manager_env.auth_headers()
+    )
+    ids = [i["id"] for i in resp2.json()["instances"]]
+    assert iid not in ids
+    assert ws.app_dir(iid).is_dir()
+
+
+def test_api_remove_unknown_instance_404(manager_env: EnvBundle) -> None:
+    """IMP-019：移除不存在的实例 → 404。"""
+    resp = manager_env.client.post(
+        "/api/instances/nonexistent-id/remove", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 404
+
+
+def test_api_redundant_remove_batch(manager_env: EnvBundle) -> None:
+    """IMP-019：POST /api/redundant/remove 批量移除冗余，保留最早者。"""
+    dup_id = _seed_redundant_duplicate(manager_env)
+    resp = manager_env.client.post(
+        "/api/redundant/remove", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["action"] == "remove-redundant"
+    assert body["removed"] == [dup_id]
+    assert body["count"] == 1
+    resp2 = manager_env.client.get(
+        "/api/instances", headers=manager_env.auth_headers()
+    )
+    ids = [i["id"] for i in resp2.json()["instances"]]
+    assert dup_id not in ids
+    assert manager_env.instance_id in ids  # 最早者保留

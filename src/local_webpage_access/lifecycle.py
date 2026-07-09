@@ -447,6 +447,12 @@ def remove_instance(
         # 3. 删除 registry 记录（级联）
         registry.delete_instance(instance_id)
 
+        # 3.5 清理浏览量统计（BUG-090）：避免残留 / 同 ID 复用时旧数据串到新实例。
+        with contextlib.suppress(Exception):
+            from local_webpage_access.pageviews import clear_instance_pageviews
+
+            clear_instance_pageviews(workspace, instance_id)
+
         # 4. 可选：删除磁盘文件
         if purge:
             app_dir = workspace.app_dir(instance_id)

@@ -17,24 +17,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
 import tempfile
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import ZipImportError
 from local_webpage_access.logging import get_logger
-from local_webpage_access.security import (
-    ZipSanitizeResult,
-    audit_zip_members,
-    has_critical,
-    sanitize_zip_members,
-)
+from local_webpage_access.security import ZipSanitizeResult
 from local_webpage_access.models import (
     ContainerConfig,
     DesiredState,
@@ -49,10 +42,14 @@ from local_webpage_access.models import (
 from local_webpage_access.paths import Workspace, validate_path_alias
 from local_webpage_access.registry import Registry
 from local_webpage_access.scanner import DetectionResult, Scanner
+from local_webpage_access.zip_processor import (
+    compute_zip_hash,
+    safe_extract,
+    validate_zip,
+)
 
 log = get_logger("importer")
 
-_HASH_CHUNK = 64 * 1024
 _MAX_SLUG_LEN = 40
 
 
@@ -168,8 +165,8 @@ class Importer:
             PathError: 路径别名格式非法、命中保留字或已被占用。
         """
         src = Path(zip_path).resolve()
-        self._validate_zip(src)
-        zip_hash = self._compute_hash(src)
+        validate_zip(src)
+        zip_hash = compute_zip_hash(src)
 
         base = name if name else src.stem
         slug = slugify(base)
@@ -204,7 +201,7 @@ class Importer:
 
             # 安全解压到 current/（IMP-001：先剥离冗余成员，再审计与解压）
             current_dir = self.ws.app_current(instance_id)
-            sanitized = self._safe_extract(src, current_dir)
+            sanitized = safe_extract(src, current_dir)
 
             # 扫描识别
             detection = self.scanner.detect(current_dir)
@@ -335,8 +332,8 @@ class Importer:
             ZipImportError: zip 非法 / 实例不存在 / 形态变化被拒绝 / 解压失败。
         """
         src = Path(zip_path).resolve()
-        self._validate_zip(src)
-        new_hash = self._compute_hash(src)
+        validate_zip(src)
+        new_hash = compute_zip_hash(src)
 
         if not self.registry.instance_exists(instance_id):
             raise ZipImportError(
@@ -384,7 +381,7 @@ class Importer:
             kind_changed = False
             with tempfile.TemporaryDirectory(prefix="lwa-update-dryrun-") as tmp:
                 staging_tmp = Path(tmp)
-                sanitized = self._safe_extract(src, staging_tmp)
+                sanitized = safe_extract(src, staging_tmp)
                 detection = self.scanner.detect(staging_tmp)
                 kind_changed = self._kind_changed(old_manifest, detection)
             log.info(
@@ -429,7 +426,7 @@ class Importer:
 
             try:
                 # 解压到暂存区 + 重扫
-                sanitized = self._safe_extract(src, staging)
+                sanitized = safe_extract(src, staging)
                 detection = self.scanner.detect(staging)
 
                 # kind/runtime 变化拒绝（首版）
@@ -676,43 +673,6 @@ class Importer:
         except Exception as rollback_exc:  # noqa: BLE001 — 回滚失败应记录原始错误继续抛出
             log.error("回滚实例 %s 的 registry 失败：%s", instance_id, rollback_exc)
 
-    # ---- 校验 ---------------------------------------------------------------
-
-    def _validate_zip(self, zip_path: Path) -> None:
-        if not zip_path.is_file():
-            raise ZipImportError(f"zip 文件不存在：{zip_path}", path=str(zip_path))
-        if zip_path.suffix.lower() != ".zip":
-            raise ZipImportError(
-                f"仅支持 .zip 文件，得到 {zip_path.name}",
-                path=str(zip_path),
-            )
-        if not zipfile.is_zipfile(zip_path):
-            raise ZipImportError(f"不是合法的 zip 文件：{zip_path}", path=str(zip_path))
-        # 损坏的 zip（如截断）会在 ZipFile 构造或读取时报错
-        try:
-            with zipfile.ZipFile(zip_path) as zf:
-                bad = zf.testzip()
-                if bad is not None:
-                    raise ZipImportError(
-                        f"zip 文件损坏，首个坏文件：{bad}",
-                        path=str(zip_path),
-                    )
-        except zipfile.BadZipFile as exc:
-            raise ZipImportError(
-                f"zip 文件无法读取：{exc}",
-                path=str(zip_path),
-            ) from exc
-
-    def _compute_hash(self, zip_path: Path) -> str:
-        h = hashlib.sha256()
-        with zip_path.open("rb") as fh:
-            while True:
-                chunk = fh.read(_HASH_CHUNK)
-                if not chunk:
-                    break
-                h.update(chunk)
-        return h.hexdigest()
-
     # ---- id 冲突处理 --------------------------------------------------------
 
     def _resolve_unique_id(self, base_slug: str) -> str:
@@ -727,111 +687,6 @@ class Importer:
         if self.registry.instance_exists(instance_id):
             return True
         return self.ws.app_dir(instance_id).exists()
-
-    # ---- 安全解压 -----------------------------------------------------------
-
-    def _safe_extract(self, zip_path: Path, target: Path) -> ZipSanitizeResult:
-        """带剥离 / zip slip / 符号链接防护与单层根目录拍平的解压（IMP-001 / BUG-049）。
-
-        安全流程四步：
-        1. **剥离分类（IMP-001）**：``sanitize_zip_members`` 把 ``node_modules/``、
-           ``__pycache__/``、``.venv/``、``.git/``、``__MACOSX/``、``.DS_Store``
-           等冗余成员分到 ``stripped``，**不落盘、不参与后续审计**。这些成员下的
-           symlink（如 ``node_modules/.bin/*``，npm 正常产物）随之剥离，不再触发
-           ``zip_symlink`` 拒绝；
-        2. **集中安全审计（BUG-049）**：仅对保留成员运行 ``audit_zip_members``，
-           critical 级（绝对路径 / 盘符 / 路径穿越 / 业务源码目录的恶意 symlink）拒绝；
-        3. **路径穿越运行时校验**：每个保留成员 resolve 后必须落在 tmp_path 之内；
-        4. **解压后深度防御**：仅解压保留成员；遍历 tmp_path，若出现未在
-           external_attr 声明的 symlink（如 Windows 打包器产出的异常 zip），拒绝。
-
-        返回 :class:`~local_webpage_access.security.ZipSanitizeResult` 供调用方
-        输出剥离摘要与事件审计。
-        """
-        target.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="lwa-import-") as tmp:
-            tmp_path = Path(tmp).resolve()
-
-            with zipfile.ZipFile(zip_path) as zf:
-                members = zf.infolist()
-                names = [m.filename for m in members]
-                modes = [
-                    (m.external_attr >> 16) & 0xFFFF if m.external_attr else 0
-                    for m in members
-                ]
-
-                # 1. 剥离分类（IMP-001）：冗余包 / 缓存不落盘、不审计
-                sanitized = sanitize_zip_members(names, modes=modes)
-                keep_members = [members[i] for i in sanitized.keep_indices]
-                if sanitized.stripped_names:
-                    parts = ", ".join(
-                        f"{rule}×{n}" for rule, n in sorted(
-                            sanitized.categories.items(), key=lambda kv: -kv[1]
-                        )
-                    )
-                    log.info(
-                        "剥离冗余成员 %d 项（含 symlink %d）：%s",
-                        len(sanitized.stripped_names),
-                        sanitized.stripped_symlink_count,
-                        parts,
-                    )
-
-                # 2. 集中安全审计（BUG-049）：仅保留成员
-                keep_names = [m.filename for m in keep_members]
-                keep_modes = [
-                    (m.external_attr >> 16) & 0xFFFF if m.external_attr else 0
-                    for m in keep_members
-                ]
-                findings = audit_zip_members(keep_names, modes=keep_modes)
-                for f in findings:
-                    if f.level == "critical":
-                        log.warning("zip 成员审计 [%s] %s", f.code, f.message)
-                if has_critical(findings):
-                    codes = ", ".join(
-                        f.code for f in findings if f.level == "critical"
-                    )
-                    raise ZipImportError(
-                        f"zip 成员安全审计未通过（{codes}）",
-                        members=keep_names,
-                    )
-
-                # 3. 运行时路径穿越校验：每个保留成员必须在 tmp_path 之内
-                for member in keep_members:
-                    member_target = (tmp_path / member.filename).resolve()
-                    try:
-                        member_target.relative_to(tmp_path)
-                    except ValueError:
-                        raise ZipImportError(
-                            f"检测到路径穿越（zip slip）：{member.filename}",
-                            member=member.filename,
-                        )
-                # 4. 仅解压保留成员（剥离成员不落盘）
-                for member in keep_members:
-                    zf.extract(member, tmp_path)
-
-            # 解压后深度防御：扫描是否产生了 symlink（即使 external_attr
-            # 未声明 S_IFLNK，也拒绝任何符号链接，杜绝 zip slip 变种）。
-            # 此时 node_modules/.bin 等 symlink 已被剥离，命中即业务源码的恶意链接。
-            for item in tmp_path.rglob("*"):
-                if item.is_symlink():
-                    raise ZipImportError(
-                        f"检测到符号链接（zip slip）：{item.relative_to(tmp_path)}",
-                        member=str(item.relative_to(tmp_path)),
-                    )
-
-            # 单层根目录拍平：tmp 下只有一个目录且无散落文件时，提升一层
-            entries = list(tmp_path.iterdir())
-            single_root = len(entries) == 1 and entries[0].is_dir()
-            source_root = entries[0] if single_root else tmp_path
-
-            for item in source_root.iterdir():
-                dest = target / item.name
-                if dest.exists():
-                    # 同名冲突时跳过（防御性）
-                    continue
-                shutil.move(str(item), str(dest))
-
-        return sanitized
 
     # ---- manifest 构建 ------------------------------------------------------
 

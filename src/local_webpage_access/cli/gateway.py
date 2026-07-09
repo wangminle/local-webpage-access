@@ -1,0 +1,138 @@
+"""gateway 子命令（IMP-010 / DEV-041，WBS 0.7）：``lwa gateway on/off/status``。
+
+DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 拆出。暴露 ``app`` 供根
+CLI 通过 ``add_typer`` 挂载为 ``lwa gateway ...`` 子命令组。
+"""
+
+from __future__ import annotations
+
+import typer
+
+from local_webpage_access.cli._common import log, open_workspace_registry
+from local_webpage_access.errors import LwaError
+
+app = typer.Typer(help="控制 Caddy 网关（master 生命周期与 :8080 别名入口）")
+
+
+def _require_caddy_version(config) -> None:
+    """``lwa gateway on/off`` 前置：校验 ``staticGateway=caddy`` 且 Caddy 满足最低版本。
+
+    与 ``doctor.check_caddy`` 同源判定，不满足时抛 :class:`LwaError` 由 CLI 统一格式化。
+    """
+    import shutil
+    import subprocess
+
+    from local_webpage_access.version_requirements import MIN_CADDY_VERSION, version_ge
+
+    if config.staticGateway != "caddy":
+        raise LwaError(
+            f"staticGateway={config.staticGateway}，网关命令仅适用于 caddy 后端",
+            code="GATEWAY_BACKEND_MISMATCH",
+            suggestion="在 local-web.yml 设置 staticGateway: caddy",
+        )
+    if not shutil.which("caddy"):
+        raise LwaError(
+            "未找到 caddy 可执行文件",
+            code="GATEWAY_CADDY_MISSING",
+            suggestion=f"安装 Caddy ≥ {MIN_CADDY_VERSION} 并加入 PATH",
+        )
+    try:
+        result = subprocess.run(
+            ["caddy", "version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LwaError(
+            f"无法获取 Caddy 版本：{exc}",
+            code="GATEWAY_VERSION_UNKNOWN",
+            suggestion=f"确认 caddy 可执行且版本 ≥ {MIN_CADDY_VERSION}",
+        ) from exc
+    if result.returncode != 0 or not version_ge(
+        (result.stdout or "").strip() or (result.stderr or "").strip(),
+        MIN_CADDY_VERSION,
+    ):
+        raise LwaError(
+            "Caddy 版本不满足要求",
+            code="GATEWAY_VERSION_TOO_LOW",
+            suggestion=f"升级 Caddy 至 ≥ {MIN_CADDY_VERSION}",
+        )
+
+
+@app.command("on")
+def gateway_on() -> None:
+    """启动 Caddy 网关（master + admin :2019，别名入口随配置就绪）。"""
+    from local_webpage_access.gateway_service import start_gateway
+    from local_webpage_access.ports import resolve_lan_ip
+
+    try:
+        ws, config, _reg = open_workspace_registry()
+        _reg.close()
+        _require_caddy_version(config)
+        pid = start_gateway(ws, config)
+        lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+        typer.secho(f"网关已启动（pid={pid}）", fg=typer.colors.GREEN)
+        typer.echo("  admin：http://127.0.0.1:2019/")
+        port = config.staticGatewayPort
+        if port:
+            typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
+        typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("off")
+def gateway_off() -> None:
+    """停止 Caddy 网关（master 优雅关闭）。
+
+    不做 ``MIN_CADDY_VERSION`` 校验：``stop_gateway`` 自身按 ``detect_backend``
+    分支处理（caddy 走 admin API 优雅关闭；builtin 仅清残留服务态），即使当前
+    ``staticGateway=builtin``（如刚从 caddy 切走）也能关掉仍在跑的 master 并清
+    ``run/gateway.json``，避免"切 builtin 后无法用 CLI 关 Caddy"的死局。
+    """
+    from local_webpage_access.gateway_service import stop_gateway
+
+    try:
+        ws, config, _reg = open_workspace_registry()
+        _reg.close()
+        if not stop_gateway(ws, config):
+            typer.secho(
+                "网关停止失败，Caddy master 可能仍在运行；请检查 admin :2019 后重试",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.secho("网关已停止", fg=typer.colors.GREEN)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("status")
+def gateway_status_cmd() -> None:
+    """查看 Caddy 网关运行状态。"""
+    from local_webpage_access.gateway_service import gateway_status
+    from local_webpage_access.ports import resolve_lan_ip
+
+    try:
+        ws, config, _reg = open_workspace_registry()
+        _reg.close()
+        st = gateway_status(ws, config)
+        running = "运行中" if st["running"] else "未运行"
+        typer.echo(f"网关：{running}")
+        typer.echo(f"  后端：{st['backend']}（staticGateway={st['configured']}）")
+        typer.echo(f"  状态启用：{st['enabled']}")
+        if st.get("pid"):
+            typer.echo(f"  pid：{st['pid']}")
+        typer.echo(f"  admin：http://127.0.0.1:{st['adminPort']}/")
+        port = st["port"]
+        if port:
+            lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+            typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
+        if not st["running"] and st["backend"] == "caddy":
+            typer.echo("  启动：lwa gateway on")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)

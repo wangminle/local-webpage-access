@@ -173,6 +173,8 @@ select:focus-visible,
 .btn-sm { padding: 3px 8px; font-size: 12px; }
 .btn-danger { color: var(--red); }
 .btn-danger:hover { background: var(--red-bg); border-color: transparent; }
+.btn-warn { color: var(--amber); border-color: var(--border-strong); }
+.btn-warn:hover { background: var(--amber-bg); border-color: var(--amber); }
 
 /* ---- 顶部统计 ---- */
 .stats { padding: 16px var(--pad-x) 4px; }
@@ -245,8 +247,26 @@ select:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
-.filter input { accent-color: var(--primary); width: 14px; height: 14px; }
+.filter input[type="checkbox"] { accent-color: var(--primary); width: 14px; height: 14px; }
+/* IMP-019：搜索框 / 下拉筛选控件 */
+.filter-input,
+.filter-select {
+  padding: 3px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  line-height: 1.4;
+}
+.filter-input { width: 200px; }
+.filter-select { cursor: pointer; }
+.filter-input:focus,
+.filter-select:focus { outline: none; border-color: var(--primary); }
 
 .table-wrap { overflow-x: auto; }
 table.instances {
@@ -313,6 +333,24 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 .row-pending:hover { background: var(--amber-bg); }
 .row-failed:hover { background: var(--red-bg); }
 .row-warn:hover { background: var(--amber-bg); }
+
+/* IMP-019：冗余实例左侧黄色边框（仅左缘强调，与状态行背景可组合不覆盖） */
+.row-redundant { box-shadow: inset 3px 0 0 var(--amber); }
+/* 冗余徽章：名称后的黄色小标签 */
+.redundant-badge {
+  display: inline-block;
+  background: var(--amber-bg);
+  color: var(--amber);
+  border: 1px solid var(--amber);
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  vertical-align: middle;
+  margin-left: 4px;
+  cursor: help;
+}
 
 .cell-name {
   font-weight: 500;
@@ -611,3 +649,41 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   table.instances th,
   table.instances td { padding: 8px 10px; }
 }
+
+/* ---- 浏览量（IMP-024 / DEV-061）------------------------------------------- */
+.pageview-btn {
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  color: var(--accent, #2563eb);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  border-radius: 4px;
+  font: inherit;
+}
+.pageview-btn:hover { background: rgba(37, 99, 235, 0.1); }
+.pageview-box { max-width: 640px; }
+.pageview-body { max-height: 70vh; overflow: auto; }
+
+.pv-bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-variant-numeric: tabular-nums;
+}
+.pv-bars li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.pv-day { width: 92px; flex: none; color: var(--muted, #6b7280); font-size: 0.85em; }
+.pv-track { flex: 1; background: rgba(127, 127, 127, 0.15); border-radius: 3px; height: 10px; overflow: hidden; }
+.pv-fill { display: block; height: 100%; background: var(--accent, #2563eb); border-radius: 3px; }
+.pv-num { width: 48px; flex: none; text-align: right; }
+
+.pv-recent { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+.pv-recent th,
+.pv-recent td { padding: 4px 8px; border-bottom: 1px solid rgba(127, 127, 127, 0.2); text-align: left; }
+.pv-recent th { color: var(--muted, #6b7280); font-weight: 600; }
+.pv-recent td:nth-child(3) { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

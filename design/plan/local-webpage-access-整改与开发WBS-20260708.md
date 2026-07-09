@@ -10,6 +10,8 @@
 > - 7/8｜[启动故障诊断报告](local-webpage-access-startup-failure-20260708.md)（`startup-failure-20260708`，DOC-015）
 > - 7/8｜[Caddy 启动故障复盘](local-webpage-access-caddy-startup-incident-20260708.md)（`caddy-startup-incident-20260708`，DOC-013）
 > - 7/8｜[Caddy 启动故障排查报告](local-webpage-access-caddy-startup-diagnostic-report-20260708.md)（`caddy-startup-diagnostic-report-20260708`，DOC-014）
+>
+> **✅ 状态更新（2026-07-09，V0.5.0）**：本表为 2026-07-08 规划快照。截至 V0.5.0，下方「现状」列所列整改/开发项**已全部落地**——`待开发→已完成`、`待修复→已修复`、`待决策→已决策（维持 Caddy）`；逐项完成记录见 `task-list.md` 对应 `DEV-/BUG-/OPS-/DOC-` 编号，全量测试 917 passed。
 
 ---
 
@@ -50,64 +52,64 @@
 
 | 编号 | 类型 | 问题 | 来源 | 现状 |
 | --- | --- | --- | --- | --- |
-| **BUG-069** | 修复 | reload 失败回滚 `previous` + enable 删片段 → 主 Caddyfile 悬空 import，Caddy 冷启动/validate 失败，形成"恢复→失败→回滚"死循环 | startup-failure §4B、caddy-startup-diagnostic §5-C2、runtime-analysis §6.1 | 待修复 |
-| **IMP-010 / DEV-041** | 开发 | Caddy master 无生命周期：全库只有 `caddy reload`，master 退出后 reload 必失败；无 `caddy start/stop`、无 pid 管理、无自愈 | startup-failure §4A、caddy-startup-incident §3.1、caddy-startup-diagnostic §5-C1、imp010-021 阶段1 | 待开发 |
-| **BUG-070**（新） | 修复 | stale pid 未清理：切换 builtin↔caddy 后 `run/static-*.pid`、`run/caddy.pid` 指向已死进程，`is_enabled()` 仅看 pid 存活致状态误判 | caddy-startup-diagnostic §5-C3、caddy-startup-incident §3.4 | 待修复 |
+| **BUG-069** | 修复 | reload 失败回滚 `previous` + enable 删片段 → 主 Caddyfile 悬空 import，Caddy 冷启动/validate 失败，形成"恢复→失败→回滚"死循环 | startup-failure §4B、caddy-startup-diagnostic §5-C2、runtime-analysis §6.1 | 已修复 |
+| **IMP-010 / DEV-041** | 开发 | Caddy master 无生命周期：全库只有 `caddy reload`，master 退出后 reload 必失败；无 `caddy start/stop`、无 pid 管理、无自愈 | startup-failure §4A、caddy-startup-incident §3.1、caddy-startup-diagnostic §5-C1、imp010-021 阶段1 | 已完成 |
+| **BUG-070**（新） | 修复 | stale pid 未清理：切换 builtin↔caddy 后 `run/static-*.pid`、`run/caddy.pid` 指向已死进程，`is_enabled()` 仅看 pid 存活致状态误判 | caddy-startup-diagnostic §5-C3、caddy-startup-incident §3.4 | 已修复 |
 
 ### 2.2 P1 —— 防复发、自愈与可观测性
 
 | 编号 | 类型 | 问题 | 来源 | 现状 |
 | --- | --- | --- | --- | --- |
-| **IMP-011** | 开发 | daemon inbox 防污染：`process_zip` 默认 rename 致 `-2/-3` 冗余实例；import 后不搬移 zip，归档后仍按旧指纹重复导入 | runtime-analysis §2.3/§6.1、imp010-021 阶段2 | 待开发 |
-| **IMP-012** | 开发 | 冗余实例批量清理：按 `sourceZipHash` 去重，保留最早者，`lwa remove --redundant --purge` + 同步删网关片段 | runtime-analysis §6.1、imp010-021 阶段2 | 待开发 |
-| **DEV-042**（新） | 开发 | 开机/守护自愈 `reconcile()`：扫描 `desired=running ∧ status≠running` 实例逐一 restart；builtin 静态服务进程存活监管 | startup-failure §4C/§6-P1、caddy-startup-diagnostic §7-P1 | 待开发 |
-| **IMP-020** | 开发 | doctor / 管理页 Caddy 健康探针：Caddyfile validate、admin :2019、:8080、enabled 站点 hostPort 可达、stale pid 提示 | runtime-analysis §6.3、caddy-startup-diagnostic §5-C4/§7、imp010-021 阶段1 | 待开发 |
-| **BUG-071**（新） | 修复 | Caddy 模式状态观测失真：master 挂掉后 `_observe_static_status` 用 `health_check(port)` 兜底把 enabled 实例标 stopped，未区分"网关不可达" | caddy-startup-incident §3.5、caddy-startup-diagnostic §7-P1 | 待修复 |
-| **DEV-043**（新） | 开发 | 状态模型区分 `stopped` / `gateway_down` / `config_invalid`（enabledButUnreachable），管理页显式呈现 | caddy-startup-diagnostic §7-P1/§9、startup-failure | 待开发 |
-| **OPS-022**（新） | 运维 | 开机自启：`lwa setup` 生成 launchd plist（macOS）/等价机制，开机自启 daemon + manager（+ 可选 caddy） | startup-failure §6-P1 | 待开发 |
+| **IMP-011** | 开发 | daemon inbox 防污染：`process_zip` 默认 rename 致 `-2/-3` 冗余实例；import 后不搬移 zip，归档后仍按旧指纹重复导入 | runtime-analysis §2.3/§6.1、imp010-021 阶段2 | 已完成 |
+| **IMP-012** | 开发 | 冗余实例批量清理：按 `sourceZipHash` 去重，保留最早者，`lwa remove --redundant --purge` + 同步删网关片段 | runtime-analysis §6.1、imp010-021 阶段2 | 已完成 |
+| **DEV-042**（新） | 开发 | 开机/守护自愈 `reconcile()`：扫描 `desired=running ∧ status≠running` 实例逐一 restart；builtin 静态服务进程存活监管 | startup-failure §4C/§6-P1、caddy-startup-diagnostic §7-P1 | 已完成 |
+| **IMP-020** | 开发 | doctor / 管理页 Caddy 健康探针：Caddyfile validate、admin :2019、:8080、enabled 站点 hostPort 可达、stale pid 提示 | runtime-analysis §6.3、caddy-startup-diagnostic §5-C4/§7、imp010-021 阶段1 | 已完成 |
+| **BUG-071**（新） | 修复 | Caddy 模式状态观测失真：master 挂掉后 `_observe_static_status` 用 `health_check(port)` 兜底把 enabled 实例标 stopped，未区分"网关不可达" | caddy-startup-incident §3.5、caddy-startup-diagnostic §7-P1 | 已修复 |
+| **DEV-043**（新） | 开发 | 状态模型区分 `stopped` / `gateway_down` / `config_invalid`（enabledButUnreachable），管理页显式呈现 | caddy-startup-diagnostic §7-P1/§9、startup-failure | 已完成 |
+| **OPS-022**（新） | 运维 | 开机自启：`lwa setup` 生成 launchd plist（macOS）/等价机制，开机自启 daemon + manager（+ 可选 caddy） | startup-failure §6-P1 | 已完成 |
 
 ### 2.3 P1 —— 大项目部署（prd-workflow 类）
 
 | 编号 | 类型 | 问题 | 来源 | 现状 |
 | --- | --- | --- | --- | --- |
-| **IMP-013** | 开发 | Scanner 误判：`package.json` 仅辅助工具（如 pi-agent）时应优先识别 Python，而非 pending/static | runtime-analysis §4.2-P1、imp010-021 阶段3 | 待开发 |
-| **IMP-014** | 开发 | 容器实例路径别名：放开 `path_alias` 的 `SHARED_STATIC` 限制，支持 `docker-compose` 反代 hostPort | runtime-analysis §6.2、imp010-021 阶段4 | 待开发 |
-| **IMP-015** | 开发 | 业务 `.env` 合并：检测 `current/.env.example` → 复制为 `docker/.env.example` + compose 多层 env_file + CLI 提示（不自动填密钥） | runtime-analysis §4.2-P4、imp010-021 阶段4 | 待开发 |
-| **IMP-016** | 开发 | Python 全栈 Dockerfile 增强：运行时含 Node 时追加 `apt nodejs npm` + `npm ci --omit=dev`（Pi Agent 可用） | runtime-analysis §4.2-P5、imp010-021 阶段3 | 待开发 |
-| **IMP-017** | 开发 | 生产依赖分离：优先 `requirements-prod.txt`，否则构建时 strip `pytest*` 测试包 | runtime-analysis §4.2-P6、imp010-021 阶段3 | 待开发 |
-| **IMP-018** | 开发 | 资源档位映射：`resourceProfile → mem/cpus` 映射表；命中 lancedb/pyarrow/torch/openai 等重依赖自动升 medium | runtime-analysis §4.2-P8、imp010-021 阶段3 | 待开发 |
-| **IMP-021** | 开发 | 端口漂移可视化：容器 restart 后 hostPort 变化时自动重写别名 conf + reload | runtime-analysis §6.3、imp010-021 阶段4 | 待开发 |
+| **IMP-013** | 开发 | Scanner 误判：`package.json` 仅辅助工具（如 pi-agent）时应优先识别 Python，而非 pending/static | runtime-analysis §4.2-P1、imp010-021 阶段3 | 已完成 |
+| **IMP-014** | 开发 | 容器实例路径别名：放开 `path_alias` 的 `SHARED_STATIC` 限制，支持 `docker-compose` 反代 hostPort | runtime-analysis §6.2、imp010-021 阶段4 | 已完成 |
+| **IMP-015** | 开发 | 业务 `.env` 合并：检测 `current/.env.example` → 复制为 `docker/.env.example` + compose 多层 env_file + CLI 提示（不自动填密钥） | runtime-analysis §4.2-P4、imp010-021 阶段4 | 已完成 |
+| **IMP-016** | 开发 | Python 全栈 Dockerfile 增强：运行时含 Node 时追加 `apt nodejs npm` + `npm ci --omit=dev`（Pi Agent 可用） | runtime-analysis §4.2-P5、imp010-021 阶段3 | 已完成 |
+| **IMP-017** | 开发 | 生产依赖分离：优先 `requirements-prod.txt`，否则构建时 strip `pytest*` 测试包 | runtime-analysis §4.2-P6、imp010-021 阶段3 | 已完成 |
+| **IMP-018** | 开发 | 资源档位映射：`resourceProfile → mem/cpus` 映射表；命中 lancedb/pyarrow/torch/openai 等重依赖自动升 medium | runtime-analysis §4.2-P8、imp010-021 阶段3 | 已完成 |
+| **IMP-021** | 开发 | 端口漂移可视化：容器 restart 后 hostPort 变化时自动重写别名 conf + reload | runtime-analysis §6.3、imp010-021 阶段4 | 已完成 |
 
 ### 2.4 P1/P2 —— 路径别名一致性（analysis-20260707 P1）
 
 | 编号 | 类型 | 问题 | 来源 | 现状 |
 | --- | --- | --- | --- | --- |
-| **IMP-022**（新） | 开发 | 路径别名 Caddy 依赖显式化：`lwa alias set` 在 `backend != caddy` 时明确报错/WARN，消除"设置成功但访问失败"的割裂 | analysis §5.1-P1/§6.2 | 待开发 |
-| **IMP-023**（新） | 开发 | SPA 子路径资源加载：Vite/Vue 绝对资源路径（`/assets/…`）在 `/<alias>/` 下白屏；`lwa alias set` 输出 `--base=/<alias>/` 重构建提示 + SKILL 记录 | analysis §5.1-P1 | 待开发 |
-| **IMP-024**（新） | 开发 | 管理页网页浏览量统计：概览展示各实例（或全局）访问次数/UV，**数量可点击**展开明细（时间、路径、来源等，口径实现前定） | 阶段4 管理页体验增补 | 待开发 |
+| **IMP-022**（新） | 开发 | 路径别名 Caddy 依赖显式化：`lwa alias set` 在 `backend != caddy` 时明确报错/WARN，消除"设置成功但访问失败"的割裂 | analysis §5.1-P1/§6.2 | 已完成 |
+| **IMP-023**（新） | 开发 | SPA 子路径资源加载：Vite/Vue 绝对资源路径（`/assets/…`）在 `/<alias>/` 下白屏；`lwa alias set` 输出 `--base=/<alias>/` 重构建提示 + SKILL 记录 | analysis §5.1-P1 | 已完成 |
+| **IMP-024**（新） | 开发 | 管理页网页浏览量统计：静态站点（builtin+caddy 均支持——分别解析各自访问日志）、容器实例（走 Docker 侧"中转统计"：`docker logs` 访问日志解析为主、`docker stats` 网络字节为兜底，best-effort）；概览展示 PV/UV，**数量可点击**展开明细（时间、IP、路径、状态、Referer、UA、来源标记） | 阶段4 管理页体验增补（详见「阶段4 · IMP-024 设计细节」） | 已完成 |
 
 ### 2.5 P2/P3 —— 技术债与体验（analysis-20260707）
 
 | 编号 | 类型 | 问题 | 来源 | 现状 |
 | --- | --- | --- | --- | --- |
-| **IMP-019** | 开发 | 管理页实例分组/过滤：文本搜索 + 状态/形态下拉 + 隐藏冗余副本 + 冗余徽章 + 一键批量删冗余 | runtime-analysis §6.3、imp010-021 阶段5 | 待开发 |
-| **DEV-044**（新） | 优化 | 拆分 `cli.py`（1112 行）：按功能域 `add_typer` 拆分为 import/lifecycle/status/manager/daemon/system 子模块 | analysis §4.3/§6.1 | 待开发 |
-| **DEV-045**（新） | 优化 | 拆分 `importer.py`（981 行）：抽出 `zip_processor.py`（sanitize+audit+extract），`Importer` 专注实例目录与 registry | analysis §4.2/§6.1 | 待开发 |
-| **DEV-046**（新） | 开发 | 管理页前端引入 Vue 3 + importmap（无 npm build），解决 vanilla `app.js` 组件化与维护上限 | analysis §5.2/§6.2 | 待开发（可延后） |
-| **DEV-047**（新） | 开发 | 跨进程构建并发：将 rebuild 统一路由到 daemon 队列，daemon 作为单例调度中枢，解决进程内 `BoundedSemaphore` 局限 | analysis §5.2/§6.2 | 待开发（可延后） |
+| **IMP-019** | 开发 | 管理页实例分组/过滤：文本搜索 + 状态/形态下拉 + 隐藏冗余副本 + 冗余徽章 + 一键批量删冗余 | runtime-analysis §6.3、imp010-021 阶段5 | 已完成 |
+| **DEV-044**（新） | 优化 | 拆分 `cli.py`（1112 行）：按功能域 `add_typer` 拆分为 import/lifecycle/status/manager/daemon/system 子模块 | analysis §4.3/§6.1 | 已完成 |
+| **DEV-045**（新） | 优化 | 拆分 `importer.py`（981 行）：抽出 `zip_processor.py`（sanitize+audit+extract），`Importer` 专注实例目录与 registry | analysis §4.2/§6.1 | 已完成 |
+| **DEV-046**（新） | 开发 | 管理页前端引入 Vue 3 + importmap（无 npm build），解决 vanilla `app.js` 组件化与维护上限 | analysis §5.2/§6.2 | 已完成 |
+| **DEV-047**（新） | 开发 | 跨进程构建并发：将 rebuild 统一路由到 daemon 队列，daemon 作为单例调度中枢，解决进程内 `BoundedSemaphore` 局限 | analysis §5.2/§6.2 | 已完成 |
 
 ### 2.6 决策待定项（需先定方向）
 
 | 编号 | 类型 | 决策点 | 来源 |
 | --- | --- | --- | --- |
-| **CHK-013**（新） | 检查 | 网关技术选型：维持 Caddy（完善 IMP-010）vs 回退 builtin + 独立 Caddy 只做 8080 别名 vs 换 nginx。CHK-009/011/012 已初步结论：换 nginx 可简化 admin/IPv6/限流插件问题，但 master 生命周期、原子配置回滚、stale pid、自愈仍需自研——**换网关不能省掉 P0**。建议先做 P0 再评估是否迁移 | CHK-009/011/012、caddy-startup-incident §4.3、caddy-startup-diagnostic §7 | 待决策 |
+| **CHK-013**（新） | 检查 | 网关技术选型：维持 Caddy（完善 IMP-010）vs 回退 builtin + 独立 Caddy 只做 8080 别名 vs 换 nginx。CHK-009/011/012 已初步结论：换 nginx 可简化 admin/IPv6/限流插件问题，但 master 生命周期、原子配置回滚、stale pid、自愈仍需自研——**换网关不能省掉 P0**。建议先做 P0 再评估是否迁移 | CHK-009/011/012、caddy-startup-incident §4.3、caddy-startup-diagnostic §7 | 已决策：维持 Caddy |
 
 ### 2.7 文档与任务同步
 
 | 编号 | 类型 | 事项 | 来源 |
 | --- | --- | --- | --- |
-| **DOC-016**（新） | 文档 | 新建 `docs/operations-playbook.md`：Caddy vs builtin 选型、inbox 勿放测试 zip、容器别名步骤、Caddy master 排障、开机自启 | imp010-021 阶段5、runtime-analysis §6.3 | 待开发 |
-| **DOC-017**（新） | 文档 | 更新 `docs/runtime-workspace.md`：gateway 命令、inbox/processed 目录、.env.local 用法、资源档位说明 | imp010-021 阶段5 | 待开发 |
+| **DOC-016**（新） | 文档 | 新建 `docs/operations-playbook.md`：Caddy vs builtin 选型、inbox 勿放测试 zip、容器别名步骤、Caddy master 排障、开机自启 | imp010-021 阶段5、runtime-analysis §6.3 | 已完成 |
+| **DOC-017**（新） | 文档 | 更新 `docs/runtime-workspace.md`：gateway 命令、inbox/processed 目录、.env.local 用法、资源档位说明 | imp010-021 阶段5 | 已完成 |
 | **任务同步** | 文档 | 每阶段完成后按 `task-list-standard` 写入 task-list.md | imp010-021 §2 | 持续 |
 
 ---
@@ -201,10 +203,58 @@
 | 4.2 | `cli.py` `alias set`、SKILL（lwa-import-zip/generate-static-gateway-config） | **IMP-023**：输出 SPA 子路径 `--base=/<alias>/` 重构建提示；SKILL.md 记录白屏限制与规避 | 提示可见 + SKILL 更新 | S |
 | 4.3 | `manager_static/index.html` / `app.js` / `style.css` | **IMP-019**：文本搜索 + 状态/形态下拉 + "显示冗余"checkbox（冗余行黄色边框 + 徽章 + 行内删除）+ 顶部"批量删除冗余" | `node --check` + DOM 单测 | M |
 | 4.4 | `manager_api.py` | `GET /api/redundant`；`/api/instances` 每项补 `redundant: bool` | `test_api_redundant`、`test_instances_redundant_flag` | S |
-| 4.5 | `manager_api.py`、`manager_static/`、（可选）`static_gateway.py` / 访问日志落盘 | **IMP-024**：管理页增加**网页浏览量**统计——概览区或实例列表展示访问量汇总（按实例/全局口径实现前定）；**数字可点击**展开详情（抽屉/折叠面板：访问时间、路径、Referer、客户端 IP 等明细列表，支持分页或最近 N 条）；后端提供汇总 + 明细 API（如 `GET /api/pageviews` 或 `/api/instances/{id}/pageviews`），前端点击加载明细 | 汇总数与明细 API 一致；点击展开/收起可用；无访问记录时显示 0 且不报错 | S |
-| 4.6 | 对应 `tests/*` | 上述全部回归（含 IMP-024 API + 前端 DOM/交互单测） | 目标 + 全量不退化 | S |
+| 4.5 | `manager_api.py`、`manager_static/`、新建 `pageviews.py`、`static_gateway.py`（Caddy JSON access log）、`docker_runtime.py`（`docker logs`／`docker stats`）、`run/pageviews.db` | **IMP-024**：管理页网页浏览量统计，覆盖静态站点（builtin+caddy）与容器实例（Docker 中转），完整设计见下方「IMP-024 设计细节」。汇总 `GET /api/pageviews` + 明细 `GET /api/instances/{id}/pageviews`；前端实例列表加「浏览量」列，数字可点击展开明细抽屉 | 静态(builtin+caddy)与容器(docker logs/stats)三类来源均可采集；汇总与明细一致；点击展开可用；无数据显示 0 不报错；docker 不可达时容器口径优雅降级 | L |
+| 4.6 | 对应 `tests/*` | 上述全部回归（IMP-024：三类日志解析、容器 docker 中转与降级、API 汇总/明细、前端 DOM/交互单测） | 目标 + 全量不退化 | M |
 
-**阶段验收**：builtin 模式设别名被明确拦截；SPA 子路径有清晰指引；管理页可搜索/过滤/隐藏冗余并一键批量删；浏览量统计可见且点击可展开访问明细。
+**阶段验收**：builtin 模式设别名被明确拦截；SPA 子路径有清晰指引；管理页可搜索/过滤/隐藏冗余并一键批量删；静态站点（builtin/caddy）与容器实例（docker 中转）浏览量均可见，数字点击可展开访问明细（来源与口径有标注，无数据不报错）。
+
+#### IMP-024 设计细节
+
+**目标**：管理页给出各实例的网页浏览量（PV/UV），数字可点击展开访问明细。因 manager 不在流量路径上，按实例形态与网关后端分三类来源采集，统一走「增量游标 → 存储 → 查询」管线。
+
+**数据来源矩阵**：
+
+| 实例形态 / 后端 | 来源 | 可得字段 | 说明 |
+| --- | --- | --- | --- |
+| 静态站点 · builtin | `apps/<id>/logs/gateway.log`（`python -m http.server` 的 CLF 文本，**已存在**） | IP、时间、method、path、status、bytes | 无 Referer/UA；UV=去重 IP 可算 |
+| 静态站点 · caddy | Caddy `log` 指令 → JSON → `run/logs/static-access.log`（按 host 归属实例） | IP、时间、method、path、status、bytes、**referer、user_agent、duration** | 需在主配/站点片段加 `log` 指令；字段最全 |
+| 容器实例 · hostPort 直达 | **Docker 中转**：`docker logs` 解析为主，`docker stats` 网络字节为兜底 | 主路径同上框架访问日志字段；兜底仅 rx/tx 字节 | best-effort、非实时；直达流量不经 lwa，只能事后从 Docker 侧捞 |
+
+**容器 Docker 中转统计（主路径 + 兜底 + 降级）**：
+
+- **主路径**：对 `manifest.container.containerId` 跑 `docker logs --since <游标> --tail N`，按一组正则匹配 CLF / uvicorn / flask / 通用 `"METHOD path HTTP/x" status` 行 → 真实 PV/IP/路径/状态/时间。多数 web 框架默认访问日志写 stdout，命中率较高。
+- **兜底**：当 `docker logs` 采样后无可识别访问行（应用未开 access log / 写文件 / 非 web 容器），轮询 `docker stats --no-stream` 取容器网卡 RX/TX 累计字节记增量 → 显示"网络流量趋势"。**口径诚实标注**：网络字节 ≠ 请求数，且混入健康检查/出站调用，前端只标"网络流量 X KiB"，**不伪装成 PV**。
+- **降级**：docker 不可达 / 容器无任何可识别日志 → 明细显示"该容器未输出可识别访问日志"，不抛错；有网络字节时仍显示流量趋势。
+- 直达 hostPort 流量两种网关都拦不到，容器靠 Docker 侧弥补，统一标"近似统计"。
+
+**采集架构**：懒加载 + 持久化游标（不强制常驻后台线程）。`GET /api/pageviews` 请求时，按各源的上次游标增量解析（`docker logs --since` 与日志 tail 均有界），写入存储；manager 重启后凭游标续采。若需更新鲜数据，可选 manager 后台线程定时轮询（60s 量级）。
+
+**存储**：新增 `run/pageviews.db`（SQLite，独立于 registry，避免高体量访问数据污染主库）。
+
+- `pageviews(instance_id, ts, client_ip, method, path, status, bytes, referer, ua, source)`，`source ∈ {static_builtin, static_caddy, container_stdout}`。
+- `container_net(instance_id, ts, rx_bytes_delta, tx_bytes_delta)`（容器网络流量趋势，兜底口径）。
+- `ingest_cursor(source_key, last_ts, last_offset)`（增量去重游标）。
+- 保留策略：默认 30 天，写入路径顺带清理过期行（可配置）。
+
+**API**（`manager_api.py`）：
+
+- `GET /api/pageviews` → 全局汇总：`[{instanceId, name, kind, servingMode, pv, uv, hasReferer, netInKib, netOutKib, source, hasDetail}]`。
+- `GET /api/instances/{id}/pageviews?tail=100&since=` → 明细（时间倒序，最近 N 条/分页），含来源标记；builtin 源的 referer/ua 列为 `null`。
+
+**前端**（`manager_static/`）：
+
+- 实例列表新增「浏览量」列：静态/有访问日志的容器显示 PV 数字（可点击）；仅有网络流量的容器显示"≈流量"标记；无数据显 0。
+- 数字点击 → 复用抽屉展开访问明细列表（时间、IP、method、path、status、Referer、UA、来源徽章），顶部标注口径与来源（如"容器 · 近似统计（docker logs）"）。
+- 无数据不报错、不阻塞渲染。
+
+**口径声明（前端可见）**：静态站点 PV=解析请求数、UV=去重 IP；容器有访问日志时 PV=解析请求数，仅有网络字节时显"网络流量"不标 PV；直达流量不可统计的局限在明细面板脚注说明。
+
+**风险与边界**：
+
+- `docker logs` 格式随框架而异，正则覆盖主流但非万能 → 命中失败即降级网络字节，不硬撑。
+- `docker stats` 网络字节含非 HTTP 流量 → 仅作趋势参考，明确标注。
+- 多容器 compose：以 `manifest.container.containerId`（主 web 容器）为采集目标。
+- 采集失败（docker 不可达 / 日志解析异常）一律 WARN 不阻断 API，明细返回空 + 状态提示。
 
 ---
 
@@ -291,8 +341,8 @@
 
 | 本 WBS | task-list 现状 | 备注 |
 | --- | --- | --- |
-| 阶段0 BUG-069 | 已存在（待修复） | 直接推进，完成后填完成时间 |
-| 阶段0 IMP-010 | DEV-041（待开发） | IMP-010 即 DEV-041 |
+| 阶段0 BUG-069 | 已完成 | task-list BUG-069 |
+| 阶段0 IMP-010 | DEV-041（已完成） | IMP-010 即 DEV-041 |
 | 阶段0 BUG-070/071 | 新增 | stale pid / 状态观测失真 |
 | 阶段1 IMP-011/012/020 | 新增 DEV 条目 | daemon 防污染 / 冗余清理 / doctor 探针 |
 | 阶段1 DEV-042/043、OPS-022 | 新增 | 自愈 reconcile / 状态模型 / 开机自启 |

@@ -24,7 +24,7 @@ python -m pytest tests/test_doctor.py
 | 层 | 说明 | 是否需要 Docker | 典型文件 |
 | --- | --- | --- | --- |
 | 单元测试 | 纯逻辑，无 IO | 否 | `test_config.py`、`test_paths.py`、`test_models.py`、`test_registry.py`、`test_ports.py`、`test_scanner.py` |
-| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_compose.py`、`test_daemon.py`、`test_manager_api.py`、`test_security.py`、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime） |
+| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_compose.py`、`test_daemon.py`、`test_manager_api.py`、`test_security.py`、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime）、`test_pageviews.py`、`test_build_queue.py`、`test_zip_processor.py`、`test_manager_static_app.py` |
 | 样例夹具 | 验证 6 个样例识别正确 | 否 | `test_fixtures.py`、`tests/fixtures/` |
 | 跨模块集成 | daemon×manager×security×doctor | 否 | `test_integration_phase57.py` |
 | 真实 Docker | 端到端容器构建与运行 | **是** | `test_docker_integration.py` |
@@ -67,10 +67,14 @@ LWA_RUN_DOCKER_TESTS=1 python -m pytest tests/test_docker_integration.py
 | 28.09 静态配置 | `test_static_gateway.py` | 网关路由、端口 |
 | 28.10 Dockerfile | `test_dockerfile_templates.py` | 模板渲染 |
 | 28.11 Compose | `test_compose.py` | 模板、env、安全审计 |
-| 28.12 生命周期 | `test_lifecycle.py`、`test_health_status.py` | start/stop/restart/rebuild/remove |
+| 28.12 生命周期 | `test_lifecycle.py`、`test_health_status.py` | start/stop/restart/rebuild/remove / 冗余清理 |
 | 28.13 资源统计 | `test_stats.py` | 磁盘、内存解析 |
-| 28.14 管理页 API | `test_manager_api.py` | token、全部端点 |
+| 28.14 管理页 API | `test_manager_api.py` | token、全部端点（含 pageviews / redundant / remove / path-alias） |
 | 28.15 Docker 跳过 | `conftest.py`、`test_docker_integration.py` | `requires_docker` / `LWA_RUN_DOCKER_TESTS` |
+| — 浏览量（IMP-024） | `test_pageviews.py` | CLF/Caddy JSON/容器日志解析、store 聚合、摄入游标 |
+| — 构建闸门（DEV-047） | `test_build_queue.py` | `CrossProcessBuildGate` 跨进程互斥与死进程回收 |
+| — zip 处理抽取 | `test_zip_processor.py` | validate / hash / safe_extract |
+| — 管理页前端 | `test_manager_static_app.py` | helpers / Vue 根组件冒烟、冗余徽章、浏览量渲染 |
 
 ## 常见问题
 
