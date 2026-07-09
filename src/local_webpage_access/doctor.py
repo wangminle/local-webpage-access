@@ -54,6 +54,9 @@ STATUS_WARN = "warn"
 STATUS_FAIL = "fail"
 STATUS_SKIP = "skip"
 
+# Caddy admin API 端口（与 gateway_service.ADMIN_PORT 一致，本地常量避免循环导入）。
+ADMIN_DOCTOR_PORT = 2019
+
 _ORDER = {STATUS_OK: 0, STATUS_SKIP: 1, STATUS_WARN: 2, STATUS_FAIL: 3}
 
 
@@ -325,42 +328,53 @@ def check_port_pool(
     port_in_use: PortChecker = _default_port_in_use,
     *,
     allocated_ports: set[int] | None = None,
+    exclude_ports: set[int] | None = None,
 ) -> CheckResult:
-    """WBS-26.05：端口池与管理端口未被占用。
+    """WBS-26.05：端口池可用性（排除 lwa 合法自用端口）。
 
-    抽样检查池首尾与 manager 端口；若池范围很小（≤32）则全量检查。
+    抽样检查池首尾；池范围很小（≤32）时全量检查。
+
+    建议项 H（gateway-switch-access-review）：排除 lwa **合法自用**端口——
+    ``managerPort``（管理页）、``staticGatewayPort``（Caddy 别名入口）、registry
+    已分配的 hostPort。这些端口被 lwa 自身监听是预期状态，报为冲突会干扰切换后
+    巡检（OPS-005 / OPS-030 / OPS-031 均有误报记录）。仅当端口池范围内的**外部**
+    占用（非 lwa 进程）才判 FAIL。
     """
-    allocated_ports = allocated_ports or set()
+    allocated = allocated_ports or set()
+    exclude = exclude_ports or set()
+    # 合法自用端口：管理端口始终自用；别名入口端口由 caddy 网关自用。
+    self_ports: set[int] = {config.managerPort}
+    if config.staticGatewayPort is not None:
+        self_ports.add(config.staticGatewayPort)
+    skip = allocated | exclude | self_ports
+
     conflicts: list[int] = []
     start = config.portPool.start
     end = config.portPool.end
     span = end - start + 1
     # 大范围抽样，小范围全量
     if span <= 32:
-        candidates = range(start, end + 1)
+        candidates: list[int] = list(range(start, end + 1))
     else:
         candidates = [start, end, start + 1, end - 1, (start + end) // 2]
     for port in candidates:
-        if port in allocated_ports:
+        if port in skip:
             continue
         if port_in_use(port):
             conflicts.append(port)
-    # 管理端口单独检查（可能与池范围不重叠）
-    if port_in_use(config.managerPort) and config.managerPort not in conflicts:
-        conflicts.append(config.managerPort)
     if conflicts:
         return CheckResult(
             "port_pool",
             STATUS_FAIL,
-            f"端口池 {start}-{end} 或管理端口 {config.managerPort} 存在占用",
+            f"端口池 {start}-{end} 存在外部占用",
             detail="被占用端口：" + ", ".join(str(p) for p in sorted(set(conflicts))),
-            suggestion="修改 local-web.yml 的 portPool 或 managerPort，"
-            "或停止占用这些端口的进程",
+            suggestion="修改 local-web.yml 的 portPool，或停止占用这些端口的外部进程",
         )
+    self_summary = ", ".join(str(p) for p in sorted(self_ports | allocated))
     return CheckResult(
         "port_pool",
         STATUS_OK,
-        f"端口池 {start}-{end}（抽样）与管理端口 {config.managerPort} 可用",
+        f"端口池 {start}-{end}（抽样）无外部占用；已排除自用端口 {self_summary}",
     )
 
 
@@ -578,6 +592,243 @@ def check_caddy_health(
         STATUS_OK,
         "Caddy master 在线（admin :2019），主配置 validate 通过",
     )
+
+
+# ---- 建议项 F：切换交接与地址漂移诊断（gateway-switch-access-review）----------
+
+
+def _list_listeners(port: int) -> list[tuple[str, str]]:
+    """best-effort：用 lsof 列出端口监听者 ``[(name, pid_str), ...]``。
+
+    POSIX 上 lsof 可用；Windows / 无 lsof 时返回空列表（调用方据此 SKIP）。
+    """
+    if shutil.which("lsof") is None:
+        return []
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    listeners: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2:
+            listeners.append((parts[0], parts[1]))
+    return listeners
+
+
+def check_lan_url_stale(
+    ws: Workspace, config: Config, registry: Registry
+) -> CheckResult:
+    """建议 F / G1：检测实例 lanUrl 是否指向失效（漂移）的 LAN IP。
+
+    换 Wi-Fi / DHCP 续约后本机 LAN IP 变化，但各实例 ``local-web.json`` 的
+    ``lanUrl`` 仅在 start/enable 时写入，不会自愈 → 管理页链接失效。本检查比对
+    各实例 lanUrl host 与当前 :func:`resolve_lan_ip`（及 127.0.0.1），漂移则 WARN，
+    提示 ``lwa access refresh``。
+    """
+    from local_webpage_access.ports import resolve_lan_ip
+
+    lan_ip = resolve_lan_ip(config)
+    drifted: list[str] = []
+    skipped = 0
+    for row in registry.list_instances():
+        iid = row["id"]
+        manifest_path = ws.app_manifest_path(iid)
+        if not manifest_path.is_file():
+            continue
+        try:
+            from local_webpage_access.models import InstanceManifest
+
+            manifest = InstanceManifest.load(manifest_path)
+        except Exception:  # noqa: BLE001
+            skipped += 1
+            continue
+        lan_url = manifest.network.lanUrl if manifest.network else None
+        if not lan_url:
+            continue
+        host = _url_host(lan_url)
+        if lan_ip and host and host not in (lan_ip, "127.0.0.1"):
+            drifted.append(f"{iid}({host})")
+    if drifted:
+        return CheckResult(
+            "lan_url_stale",
+            STATUS_WARN,
+            f"{len(drifted)} 个实例的 lanUrl 指向非当前 LAN IP（{lan_ip}）",
+            detail="漂移实例：" + ", ".join(drifted[:8]),
+            suggestion="运行 `lwa access refresh` 用当前 LAN IP 刷新所有实例访问地址",
+        )
+    return CheckResult(
+        "lan_url_stale",
+        STATUS_OK,
+        f"实例 lanUrl 与当前 LAN IP（{lan_ip or '127.0.0.1'}）一致" + (
+            "" if not skipped else f"（{skipped} 个 manifest 跳过）"
+        ),
+    )
+
+
+def check_backend_handoff(
+    ws: Workspace, config: Config, registry: Registry
+) -> CheckResult:
+    """建议 F / G3：检测 builtin 与 caddy 在同一 hostPort 上双开（切换残留）。
+
+    切换 builtin↔caddy 时若旧进程未停干净（建议 A 前的现场已观察到），同一
+    hostPort 会同时被 Python ``http.server`` 与 Caddy 监听，行为不确定、排障极难。
+    用 lsof 检查每个 enabled 静态站点的 hostPort，发现双开则 FAIL。无 lsof 时 SKIP。
+    """
+    double: list[str] = []
+    probed = 0
+    for row in registry.list_instances():
+        if row.get("runtime") != "shared-static":
+            continue
+        iid = row["id"]
+        site = registry.get_static_site(iid)
+        if not site or not site.get("enabled"):
+            continue
+        hp = site.get("host_port")
+        if not hp:
+            continue
+        listeners = _list_listeners(int(hp))
+        if not listeners:
+            continue
+        probed += 1
+        names = {name.lower() for name, _ in listeners}
+        has_caddy = any("caddy" in n for n in names)
+        has_python = any(
+            "python" in n or "http.server" in n for n in names
+        )
+        if has_caddy and has_python:
+            double.append(
+                f"{iid}:{hp}（{', '.join(sorted(names))}）"
+            )
+    if probed == 0:
+        return CheckResult(
+            "backend_handoff",
+            STATUS_SKIP,
+            "无 enabled 静态站点 hostPort 可探（或 lsof 不可用）",
+        )
+    if double:
+        return CheckResult(
+            "backend_handoff",
+            STATUS_FAIL,
+            f"{len(double)} 个 hostPort 上 builtin + caddy 双开（切换未彻底交接）",
+            detail="双开端口：" + ", ".join(double),
+            suggestion="运行 `lwa gateway off` 再 `lwa gateway on`，统一停掉残留进程后重启网关",
+        )
+    return CheckResult(
+        "backend_handoff",
+        STATUS_OK,
+        f"已探 {probed} 个 enabled 静态 hostPort，未发现 builtin+caddy 双开",
+    )
+
+
+def check_port_contention(
+    ws: Workspace, config: Config, *, registry: Registry | None = None
+) -> CheckResult:
+    """建议 F / §2.7：检测关键端口上的**非预期**监听者（测试/外部孤儿）。
+
+    陈旧监听不只来自 builtin↔caddy 切换，也可能来自 pytest 泄漏的真实 Caddy
+    占 ``:2019``（现场 pid 75224，见复盘 §2.7）。本检查断言关键端口上的监听者
+    符合当前后端与工作区预期：
+
+    * ``:2019``（admin）：若有监听者但**非** ``run/caddy.pid`` 所记 master，判 FAIL（孤儿）；
+    * ``:staticGatewayPort``（别名入口）：caddy 后端下应仅 caddy 监听。
+
+    无 lsof 时 SKIP（无法判定监听者身份）。
+
+    仅在 ``staticGateway=caddy`` 时检查——:2019 / 别名入口都是 caddy 的端口，
+    builtin 模式工作区不占用它们，其上的陈旧监听不属本工作区 concern（避免 builtin
+    工作区因机器上残留的测试 caddy 而 doctor FAIL）。builtin+caddy 双开由
+    :func:`check_backend_handoff` 负责。
+    """
+    from local_webpage_access.static_gateway import StaticGateway
+
+    if config.staticGateway != "caddy":
+        return CheckResult(
+            "port_contention",
+            STATUS_SKIP,
+            f"staticGateway={config.staticGateway}，:2019/别名入口非本工作区占用，跳过",
+        )
+    findings: list[str] = []
+    probed = 0
+    gateway = StaticGateway(ws, config)
+    # :2019 admin
+    admin_listeners = _list_listeners(ADMIN_DOCTOR_PORT)
+    caddy_pid = None
+    pid_path = gateway.caddy_pid_path()
+    if pid_path.is_file():
+        try:
+            caddy_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            caddy_pid = None
+    if admin_listeners:
+        probed += 1
+        non_self = [
+            (name, pid) for name, pid in admin_listeners
+            if caddy_pid is None or pid != str(caddy_pid)
+        ]
+        if non_self and not gateway._admin_alive():
+            # :2019 被占但非本工作区 caddy master（admin 不可达说明不是健康 master）
+            findings.append(
+                f":2019 被 {len(non_self)} 个非预期进程占用"
+                f"（{', '.join(sorted({n for n, _ in non_self}))}）——疑似测试/外部孤儿"
+            )
+        elif non_self:
+            findings.append(
+                f":2019 存在非本工作区 caddy.pid 记录的监听者"
+                f"（{', '.join(sorted({n for n, _ in non_self}))}）"
+            )
+    # :staticGatewayPort（别名入口）：caddy 后端下应仅 caddy 监听。
+    # 只要存在非 caddy 监听者即 FAIL（含 caddy+python 混合），不得因「有 caddy」放行。
+    entry_port = config.staticGatewayPort
+    if entry_port is not None:
+        entry_listeners = _list_listeners(int(entry_port))
+        if entry_listeners:
+            probed += 1
+            non_caddy = sorted(
+                {
+                    name.lower()
+                    for name, _ in entry_listeners
+                    if "caddy" not in name.lower()
+                }
+            )
+            if non_caddy:
+                findings.append(
+                    f":{entry_port}（别名入口）存在非 caddy 监听者"
+                    f"（{', '.join(non_caddy)}）"
+                )
+    if probed == 0:
+        return CheckResult(
+            "port_contention",
+            STATUS_SKIP,
+            "关键端口无监听者或 lsof 不可用，跳过",
+        )
+    if findings:
+        return CheckResult(
+            "port_contention",
+            STATUS_FAIL,
+            "；".join(findings),
+            suggestion="确认监听者来源：测试泄漏用 pkill 清理；外部进程改用其他端口；"
+            "本工作区用 `lwa gateway off` 再 `lwa gateway on`",
+        )
+    return CheckResult(
+        "port_contention",
+        STATUS_OK,
+        f"关键端口（:2019{f'/:{entry_port}' if entry_port else ''}）监听者符合预期",
+    )
+
+
+def _url_host(url: str) -> str | None:
+    """从 URL 提取 host（供 lan_url_stale 比对）。"""
+    from urllib.parse import urlparse
+
+    return urlparse(url).hostname
 
 
 def check_disk_space(ws: Workspace, *, min_gb: float = 1.0) -> CheckResult:
@@ -867,6 +1118,19 @@ def run_doctor(
             check_caddy_health(
                 ws, config, runner=runner, registry=caddy_probe_registry
             ),
+            check_lan_url_stale(
+                ws, config, caddy_probe_registry
+            ) if caddy_probe_registry is not None
+            else CheckResult(
+                "lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"
+            ),
+            check_backend_handoff(
+                ws, config, caddy_probe_registry
+            ) if caddy_probe_registry is not None
+            else CheckResult(
+                "backend_handoff", STATUS_SKIP, "registry 不可用，跳过后端交接检测"
+            ),
+            check_port_contention(ws, config, registry=caddy_probe_registry),
             check_disk_space(ws),
             check_memory(),
         ]
@@ -953,6 +1217,9 @@ __all__ = [
     "check_registry",
     "check_static_gateway",
     "check_caddy_health",
+    "check_lan_url_stale",
+    "check_backend_handoff",
+    "check_port_contention",
     "check_disk_space",
     "check_memory",
     "diagnose_instance",

@@ -33,6 +33,7 @@ from local_webpage_access.config import Config
 from local_webpage_access.errors import LifecycleError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
 from local_webpage_access.version_requirements import MIN_CADDY_VERSION
 
@@ -162,12 +163,22 @@ def gateway_start_lock(
             path.unlink()
 
 
-def start_gateway(workspace: Workspace, config: Config) -> int:
+def start_gateway(
+    workspace: Workspace,
+    config: Config,
+    *,
+    registry: Registry | None = None,
+) -> int:
     """``lwa gateway on`` / ``lwa init`` 联动：启动 Caddy master 并写服务态。
 
     Caddy 由 ``caddy start --pidfile`` 自守护（:meth:`StaticGateway.caddy_start`
     已轮询 admin :2019 确认在线），成功后把 pid 写入 ``run/gateway.json``。
     已在运行则不重复启动。返回 master pid；admin 在线但读不到 pidfile 时返回 0。
+
+    建议项 A/B/F（gateway-switch-access-review）：传入 ``registry`` 时额外执行切换
+    事务收尾——停掉残留 builtin 静态进程、刷新各实例 LAN 访问地址、记录
+    ``gateway_backend_switch`` 审计事件。``lwa init`` / ``maybe_start_gateway``
+    不传 registry（失败不阻断），故不执行收尾。
     """
     gateway = StaticGateway(workspace, config)
     _require_caddy_backend(gateway)
@@ -194,11 +205,34 @@ def start_gateway(workspace: Workspace, config: Config) -> int:
                 log.info("网关已在线，补写服务态（pid=%s）", pid if pid else "?")
             else:
                 log.info("网关已在运行（pid=%s），不重复启动", pid if pid else "?")
+            # 即使网关已在线，也清理可能残留的 builtin 孤儿（含 pid-less 孤儿，
+            # §2.7）+ 刷新地址（建议 A/B）。不重复 caddy start，但交接收尾必须执行。
+            # I1：先停旧再必要时 reload，避免 hostPort 仍被 Python 占用时站点半死。
+            stopped_builtin = gateway.stop_all_builtin()
+            if stopped_builtin:
+                log.info("网关已在线：清理残留 builtin 静态服务 %s", ", ".join(stopped_builtin))
+                try:
+                    gateway.reload_all()
+                except Exception as exc:  # noqa: BLE001 — reload 失败不阻断已在线网关
+                    log.warning("清理 builtin 后 reload 失败（不阻断）：%s", exc)
+            _post_switch_finalize(
+                workspace, config, registry, pid, started=False,
+                stopped_builtin=stopped_builtin,
+            )
             return int(pid) if pid else 0
+
+        # I1 / §4.1：先停残留 builtin（释放 hostPort），再拉 Caddy——避免双开竞态。
+        stopped_builtin = gateway.stop_all_builtin()
+        if stopped_builtin:
+            log.info(
+                "切换到 Caddy：启动前已停止残留 builtin 静态服务 %s",
+                ", ".join(stopped_builtin),
+            )
 
         if not gateway.caddy_start():
             raise LifecycleError(
-                "Caddy master 启动失败（caddy start 返回非零）；请检查 Caddyfile 配置与 Caddy 日志",
+                "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）；"
+                "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019",
             )
         # BUG-074：caddy_start 无主 Caddyfile 时加载最小 bootstrap（仅保证 admin 在线），
         # 真实站点/别名片段不会自动加载。若磁盘上有 sites/aliases 片段但主配置缺失，
@@ -206,6 +240,12 @@ def start_gateway(workspace: Workspace, config: Config) -> int:
         main = gateway.main_config_path()
         if not (main.is_file() and main.read_text(encoding="utf-8").strip()):
             gateway._sync_main_config()
+        elif stopped_builtin:
+            # 启动前清过占用 hostPort 的 builtin：再 reload 一次确保站点绑定生效。
+            try:
+                gateway.reload_all()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("启动后 reload 失败（不阻断）：%s", exc)
         pid = _read_caddy_pid(gateway)
         state = GatewayState(
             enabled=True,
@@ -219,7 +259,48 @@ def start_gateway(workspace: Workspace, config: Config) -> int:
             "网关已启动（pid=%s，admin=127.0.0.1:%d，entry=%s）",
             pid if pid else "?", ADMIN_PORT, config.staticGatewayPort,
         )
+        _post_switch_finalize(
+            workspace, config, registry, pid, started=True, stopped_builtin=stopped_builtin
+        )
         return int(pid) if pid else 0
+
+
+def _post_switch_finalize(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry | None,
+    pid: int | None,
+    *,
+    started: bool,
+    stopped_builtin: list[str] | None = None,
+) -> None:
+    """切换事务收尾（建议 A/B/F）：停孤儿、刷新地址、记审计事件。
+
+    无 registry 时（``lwa init`` / 自动启动）跳过——只保证 master 在线，不阻断。
+    """
+    if registry is None:
+        return
+    try:
+        from local_webpage_access.access import refresh_network_entries
+
+        report = refresh_network_entries(workspace, config, registry)
+    except Exception as exc:  # noqa: BLE001 — 地址刷新失败不阻断网关启动
+        log.warning("切换后刷新访问地址失败（不阻断）：%s", exc)
+        report = None
+    # F（建议 F）：审计事件——记录本次切换动作与收尾结果。
+    try:
+        parts = [
+            f"backend=caddy pid={pid if pid else '?'}",
+            f"started={'yes' if started else 'already-running'}",
+        ]
+        if stopped_builtin:
+            parts.append(f"stopped_builtin={','.join(stopped_builtin)}")
+        if report is not None:
+            parts.append(f"lan_ip={report.lan_ip or 'none'}")
+            parts.append(f"lan_drifted={report.drifted_count}")
+        registry.add_event(None, "gateway_backend_switch", "；".join(parts))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("记录 gateway_backend_switch 事件失败：%s", exc)
 
 
 def stop_gateway(workspace: Workspace, config: Config) -> bool:
@@ -268,11 +349,19 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
 
 
 def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
-    """``lwa gateway status``：返回状态摘要。"""
+    """``lwa gateway status``：返回状态摘要。
+
+    BUG-108：``running`` 以 admin :2019 是否在线为准，**不**要求
+    ``staticGateway=caddy``。配置已切 builtin 但旧 master 仍占 :2019 时，
+    必须报 ``running=True`` 并标 ``orphanMaster``，与 :func:`stop_gateway`
+    （BUG-077）一致，避免 CLI 显示「未运行」掩盖端口占用。
+    """
     gateway = StaticGateway(workspace, config)
     backend = gateway.detect_backend()
     state = read_state(workspace)
-    running = backend == "caddy" and gateway._admin_alive()
+    admin_alive = gateway._admin_alive()
+    running = admin_alive
+    orphan_master = running and backend != "caddy"
     pid = state.pid if state else None
     if running and pid is None:
         # 服务态缺失但 master 在线：补读 caddy.pid 便于展示。
@@ -287,6 +376,7 @@ def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
         "startedAt": state.started_at if state else None,
         "port": (state.port if state and state.port is not None else configured_port),
         "adminPort": ADMIN_PORT,
+        "orphanMaster": orphan_master,
     }
 
 

@@ -33,6 +33,7 @@
 * **数据持久化**：仅自动 bind mount `data/` 目录。其他路径（如日志、上传目录）需用户在项目内处理。
 * **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。
 * **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。
+* **别名下 SPA 绝对资源路径（IMP-023）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 → 空 200，页面白屏。受影响项目应构建时设相对 base（Vite `base: './'`）或 `--base=/<alias>/`，或继续用 hostPort 直达。`lwa access review` 会检测该空 200 并告警（入口 HTML 200 ≠ 别名下可渲染）。
 * **浏览量统计**：别名入口流量计入（Caddy JSON log）；直连 hostPort 默认不计入；容器路径为尽力解析，数字可能近似。
 
 ## 管理页与 API

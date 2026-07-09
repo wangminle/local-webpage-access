@@ -112,6 +112,14 @@
 | BUG-099 | 修复 | 管理页 `openDetail`/`openPageview` 无请求序号，慢响应可覆盖新选中实例或把已关抽屉重新打开 | 2026-07-09 08:48 | 2026-07-09 09:34 | 已完成 | 快速切换实例或 Esc 关闭后旧 Promise resolve 仍写 `drawer`/`pageview.body`。修复：递增 seq，回调比对；关抽屉时忽略过期响应。 【完成 2026-07-09 09:34】openDetail/openPageview 引入 _detailReq/_pageviewReq 自增序号，.then/.catch 回调比对序号，过期或已关抽屉的响应被忽略。jsdom 验证。 |
 | BUG-100 | 修复 | `PageviewStore.detail()` 不返回 `source`，浏览量弹窗在 summary map 未就绪时「数据来源」为空 | 2026-07-09 08:48 | 2026-07-09 09:34 | 已完成 | 前端 `renderPageviewHtml` 用 `(pv && pv.source) \|\| data.source`；detail API 无 source 字段。【完成 2026-07-09 09:34】PageviewStore.detail() 补 source 字段（查 pageviews.source），浏览量弹窗来源兜底不再为空。 |
 | BUG-101 | 修复 | 管理页名称单元格内点「冗余」徽章会因事件冒泡打开详情抽屉 | 2026-07-09 08:48 | 2026-07-09 09:34 | 已完成 | `helpers.js` 徽章在 `[data-detail]` 的 `td` 内；`onTableClick` 先匹配 `closest("[data-detail]")`。徽章 `cursor:help` 暗示悬停，点击却开抽屉。修复：徽章加 `data-op` 忽略或对 `.redundant-badge` early-return。 【完成 2026-07-09 09:34】onTableClick 先判 data-op（按钮/徽章 early-return）再判 data-detail，消除冗余徽章点击冒泡误开详情抽屉。jsdom 验证点 pageview 按钮只触发 openPageview。 |
+| BUG-102 | 修复 | caddy start --pingback 超时返回非零时 gateway on 直接 LIFECYCLE_ERROR，但 master 可能已起来（admin :2019/pidfile 就绪），报告 FAIL≠真失败 | 2026-07-09 12:24 | 2026-07-09 13:41 | 已修复 | OPS-031 实测：gateway on 报 pingback~20s 超时，实际 pid=93524 已写、:8080/:2019 在服务。复盘 design/plan/local-webpage-access-gateway-switch-access-review-20260709.md §2.7；建议 returncode≠0 时回退 admin 探活，仅 admin 不可达才判失败。 已修：static_gateway.caddy_start 在 returncode≠0/TimeoutExpired 时回退 admin :2019 探活，admin 在线即视为成功（WARN pingback 假失败），仅 admin 不可达才判失败；start_gateway 错误信息同步改为 admin 口径。回归测试 test_caddy_start_admin_probe_when_cmd_fails_but_admin_alive / _returns_false_when_cmd_fails_and_admin_down / _recovers_on_timeout_exception。|
+| BUG-103 | 修复 | macOS 上 stop_all_builtin 用 pgrep -af 只得 PID、无命令行，pid-less 孤儿枚举恒空（打穿 G3） | 2026-07-09 14:00 | 2026-07-09 14:09 | 已完成 | 复盘 §10.2-C1。改 pgrep -lf；test_enumerate_workspace_builtin_pids_parses_pgrep_lf；conftest 同步。 |
+| BUG-104 | 修复 | caddy_start 对 FileNotFoundError 也走 admin 兜底且不校验工作区 pidfile，可能认领 pytest 孤儿 admin 假绿 | 2026-07-09 14:00 | 2026-07-09 14:09 | 已完成 | 复盘 §10.2-C2。FileNotFoundError 硬失败；pingback 失败须 _workspace_caddy_pid_alive；拒认领孤儿。回归 test_caddy_start_file_not_found_* / rejects_orphan_admin_*。 |
+| BUG-105 | 修复 | start_gateway 先 caddy_start 再 stop_all_builtin，与切换清单「先停旧再拉新」相反；清孤儿后未 reload | 2026-07-09 14:00 | 2026-07-09 14:09 | 已完成 | 复盘 §10.3-I1。改为先 stop_all_builtin 再 caddy_start；清孤儿后 reload_all。回归 test_start_gateway_stops_builtin_before_caddy_start。 |
+| BUG-106 | 修复 | access review 要求 routeUrl and path_alias，prd-workflow 等 routeUrl 为空但有 static.routeHost/别名片段时漏检 IMP-023 空 200 | 2026-07-09 14:00 | 2026-07-09 14:09 | 已完成 | 复盘 §10.3-I2。_extract_host_port_alias 多段兜底；无 routeUrl 时合成 127.0.0.1:entry/<alias>/。runtime 实测 prd-workflow 现 WARN。回归 test_review_synthesizes_route_when_route_url_missing。 |
+| BUG-107 | 修复 | doctor port_contention 对别名入口只要存在 caddy 就放行，漏报 caddy 与非 caddy 混合监听 | 2026-07-09 14:19 | 2026-07-09 14:26 | 已修复 | 审查发现：doctor.py 别名入口仅判定 names 中是否存在 caddy，caddy+python 混合会 OK。已改为显式枚举 non-caddy 监听者并 FAIL；回归 test_check_port_contention_fails_on_mixed_entry_listeners / _ok_when_entry_only_caddy。 |
+| BUG-108 | 修复 | gateway_status 在 staticGateway 已切 builtin 但残留 Caddy master 仍在线时把运行态固定为未运行，`lwa gateway status` 会掩盖占用 :2019 的残留进程 | 2026-07-09 14:47 | 2026-07-09 14:51 | 已修复 | gateway_status 以 admin :2019 在线判定 running（不要求 backend=caddy）；新增 orphanMaster；CLI 提示 `lwa gateway off`。回归 test_gateway_status_exposes_orphan_master_when_builtin。 |
+| BUG-109 | 修复 | access refresh 复用 review 用的陈旧别名兜底逻辑，可能把已切回端口模式的实例误写回 routeMode=name/routeUrl | 2026-07-09 14:47 | 2026-07-09 14:51 | 已修复 | 拆分 _extract_active_path_alias（须 routeMode=name）与 _extract_path_alias_for_review（忽略 routeMode）；refresh 用前者，review 用后者。回归 test_refresh_ignores_stale_routehost_when_port_mode。 |
 
 ## 调整事项
 
@@ -122,6 +130,7 @@
 | ADJ-003 | 调整 | IMP-001 计划要求剥离 env/，实现中明确排除裸 env，验收口径需统一 | 2026-07-06 23:27 | 2026-07-06 23:35 | 已完成 | 计划文档清理规则移除裸 env/，注明保留原因（环境配置目录）；与 security.py _STRIPPABLE_SEGMENTS 及注释一致 |
 | ADJ-004 | 调整 | 管理页时间字段显示为本地主机标准时间格式 | 2026-07-07 10:37 | 2026-07-07 10:37 | 已完成 | manager_static/app.js 新增 formatLocalDateTime，将 updatedAt/lastHealthCheckAt/构建 startedAt/事件 createdAt 从 ISO 字符串显示为 YYYY-MM-DD HH:mm:ss(UTC+8) 等格式；新增 tests/test_manager_static_app.py 覆盖 +08:00/+05:30/空值；pytest 全量通过，compileall 与 node --check 通过 |
 | ADJ-005 | 调整 | 清理 tests/test_manager_api.py 文件末尾多余空行，恢复 git diff --check 通过 | 2026-07-08 23:54 | 2026-07-09 00:19 | 已完成 | 去除 tests/test_manager_api.py 末尾多余空行，git diff --check 通过。 |
+| ADJ-006 | 调整 | task-list.md 统计摘要与实际记录数不一致 | 2026-07-09 14:19 | 2026-07-09 14:26 | 已完成 | 审查发现 summary 漂移（文件写总计 268/待处理 0，实际更高）。已用 `task_list_cli.py summary --file task-list.md --write` 按当前记录重算回写统计摘要。 |
 
 ## 检查事项
 
@@ -156,6 +165,15 @@
 | CHK-027 | 检查 | 当前未提交代码复审（build_queue / pageviews / CLI 拆包 / 管理页 Vue 重构 / zip_processor） | 2026-07-09 08:39 | 2026-07-09 08:39 | 已完成 | 审查当前未提交 diff 与未跟踪文件；pytest 全量 908 passed/4 skipped；compileall 通过；node --check helpers/app/boot 通过；ruff 未安装未执行。确认既有 BUG-087~090 仍成立，并新增 BUG-091~093。 |
 | CHK-029 | 检查 | 对照未提交实现核查 README/docs/skills 文档新鲜度 | 2026-07-09 09:58 | 2026-07-09 09:58 | 已完成 | P0：manager-page.md 缺 pageviews/redundant/remove API 且 IMP-022/容器别名写反；README 缺浏览量/冗余/目录文件与 playbook 索引；faq.md 仍写自动 -2/-3。P1：runtime-workspace builtin「别名可登记」、known-limitations、release-checklist cli.py、testing.md 缺新测、版本位 0.5.0。Skill：generate-static-gateway-config 路径/模板过时（P0）；import-zip 缺容器别名+冗余清理、setup-host 缺别名必 Caddy（P1）。operations-playbook 与已改 import-zip/build-frontend/update-runtime 基本对齐。未改业务代码。 |
 | CHK-030 | 检查 | 用 task-list-initialization skill 标准化诊断 task-list.md | 2026-07-09 10:06 | 2026-07-09 10:06 | 已完成 | standardize/check 诊断发现 BUG-087~101 共 15 行列数异常：前序原子脚本把完成备注追加成第 8 列且缺末尾分隔符；BUG-100 另含未转义的 JS 逻辑或符号。已逐行重建为标准 7 列：合并审查与完成备注为单一备注格，逻辑或符号转义，补齐末尾分隔符。官方 check 复跑通过（0 结构/枚举/重复问题），记录数 239→253 全部可解析。维护规则与 Stop hook 均已安装。遗留建议：BUG-064/DEV-044/DEV-045 动作=优化但无「优化事项」分区，仅 3 条暂不单列 OPT，待用户定夺是否扩展为 extended profile。 |
+| CHK-031 | 检查 | 网关切换与访问地址可用性全链路验证（gateway-switch-access-review 建议 A-H + BUG-102） | 2026-07-09 13:42 | 2026-07-09 13:42 | 已完成 | 全量 pytest 938 passed/4 skipped（+21 新增）；runtime 实测：LAN 刷新、孤儿清理、双开消除、doctor 全绿、localhostUrl 入 API。覆盖 G1/G2/G3/G5 与建议 A-H 全部落地。 |
+| CHK-032 | 检查 | 审查所有未提交代码和文档，检查是否还有 bug | 2026-07-09 14:19 | 2026-07-09 14:19 | 已完成 | 审查 tracked/untracked 变更：access/doctor/static_gateway/gateway_service/CLI/manager helper/docs/tests/task-list；验证 pytest 相关切片通过、全量 pytest 通过（4 skipped）、compileall/node --check/git diff --check/task-list check 通过；发现 BUG-107 与 ADJ-006。 |
+| CHK-033 | 检查 | 修复 BUG-107 port_contention 混合监听漏报并刷新 ADJ-006 统计摘要 | 2026-07-09 14:26 | 2026-07-09 14:26 | 已完成 | doctor.py 别名入口改为显式枚举 non-caddy 监听者并 FAIL；补 test_check_port_contention_fails_on_mixed_entry_listeners / _ok_when_entry_only_caddy；test_doctor 全绿；summary --write 回写摘要。 |
+| CHK-034 | 检查 | 验证 G6 rebuild 兼容检查实现与相关测试 | 2026-07-09 14:35 | 2026-07-09 14:35 | 已完成 | pytest tests/test_access.py / test_gateway_service / test_static_gateway 通过；compileall 通过。 |
+| CHK-035 | 检查 | 排查 vp-app-demo-v3 别名白屏：根因为浏览器缓存重建前的旧 index.html（旧版 Vite base:/ 绝对路径），别名下绝对 /assets 打到 :8080 根返回空 200(IMP-023)；当前 14:18 重建产物已用相对 base，别名全链路 200 正常 | 2026-07-09 14:39 | 2026-07-09 14:39 | 已完成 | 证据：旧 hash index-DBjU_3z5.js 已不在磁盘但浏览器仍请求(referer=别名页)；绝对 /assets/index-C2I0oP_p.js 返回 200 size=0；别名前缀 /vp-app-demo-v3/assets/* 全 200。解决=浏览器硬刷新/清缓存。可选增强：别名入口 index.html 下发 Cache-Control no-cache |
+| CHK-036 | 检查 | 核对 G6（切换后 rebuild 兼容检查）实现完整度：代码(access.py maybe_rebuild_after_review + cli/gateway.py + cli/access.py --rebuild-if-needed)+测试(test_access 4 用例)+文档(§4.6/§11)均已就绪，15 测试全绿 | 2026-07-09 14:39 | 2026-07-09 14:39 | 已完成 | 逐条对齐设计：触发仅 IMP-023 空 200；默认不重建；rebuild_fn 注入可 mock。唯一缺口=rebuild 后未复检 IMP-023(可能误报 OK)，待用户确认是否补 still_imp023 增强。文件未提交(access.py/cli/access.py 未跟踪) |
+| CHK-037 | 检查 | 采纳 pair review：补 G6 rebuild 后 IMP-023 复检并验证测试 | 2026-07-09 14:42 | 2026-07-09 14:43 | 已完成 | 同意 CHK-036 所指唯一缺口；pytest tests/test_access.py 16 项全绿。G6 主流程此前已完成（非待开发）。 |
+| CHK-038 | 检查 | 当前全部未提交代码与文档复审（access/gateway/doctor/manager helper/docs/tests/task-list） | 2026-07-09 14:47 | 2026-07-09 14:47 | 已完成 | 审查当前 working tree 的 tracked/untracked 变更，运行 `pytest -q tests/test_access.py tests/test_gateway_service.py tests/test_static_gateway.py tests/test_doctor.py` 全绿；补做最小复现实验确认 BUG-109。新增发现 BUG-108、BUG-109；其余本轮未见新的阻断级问题。 |
+| CHK-039 | 检查 | 修复并验证 BUG-108 gateway_status 残留 master 与 BUG-109 refresh 误写别名 | 2026-07-09 14:47 | 2026-07-09 14:51 | 已完成 | gateway_status 以 admin 在线判定 running + orphanMaster；refresh/review 分离别名提取。pytest test_access/test_gateway_service/test_doctor 全绿。 |
 
 ## 测试数据
 
@@ -187,6 +205,12 @@
 | DOC-019 | 文档 | README 快速开始与管理页章节补 gateway/autostart/recover 与 reconcile 说明（V0.4.3 发布收口） | 2026-07-08 19:55 | 2026-07-08 19:55 | 已完成 | 快速开始增 lwa gateway on、setup --autostart；管理页章补 gateway_down/config_invalid 与 recover；daemon 章补 reconcile 自愈；CHK-018 遗留项闭合 |
 | DOC-020 | 文档 | 同步 README/docs/skills 与未提交实现（浏览量/冗余/IMP-022/运维手册/CLI 包） | 2026-07-09 10:13 | 2026-07-09 10:20 | 已完成 | 按 CHK-029：重写 manager-page API/前端（pageviews/redundant/remove/IMP-022/014）；README 特性/目录/管理页/文档索引补 operations-playbook；faq slug 冲突改 --update；runtime-workspace 补 pageviews.db/build-locks/static-access 与 builtin 拦截；known-limitations .env.local+冗余批量例外；release-checklist cli/ 包；testing 补新测；acceptance 增 29.19/29.20；重写 lwa-generate-static-gateway-config；import-zip 补容器别名+冗余；setup-host 补 Caddy 硬依赖；skills README 链 playbook。 |
 | DOC-021 | 文档 | 同步 design/plan 规划文档状态至 V0.5.0 | 2026-07-09 10:55 | 2026-07-09 10:55 | 已完成 | 核实并修正 design/plan 规划文档状态与 V0.5.0 一致：V0.5.0 提交(f48caf9)已将整改WBS §二 现状列同步为已完成/已修复/已决策（维持 Caddy）并加状态横幅；本次修正其工作树漂移（§二 一度回退为待开发）使其重新对齐，并补修 §七 编号映射表 BUG-069/IMP-010 两处遗留陈旧状态格、imp010-021-plan 状态行由「尚未动工」改为「已于 V0.5.0 全部落地」。待改进功能点记录-20260706 本就为已完成。事故/诊断/分析类报告（caddy-startup-diagnostic/incident、startup-failure、analysis×2）作为 7/8 历史快照保留不动。 |
+| DOC-022 | 文档 | 网关切换与访问地址可用性复盘：陈旧 LAN IP、IMP-023 假 200、builtin/caddy 双开与切换交接清单 | 2026-07-09 12:37 | 2026-07-09 12:37 | 已完成 | 新增 design/plan/local-webpage-access-gateway-switch-access-review-20260709.md：分析过程、G1–G5 缺口、切换事务清单、access-review 探测口径、临时可用地址与落地建议 A–F |
+| DOC-023 | 文档 | 网关切换复盘文档吸纳交叉评审：§2.7 pytest 占:2019、pingback 假 FAIL、port_pool 误报 | 2026-07-09 12:44 | 2026-07-09 12:44 | 已完成 | 更新 design/plan/local-webpage-access-gateway-switch-access-review-20260709.md：§2.7 + 强化 §2.6/§4.1/§4.5/§5(G/H)/§6/§9/§10；登记候选 BUG-102 |
+| DOC-024 | 文档 | operations-playbook 新增 §七 网关切换交接与访问地址复核（建议 A-H + BUG-102 落地说明） | 2026-07-09 13:42 | 2026-07-09 13:42 | 已完成 | docs/operations-playbook.md §七：7.1 切换事务、7.2 access refresh、7.3 access review（IMP-023 口径）、7.4 doctor 新检查项、7.5 管理页兜底 + BUG-102。 |
+| DOC-025 | 文档 | 网关切换复盘 §10 二次审查与 C1/C2/I1/I2 修复落地记录 | 2026-07-09 14:05 | 2026-07-09 14:09 | 已完成 | 更新 design/plan/local-webpage-access-gateway-switch-access-review-20260709.md §10/§10.5/§11。 |
+| DOC-026 | 文档 | 复盘与 playbook 记录 G6 切换后 rebuild 兼容检查规格 | 2026-07-09 14:33 | 2026-07-09 14:35 | 已完成 | design/plan/local-webpage-access-gateway-switch-access-review-20260709.md（G6/§4.6/建议 I/§11）；docs/operations-playbook.md §7.4。 |
+| DOC-027 | 文档 | 同步 V0.5.1 新增特性到用户文档：README 命令表补 lwa access refresh/review 两行+gateway on --rebuild-if-needed、快速开始 step8 加 access review；manager-page.md 字段表补 lanUrl/localhostUrl；faq.md 新增「访问类问题·别名入口白屏」(IMP-023 绝对路径 + 浏览器缓存旧 HTML 双根因+自查+修复) | 2026-07-09 15:08 | 2026-07-09 15:08 | 已完成 | operations-playbook.md/known-limitations.md 上轮已覆盖(16/1 命中)；本次补 README/manager-page/faq 三处缺口。文件均未提交 |
 
 ## 功能开发
 
@@ -253,6 +277,11 @@
 | DEV-059 | 开发 | IMP-022 路径别名 Caddy 依赖显式化：lwa alias set 在 backend≠caddy 时明确报错/WARN，消除"设置成功但访问失败"割裂 | 2026-07-08 14:01 | 2026-07-08 22:56 | 已完成 | path_alias.set_instance_path_alias 在 backend≠caddy 时抛 RecognitionError(400) 拦截别名设置，清除别名仍允许；test_alias_set_blocks_builtin/test_alias_clear_allows_builtin 回归 |
 | DEV-060 | 开发 | IMP-023 SPA 子路径资源加载：lwa alias set 输出 --base=/<alias>/ 重构建提示 + SKILL 记录白屏限制与规避 | 2026-07-08 14:01 | 2026-07-08 22:56 | 已完成 | cli alias set 成功后输出 SPA base 提示（Vite base:'./' 或 --base=/<alias>/）；lwa-import-zip/lwa-build-frontend-static SKILL 记录白屏限制与框架规避 |
 | DEV-061 | 开发 | IMP-024 管理页网页浏览量统计：概览/实例列表展示访问量汇总，数字可点击展开明细（时间、路径、Referer、IP 等）；后端汇总+明细 API | 2026-07-08 20:10 | 2026-07-09 02:21 | 已完成 | WBS-20260708 阶段4.5；触点 manager_api.py、manager_static/、可选 static_gateway 访问日志落盘；IMP-024 浏览量统计：pageviews.py（builtin CLF / caddy JSON / 容器 docker logs 三解析器 + run/pageviews.db 惰性游标摄入 + 明细截断）、static_gateway 统一入口 JSON access log、/api/pageviews + /api/instances/{id}/pageviews、管理页浏览量列 + 详情弹屉；16 测试通过 |
+| DEV-062 | 开发 | 网关切换事务：enable() 启用前停掉实例仍存活的 builtin；stop_all_builtin() 双途径（pid 文件 + 枚举服务本工作区 apps/ 的 http.server）清理切换残留与 pid-less 孤儿；start_gateway 拉起/确认 caddy 后统一调用 stop_all_builtin（gateway-switch-access-review 建议 A/§2.5/§2.7） | 2026-07-09 13:41 | 2026-07-09 13:41 | 已完成 | src/local_webpage_access/static_gateway.py（_stop_live_builtin_if_any/stop_all_builtin/_enumerate_workspace_builtin_pids）、gateway_service.py（start_gateway 两分支均收尾）。回归 test_access.py::test_enable_caddy_stops_live_builtin / test_stop_all_builtin_*；runtime 实测清理孤儿 65599/65793。938 passed。 |
+| DEV-063 | 开发 | 访问地址刷新与可用性复核：新模块 access.py（refresh_network_entries 用当前 LAN IP 重算 lanUrl/routeUrl；review_access 对声明 URL 真探活含 SPA 绝对路径空 200 检测）；新 CLI lwa access refresh/review；lwa gateway on 启动时自动刷新地址（建议 B/C，G1/G2/G5） | 2026-07-09 13:41 | 2026-07-09 13:41 | 已完成 | src/local_webpage_access/access.py + cli/access.py（注册到根 app）；start_gateway 收尾调用 refresh_network_entries。回归 test_access.py 9 项含 IMP-023 空 200 真实 http.server 场景。runtime access review 正确识别 voiceprint 的 /assets/index-DBjU_3z5.js 空 200（0B vs 带前缀 120999B）。 |
+| DEV-064 | 开发 | 可观测性与误报修复：doctor 新增 lan_url_stale/backend_handoff/port_contention 检查；check_port_pool 排除 managerPort/staticGatewayPort/已分配 hostPort 等自用端口；管理页快照新增 localhostUrl 字段 + helpers.js urlHtml 增加「本机」兜底链接（建议 D/F/H） | 2026-07-09 13:41 | 2026-07-09 13:41 | 已完成 | src/local_webpage_access/doctor.py（3 新检查 + _list_listeners/_url_host + run_doctor 挂载）、status.py（localhostUrl）、manager_static/helpers.js。回归 test_doctor.py 7 项新检查 + test_check_port_pool_excludes_*。runtime doctor 总体 OK：port_pool 不再误报自用端口，backend_handoff 确认无双开，port_contention 确认 :2019/:8080 符合预期。 |
+| DEV-065 | 开发 | G6：gateway on / access review 默认检查是否需 rebuild，支持 --rebuild-if-needed 可选自动重建 | 2026-07-09 14:33 | 2026-07-09 14:35 | 已完成 | 复盘文档增 G6/§4.6/§11；access.py 增加 needs_rebuild/maybe_rebuild_after_review/format_rebuild_advice；cli gateway on 与 access review 挂开关；playbook §7.4；回归 test_instances_needing_rebuild_* / test_maybe_rebuild_*（4 项）。仅 IMP-023 空 200 触发。 |
+| DEV-066 | 开发 | G6 增强：rebuild 后复检 IMP-023（still_imp023），避免调用成功但产物未变假绿 | 2026-07-09 14:42 | 2026-07-09 14:43 | 已完成 | pair review 缺口：RebuildActionResult.still_imp023；instance_still_has_imp023；format_rebuild_advice [WARN]；all_ok 要求 resolved；回归 test_maybe_rebuild_still_imp023_when_assets_unchanged。复盘 §11.1-7、playbook §7.4 同步。 |
 
 ## 配置运维
 
@@ -287,6 +316,12 @@
 | OPS-027 | 运维 | 应用版本号提升至 V0.4.3 | 2026-07-08 19:52 | 2026-07-08 19:52 | 已完成 | pyproject/version_info(fallback+docstring×3)/cli.py/test_version_info(优先级 0.4.3>0.4.2)/skills·lwa-update-runtime 同步为 0.4.3/V0.4.3；README 命令表补 lwa gateway、remove --redundant、setup --autostart；compileall+pyflakes+node 清，838 passed/4 skip/0 fail（lwa version 显示值取 git HEAD 主题，提交 V0.4.3 后即 V0.4.3） |
 | OPS-028 | 运维 | 应用版本号提升至 V0.4.4 | 2026-07-08 20:49 | 2026-07-08 20:49 | 已完成 | pyproject/version_info(fallback+docstring×3)/cli.py/test_version_info(优先级 0.4.4>0.4.3) 同步为 0.4.4/V0.4.4；承载阶段2/3 大项目部署+容器别名+.env/端口漂移 7 项（DEV-050~055/058）；compileall+pyflakes+node 清，859 passed/4 skip/0 fail（lwa version 取 git HEAD 主题，提交 V0.4.4 后即显示 V0.4.4） |
 | OPS-029 | 运维 | 应用版本号提升至 V0.5.0 | 2026-07-09 09:52 | 2026-07-09 09:52 | 已完成 | pyproject.toml、version_info（fallback+docstring×3）、cli/__init__.py docstring、test_version_info（优先级 0.5.0>0.4.4）、skills/lwa-update-runtime「当前版本」同步为 0.5.0/V0.5.0；历史「V0.4.x 起」功能引入标记保留不动；917 passed/4 skip/0 fail（lwa version 取 git HEAD 主题，提交 V0.5.0 后即显示 V0.5.0） |
+| OPS-030 | 运维 | runtime 工作区 lwa update 升级至 V0.5.0 | 2026-07-09 12:12 | 2026-07-09 12:12 | 已完成 | lwa update -w runtime：pip install -e . 装本地网页部署基座 0.5.0；syncSkills 更新 6/16；manager 重启（pid 87621，端口 17800）、daemon 重启（pid 87653）；/api/health 由 V0.4.1 → V0.5.0 确认。未加 --restart-instances，3 个实例（demo-static / voiceprint-v3-demo / prd-workflow）保持 running 未受扰动。doctor 仅 1 处既有环境 FAIL：port_pool 报 17800 占用（实为 manager 自身监听，误报，OPS-005 即有记录），其余 python/docker/compose/registry/gateway/disk/memory 全 OK。 |
+| OPS-031 | 运维 | runtime 工作区静态网关由 builtin 切换至 caddy | 2026-07-09 12:24 | 2026-07-09 12:24 | 已完成 | 改 local-web.yml staticGateway: builtin→caddy（已备份 .bak.时间戳）；lwa update 重启 manager/daemon 读取新配置；清理一个占用 :2019 的 pytest 残留 caddy 孤儿进程(pid 75224，曾致 gateway status 误报运行中且 pid=?)；lwa gateway on 启动 caddy master(pid 93524, :8080/:2019)，pid 正确写入 run/caddy.pid。3 实例经 caddy 可达：demo-static :18000、voiceprint :8080/vp-app-demo-v3/、prd-workflow :8080/prd-workflow/（LAN IP 10.181.239.115 同样 200）；doctor caddy_health OK。遗留：lwa gateway on 报 caddy start pingback 超时 20s + LIFECYCLE_ERROR，但 caddy 实际已启动、pid 正确，疑似 pingback 机制误报（与 IMP-010/BUG-069~071 同类），建议后续排查。port_pool FAIL 为既有误报。 |
+| OPS-032 | 运维 | voiceprint-v3-demo 按 IMP-023 以 Vite base=./ 重构建并同步 public，验证别名与端口资源均可达 | 2026-07-09 12:47 | 2026-07-09 12:48 | 已完成 | npm run build -- --base=./；HTML 资源改为 ./assets/...；8080/vp-app-demo-v3/ 与 :18001 下 JS/CSS 均 200 且非空（JS~121KB）。未改 vite.config.js 持久配置，下次默认 build 仍可能回到绝对路径。 |
+| OPS-033 | 运维 | runtime 工作区网关切换交接与地址刷新验证（gateway-switch-access-review 落地验证） | 2026-07-09 13:42 | 2026-07-09 13:42 | 已完成 | lwa access refresh：3 实例 lanUrl 10.181.239.49→10.181.239.115（地址漂移修复）；lwa gateway on：stop_all_builtin 杀掉 pid-less 孤儿 65599(demo-static)/65793(voiceprint)，18000/18001 恢复 caddy 独占；access review：demo-static/prd-workflow OK，voiceprint 正确标 IMP-023 空 200；lwa doctor 总体 OK（lan_url_stale/backend_handoff/port_contention/port_pool 全绿）。 |
+| OPS-034 | 运维 | voiceprint 固化 Vite base:./ 并重构建；reload Caddy 恢复 :8080/:18001；验证别名资源可达 | 2026-07-09 14:19 | 2026-07-09 14:19 | 已完成 | 重启后 Caddy 仅剩 :2019、静态实例 config_invalid；public 又回绝对 /assets。写 vite.config.js base:'./'；npm run build；caddy reload；lwa restart 两静态站。实测 10.181.239.115:8080/vp-app-demo-v3/ 下 ./assets JS/CSS 均为 200 非空。 |
+| OPS-035 | 运维 | 应用版本号提升至 V0.5.1：pyproject.toml、version_info(_FALLBACK_VERSION+3处docstring)、cli/__init__.py docstring、test_version_info、release-checklist 示例、skills/lwa-update-runtime「当前版本」同步为 0.5.1 | 2026-07-09 15:08 | 2026-07-09 15:08 | 已完成 | 历史快照不动：task-list 既有 V0.5.0 条目(OPS-029等)、design 文档「截至V0.5.0」标记、skill「V0.4.0起」功能引入标记。lwa version 取 git HEAD 主题，当前 HEAD 仍是 V0.5.0 commit 故显示 V0.5.0；提交 V0.5.1-BuildXXXX 主题后即显示 V0.5.1。952 passed/4 skip |
 
 ## 规划事项
 
@@ -307,12 +342,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 101 | 101 | 0 | 100.0% |
-| 调整事项 | 5 | 5 | 0 | 100.0% |
-| 检查事项 | 29 | 29 | 0 | 100.0% |
+| 代码 Bug | 109 | 109 | 0 | 100% |
+| 调整事项 | 6 | 6 | 0 | 100% |
+| 检查事项 | 38 | 38 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 21 | 21 | 0 | 100.0% |
-| 功能开发 | 61 | 61 | 0 | 100.0% |
-| 配置运维 | 29 | 29 | 0 | 100.0% |
-| 规划事项 | 10 | 10 | 0 | 100.0% |
-| **总计** | 256 | 256 | 0 | 100.0% |
+| 文档维护 | 26 | 26 | 0 | 100% |
+| 功能开发 | 66 | 66 | 0 | 100% |
+| 配置运维 | 34 | 34 | 0 | 100% |
+| 规划事项 | 10 | 10 | 0 | 100% |
+| **总计** | 289 | 289 | 0 | 100% |

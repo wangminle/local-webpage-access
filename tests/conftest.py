@@ -109,8 +109,9 @@ def _list_http_server_pids_on_test_ports() -> set[int]:
             )
             out = proc.stdout or ""
         else:
+            # -lf：Darwin 上 -af 只输出 PID、无命令行（复盘 §10.2-C1）
             proc = subprocess.run(
-                ["pgrep", "-af", "http.server"],
+                ["pgrep", "-lf", "http.server"],
                 capture_output=True,
                 text=True,
                 timeout=20,

@@ -311,6 +311,11 @@ class StaticGateway:
             )
         # BUG-070：清理切换 builtin↔caddy 或上次崩溃遗留的死 pid，避免状态误判。
         self._clear_stale_static_pid(instance_id)
+        # G3（gateway-switch-access-review 建议 A）：切换 builtin→caddy 或上次崩溃后，
+        # 该实例可能仍有**存活**的 builtin http.server 进程占用 hostPort（不只是死 pid）。
+        # 旧代码只清 stale（死）pid，活进程残留 → builtin + caddy 在同一 hostPort 双开，
+        # 行为不确定、排障极难。启用新服务前先停掉它。
+        self._stop_live_builtin_if_any(instance_id)
         self.generate_site_config(instance_id, host_port, root)
 
         backend = self.detect_backend()
@@ -595,11 +600,17 @@ class StaticGateway:
         return self.ws.static_gateway / ".caddy-bootstrap"
 
     def caddy_start(self) -> bool:
-        """启动 Caddy master（IMP-010）。
+        """启动 Caddy master（IMP-010；BUG-102 假失败兜底）。
 
         优先用当前主 Caddyfile（若存在且非空）；否则写入最小 bootstrap 配置
         （仅保证 admin :2019 在线），真实站点由随后的 :meth:`reload_all` 注入。
-        成功返回 True。``caddy start`` 命令本身失败时立即返回 False，不轮询 admin。
+
+        BUG-102：``caddy start --pingback`` 在 master 已成功拉起后仍可能因 pingback
+        回调超时（约 20s）而抛 :class:`TimeoutExpired` 或返回非零——这是**假失败**。
+        对此类失败回退用 admin :2019 探活，并要求本工作区 ``caddy.pid`` 指向存活
+        进程，避免认领 pytest/外部孤儿 admin（复盘 §10.2-C2）。
+
+        ``FileNotFoundError``（PATH 无 caddy）**立即失败**，不做 admin 兜底。
         """
         main = self.main_config_path()
         if main.is_file() and main.read_text(encoding="utf-8").strip():
@@ -619,24 +630,66 @@ class StaticGateway:
             "--pidfile",
             str(self.caddy_pid_path()),
         ]
+        pingback_failed = False
+        result = None
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=_CADDY_START_TIMEOUT)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        except FileNotFoundError:
+            # PATH 无 caddy：真失败，绝不能用孤儿 admin 假绿（§10.2-C2）。
+            log.warning("caddy start 失败：未找到 caddy 可执行文件")
+            return False
+        except subprocess.TimeoutExpired as exc:
+            # BUG-102：pingback 超时常见为 TimeoutExpired，master 可能已起。
+            log.warning("caddy start 超时（将探测 admin + pidfile 确认）：%s", exc)
+            pingback_failed = True
+        except OSError as exc:
             log.warning("caddy start 执行异常：%s", exc)
             return False
-        if result.returncode != 0:
+        if result is not None and result.returncode != 0:
             log.warning(
-                "caddy start 失败：%s",
+                "caddy start 非零退出（将探测 admin + pidfile 确认）：%s",
                 result.stderr.decode("utf-8", "replace").strip(),
             )
-            return False
-        # start 成功：轮询 admin 直到在线（或超时）
+            pingback_failed = True
+        # 轮询 admin；若曾出现 pingback 类失败，还须本工作区 pidfile 存活才算成功。
         deadline = time.monotonic() + _ADMIN_STARTUP_WAIT
         while time.monotonic() < deadline:
             if self._admin_alive(timeout=0.5):
-                return True
+                if not pingback_failed:
+                    return True
+                if self._workspace_caddy_pid_alive():
+                    log.warning(
+                        "caddy start 的 --pingback 未确认成功，但本工作区 Caddy "
+                        "admin :2019 与 pidfile 均就绪——视为启动成功（BUG-102）"
+                    )
+                    return True
+                # admin 在线但 pidfile 非本工作区存活进程 → 疑似孤儿，勿认领
+                log.warning(
+                    "caddy start 失败后 admin :2019 在线，但本工作区 caddy.pid "
+                    "未指向存活进程——疑似外部/测试孤儿，不视为本网关启动成功"
+                )
+                return False
             time.sleep(0.2)
-        return self._admin_alive(timeout=0.5)
+        if self._admin_alive(timeout=0.5) and (
+            not pingback_failed or self._workspace_caddy_pid_alive()
+        ):
+            if pingback_failed:
+                log.warning(
+                    "caddy start --pingback 未确认成功但本工作区 Caddy 已就绪（BUG-102）"
+                )
+            return True
+        return False
+
+    def _workspace_caddy_pid_alive(self) -> bool:
+        """本工作区 ``run/caddy.pid`` 是否指向仍存活的进程。"""
+        path = self.caddy_pid_path()
+        if not path.is_file():
+            return False
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            return False
+        return self._pid_alive(pid)
 
     def caddy_stop(self) -> bool:
         """停止 Caddy master（IMP-010）。通过 admin API ``POST /stop`` 优雅关闭。
@@ -709,6 +762,115 @@ class StaticGateway:
                 path.unlink()
             except OSError:
                 pass
+
+    def _stop_live_builtin_if_any(self, instance_id: str) -> bool:
+        """若该实例有仍**存活**的 builtin 静态进程，停掉它（G3 / 建议 A）。
+
+        与 :meth:`_clear_stale_static_pid`（仅清死 pid）互补：用于 :meth:`enable`
+        前置——切换后端或重启用时，先把占用 hostPort 的旧 builtin 进程停掉，
+        避免 builtin + caddy 在同一 hostPort 上双开。无存活进程时返回 ``False``。
+        """
+        pid = self._read_pid(instance_id)
+        if pid is None or not self._pid_alive(pid):
+            return False
+        log.info(
+            "启用前停掉残留存活的 builtin 静态服务 %s（pid=%d）", instance_id, pid
+        )
+        self._stop_builtin(instance_id)
+        return True
+
+    def stop_all_builtin(self) -> list[str]:
+        """停止**所有**仍存活的 builtin 静态服务进程（G3 / 建议 A / §2.7）。
+
+        切换到 Caddy 后端的全局交接事务（:func:`gateway_service.start_gateway`
+        在拉起 caddy master 后调用）。两条途径互补，覆盖**所有**陈旧监听来源
+        （切换残留 **或** pid 文件已被清理的孤儿，复盘 §2.5/§2.7 现场 65599/65793
+        即后者——PPID=1、无 pid 文件）：
+
+        1. 扫描 ``run/static-*.pid``——正常追踪的进程；
+        2. 枚举服务**本工作区** ``apps/`` 的 ``http.server`` 进程——pid 文件已丢失
+           的孤儿（崩溃/异常切换遗留）。仅匹配命令行同时含 ``http.server`` 与
+           本工作区 ``apps/`` 路径的进程，绝不误杀其他工作区或无关 Python。
+
+        返回被停止的实例 ID 列表。
+        """
+        stopped: list[str] = []
+        seen_pids: set[int] = set()
+        # 途径 1：pid 文件
+        for pid_path in sorted(self.ws.run.glob("static-*.pid")):
+            name = pid_path.name
+            iid = name[len("static-") : -len(".pid")]
+            if not iid:
+                continue
+            pid = self._read_pid(iid)
+            if pid is None or not self._pid_alive(pid):
+                self._clear_stale_static_pid(iid)
+                continue
+            log.info("切换后端：停止残留 builtin 静态服务 %s（pid=%d）", iid, pid)
+            self._stop_builtin(iid)
+            stopped.append(iid)
+            seen_pids.add(pid)
+        # 途径 2：枚举 workspace http.server（补 pid-less 孤儿）
+        for pid, iid in self._enumerate_workspace_builtin_pids():
+            if pid in seen_pids:
+                continue
+            log.info(
+                "切换后端：停止残留 builtin http.server %s（pid=%d，无 pid 文件）",
+                iid, pid,
+            )
+            if self._kill_process(pid):
+                stopped.append(iid)
+                seen_pids.add(pid)
+        return stopped
+
+    def _enumerate_workspace_builtin_pids(self) -> list[tuple[int, str]]:
+        """枚举服务本工作区 ``apps/`` 的 ``http.server`` 进程 (pid, inferred_iid)。
+
+        POSIX 用 ``pgrep -lf http.server``（**必须** ``-l``：Darwin 上 ``pgrep -af``
+        只输出 PID、不含命令行，会导致本方法恒返回空——复盘 §10.2-C1）。
+        Windows / 无 pgrep 时返回空列表。
+        仅匹配命令行同时含 ``http.server`` 与本工作区 ``apps/`` 路径的进程。
+        ``iid`` 从 ``--directory <apps/<iid>/public>`` 推断；推断失败用 ``pid-<n>``。
+        """
+        apps_prefix = str(self.ws.apps)
+        try:
+            # -l：完整命令行；-f：按完整命令行匹配 pattern。勿用 -af（macOS 无 cmdline）。
+            result = subprocess.run(
+                ["pgrep", "-lf", "http.server"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            return []
+        out: list[tuple[int, str]] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or "http.server" not in line:
+                continue
+            if apps_prefix not in line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            iid = self._iid_from_cmdline(parts[1], apps_prefix) or f"pid-{pid}"
+            out.append((pid, iid))
+        return out
+
+    @staticmethod
+    def _iid_from_cmdline(cmdline: str, apps_prefix: str) -> str | None:
+        """从 ``--directory <apps/<iid>/public>`` 推断 instance_id。"""
+        import re
+
+        # 形如 ... --directory /path/apps/<iid>/public [--bind ...]
+        m = re.search(
+            re.escape(apps_prefix) + r"/([^/]+)/public", cmdline
+        )
+        return m.group(1) if m else None
 
     # ---- builtin 进程管理 ---------------------------------------------------
 

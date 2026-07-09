@@ -93,6 +93,10 @@ def fake_gateway(monkeypatch, workspace):
         "start_calls": 0,
         "stop_calls": 0,
         "sync_calls": 0,
+        "stop_builtin_calls": 0,
+        "reload_calls": 0,
+        "call_order": [],
+        "stopped_builtin": [],
         "pid": 12345,
     }
 
@@ -109,6 +113,7 @@ def fake_gateway(monkeypatch, workspace):
 
         def caddy_start(self) -> bool:
             state["start_calls"] += 1
+            state["call_order"].append("caddy_start")
             if state["start_ok"]:
                 state["admin_alive"] = True  # start 成功后 master 在线
                 self.ws.run.mkdir(parents=True, exist_ok=True)
@@ -132,6 +137,16 @@ def fake_gateway(monkeypatch, workspace):
         def _sync_main_config(self) -> None:
             # BUG-074：start_gateway 在无主 Caddyfile 时应调此方法加载真实站点。
             state["sync_calls"] += 1
+
+        def stop_all_builtin(self) -> list[str]:
+            # I1 / G3：start_gateway 在 caddy_start **之前**调用（先停旧再拉新）。
+            state["stop_builtin_calls"] += 1
+            state["call_order"].append("stop_all_builtin")
+            return list(state.get("stopped_builtin") or [])
+
+        def reload_all(self) -> None:
+            state["reload_calls"] += 1
+            state["call_order"].append("reload_all")
 
     monkeypatch.setattr("local_webpage_access.gateway_service.StaticGateway", _Fake)
     return state
@@ -174,6 +189,22 @@ def test_start_gateway_writes_state_and_pid(
     assert fake_gateway["start_calls"] == 1
     st = read_state(workspace)
     assert st is not None and st.enabled and st.pid == 12345
+
+
+def test_start_gateway_stops_builtin_before_caddy_start(
+    workspace: Workspace, config: Config, fake_gateway
+) -> None:
+    """I1 / §4.1：先 stop_all_builtin，再 caddy_start；清过孤儿且主配置已存在则 reload。"""
+    fake_gateway["admin_alive"] = False
+    fake_gateway["stopped_builtin"] = ["demo-static"]
+    # 主 Caddyfile 已存在时走 reload 分支（无主配置时走 _sync_main_config）
+    workspace.static_gateway.mkdir(parents=True, exist_ok=True)
+    (workspace.static_gateway / "Caddyfile").write_text(":2019 {}\n", encoding="utf-8")
+    start_gateway(workspace, config)
+    assert fake_gateway["stop_builtin_calls"] == 1
+    assert fake_gateway["start_calls"] == 1
+    assert fake_gateway["call_order"][:2] == ["stop_all_builtin", "caddy_start"]
+    assert fake_gateway["reload_calls"] == 1
 
 
 def test_start_gateway_syncs_main_config_when_no_main(
@@ -252,6 +283,40 @@ def test_start_gateway_creates_and_releases_lock(
     start_gateway(workspace, config)
     # 启动结束后锁文件应被清理（即便成功路径）
     assert not start_lock_path(workspace).exists()
+
+
+def test_start_gateway_records_switch_event_with_registry(
+    workspace: Workspace, config: Config, fake_gateway, registry, monkeypatch
+) -> None:
+    """建议 F/A：传入 registry 时记录 gateway_backend_switch 事件并刷新地址。"""
+    from local_webpage_access.access import RefreshReport
+
+    fake_gateway["admin_alive"] = False
+    refreshed = {"called": False}
+    monkeypatch.setattr(
+        "local_webpage_access.access.refresh_network_entries",
+        lambda ws, cfg, reg: refreshed.__setitem__("called", True) or RefreshReport(),
+    )
+    start_gateway(workspace, config, registry=registry)
+    assert refreshed["called"] is True
+    events = registry.list_events(limit=5)
+    switch_events = [e for e in events if e["event_type"] == "gateway_backend_switch"]
+    assert switch_events, "应记录 gateway_backend_switch 事件"
+    assert "backend=caddy" in switch_events[0]["message"]
+
+
+def test_start_gateway_without_registry_skips_finalize(
+    workspace: Workspace, config: Config, fake_gateway, monkeypatch
+) -> None:
+    """无 registry（lwa init / 自动启动）时不执行收尾、不刷新地址。"""
+    fake_gateway["admin_alive"] = False
+    called = {"n": 0}
+    monkeypatch.setattr(
+        "local_webpage_access.access.refresh_network_entries",
+        lambda *a, **kw: called.__setitem__("n", called["n"] + 1),
+    )
+    start_gateway(workspace, config)  # 不传 registry
+    assert called["n"] == 0
 
 
 # ---- stop_gateway -----------------------------------------------------------
@@ -337,9 +402,27 @@ def test_gateway_status_builtin_backend(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
     fake_gateway["backend"] = "builtin"
+    fake_gateway["admin_alive"] = False
     st = gateway_status(workspace, config)
     assert st["running"] is False
     assert st["backend"] == "builtin"
+    assert st.get("orphanMaster") is False
+
+
+def test_gateway_status_exposes_orphan_master_when_builtin(
+    workspace: Workspace, config: Config, fake_gateway
+) -> None:
+    """BUG-108：配置已切 builtin 但 admin :2019 仍在线 → running + orphanMaster。"""
+    fake_gateway["backend"] = "builtin"
+    fake_gateway["admin_alive"] = True
+    fake_gateway["pid"] = 75224
+    workspace.run.mkdir(parents=True, exist_ok=True)
+    (workspace.run / "caddy.pid").write_text("75224")
+    st = gateway_status(workspace, config)
+    assert st["running"] is True
+    assert st["backend"] == "builtin"
+    assert st["orphanMaster"] is True
+    assert st["pid"] == 75224
 
 
 # ---- maybe_start_gateway ----------------------------------------------------

@@ -976,21 +976,87 @@ def test_caddy_start_falls_back_to_bootstrap_when_no_main(
     assert str(gateway._bootstrap_config_path()) in " ".join(captured["cmd"])
 
 
-def test_caddy_start_returns_false_on_cmd_failure(gateway: StaticGateway, monkeypatch) -> None:
-    """IMP-010：caddy start 命令本身失败时立即返回 False，不轮询 admin。"""
+def test_caddy_start_admin_probe_when_cmd_fails_but_admin_alive(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """BUG-102：caddy start 非零退出但 admin + 本工作区 pidfile 就绪 → True。"""
     class _Fail:
         returncode = 1
-        stderr = b"boom"
+        stderr = b"pingback timeout"
 
     monkeypatch.setattr(
         "local_webpage_access.static_gateway.subprocess.run",
         lambda *a, **kw: _Fail(),
     )
-    polled = {"n": 0}
-    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: polled.__setitem__("n", polled["n"] + 1) or True)
-    assert gateway.caddy_start() is False
-    assert polled["n"] == 0  # 命令失败，不轮询 admin（避免拖慢失败路径）
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
+    assert gateway.caddy_start() is True  # 假失败恢复
 
+
+def test_caddy_start_returns_false_when_cmd_fails_and_admin_down(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """BUG-102：caddy start 命令失败且 admin 始终不可达 → 真失败，返回 False。"""
+    class _Fail:
+        returncode = 1
+        stderr = b"real error"
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run",
+        lambda *a, **kw: _Fail(),
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    assert gateway.caddy_start() is False
+
+
+def test_caddy_start_recovers_on_timeout_exception(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """BUG-102：TimeoutExpired（pingback）但本工作区 admin+pidfile 就绪 → True。"""
+    import subprocess as sp
+
+    def _timeout(*a, **kw):
+        raise sp.TimeoutExpired(cmd=a[0] if a else "caddy", timeout=20)
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run", _timeout
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
+    assert gateway.caddy_start() is True
+
+
+def test_caddy_start_file_not_found_is_hard_fail(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """§10.2-C2：PATH 无 caddy（FileNotFoundError）立即失败，不认领孤儿 admin。"""
+
+    def _missing(*a, **kw):
+        raise FileNotFoundError("caddy")
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run", _missing
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
+    assert gateway.caddy_start() is False
+
+
+def test_caddy_start_rejects_orphan_admin_without_workspace_pid(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """§10.2-C2：pingback 失败后 admin 在线但本工作区 pidfile 无效 → 不认领。"""
+    class _Fail:
+        returncode = 1
+        stderr = b"pingback timeout"
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run",
+        lambda *a, **kw: _Fail(),
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: False)
+    assert gateway.caddy_start() is False
 
 def test_caddy_stop_clears_pid_when_admin_down(
     gateway: StaticGateway, monkeypatch

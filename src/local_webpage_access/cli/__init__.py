@@ -11,6 +11,7 @@
 * :mod:`local_webpage_access.cli.daemon`      —— ``lwa daemon on/off/status`` 子命令组
 * :mod:`local_webpage_access.cli.manager`     —— ``lwa manager on/off/status/start`` 子命令组
 * :mod:`local_webpage_access.cli.gateway`     —— ``lwa gateway on/off/status`` 子命令组
+* :mod:`local_webpage_access.cli.access`      —— ``lwa access refresh/review`` 子命令组
 
 命令语义见 V1 设计说明第 10 节。拆分前后 CLI 行为完全一致（验收：全量 pytest）。
 """
@@ -43,7 +44,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.5.0-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.5.1-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -92,9 +93,10 @@ def _register_all() -> None:
     system.register(app)
 
     # 子命令组（保持 ``lwa <group> <sub>`` 形式不变）
-    from local_webpage_access.cli import alias, daemon, gateway, manager
+    from local_webpage_access.cli import alias, access, daemon, gateway, manager
 
     app.add_typer(alias.app, name="alias")
+    app.add_typer(access.app, name="access")
     app.add_typer(daemon.app, name="daemon")
     app.add_typer(manager.app, name="manager")
     app.add_typer(gateway.app, name="gateway")

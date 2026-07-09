@@ -156,7 +156,16 @@
       parts.push(
         '<a href="' +
           LWA.esc(i.lanUrl) +
-          '" target="_blank" rel="noopener" title="宿主端口访问">端口</a>'
+          '" target="_blank" rel="noopener" title="宿主端口访问（LAN IP）">端口</a>'
+      );
+    }
+    // 建议项 D：始终提供 127.0.0.1 本机链接作兜底——DHCP/换网后 LAN IP 漂移，
+    // 旧 lanUrl 打不开时，本机回环链接仍可用。
+    if (i.localhostUrl) {
+      parts.push(
+        '<a href="' +
+          LWA.esc(i.localhostUrl) +
+          '" target="_blank" rel="noopener" title="本机回环访问（127.0.0.1，LAN IP 漂移时兜底）">本机</a>'
       );
     }
     if (i.routeUrl) {

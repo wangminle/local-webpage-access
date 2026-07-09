@@ -58,26 +58,76 @@ def _require_caddy_version(config) -> None:
 
 
 @app.command("on")
-def gateway_on() -> None:
-    """启动 Caddy 网关（master + admin :2019，别名入口随配置就绪）。"""
+def gateway_on(
+    rebuild_if_needed: bool = typer.Option(
+        False,
+        "--rebuild-if-needed",
+        help="交接收尾后对检出 IMP-023 空 200 的实例自动 rebuild（默认仅检查并提示）",
+    ),
+) -> None:
+    """启动 Caddy 网关（master + admin :2019，别名入口随配置就绪）。
+
+    建议项 A/B/F/I（gateway-switch-access-review）：启动同时执行切换事务收尾——
+    停掉残留 builtin 静态进程、用当前 LAN IP 刷新各实例访问地址、记审计事件；
+    随后默认跑 access review（G6），可选 ``--rebuild-if-needed`` 自动重建。
+    """
+    from local_webpage_access.access import (
+        format_review_report,
+        maybe_rebuild_after_review,
+        review_access,
+    )
     from local_webpage_access.gateway_service import start_gateway
     from local_webpage_access.ports import resolve_lan_ip
 
+    review_failed = False
+    rebuild_failed = False
     try:
-        ws, config, _reg = open_workspace_registry()
-        _reg.close()
-        _require_caddy_version(config)
-        pid = start_gateway(ws, config)
-        lan_ip = resolve_lan_ip(config) or "127.0.0.1"
-        typer.secho(f"网关已启动（pid={pid}）", fg=typer.colors.GREEN)
-        typer.echo("  admin：http://127.0.0.1:2019/")
-        port = config.staticGatewayPort
-        if port:
-            typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
-        typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
+        ws, config, reg = open_workspace_registry()
+        try:
+            _require_caddy_version(config)
+            pid = start_gateway(ws, config, registry=reg)
+            lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+            typer.secho(f"网关已启动（pid={pid}）", fg=typer.colors.GREEN)
+            typer.echo("  admin：http://127.0.0.1:2019/")
+            port = config.staticGatewayPort
+            if port:
+                typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
+            typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
+            typer.echo("  刷新地址：lwa access refresh")
+            # G6：交接收尾后默认复核访问；可选自动 rebuild。
+            try:
+                report = review_access(ws, config, reg)
+                rebuild_report = maybe_rebuild_after_review(
+                    ws,
+                    config,
+                    reg,
+                    report,
+                    rebuild_if_needed=rebuild_if_needed,
+                )
+                typer.echo("")
+                typer.echo(
+                    format_review_report(report, rebuild_report=rebuild_report)
+                )
+                review_failed = report.has_failures
+                rebuild_failed = not rebuild_report.all_ok
+            except Exception as exc:  # noqa: BLE001 — review 失败不掩盖网关已启动
+                log.warning(
+                    "gateway on 后 access review 失败（不阻断启动）：%s", exc
+                )
+                typer.secho(
+                    f"  访问复核失败（网关已启动）：{exc}",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+                typer.echo("  请手动运行：lwa access review")
+                review_failed = True
+        finally:
+            reg.close()
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if review_failed or rebuild_failed:
         raise typer.Exit(code=1)
 
 
@@ -119,8 +169,15 @@ def gateway_status_cmd() -> None:
         ws, config, _reg = open_workspace_registry()
         _reg.close()
         st = gateway_status(ws, config)
-        running = "运行中" if st["running"] else "未运行"
-        typer.echo(f"网关：{running}")
+        if st.get("orphanMaster"):
+            typer.secho(
+                "网关：运行中（残留 Caddy master；配置已非 caddy）",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo("  处置：lwa gateway off（可在 builtin 配置下关停残留 master）")
+        else:
+            running = "运行中" if st["running"] else "未运行"
+            typer.echo(f"网关：{running}")
         typer.echo(f"  后端：{st['backend']}（staticGateway={st['configured']}）")
         typer.echo(f"  状态启用：{st['enabled']}")
         if st.get("pid"):

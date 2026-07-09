@@ -20,6 +20,9 @@ from local_webpage_access.doctor import (
     check_docker_compose,
     check_caddy,
     check_caddy_health,
+    check_lan_url_stale,
+    check_backend_handoff,
+    check_port_contention,
     check_disk_space,
     check_memory,
     check_port_pool,
@@ -279,7 +282,8 @@ def test_check_port_pool_ignores_allocated_instance_ports() -> None:
     assert r.status == STATUS_OK
 
 
-def test_check_port_pool_still_checks_manager_port_when_busy() -> None:
+def test_check_port_pool_excludes_manager_port_when_busy() -> None:
+    """建议 H：managerPort 由 lwa 自用，被占用不应判为端口池冲突。"""
     from local_webpage_access.config import Config, PortPool
 
     cfg = Config(managerPort=22000, portPool=PortPool(start=21000, end=21010))
@@ -288,8 +292,36 @@ def test_check_port_pool_still_checks_manager_port_when_busy() -> None:
         return port == 22000
 
     r = check_port_pool(cfg, port_in_use=manager_busy, allocated_ports={22000})
+    assert r.status == STATUS_OK  # managerPort 是自用端口，排除
+
+
+def test_check_port_pool_excludes_static_gateway_port_when_busy() -> None:
+    """建议 H：staticGatewayPort（别名入口）由 caddy 自用，不判为冲突。"""
+    from local_webpage_access.config import Config, PortPool
+
+    cfg = Config(
+        staticGatewayPort=8090, portPool=PortPool(start=21000, end=21010)
+    )
+
+    def entry_busy(port: int) -> bool:
+        return port == 8090
+
+    r = check_port_pool(cfg, port_in_use=entry_busy)
+    assert r.status == STATUS_OK
+
+
+def test_check_port_pool_flags_external_squatter_in_pool() -> None:
+    """建议 H：端口池范围内的外部占用仍应判 FAIL。"""
+    from local_webpage_access.config import Config, PortPool
+
+    cfg = Config(portPool=PortPool(start=21000, end=21010))
+
+    def external_busy(port: int) -> bool:
+        return port == 21005  # 非自用、非已分配
+
+    r = check_port_pool(cfg, port_in_use=external_busy)
     assert r.status == STATUS_FAIL
-    assert "22000" in (r.detail or "")
+    assert "21005" in (r.detail or "")
 
 
 def test_check_port_pool_custom_config() -> None:
@@ -690,12 +722,13 @@ def test_check_caddy_health_warn_on_stale_pid(env, monkeypatch) -> None:
 # ---- IMP-020：master 在线时的站点/入口可达性探测 -----------------------------
 
 
-def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None):
+def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None, lan_url=None):
     """落一个 enabled 静态实例到 registry，供 check_caddy_health 站点探测。"""
     from local_webpage_access.models import (
         DesiredState,
         InstanceManifest,
         Kind,
+        NetworkConfig,
         ResourceProfile,
         Runtime,
         ServingMode,
@@ -708,6 +741,12 @@ def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None):
     if alias:
         static.routeMode = "name"
         static.routeHost = alias
+    network = NetworkConfig(hostPort=host_port)
+    if alias:
+        network.routeMode = "name"
+        network.routeHost = alias
+    if lan_url:
+        network.lanUrl = lan_url
     m = InstanceManifest(
         id=iid,
         name=iid,
@@ -719,6 +758,7 @@ def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None):
         desiredState=DesiredState.RUNNING,
         status=Status.RUNNING,
         static=static,
+        network=network,
     )
     m.save(ws.app_manifest_path(iid))
     reg.upsert_from_manifest(m)
@@ -806,6 +846,165 @@ def test_check_caddy_health_ok_when_all_sites_reachable(env, monkeypatch) -> Non
     main.write_text(":8080 {}\n")
     runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
     r = check_caddy_health(ws, config, runner=runner, registry=reg)
+    assert r.status == STATUS_OK
+
+
+# ---- 建议项 F：lan_url_stale / backend_handoff / port_contention -----------
+
+
+def test_check_lan_url_stale_warns_on_drift(env, monkeypatch) -> None:
+    """lanUrl host 与当前 LAN IP 不一致 → WARN。"""
+    ws, config, reg = env
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
+                            lan_url="http://10.0.0.99:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip",
+                        lambda cfg: "192.168.1.50")
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status == STATUS_WARN
+    assert "refresh" in (r.suggestion or "")
+    assert "demo" in (r.detail or "")
+
+
+def test_check_lan_url_stale_ok_when_current(env, monkeypatch) -> None:
+    """lanUrl host 与当前 LAN IP 一致 → OK。"""
+    ws, config, reg = env
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
+                            lan_url="http://192.168.1.50:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip",
+                        lambda cfg: "192.168.1.50")
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status == STATUS_OK
+
+
+def test_check_port_contention_skips_for_builtin(env) -> None:
+    """builtin 后端不占用 :2019/别名入口 → SKIP。"""
+    ws, config, _reg = env
+    config.staticGateway = "builtin"
+    r = check_port_contention(ws, config)
+    assert r.status == STATUS_SKIP
+
+
+def test_check_port_contention_detects_orphan_admin(env, monkeypatch) -> None:
+    """§2.7：:2019 被非本工作区进程占用（测试孤儿）且 admin 不可达 → FAIL。"""
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    # 无 caddy.pid（caddy_pid=None），:2019 被某 caddy 占，admin 不可达（非健康 master）
+    monkeypatch.setattr("local_webpage_access.doctor._list_listeners",
+                        lambda port: [("caddy", "75224")] if port == 2019 else [])
+
+    class _FakeGateway:
+        def __init__(self, w, c):
+            self._ws = w
+
+        def caddy_pid_path(self):
+            return self._ws.run / "caddy.pid"  # 不存在
+
+        def _admin_alive(self, **kw):
+            return False
+
+    # check_port_contention 内部 lazy `from static_gateway import StaticGateway`
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway",
+                        _FakeGateway)
+    r = check_port_contention(ws, config)
+    assert r.status == STATUS_FAIL
+    assert "2019" in r.message
+
+
+def test_check_port_contention_fails_on_mixed_entry_listeners(
+    env, monkeypatch
+) -> None:
+    """BUG-107：别名入口同时有 caddy 与 python 监听 → FAIL（不得因有 caddy 放行）。"""
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    entry = int(config.staticGatewayPort)
+
+    def fake_listeners(port):
+        if port == entry:
+            return [("caddy", "1"), ("python", "2")]
+        return []
+
+    monkeypatch.setattr(
+        "local_webpage_access.doctor._list_listeners", fake_listeners
+    )
+
+    class _FakeGateway:
+        def __init__(self, w, c):
+            self._ws = w
+
+        def caddy_pid_path(self):
+            return self._ws.run / "caddy.pid"
+
+        def _admin_alive(self, **kw):
+            return True
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway", _FakeGateway
+    )
+    r = check_port_contention(ws, config)
+    assert r.status == STATUS_FAIL
+    assert str(entry) in r.message
+    assert "python" in r.message
+
+
+def test_check_port_contention_ok_when_entry_only_caddy(
+    env, monkeypatch
+) -> None:
+    """别名入口仅 caddy 监听 → OK。"""
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    entry = int(config.staticGatewayPort)
+
+    monkeypatch.setattr(
+        "local_webpage_access.doctor._list_listeners",
+        lambda port: [("caddy", "1")] if port == entry else [],
+    )
+
+    class _FakeGateway:
+        def __init__(self, w, c):
+            self._ws = w
+
+        def caddy_pid_path(self):
+            return self._ws.run / "caddy.pid"
+
+        def _admin_alive(self, **kw):
+            return True
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway", _FakeGateway
+    )
+    r = check_port_contention(ws, config)
+    assert r.status == STATUS_OK
+
+
+def test_check_backend_handoff_detects_double_serve(env, monkeypatch) -> None:
+    """同一 hostPort 上 caddy + python 同时监听 → FAIL（切换残留）。"""
+    ws, config, reg = env
+    config.staticGateway = "caddy"
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
+                            lan_url="http://127.0.0.1:18000")
+
+    def fake_listeners(port):
+        if port == 18000:
+            return [("caddy", "1"), ("python", "2")]
+        return []
+
+    monkeypatch.setattr("local_webpage_access.doctor._list_listeners",
+                        fake_listeners)
+    r = check_backend_handoff(ws, config, reg)
+    assert r.status == STATUS_FAIL
+    assert "18000" in (r.detail or "")
+
+
+def test_check_backend_handoff_ok_single_listener(env, monkeypatch) -> None:
+    """hostPort 仅 caddy 监听（无 builtin 残留）→ OK。"""
+    ws, config, reg = env
+    config.staticGateway = "caddy"
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
+                            lan_url="http://127.0.0.1:18000")
+
+    monkeypatch.setattr("local_webpage_access.doctor._list_listeners",
+                        lambda port: [("caddy", "1")] if port == 18000 else [])
+    r = check_backend_handoff(ws, config, reg)
     assert r.status == STATUS_OK
 
 

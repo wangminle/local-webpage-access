@@ -114,6 +114,8 @@ Content-Type: application/json
 | `portMappingLabel` | 形如 `33001 → 18001` 的映射说明 |
 | `routeHost` | 路径别名 slug（无则为 null） |
 | `routeUrl` | 统一入口 URL（`routeMode=name` 且 Caddy 可用时） |
+| `lanUrl` | 局域网直达 URL（`http://<LAN-IP>:<hostPort>`） |
+| `localhostUrl` | 本机回环兜底 URL（`http://127.0.0.1:<hostPort>/`，LAN 不通时可用） |
 | `redundant` | 是否为同 zip 指纹分组中的冗余实例（非最早者，IMP-019） |
 
 ### 浏览量统计（IMP-024）

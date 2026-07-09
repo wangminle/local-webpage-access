@@ -147,6 +147,20 @@ token 存在工作区 `run/` 目录下。删除该文件后 `lwa manager start` 
 管理页每次 `GET /api/instances` 都会先观测回写状态，理论上始终一致。
 若仍不一致，运行 `lwa status` 强制刷新，或 `lwa doctor <id>` 诊断该实例。
 
+## 访问类问题
+
+### 别名入口白屏（页面空白 / 资源空 200 或 404）
+
+经路径别名访问 `http://<LAN-IP>:8080/<alias>/` 白屏，但端口直连 `http://<LAN-IP>:<hostPort>/` 正常：
+
+* **根因 A — SPA 绝对路径（IMP-023）**：Vite/Vue/React 等构建产物若用默认 `base: '/'`，HTML 里是 `/assets/app.js`（绝对）。别名 `/<alias>/` 是子路径，绝对路径会绕过别名打到入口根，Caddy 对未匹配路由返回**空 200**（0 字节）→ JS 为空 → 白屏。
+  * 自查：`curl -i http://127.0.0.1:8080/<alias>/`，看 HTML 里 `src=` 是 `/assets/...`（绝对＝有问题）还是 `./assets/...`（相对＝正常）；再 `curl -i http://127.0.0.1:8080/assets/<file>`，若返回 `200` 且 `Content-Length: 0` 即命中。
+  * 修复：构建时设相对 base（Vite `base: './'`）后 `lwa rebuild <id>`；或 `lwa access review --rebuild-if-needed` 自动检出并重建命中实例。
+* **根因 B — 浏览器缓存了旧 HTML**：产物已重建为相对路径，但浏览器仍用重建前的旧 HTML（绝对路径 + 旧 hash）→ 同样白屏。重启 lwa / 网关无效（服务端已正确，问题在客户端缓存）。
+  * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
+  * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
+* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源空 200 对照，直接指出哪些实例需要 rebuild；`lwa gateway on` 也会在交接后默认跑一次。
+
 ## 数据与清理
 
 ### `lwa remove` 后磁盘文件还在

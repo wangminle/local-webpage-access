@@ -104,6 +104,11 @@ class InstanceStatus:
             "internalPort": self.internal_port,
             "portMappingLabel": self.port_mapping_label,
             "lanUrl": self.lan_url,
+            # 建议项 D（gateway-switch-access-review）：始终可用的本机回环链接，
+            # 作 LAN URL 漂移失效时的兜底（DHCP 换网后管理页旧 lanUrl 打不开）。
+            "localhostUrl": (
+                f"http://127.0.0.1:{self.host_port}/" if self.host_port else None
+            ),
             "routeHost": self.route_host,
             "routeUrl": self.route_url,
             "sourceSizeBytes": self.source_size_bytes,

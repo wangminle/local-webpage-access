@@ -92,6 +92,7 @@ lwa setup --autostart         # 生成 launchd plist，见 docs/autostart.md
 # 8.（可选）环境/实例排障
 lwa doctor                    # 全部环境检查
 lwa doctor my-site            # 对单个实例深度诊断
+lwa access review             # 复核访问地址可用性（别名白屏 / 空 200 自查）
 ```
 
 管理页 token 在首次 `lwa manager on` 或 `lwa manager start` 时生成；也可在工作区 `run/` 下查看。详见 [管理页说明](docs/manager-page.md)。
@@ -120,7 +121,9 @@ lwa doctor my-site            # 对单个实例深度诊断
 | `lwa manager on / off / status` | 后台启动 / 停止 / 查看管理页状态 |
 | `lwa manager start` | 前台启动管理页 HTTP 服务（Ctrl+C 退出） |
 | `lwa daemon on / off / status` | 控制 inbox/ 自动导入守护进程（启动即自愈 + 周期 reconcile，DEV-042） |
-| `lwa gateway on / off / status` | 控制 Caddy 网关 master（admin :2019 探活；切 builtin 后仍可关残留 master，BUG-077） |
+| `lwa gateway on / off / status` | 控制 Caddy 网关 master（admin :2019 探活；切 builtin 后仍可关残留 master，BUG-077）；`on` 默认复核访问地址，`--rebuild-if-needed` 对 IMP-023 命中实例自动 rebuild（G6） |
+| `lwa access refresh` | 用当前 LAN IP 重算所有实例 lanUrl/routeUrl（DHCP 换网、重启网关后地址漂移自愈，G1） |
+| `lwa access review [--json] [--rebuild-if-needed]` | 复核各实例声明 URL 的真实可用性（回环 / lanUrl / routeUrl + SPA 绝对路径空 200 检测 IMP-023）；默认仅提示需 rebuild 的实例 |
 | `lwa version` | 显示版本号 |
 
 全局选项 `-v/--verbose` 输出 DEBUG 日志。各命令的参数细节可用 `lwa <command> --help` 查看。
