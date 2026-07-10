@@ -704,7 +704,7 @@
     // token
     '<div class="modal" :hidden="!needToken">',
     '  <div class="token-box"><h2>需要 API token</h2>',
-    '    <p>请输入管理页 token（由 <code>lwa manager start</code> 输出；本机 127.0.0.1 访问免 token）：</p>',
+    '    <p>请输入管理页 token（由 <code>lwa manager on</code> / <code>lwa manager start</code> 输出；本机 127.0.0.1 访问免 token）：</p>',
     '    <input type="password" placeholder="API token" autocomplete="off" v-model="tokenInput" @keydown.enter="submitToken" />',
     '    <div class="token-actions"><button class="btn btn-primary" @click="submitToken">进入</button></div>',
     '    <p class="token-hint">token 保存在浏览器 sessionStorage，关闭标签页即清除。</p>',

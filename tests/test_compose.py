@@ -85,6 +85,18 @@ def test_compose_basic_structure(workspace: Workspace) -> None:
     assert "restart: unless-stopped" in content
 
 
+def test_compose_pythonpath_for_src_main(workspace: Workspace) -> None:
+    """current/src/main.py 存在时注入 PYTHONPATH=src（FastAPI 常见布局）。"""
+    workspace.ensure_app_dirs("api")
+    src = workspace.app_current("api") / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "main.py").write_text("app = None\n")
+    m = _mk_manifest(internal_port=8000)
+    content = generate_compose(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "environment:" in content
+    assert "- PYTHONPATH=src" in content
+
+
 def test_compose_custom_resource_limits(workspace: Workspace) -> None:
     m = _mk_manifest(memory="1g", cpus="1.5")
     content = generate_compose(m, workspace, host_port=18000).read_text(encoding="utf-8")

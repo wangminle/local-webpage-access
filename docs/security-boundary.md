@@ -69,7 +69,7 @@
 
 ## 管理页绑定校验（`validate_manager_binding`）
 
-`lwa manager start` 时校验绑定地址与 token：
+`lwa manager on` / `lwa manager start` 时校验绑定地址与 token：
 
 | 绑定地址 | 无 token | 有 token |
 | --- | --- | --- |

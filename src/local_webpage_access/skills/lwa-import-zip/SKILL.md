@@ -96,6 +96,11 @@ lwa import inbox/foo-v2.zip --update foo --force-kind-change
 `data/`（SQLite / 上传文件等持久数据）、`desiredState`、IMP-006 路径别名。
 **update 替换什么**：`apps/<id>/current/` 全量业务源码、`sourceZipHash`、扫描结果。
 
+**容器实例（DEV-067 / BUG-112）**：源码换入后会清空 `containerId`/`imageId`（作废旧部署）。
+若原 `desiredState=running` 且未传 `--no-restart`，调用方走 **`lwa rebuild`**
+（`compose build` + `up`），**不会**轻量 `restart`——后者不重建镜像，会造成
+「磁盘已新、容器仍旧」假绿。`--no-restart` 时只换源码并提示稍后 `lwa rebuild <id>`。
+
 **hash 相同**：新 zip 与当前 `sourceZipHash` 一致 → 自动跳过，提示"包未变化"，不 rebuild。
 
 **形态变化**：新 zip 的 `kind`/`runtime` 与原实例不同（如 static → python 容器），

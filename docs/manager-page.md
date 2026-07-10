@@ -1,27 +1,31 @@
 # 管理页说明（WBS-30.06）
 
-`lwa manager start` 启动内置管理页，提供图形化的实例管理与监控能力。
+默认用 `lwa manager on` 后台启动管理页（`lwa init` 在 `managerEnabled=true` 时也会自动拉起）。
+需要前台调试时可用 `lwa manager start`。
 管理页由 FastAPI 后端（`src/local_webpage_access/manager_api.py`）与单页前端
 （`src/local_webpage_access/manager_static/`：Vue 3 + `boot.js` / `helpers.js` / vendored Vue）组成。
 
 ## 启动
 
 ```bash
-lwa manager start
+lwa manager on          # 推荐：后台启动（默认流程）
+lwa manager status      # 查看是否在跑
+lwa manager off         # 停止
+# 前台调试（Ctrl+C 退出）：
+# lwa manager start
 ```
 
 * 默认监听 `0.0.0.0:17800`（由 `local-web.yml` 的 `managerPort` / `managerHost` 控制）。
-* 前台运行，`Ctrl+C` 退出。
-* 首次启动自动生成访问 token 并打印到终端，例如：
+* **本机访问免 token**：浏览器打开 http://127.0.0.1:17800/ 即可进入（IMP-003）。
+* 从局域网 IP 访问时仍须 token。token 写入工作区 `run/` 目录；`lwa manager on` /
+  `lwa manager start` 首次启动会生成并打印，例如：
 
   ```
   管理 token：ab12cd34-...
   请访问 http://192.168.1.10:17800/ 并输入上述 token
   ```
 
-* token 同时写入工作区 `run/` 目录，便于事后查阅。
-
-浏览器打开打印的 URL，在登录框输入 token 即可进入管理页。
+* 也可事后查阅 `run/` 下的 token 文件。
 
 ## 鉴权
 
@@ -77,6 +81,9 @@ Content-Type: application/json
 
 * `zipPath`：相对路径以 `inbox/` 为根；也支持 inbox 内的绝对路径。
 * 成功响应含 `skipped` / `rebuilt` / `restarted` 与最新 `instance` 快照。
+  - **容器**（`runtime=docker-compose`）且 `restart=true`、原为 running：走 **rebuild**（`rebuilt=true`），不轻量 restart。
+  - **静态 / 前端**：`restarted=true`。
+  - `restart=false`（对应 CLI `--no-restart`）：只换源码；容器需稍后 `lwa rebuild` / `POST .../rebuild`。
 * 与 CLI `lwa import inbox/foo.zip --update <id>` 共用 `importer.update_zip` 代码路径。
 
 ### 路径别名（IMP-006 / IMP-014 / IMP-022）

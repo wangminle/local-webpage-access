@@ -247,6 +247,20 @@ def test_detect_heavy_db_marks_pending(tmp_path: Path) -> None:
     assert result.pending is True
     assert result.confidence == "medium"
     assert "psycopg2" in result.notes[0]
+    assert result.kind == Kind.PYTHON
+
+
+def test_detect_pipfile_only_heavy_db_fills_python_kind(tmp_path: Path) -> None:
+    """Pipfile-only + heavy DB：pending 但仍应填 kind=python（_fill_language 须认 has_pipfile）。"""
+    (tmp_path / "Pipfile").write_text(
+        '[packages]\n'
+        'fastapi = "*"\n'
+        'psycopg2 = "*"\n'
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+    assert result.kind == Kind.PYTHON
+    assert "psycopg2" in result.notes[0]
 
 
 # ---- Unknown --------------------------------------------------------------

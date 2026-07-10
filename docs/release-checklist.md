@@ -4,7 +4,7 @@
 
 ## 代码与版本
 
-- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.5.1` / `1.0.0`）。
+- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.5.2` / `1.0.0`）。
 - [ ] `src/local_webpage_access/cli/` 包入口（`cli/__init__.py` 的 `version` 命令 / `version_info.py`）读取该版本号；`python -m local_webpage_access` 与 `python -m local_webpage_access.cli` 均可调用。
 - [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册索引）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。
@@ -33,7 +33,7 @@
 - [ ] 干净虚拟环境中 `pip install -e .` 成功，`lwa version` 输出版本号。
 - [ ] `pip install -e ".[dev]"` 成功，`python -m pytest` 可运行。
 - [ ] 全新目录 `lwa init` → `lwa import <样例 zip>` → `lwa start` → `lwa status` 全链路通过。
-- [ ] `lwa manager start` 能打开管理页并完成 token 登录。
+- [ ] `lwa manager on`（或前台 `lwa manager start`）能打开管理页；本机免 token，局域网访问需 token 登录。
 - [ ] `lwa doctor` 在干净环境全部 ok/warn，无 fail。
 - [ ] `lwa daemon on` 能自动导入 `inbox/` 中的 zip。
 

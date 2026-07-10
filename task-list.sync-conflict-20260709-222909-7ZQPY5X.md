@@ -222,7 +222,6 @@
 | DOC-027 | 文档 | 同步 V0.5.1 新增特性到用户文档：README 命令表补 lwa access refresh/review 两行+gateway on --rebuild-if-needed、快速开始 step8 加 access review；manager-page.md 字段表补 lanUrl/localhostUrl；faq.md 新增「访问类问题·别名入口白屏」(IMP-023 绝对路径 + 浏览器缓存旧 HTML 双根因+自查+修复) | 2026-07-09 15:08 | 2026-07-09 15:08 | 已完成 | operations-playbook.md/known-limitations.md 上轮已覆盖(16/1 命中)；本次补 README/manager-page/faq 三处缺口。文件均未提交 |
 | DOC-028 | 文档 | 修正 docs/autostart.md Linux systemd 示例：daemon/manager 入口误写为独立模块 | 2026-07-09 19:22 | 2026-07-09 19:31 | 已完成 | CHK-040：原 ExecStart 写 python -m local_webpage_access.daemon/manager on，实际应为 python -m local_webpage_access daemon\|manager on；并注明直调子进程入口须传 --workspace。 |
 | DOC-029 | 文档 | 同步管理页文档与登录弹窗：默认流程改为 lwa manager on，本机免 token | 2026-07-09 19:22 | 2026-07-09 19:31 | 已完成 | CHK-040：manager-page.md/app.js/faq/manager_api 占位页仍偏 manager start。已改为 on 为主、start 为前台调试；token 文案同步。 |
-| DOC-030 | 文档 | 同步 V0.5.2 文档：容器 --update→rebuild、manager on 口径、autostart systemd 入口 | 2026-07-10 09:59 | 2026-07-10 09:59 | 已完成 | README/faq/operations-playbook/manager-page 补 DEV-067 容器 update 走 rebuild；security-boundary/release-checklist 对齐 manager on；autostart/faq/manager-page/import-zip skill 既有未提交修正一并纳入。design 历史快照不动。 |
 
 ## 功能开发
 
@@ -337,7 +336,6 @@
 | OPS-035 | 运维 | 应用版本号提升至 V0.5.1：pyproject.toml、version_info(_FALLBACK_VERSION+3处docstring)、cli/__init__.py docstring、test_version_info、release-checklist 示例、skills/lwa-update-runtime「当前版本」同步为 0.5.1 | 2026-07-09 15:08 | 2026-07-09 15:08 | 已完成 | 历史快照不动：task-list 既有 V0.5.0 条目(OPS-029等)、design 文档「截至V0.5.0」标记、skill「V0.4.0起」功能引入标记。lwa version 取 git HEAD 主题，当前 HEAD 仍是 V0.5.0 commit 故显示 V0.5.0；提交 V0.5.1-BuildXXXX 主题后即显示 V0.5.1。952 passed/4 skip |
 | OPS-036 | 运维 | runtime 工作区 lwa update 升级至 V0.5.1：pip install -e . 装 local-webpage-access-0.5.1；syncSkills 更新 1；manager 重启(pid 4439→48761)、daemon 重启(pid 4531→48844)；gateway caddy 93524 与 3 实例未受扰动；doctor 总体 OK；/api/health=V0.5.1 | 2026-07-09 16:21 | 2026-07-09 16:21 | 已完成 | V0.5.1 已由用户提交(932e111 Build0867)，故 lwa version 与 /api/health 均显示 V0.5.1。lwa access review 验证新代码上线：voiceprint-v3-demo OK(相对 base)；prd-workflow 检出真实 IMP-023(6 个绝对路径资源)，但其为容器应用、HTML 源码绝对路径，rebuild 无法修复(印证 still_imp023 复检缺口) |
 | OPS-037 | 运维 | prd-workflow 原地更新至 v0.3.4（zip build202607091718），重建镜像并验证别名 /prd-workflow/ | 2026-07-09 18:20 | 2026-07-09 18:20 | 已完成 | 源码已由前次 --update 落盘但镜像未替换（卡 building/孤儿 builds）。清理 builds 43/44 后重建：镜像含相对路径资源 + package.json 0.3.4；compose 注入 PYTHONPATH=src；直连 :18002 与 http://127.0.0.1:8080/prd-workflow/（HTML/CSS/JS）均 200；/api/health 返回 version 0.3.4。别名片段已存在未改。 |
-| OPS-038 | 运维 | 应用版本号提升至 V0.5.2：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步为 0.5.2 | 2026-07-10 09:59 | 2026-07-10 09:59 | 已完成 | 历史快照与「V0.4.x/V0.5.0 起」功能引入标记保留；design 文档不动。lwa version 仍取 git HEAD 主题（当前 V0.5.1），提交 V0.5.2-BuildXXXX 后即显示 V0.5.2。test_version_info 5 项通过。 |
 
 ## 规划事项
 
@@ -362,8 +360,8 @@
 | 调整事项 | 6 | 6 | 0 | 100% |
 | 检查事项 | 41 | 41 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 30 | 30 | 0 | 100% |
+| 文档维护 | 29 | 29 | 0 | 100% |
 | 功能开发 | 67 | 67 | 0 | 100% |
-| 配置运维 | 38 | 38 | 0 | 100% |
+| 配置运维 | 37 | 37 | 0 | 100% |
 | 规划事项 | 10 | 10 | 0 | 100% |
-| **总计** | 307 | 307 | 0 | 100% |
+| **总计** | 305 | 305 | 0 | 100% |

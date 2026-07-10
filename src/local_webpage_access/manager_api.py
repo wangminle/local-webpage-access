@@ -577,7 +577,15 @@ def _register_routes(app: FastAPI) -> None:
         )
 
         restarted = False
-        if result.needs_restart:
+        rebuilt_runtime = False
+        if result.needs_rebuild:
+            from local_webpage_access.lifecycle import rebuild_instance
+
+            rebuild_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id
+            )
+            rebuilt_runtime = True
+        elif result.needs_restart:
             from local_webpage_access.lifecycle import restart_instance
 
             restart_instance(
@@ -595,6 +603,8 @@ def _register_routes(app: FastAPI) -> None:
             "skipped": result.skipped,
             "rebuilt": result.rebuilt,
             "restarted": restarted,
+            "rebuiltRuntime": rebuilt_runtime,
+            "needsRebuild": result.needs_rebuild,
             "prevHash": result.prev_hash,
             "zipHash": result.zip_hash,
             "instance": snap.to_dict(),
@@ -904,7 +914,7 @@ _PLACEHOLDER_HTML = (
     "<title>Local Webpage Access</title></head>"
     "<body style='font-family:system-ui;padding:2rem;line-height:1.6'>"
     "<h1>Local Webpage Access Manager</h1>"
-    "<p>管理页前端尚未部署（WBS-23）。API 已就绪，可用 <code>lwa manager start</code> "
+    "<p>管理页前端尚未部署（WBS-23）。API 已就绪，可用 <code>lwa manager on</code> "
     "查看 token 并访问 <code>/api/stats</code>、<code>/api/instances</code> 等接口。</p>"
     "</body></html>"
 )

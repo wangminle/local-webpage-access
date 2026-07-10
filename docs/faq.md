@@ -88,6 +88,7 @@ status: pending
 
 * **手动 `lwa import`**：同名 slug 已存在时会**报错**，提示使用 `lwa import <zip> --update <id>` 原地升级；不会静默覆盖，也不会自动建 `my-site-2`。
 * **daemon 自动导入（IMP-011）**：slug 冲突时记 `import_conflict` 事件并提示 `--update`，**不再**自动追加 `-2/-3`；导入成功后 zip 会移入 `inbox/processed/`。
+* **`--update` 后容器仍是旧版？**：容器实例必须 **rebuild 镜像** 才会跑新源码。V0.5.2 起，running 容器的 `--update` 默认走 `lwa rebuild`（不再轻量 `restart`）。若用了 `--no-restart`，请手动 `lwa rebuild <id>`。
 * **同包重复导入**：同一 zip 指纹（`sourceZipHash`）会产生冗余实例。清理：
 
   ```bash
@@ -133,7 +134,7 @@ PortError: 端口池 [18000, 19999] 已耗尽
 
 ### 管理 token 丢失
 
-token 存在工作区 `run/` 目录下。删除该文件后 `lwa manager start` 会重新生成。
+token 存在工作区 `run/` 目录下。删除该文件后 `lwa manager on`（或 `lwa manager start`）会重新生成。
 **重置 token 会使旧 token 失效**。
 
 ### 管理页打不开 / 401

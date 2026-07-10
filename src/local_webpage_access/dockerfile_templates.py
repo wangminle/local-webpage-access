@@ -28,6 +28,8 @@ from local_webpage_access.paths import Workspace
 log = get_logger("dockerfile")
 
 _NODE_IMAGE = "node:24-alpine"
+# Python 全栈镜像内嵌 Node 官方二进制版本（与 _NODE_IMAGE major 对齐，OPS-001 / BUG-114）
+_NODE_DIST_VERSION = "24.16.0"
 _PYTHON_IMAGE = "python:3.13-slim"
 
 # 启动命令缺省时的兜底（与 scanner 推断保持一致）
@@ -185,12 +187,26 @@ def _render_python(
 
     # IMP-016（WBS-20260708 阶段2.5）：Python 全栈镜像含 Node 运行时。
     # 源码含 package.json（如 Pi Agent 这类 Python + 辅助 Node 项目）时，追加
-    # nodejs/npm 与 Node 依赖安装，base 仍为 python:3.13-slim。
+    # Node.js/npm 与 Node 依赖安装，base 仍为 python:3.13-slim。
+    #
+    # 注意：不要用 Debian 的 ``apt install nodejs npm``——``npm`` 元包会拉入
+    # webpack/terser 等约 300+ 依赖，在 Docker Desktop 默认内存下易 OOM
+    #（cannot allocate memory）。改用官方 Node 二进制 tarball（含 npm）。
     node_block = ""
     if source_dir is not None and (source_dir / "package.json").is_file():
         node_block = (
-            "RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm"
-            " && rm -rf /var/lib/apt/lists/*\n"
+            "RUN set -eux; \\\n"
+            "  apt-get update; \\\n"
+            "  apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \\\n"
+            "  ARCH=\"$(dpkg --print-architecture)\"; \\\n"
+            "  case \"$ARCH\" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;"
+            " *) echo \"unsupported arch: $ARCH\" >&2; exit 1;; esac; \\\n"
+            "  curl -fsSL"
+            f" \"https://nodejs.org/dist/v{_NODE_DIST_VERSION}/"
+            f"node-v{_NODE_DIST_VERSION}-linux-${{NODE_ARCH}}.tar.xz\""
+            " | tar -xJ -C /usr/local --strip-components=1; \\\n"
+            "  rm -rf /var/lib/apt/lists/*; \\\n"
+            "  node -v && npm -v\n"
             "COPY current/package*.json ./\n"
             "RUN npm ci --omit=dev || npm install --omit=dev\n"
         )
@@ -199,6 +215,12 @@ def _render_python(
     if _is_sqlite(manifest):
         sqlite_mkdir = "RUN mkdir -p /app/data\n"
 
+    # 常见 FastAPI 布局：入口在 src/main.py（如 start.sh 用 PYTHONPATH=src）。
+    # exec 形式 CMD 无法携带 ``VAR=val`` 前缀，因此用 ENV 注入。
+    pythonpath_env = ""
+    if source_dir is not None and (source_dir / "src" / "main.py").is_file():
+        pythonpath_env = "ENV PYTHONPATH=src\n"
+
     lines = [
         header,
         f"FROM {_PYTHON_IMAGE}",
@@ -206,6 +228,7 @@ def _render_python(
         install_block,
         node_block,
         sqlite_mkdir,
+        pythonpath_env,
         "ENV HOST=0.0.0.0",
         f"ENV PORT={internal_port}",
         f"EXPOSE {internal_port}",
@@ -257,8 +280,19 @@ def _to_exec_form(shell_cmd: str) -> str:
 
     信号传递和参数安全都优于 shell 形式；scanner 推断的启动命令都是简单
     空格分隔，``shlex.split`` 足够。无法解析时回退到 shell 形式。
+
+    前缀 ``KEY=VAL``（如 ``PYTHONPATH=src``）会从 exec 参数中剥离——exec
+    形式不会像 shell 那样设置环境变量；这类变量应通过 ``ENV`` / compose
+    ``environment`` 注入（见 ``_render_python`` / ``compose.generate_compose``）。
     """
     parts = shlex.split(shell_cmd)
+    while parts and "=" in parts[0] and not parts[0].startswith("-"):
+        # 仅剥离 ``NAME=value`` 形态；保留含 ``=`` 的普通参数极少见，且
+        # 启动命令首段几乎总是解释器名。
+        key, _, _ = parts[0].partition("=")
+        if not key.isidentifier():
+            break
+        parts = parts[1:]
     if parts:
         return "[" + ", ".join(json.dumps(p) for p in parts) + "]"
     return f'{json.dumps(shell_cmd)}'

@@ -848,12 +848,138 @@ def test_update_needs_restart_when_running(
     result = importer.update_zip(v2, iid, restart=True)
     assert result.was_running is True
     assert result.needs_restart is True
+    assert result.needs_rebuild is False
 
     # restart=False（--no-restart）：即使原 running 也不要求重启
     v3 = _make_static_zip(tmp_path / "demo-v3.zip", "v3")
     result2 = importer.update_zip(v3, iid, restart=False)
     assert result2.was_running is True
     assert result2.needs_restart is False
+    assert result2.needs_rebuild is False
+
+
+def test_update_container_needs_rebuild_not_restart(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """DEV-067：容器 running 更新 → needs_rebuild=True，且作废 containerId。"""
+    from local_webpage_access.models import InstanceManifest
+
+    v1 = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    # 模拟已部署：落库 containerId，使旧逻辑会走轻量 start
+    mpath = workspace.app_manifest_path(iid)
+    m = InstanceManifest.load(mpath)
+    assert m.container is not None
+    m.container.containerId = "old-container-id"
+    m.container.imageId = "old-image-id"
+    m.save(mpath)
+    registry.upsert_from_manifest(m)
+    _set_desired_running(workspace, iid)
+
+    v2 = _make_zip(
+        tmp_path / "api-v2.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=2\n"},
+    )
+    result = importer.update_zip(v2, iid, restart=True)
+    assert result.was_running is True
+    assert result.needs_rebuild is True
+    assert result.needs_restart is False
+    assert result.manifest.container is not None
+    assert result.manifest.container.containerId is None
+    assert result.manifest.container.imageId is None
+    # registry 同步后也不应再有旧 container_id（避免 start 误判已部署）
+    row = registry.get_container(iid)
+    assert row is not None
+    assert row.get("container_id") in (None, "")
+
+    # --no-restart：仍作废部署标记，但不要求立即 rebuild
+    v3 = _make_zip(
+        tmp_path / "api-v3.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=3\n"},
+    )
+    # 再假装部署过
+    m = InstanceManifest.load(mpath)
+    assert m.container is not None
+    m.container.containerId = "again"
+    m.save(mpath)
+    registry.upsert_from_manifest(m)
+    result2 = importer.update_zip(v3, iid, restart=False)
+    assert result2.needs_rebuild is False
+    assert result2.needs_restart is False
+    assert result2.manifest.container is not None
+    assert result2.manifest.container.containerId is None
+
+
+def test_update_dry_run_container_reports_needs_rebuild(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """BUG-113：dry-run 对 running 容器应预告 needs_rebuild（非 restart）。"""
+    v1 = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    _set_desired_running(workspace, iid)
+
+    v2 = _make_zip(
+        tmp_path / "api-v2.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=2\n"},
+    )
+    result = importer.update_zip(v2, iid, restart=True, dry_run=True)
+    assert result.dry_run is True
+    assert result.was_running is True
+    assert result.needs_rebuild is True
+    assert result.needs_restart is False
+
+
+def test_cli_import_update_dry_run_says_rebuild_for_container(
+    workspace: Workspace,
+    registry: Registry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-113：CLI --dry-run 对 running 容器输出将 rebuild，而非 restart。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+    from local_webpage_access.config import Config
+    from local_webpage_access.importer import Importer
+    from local_webpage_access.init_workspace import init_workspace
+
+    init_workspace(workspace.root)
+    # init 会新建 registry；复用同一路径重新打开
+    registry.close()
+    reg = Registry(workspace.db_path)
+    reg.open()
+    try:
+        importer = Importer(workspace, Config(), reg)
+        v1 = _make_zip(
+            tmp_path / "api.zip",
+            {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+        )
+        r1 = importer.import_zip(v1)
+        iid = r1.instance_id
+        _set_desired_running(workspace, iid)
+
+        v2 = _make_zip(
+            tmp_path / "api-v2.zip",
+            {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=2\n"},
+        )
+        monkeypatch.chdir(workspace.root)
+        result = CliRunner().invoke(
+            app,
+            ["import", str(v2), "--update", iid, "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "将 rebuild" in result.output
+        assert "将 restart" not in result.output
+    finally:
+        reg.close()
 
 
 def test_update_dry_run_no_writes(

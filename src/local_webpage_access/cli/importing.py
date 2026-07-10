@@ -182,7 +182,17 @@ def _do_update(
                 fg=typer.colors.YELLOW,
             )
         if result.was_running:
-            typer.echo("  原状态：running（实际更新后将 restart）")
+            if result.needs_rebuild:
+                action = "rebuild"
+            elif result.needs_restart:
+                action = "restart"
+            else:
+                # --no-restart 或非 running 路径：仅报告原状态
+                action = None
+            if action:
+                typer.echo(f"  原状态：running（实际更新后将 {action}）")
+            else:
+                typer.echo("  原状态：running（--no-restart，不会自动 rebuild/restart）")
         if result.sanitized and result.sanitized.stripped_names:
             typer.echo(
                 f"  将剥离冗余成员 {len(result.sanitized.stripped_names)} 项"
@@ -206,13 +216,33 @@ def _do_update(
             fg=typer.colors.CYAN,
         )
 
-    # needs_restart=True：调用方执行 restart（hostPort 由 hosting 复用，不变）
-    if result.needs_restart:
+    # DEV-067 / BUG-112：容器源码已换 → rebuild 镜像；静态/前端 → restart。
+    if result.needs_rebuild:
+        from local_webpage_access.lifecycle import rebuild_instance
+
+        typer.secho(
+            "  正在 rebuild（容器源码已更新，须重建镜像）…",
+            fg=typer.colors.CYAN,
+        )
+        rebuild_instance(ws, config, reg, instance_id)
+        typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
+    elif result.needs_restart:
         from local_webpage_access.lifecycle import restart_instance
 
         typer.secho("  正在 restart…", fg=typer.colors.CYAN)
         restart_instance(ws, config, reg, instance_id)
         typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
+    elif (
+        not result.skipped
+        and result.manifest.runtime.value == "docker-compose"
+        and not restart
+    ):
+        typer.secho(
+            "  提示：容器源码已更新但未重建镜像（--no-restart）。"
+            "运行中的仍是旧镜像；就绪后请执行："
+            f" lwa rebuild {instance_id}",
+            fg=typer.colors.YELLOW,
+        )
 
 
 def scan(

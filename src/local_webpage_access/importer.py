@@ -72,14 +72,23 @@ class UpdateResult:
     """``update_zip`` 结果（IMP-009）。
 
     ``skipped`` 与 ``rebuilt`` 互斥：hash 未变化时 ``skipped=True``；
-    ``dry_run=True`` 时两者均为 False（仅预演，不落盘）。
+    ``dry_run=True`` 时不落盘，但会按 runtime 预填 ``needs_rebuild`` /
+    ``needs_restart``，供 CLI 预告实际更新后的动作。
 
     ``needs_restart`` 表示调用方（CLI / 管理页）应在更新后调用
     :func:`local_webpage_access.lifecycle.restart_instance`：当且仅当
-    ``restart=True``、更新前 ``desiredState=running`` 且实际发生了替换。
-    update_zip 本身不启动 / 重启进程（保持纯数据层、便于测试），
-    端口复用由 hosting 的 ``_ensure_static_port`` / ``_ensure_container_port``
-    在重启时自动完成（stop 不释放端口登记，故 hostPort 不变）。
+    ``restart=True``、更新前 ``desiredState=running``、实际发生了替换，
+    **且不是容器实例**（静态 / 前端同步 public 即可）。
+
+    ``needs_rebuild``（DEV-067 / BUG-112）：容器实例源码已换，旧镜像失效。
+    当且仅当 ``restart=True``、更新前 running、runtime=docker-compose。
+    调用方须走 :func:`~local_webpage_access.lifecycle.rebuild_instance`
+    （``compose build``），**禁止**轻量 ``restart``（那不会重建镜像，
+    会造成「源码已新、镜像仍旧」假绿）。
+
+    update_zip 本身不启动 / 重启 / 重建进程（保持纯数据层、便于测试）；
+    但对容器会清空 ``containerId``/``imageId``，使后续 ``lwa start``
+    也不会误走轻量 start。端口复用由 hosting 在 rebuild/start 时完成。
     """
 
     instance_id: str
@@ -93,6 +102,7 @@ class UpdateResult:
     dry_run: bool = False
     was_running: bool = False
     needs_restart: bool = False
+    needs_rebuild: bool = False
     kind_changed: bool = False
     sanitized: ZipSanitizeResult | None = None
 
@@ -325,7 +335,8 @@ class Importer:
            - 重建 manifest（保留 id/createdAt/desiredState/status/路径别名），
              刷 ``sourceZipHash`` / ``updatedAt``，registry 同步 + 事件。
 
-        本方法不启动 / 重启进程；``needs_restart=True`` 时由调用方执行
+        本方法不启动 / 重启 / 重建进程；``needs_rebuild=True`` 时由调用方执行
+        :func:`lifecycle.rebuild_instance`，``needs_restart=True`` 时执行
         :func:`lifecycle.restart_instance`。hostPort 由 hosting 在重启时复用。
 
         Raises:
@@ -384,12 +395,17 @@ class Importer:
                 sanitized = safe_extract(src, staging_tmp)
                 detection = self.scanner.detect(staging_tmp)
                 kind_changed = self._kind_changed(old_manifest, detection)
+            # 预告实际更新后的动作（与落盘路径一致：容器 rebuild，静态/前端 restart）
+            is_container = old_manifest.runtime.value == "docker-compose"
+            dry_needs_rebuild = bool(restart and was_running and is_container)
+            dry_needs_restart = bool(restart and was_running and not is_container)
             log.info(
-                "实例 %s dry-run：sha256 %s → %s，形态变化=%s",
+                "实例 %s dry-run：sha256 %s → %s，形态变化=%s，needs_rebuild=%s",
                 instance_id,
                 (old_hash[:12] if old_hash else "∅"),
                 new_hash[:12],
                 kind_changed,
+                dry_needs_rebuild,
             )
             return UpdateResult(
                 instance_id=instance_id,
@@ -402,7 +418,8 @@ class Importer:
                 rebuilt=False,
                 dry_run=True,
                 was_running=was_running,
-                needs_restart=False,
+                needs_restart=dry_needs_restart,
+                needs_rebuild=dry_needs_rebuild,
                 kind_changed=kind_changed,
                 sanitized=sanitized,
             )
@@ -476,6 +493,14 @@ class Importer:
                 # 避免 upsert_from_manifest 用 manifest 的空 hostPort 清零登记
                 # （hosting 重启时靠 static_sites/containers 表复用端口）
                 self._preserve_hostport(manifest, instance_id)
+                # DEV-067 / BUG-112：容器源码已换 → 作废旧部署标记，避免
+                # restart/start 走轻量 compose start 继续跑旧镜像。
+                if (
+                    manifest.runtime.value == "docker-compose"
+                    and manifest.container is not None
+                ):
+                    manifest.container.containerId = None
+                    manifest.container.imageId = None
                 manifest.touch()
                 manifest.save(manifest_path)
 
@@ -548,12 +573,19 @@ class Importer:
                     if stale.exists():
                         shutil.rmtree(stale, ignore_errors=True)
 
-        needs_restart = restart and was_running
+        # 容器必须 rebuild 镜像；静态/前端只需 restart 同步 public。
+        is_container = (
+            manifest is not None  # type: ignore[possibly-undefined]
+            and manifest.runtime.value == "docker-compose"  # type: ignore[possibly-undefined]
+        )
+        needs_rebuild = bool(restart and was_running and is_container)
+        needs_restart = bool(restart and was_running and not is_container)
         log.info(
-            "实例 %s 更新成功（sha256 %s → %s，needs_restart=%s）",
+            "实例 %s 更新成功（sha256 %s → %s，needs_rebuild=%s，needs_restart=%s）",
             instance_id,
             (old_hash[:12] if old_hash else "∅"),
             new_hash[:12],
+            needs_rebuild,
             needs_restart,
         )
         return UpdateResult(
@@ -567,6 +599,7 @@ class Importer:
             rebuilt=True,
             was_running=was_running,
             needs_restart=needs_restart,
+            needs_rebuild=needs_rebuild,
             sanitized=sanitized,  # type: ignore[possibly-undefined]
         )
 

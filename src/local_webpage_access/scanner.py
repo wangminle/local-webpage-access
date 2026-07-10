@@ -314,6 +314,7 @@ class Scanner:
             summary.has_pyproject_toml
             or summary.has_requirements_txt
             or summary.has_requirements_prod
+            or summary.has_pipfile
         ):
             result.kind = Kind.PYTHON
 

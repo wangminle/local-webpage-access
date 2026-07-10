@@ -59,6 +59,7 @@ lwa import ./inbox/my-site.zip --name my-site
 lwa import ./inbox/my-site.zip --path-alias my-site
 
 # 2b. 同项目新版本：原地更新 zip（保留 id / 端口 / data / 路径别名）
+# 容器实例会自动 rebuild 镜像；静态/前端走 restart。加 --no-restart 则只换源码。
 lwa import ./inbox/my-site-v2.zip --update my-site
 
 # 3.（可选）对被标记为 pending 的实例重新识别
@@ -103,7 +104,7 @@ lwa access review             # 复核访问地址可用性（别名白屏 / 空
 | --- | --- |
 | `lwa init [-w DIR] [--force]` | 初始化工作区（目录 / 配置 / registry / skills），幂等 |
 | `lwa update` | 升级 lwa 包并热重载工作区：同步 skills、补齐配置、重启 manager/daemon、可选 doctor / restart 实例 |
-| `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名；`--update` 原地升级已有实例 |
+| `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名；`--update` 原地升级（容器自动 rebuild，静态/前端 restart；`--no-restart` 仅换源码） |
 | `lwa alias set <ID> <slug>` / `lwa alias clear <ID>` | 为静态或容器实例设置/清除路径别名（需 Caddy；与管理页/API 共用逻辑） |
 | `lwa scan [ID]` | 重新扫描实例（省略 ID 则扫所有 `pending`） |
 | `lwa start <ID>` | 启动实例（容器已部署走轻量 `compose start`，否则全量部署） |

@@ -50,7 +50,7 @@ services:
       - "${{HOST_PORT}}:${{INTERNAL_PORT}}"
     env_file:
       - .env
-{env_local_block}    volumes:
+{env_local_block}{extra_environment}    volumes:
       - {data_volume}
     mem_limit: ${{MEMORY_LIMIT:-{memory}}}
     cpus: "${{CPU_LIMIT:-{cpus}}}"
@@ -79,6 +79,12 @@ def generate_compose(
         raise ValueError(f"实例 {manifest.id} 缺少 container 配置，无法生成 compose.yaml")
     limits = container.resourceLimits
 
+    # FastAPI 常见 src/ 布局：不重建镜像时也要能找到 main（与 Dockerfile ENV 对齐）。
+    extra_environment = ""
+    source_dir = workspace.app_current(manifest.id)
+    if (source_dir / "src" / "main.py").is_file():
+        extra_environment = "    environment:\n      - PYTHONPATH=src\n"
+
     content = _COMPOSE_TEMPLATE.format(
         project_name=container.projectName,
         instance_id=manifest.id,
@@ -89,6 +95,7 @@ def generate_compose(
         memory=limits.memory,
         cpus=limits.cpus,
         env_local_block=_ENV_LOCAL_BLOCK,
+        extra_environment=extra_environment,
     )
     # WBS-25.03/04/05：自检生成的 compose 是否含 critical 安全问题
     # （模板本身安全；此检查防止模板被改动或 skill 覆盖后引入风险）。

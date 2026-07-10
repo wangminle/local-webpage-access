@@ -45,7 +45,8 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/path/to/workspace
-ExecStart=/usr/bin/python3 -m local_webpage_access.daemon on
+# 与 macOS launchd 一致：走 CLI 入口（python -m local_webpage_access <cmd> on）
+ExecStart=/usr/bin/python3 -m local_webpage_access daemon on
 Restart=on-failure
 RestartSec=5
 
@@ -63,13 +64,20 @@ After=network.target lwa-daemon.service
 [Service]
 Type=simple
 WorkingDirectory=/path/to/workspace
-ExecStart=/usr/bin/python3 -m local_webpage_access.manager on
+ExecStart=/usr/bin/python3 -m local_webpage_access manager on
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=default.target
 ```
+
+> **注意**：不要写成 `python -m local_webpage_access.daemon on` 或
+> `python -m local_webpage_access.manager on`——`daemon` / `manager` 不是独立可执行模块。
+> 若直接调用子进程入口（`python -m local_webpage_access.daemon` /
+> `python -m local_webpage_access.manager_service`），必须传 `--workspace /path/to/workspace`，
+> 且该入口是前台 watcher/uvicorn，语义与 `lwa daemon on` / `lwa manager on`（后台拉起）不同。
+> 开机自启请优先用上面的 CLI 形式。
 
 启用（登录后自启 + linger 保证未登录也运行）：
 

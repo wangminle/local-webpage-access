@@ -272,7 +272,7 @@ def test_dockerfile_header_records_summary(workspace: Workspace) -> None:
 
 
 def test_dockerfile_python_with_node(workspace: Workspace) -> None:
-    """IMP-016：Python 项目源码含 package.json → Dockerfile 追加 nodejs/npm。"""
+    """IMP-016：Python 项目源码含 package.json → Dockerfile 追加 Node 官方二进制。"""
     workspace.ensure_app_dirs("api")
     (workspace.app_current("api") / "package.json").write_text(
         '{"name":"pi-agent","dependencies":{}}'
@@ -281,9 +281,29 @@ def test_dockerfile_python_with_node(workspace: Workspace) -> None:
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     # base 仍为 python
     assert "FROM python:3.13-slim" in content
-    # 追加 Node 工具链
-    assert "nodejs npm" in content
+    # 追加 Node 工具链（官方二进制，避免 apt npm 元包 OOM）
+    assert "nodejs.org/dist" in content
+    # BUG-114：与纯 Node 基线 node:24-alpine 同一 major（非 v22）
+    assert "nodejs.org/dist/v24." in content
+    assert "node-v24." in content
+    assert "v22.19.0" not in content
     assert "npm ci --omit=dev" in content
+
+
+def test_dockerfile_python_src_main_sets_pythonpath(workspace: Workspace) -> None:
+    """src/main.py 布局 → Dockerfile 注入 PYTHONPATH=src；CMD 剥离 VAR= 前缀。"""
+    workspace.ensure_app_dirs("api")
+    src = workspace.app_current("api") / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "main.py").write_text("app = None\n")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="PYTHONPATH=src uvicorn main:app --host 0.0.0.0 --port 8000",
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "ENV PYTHONPATH=src" in content
+    assert 'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]' in content
+    assert '"PYTHONPATH=src"' not in content
 
 
 def test_dockerfile_python_without_node_omits_node_toolchain(
@@ -293,7 +313,7 @@ def test_dockerfile_python_without_node_omits_node_toolchain(
     workspace.ensure_app_dirs("api")
     m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
-    assert "nodejs npm" not in content
+    assert "nodejs.org/dist" not in content
     assert "npm ci" not in content
 
 
