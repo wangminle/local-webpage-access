@@ -134,8 +134,8 @@ PortError: 端口池 [18000, 19999] 已耗尽
 
 ### 管理 token 丢失
 
-token 存在工作区 `run/` 目录下。删除该文件后 `lwa manager on`（或 `lwa manager start`）会重新生成。
-**重置 token 会使旧 token 失效**。
+token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager on`（或 `lwa manager start`）会重新生成。
+**重置 token 会使旧 token 失效**。完整 token 只出现在 CLI 终端输出，不会写入 `logs/`。
 
 ### 管理页打不开 / 401
 

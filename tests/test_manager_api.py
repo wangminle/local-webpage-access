@@ -122,6 +122,47 @@ def test_ensure_token_idempotent(workspace: Workspace) -> None:
     assert t1 == t2  # 幂等
 
 
+def test_rotate_token_replaces_existing(workspace: Workspace) -> None:
+    """BUG-118：rotate_token 生成新 token 并覆盖旧文件。"""
+    from local_webpage_access.manager_api import rotate_token
+
+    old = ensure_token(workspace)
+    new = rotate_token(workspace)
+    assert new != old
+    assert read_token(workspace) == new
+    assert token_path(workspace).stat().st_mode & 0o777 == 0o600
+
+
+def test_run_manager_does_not_log_full_token(
+    workspace: Workspace, config, monkeypatch
+) -> None:
+    """BUG-118：run_manager 不得把完整 token 写入日志。"""
+    from local_webpage_access import manager_api as ma
+
+    workspace.ensure_workspace_dirs()
+    _write_config(workspace)
+    token = ensure_token(workspace)
+    logged: list[str] = []
+
+    class _FakeServer:
+        def run(self):
+            return None
+
+    real_info = ma.log.info
+
+    def capture_info(msg, *args, **kwargs):  # noqa: ANN001
+        logged.append(msg % args if args else str(msg))
+        return real_info(msg, *args, **kwargs)
+
+    monkeypatch.setattr(ma.log, "info", capture_info)
+    monkeypatch.setattr("uvicorn.Config", lambda *a, **kw: object())
+    monkeypatch.setattr("uvicorn.Server", lambda *a, **kw: _FakeServer())
+    ma.run_manager(workspace, config)
+    joined = "\n".join(logged)
+    assert token not in joined
+    assert any("管理页已就绪" in line for line in logged)
+
+
 def test_read_token_none_when_absent(workspace: Workspace) -> None:
     assert read_token(workspace) is None
 

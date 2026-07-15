@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -13,11 +14,14 @@ from local_webpage_access.manager_service import (
     health_matches_workspace,
     health_ok,
     is_running,
+    log_file_path,
     maybe_start_manager,
+    read_manager_log,
     read_state,
     start_manager,
     stop_manager,
     write_state,
+    _spawn_manager,
 )
 from local_webpage_access.paths import Workspace
 
@@ -203,3 +207,82 @@ def test_is_running_legacy_manager_without_workspace_root(workspace: Workspace) 
             "local_webpage_access.manager_service.is_pid_alive", return_value=False
         ):
             assert is_running(workspace, cfg) is False
+
+
+# ---- BUG-116：管理页运行时日志不得丢弃 ---------------------------------------
+
+
+def test_log_file_path_is_workspace_manager_log(workspace: Workspace) -> None:
+    """BUG-116：管理页日志落在 workspace logs/manager.log。"""
+    assert log_file_path(workspace) == workspace.logs / "manager.log"
+
+
+def test_spawn_manager_redirects_stdout_to_manager_log(workspace: Workspace) -> None:
+    """BUG-116：子进程 stdout/stderr 写入 manager.log，而非 DEVNULL。"""
+    import subprocess
+
+    workspace.ensure_workspace_dirs()
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 424242
+
+    def fake_popen(cmd, **kwargs):  # noqa: ANN001
+        captured["kwargs"] = kwargs
+        return FakeProc()
+
+    with patch("local_webpage_access.manager_service.subprocess.Popen", side_effect=fake_popen):
+        assert _spawn_manager(workspace) == 424242
+
+    kwargs = captured["kwargs"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.STDOUT
+    assert kwargs["stdout"] is not subprocess.DEVNULL
+    # 句柄应指向 manager.log；父进程关闭自己的副本（避免泄漏）
+    assert log_file_path(workspace).is_file()
+    assert getattr(kwargs["stdout"], "closed", False) is True
+
+
+def test_read_manager_log_tail(workspace: Workspace) -> None:
+    """BUG-116：可读管理页日志尾部。"""
+    workspace.ensure_workspace_dirs()
+    assert read_manager_log(workspace, tail=10) == ""
+    path = log_file_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(f"line{i}" for i in range(10)) + "\n", encoding="utf-8")
+    assert read_manager_log(workspace, tail=3) == "line7\nline8\nline9"
+    assert read_manager_log(workspace, tail=0).startswith("line0")
+    assert read_manager_log(workspace, tail=50).count("line") == 10
+
+
+def test_run_service_main_passes_log_dir(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-116：子进程入口 setup_logging 必须传入 workspace.logs。"""
+    from local_webpage_access import manager_service
+
+    workspace.ensure_workspace_dirs()
+    (workspace.root / "local-web.yml").write_text(
+        "portPool:\n  start: 21000\n  end: 21050\nmanagerEnabled: true\n",
+        encoding="utf-8",
+    )
+    seen: dict = {}
+
+    def fake_setup_logging(level="INFO", log_dir=None, *, force=False):  # noqa: ANN001
+        seen["log_dir"] = log_dir
+        return None
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["manager_service", "--workspace", str(workspace.root)],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.logging.setup_logging", fake_setup_logging
+    )
+    with patch("local_webpage_access.manager_api.run_manager"):
+        with patch("local_webpage_access.registry.Registry") as reg_cls:
+            reg_cls.return_value.open.return_value = None
+            reg_cls.return_value.close.return_value = None
+            assert manager_service.run_service_main() == 0
+    assert seen.get("log_dir") == workspace.logs

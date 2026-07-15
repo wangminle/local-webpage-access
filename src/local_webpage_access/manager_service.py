@@ -33,6 +33,7 @@ log = get_logger("manager")
 
 STATE_FILENAME = "manager.json"
 START_LOCK_FILENAME = "manager-start.lock"
+LOG_FILENAME = "manager.log"
 MANAGER_START_TIMEOUT = 15.0
 
 
@@ -56,6 +57,23 @@ def state_path(workspace: Workspace) -> Path:
 
 def start_lock_path(workspace: Workspace) -> Path:
     return workspace.run / START_LOCK_FILENAME
+
+
+def log_file_path(workspace: Workspace) -> Path:
+    """管理页运行时日志路径（``logs/manager.log``）。"""
+    return workspace.logs / LOG_FILENAME
+
+
+def read_manager_log(workspace: Workspace, *, tail: int = 200) -> str:
+    """读取管理页日志；``tail<=0`` 返回全文，文件不存在返回空串。"""
+    path = log_file_path(workspace)
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if tail is None or tail <= 0:
+        return text
+    lines = text.splitlines()
+    return "\n".join(lines[-tail:])
 
 
 def read_state(workspace: Workspace) -> ManagerState | None:
@@ -166,6 +184,7 @@ def is_running(workspace: Workspace, config: Config) -> bool:
 
 
 def _spawn_manager(workspace: Workspace) -> int:
+    """以独立子进程启动管理页，stdout/stderr 追加到 ``logs/manager.log``。"""
     root = str(workspace.root)
     cmd = [
         sys.executable,
@@ -174,16 +193,26 @@ def _spawn_manager(workspace: Workspace) -> int:
         "--workspace",
         root,
     ]
+    log_path = log_file_path(workspace)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = log_path.open("a", encoding="utf-8")
+    from local_webpage_access.logging import secure_chmod
+
+    secure_chmod(log_path)
     popen_kwargs: dict[str, Any] = {
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": log_fh,
+        "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
     }
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
     else:
         popen_kwargs["start_new_session"] = True
-    proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
+    try:
+        proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
+    finally:
+        # 子进程已继承句柄，父进程关闭自己的副本，避免泄漏。
+        log_fh.close()
     return int(proc.pid)
 
 
@@ -369,8 +398,9 @@ def run_service_main() -> int:
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     args = parser.parse_args()
 
-    setup_logging(level=args.log_level.upper())  # type: ignore[arg-type]
     workspace = Workspace(Path(args.workspace).resolve())
+    # BUG-116：写入 logs/lwa.log；uvicorn 等 stdout 由父进程重定向到 manager.log。
+    setup_logging(level=args.log_level.upper(), log_dir=workspace.logs)  # type: ignore[arg-type]
     if not workspace.config_path.is_file():
         log.error("工作区未初始化：%s", workspace.root)
         return 2
@@ -402,6 +432,8 @@ __all__ = [
     "health_ok",
     "health_matches_workspace",
     "is_running",
+    "log_file_path",
+    "read_manager_log",
     "start_manager",
     "stop_manager",
     "manager_status",

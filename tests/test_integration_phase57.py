@@ -30,8 +30,13 @@ def env(tmp_path: Path):
     root = tmp_path / "ws"
     init_workspace(root)
     ws = Workspace(root)
-    ws.config_path.write_text(example_config_text(), encoding="utf-8")
+    ws.config_path.write_text(
+        example_config_text().replace("staticGateway: caddy", "staticGateway: builtin"),
+        encoding="utf-8",
+    )
     config = load_config(ws)
+    # BUG-121：双保险
+    config.staticGateway = "builtin"
     reg = Registry(ws.db_path)
     reg.open()
     token = ensure_token(ws)

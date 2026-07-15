@@ -125,3 +125,28 @@ def manager_start(
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+@app.command("logs")
+def manager_logs(
+    tail: int = typer.Option(200, "--tail", "-n", help="显示最近 N 行（0=全文）"),
+) -> None:
+    """查看管理页运行时日志（``logs/manager.log``）。"""
+    from local_webpage_access.manager_service import log_file_path, read_manager_log
+
+    try:
+        ws, _config, _reg = open_workspace_registry()
+        _reg.close()
+        text = read_manager_log(ws, tail=tail)
+        if not text:
+            path = log_file_path(ws)
+            typer.secho(
+                f"管理页日志不存在或为空：{path}",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            typer.echo(text)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)

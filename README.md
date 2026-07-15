@@ -121,6 +121,7 @@ lwa access review             # 复核访问地址可用性（别名白屏 / 空
 | `lwa doctor [ID] [--json]` | 诊断环境与实例问题；`--json` 输出机器可读报告，有 fail 时退出码 1 |
 | `lwa manager on / off / status` | 后台启动 / 停止 / 查看管理页状态 |
 | `lwa manager start` | 前台启动管理页 HTTP 服务（Ctrl+C 退出） |
+| `lwa manager logs [-n TAIL]` | 查看管理页运行时日志（`logs/manager.log`） |
 | `lwa daemon on / off / status` | 控制 inbox/ 自动导入守护进程（启动即自愈 + 周期 reconcile，DEV-042） |
 | `lwa gateway on / off / status` | 控制 Caddy 网关 master（admin :2019 探活；切 builtin 后仍可关残留 master，BUG-077）；`on` 默认复核访问地址，`--rebuild-if-needed` 对 IMP-023 命中实例自动 rebuild（G6） |
 | `lwa access refresh` | 用当前 LAN IP 重算所有实例 lanUrl/routeUrl（DHCP 换网、重启网关后地址漂移自愈，G1） |

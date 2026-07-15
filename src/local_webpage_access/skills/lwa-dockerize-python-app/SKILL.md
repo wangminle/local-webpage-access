@@ -16,14 +16,16 @@
 
 ## 输出
 
-- 生成 `apps/<id>/current/Dockerfile`。
+- 生成 `apps/<id>/docker/Dockerfile`（由 `dockerfile_templates.generate_dockerfile` 渲染）。
+- 同步生成 `apps/<id>/.dockerignore`（排除 `node_modules` / `.git` / `__pycache__` / `.env` 等）。
 - 修改 `local-web.json` 的 `container` 字段（`image`、`internalPort`、`entry.start`）。
 
 ## 可修改文件
 
-- `apps/<id>/current/Dockerfile`。
+- `apps/<id>/docker/Dockerfile`。
+- `apps/<id>/.dockerignore`。
 - `apps/<id>/local-web.json`。
-- 必要时新增 `.dockerignore`。
+- 必要时手工微调上述生成文件（改模板可惠及全部 Python 实例）。
 
 ## 禁止事项
 
@@ -39,12 +41,14 @@
 2. 确定依赖安装方式：
    - `pyproject.toml` + `poetry.lock` → `poetry install --no-dev --no-root`
    - `pyproject.toml`（无 lock）→ `pip install .`
-   - `requirements.txt` → `pip install -r requirements.txt`
+   - `requirements.txt` → `pip install -r requirements.txt`（模板使用 BuildKit
+     `--mount=type=cache,target=/root/.cache/pip` 加速重复构建）
 3. 推断启动命令：
    - FastAPI：`uvicorn app:app --host 0.0.0.0 --port <internalPort>`
    - Flask：`gunicorn app:app -b 0.0.0.0:<internalPort>`（或 `flask run`）
    - Django：`gunicorn project.wsgi -b 0.0.0.0:<internalPort>`
-4. 生成多阶段或单阶段 Dockerfile（小型用单阶段 slim 即可）。
+4. 生成 Dockerfile：依赖层（含可选 Node 工具链）在完整 `COPY current/` **之前**，
+   避免源码改动打掉 pip/npm 缓存。
 5. 写回 `local-web.json`。
 
 ## 示例

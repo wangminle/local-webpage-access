@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500" role="img" aria-labelledby="title desc">
+  <title id="title">LWA 标志方案 B：网页网络</title>
+  <desc id="desc">具有轻微平行四边形透视的三层网页窗口位于同心嵌套的三层空心圆环底座之上，七条黄色射线延伸至圆环上的七个节点，代表网页服务被稳定部署并访问。</desc>
+  <rect x="40" y="40" width="420" height="420" rx="112" fill="#E8F8F4"/>
+  <g transform="skewY(-5) translate(0 22)">
+    <ellipse cx="250" cy="380" rx="150" ry="53" fill="none" stroke="#2496ED" stroke-width="11"/>
+  </g>
+  <g transform="skewY(-5) translate(0 22)">
+    <ellipse cx="250" cy="380" rx="126" ry="37" fill="none" stroke="#339933" stroke-width="11"/>
+  </g>
+  <g transform="skewY(-5) translate(0 22)">
+    <ellipse cx="250" cy="380" rx="102" ry="21" fill="none" stroke="#FFD43B" stroke-width="13"/>
+  </g>
+  <g transform="skewY(-5) translate(0 22)" fill="none" stroke="#FFD43B" stroke-width="6" stroke-linecap="round" stroke-dasharray="1 14" opacity="0.82">
+    <path d="M178 355L151 320"/>
+    <path d="M205 353L190 305"/>
+    <path d="M232 352L226 293"/>
+    <path d="M258 352L261 290"/>
+    <path d="M284 352L297 294"/>
+    <path d="M310 353L332 306"/>
+    <path d="M335 355L365 320"/>
+  </g>
+  <g transform="skewY(-5) translate(0 22)" fill="#FFD43B">
+    <circle cx="197.04" cy="379.69" r="4"/>
+    <circle cx="213.44" cy="380.00" r="4"/>
+    <circle cx="234.76" cy="379.20" r="4"/>
+    <circle cx="256.69" cy="379.04" r="4"/>
+    <circle cx="277.82" cy="379.59" r="4"/>
+    <circle cx="297.12" cy="380.50" r="4"/>
+    <circle cx="312.63" cy="381.10" r="4"/>
+  </g>
+  <g transform="skewY(-5) translate(-25 2)">
+    <rect x="132" y="103" width="220" height="185" rx="32" fill="#FFF7F3" stroke="#F05D5E" stroke-width="16"/>
+  </g>
+  <g transform="skewY(-5) translate(8 17)">
+    <rect x="132" y="103" width="220" height="185" rx="32" fill="#FFFCEF" stroke="#F5B942" stroke-width="16"/>
+  </g>
+  <g transform="skewY(-5) translate(41 36)">
+    <rect x="132" y="103" width="220" height="185" rx="32" fill="#FFFFFF" stroke="#3563E9" stroke-width="16"/>
+    <path d="M132 161H352" fill="none" stroke="#3563E9" stroke-width="16" stroke-linecap="round"/>
+    <circle cx="168" cy="134" r="9" fill="#13B8A6"/>
+    <circle cx="200" cy="134" r="9" fill="#91A8F5"/>
+    <circle cx="232" cy="134" r="9" fill="#CBD7FF"/>
+    <path d="M182 216C182 198 197 183 215 183H269C287 183 302 198 302 216V241C302 259 287 274 269 274H215C197 274 182 259 182 241V216Z" fill="#EAF0FF"/>
+    <path d="M225 215L212 229L225 243M258 215L271 229L258 243M251 210L239 248" fill="none" stroke="#3563E9" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

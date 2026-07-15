@@ -624,6 +624,7 @@
   var ROOT_TEMPLATE = [
     '<header class="topbar">',
     '  <div class="topbar-title">',
+    '    <img class="topbar-logo" src="/logo.svg" width="16" height="16" alt="" />',
     '    <h1>Local Webpage Access</h1>',
     '    <span class="version">{{ version }}</span>',
     "  </div>",

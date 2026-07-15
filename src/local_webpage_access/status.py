@@ -212,9 +212,14 @@ def sync_status(
             # 永远跳过 building 状态，实例卡死。先判断是否 stale，是则回写
             # failed 并清理孤儿 builds 行；未超时则保留 building（观测无法
             # 判定仍在进行的构建，交给构建流程自己收尾）。
+            # 须在 BUG-119 孤儿行清理之前执行，否则最新 running 行被先收尾后
+            # 本函数看不到 running，实例会继续卡在 building。
             if _recover_stale_building(registry, iid):
                 changed[iid] = Status.FAILED.value
+            _recover_orphan_running_builds(registry, iid)
             continue
+        # BUG-119：非 building 实例也要回收被后续成功记录遮蔽的超时 running 行。
+        _recover_orphan_running_builds(registry, iid)
         try:
             observed = observe_status(workspace, config, registry, iid)
         except Exception:  # noqa: BLE001 — 单实例观测失败不影响其它
@@ -222,6 +227,37 @@ def sync_status(
         if observed.value != before:
             changed[iid] = observed.value
     return changed
+
+
+def _recover_orphan_running_builds(registry: Registry, instance_id: str) -> list[int]:
+    """回收超时仍为 running 的构建行（BUG-119）。
+
+    与 BUG-048 不同：不要求实例仍处于 building，也不要求最新 builds 行
+    为 running——可清理被后续 success 遮蔽的历史孤儿行。不改实例 status。
+    """
+    recovered: list[int] = []
+    for build in registry.list_builds(instance_id, limit=200):
+        if build.get("status") != "running":
+            continue
+        started_at = build.get("started_at")
+        if not started_at or _age_seconds(started_at) <= _STALE_BUILDING_SECONDS:
+            continue
+        try:
+            registry.finish_build(
+                build["id"],
+                status="failed",
+                error_summary="孤儿 running 构建回收（被后续构建遮蔽或进程已结束）",
+            )
+            recovered.append(int(build["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+    if recovered:
+        log.warning(
+            "实例 %s 回收孤儿 running 构建：%s",
+            instance_id,
+            ",".join(str(i) for i in recovered),
+        )
+    return recovered
 
 
 def _recover_stale_building(registry: Registry, instance_id: str) -> bool:

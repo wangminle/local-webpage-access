@@ -9,7 +9,7 @@
 * :mod:`local_webpage_access.cli.system`      —— setup / doctor / update
 * :mod:`local_webpage_access.cli.alias`       —— ``lwa alias set/clear`` 子命令组
 * :mod:`local_webpage_access.cli.daemon`      —— ``lwa daemon on/off/status`` 子命令组
-* :mod:`local_webpage_access.cli.manager`     —— ``lwa manager on/off/status/start`` 子命令组
+* :mod:`local_webpage_access.cli.manager`     —— ``lwa manager on/off/status/start/logs`` 子命令组
 * :mod:`local_webpage_access.cli.gateway`     —— ``lwa gateway on/off/status`` 子命令组
 * :mod:`local_webpage_access.cli.access`      —— ``lwa access refresh/review`` 子命令组
 
@@ -44,7 +44,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.5.2-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.5.3-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())

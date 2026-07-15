@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500" role="img" aria-labelledby="title desc">
+  <title id="title">LWA 标志方案 A：稳定入口</title>
+  <desc id="desc">圆角网关窗口与向外延伸的访问路径，代表将本地网页稳定开放至局域网。</desc>
+  <rect x="40" y="40" width="420" height="420" rx="112" fill="#EAF0FF"/>
+  <rect x="128" y="118" width="244" height="264" rx="42" fill="#FFFFFF" stroke="#3563E9" stroke-width="16"/>
+  <path d="M128 194H372" fill="none" stroke="#3563E9" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="169" cy="156" r="10" fill="#13B8A6"/>
+  <circle cx="205" cy="156" r="10" fill="#91A8F5"/>
+  <circle cx="241" cy="156" r="10" fill="#CBD7FF"/>
+  <path d="M178 294H264C278 294 290 282 290 268V237" fill="none" stroke="#17223B" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M255 248L290 213L325 248" fill="none" stroke="#13B8A6" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M178 330H246" fill="none" stroke="#91A8F5" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="326" cy="294" r="27" fill="#13B8A6"/>
+  <path d="M314 294L323 303L340 284" fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

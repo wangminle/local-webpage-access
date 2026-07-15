@@ -41,6 +41,8 @@ _ADMIN_CONFIG_URL = f"{_ADMIN_BASE}/config/"
 _ADMIN_STOP_URL = f"{_ADMIN_BASE}/stop"
 _ADMIN_PROBE_TIMEOUT = 1.0
 _ADMIN_STARTUP_WAIT = 5.0
+# BUG-121：pytest 默认禁止触碰全局 admin :2019；Caddy 单测可设此环境变量放行。
+_ENV_ALLOW_CADDY_ADMIN = "LWA_ALLOW_CADDY_ADMIN"
 _CADDY_OP_TIMEOUT = 15
 _CADDY_START_TIMEOUT = 20
 # 仅保证 Caddy admin 在线的最小 bootstrap 配置（无任何站点；真实站点由 reload_all 注入）。
@@ -49,6 +51,19 @@ _CADDY_START_TIMEOUT = 20
 _MIN_CADDYFILE = (
     "# lwa bootstrap：仅保证 Caddy admin 在线，真实站点由 reload_all 注入\n"
 )
+
+
+def _refuse_caddy_admin_in_pytest(action: str) -> None:
+    """BUG-121：pytest 下默认拒绝真实 caddy reload/start，防止覆盖生产 :2019。"""
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if os.environ.get(_ENV_ALLOW_CADDY_ADMIN) == "1":
+        return
+    raise RuntimeError(
+        f"BUG-121: pytest 禁止对生产 Caddy admin :2019 执行 {action}；"
+        f"请使用 staticGateway=builtin，或设置 {_ENV_ALLOW_CADDY_ADMIN}=1"
+    )
+
 
 # builtin 模式回退用的 Caddy 配置模板（也用于 Caddy 模式渲染）
 # {rate_limit_block} 占位符由 _rate_limit_directive 填充（IMP-005）；
@@ -477,6 +492,7 @@ class StaticGateway:
 
     def _reload_once(self) -> tuple[bool, str]:
         """执行一次 ``caddy reload``，返回 (是否成功, stderr 文本)。"""
+        _refuse_caddy_admin_in_pytest("reload")
         cmd = [
             "caddy",
             "reload",
@@ -612,6 +628,7 @@ class StaticGateway:
 
         ``FileNotFoundError``（PATH 无 caddy）**立即失败**，不做 admin 兜底。
         """
+        _refuse_caddy_admin_in_pytest("start")
         main = self.main_config_path()
         if main.is_file() and main.read_text(encoding="utf-8").strip():
             config_path = main

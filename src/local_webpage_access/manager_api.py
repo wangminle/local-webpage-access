@@ -95,7 +95,22 @@ def ensure_token(workspace: Workspace) -> str:
                 return token
         except (OSError, ValueError):
             pass  # 损坏则重新生成
-    token = secrets.token_urlsafe(24)
+    return _write_token(workspace, secrets.token_urlsafe(24))
+
+
+def rotate_token(workspace: Workspace) -> str:
+    """轮换管理页 API token（BUG-118）。
+
+    覆盖写入新 token 并收紧权限；调用方需重启管理页使新 token 生效。
+    """
+    return _write_token(workspace, secrets.token_urlsafe(24))
+
+
+def _write_token(workspace: Workspace, token: str) -> str:
+    import json
+
+    path = token_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {"token": token, "createdAt": _now_iso()}, ensure_ascii=False, indent=2
@@ -948,7 +963,8 @@ def run_manager(
         assert_no_critical(
             validate_manager_binding(bind_host, has_token=bool(token), port=bind_port)
         )
-        log.info("管理页 token：%s", token)
+        # BUG-118：禁止把完整 token 写入可被他人读取的日志文件；CLI 仍会向终端打印。
+        log.info("管理页已就绪（API token 仅通过 CLI 输出，不写入日志）")
         app = create_app(workspace, config, reg, token=token)
         config_obj = uvicorn.Config(
             app,
@@ -968,6 +984,7 @@ __all__ = [
     "MANAGER_STATIC_DIR",
     "token_path",
     "ensure_token",
+    "rotate_token",
     "read_token",
     "create_app",
     "run_manager",

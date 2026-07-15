@@ -32,7 +32,7 @@ def setup_logging(
     """配置全局日志。
 
     多次调用默认幂等（除非 ``force=True``），避免重复添加 handler。
-    当提供 ``log_dir`` 时，会额外写入 ``<log_dir>/lwa.log``。
+    当提供 ``log_dir`` 时，会额外写入 ``<log_dir>/lwa.log``（权限 0600）。
     """
     global _CONFIGURED
 
@@ -58,14 +58,24 @@ def setup_logging(
 
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_dir / "lwa.log", encoding="utf-8")
+        log_path = log_dir / "lwa.log"
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
         file_handler.setLevel(level)
         root.addHandler(file_handler)
+        secure_chmod(log_path)
 
     root.propagate = False
     _CONFIGURED = True
     return root
+
+
+def secure_chmod(path: Path, mode: int = 0o600) -> None:
+    """收紧文件权限（BUG-118）；Windows 上 chmod 可能无效，忽略错误。"""
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -123,6 +133,7 @@ def utc_now() -> datetime:
 __all__ = [
     "setup_logging",
     "get_logger",
+    "secure_chmod",
     "instance_log_dir",
     "write_instance_log",
     "now_iso",

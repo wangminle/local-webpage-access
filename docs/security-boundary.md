@@ -79,6 +79,11 @@
 > 默认 `managerHost: 0.0.0.0`（局域网访问），因此**首次启动会自动生成 token**。
 > 若手动删除 token 文件又绑定到 LAN，启动会被拒绝，强制用户先解决鉴权。
 
+* token 文件：`run/manager-token.json`，权限 `0600`。
+* 应用日志（`logs/lwa.log`、`logs/manager.log`）同样收紧为 `0600`，且**不落盘完整 token**
+  （仅 CLI 终端打印）。查看管理页运行日志用 `lwa manager logs`。
+* 轮换：删除 `run/manager-token.json` 后 `lwa manager off && lwa manager on`（旧 token 立即失效）。
+
 ## 默认资源限制
 
 V1 生成的容器统一带资源限额（`local-web.yml` 的 `defaultResourceLimits`）：
@@ -109,4 +114,4 @@ defaultResourceLimits:
 * **不做多租户隔离**：所有实例共享同一 Docker daemon 与主机内核。
 * **不做网络隔离**：默认 bridge 网络，实例间可通信（V1 未启用自定义网络隔离）。
 * **不做镜像签名校验**：基线镜像来自 Docker Hub，未做签名验证。
-* **token 为静态随机串**：无过期、无轮换、无细粒度权限（V2 规划）。
+* **token 为静态随机串**：无过期、无细粒度权限（V2 规划）；可通过删除 token 文件并重启管理页轮换。

@@ -10,6 +10,7 @@
 ```bash
 lwa manager on          # 推荐：后台启动（默认流程）
 lwa manager status      # 查看是否在跑
+lwa manager logs        # 查看管理页运行时日志（logs/manager.log）
 lwa manager off         # 停止
 # 前台调试（Ctrl+C 退出）：
 # lwa manager start
@@ -17,15 +18,18 @@ lwa manager off         # 停止
 
 * 默认监听 `0.0.0.0:17800`（由 `local-web.yml` 的 `managerPort` / `managerHost` 控制）。
 * **本机访问免 token**：浏览器打开 http://127.0.0.1:17800/ 即可进入（IMP-003）。
-* 从局域网 IP 访问时仍须 token。token 写入工作区 `run/` 目录；`lwa manager on` /
-  `lwa manager start` 首次启动会生成并打印，例如：
+* 从局域网 IP 访问时仍须 token。token 写入工作区 `run/manager-token.json`（权限 `0600`）；
+  `lwa manager on` / `lwa manager start` 首次启动会生成并**仅在终端打印**（不会写入
+  `logs/lwa.log` / `logs/manager.log`），例如：
 
   ```
-  管理 token：ab12cd34-...
-  请访问 http://192.168.1.10:17800/ 并输入上述 token
+  token：ab12cd34-...
+  本机：http://127.0.0.1:17800/
+  局域网：http://192.168.1.10:17800/
   ```
 
-* 也可事后查阅 `run/` 下的 token 文件。
+* 也可事后查阅 `run/manager-token.json`。重置：删除该文件后重启管理页。
+* 页眉使用 `manager_static/logo.svg`；浏览器标签栏图标为 `favicon.png`。
 
 ## 鉴权
 

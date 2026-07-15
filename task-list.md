@@ -126,6 +126,12 @@
 | BUG-113 | 修复 | `lwa import --update --dry-run` 对 running 容器仍提示实际更新后将 restart，与现实现容器会 rebuild 的行为相反 | 2026-07-09 19:23 | 2026-07-09 19:31 | 已完成 | 审查未提交 diff 发现：`cli/importing.py` dry-run 分支固定输出 `实际更新后将 restart`，但 `UpdateResult.needs_rebuild` 已要求 docker-compose running 更新走 rebuild。 【完成 2026-07-09 19:31】dry-run 预填 needs_rebuild/needs_restart；CLI 按 runtime 输出 rebuild/restart；回归 test_update_dry_run_container_reports_needs_rebuild / test_cli_import_update_dry_run_says_rebuild_for_container。 |
 | BUG-114 | 修复 | Python+Node Dockerfile 新增官方 Node tarball 但硬编码 v22.19.0，和项目公开基线 Node 24 不一致 | 2026-07-09 19:23 | 2026-07-09 19:31 | 已完成 | README 与 OPS-001 约定生成容器基线为 `node:24-alpine` / Node 24.16；纯 Node 模板也用 `node:24-alpine`。 【完成 2026-07-09 19:31】抽出 `_NODE_DIST_VERSION=24.16.0` 与 `_NODE_IMAGE` major 对齐；test_dockerfile_python_with_node 断言 v24. 且拒 v22.19.0。 |
 | BUG-115 | 修复 | Pipfile-only 且命中 heavy DB 的项目会丢失 kind=python（_fill_language 未认 has_pipfile） | 2026-07-09 19:22 | 2026-07-09 19:31 | 已完成 | CHK-040 发现：detect() heavy-db 早返回调 _fill_language，但后者未把 has_pipfile 当 Python 信号，结果 pending=True,kind=None。已补 has_pipfile；回归 test_detect_pipfile_only_heavy_db_fills_python_kind。 |
+| BUG-116 | 修复 | 管理页运行时日志全部丢弃（可观测性缺口） | 2026-07-14 22:40 | 2026-07-14 23:04 | 已完成 | 已修：`_spawn_manager` 将 stdout/stderr 追加到 `logs/manager.log`；`run_service_main` 传 `log_dir=workspace.logs` 写 `lwa.log`；新增 `lwa manager logs`（工作区级，非实例 category）。验证：manager 重启后两日志均有内容。审查来源 CHK-043。 |
+| BUG-117 | 优化 | 生成的Dockerfile缓存分层不合理致首次构建12min | 2026-07-14 22:40 | 2026-07-14 23:04 | 已完成 | 已修：Python 模板将 Node 工具链+npm ci 移到完整 `COPY current/` 前；pip/uv 使用 BuildKit `--mount=type=cache`；`generate_dockerfile` 同步写 `apps/<id>/.dockerignore`。prd-workflow Dockerfile 已按新模板重生成。审查来源 CHK-043。 |
+| BUG-118 | 修复 | 管理页后台日志以明文记录 API token，且日志文件权限为 0644，扩大凭据泄露范围 | 2026-07-14 23:14 | 2026-07-14 23:58 | 已完成 | 已修：`run_manager` 不再写完整 token；`lwa.log`/`manager.log` 创建时 `chmod 0600`；新增 `rotate_token` 并已轮换 runtime token、清空泄露日志。验证：重启后日志无 token、权限 0600。 |
+| BUG-119 | 修复 | 旧的 running 构建记录在实例后续成功构建后仍永久残留，管理页构建历史状态失真 | 2026-07-14 23:14 | 2026-07-14 23:58 | 已完成 | 已修：`add_build` 启动时关闭同实例其它 running 行；`sync_status` 增加 `_recover_orphan_running_builds` 回收被遮蔽超时行。runtime builds#45 已标 failed。 |
+| BUG-120 | 修复 | 仓库跟踪 pytest 同步冲突残留文件，导致全量测试在收集阶段直接失败 | 2026-07-14 23:17 | 2026-07-14 23:58 | 已完成 | 已删除 `tests/test_manager_api.sync-conflict-*.py`；`conftest.pytest_ignore_collect` 忽略含 `sync-conflict` 的文件名。收集阶段恢复正常。 |
+| BUG-121 | 修复 | 全量测试会连接本机全局 Caddy admin 并覆盖真实运行配置，导致线上网关入口和静态站点中断 | 2026-07-14 23:19 | 2026-07-14 23:58 | 已完成 | 已修：测试默认 `staticGateway=builtin`（conftest/daemon/e2e/integration）；`_reload_once`/`caddy_start` 在 pytest 下默认拒绝触碰 :2019（`LWA_ALLOW_CADDY_ADMIN=1` 仅 Caddy 单测放行）。 |
 
 ## 调整事项
 
@@ -137,6 +143,28 @@
 | ADJ-004 | 调整 | 管理页时间字段显示为本地主机标准时间格式 | 2026-07-07 10:37 | 2026-07-07 10:37 | 已完成 | manager_static/app.js 新增 formatLocalDateTime，将 updatedAt/lastHealthCheckAt/构建 startedAt/事件 createdAt 从 ISO 字符串显示为 YYYY-MM-DD HH:mm:ss(UTC+8) 等格式；新增 tests/test_manager_static_app.py 覆盖 +08:00/+05:30/空值；pytest 全量通过，compileall 与 node --check 通过 |
 | ADJ-005 | 调整 | 清理 tests/test_manager_api.py 文件末尾多余空行，恢复 git diff --check 通过 | 2026-07-08 23:54 | 2026-07-09 00:19 | 已完成 | 去除 tests/test_manager_api.py 末尾多余空行，git diff --check 通过。 |
 | ADJ-006 | 调整 | task-list.md 统计摘要与实际记录数不一致 | 2026-07-09 14:19 | 2026-07-09 14:26 | 已完成 | 审查发现 summary 漂移（文件写总计 268/待处理 0，实际更高）。已用 `task_list_cli.py summary --file task-list.md --write` 按当前记录重算回写统计摘要。 |
+| ADJ-007 | 调整 | 新增三套本地网页部署基座 SVG Logo 备选方案 | 2026-07-10 11:25 | 2026-07-10 11:25 | 已完成 | 新增 design/logo/lwa-logo-a-stable-entry.svg、lwa-logo-b-web-network.svg、lwa-logo-c-deployment-container.svg；均为原生 SVG、500×500、含无障碍 title/desc；xmllint、PNG 渲染与缩放检查通过。 |
+| ADJ-008 | 调整 | 新增三套多配色 LWA 字母 SVG Logo 方案 | 2026-07-10 12:08 | 2026-07-10 12:08 | 已完成 | 新增 design/logo/lwa-lettermark-a-connected.svg（青绿连写）、lwa-lettermark-b-modular.svg（珊瑚橙模块化）、lwa-lettermark-c-negative.svg（深紫负形）；均为原生 SVG、500×500、无外部字体依赖；xmllint、PNG 渲染、64px 缩放检查通过。 |
+| ADJ-009 | 调整 | 重构网页网络 Logo 为悬浮网页与三节点虚线底座构图 | 2026-07-10 12:16 | 2026-07-10 12:16 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：左右节点下移至底部，与中点组成横向底座；节点间增加绿色圆点虚线；浏览器由 260×220 缩至 234×198 并上移约 10%，新增悬浮阴影线；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-010 | 调整 | 网页网络 Logo 增加斜向三层网页堆叠视角 | 2026-07-10 12:31 | 2026-07-10 12:31 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：蓝色网页转为斜向前景卡片，后方叠加黄色与红色网页边框并向右下露出；保留三节点虚线底座与悬浮阴影；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-011 | 调整 | 修正网页网络 Logo 三层透视的前后遮挡方向 | 2026-07-10 12:33 | 2026-07-10 12:33 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：黄色、红色后层由右下错位改为左上错位，边框仅在蓝色前景网页的上方与左上露出，右下由蓝色网页完全遮挡；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-012 | 调整 | 取消网页网络 Logo 卡片倾斜并保留左上层叠关系 | 2026-07-10 12:45 | 2026-07-10 12:45 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：移除三张网页的旋转变换，改为正向平行堆叠；红、黄后层继续从蓝色前景的左上露出，蓝色覆盖右下；同步上移悬浮阴影；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-013 | 调整 | 增强网页网络 Logo 的平行四边形透视与部署语义 | 2026-07-10 12:49 | 2026-07-10 12:49 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：三层网页采用右上略抬的轻微 skewY 透视；红、黄后层增大左上错位距离；悬浮横线改为椭圆投影；中心十字改为代码符号加绿色状态勾；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-014 | 调整 | 优化网页网络 Logo 的三层间距、居中与中心符号 | 2026-07-10 14:06 | 2026-07-10 14:06 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：移除绿色状态勾；三层卡片整体向右校正到画布视觉中点；相邻页面横向错位由约21px增至33px以扩大层间留白；保留轻透视与节点底座；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-015 | 调整 | 重构网页网络 Logo 底部为同透视面的三枚椭圆承托环 | 2026-07-10 14:20 | 2026-07-10 14:20 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：移除底部三圆节点和虚线，改为与网页相同 skewY 透视的三枚青绿色椭圆承托环；内环改浅绿、去除深色中心点并整体上移，形成稳定承托感；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-016 | 调整 | 将网页网络 Logo 椭圆承托环改为品字形圆点虚线连接 | 2026-07-10 14:24 | 2026-07-10 14:24 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：三枚椭圆承托环由横向排列调整为上二下一级品字形；新增同透视平面内的圆点虚线三角连接；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-017 | 调整 | 翻转网页网络 Logo 品字底座并移除网页阴影 | 2026-07-10 14:28 | 2026-07-10 14:28 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：椭圆底座改为上单下双，顶部椭圆居于画布水平中心轴；删除三层网页下方的独立椭圆阴影；保留圆点虚线三角连接与统一透视；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-018 | 调整 | 扩大网页网络 Logo 椭圆底座间距并调整上下关系 | 2026-07-10 14:33 | 2026-07-10 14:33 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：三枚椭圆承托环的三角中心距扩大约10%，整体上移约10px；红黄蓝三层网页各下移10px（画布高度2%）；同步更新圆点虚线三角；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-019 | 调整 | 选定并恢复网页网络 Logo 横向三椭圆稳定底座 | 2026-07-10 15:03 | 2026-07-10 15:03 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：按用户选定截图左侧方案，将品字形底座恢复为横向三枚椭圆承托环，圆点虚线随透视调整为视觉水平连接；保留三层网页透视、配色与代码符号；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-020 | 调整 | 将网页网络 Logo 三椭圆底座替换为空心圆环底座 | 2026-07-10 16:35 | 2026-07-10 16:35 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：移除横向三枚椭圆承托环及圆点虚线，改为与三层网页共用轻微透视的单一青绿色空心圆环；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-021 | 调整 | 将网页网络 Logo 空心圆环底座改为三层叠环 | 2026-07-10 16:58 | 2026-07-10 16:58 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：单一青绿色空心圆环替换为红、黄、青绿三层透视叠环，后两层从左上露出并与三层网页的配色和方向对应；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-022 | 调整 | 将网页网络 Logo 三层叠环改为同心嵌套圆环 | 2026-07-10 17:57 | 2026-07-10 17:57 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：保持青绿色内环112×29不变；黄色中环调整为130×41，红色外环调整为150×53，三环同心且同透视；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-023 | 调整 | 用 Python、Node、Docker 基础色替换 Logo 同心圆环配色 | 2026-07-10 18:33 | 2026-07-10 18:33 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：外环替换为 Python 黄#FFD43B，中环替换为 Node 绿#339933，内环替换为 Docker 蓝#2496ED；尺寸、同心关系和透视不变；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-024 | 调整 | 调整网页网络 Logo 同心三环颜色顺序与环间距 | 2026-07-10 18:36 | 2026-07-10 18:36 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：外环改 Docker 蓝#2496ED，中环保持 Node 绿#339933，内环改 Python 黄#FFD43B；中环缩至126×37、内环缩至102×21，使相邻环净间距各增加约4px；xmllint、PNG 500×500 渲染与 git diff --check 通过。 |
+| ADJ-025 | 调整 | 为网页网络 Logo 黄色内环增加上喷圆点光束 | 2026-07-10 19:09 | 2026-07-10 19:09 | 已完成 | design/logo/lwa-logo-b-web-network.svg 在圆环与网页间增加7条黄色#FFD43B细圆点光束，沿既有skewY透视从内环向网页底部发散；既有网页、三环与配色未改。xmllint、光束源代码定位和 git diff --check 通过；系统PNG渲染器当前返回未知错误。 |
+| ADJ-026 | 调整 | 将黄色内环光束扩展为整圈白色上喷圆点光线 | 2026-07-10 19:12 | 2026-07-10 19:12 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：删除局部7条黄色光束，改为10条白色#FFFFFF细圆点光束，覆盖黄色内环的侧边、下半与上半多点并统一向上延伸；光束置于圆环之后，不改既有网页和圆环；xmllint、源代码定位与 git diff --check 通过；本机PNG渲染器仍不可用。 |
+| ADJ-027 | 调整 | 回退网页网络 Logo 整圈白色光束至黄色局部托举光束 | 2026-07-10 19:15 | 2026-07-10 19:15 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：移除10条白色整圈光束，恢复黄色内环上方7条细圆点发散光束；三层网页、同心三环及基础设施配色不变；xmllint、源代码定位与 git diff --check 通过；本机PNG渲染器仍不可用。 |
+| ADJ-028 | 调整 | 在网页网络 Logo 黄色椭圆内沿七条射线补充七个节点 | 2026-07-15 12:05 | 2026-07-15 12:05 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：沿7条黄色射线的延长方向，在黄色内环内部加入7个#FFD43B实心圆点；同步更新无障碍描述。xmllint、射线/节点数量与椭圆内间隙几何校验、Quick Look 1000px PNG渲染、diff-check均通过。 |
 
 ## 检查事项
 
@@ -183,6 +211,8 @@
 | CHK-040 | 检查 | 全量复审当前 `docs/` 与 `src/`，排查剩余代码与文档问题 | 2026-07-09 19:22 | 2026-07-09 19:22 | 已完成 | 复审 `docs/*.md` 与 `src/local_webpage_access/**`；`python3 -m compileall src` 通过。全量 `pytest -q` 当前 1 失败：`tests/test_hosting.py::test_host_static_with_alias_port_and_path_coexist`（builtin 静态启用后健康检查偶发失败，单测单独重跑可过，疑似稳定性/竞态风险）；另确认 3 个确定问题：`scanner._fill_language()` 未把 `has_pipfile` 视为 Python 信号，致 Pipfile-only + heavy DB 项目 `kind=None`；`docs/autostart.md` Linux systemd 示例误写为 `python -m local_webpage_access.daemon/manager on`，与真实入口不符；`docs/manager-page.md` 与管理页 token 文案仍以 `lwa manager start` 为主，与当前默认 `lwa manager on` / 本机免 token 体验不一致。 |
 | CHK-041 | 检查 | 审查所有未提交的代码和文档是否还有 bug | 2026-07-09 19:23 | 2026-07-09 19:23 | 已完成 | 审查当前 working tree 11 个改动文件（importer/CLI/API/compose/Dockerfile/skill/tests/task-list），运行目标测试切片、全量 pytest、compileall、git diff --check；全量 pytest 第二轮通过（4 skipped，真实 Docker 集成按环境变量跳过）。新增发现 BUG-113、BUG-114；另首次全量测试出现 1 次 builtin 健康检查偶发失败，单测复跑与第二轮全量均通过，按环境/时序抖动记录在审查结论中。 |
 | CHK-042 | 检查 | 修复 BUG-113/114/115 与 DOC-028/029 并全量回归 | 2026-07-09 19:26 | 2026-07-09 19:31 | 已完成 | dry-run 按 runtime 预告 rebuild/restart；Python+Node 统一 Node 24.16.0；Pipfile+heavy-db 填 kind；autostart/manager 文档与前端文案同步。目标切片+全量 pytest 通过（4 skipped）。 |
+| CHK-043 | 检查 | 本次运行审查：拉起全栈并做代码审查 | 2026-07-14 22:40 | 2026-07-14 22:40 | 已完成 | lwa doctor 全绿（0失败0警告），4实例（demo-static/voiceprint-v3-demo/prd-workflow/3d-demo-family-wakeup）+管理页:17800+Caddy网关:8080均running/HTTP200；本次导入并启动3d-demo-family-wakeup（static，端口18003，别名/3d-demo-family-wakeup/）。代码审查发现：P1管理页运行时日志全部丢失（详见BUG-116）、P1生成的Dockerfile缓存分层不合理致重建慢（详见BUG-117）、P2 lwa --version无效（仅version子命令）、P3 build-*.log堆积无滚动清理。 |
+| CHK-044 | 检查 | 检查本次运行日志并分析是否仍存在 bug | 2026-07-14 23:14 | 2026-07-14 23:33 | 已完成 | 核对 manager/lwa/build/run/static-access 日志、Docker 状态、registry、doctor、HTTP 直连与网关；确认 BUG-118、BUG-119、BUG-120、BUG-121。另发现 prd-workflow 使用默认管理员口令、npm audit 报 4 个高危依赖漏洞，属于被部署应用的安全风险；历史 502、npm ci 回退和 apt 警告均非当前故障。排除 BUG-120 冲突残留文件后，全量测试 100% 通过、4 项按配置跳过；全量测试触发 BUG-121 覆盖真实 Caddy 配置后已按 OPS-040 恢复，最终 4 实例、管理页和网关均 HTTP 200，doctor 全绿。 |
 
 ## 测试数据
 
@@ -223,6 +253,7 @@
 | DOC-028 | 文档 | 修正 docs/autostart.md Linux systemd 示例：daemon/manager 入口误写为独立模块 | 2026-07-09 19:22 | 2026-07-09 19:31 | 已完成 | CHK-040：原 ExecStart 写 python -m local_webpage_access.daemon/manager on，实际应为 python -m local_webpage_access daemon\|manager on；并注明直调子进程入口须传 --workspace。 |
 | DOC-029 | 文档 | 同步管理页文档与登录弹窗：默认流程改为 lwa manager on，本机免 token | 2026-07-09 19:22 | 2026-07-09 19:31 | 已完成 | CHK-040：manager-page.md/app.js/faq/manager_api 占位页仍偏 manager start。已改为 on 为主、start 为前台调试；token 文案同步。 |
 | DOC-030 | 文档 | 同步 V0.5.2 文档：容器 --update→rebuild、manager on 口径、autostart systemd 入口 | 2026-07-10 09:59 | 2026-07-10 09:59 | 已完成 | README/faq/operations-playbook/manager-page 补 DEV-067 容器 update 走 rebuild；security-boundary/release-checklist 对齐 manager on；autostart/faq/manager-page/import-zip skill 既有未提交修正一并纳入。design 历史快照不动。 |
+| DOC-031 | 文档 | 同步 V0.5.3：README/manager-page/faq/security-boundary 补 manager logs、token 不落盘与日志 0600、logo/favicon；dockerize skills 修正 Dockerfile 路径与缓存分层 | 2026-07-15 12:17 | 2026-07-15 12:17 | 已完成 | 历史「V0.5.2 起」与 design 快照不动；operations-playbook/known-limitations/testing 等无强制变更。 |
 
 ## 功能开发
 
@@ -338,6 +369,9 @@
 | OPS-036 | 运维 | runtime 工作区 lwa update 升级至 V0.5.1：pip install -e . 装 local-webpage-access-0.5.1；syncSkills 更新 1；manager 重启(pid 4439→48761)、daemon 重启(pid 4531→48844)；gateway caddy 93524 与 3 实例未受扰动；doctor 总体 OK；/api/health=V0.5.1 | 2026-07-09 16:21 | 2026-07-09 16:21 | 已完成 | V0.5.1 已由用户提交(932e111 Build0867)，故 lwa version 与 /api/health 均显示 V0.5.1。lwa access review 验证新代码上线：voiceprint-v3-demo OK(相对 base)；prd-workflow 检出真实 IMP-023(6 个绝对路径资源)，但其为容器应用、HTML 源码绝对路径，rebuild 无法修复(印证 still_imp023 复检缺口) |
 | OPS-037 | 运维 | prd-workflow 原地更新至 v0.3.4（zip build202607091718），重建镜像并验证别名 /prd-workflow/ | 2026-07-09 18:20 | 2026-07-09 18:20 | 已完成 | 源码已由前次 --update 落盘但镜像未替换（卡 building/孤儿 builds）。清理 builds 43/44 后重建：镜像含相对路径资源 + package.json 0.3.4；compose 注入 PYTHONPATH=src；直连 :18002 与 http://127.0.0.1:8080/prd-workflow/（HTML/CSS/JS）均 200；/api/health 返回 version 0.3.4。别名片段已存在未改。 |
 | OPS-038 | 运维 | 应用版本号提升至 V0.5.2：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步为 0.5.2 | 2026-07-10 09:59 | 2026-07-10 09:59 | 已完成 | 历史快照与「V0.4.x/V0.5.0 起」功能引入标记保留；design 文档不动。lwa version 仍取 git HEAD 主题（当前 V0.5.1），提交 V0.5.2-BuildXXXX 后即显示 V0.5.2。test_version_info 5 项通过。 |
+| OPS-039 | 运维 | runtime 工作区 lwa update 升级至 V0.5.2 | 2026-07-10 10:36 | 2026-07-10 10:36 | 已完成 | lwa update -w runtime：pip install -e . 装 local-webpage-access-0.5.2；syncSkills 更新 1；manager 重启(pid 48761→51771)；daemon 原本未运行跳过；gateway caddy 93524 与 3 实例未受扰动；doctor 总体 OK；lwa version 与 /api/health 均为 V0.5.2。 |
+| OPS-040 | 运维 | 恢复被全量测试覆盖的 runtime Caddy 网关配置 | 2026-07-14 23:18 | 2026-07-14 23:33 | 已完成 | 先执行 lwa gateway off/on 重建当前工作区主配置；因 caddy start 的 pingback 兜底进程随后退出，改用 caddy run 持续运行并同步 gateway.json，最终 pid=96325。访问复核 4 个实例全部 OK，直连端口与 3 个路径别名均 HTTP 200，doctor 0 失败 0 警告。 |
+| OPS-041 | 运维 | 应用版本号提升至 V0.5.3：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步为 0.5.3；并更新 README/manager-page/faq/security-boundary 与 dockerize skills | 2026-07-15 12:17 | 2026-07-15 12:17 | 已完成 | 历史「V0.5.2 起」功能引入标记与 design 快照保留。补 `lwa manager logs`、token 不落盘/日志 0600、logo/favicon、Dockerfile 路径与 cache/.dockerignore。lwa version 仍取 git HEAD 主题，提交 V0.5.3-BuildXXXX 后即显示 V0.5.3。 |
 
 ## 规划事项
 
@@ -364,6 +398,6 @@
 | 测试数据 | 0 | 0 | 0 | 0% |
 | 文档维护 | 30 | 30 | 0 | 100% |
 | 功能开发 | 67 | 67 | 0 | 100% |
-| 配置运维 | 38 | 38 | 0 | 100% |
+| 配置运维 | 39 | 39 | 0 | 100% |
 | 规划事项 | 10 | 10 | 0 | 100% |
-| **总计** | 307 | 307 | 0 | 100% |
+| **总计** | 308 | 308 | 0 | 100% |

@@ -71,8 +71,39 @@ def generate_dockerfile(manifest: InstanceManifest, workspace: Workspace) -> Pat
         content = _render_generic(manifest, internal_port)
 
     out_path.write_text(content, encoding="utf-8")
+    # BUG-117：构建上下文是 apps/<id>/，.dockerignore 与 Dockerfile 一并生成。
+    generate_dockerignore(workspace, manifest.id)
     log.info("已生成 Dockerfile：%s", out_path)
     return out_path
+
+
+_DOCKERIGNORE = """\
+# 由 lwa 自动生成，请勿手动编辑。
+# 构建上下文为 apps/<id>/（compose context: ..）。
+**/node_modules
+**/.git
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/venv
+**/.env
+**/.env.*
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/dist
+**/build
+**/.DS_Store
+source/
+"""
+
+
+def generate_dockerignore(workspace: Workspace, instance_id: str) -> Path:
+    """写入 ``apps/<id>/.dockerignore``（BUG-117）。"""
+    path = workspace.app_dir(instance_id) / ".dockerignore"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_DOCKERIGNORE, encoding="utf-8")
+    return path
 
 
 # ---- Node -------------------------------------------------------------------
@@ -113,6 +144,19 @@ def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
 # ---- Python -----------------------------------------------------------------
 
 
+def _pip_run(shell_cmd: str) -> str:
+    """把 pip/uv 安装命令包成带 BuildKit cache mount 的 RUN（BUG-117）。
+
+    有 cache mount 时去掉 ``--no-cache-dir``，让下载留在挂载缓存里跨构建复用。
+    """
+    cmd = shell_cmd.replace("pip install --no-cache-dir", "pip install").strip()
+    mounts = ["--mount=type=cache,target=/root/.cache/pip"]
+    if "uv sync" in cmd or cmd.startswith("uv "):
+        mounts.append("--mount=type=cache,target=/root/.cache/uv")
+    mount_prefix = " ".join(mounts)
+    return f"RUN {mount_prefix} \\\n  {cmd}"
+
+
 def _render_python(
     manifest: InstanceManifest, internal_port: int, source_dir: Path | None = None
 ) -> str:
@@ -127,30 +171,34 @@ def _render_python(
     )
 
     uses_uv = install.startswith("uv sync") or "uv sync" in install
+    # ``pip install .`` 需要完整源码，无法把依赖层与源码层完全拆开。
+    needs_early_full_copy = False
+
     if uses_uv:
-        # uv 需要先安装到镜像，再用 uv sync 装依赖；启动用 uv run 进入虚拟环境
-        install_block = (
+        deps_block = (
             "COPY current/uv.lock current/pyproject.toml ./\n"
-            "RUN pip install --no-cache-dir uv && uv sync --frozen --no-dev\n"
-            "COPY current/ ./"
+            + _pip_run("pip install uv && uv sync --frozen --no-dev")
+            + "\n"
         )
         run_prefix = "uv run "
         if not start.startswith("uv run"):
             start = run_prefix + start
     elif install.startswith("pip install ."):
-        # pyproject 项目：先拷贝整个项目再装
-        install_block = (
+        needs_early_full_copy = True
+        deps_block = (
             "COPY current/ ./\n"
-            f"RUN {install.replace('pip install', 'pip install --no-cache-dir', 1)}"
+            + _pip_run(install)
+            + "\n"
         )
     elif "pipenv" in install:
         install_cmd = install
         if install_cmd.startswith("pipenv "):
             install_cmd = f"pip install pipenv && {install_cmd}"
-        install_block = (
+        install_cmd = install_cmd.replace("pip install --no-cache-dir", "pip install")
+        deps_block = (
             "COPY current/Pipfile* ./\n"
-            f"RUN {install_cmd.replace('pip install', 'pip install --no-cache-dir', 1)}\n"
-            "COPY current/ ./"
+            + _pip_run(install_cmd)
+            + "\n"
         )
     elif install.startswith("pip install -r"):
         # requirements 路径（默认 / requirements-prod.txt，IMP-017）。
@@ -171,18 +219,19 @@ def _render_python(
             strip_step = (
                 f"RUN sed -i -E '/^pytest([-_]|[<>=!~]|$)/d' {req_file}\n"
             )
-            install_run = f"RUN pip install --no-cache-dir -r {req_file}"
         else:
             # requirements-prod.txt 已是生产子集，无需剥离。
             strip_step = ""
-            install_run = f"RUN pip install --no-cache-dir -r {req_file}"
-        install_block = f"{req_copy}\n{strip_step}{install_run}\nCOPY current/ ./"
+        deps_block = f"{req_copy}\n{strip_step}{_pip_run(f'pip install -r {req_file}')}\n"
     else:
         # 兜底（无法解析的 install）：按 requirements.txt 处理
-        install_block = (
+        fallback = install.replace("pip install --no-cache-dir", "pip install")
+        if "pip install" in fallback and "--no-cache-dir" not in fallback:
+            pass
+        deps_block = (
             "COPY current/requirements.txt ./\n"
-            f"RUN {install.replace('pip install', 'pip install --no-cache-dir', 1)}"
-            + "\nCOPY current/ ./"
+            + _pip_run(fallback)
+            + "\n"
         )
 
     # IMP-016（WBS-20260708 阶段2.5）：Python 全栈镜像含 Node 运行时。
@@ -192,9 +241,13 @@ def _render_python(
     # 注意：不要用 Debian 的 ``apt install nodejs npm``——``npm`` 元包会拉入
     # webpack/terser 等约 300+ 依赖，在 Docker Desktop 默认内存下易 OOM
     #（cannot allocate memory）。改用官方 Node 二进制 tarball（含 npm）。
-    node_block = ""
+    #
+    # BUG-117：Node 工具链与 npm ci 必须在完整 ``COPY current/`` 之前，
+    # 否则任意源码改动都会打掉 Node 下载层（约 30MB）与 npm 依赖层。
+    node_toolchain = ""
+    npm_block = ""
     if source_dir is not None and (source_dir / "package.json").is_file():
-        node_block = (
+        node_toolchain = (
             "RUN set -eux; \\\n"
             "  apt-get update; \\\n"
             "  apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \\\n"
@@ -207,9 +260,15 @@ def _render_python(
             " | tar -xJ -C /usr/local --strip-components=1; \\\n"
             "  rm -rf /var/lib/apt/lists/*; \\\n"
             "  node -v && npm -v\n"
-            "COPY current/package*.json ./\n"
-            "RUN npm ci --omit=dev || npm install --omit=dev\n"
         )
+        if needs_early_full_copy:
+            # 源码已整包拷入，只需 npm 安装。
+            npm_block = "RUN npm ci --omit=dev || npm install --omit=dev\n"
+        else:
+            npm_block = (
+                "COPY current/package*.json ./\n"
+                "RUN npm ci --omit=dev || npm install --omit=dev\n"
+            )
 
     sqlite_mkdir = ""
     if _is_sqlite(manifest):
@@ -221,12 +280,17 @@ def _render_python(
     if source_dir is not None and (source_dir / "src" / "main.py").is_file():
         pythonpath_env = "ENV PYTHONPATH=src\n"
 
+    # 分层顺序：Node 工具链（最稳）→ Python 依赖 → npm 依赖 → 完整源码。
+    final_copy = "" if needs_early_full_copy else "COPY current/ ./\n"
+
     lines = [
         header,
         f"FROM {_PYTHON_IMAGE}",
         "WORKDIR /app",
-        install_block,
-        node_block,
+        node_toolchain,
+        deps_block,
+        npm_block,
+        final_copy,
         sqlite_mkdir,
         pythonpath_env,
         "ENV HOST=0.0.0.0",
@@ -321,4 +385,4 @@ def _node_dependency_copy_block(install: str) -> str:
     return "COPY current/package*.json ./"
 
 
-__all__ = ["generate_dockerfile"]
+__all__ = ["generate_dockerfile", "generate_dockerignore"]

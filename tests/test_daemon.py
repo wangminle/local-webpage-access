@@ -27,7 +27,11 @@ def workspace(workspace_root: Path) -> Workspace:
     from local_webpage_access.config import example_config_text
 
     if not ws.config_path.is_file():
-        ws.config_path.write_text(example_config_text(), encoding="utf-8")
+        # BUG-121：示例配置默认 caddy；测试工作区改为 builtin
+        text = example_config_text().replace(
+            "staticGateway: caddy", "staticGateway: builtin"
+        )
+        ws.config_path.write_text(text, encoding="utf-8")
     return ws
 
 
@@ -42,7 +46,8 @@ def registry(workspace_root: Path) -> Registry:
 
 @pytest.fixture()
 def config(workspace_root: Path) -> Config:
-    return Config(portPool=PortPool(start=21000, end=21050))
+    # BUG-121：强制 builtin，避免 process_zip/start 打到本机 :2019
+    return Config(staticGateway="builtin", portPool=PortPool(start=21000, end=21050))
 
 
 # ---- 状态持久化（WBS-21.04）------------------------------------------------

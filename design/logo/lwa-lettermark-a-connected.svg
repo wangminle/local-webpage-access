@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500" role="img" aria-labelledby="title desc">
+  <title id="title">LWA 字标方案 A：连写</title>
+  <desc id="desc">青绿色的 LWA 连写字母，用连续线条表现局域网网页访问的顺畅连通。</desc>
+  <rect x="40" y="40" width="420" height="420" rx="112" fill="#E7F8F2"/>
+  <path d="M112 153V329H198L229 204L260 329L291 239L322 329L353 204L391 329L429 204" fill="none" stroke="#128A70" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M198 329L229 204L260 329L291 239L322 329L353 204" fill="none" stroke="#16B394" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M353 329L391 204L429 329M369 277H412" fill="none" stroke="#0B6654" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="112" cy="153" r="18" fill="#FFD166"/>
+  <circle cx="429" cy="329" r="14" fill="#16B394"/>
+</svg>

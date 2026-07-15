@@ -136,7 +136,8 @@ def test_python_fastapi_dockerfile(workspace: Workspace) -> None:
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "FROM python:3.13-slim" in content
     assert "COPY current/requirements.txt requirements.txt" in content
-    assert "RUN pip install --no-cache-dir -r requirements.txt" in content
+    assert "--mount=type=cache,target=/root/.cache/pip" in content
+    assert "pip install -r requirements.txt" in content
     assert "ENV PORT=8000" in content
     assert '["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]' in content
 
@@ -189,7 +190,8 @@ def test_python_pyproject_install_path(workspace: Workspace) -> None:
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     # pyproject 路径：先拷整个项目再装
     assert "COPY current/ ./" in content
-    assert "RUN pip install --no-cache-dir ." in content
+    assert "pip install ." in content
+    assert "--mount=type=cache,target=/root/.cache/pip" in content
 
 
 def test_python_uv_sync_path(workspace: Workspace) -> None:
@@ -200,7 +202,9 @@ def test_python_uv_sync_path(workspace: Workspace) -> None:
         start="uvicorn main:app --host 0.0.0.0 --port 8000",
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
-    assert "pip install --no-cache-dir uv && uv sync --frozen --no-dev" in content
+    assert "pip install uv && uv sync --frozen --no-dev" in content
+    assert "--mount=type=cache,target=/root/.cache/pip" in content
+    assert "--mount=type=cache,target=/root/.cache/uv" in content
     # 启动命令自动包 uv run
     assert '"uv", "run", "uvicorn"' in content
 
@@ -215,7 +219,7 @@ def test_python_pipfile_install_path(workspace: Workspace) -> None:
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "COPY current/Pipfile* ./" in content
-    assert "pip install --no-cache-dir pipenv" in content
+    assert "pip install pipenv" in content
     assert "pipenv install --system --skip-lock" in content
     assert "COPY current/requirements.txt ./" not in content
 
@@ -325,7 +329,8 @@ def test_dockerfile_strips_pytest(workspace: Workspace) -> None:
     assert "sed -i -E" in content
     assert "pytest" in content
     # 仍从 requirements.txt 安装（剥离后）
-    assert "pip install --no-cache-dir -r requirements.txt" in content
+    assert "pip install -r requirements.txt" in content
+    assert "--mount=type=cache,target=/root/.cache/pip" in content
 
 
 def test_dockerfile_prefers_requirements_prod(workspace: Workspace) -> None:
@@ -337,7 +342,8 @@ def test_dockerfile_prefers_requirements_prod(workspace: Workspace) -> None:
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "COPY current/requirements-prod.txt requirements-prod.txt" in content
-    assert "pip install --no-cache-dir -r requirements-prod.txt" in content
+    assert "pip install -r requirements-prod.txt" in content
+    assert "--mount=type=cache,target=/root/.cache/pip" in content
     # prod 清单无需剥离
     assert "sed -i" not in content
 
@@ -356,7 +362,8 @@ def test_dockerfile_nested_requirements_path_consistent(workspace: Workspace) ->
     assert "RUN mkdir -p requirements" in content
     assert "COPY current/requirements/prod.txt requirements/prod.txt" in content
     # RUN 安装路径与 COPY 落点一致
-    assert "pip install --no-cache-dir -r requirements/prod.txt" in content
+    assert "pip install -r requirements/prod.txt" in content
+    assert "--mount=type=cache,target=/root/.cache/pip" in content
     # 不应出现平铺到根的旧写法（BUG-083 根因）
     assert "COPY current/requirements/prod.txt ./" not in content
 
@@ -371,3 +378,46 @@ def test_dockerfile_flat_requirements_no_mkdir(workspace: Workspace) -> None:
     assert "COPY current/requirements.txt requirements.txt" in content
     # 扁平路径无父目录，不应插入 mkdir
     assert "mkdir -p requirements\n" not in content
+
+
+# ---- BUG-117：Python 缓存分层 / pip cache mount / .dockerignore --------------
+
+
+def test_python_node_toolchain_before_full_source_copy(workspace: Workspace) -> None:
+    """BUG-117：Node 安装与 npm ci 必须在 COPY current/ ./ 之前，避免源码改动打掉缓存。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "package.json").write_text(
+        '{"name":"app","dependencies":{}}'
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    idx_node = content.find("nodejs.org/dist")
+    idx_npm = content.find("npm ci --omit=dev")
+    # 取「完整源码拷贝」层：排除 package*.json / requirements 的局部 COPY
+    idx_full = content.find("COPY current/ ./")
+    assert idx_node >= 0
+    assert idx_npm >= 0
+    assert idx_full >= 0
+    assert idx_node < idx_full
+    assert idx_npm < idx_full
+
+
+def test_python_pip_uses_buildkit_cache_mount(workspace: Workspace) -> None:
+    """BUG-117：pip install 使用 BuildKit cache mount，避免每次全量重下。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "--mount=type=cache,target=/root/.cache/pip" in content
+    assert "pip install -r requirements.txt" in content
+    # 有 cache mount 时不再使用 --no-cache-dir（否则挂载缓存无效）
+    assert "pip install --no-cache-dir" not in content
+
+
+def test_generate_dockerfile_writes_dockerignore(workspace: Workspace) -> None:
+    """BUG-117：构建上下文 apps/<id>/ 写入 .dockerignore，排除噪声目录。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    generate_dockerfile(m, workspace)
+    ignore = (workspace.app_dir("api") / ".dockerignore").read_text(encoding="utf-8")
+    for pattern in ("**/node_modules", "**/.git", "**/__pycache__", "**/.env", "source/"):
+        assert pattern in ignore

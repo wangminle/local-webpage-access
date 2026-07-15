@@ -403,7 +403,22 @@ class Registry:
                 "VALUES (?, ?, ?, ?)",
                 (instance_id, status, started_at or now_iso(), log_path),
             )
-            return int(cur.lastrowid)
+            new_id = int(cur.lastrowid)
+            # BUG-119：新构建启动时立刻关闭同实例其它 running 行，避免被后续
+            # 成功记录遮蔽后永久残留。
+            if status == "running":
+                tx.execute(
+                    "UPDATE builds SET status = ?, finished_at = ?, error_summary = ? "
+                    "WHERE instance_id = ? AND status = 'running' AND id != ?",
+                    (
+                        "failed",
+                        now_iso(),
+                        "被后续构建取代",
+                        instance_id,
+                        new_id,
+                    ),
+                )
+            return new_id
 
     def finish_build(
         self,

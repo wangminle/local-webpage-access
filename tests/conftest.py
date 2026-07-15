@@ -39,6 +39,12 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:  # noqa: ARG001
+    """BUG-120：忽略同步冲突残留文件，避免收集阶段 ModuleNotFoundError。"""
+    name = collection_path.name
+    return "sync-conflict" in name
+
+
 # ---- 通用夹具 --------------------------------------------------------------
 
 
@@ -72,7 +78,12 @@ def registry(workspace_root: Path):
 def config(workspace_root: Path):
     from local_webpage_access.config import Config, PortPool
 
-    return Config(portPool=PortPool(start=21000, end=21050))
+    # BUG-121：测试默认强制 builtin，避免本机有 caddy 时把临时 Caddyfile
+    # 通过全局 admin :2019 reload 进生产 master。
+    return Config(
+        staticGateway="builtin",
+        portPool=PortPool(start=21000, end=21050),
+    )
 
 
 # ---- 测试套件进程泄漏兜底网（BUG：测试不幂等）------------------------------

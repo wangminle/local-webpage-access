@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500" role="img" aria-labelledby="title desc">
+  <title id="title">LWA 字标方案 B：模块化</title>
+  <desc id="desc">由三个圆角模块承载的珊瑚橙 LWA 字母，代表可组合的网页部署单元。</desc>
+  <rect x="40" y="40" width="420" height="420" rx="112" fill="#FFF0EA"/>
+  <rect x="82" y="126" width="104" height="244" rx="32" fill="#FFFFFF" stroke="#FFD4C8" stroke-width="8"/>
+  <rect x="198" y="126" width="104" height="244" rx="32" fill="#FFFFFF" stroke="#FFD4C8" stroke-width="8"/>
+  <rect x="314" y="126" width="104" height="244" rx="32" fill="#FFFFFF" stroke="#FFD4C8" stroke-width="8"/>
+  <path d="M112 174V322H164" fill="none" stroke="#F06B4F" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M217 174L234 322L250 245L266 322L283 174" fill="none" stroke="#F06B4F" stroke-width="23" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M335 322L366 174L397 322M347 275H385" fill="none" stroke="#F06B4F" stroke-width="23" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="134" cy="103" r="13" fill="#F59E0B"/>
+  <circle cx="250" cy="103" r="13" fill="#F06B4F"/>
+  <circle cx="366" cy="103" r="13" fill="#E96A8D"/>
+</svg>

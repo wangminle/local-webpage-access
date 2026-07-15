@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500" role="img" aria-labelledby="title desc">
+  <title id="title">LWA 字标方案 C：负形</title>
+  <desc id="desc">深紫色圆角方形中的留白 LWA 字母和黄色状态点，突出控制台的精确与可信。</desc>
+  <rect x="40" y="40" width="420" height="420" rx="112" fill="#43256F"/>
+  <path d="M110 158V332H185" fill="none" stroke="#FFFFFF" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M194 177L219 332L248 234L277 332L302 177" fill="none" stroke="#E8DFFF" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M315 332L360 158L405 332M333 273H387" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M105 379H395" fill="none" stroke="#6E4D9B" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="390" cy="127" r="26" fill="#FFD166"/>
+  <path d="M378 127L387 136L403 117" fill="none" stroke="#43256F" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

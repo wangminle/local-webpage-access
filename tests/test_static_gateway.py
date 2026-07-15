@@ -18,6 +18,14 @@ from local_webpage_access.errors import GatewayError
 from local_webpage_access.paths import Workspace
 from local_webpage_access.static_gateway import StaticGateway
 
+# BUG-121：本模块单测会走真实 _reload_once/caddy_start（subprocess 已 mock），需放行。
+pytestmark = pytest.mark.usefixtures("_allow_caddy_admin_for_unit_tests")
+
+
+@pytest.fixture()
+def _allow_caddy_admin_for_unit_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LWA_ALLOW_CADDY_ADMIN", "1")
+
 
 @pytest.fixture()
 def workspace(workspace_root: Path) -> Workspace:

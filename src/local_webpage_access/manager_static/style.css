@@ -126,14 +126,23 @@ select:focus-visible,
   top: 0;
   z-index: 10;
 }
-.topbar-title { display: flex; align-items: center; gap: 10px; }
-.topbar-title::before {
-  content: "";
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-  background: var(--primary);
+.topbar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px; /* 与 h1 同字号，供 logo 的 1em 对齐字母盒 */
+}
+.topbar-logo {
+  height: 1em;
+  width: 1em;
   flex: none;
+  display: block;
+  border-radius: 3px;
+  object-fit: contain;
+}
+.topbar-title h1 {
+  font-size: 1em;
+  line-height: 1;
 }
 .topbar-title .version {
   color: var(--text-muted);

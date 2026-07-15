@@ -489,3 +489,61 @@ def test_sync_status_recovers_stale_building_no_build_row(
 
     assert changed == {"demo": "failed"}
     assert registry.get_instance("demo")["status"] == "failed"
+
+
+# ---- 回归测试：BUG-119 ----------------------------------------------------
+
+
+def test_add_build_fails_prior_running_siblings(workspace, registry) -> None:
+    """BUG-119：新 add_build 立刻关闭同实例其它 running 行。"""
+    _seed_container(workspace, registry, "api")
+    old_id = registry.add_build("api", status="running", started_at="2020-01-01T00:00:00")
+    new_id = registry.add_build("api", status="running")
+    builds = {b["id"]: b for b in registry.list_builds("api")}
+    assert builds[old_id]["status"] == "failed"
+    assert "被后续构建取代" in (builds[old_id].get("error_summary") or "")
+    assert builds[new_id]["status"] == "running"
+
+
+def test_sync_status_fails_shadowed_orphan_running_build(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-119：实例已 running 且最新构建成功时，仍回收被遮蔽的旧 running 行。"""
+    from local_webpage_access import status as status_mod
+    from local_webpage_access.logging import now_iso
+
+    _seed_container(workspace, registry, "api")
+    registry.update_status("api", Status.RUNNING.value)
+    # 直接 SQL 插入历史孤儿（绕过 add_build 的兄弟关闭，模拟修复前数据）
+    with registry.conn:
+        registry.conn.execute(
+            "INSERT INTO builds(instance_id, status, started_at, log_path) "
+            "VALUES (?, 'running', ?, NULL)",
+            ("api", "2020-01-01T00:00:00+08:00"),
+        )
+        orphan_id = int(
+            registry.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        )
+    success_id = registry.add_build("api", status="running", started_at=now_iso())
+    # add_build 会把孤儿标 failed；再手工改回 running 以模拟旧库状态
+    with registry.conn:
+        registry.conn.execute(
+            "UPDATE builds SET status='running', finished_at=NULL, error_summary=NULL "
+            "WHERE id=?",
+            (orphan_id,),
+        )
+    registry.finish_build(success_id, status="success")
+    monkeypatch.setattr(status_mod, "_STALE_BUILDING_SECONDS", 0.0)
+
+    # observe 会改实例状态；桩掉避免依赖 docker
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.observe_status",
+        lambda *a, **kw: Status.RUNNING,
+    )
+    changed = sync_status(workspace, config, registry, "api")
+
+    assert changed == {}
+    assert registry.get_instance("api")["status"] == "running"
+    by_id = {b["id"]: b for b in registry.list_builds("api")}
+    assert by_id[orphan_id]["status"] == "failed"
+    assert by_id[success_id]["status"] == "success"

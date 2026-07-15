@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500" role="img" aria-labelledby="title desc">
+  <title id="title">LWA 标志方案 C：部署容器</title>
+  <desc id="desc">带有代码符号和健康状态的部署容器，代表自动构建、运行与可观测性。</desc>
+  <rect x="40" y="40" width="420" height="420" rx="112" fill="#EEF2FF"/>
+  <path d="M250 94L380 168V318L250 392L120 318V168L250 94Z" fill="#FFFFFF" stroke="#3563E9" stroke-width="16" stroke-linejoin="round"/>
+  <path d="M120 168L250 242L380 168M250 242V392" fill="none" stroke="#3563E9" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M250 94V242" fill="none" stroke="#91A8F5" stroke-width="16" stroke-linecap="round"/>
+  <path d="M168 221L205 250L168 279M332 221L295 250L332 279M272 205L230 295" fill="none" stroke="#17223B" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="356" cy="132" r="34" fill="#13B8A6" stroke="#FFFFFF" stroke-width="10"/>
+  <path d="M342 132L352 142L372 120" fill="none" stroke="#FFFFFF" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M184 337H216L234 363L250 337L266 363L284 337H316" fill="none" stroke="#13B8A6" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

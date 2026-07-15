@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500" role="img" aria-labelledby="title desc">
+  <title id="title">LWA 标志方案 B：网页网络（透视改进稿）</title>
+  <desc id="desc">三层网页窗口沿统一消失点递进缩小，与同心圆环底座共用同一俯仰剪切；投影虚线收敛于前层窗口底边中心下方，代表网页服务被稳定部署并访问。</desc>
+  <rect x="40" y="40" width="420" height="420" rx="112" fill="#E8F8F4"/>
+  <!-- 统一场景剪切：窗口与底座同一俯仰 / 侧向 -->
+  <g transform="translate(2 6) skewX(4) skewY(-5)">
+    <!-- 底座对齐前窗下方；ry/rx≈0.42，与窗口俯仰更一致 -->
+    <ellipse cx="298" cy="382" rx="138" ry="58" fill="none" stroke="#2496ED" stroke-width="11"/>
+    <ellipse cx="298" cy="382" rx="112" ry="47" fill="none" stroke="#339933" stroke-width="11"/>
+    <ellipse cx="298" cy="382" rx="86" ry="36" fill="none" stroke="#FFD43B" stroke-width="12"/>
+    <!-- 投影虚线汇聚到前窗底边中心下方 (308, 340) -->
+    <g fill="none" stroke="#FFD43B" stroke-width="6" stroke-linecap="round" stroke-dasharray="1 14" opacity="0.82">
+      <path d="M218 356L308 340"/>
+      <path d="M242 366L308 340"/>
+      <path d="M268 374L308 340"/>
+      <path d="M298 378L308 340"/>
+      <path d="M326 374L308 340"/>
+      <path d="M350 366L308 340"/>
+      <path d="M372 354L308 340"/>
+    </g>
+    <!-- 后层 84%：多露出左上边，缩小可辨 -->
+    <g transform="translate(200 138) scale(0.84) translate(-242 -195.5)">
+      <rect x="132" y="103" width="220" height="185" rx="32" fill="#FFF7F3" stroke="#F05D5E" stroke-width="16"/>
+    </g>
+    <!-- 中层 92% -->
+    <g transform="translate(250 182) scale(0.92) translate(-242 -195.5)">
+      <rect x="132" y="103" width="220" height="185" rx="32" fill="#FFFCEF" stroke="#F5B942" stroke-width="16"/>
+    </g>
+    <!-- 前层 100%：底边中心 (308, 324.5)，汇聚点 (308, 340) -->
+    <g transform="translate(308 232) translate(-242 -195.5)">
+      <rect x="132" y="103" width="220" height="185" rx="32" fill="#FFFFFF" stroke="#3563E9" stroke-width="16"/>
+      <path d="M132 161H352" fill="none" stroke="#3563E9" stroke-width="16" stroke-linecap="round"/>
+      <circle cx="168" cy="134" r="9" fill="#13B8A6"/>
+      <circle cx="200" cy="134" r="9" fill="#91A8F5"/>
+      <circle cx="232" cy="134" r="9" fill="#CBD7FF"/>
+      <path d="M182 216C182 198 197 183 215 183H269C287 183 302 198 302 216V241C302 259 287 274 269 274H215C197 274 182 259 182 241V216Z" fill="#EAF0FF"/>
+      <path d="M225 215L212 229L225 243M258 215L271 229L258 243M251 210L239 248" fill="none" stroke="#3563E9" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

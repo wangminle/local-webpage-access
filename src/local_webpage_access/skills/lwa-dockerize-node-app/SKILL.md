@@ -4,7 +4,7 @@
 
 ## 何时触发
 
-- 识别为 `kind: node`、`runtime: docker-compose`，但 `apps/<id>/current/Dockerfile` 不存在。
+- 识别为 `kind: node`、`runtime: docker-compose`，但 `apps/<id>/docker/Dockerfile` 不存在。
 - daemon 或用户要把 Node 后端容器化（资源档位 small）。
 
 ## 输入
@@ -16,14 +16,15 @@
 
 ## 输出
 
-- 生成 `apps/<id>/current/Dockerfile`。
+- 生成 `apps/<id>/docker/Dockerfile`（模板默认 `node:24-alpine`）。
+- 同步生成 `apps/<id>/.dockerignore`。
 - 修改 `local-web.json` 的 `container.image` / `container.internalPort`。
 
 ## 可修改文件
 
-- `apps/<id>/current/Dockerfile`（新建或覆盖）。
+- `apps/<id>/docker/Dockerfile`（新建或覆盖）。
+- `apps/<id>/.dockerignore`。
 - `apps/<id>/local-web.json`。
-- 必要时新增 `.dockerignore`。
 
 ## 禁止事项
 
@@ -35,12 +36,10 @@
 
 ## 处理流程
 
-1. 确定 Node 版本：`engines.node` > `.nvmrc` > 默认 `20`。
+1. 确定 Node 版本：`engines.node` > `.nvmrc` > 默认与模板一致（`node:24-alpine` / Node 24）。
 2. 确定包管理器：有 `pnpm-lock.yaml` → pnpm；`yarn.lock` → yarn；否则 npm。
-3. 生成多阶段 Dockerfile：
-   - 阶段 1（deps）：`npm ci --omit=dev`（或等价）到 `/app/node_modules`。
-   - 阶段 2（runtime）：复制源码 + deps，`USER node`，`EXPOSE <internalPort>`，`CMD ["npm", "start"]`。
-4. 生成 `.dockerignore`（排除 `node_modules`、`.git`、`.env`、`dist`）。
+3. 生成 Dockerfile：先 `COPY` 锁文件并安装依赖，再 `COPY current/` 源码（缓存友好）。
+4. 确认 `.dockerignore`（排除 `node_modules`、`.git`、`.env`、`dist`）。
 5. 写回 `local-web.json` 的 `container` 字段。
 
 ## 示例
