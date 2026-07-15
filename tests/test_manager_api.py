@@ -49,7 +49,10 @@ def manager_env(workspace_root: Path):
     ws = Workspace(workspace_root)
     ws.ensure_workspace_dirs()
     _write_config(ws)
-    config = Config(portPool=PortPool(start=21000, end=21050))
+    config = Config(
+        staticGateway="builtin",
+        portPool=PortPool(start=21000, end=21050),
+    )
 
     reg = Registry(ws.db_path)
     reg.open()

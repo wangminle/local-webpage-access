@@ -787,6 +787,7 @@ def test_host_static_alias_writes_caddy_fragment(
     # 探测不到真实 caddy 时 detect_backend 会降级 builtin；强制走 caddy 路径
     monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
     monkeypatch.setattr(StaticGateway, "reload_all", lambda self: None)
+    monkeypatch.setattr(StaticGateway, "_sync_main_config", lambda self: None)
 
     manifest = host_static(workspace, config, registry, "demo")
 

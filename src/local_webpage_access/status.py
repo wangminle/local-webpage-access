@@ -261,12 +261,14 @@ def _recover_orphan_running_builds(registry: Registry, instance_id: str) -> list
 
 
 def _recover_stale_building(registry: Registry, instance_id: str) -> bool:
-    """检测并回收孤儿 building 状态（BUG-048）。
+    """检测并回收孤儿 building 状态（BUG-048 / BUG-129）。
 
     判据（任一满足即视为孤儿）：
     1. 该实例最新 builds 行 status=running 且 started_at 距今超过阈值
        （覆盖前端/容器构建——它们进入 building 时会 add_build）；
-    2. 无 builds 行（如静态托管 host_static 只写 status 不写 builds），
+    2. 最新 builds 行已 success/failed，但 finished_at（回退 started_at）已超时，
+       说明构建已收尾而实例状态未同步（BUG-129）；
+    3. 无 builds 行（如静态托管 host_static 只写 status 不写 builds），
        但实例 updated_at 距今超过阈值（粗略兜底）。
 
     回收动作：把实例 status 置 failed、写 last_error、写 build_recover 事件、
@@ -291,6 +293,19 @@ def _recover_stale_building(registry: Registry, instance_id: str) -> bool:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+        elif latest.get("status") in {"success", "failed"}:
+            # BUG-129：构建记录已经结束，但实例可能因进程在两次写入之间崩溃
+            # 而永久留在 building。结束记录超过阈值即可确认不是正常过渡窗口。
+            finished_at = latest.get("finished_at") or latest.get("started_at")
+            if (
+                finished_at
+                and _age_seconds(finished_at) > _STALE_BUILDING_SECONDS
+            ):
+                is_stale = True
+                detail = (
+                    f"最新构建已为 {latest.get('status')}，"
+                    f"但 building 状态仍停留 {_age_seconds(finished_at):.0f}s"
+                )
     else:
         # 无 builds 行：用 instances.updated_at 兜底（host_static 路径）
         row = registry.get_instance(instance_id)

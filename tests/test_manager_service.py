@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +13,7 @@ from local_webpage_access.config import Config, PortPool
 from local_webpage_access.errors import LifecycleError
 from local_webpage_access.manager_service import (
     ManagerState,
+    manager_start_lock,
     health_matches_workspace,
     health_ok,
     is_running,
@@ -110,6 +113,31 @@ def test_start_manager_recovers_state_for_own_workspace(workspace: Workspace) ->
     assert state.pid is None
 
 
+def test_start_manager_recovery_stores_discovered_pid(workspace: Workspace) -> None:
+    """BUG-126：恢复本工作区健康服务时记录监听 PID，避免后续无法停止。"""
+    workspace.ensure_workspace_dirs()
+    cfg = Config(portPool=PortPool(start=21000, end=21050))
+    with (
+        patch("local_webpage_access.manager_service.is_running", return_value=False),
+        patch(
+            "local_webpage_access.manager_service.health_matches_workspace",
+            return_value=True,
+        ),
+        patch(
+            "local_webpage_access.manager_service.find_listening_pid",
+            return_value=4242,
+        ),
+        patch(
+            "local_webpage_access.manager_service.pid_cmdline_contains",
+            return_value=True,
+        ),
+    ):
+        assert start_manager(workspace, cfg) == 4242
+    state = read_state(workspace)
+    assert state is not None
+    assert state.pid == 4242
+
+
 def test_stop_manager_clears_enabled(workspace: Workspace) -> None:
     workspace.ensure_workspace_dirs()
     write_state(
@@ -134,6 +162,68 @@ def test_stop_manager_keeps_enabled_when_terminate_fails(workspace: Workspace) -
     state = read_state(workspace)
     assert state is not None
     assert state.enabled is True
+
+
+def test_stop_manager_without_pid_discovers_and_terminates(
+    workspace: Workspace,
+) -> None:
+    """BUG-126：pid=None 仍应查监听进程并停止，不能直接假成功。"""
+    workspace.ensure_workspace_dirs()
+    write_state(
+        workspace,
+        ManagerState(enabled=True, pid=None, host="0.0.0.0", port=17800),
+    )
+    with (
+        patch(
+            "local_webpage_access.manager_service.find_listening_pid",
+            return_value=4242,
+        ),
+        patch(
+            "local_webpage_access.manager_service.pid_cmdline_contains",
+            return_value=True,
+        ),
+        patch(
+            "local_webpage_access.manager_service._terminate_pid",
+            return_value=True,
+        ) as terminate,
+    ):
+        assert stop_manager(workspace) is True
+    terminate.assert_called_once()
+    assert read_state(workspace).enabled is False
+
+
+def test_stop_manager_refuses_foreign_reused_pid(workspace: Workspace) -> None:
+    """BUG-125：PID 已复用为无关进程时清状态但绝不发送信号。"""
+    workspace.ensure_workspace_dirs()
+    write_state(
+        workspace,
+        ManagerState(enabled=True, pid=4242, host="0.0.0.0", port=17800),
+    )
+    with (
+        patch("local_webpage_access.manager_service.is_pid_alive", return_value=True),
+        patch(
+            "local_webpage_access.manager_service.pid_cmdline_contains",
+            return_value=False,
+        ),
+        patch("local_webpage_access.manager_service.os.kill") as kill,
+    ):
+        assert stop_manager(workspace) is True
+    kill.assert_not_called()
+    assert read_state(workspace).enabled is False
+
+
+def test_manager_start_lock_recovers_stale_file(workspace: Workspace) -> None:
+    """BUG-130：死 PID 或超龄的 manager 启动锁可立即回收。"""
+    workspace.ensure_workspace_dirs()
+    lock = workspace.run / "manager-start.lock"
+    lock.write_text("999999\n", encoding="utf-8")
+    old = time.time() - 120
+    os.utime(lock, (old, old))
+
+    with patch("local_webpage_access.manager_service.is_pid_alive", return_value=False):
+        with manager_start_lock(workspace, timeout=0.1):
+            assert lock.is_file()
+    assert not lock.exists()
 
 
 def test_health_ok_false_on_closed_port() -> None:

@@ -33,6 +33,7 @@ from local_webpage_access.models import (
     Status,
 )
 from local_webpage_access.paths import Workspace
+from local_webpage_access.probe import mark_probe_url
 from local_webpage_access.ports import PortAllocator, build_network_entry, is_port_listening
 from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
@@ -602,7 +603,7 @@ def _wait_for_http(
 
 def _http_ok(host_port: int, *, timeout: float = 2.0) -> bool:
     """单次 HTTP GET 健康探测（2xx/3xx 视为成功）。"""
-    url = f"http://127.0.0.1:{host_port}/"
+    url = mark_probe_url(f"http://127.0.0.1:{host_port}/")
     try:
         resp = urllib.request.urlopen(url, timeout=timeout)
         return 200 <= resp.status < 400

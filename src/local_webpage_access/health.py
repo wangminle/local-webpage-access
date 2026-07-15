@@ -18,6 +18,7 @@ from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.models import InstanceManifest, Status
 from local_webpage_access.paths import Workspace
+from local_webpage_access.probe import mark_probe_url
 from local_webpage_access.registry import Registry
 
 log = get_logger("health")
@@ -49,7 +50,7 @@ def http_ok(host_port: int, *, timeout: float = _DEFAULT_TIMEOUT) -> tuple[bool,
 
     返回 ``(是否成功, HTTP 状态码)``。2xx/3xx 视为成功；连接失败/超时/4xx/5xx 失败。
     """
-    url = f"http://127.0.0.1:{host_port}/"
+    url = mark_probe_url(f"http://127.0.0.1:{host_port}/")
     try:
         resp = urllib.request.urlopen(url, timeout=timeout)
         code = getattr(resp, "status", None) or resp.getcode()

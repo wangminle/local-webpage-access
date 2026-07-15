@@ -132,6 +132,22 @@
 | BUG-119 | 修复 | 旧的 running 构建记录在实例后续成功构建后仍永久残留，管理页构建历史状态失真 | 2026-07-14 23:14 | 2026-07-14 23:58 | 已完成 | 已修：`add_build` 启动时关闭同实例其它 running 行；`sync_status` 增加 `_recover_orphan_running_builds` 回收被遮蔽超时行。runtime builds#45 已标 failed。 |
 | BUG-120 | 修复 | 仓库跟踪 pytest 同步冲突残留文件，导致全量测试在收集阶段直接失败 | 2026-07-14 23:17 | 2026-07-14 23:58 | 已完成 | 已删除 `tests/test_manager_api.sync-conflict-*.py`；`conftest.pytest_ignore_collect` 忽略含 `sync-conflict` 的文件名。收集阶段恢复正常。 |
 | BUG-121 | 修复 | 全量测试会连接本机全局 Caddy admin 并覆盖真实运行配置，导致线上网关入口和静态站点中断 | 2026-07-14 23:19 | 2026-07-14 23:58 | 已完成 | 已修：测试默认 `staticGateway=builtin`（conftest/daemon/e2e/integration）；`_reload_once`/`caddy_start` 在 pytest 下默认拒绝触碰 :2019（`LWA_ALLOW_CADDY_ADMIN=1` 仅 Caddy 单测放行）。 |
+| BUG-122 | 修复 | Node Dockerfile 在安装依赖前设置 NODE_ENV=production，构建工具类 devDependencies 被省略 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`_render_node` 将 `ENV NODE_ENV=production` 挪到 install/build 之后；回归 test_node_dockerfile_sets_production_env_after_build。 |
+| BUG-123 | 修复 | ZIP 导入未限制成员数、解压总大小及压缩比，可被压缩炸弹耗尽资源 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`_assert_zip_bomb_safe` 限制成员数/单文件/总大小/压缩比；validate_zip 与 safe_extract 均拦截。回归 test_validate_zip_rejects_zip_bomb_*。 |
+| BUG-124 | 修复 | force-kind-change 跨运行时更新未先停止旧服务，可能遗留无法管理的旧容器或静态进程 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`update_zip` 在 upsert 删旧子表前按旧 manifest 调用 `stop_instance`；保留 hostPort 快照。回归 test_update_force_kind_change_stops_old_runtime。 |
+| BUG-125 | 修复 | manager、daemon 与 builtin 网关按 PID 直接终止进程，PID 复用时可能误杀无关进程 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`read_pid_cmdline`/`pid_cmdline_contains`；manager/daemon/builtin 终止前校验命令行身份；身份不匹配视为陈旧。 |
+| BUG-126 | 修复 | 管理页状态恢复为 pid=None 后 manager off 假报成功但不会终止服务进程 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：恢复态用 `find_listening_pid` 回填；`stop_manager` 在 pid=None 时按端口发现并校验身份后终止，仍健康却找不到 PID 则返回 False。 |
+| BUG-127 | 修复 | 并发导入同名 ZIP 缺少跨进程原子占位，可能把两个项目内容混入同一实例 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`_claim_unique_id` 用 `mkdir(exist_ok=False)` 原子占位 apps/<id>；冲突自动改名。回归 test_claim_unique_id_*。 |
+| BUG-128 | 修复 | 全局 dockerignore 排除所有 dist/build，可能从容器镜像删除应用必需的预构建产物 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：仅当 `entry.build` 存在时写入 `**/dist`/`**/build`；无 build 保留预构建产物。回归 dockerignore 有/无 build 断言。 |
+| BUG-129 | 修复 | 实例处于 building 但最新构建记录已是 success/failed 时不会被 stale 回收 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`_recover_stale_building` 对最新 success/failed 用 finished_at（回退 started_at）超时回收。回归 test_sync_status_recovers_building_after_finished_build。 |
+| BUG-130 | 修复 | manager-start.lock 无陈旧锁识别，启动进程异常退出后可永久阻塞后续 manager on | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`manager_start_lock` 识别死 PID / 超时 mtime 陈旧锁并 unlink 重试。回归 test_manager_start_lock_recovers_stale。 |
+| BUG-131 | 修复 | BUG-121 Caddy pytest 防护未与既有测试隔离配套，当前全量测试稳定失败3项 | 2026-07-15 13:26 | 2026-07-15 13:50 | 已完成 | 已修：`_reload_once` pytest 下返回软失败；自愈跳过 BUG-121；manager_env 默认 builtin；hosting 单测额外 stub `_sync_main_config`。全量 pytest 仅剩 4 项 Docker 跳过。 |
+| BUG-132 | 修复 | 容器 pageview 从 Caddy 别名源切回 docker logs 时会重放历史请求并重复计数 | 2026-07-15 19:11 | 2026-07-15 19:24 | 已完成 | 容器批次事务检测旧源后原子清理该实例聚合、明细、IP、去重集及独占游标，再按当前 docker 日志窗口重建；回归覆盖首次切换不翻倍及再次摄入幂等。 |
+| BUG-133 | 修复 | PageviewStore.record_hits 未开启事务，写入失败会留下部分聚合且明细缺失 | 2026-07-15 19:11 | 2026-07-15 19:24 | 已完成 | record_hits 改用显式事务；builtin/Caddy 的多实例聚合与文件游标、container 的去重哈希与游标均和聚合纳入同一事务。失败触发器回归确认业务表和水位全部回滚，解除故障后可重试。 |
+| BUG-134 | 修复 | pageviews schema 初始化失败后缓存连接，后续请求会绕过未来版本保护 | 2026-07-15 19:11 | 2026-07-15 19:19 | 已完成 | _conn_or_open 改为在锁内创建临时连接，仅 schema 初始化成功后缓存；失败时关闭连接并保持 _conn=None，连续访问均触发未来版本保护且未来数据不被改写。 |
+| BUG-135 | 修复 | 管理页浏览量 IP 列表最近访问时间显示非本机时区（Caddy 日志 ts 为 UTC，前端未换算） | 2026-07-15 19:44 | 2026-07-15 19:44 | 已修复 | helpers.js formatLocalDateTime 原对带时区 ISO(+00:00/Z 等)直接返回源时间不转换，与无时区分支(转本地)不一致。移除该早返回分支，统一走 new Date(text)+getHours() 等本地方法；删冗余 formatUtcOffset。test_helpers_format_local_date_time 改 TZ=Asia/Shanghai 断言本地换算(UTC 02:00→本地 10:00，+05:30 源也转本地)。前端经 editable+StaticFiles 实时读盘已上线，curl 确认含新逻辑。关联 IMP-026(DEV-069)。 |
+| BUG-136 | 修复 | 浏览量独立 IP 列表弹窗只能再次点击链接才收起，点击弹窗外任意位置无效 | 2026-07-15 19:58 | 2026-07-15 19:58 | 已修复 | app.js 新增闭包 closeIpListsOnOutsideClick，在 document 上委托 click：命中点不在任何 .ip-list 内即把所有 .ip-list[open] 的 open 置 false；于 mounted/unmounted 成对增删监听。<details> 原生仅在点击 summary 时切换开合，故需此兜底。经 __LWA_TEST_HOOKS__ 暴露并加单测（面板外点击关闭全部、面板内点击不动）。关联 IMP-026(DEV-069)。 |
+| BUG-137 | 修复 | 独立 IP 列表每条信息按两行展示（首行 IP+本机、次行 访问次数·最近时间），原两列布局不够直观 | 2026-07-15 19:58 | 2026-07-15 19:58 | 已修复 | 按用户澄清，每个 IP 显示为两行而非两列：style.css .ip-list-panel li 去掉 flex 行布局；.ip-addr 与 .ip-meta 改 display:block 自然堆叠（首行 IP+本机徽标、次行 访问次数·时间，meta 加 margin-top:2px 微间距），每条 li 以 border-bottom 分隔成卡片。初版误解为「单行两列」已更正。HTML 结构(span.ip-addr+span.ip-meta)不变，仅 CSS 调整；前端实时上线 curl 确认 display:block。关联 IMP-026(DEV-069)。 |
 
 ## 调整事项
 
@@ -213,6 +229,9 @@
 | CHK-042 | 检查 | 修复 BUG-113/114/115 与 DOC-028/029 并全量回归 | 2026-07-09 19:26 | 2026-07-09 19:31 | 已完成 | dry-run 按 runtime 预告 rebuild/restart；Python+Node 统一 Node 24.16.0；Pipfile+heavy-db 填 kind；autostart/manager 文档与前端文案同步。目标切片+全量 pytest 通过（4 skipped）。 |
 | CHK-043 | 检查 | 本次运行审查：拉起全栈并做代码审查 | 2026-07-14 22:40 | 2026-07-14 22:40 | 已完成 | lwa doctor 全绿（0失败0警告），4实例（demo-static/voiceprint-v3-demo/prd-workflow/3d-demo-family-wakeup）+管理页:17800+Caddy网关:8080均running/HTTP200；本次导入并启动3d-demo-family-wakeup（static，端口18003，别名/3d-demo-family-wakeup/）。代码审查发现：P1管理页运行时日志全部丢失（详见BUG-116）、P1生成的Dockerfile缓存分层不合理致重建慢（详见BUG-117）、P2 lwa --version无效（仅version子命令）、P3 build-*.log堆积无滚动清理。 |
 | CHK-044 | 检查 | 检查本次运行日志并分析是否仍存在 bug | 2026-07-14 23:14 | 2026-07-14 23:33 | 已完成 | 核对 manager/lwa/build/run/static-access 日志、Docker 状态、registry、doctor、HTTP 直连与网关；确认 BUG-118、BUG-119、BUG-120、BUG-121。另发现 prd-workflow 使用默认管理员口令、npm audit 报 4 个高危依赖漏洞，属于被部署应用的安全风险；历史 502、npm ci 回退和 apt 警告均非当前故障。排除 BUG-120 冲突残留文件后，全量测试 100% 通过、4 项按配置跳过；全量测试触发 BUG-121 覆盖真实 Caddy 配置后已按 OPS-040 恢复，最终 4 实例、管理页和网关均 HTTP 200，doctor 全绿。 |
+| CHK-045 | 检查 | 审查 src 全部源码并运行编译、静态分析、前端语法与全量测试 | 2026-07-15 13:26 | 2026-07-15 13:26 | 已完成 | 审查 V0.5.3 全部 src 及重点调用链；compileall、flake8 F、node --check、git diff-check通过；mypy发现13项类型问题；全量pytest稳定3失败/4跳过；独立子代理交叉复核。新增 BUG-122~131。 |
+| CHK-046 | 检查 | 核对并修复 CHK-045 检出的 BUG-122～131 | 2026-07-15 13:28 | 2026-07-15 13:50 | 已完成 | 逐条源码复核 10 项均属实；已全部修复并补回归；全量 pytest 仅 4 项 Docker 跳过，原 3 失败已清。 |
+| CHK-047 | 检查 | 复审 IMP-027 Docker 经 Caddy 统计 pageview 与真实 IP 的实现 | 2026-07-15 19:11 | 2026-07-15 19:11 | 已完成 | 审阅 pageviews 数据源分流、别名前缀、schema、游标与测试；全量 pytest 通过，4 项真实 Docker 集成按配置跳过；compileall、前端 node check、git diff check 通过。最小复现确认 BUG-132 至 BUG-134，未修改业务代码。 |
 
 ## 测试数据
 
@@ -254,6 +273,9 @@
 | DOC-029 | 文档 | 同步管理页文档与登录弹窗：默认流程改为 lwa manager on，本机免 token | 2026-07-09 19:22 | 2026-07-09 19:31 | 已完成 | CHK-040：manager-page.md/app.js/faq/manager_api 占位页仍偏 manager start。已改为 on 为主、start 为前台调试；token 文案同步。 |
 | DOC-030 | 文档 | 同步 V0.5.2 文档：容器 --update→rebuild、manager on 口径、autostart systemd 入口 | 2026-07-10 09:59 | 2026-07-10 09:59 | 已完成 | README/faq/operations-playbook/manager-page 补 DEV-067 容器 update 走 rebuild；security-boundary/release-checklist 对齐 manager on；autostart/faq/manager-page/import-zip skill 既有未提交修正一并纳入。design 历史快照不动。 |
 | DOC-031 | 文档 | 同步 V0.5.3：README/manager-page/faq/security-boundary 补 manager logs、token 不落盘与日志 0600、logo/favicon；dockerize skills 修正 Dockerfile 路径与缓存分层 | 2026-07-15 12:17 | 2026-07-15 12:17 | 已完成 | 历史「V0.5.2 起」与 design 快照不动；operations-playbook/known-limitations/testing 等无强制变更。 |
+| DOC-032 | 文档 | 新增 IMP-025/026 浏览量改进计划文档 | 2026-07-15 13:50 | 2026-07-15 13:50 | 已完成 | 新建 design/plan/local-webpage-access-新增功能点2607.md，记录两项需求与实施计划：IMP-025 访问次数从资源级改为 page 级（pageviews.py record_hits 摄入期按 _is_page_view 过滤、schema 版本迁移全量重摄入）；IMP-026 独立 IP 数加可点击入口弹小面板列全部 IP，本机地址（127.0.0.1/局域网IP/Tailscale 100.64段）标（本机）（ports.py 新增 is_local_ip/detect_local_ips，detail() 增 uniqueIpList，app.js renderPageviewHtml 用 details 展开）。尚未实施，落地后另记 DEV- 条目。 |
+| DOC-033 | 文档 | 审阅并补强 IMP-025/026 浏览量改进计划 | 2026-07-15 17:28 | 2026-07-15 17:28 | 已完成 | 更新 design/plan/local-webpage-access-新增功能点2607.md：新增内部探针排除；以 pageview_ip_stats 保证 IP 全量聚合不受 500 条明细窗影响；迁移纳入 container_seen、事务与未来版本保护；Tailscale 改为仅标记本机实际地址；补齐状态码/API 路径、前端转义/可访问性、验收与测试门禁。未改业务代码。 |
+| DOC-034 | 文档 | 整理 design/plan/：11 份已落地/历史文档归档至 design/archive/；待改进功能点记录补 IMP-029 | 2026-07-15 21:17 | 2026-07-15 21:17 | 已完成 | 归档(git mv 保留历史)：6 份故障复盘/分析报告(analysis/runtime-analysis/caddy-startup-diagnostic-report/caddy-startup-incident/startup-failure/gateway-switch-access-review)、2 份 V1 基线(v1-design/v1-wbs)、3 份已执行 WBS(imp010-021-plan 文内标注 V0.5.0 全部落地、整改与开发WBS 标注 V0.5.0 全部落地、待改进功能-WBS 拆解的 IMP-001/005~009 均已完成)。plan/ 仅留 2 份活跃文档。修复 新增功能点2607 中指向 imp010-021 的断链改为 ../archive/。新增 IMP-029(待规划/P2)：把 stats.collect_and_store 接入周期采集，补资源列 + 长期内存采样供泄漏早发现。 |
 
 ## 功能开发
 
@@ -326,6 +348,11 @@
 | DEV-065 | 开发 | G6：gateway on / access review 默认检查是否需 rebuild，支持 --rebuild-if-needed 可选自动重建 | 2026-07-09 14:33 | 2026-07-09 14:35 | 已完成 | 复盘文档增 G6/§4.6/§11；access.py 增加 needs_rebuild/maybe_rebuild_after_review/format_rebuild_advice；cli gateway on 与 access review 挂开关；playbook §7.4；回归 test_instances_needing_rebuild_* / test_maybe_rebuild_*（4 项）。仅 IMP-023 空 200 触发。 |
 | DEV-066 | 开发 | G6 增强：rebuild 后复检 IMP-023（still_imp023），避免调用成功但产物未变假绿 | 2026-07-09 14:42 | 2026-07-09 14:43 | 已完成 | pair review 缺口：RebuildActionResult.still_imp023；instance_still_has_imp023；format_rebuild_advice [WARN]；all_ok 要求 resolved；回归 test_maybe_rebuild_still_imp023_when_assets_unchanged。复盘 §11.1-7、playbook §7.4 同步。 |
 | DEV-067 | 开发 | zip --update 容器实例：更新后校验镜像与 current 一致，失败不得假绿为已更新 | 2026-07-09 19:04 | 2026-07-09 19:07 | 已完成 | 现实事故：prd-workflow v0.3.4 源码已落盘但镜像未替换、卡 building。约定：镜像新鲜度检查挂在 import --update（非 gateway）。需：更新后强制/确认 rebuild；构建失败或超时须 finish_build+status=failed 并明确报错；可选校验镜像 Created/内容落后于 current 则拒绝宣称成功。 【完成 2026-07-09 19:07】UpdateResult.needs_rebuild；容器更新清空 containerId/imageId；CLI/API 对 running 容器走 rebuild_instance 而非 restart；--no-restart 黄字提示 lwa rebuild；单测 test_update_container_needs_rebuild_not_restart / test_update_endpoint_container_rebuild_when_running 通过。 |
+| DEV-068 | 开发 | IMP-025 访问次数从资源级改为 page 级 | 2026-07-15 17:30 | 2026-07-15 18:10 | 已完成 | pageviews.py 新增 _is_page_view(method,path,status)：仅 GET、仅 2xx(排除204/206)/304、排除资源扩展名黑名单与 /api//graphql/health/healthz/metrics 端点、排除 __lwa_probe 标记；record_hits 摄入期过滤只计 page，hits/pageview_ips/pageview_detail 全部 page 口径。新增 pageview_ip_stats 全量 IP 聚合表（同事务 UPSERT）。schema 版本迁移 user_version 0→1 单事务重建派生表+游标+container_seen，未来版本拒迁。summary 的 uniqueIps 改从 pageview_ip_stats 取。新建 probe.py(mark_probe_url)，health/hosting/static_gateway/access 4 处内部探针加 __lwa_probe=1。e2e 验证：3 页面+1 资源+1 探针→hits 精确 +3。详见 design/plan/local-webpage-access-新增功能点2607.md。 |
+| DEV-069 | 开发 | IMP-026 独立 IP 列表弹窗 + 本机标记 | 2026-07-15 17:30 | 2026-07-15 18:10 | 已完成 | ports.py 新增 detect_local_ips（loopback∪detect_lan_ip∪hostname 解析∪tailscale ip 输出）/is_local_ip（ipaddress 规范化含 IPv4-mapped/zone-id，精确集合匹配，不按 100.64.0.0/10 整网段兜底，避免误标同 tailnet 节点）；pageviews.detail() 增 uniqueIpList[{ip,count,lastSeen,local}]，本机探测每请求只一次。app.js renderPageviewHtml 把静态独立 IP 改为 details>summary 展开小面板（绝对定位+max-height 滚动+窄屏文档流降级），本机项 .ip-local+本机徽标（不只靠颜色）；style.css 加 .ip-list/.ip-list-panel 样式。e2e 验证：127.0.0.1 与本机 LAN IP 标本机，同网段其他节点不标；uniqueIps==列表长度。关联 IMP-025(DEV-068)。 |
+| DEV-070 | 开发 | IMP-027 Docker 容器经 Caddy 别名日志统计真实访客 IP | 2026-07-15 18:15 | 2026-07-15 18:35 | 已完成 | pageviews.py：_instance_alias 扩展同时查 get_container(route_mode=name 的 route_host)；_instance_sources 中 docker-compose 分支改为有别名+caddy 后端→caddy 源、否则→container 源（一实例一源，互斥防双计）；_ingest_caddy_shared 按命中前缀剥掉 /<alias> 再分类（否则 /alias/api/data 不命中 /api/ 规则被误算为 page，query 保留）；_PAGEVIEW_SCHEMA_VERSION 升 1→2 触发 drop 全部派生表+游标(含共享 caddy 游标)后重摄入(先清数据无双计)。测试 test_pageviews 加 _instance_alias/_instance_sources/前缀剥离用例。e2e：prd-workflow source 由 container→caddy，uniqueIpList 从空→真实 IP(127.0.0.1/10.181.239.115 标本机)，recent 路径已剥前缀。详见 design/plan/local-webpage-access-新增功能点2607.md §8。关联 IMP-025(DEV-068)/IMP-026(DEV-069)。 |
+| DEV-071 | 开发 | 管理页大标题左侧 logo 放大 200%（1em→2em，约 32px） | 2026-07-15 19:44 | 2026-07-15 19:44 | 已完成 | app.js 顶部 logo img width/height 16→32；style.css .topbar-logo height/width 1em→2em 并更新注释。.topbar-title flex 居中保持，h1 与 version span 不受影响。前端实时上线，curl 确认 width=32 与 2em。 |
+| DEV-072 | 开发 | IMP-028 无别名的直连端口静态站点（如 demo-static）浏览量按端口归属统计 | 2026-07-15 20:42 | 2026-07-15 20:42 | 已完成 | 根因：demo-static 走 Caddy 独立站点 :18000（sites/demo-static.conf 无 log 指令），流量不写共享 static-access.log，而摄入器只读该日志 → 永不统计。方案 b：①静态站点模板（src 与 runtime 的 caddy_site.conf.tpl 及 _FALLBACK_TEMPLATE）加 log 块写共享 access log；generate_site_config 传 access_log 变量。②pageviews：AccessHit 加 host 字段、parse_caddy_json_line 提取 request.host；新增 _port_from_host 与 _static_host_port；_instance_sources 为无别名 caddy 静态站点填 host_port；ingest_all 建 port_to_id；_ingest_caddy_shared 别名前缀未命中时按 host 端口归属。有别名实例仍按前缀归属（不变，无双计）。test_pageviews 加端口解析/host 捕获/按端口归属 3 测试，test_static_gateway 加 log 指令断言。应用：重新生成 demo-static.conf 并 caddy reload，重启 manager(pid 42030，token 保留)；API 验证 demo-static source=caddy hits=8 uniqueIpList 127.0.0.1(本机)。全量 pytest 全绿。关联 IMP-024(DEV-061)/IMP-027(DEV-070)。 |
 
 ## 配置运维
 
@@ -372,6 +399,7 @@
 | OPS-039 | 运维 | runtime 工作区 lwa update 升级至 V0.5.2 | 2026-07-10 10:36 | 2026-07-10 10:36 | 已完成 | lwa update -w runtime：pip install -e . 装 local-webpage-access-0.5.2；syncSkills 更新 1；manager 重启(pid 48761→51771)；daemon 原本未运行跳过；gateway caddy 93524 与 3 实例未受扰动；doctor 总体 OK；lwa version 与 /api/health 均为 V0.5.2。 |
 | OPS-040 | 运维 | 恢复被全量测试覆盖的 runtime Caddy 网关配置 | 2026-07-14 23:18 | 2026-07-14 23:33 | 已完成 | 先执行 lwa gateway off/on 重建当前工作区主配置；因 caddy start 的 pingback 兜底进程随后退出，改用 caddy run 持续运行并同步 gateway.json，最终 pid=96325。访问复核 4 个实例全部 OK，直连端口与 3 个路径别名均 HTTP 200，doctor 0 失败 0 警告。 |
 | OPS-041 | 运维 | 应用版本号提升至 V0.5.3：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步为 0.5.3；并更新 README/manager-page/faq/security-boundary 与 dockerize skills | 2026-07-15 12:17 | 2026-07-15 12:17 | 已完成 | 历史「V0.5.2 起」功能引入标记与 design 快照保留。补 `lwa manager logs`、token 不落盘/日志 0600、logo/favicon、Dockerfile 路径与 cache/.dockerignore。lwa version 仍取 git HEAD 主题，提交 V0.5.3-BuildXXXX 后即显示 V0.5.3。 |
+| OPS-042 | 运维 | 应用版本号提升至 V0.5.4：pyproject/version_info(_FALLBACK_VERSION+docstring×3)/cli docstring/skills·lwa-update-runtime/test_version_info 同步为 0.5.4 | 2026-07-15 19:44 | 2026-07-15 19:44 | 已完成 | 全仓 0.5.3 残留仅 task-list 历史条目(OPS-041 等)与 release-checklist 泛例(如 0.5.3/1.0.0)，属不可改历史/格式示例，保留不动。lwa version 仍取 git HEAD 主题(当前 V0.5.3)，提交 V0.5.4-BuildXXXX 后即显示 V0.5.4。全量 pytest 全绿(4 项 Docker 集成按配置跳过)，compileall/node check/git diff --check 通过。 |
 
 ## 规划事项
 
@@ -392,12 +420,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 115 | 115 | 0 | 100% |
-| 调整事项 | 6 | 6 | 0 | 100% |
-| 检查事项 | 41 | 41 | 0 | 100% |
+| 代码 Bug | 137 | 137 | 0 | 100% |
+| 调整事项 | 28 | 28 | 0 | 100% |
+| 检查事项 | 46 | 46 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 30 | 30 | 0 | 100% |
-| 功能开发 | 67 | 67 | 0 | 100% |
-| 配置运维 | 39 | 39 | 0 | 100% |
+| 文档维护 | 34 | 34 | 0 | 100% |
+| 功能开发 | 72 | 72 | 0 | 100% |
+| 配置运维 | 42 | 42 | 0 | 100% |
 | 规划事项 | 10 | 10 | 0 | 100% |
-| **总计** | 308 | 308 | 0 | 100% |
+| **总计** | 369 | 369 | 0 | 100% |

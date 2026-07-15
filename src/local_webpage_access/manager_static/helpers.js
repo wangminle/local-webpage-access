@@ -45,12 +45,6 @@
     );
   };
 
-  function formatUtcOffset(sign, hours, minutes) {
-    var h = String(Number(hours));
-    var m = Number(minutes);
-    return "UTC" + sign + h + (m ? ":" + LWA.pad2(m) : "");
-  }
-
   function formatOffsetMinutes(totalMinutes) {
     if (totalMinutes === 0) return "UTC";
     var sign = totalMinutes >= 0 ? "+" : "-";
@@ -65,20 +59,9 @@
     var text = String(value).trim();
     if (!text) return "—";
 
-    var match = text.match(
-      /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:(Z)|([+-])(\d{2}):?(\d{2}))?$/
-    );
-    if (match && (match[3] || match[4])) {
-      return (
-        match[1] +
-        " " +
-        match[2] +
-        "(" +
-        (match[3] ? "UTC" : formatUtcOffset(match[4], match[5], match[6])) +
-        ")"
-      );
-    }
-
+    // 统一换算到本机时区：new Date() 解析出绝对时刻，再用 getHours() 等
+    // 本地方法渲染。带时区的 ISO（如 Caddy 的 +00:00 / Z）也会转为本地时间，
+    // 而非保留源时区原样显示。
     var d = new Date(text);
     if (isNaN(d.getTime())) return text;
     return (

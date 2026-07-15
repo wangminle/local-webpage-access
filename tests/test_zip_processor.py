@@ -63,6 +63,31 @@ def test_validate_zip_rejects_truncated(tmp_path: Path) -> None:
         validate_zip(zp)
 
 
+def test_validate_zip_rejects_high_compression_ratio(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-123：在 testzip 解压前拒绝异常高压缩比。"""
+    from local_webpage_access import zip_processor
+
+    zp = _make_zip(tmp_path / "bomb.zip", {"huge.txt": "0" * 10_000})
+    monkeypatch.setattr(zip_processor, "_MAX_COMPRESSION_RATIO", 1.0)
+    monkeypatch.setattr(zip_processor, "_MIN_RATIO_CHECK_BYTES", 1)
+    with pytest.raises(ZipImportError, match="压缩比过高"):
+        validate_zip(zp)
+
+
+def test_validate_zip_rejects_too_many_members(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-123：成员数超过上限时拒绝。"""
+    from local_webpage_access import zip_processor
+
+    zp = _make_zip(tmp_path / "many.zip", {"a.txt": "a", "b.txt": "b"})
+    monkeypatch.setattr(zip_processor, "_MAX_ZIP_MEMBERS", 1)
+    with pytest.raises(ZipImportError, match="成员数过多"):
+        validate_zip(zp)
+
+
 # ---- compute_zip_hash ------------------------------------------------------
 
 

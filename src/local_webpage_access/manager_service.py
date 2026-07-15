@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from local_webpage_access.config import Config
-from local_webpage_access.daemon import is_pid_alive
+from local_webpage_access.daemon import is_pid_alive, pid_cmdline_contains
 from local_webpage_access.gateway_service import maybe_start_gateway
 from local_webpage_access.errors import LifecycleError
 from local_webpage_access.logging import get_logger, now_iso
@@ -35,6 +35,7 @@ STATE_FILENAME = "manager.json"
 START_LOCK_FILENAME = "manager-start.lock"
 LOG_FILENAME = "manager.log"
 MANAGER_START_TIMEOUT = 15.0
+MANAGER_START_LOCK_STALE_SECONDS = 60.0
 
 
 @dataclass
@@ -216,8 +217,49 @@ def _spawn_manager(workspace: Workspace) -> int:
     return int(proc.pid)
 
 
-def _terminate_pid(pid: int, *, timeout: float = 5.0) -> bool:
+def find_listening_pid(port: int) -> int | None:
+    """用 lsof 查找 TCP 监听进程 PID；不可用时返回 ``None``（BUG-126）。"""
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid > 0:
+            return pid
+    return None
+
+
+def _manager_pid_matches(pid: int, workspace: Workspace) -> bool:
+    return pid_cmdline_contains(
+        pid,
+        "local_webpage_access.manager_service",
+        str(workspace.root),
+    )
+
+
+def _terminate_pid(
+    pid: int,
+    *,
+    timeout: float = 5.0,
+    workspace: Workspace | None = None,
+) -> bool:
     if not is_pid_alive(pid):
+        return True
+    # BUG-125：仅凭 PID 发送信号可能误杀复用该 PID 的无关进程。
+    if workspace is not None and not _manager_pid_matches(pid, workspace):
+        log.warning("管理页 PID %s 身份不匹配，拒绝终止", pid)
         return True
     try:
         os.kill(pid, 15 if sys.platform != "win32" else 9)
@@ -239,7 +281,7 @@ def _terminate_pid(pid: int, *, timeout: float = 5.0) -> bool:
 
 @contextlib.contextmanager
 def manager_start_lock(workspace: Workspace, *, timeout: float = 5.0) -> Iterator[None]:
-    """串行化 ``manager on``，避免并发 spawn。"""
+    """串行化 ``manager on``，并回收陈旧启动锁（BUG-130）。"""
     path = start_lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
@@ -250,6 +292,22 @@ def manager_start_lock(workspace: Workspace, *, timeout: float = 5.0) -> Iterato
             os.write(fd, f"{os.getpid()}\n".encode())
             break
         except FileExistsError:
+            stale = False
+            try:
+                content = path.read_text(encoding="utf-8").strip().splitlines()
+                holder_pid = int(content[0]) if content else 0
+                stale = not is_pid_alive(holder_pid)
+                if not stale:
+                    stale = (
+                        time.time() - path.stat().st_mtime
+                        > MANAGER_START_LOCK_STALE_SECONDS
+                    )
+            except (OSError, ValueError):
+                stale = True
+            if stale:
+                with contextlib.suppress(FileNotFoundError, PermissionError):
+                    path.unlink()
+                continue
             if time.monotonic() >= deadline:
                 raise LifecycleError("管理页启动锁被占用，稍后重试")
             time.sleep(0.05)
@@ -291,16 +349,21 @@ def start_manager(workspace: Workspace, config: Config) -> int:
 
         # 端口已被占用：仅当健康端点确认属于本工作区时才恢复状态
         if health_matches_workspace(bind_host, bind_port, workspace.root, state=state):
+            recovered_pid = find_listening_pid(bind_port)
+            if recovered_pid is not None and not _manager_pid_matches(
+                recovered_pid, workspace
+            ):
+                recovered_pid = None
             state = ManagerState(
                 enabled=True,
-                pid=None,
+                pid=recovered_pid,
                 started_at=now_iso(),
                 host=bind_host,
                 port=bind_port,
             )
             write_state(workspace, state)
             log.info("管理页端口 %s 已有本工作区健康响应，恢复状态记录", bind_port)
-            return 0
+            return recovered_pid or 0
 
         if health_ok(bind_host, bind_port):
             raise LifecycleError(
@@ -321,7 +384,7 @@ def start_manager(workspace: Workspace, config: Config) -> int:
             state.enabled = False
             write_state(workspace, state)
             if is_pid_alive(pid):
-                _terminate_pid(pid, timeout=1.0)
+                _terminate_pid(pid, timeout=1.0, workspace=workspace)
             raise LifecycleError(
                 f"管理页子进程启动失败或健康检查超时（pid={pid}，port={bind_port}）",
                 pid=pid,
@@ -345,13 +408,36 @@ def stop_manager(workspace: Workspace) -> bool:
     state = read_state(workspace)
     if state is None:
         return True
+    pid = state.pid
+    discovered = False
+    if pid is None and state.enabled:
+        pid = find_listening_pid(state.port)
+        discovered = pid is not None
+
     stopped = True
-    if state.pid:
-        stopped = _terminate_pid(state.pid)
+    if pid:
+        if is_pid_alive(pid) and not _manager_pid_matches(pid, workspace):
+            if state.pid is not None:
+                # 已记录 PID 身份不匹配，说明 PID 被复用；清理陈旧状态即可。
+                log.warning("管理页 PID %s 身份不匹配，按陈旧状态清理", pid)
+            else:
+                # 端口监听者不是本工作区 manager，不能终止。
+                pid = None
+        else:
+            stopped = _terminate_pid(pid, workspace=workspace)
+
+    if pid is None and state.enabled and health_matches_workspace(
+        state.host, state.port, workspace.root, state=state
+    ):
+        # BUG-126：健康端点仍属于本工作区但找不到可确认身份的 PID，不能假报成功。
+        log.warning("管理页仍健康但未找到可安全终止的监听 PID（port=%s）", state.port)
+        return False
     if stopped:
         state.enabled = False
+        if discovered:
+            state.pid = pid
         write_state(workspace, state)
-        log.info("管理页已停止（pid=%s）", state.pid)
+        log.info("管理页已停止（pid=%s）", pid or state.pid)
     else:
         log.warning("管理页停止失败，进程可能仍在运行（pid=%s）", state.pid)
     return stopped
@@ -434,6 +520,7 @@ __all__ = [
     "is_running",
     "log_file_path",
     "read_manager_log",
+    "find_listening_pid",
     "start_manager",
     "stop_manager",
     "manager_status",

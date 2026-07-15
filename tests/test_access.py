@@ -298,7 +298,8 @@ class _SpaHandler(http.server.BaseHTTPRequestHandler):
     )
 
     def do_GET(self):  # noqa: N802
-        path = self.path
+        # 真实静态服务器（http.server / Caddy）忽略 query；剥掉 __lwa_probe 等
+        path = self.path.split("?", 1)[0]
         if path == "/" or path == "/alias/":
             self._send(200, self.HTML if path == "/alias/" else b"root")
         elif path == "/alias/assets/app.js":
@@ -624,7 +625,7 @@ def test_stop_all_builtin_kills_pid_less_orphans(workspace, config, monkeypatch)
                         lambda: [(65599, "demo-static")])
     killed = []
     monkeypatch.setattr(gateway, "_kill_process",
-                        lambda pid, proc=None: killed.append(pid) or True)
+                        lambda pid, proc=None, **kw: killed.append(pid) or True)
 
     result = gateway.stop_all_builtin()
     assert result == ["demo-static"]

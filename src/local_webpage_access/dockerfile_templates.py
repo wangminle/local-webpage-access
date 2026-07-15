@@ -72,12 +72,16 @@ def generate_dockerfile(manifest: InstanceManifest, workspace: Workspace) -> Pat
 
     out_path.write_text(content, encoding="utf-8")
     # BUG-117：构建上下文是 apps/<id>/，.dockerignore 与 Dockerfile 一并生成。
-    generate_dockerignore(workspace, manifest.id)
+    # BUG-128：有 build 步骤才排除 dist/build（构建会重生成）；否则保留预构建产物。
+    has_build = bool(manifest.entry and manifest.entry.build)
+    generate_dockerignore(
+        workspace, manifest.id, exclude_build_artifacts=has_build
+    )
     log.info("已生成 Dockerfile：%s", out_path)
     return out_path
 
 
-_DOCKERIGNORE = """\
+_DOCKERIGNORE_BASE = """\
 # 由 lwa 自动生成，请勿手动编辑。
 # 构建上下文为 apps/<id>/（compose context: ..）。
 **/node_modules
@@ -91,18 +95,31 @@ _DOCKERIGNORE = """\
 **/.pytest_cache
 **/.mypy_cache
 **/.ruff_cache
-**/dist
-**/build
 **/.DS_Store
 source/
 """
 
+# 仅当 Dockerfile 含构建步骤时追加：构建期会重新生成产物。
+# 无 build 命令时保留 dist/build，避免丢掉预构建入口（BUG-128）。
+_DOCKERIGNORE_BUILD_ARTIFACTS = """\
+**/dist
+**/build
+"""
 
-def generate_dockerignore(workspace: Workspace, instance_id: str) -> Path:
-    """写入 ``apps/<id>/.dockerignore``（BUG-117）。"""
+
+def generate_dockerignore(
+    workspace: Workspace,
+    instance_id: str,
+    *,
+    exclude_build_artifacts: bool = False,
+) -> Path:
+    """写入 ``apps/<id>/.dockerignore``（BUG-117 / BUG-128）。"""
     path = workspace.app_dir(instance_id) / ".dockerignore"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_DOCKERIGNORE, encoding="utf-8")
+    content = _DOCKERIGNORE_BASE
+    if exclude_build_artifacts:
+        content += _DOCKERIGNORE_BUILD_ARTIFACTS
+    path.write_text(content, encoding="utf-8")
     return path
 
 
@@ -124,15 +141,17 @@ def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
         build_step = f"RUN {manifest.entry.build}\n"
     dependency_copy = _node_dependency_copy_block(install)
 
+    # BUG-122：安装/构建阶段不可设 NODE_ENV=production，否则 npm 会 omit
+    # devDependencies，导致 tsc/vite 等构建工具缺失。运行期再切 production。
     lines = [
         header,
         f"FROM {_NODE_IMAGE}",
         "WORKDIR /app",
-        "ENV NODE_ENV=production",
         dependency_copy,
         f"RUN {install}",
         "COPY current/ ./",
         build_step,
+        "ENV NODE_ENV=production",
         "ENV HOST=0.0.0.0",
         f"ENV PORT={internal_port}",
         f"EXPOSE {internal_port}",

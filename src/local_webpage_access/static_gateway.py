@@ -23,9 +23,11 @@ import urllib.request
 from pathlib import Path
 
 from local_webpage_access.config import Config
+from local_webpage_access.daemon import pid_cmdline_contains
 from local_webpage_access.errors import GatewayError
 from local_webpage_access.logging import get_logger, write_instance_log
 from local_webpage_access.paths import Workspace
+from local_webpage_access.probe import mark_probe_url
 
 log = get_logger("gateway")
 
@@ -76,6 +78,13 @@ _FALLBACK_TEMPLATE = """\
 \tfile_server
 \tencode gzip
 {rate_limit_block}
+\tlog {{
+\t\toutput file {access_log} {{
+\t\t\troll_size 10mb
+\t\t\troll_keep 3
+\t\t}}
+\t\tformat json
+\t}}
 }}
 """
 
@@ -234,6 +243,9 @@ class StaticGateway:
             root=_caddy_quote(str(root).replace("\\", "/")),
             site_id=instance_id,
             rate_limit_block=self._rate_limit_directive(instance_id),
+            access_log=_caddy_quote(
+                str(self.ws.logs / "static-access.log").replace("\\", "/")
+            ),
         )
         path = self.site_config_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -419,7 +431,7 @@ class StaticGateway:
         默认探 ``/``；别名统一入口端口（:staticGatewayPort）的根路径不提供服务
         （仅 ``/<alias>/`` 有路由），探测入口时应传 ``path="/<alias>/"``（BUG-080）。
         """
-        url = f"http://127.0.0.1:{host_port}{path}"
+        url = mark_probe_url(f"http://127.0.0.1:{host_port}{path}")
         try:
             resp = urllib.request.urlopen(url, timeout=timeout)
             return 200 <= resp.status < 400
@@ -492,7 +504,12 @@ class StaticGateway:
 
     def _reload_once(self) -> tuple[bool, str]:
         """执行一次 ``caddy reload``，返回 (是否成功, stderr 文本)。"""
-        _refuse_caddy_admin_in_pytest("reload")
+        try:
+            _refuse_caddy_admin_in_pytest("reload")
+        except RuntimeError as exc:
+            # BUG-131：reload 属于可软失败路径，交给 _sync_main_config 记 WARN；
+            # caddy_start 仍直接拒绝，避免测试触碰生产 admin。
+            return False, str(exc)
         cmd = [
             "caddy",
             "reload",
@@ -519,6 +536,9 @@ class StaticGateway:
         ok, stderr = self._reload_once()
         if ok:
             return True, ""
+        # BUG-131：pytest 防护拒绝触碰生产 admin 时不要自愈拉起 caddy_start。
+        if "BUG-121" in stderr:
+            return False, stderr
         log.warning(
             "caddy reload 失败，尝试自愈（ensure_caddy_running + reload）：%s",
             stderr.strip(),
@@ -835,7 +855,7 @@ class StaticGateway:
                 "切换后端：停止残留 builtin http.server %s（pid=%d，无 pid 文件）",
                 iid, pid,
             )
-            if self._kill_process(pid):
+            if self._kill_process(pid, expected_path=self.ws.apps):
                 stopped.append(iid)
                 seen_pids.add(pid)
         return stopped
@@ -967,13 +987,16 @@ class StaticGateway:
 
     def _stop_builtin(self, instance_id: str) -> None:
         proc = self._procs.pop(instance_id, None)
-        pid = self._read_pid(instance_id)
-        if pid is None:
-            # PID 文件缺失时从句柄兜底取 pid，确保仍能终止并回收本网关启动的子进程
-            pid = proc.pid if proc is not None else None
+        # BUG-125：有 Popen 句柄时信任句柄 PID，不让陈旧/被篡改的 pidfile
+        # 把终止目标引向无关进程；无句柄的跨实例停止才读取 pidfile 并验身份。
+        pid = proc.pid if proc is not None else self._read_pid(instance_id)
         if pid is None:
             return
-        if self._kill_process(pid, proc=proc):
+        if self._kill_process(
+            pid,
+            proc=proc,
+            expected_path=self.ws.app_public(instance_id),
+        ):
             self._clear_pid(instance_id)
         else:
             # kill 失败：保留 PID 文件，便于重试或人工排查（BUG-015）。
@@ -991,7 +1014,11 @@ class StaticGateway:
         )
 
     def _kill_process(
-        self, pid: int, *, proc: subprocess.Popen | None = None
+        self,
+        pid: int,
+        *,
+        proc: subprocess.Popen | None = None,
+        expected_path: Path | None = None,
     ) -> bool:
         """终止进程并等待其退出（BUG-015 / BUG-045）。
 
@@ -1004,6 +1031,16 @@ class StaticGateway:
         而 ``os.kill(pid, 0)`` 对僵尸恒返回 True，会把已退出的子进程误判为
         存活，进而误报 kill 失败并保留 PID 文件（BUG-045）。
         """
+        # BUG-125：没有 Popen 句柄时 PID 可能已复用。只有命令行同时包含
+        # http.server 与该实例 public（或工作区 apps 前缀）才允许 killpg。
+        if proc is None and self._pid_alive(pid):
+            identity_path = expected_path or self.ws.apps
+            if not pid_cmdline_contains(pid, "http.server", str(identity_path)):
+                log.warning(
+                    "静态服务 PID %d 身份不匹配，拒绝终止并清理陈旧 pidfile",
+                    pid,
+                )
+                return True
         try:
             if os.name == "nt":
                 result = subprocess.run(

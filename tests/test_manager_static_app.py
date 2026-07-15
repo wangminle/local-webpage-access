@@ -10,6 +10,7 @@ DEV-046 把纯渲染函数抽到 ``helpers.js``（``window.LWA`` / ``__LWA_TEST_
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -27,8 +28,9 @@ const vm = require("node:vm");
 """
 
 
-def _run(script: str) -> None:
-    subprocess.run(["node", "-e", _VM_PRELUDE + script], check=True)
+def _run(script: str, env: dict[str, str] | None = None) -> None:
+    run_env = {**os.environ, **(env or {})}
+    subprocess.run(["node", "-e", _VM_PRELUDE + script], check=True, env=run_env)
 
 
 def _load_helpers_body() -> str:
@@ -40,7 +42,8 @@ def _load_app_body() -> str:
 
 
 def test_helpers_format_local_date_time() -> None:
-    """更新时间应显示为本地主机标准时间格式，而不是原始 ISO 字符串。"""
+    """更新时间一律换算到本机时区显示（带时区的 ISO 也要转本地，而非保留源时区）。"""
+    # 固定本机时区，避免测试机时区差异导致断言漂移
     _run(
         f"""
 const assert = require("node:assert");
@@ -50,11 +53,16 @@ const context = {{
 }};
 vm.runInNewContext({_load_helpers_body()}, context);
 const f = context.window.__LWA_TEST_HOOKS__.formatLocalDateTime;
+// UTC 时间换算到本地（+08:00）
+assert.strictEqual(f("2026-07-15T02:00:00+00:00"), "2026-07-15 10:00:00(UTC+8)");
+assert.strictEqual(f("2026-07-15T02:00:00Z"), "2026-07-15 10:00:00(UTC+8)");
+// 源时区即本地时区，时间不变
 assert.strictEqual(f("2026-07-07T10:08:00+08:00"), "2026-07-07 10:08:00(UTC+8)");
-assert.strictEqual(f("2026-07-06T20:12:09+08:00"), "2026-07-06 20:12:09(UTC+8)");
-assert.strictEqual(f("2026-07-07T02:38:00+05:30"), "2026-07-07 02:38:00(UTC+5:30)");
+// 源时区非本地需换算：02:38+05:30 == 05:08+08:00
+assert.strictEqual(f("2026-07-07T02:38:00+05:30"), "2026-07-07 05:08:00(UTC+8)");
 assert.strictEqual(f(""), "—");
-"""
+""",
+        env={"TZ": "Asia/Shanghai"},
     )
 
 
@@ -246,5 +254,125 @@ const tbodyCtx = {{
 const html = capturedRoot.computed.tbodyHtml.call(tbodyCtx);
 assert.ok(html.indexOf("pageview-btn") !== -1, html);
 assert.ok(html.indexOf("data-op=\\"pageview\\"") !== -1, html);
+"""
+    )
+
+
+def test_render_pageview_ip_list_panel_and_local_badge() -> None:
+    """IMP-026：独立 IP 列表用 details 展开、本机徽标、转义、空态。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: function () {{ throw new Error("no fetch"); }},
+  location: {{ hostname: "127.0.0.1", search: "", pathname: "/" }},
+  sessionStorage: {{ getItem: function () {{ return null; }}, setItem: function () {{}}, removeItem: function () {{}} }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+// renderPageviewHtml 定义在 createManagerApp 作用域内，调用一次工厂以填充测试钩子
+context.window.LWA.createManagerApp(
+  {{ createApp: function (root) {{ return {{ mount: function () {{}} }}; }} }},
+  {{
+    document: null,
+    fetch: function () {{ throw new Error("no fetch"); }},
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+const render = context.window.__LWA_TEST_HOOKS__.renderPageviewHtml;
+assert.strictEqual(typeof render, "function");
+
+var html = render("demo", {{
+  byDay: [{{ day: "2026-07-15", hits: 2, uniqueIps: 2 }}],
+  recent: [],
+  source: "caddy",
+  uniqueIpList: [
+    {{ ip: "10.0.0.5", count: 1, lastSeen: "2026-07-15T10:00:00+08:00", local: true }},
+    {{ ip: "8.8.8.8", count: 1, lastSeen: "2026-07-15T10:01:00+08:00", local: false }},
+    {{ ip: "<x>", count: 1, lastSeen: "2026-07-15T10:02:00+08:00", local: false }}
+  ],
+}}, {{ hits: 2, uniqueIps: 2, source: "caddy", lastSeen: "2026-07-15T10:02:00+08:00" }});
+
+assert.ok(html.indexOf('class="ip-list"') !== -1, "应有 details.ip-list 容器");
+assert.ok(html.indexOf("独立 IP") !== -1, "应保留「独立 IP」标签");
+assert.ok(html.indexOf("ip-local") !== -1, "本机 IP 行应有 ip-local 类");
+assert.ok(html.indexOf("本机") !== -1, "应显示本机徽标文字");
+assert.ok(html.indexOf("8.8.8.8") !== -1, "应列出非本机 IP");
+assert.ok(html.indexOf("<x>") === -1, "IP 文本应被转义，不得出现裸 <x>");
+assert.ok(html.indexOf("&lt;x&gt;") !== -1, "转义后应含 &lt;x&gt;");
+
+// 空态
+var html2 = render("demo", {{ byDay: [], recent: [], source: "caddy", uniqueIpList: [] }}, {{ hits: 0, uniqueIps: 0 }});
+assert.ok(html2.indexOf("暂无") !== -1, "空列表显示「暂无」");
+"""
+    )
+
+
+def test_close_ip_list_on_outside_click() -> None:
+    """IMP-026 修订：点击 IP 面板外的任意位置应收起所有展开的 details。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: function () {{ throw new Error("no fetch"); }},
+  location: {{ hostname: "127.0.0.1", search: "", pathname: "/" }},
+  sessionStorage: {{ getItem: function () {{ return null; }}, setItem: function () {{}}, removeItem: function () {{}} }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+
+// 两个已展开的面板（details.open=true）
+var panelA = {{ open: true }};
+var panelB = {{ open: true }};
+var fakeDoc = {{ querySelectorAll: function () {{ return [panelA, panelB]; }} }};
+
+// 用 fakeDoc 构造工厂，使闭包内的 doc 指向它
+context.window.LWA.createManagerApp(
+  {{ createApp: function () {{ return {{ mount: function () {{}} }}; }} }},
+  {{
+    document: fakeDoc,
+    fetch: function () {{ throw new Error("no fetch"); }},
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+const close = context.window.__LWA_TEST_HOOKS__.closeIpListsOnOutsideClick;
+
+// 命中点在 .ip-list 之外 → 关闭所有展开面板
+close({{ target: {{ closest: function () {{ return null; }} }} }});
+assert.strictEqual(panelA.open, false);
+assert.strictEqual(panelB.open, false);
+
+// 命中点在 .ip-list 之内 → 不收起
+panelA.open = true;
+close({{ target: {{ closest: function (sel) {{ return sel === ".ip-list" ? {{}} : null; }} }} }});
+assert.strictEqual(panelA.open, true);
 """
     )

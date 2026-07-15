@@ -130,11 +130,11 @@ select:focus-visible,
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 16px; /* 与 h1 同字号，供 logo 的 1em 对齐字母盒 */
+  font-size: 16px; /* 与 h1 同字号，logo 以 em 为单位随其缩放 */
 }
 .topbar-logo {
-  height: 1em;
-  width: 1em;
+  height: 2em; /* 放大至标题字高 2 倍（约 32px） */
+  width: 2em;
   flex: none;
   display: block;
   border-radius: 3px;
@@ -696,3 +696,37 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 .pv-recent td { padding: 4px 8px; border-bottom: 1px solid rgba(127, 127, 127, 0.2); text-align: left; }
 .pv-recent th { color: var(--muted, #6b7280); font-weight: 600; }
 .pv-recent td:nth-child(3) { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* IMP-026：独立 IP 列表小面板（details 展开，v-html 下零 JS） */
+.ip-list { position: relative; display: inline-block; }
+.ip-list > summary {
+  cursor: pointer; list-style: none; user-select: none;
+  color: var(--primary); font-weight: 600;
+}
+.ip-list > summary::-webkit-details-marker { display: none; }
+.ip-list > summary::after { content: " ▾"; font-size: 0.8em; color: var(--text-muted); }
+.ip-list[open] > summary::after { content: " ▴"; }
+.ip-list > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 3px; }
+.ip-list-panel {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 20;
+  min-width: 260px; max-width: 420px; max-height: 280px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 6px 8px;
+}
+.ip-list-panel ul { list-style: none; margin: 0; padding: 0; }
+.ip-list-panel li {
+  padding: 5px 2px; border-bottom: 1px solid var(--border); font-size: 0.85em;
+}
+.ip-list-panel li:last-child { border-bottom: none; }
+/* 每个 IP 两行：首行 IP(+本机徽标)，次行 访问次数·最近时间 */
+.ip-list-panel .ip-addr { display: block; font-family: var(--monospace); word-break: break-all; }
+.ip-list-panel .ip-meta { display: block; margin-top: 2px; color: var(--text-muted); white-space: nowrap; font-size: 0.92em; }
+.ip-badge { font-style: normal; font-weight: 600; font-size: 0.8em;
+  color: var(--green); background: var(--green-bg); padding: 0 5px; border-radius: 999px;
+  margin-left: 4px; }
+.ip-local .ip-addr { color: var(--green); }
+/* 窄屏：面板降级为文档流，避免被抽屉裁切 */
+@media (max-width: 560px) {
+  .ip-list { display: block; }
+  .ip-list-panel { position: static; max-width: none; box-shadow: none; border-color: var(--border); }
+}

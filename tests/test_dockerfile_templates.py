@@ -421,3 +421,48 @@ def test_generate_dockerfile_writes_dockerignore(workspace: Workspace) -> None:
     ignore = (workspace.app_dir("api") / ".dockerignore").read_text(encoding="utf-8")
     for pattern in ("**/node_modules", "**/.git", "**/__pycache__", "**/.env", "source/"):
         assert pattern in ignore
+
+
+def test_node_production_env_only_after_install_and_build(
+    workspace: Workspace,
+) -> None:
+    """BUG-122：开发依赖完成 install/build 后才切 NODE_ENV=production。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        kind=Kind.NODE,
+        install="npm ci",
+        build="npm run build",
+        start="npm start",
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+
+    env_index = content.index("ENV NODE_ENV=production")
+    assert env_index > content.index("RUN npm ci")
+    assert env_index > content.index("RUN npm run build")
+    assert "ENV NODE_ENV=production" not in content[: content.index("RUN npm ci")]
+
+
+def test_dockerignore_dist_only_for_build_entry(workspace: Workspace) -> None:
+    """BUG-128：仅有 build 命令时排除宿主 dist/build 产物。"""
+    workspace.ensure_app_dirs("with-build")
+    with_build = _mk_manifest(
+        mid="with-build",
+        kind=Kind.NODE,
+        install="npm ci",
+        build="npm run build",
+        start="npm start",
+    )
+    generate_dockerfile(with_build, workspace)
+    ignore = (workspace.app_dir("with-build") / ".dockerignore").read_text()
+    assert "**/dist" in ignore
+
+    workspace.ensure_app_dirs("without-build")
+    without_build = _mk_manifest(
+        mid="without-build",
+        kind=Kind.NODE,
+        install="npm ci",
+        start="npm start",
+    )
+    generate_dockerfile(without_build, workspace)
+    ignore = (workspace.app_dir("without-build") / ".dockerignore").read_text()
+    assert "**/dist" not in ignore

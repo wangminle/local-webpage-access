@@ -639,6 +639,24 @@ def test_stop_daemon_noop_when_never_started(workspace: Workspace) -> None:
     assert daemon_mod.stop_daemon(workspace) is True
 
 
+def test_stop_daemon_refuses_foreign_reused_pid(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-125：daemon PID 已复用时只清状态，不终止无关进程。"""
+    daemon_mod.write_state(
+        workspace,
+        daemon_mod.DaemonState(enabled=True, pid=4242, started_at="now"),
+    )
+    monkeypatch.setattr(daemon_mod, "is_pid_alive", lambda pid: True)
+    monkeypatch.setattr(daemon_mod, "pid_cmdline_contains", lambda pid, *needles: False)
+    killed: list[int] = []
+    monkeypatch.setattr(daemon_mod.os, "kill", lambda pid, sig: killed.append(pid))
+
+    assert daemon_mod.stop_daemon(workspace) is True
+    assert killed == []
+    assert daemon_mod.read_state(workspace).enabled is False
+
+
 # ---- IMP-011：inbox 防污染（on_conflict=error + processed 归档）-------------
 
 

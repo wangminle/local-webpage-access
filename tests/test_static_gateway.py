@@ -65,6 +65,19 @@ def test_generate_site_config_writes_file(gateway: StaticGateway, workspace: Wor
     assert str(root).replace("\\", "/") in content
 
 
+def test_generate_site_config_includes_access_log(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """IMP-028：直连端口站点写入共享 access log，供浏览量按端口归属。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+    content = gateway.site_config_path("demo").read_text(encoding="utf-8")
+    assert "log {" in content
+    assert "format json" in content
+    assert str(workspace.logs / "static-access.log").replace("\\", "/") in content
+
+
 def test_remove_site_config(gateway: StaticGateway, workspace: Workspace) -> None:
     root = workspace.app_public("demo")
     root.mkdir(parents=True)
@@ -457,6 +470,28 @@ def test_stop_builtin_clears_pid_when_kill_succeeds(
 
     gateway._stop_builtin("demo")
 
+    assert gateway._read_pid("demo") is None
+
+
+def test_stop_builtin_refuses_foreign_reused_pid(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """BUG-125：孤儿 PID 身份不匹配时清 pidfile，但绝不 killpg。"""
+    gateway._write_pid("demo", 4242)
+    monkeypatch.setattr(gateway, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.pid_cmdline_contains",
+        lambda pid, *needles: False,
+    )
+    killed: list[int] = []
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.os.killpg",
+        lambda pgid, sig: killed.append(pgid),
+    )
+
+    gateway._stop_builtin("demo")
+
+    assert killed == []
     assert gateway._read_pid("demo") is None
 
 

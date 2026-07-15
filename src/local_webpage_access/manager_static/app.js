@@ -237,13 +237,43 @@
     function renderPageviewHtml(id, data, pv) {
       var byDay = data.byDay || [];
       var recent = data.recent || [];
+      var ipList = data.uniqueIpList || [];
       var total = (pv && pv.hits) || byDay.reduce(function (a, d) { return a + (d.hits || 0); }, 0);
+      var ipCount = (pv && pv.uniqueIps) || ipList.length;
+      var ipDetails =
+        '<details class="ip-list"><summary>' + Number(ipCount).toLocaleString() + " 个</summary>" +
+        '<div class="ip-list-panel">';
+      if (ipList.length) {
+        ipDetails += "<ul>" +
+          ipList
+            .map(function (it) {
+              var cls = it.local ? "ip-local" : "";
+              var badge = it.local ? ' <em class="ip-badge">本机</em>' : "";
+              return (
+                '<li class="' +
+                cls +
+                '"><span class="ip-addr">' +
+                LWA.esc(it.ip || "") +
+                badge +
+                '</span><span class="ip-meta">' +
+                Number(it.count || 0).toLocaleString() +
+                " 次 · " +
+                LWA.esc(LWA.formatLocalDateTime(it.lastSeen)) +
+                "</span></li>"
+              );
+            })
+            .join("") +
+          "</ul>";
+      } else {
+        ipDetails += '<p class="cell-muted">暂无</p>';
+      }
+      ipDetails += "</div></details>";
       var html = "";
       html += section(
         "概要",
         '<dl class="detail-kv">' +
           "<dt>累计访问</dt><dd>" + Number(total).toLocaleString() + " 次</dd>" +
-          "<dt>独立 IP</dt><dd>" + ((pv && pv.uniqueIps) || 0) + " 个</dd>" +
+          "<dt>独立 IP</dt><dd>" + ipDetails + "</dd>" +
           "<dt>数据来源</dt><dd>" + LWA.esc(LWA.sourceLabel((pv && pv.source) || data.source)) + "</dd>" +
           "<dt>最近访问</dt><dd>" + LWA.esc(LWA.formatLocalDateTime(pv && pv.lastSeen)) + "</dd>" +
           "</dl>"
@@ -284,6 +314,17 @@
         '<p class="detail-hint cell-muted">数据为按日志惰性统计的近似值：静态站点读网关/访问日志，'
         + "容器实例尽力解析应用 access 行。访问量统计不影响业务运行。</p>";
       return html;
+    }
+
+    // IMP-026 修订：点击 IP 面板外任意处自动收起。
+    // <details> 原生只在点击 summary 时切换开合，因此在 document 上委托一次：
+    // 只要命中点不在任何 .ip-list 内，就关闭所有已展开的面板。
+    function closeIpListsOnOutsideClick(e) {
+      var t = e.target;
+      if (t && t.closest && !t.closest(".ip-list")) {
+        var opened = doc ? doc.querySelectorAll(".ip-list[open]") : [];
+        for (var i = 0; i < opened.length; i++) opened[i].open = false;
+      }
     }
 
     // ---- 根组件 ----
@@ -601,13 +642,25 @@
       template: ROOT_TEMPLATE,
       mounted: function () {
         this.requireToken();
-        if (doc) doc.addEventListener("keydown", this.onKeydown);
+        if (doc) {
+          doc.addEventListener("keydown", this.onKeydown);
+          doc.addEventListener("click", closeIpListsOnOutsideClick);
+        }
       },
       unmounted: function () {
         if (this._timer) clearIntervalFn(this._timer);
-        if (doc) doc.removeEventListener("keydown", this.onKeydown);
+        if (doc) {
+          doc.removeEventListener("keydown", this.onKeydown);
+          doc.removeEventListener("click", closeIpListsOnOutsideClick);
+        }
       },
     };
+
+    // IMP-026：暴露纯渲染函数供测试（renderPageviewHtml 等定义在本作用域内）
+    if (typeof window !== "undefined" && window.__LWA_TEST_HOOKS__) {
+      window.__LWA_TEST_HOOKS__.renderPageviewHtml = renderPageviewHtml;
+      window.__LWA_TEST_HOOKS__.closeIpListsOnOutsideClick = closeIpListsOnOutsideClick;
+    }
 
     var app = vue.createApp(root);
     return {
@@ -624,7 +677,7 @@
   var ROOT_TEMPLATE = [
     '<header class="topbar">',
     '  <div class="topbar-title">',
-    '    <img class="topbar-logo" src="/logo.svg" width="16" height="16" alt="" />',
+    '    <img class="topbar-logo" src="/logo.svg" width="32" height="32" alt="" />',
     '    <h1>Local Webpage Access</h1>',
     '    <span class="version">{{ version }}</span>',
     "  </div>",

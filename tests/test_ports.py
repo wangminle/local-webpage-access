@@ -14,6 +14,8 @@ from local_webpage_access.ports import (
     build_lan_url,
     build_network_entry,
     detect_lan_ip,
+    detect_local_ips,
+    is_local_ip,
     is_port_in_use,
     resolve_lan_ip,
 )
@@ -301,3 +303,59 @@ def test_build_network_entry_alias_route_url_none_when_port_disabled() -> None:
     assert entry["routeMode"] == "name"
     assert entry["routeHost"] == "demo"
     assert entry["routeUrl"] is None  # 入口未启用，只能走端口
+
+
+# ---- IMP-026：本机 IP 判定 ---------------------------------------------------
+
+
+def test_is_local_ip_loopback() -> None:
+    local = {"127.0.0.1", "::1"}
+    assert is_local_ip("127.0.0.1", local)
+    assert is_local_ip("::1", local)
+
+
+def test_is_local_ip_exact_membership_not_whole_subnet() -> None:
+    """只匹配本机实际地址，不把整个 Tailscale CGNAT 网段当本机。"""
+    local = {"10.0.0.5", "100.64.0.5"}  # 含一个本机 Tailscale 地址
+    assert is_local_ip("10.0.0.5", local)
+    assert is_local_ip("100.64.0.5", local)  # 本机实际 Tailscale → 真
+    assert not is_local_ip("100.64.0.6", local)  # 同网段其他节点 → 假
+    assert not is_local_ip("10.0.0.9", local)
+
+
+def test_is_local_ip_normalizes_mapped_and_zone() -> None:
+    local = {"10.0.0.5", "fe80::1"}
+    assert is_local_ip("::ffff:10.0.0.5", local)  # IPv4-mapped IPv6 → IPv4
+    assert is_local_ip("fe80::1%eth0", local)  # 带 zone-id
+
+
+def test_is_local_ip_invalid_input() -> None:
+    assert not is_local_ip("not-an-ip", {"127.0.0.1"})
+    assert not is_local_ip("", {"127.0.0.1"})
+    assert not is_local_ip("999.999.999.999", {"127.0.0.1"})
+
+
+def test_detect_local_ips_includes_loopback_and_lan(monkeypatch) -> None:
+    """loopback 恒在；tailscale 子进程与 getaddrinfo 被桩掉避免外部依赖。"""
+    import local_webpage_access.ports as ports
+
+    monkeypatch.setattr(ports, "_tailscale_ips", lambda: set())
+    monkeypatch.setattr(ports, "detect_lan_ip", lambda: "10.0.0.5")
+    monkeypatch.setattr(ports.socket, "getaddrinfo", lambda *a, **k: [])
+    ips = detect_local_ips()
+    assert "127.0.0.1" in ips
+    assert "::1" in ips
+    assert "10.0.0.5" in ips
+
+
+def test_detect_local_ips_includes_tailscale_output(monkeypatch) -> None:
+    """tailscale ip 输出纳入本机集合；同 tailnet 其他地址仍非本机。"""
+    import local_webpage_access.ports as ports
+
+    monkeypatch.setattr(ports, "_tailscale_ips", lambda: {"100.64.0.5"})
+    monkeypatch.setattr(ports, "detect_lan_ip", lambda: None)
+    monkeypatch.setattr(ports.socket, "getaddrinfo", lambda *a, **k: [])
+    ips = detect_local_ips()
+    assert "100.64.0.5" in ips
+    assert is_local_ip("100.64.0.5", ips)
+    assert not is_local_ip("100.64.0.99", ips)  # 同 tailnet 其他节点不是本机

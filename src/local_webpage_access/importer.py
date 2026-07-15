@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import ZipImportError
+from local_webpage_access.errors import LwaError, ZipImportError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.security import ZipSanitizeResult
 from local_webpage_access.models import (
@@ -191,18 +191,19 @@ class Importer:
                 f"如需另建新实例，请用 --name 指定不同的名称。",
                 instance_id=slug,
             )
-        instance_id = self._resolve_unique_id(slug)
-
         # IMP-006：路径别名在写盘前校验，避免半成品写入后才发现冲突。
         if path_alias is not None:
             existing = set(self.registry.list_route_hosts().keys())
             validate_path_alias(path_alias, existing_aliases=existing)
-            log.info("路径别名 %s 已校验通过，将写入实例 %s", path_alias, instance_id)
+            log.info("路径别名 %s 已校验通过", path_alias)
+
+        # BUG-127：目录本身作为原子 claim。仅先查再 mkdir 会让并发导入拿到同一 slug。
+        instance_id = self._claim_unique_id(slug)
+        if path_alias is not None:
+            log.info("路径别名 %s 将写入实例 %s", path_alias, instance_id)
 
         log.info("开始导入 %s → 实例 %s（sha256=%s）", src, instance_id, zip_hash[:12])
 
-        # 创建目录结构
-        self.ws.ensure_app_dirs(instance_id)
         app_dir = self.ws.app_dir(instance_id)
 
         try:
@@ -434,6 +435,18 @@ class Importer:
             old_current = parent / f"{current_dir.name}.old"
             manifest_snapshot = manifest_path.read_bytes()
             old_resources = self.registry.get_resources(instance_id)
+            old_port_rows = (
+                self.registry.get_static_site(instance_id),
+                self.registry.get_container(instance_id),
+            )
+            old_host_port = next(
+                (
+                    int(row["host_port"])
+                    for row in old_port_rows
+                    if row and row.get("host_port")
+                ),
+                None,
+            )
             current_swapped = False
 
             # 清理可能残留的暂存区
@@ -445,9 +458,10 @@ class Importer:
                 # 解压到暂存区 + 重扫
                 sanitized = safe_extract(src, staging)
                 detection = self.scanner.detect(staging)
+                kind_changed = self._kind_changed(old_manifest, detection)
 
                 # kind/runtime 变化拒绝（首版）
-                if not force_kind_change and self._kind_changed(old_manifest, detection):
+                if not force_kind_change and kind_changed:
                     raise ZipImportError(
                         f"新 zip 的形态发生变化（"
                         f"{old_manifest.kind.value}/{old_manifest.runtime.value}"
@@ -456,6 +470,21 @@ class Importer:
                         f"或加 --force-kind-change 确认强制迁移",
                         instance_id=instance_id,
                     )
+
+                # BUG-124：跨形态 upsert 会删除旧 static_sites/containers 子表，
+                # 必须在换表前按旧 manifest 停掉 runtime。即使 desired=stopped 也尝试，
+                # 以清理历史遗留的存活进程；业务停止失败只警告，不阻断从未托管实例更新。
+                if force_kind_change and kind_changed:
+                    try:
+                        from local_webpage_access.hosting import stop_instance
+
+                        stop_instance(self.ws, self.config, self.registry, instance_id)
+                    except LwaError as exc:
+                        log.warning(
+                            "实例 %s 跨形态更新前停止旧 runtime 失败（继续更新）：%s",
+                            instance_id,
+                            exc,
+                        )
 
                 # 备份 original.zip
                 orig_zip = self.ws.app_original_zip(instance_id)
@@ -493,6 +522,13 @@ class Importer:
                 # 避免 upsert_from_manifest 用 manifest 的空 hostPort 清零登记
                 # （hosting 重启时靠 static_sites/containers 表复用端口）
                 self._preserve_hostport(manifest, instance_id)
+                # BUG-124：stop_instance 会按旧 manifest 回写 registry；当端口只存在
+                # 于 registry、尚未同步到 manifest 时会被清空，因此用停止前快照兜底。
+                if old_host_port is not None:
+                    if manifest.static is not None:
+                        manifest.static.hostPort = old_host_port
+                    elif manifest.container is not None:
+                        manifest.container.hostPort = old_host_port
                 # DEV-067 / BUG-112：容器源码已换 → 作废旧部署标记，避免
                 # restart/start 走轻量 compose start 继续跑旧镜像。
                 if (
@@ -600,6 +636,7 @@ class Importer:
             was_running=was_running,
             needs_restart=needs_restart,
             needs_rebuild=needs_rebuild,
+            kind_changed=kind_changed,  # type: ignore[possibly-undefined]
             sanitized=sanitized,  # type: ignore[possibly-undefined]
         )
 
@@ -708,7 +745,26 @@ class Importer:
 
     # ---- id 冲突处理 --------------------------------------------------------
 
+    def _claim_unique_id(self, base_slug: str) -> str:
+        """原子占用实例目录，避免并发导入同一 slug（BUG-127）。"""
+        candidate = base_slug
+        n = 2
+        while True:
+            if self.registry.instance_exists(candidate):
+                candidate = f"{base_slug}-{n}"
+                n += 1
+                continue
+            try:
+                self.ws.app_dir(candidate).mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                candidate = f"{base_slug}-{n}"
+                n += 1
+                continue
+            self.ws.ensure_app_dirs(candidate)
+            return candidate
+
     def _resolve_unique_id(self, base_slug: str) -> str:
+        """兼容旧调用：仅解析可用 ID，不占用目录。"""
         candidate = base_slug
         n = 2
         while self._id_taken(candidate):

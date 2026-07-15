@@ -163,6 +163,41 @@ def is_pid_alive(pid: int) -> bool:
         return False
 
 
+def read_pid_cmdline(pid: int) -> str | None:
+    """读取进程完整命令行；不可读或进程已退出时返回 ``None``（BUG-125）。"""
+    if pid <= 0:
+        return None
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if sys.platform.startswith("linux") and proc_cmdline.is_file():
+        try:
+            raw = proc_cmdline.read_bytes()
+            text = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            return text or None
+        except OSError:
+            return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-ww", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def pid_cmdline_contains(pid: int, *needles: str) -> bool:
+    """进程命令行是否包含全部非空特征串（BUG-125）。"""
+    cmdline = read_pid_cmdline(pid)
+    if not cmdline:
+        return False
+    return all(not needle or needle in cmdline for needle in needles)
+
+
 def _terminate_pid(pid: int, *, timeout: float = 5.0) -> bool:
     """best-effort 终止进程，返回是否成功（或已不存在）。"""
     if pid <= 0:
@@ -851,7 +886,17 @@ def stop_daemon(workspace: Workspace) -> bool:
 
     stopped = True
     if state.pid:
-        stopped = _terminate_pid(state.pid)
+        # BUG-125：PID 可能已被系统复用。仅终止命令行同时属于 daemon 与本工作区
+        # 的进程；身份不匹配视为陈旧状态，绝不误杀无关进程。
+        if is_pid_alive(state.pid) and not pid_cmdline_contains(
+            state.pid,
+            "local_webpage_access.daemon",
+            str(workspace.root),
+        ):
+            log.warning("daemon PID %s 身份不匹配，按陈旧状态清理", state.pid)
+            stopped = True
+        else:
+            stopped = _terminate_pid(state.pid)
     # 清理锁文件；状态文件保留为 disabled 供 status 查询
     with contextlib.suppress(FileNotFoundError, PermissionError):
         lock_path(workspace).unlink()
@@ -946,6 +991,8 @@ __all__ = [
     "start_lock_path",
     "log_file_path",
     "is_pid_alive",
+    "read_pid_cmdline",
+    "pid_cmdline_contains",
     "is_running",
     "daemon_lock",
     "daemon_start_lock",

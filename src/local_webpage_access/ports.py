@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import socket
+import subprocess
 from typing import Iterable
 
 from local_webpage_access.config import Config
@@ -87,6 +89,94 @@ def detect_lan_ip() -> str | None:
         finally:
             sock.close()
     return None
+
+
+def _normalize_ip(value: str) -> str | None:
+    """规范化 IP 地址字符串，供集合比较。
+
+    - 去掉 zone-id（``fe80::1%eth0`` → ``fe80::1``）。
+    - IPv4-mapped IPv6（``::ffff:1.2.3.4``）归一到 IPv4。
+    - 非法输入返回 ``None``。
+    """
+    if not value:
+        return None
+    addr_str = value.split("%", 1)[0].strip()
+    try:
+        addr = ipaddress.ip_address(addr_str)
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return str(addr)
+
+
+def _tailscale_ips() -> set[str]:
+    """尽力获取本机 Tailscale 地址（命令缺失/超时/异常均返回空集）。"""
+    result: set[str] = set()
+    for family in ("-4", "-6"):
+        try:
+            proc = subprocess.run(  # noqa: S603, S607 — PATH 查找 tailscale，失败即降级
+                ["tailscale", "ip", family],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
+            n = _normalize_ip(line.strip())
+            if n:
+                result.add(n)
+    return result
+
+
+def detect_local_ips() -> set[str]:
+    """构造本机**实际持有**的地址集合（规范化后）。
+
+    来源：loopback ∪ :func:`detect_lan_ip` ∪ hostname 解析地址 ∪ 可用时
+    ``tailscale ip -4/-6`` 输出。任一来源失败静默降级。用于浏览量 IP 列表的
+    「本机」标记——只标记本机真实地址，**不能**把整个 ``100.64.0.0/10`` 网段
+    都判为本机（否则同一 tailnet 的其他节点也会被误标）。
+    """
+    found: set[str] = set()
+    for loopback in ("127.0.0.1", "::1"):
+        n = _normalize_ip(loopback)
+        if n:
+            found.add(n)
+    lan = detect_lan_ip()
+    if lan:
+        n = _normalize_ip(lan)
+        if n:
+            found.add(n)
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None)
+    except OSError:
+        infos = []
+    for info in infos:
+        sockaddr = info[4]
+        if sockaddr and sockaddr[0]:
+            n = _normalize_ip(sockaddr[0])
+            if n:
+                found.add(n)
+    found |= _tailscale_ips()
+    return found
+
+
+def is_local_ip(ip: str, local_ips: set[str] | None = None) -> bool:
+    """``ip`` 是否为本机实际持有的地址。
+
+    ``local_ips`` 为 ``None`` 时即时调用 :func:`detect_local_ips`（会派生子进程，
+    不要在循环里逐 IP 调用——先取一次集合再复用）。
+    """
+    n = _normalize_ip(ip)
+    if n is None:
+        return False
+    if local_ips is None:
+        local_ips = detect_local_ips()
+    return n in local_ips
 
 
 def resolve_lan_ip(config: Config) -> str | None:

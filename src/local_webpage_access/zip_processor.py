@@ -32,6 +32,55 @@ log = get_logger("importer")
 
 _HASH_CHUNK = 64 * 1024
 
+# BUG-123：压缩炸弹防护上限（声明大小 / 成员数；在完整解压前拦截）
+_MAX_ZIP_MEMBERS = 50_000
+_MAX_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+_MAX_SINGLE_MEMBER_BYTES = 512 * 1024 * 1024  # 512 MiB
+_MAX_COMPRESSION_RATIO = 100.0
+_MIN_RATIO_CHECK_BYTES = 1024 * 1024  # 小文本高度重复很常见，不单凭压缩比拒绝
+
+
+def _assert_zip_bomb_safe(
+    members: list[zipfile.ZipInfo], *, path: str | None = None
+) -> None:
+    """按声明元数据拒绝可疑压缩炸弹（BUG-123）。"""
+    if len(members) > _MAX_ZIP_MEMBERS:
+        raise ZipImportError(
+            f"zip 成员数过多（{len(members)} > {_MAX_ZIP_MEMBERS}），疑似压缩炸弹",
+            path=path,
+        )
+    total_uncompressed = 0
+    for member in members:
+        if member.is_dir():
+            continue
+        uncompressed = int(member.file_size or 0)
+        compressed = int(member.compress_size or 0)
+        if uncompressed > _MAX_SINGLE_MEMBER_BYTES:
+            raise ZipImportError(
+                f"zip 成员过大（{member.filename} 声明 "
+                f"{uncompressed} 字节 > {_MAX_SINGLE_MEMBER_BYTES}），疑似压缩炸弹",
+                path=path,
+                member=member.filename,
+            )
+        if (
+            compressed > 0
+            and uncompressed >= _MIN_RATIO_CHECK_BYTES
+            and uncompressed > compressed * _MAX_COMPRESSION_RATIO
+        ):
+            ratio = uncompressed / compressed
+            raise ZipImportError(
+                f"zip 压缩比过高（{member.filename} 约 {ratio:.0f}:1 > "
+                f"{_MAX_COMPRESSION_RATIO:.0f}:1），疑似压缩炸弹",
+                path=path,
+                member=member.filename,
+            )
+        total_uncompressed += uncompressed
+        if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
+            raise ZipImportError(
+                f"zip 解压总大小超限（>{_MAX_UNCOMPRESSED_BYTES} 字节），疑似压缩炸弹",
+                path=path,
+            )
+
 
 def validate_zip(zip_path: Path) -> None:
     """校验 zip 文件存在、扩展名与可读性（含损坏 / 截断检测）。"""
@@ -47,6 +96,8 @@ def validate_zip(zip_path: Path) -> None:
     # 损坏的 zip（如截断）会在 ZipFile 构造或读取时报错
     try:
         with zipfile.ZipFile(zip_path) as zf:
+            # BUG-123：先按声明大小拦截炸弹，再做 CRC 抽检（testzip 会解压）
+            _assert_zip_bomb_safe(zf.infolist(), path=str(zip_path))
             bad = zf.testzip()
             if bad is not None:
                 raise ZipImportError(
@@ -96,6 +147,8 @@ def safe_extract(zip_path: Path, target: Path) -> ZipSanitizeResult:
 
         with zipfile.ZipFile(zip_path) as zf:
             members = zf.infolist()
+            # BUG-123：解压前再次按声明元数据拦截（validate_zip 后文件可能被替换）
+            _assert_zip_bomb_safe(members, path=str(zip_path))
             names = [m.filename for m in members]
             modes = [
                 (m.external_attr >> 16) & 0xFFFF if m.external_attr else 0
@@ -105,6 +158,8 @@ def safe_extract(zip_path: Path, target: Path) -> ZipSanitizeResult:
             # 1. 剥离分类（IMP-001）：冗余包 / 缓存不落盘、不审计
             sanitized = sanitize_zip_members(names, modes=modes)
             keep_members = [members[i] for i in sanitized.keep_indices]
+            # 对保留成员再算一次上限（剥离后仍可能过大）
+            _assert_zip_bomb_safe(keep_members, path=str(zip_path))
             if sanitized.stripped_names:
                 parts = ", ".join(
                     f"{rule}×{n}" for rule, n in sorted(

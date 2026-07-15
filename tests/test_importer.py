@@ -11,7 +11,14 @@ import pytest
 from local_webpage_access.config import Config
 from local_webpage_access.errors import PathError, ZipImportError
 from local_webpage_access.importer import Importer, slugify, titleize
-from local_webpage_access.models import Kind, Runtime, ServingMode, Status
+from local_webpage_access.models import (
+    DesiredState,
+    InstanceManifest,
+    Kind,
+    Runtime,
+    ServingMode,
+    Status,
+)
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 
@@ -158,6 +165,31 @@ def test_import_same_name_appends_suffix(
     r2 = importer.import_zip(zip_path)
     assert r1.instance_id == "demo"
     assert r2.instance_id == "demo-2"
+
+
+def test_import_claim_retries_when_directory_wins_race(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-127：同 slug 目录被并发抢占后，原子 claim 自动尝试 -2。"""
+    zip_path = _make_zip(tmp_path / "demo.zip", {"index.html": "<html></html>"})
+    original_mkdir = Path.mkdir
+    raced = False
+
+    def racing_mkdir(path, *args, **kwargs):  # noqa: ANN001
+        nonlocal raced
+        if path == workspace.app_dir("demo") and kwargs.get("exist_ok") is False:
+            if not raced:
+                raced = True
+                original_mkdir(path, parents=True, exist_ok=False)
+                raise FileExistsError(path)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+    result = importer.import_zip(zip_path)
+
+    assert result.instance_id == "demo-2"
+    assert workspace.app_dir("demo").is_dir()
+    assert workspace.app_manifest_path("demo-2").is_file()
 
 
 def test_import_custom_name(importer: Importer, tmp_path: Path) -> None:
@@ -651,6 +683,46 @@ def test_update_kind_change_forced(
         container_zip, iid, restart=False, force_kind_change=True
     )
     assert result.rebuilt is True
+    assert result.kind_changed is True
+
+
+def test_update_force_kind_change_stops_old_runtime(
+    importer: Importer,
+    workspace: Workspace,
+    registry: Registry,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """BUG-124：跨形态换表前先停止旧 runtime，并恢复原 desiredState。"""
+    static_zip = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(static_zip)
+    iid = r1.instance_id
+    _set_desired_running(workspace, iid)
+    old_manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(old_manifest)
+
+    stopped: list[str] = []
+
+    def fake_stop(ws, config, reg, instance_id):  # noqa: ANN001
+        stopped.append(instance_id)
+        manifest = InstanceManifest.load(ws.app_manifest_path(instance_id))
+        manifest.desiredState = DesiredState.STOPPED
+        manifest.save(ws.app_manifest_path(instance_id))
+        return manifest
+
+    monkeypatch.setattr("local_webpage_access.hosting.stop_instance", fake_stop)
+    container_zip = _make_zip(
+        tmp_path / "demo-api.zip",
+        {"requirements.txt": "fastapi\n", "main.py": "x = 1"},
+    )
+
+    result = importer.update_zip(
+        container_zip, iid, restart=False, force_kind_change=True
+    )
+
+    assert stopped == [iid]
+    assert result.kind_changed is True
+    assert result.manifest.desiredState == DesiredState.RUNNING
 
 
 def test_update_failure_rolls_back(

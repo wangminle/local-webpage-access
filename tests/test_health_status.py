@@ -491,6 +491,31 @@ def test_sync_status_recovers_stale_building_no_build_row(
     assert registry.get_instance("demo")["status"] == "failed"
 
 
+@pytest.mark.parametrize("build_status", ["success", "failed"])
+def test_sync_status_recovers_building_with_old_finished_build(
+    workspace, registry, config, monkeypatch, build_status
+) -> None:
+    """BUG-129：最新构建已结束很久但实例仍 building 时也应自动回收。"""
+    from local_webpage_access import status as status_mod
+
+    _seed_container(workspace, registry, "api")
+    registry.update_status("api", Status.BUILDING.value)
+    build_id = registry.add_build(
+        "api", status=build_status, started_at="2020-01-01T00:00:00"
+    )
+    with registry.conn:
+        registry.conn.execute(
+            "UPDATE builds SET finished_at = ? WHERE id = ?",
+            ("2020-01-01T01:00:00", build_id),
+        )
+    monkeypatch.setattr(status_mod, "_STALE_BUILDING_SECONDS", 0.0)
+
+    changed = sync_status(workspace, config, registry, "api")
+
+    assert changed == {"api": "failed"}
+    assert registry.get_instance("api")["status"] == "failed"
+
+
 # ---- 回归测试：BUG-119 ----------------------------------------------------
 
 

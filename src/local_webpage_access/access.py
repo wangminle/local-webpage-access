@@ -32,6 +32,7 @@ from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.ports import resolve_lan_ip
+from local_webpage_access.probe import mark_probe_url
 from local_webpage_access.registry import Registry
 
 log = get_logger("access")
@@ -482,7 +483,10 @@ def refresh_network_entries(
 def _http_get(url: str, *, timeout: float = _PROBE_TIMEOUT) -> UrlProbe:
     """对 ``url`` 做 GET，返回 :class:`UrlProbe`（不抛异常）。"""
     probe = UrlProbe(url=url)
-    req = urllib.request.Request(url, headers={"User-Agent": "lwa-access-review"})
+    # 实际请求带 __lwa_probe=1（不计入浏览量），UrlProbe 仍展示干净 URL
+    req = urllib.request.Request(
+        mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
