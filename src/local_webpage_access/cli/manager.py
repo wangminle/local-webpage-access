@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import typer
 
-from local_webpage_access.cli._common import log, open_workspace_registry
+from local_webpage_access.cli._common import coordinated_autostart_disable, log, open_workspace_registry
 from local_webpage_access.errors import LwaError
 
 app = typer.Typer(help="控制管理页 HTTP 服务")
@@ -46,6 +46,13 @@ def manager_off() -> None:
     try:
         ws, _config, _reg = open_workspace_registry()
         _reg.close()
+        # IMP-030/030.b：若 manager 自启动单元已加载/启用，先停用，避免 KeepAlive 立刻拉回。
+        note, ok = coordinated_autostart_disable(ws, "manager")
+        if note:
+            typer.secho(note, fg=typer.colors.GREEN if ok else typer.colors.YELLOW)
+        if not ok:
+            # 单元未能停用 → 停进程会被立即拉回，off 无法生效：阻断并提示先 disable（BUG-147）。
+            raise typer.Exit(code=1)
         if not stop_manager(ws):
             typer.secho(
                 "管理页停止失败，进程可能仍在运行；请检查 pid 或端口占用后重试",

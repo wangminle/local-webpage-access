@@ -38,7 +38,7 @@ def _runner_from_map(mapping: dict[tuple[str, ...], subprocess.CompletedProcess]
 
 
 def test_detect_platform_returns_known_value() -> None:
-    assert detect_platform() in {"macos", "linux", "windows", "unknown"}
+    assert detect_platform() in {"macos", "linux", "wsl", "windows", "unknown"}
 
 
 def test_run_setup_all_ok_with_mocked_tools() -> None:
@@ -182,16 +182,18 @@ def test_generate_launchd_plists_macos(tmp_path, monkeypatch) -> None:
     data = plistlib.loads(daemon_plist.read_bytes())
     assert data["Label"] == "com.fenix.lwa.daemon"
     assert data["RunAtLoad"] is True
+    # IMP-030：前台入口（--workspace），不是 detached `on`
     assert data["ProgramArguments"] == [
         "/usr/local/bin/python3",
         "-m",
-        "local_webpage_access",
-        "daemon",
-        "on",
+        "local_webpage_access.daemon",
+        "--workspace",
+        str(root),
     ]
     assert data["WorkingDirectory"] == str(root)
-    # KeepAlive 必须未设置（避免与 lwa X off 冲突）
-    assert "KeepAlive" not in data
+    # IMP-030：前台监管 + KeepAlive（崩溃即拉起，修复 BUG-138）+ PATH（BUG-139）
+    assert "KeepAlive" in data
+    assert "PATH" in data["EnvironmentVariables"]
 
 
 def test_generate_launchd_plists_omits_manager_when_disabled(tmp_path, monkeypatch) -> None:

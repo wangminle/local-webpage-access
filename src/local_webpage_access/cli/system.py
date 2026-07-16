@@ -43,9 +43,7 @@ def setup_cmd(
     import json as json_mod
 
     from local_webpage_access.setup import (
-        format_autostart_report,
         format_setup_report,
-        generate_launchd_plists,
         render_setup_script,
         run_setup,
     )
@@ -55,6 +53,7 @@ def setup_cmd(
         return
 
     if autostart:
+        # IMP-030：`setup --autostart` 委托给统一的 `autostart install`（前台监管）。
         # 自启需要已初始化的工作区（daemon/manager 依赖 local-web.yml）
         try:
             ws, config, _reg = open_workspace_registry()
@@ -66,11 +65,36 @@ def setup_cmd(
                 err=True,
             )
             raise typer.Exit(code=1) from exc
-        skipped_caddy = with_caddy and config.staticGateway != "caddy"
-        written = generate_launchd_plists(
-            ws.root, config, include_caddy=with_caddy
+        typer.secho(
+            "提示：`lwa setup --autostart` 已委托给 `lwa autostart install`（IMP-030，"
+            "推荐直接使用 `lwa autostart install/check/...`）。",
+            fg=typer.colors.CYAN,
         )
-        typer.echo(format_autostart_report(written, skipped_caddy=skipped_caddy))
+        from local_webpage_access import autostart as asm
+        from local_webpage_access.autostart import (
+            EXIT_UNSUPPORTED,
+            AutostartError,
+        )
+
+        try:
+            result = asm.install(ws, config, with_caddy=with_caddy, enable=True)
+        except AutostartError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=EXIT_UNSUPPORTED)
+        for unit in result.written:
+            typer.echo(f"  · {unit.name}: {unit.path}")
+        if not result.enable_ok:
+            typer.secho(
+                "⚠️ 自启动单元已生成但启用失败（单元可能未真正加载）；"
+                "请运行 `lwa autostart check` 复核并按提示修复",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.secho(
+            "已生成并启用自启动单元。运行 `lwa autostart check` 复核完备性。",
+            fg=typer.colors.GREEN,
+        )
         return
 
     report = run_setup(static_gateway=static_gateway)

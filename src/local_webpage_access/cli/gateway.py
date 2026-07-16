@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import typer
 
-from local_webpage_access.cli._common import log, open_workspace_registry
+from local_webpage_access.cli._common import coordinated_autostart_disable, log, open_workspace_registry
 from local_webpage_access.errors import LwaError
 
 app = typer.Typer(help="控制 Caddy 网关（master 生命周期与 :8080 别名入口）")
@@ -145,6 +145,13 @@ def gateway_off() -> None:
     try:
         ws, config, _reg = open_workspace_registry()
         _reg.close()
+        # IMP-030/030.b：若 gateway 自启动单元已加载/启用，先停用，避免 KeepAlive 立刻拉回。
+        note, ok = coordinated_autostart_disable(ws, "gateway")
+        if note:
+            typer.secho(note, fg=typer.colors.GREEN if ok else typer.colors.YELLOW)
+        if not ok:
+            # 单元未能停用 → 停进程会被立即拉回，off 无法生效：阻断并提示先 disable（BUG-147）。
+            raise typer.Exit(code=1)
         if not stop_gateway(ws, config):
             typer.secho(
                 "网关停止失败，Caddy master 可能仍在运行；请检查 admin :2019 后重试",

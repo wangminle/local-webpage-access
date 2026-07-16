@@ -501,11 +501,37 @@ def run_service_main() -> int:
     reg.open()
     reg.close()
 
+    # IMP-030/BUG-147：前台入口回写自身 pid 到 manager.json，使 manager_status /
+    # `lwa manager off` 能识别前台监管进程（不再依赖 `lwa manager on` 事后补写）。
+    write_state(
+        workspace,
+        ManagerState(
+            enabled=True,
+            pid=os.getpid(),
+            started_at=now_iso(),
+            host=config.managerHost,
+            port=config.managerPort,
+        ),
+    )
     try:
         run_manager(workspace, config)
     except Exception:
         log.exception("管理页子进程异常退出")
         return 1
+    finally:
+        # 进程退出（含 uvicorn 收到 SIGTERM 正常返回）后标记未运行，避免状态残留。
+        st = read_state(workspace)
+        if st is not None and st.pid == os.getpid():
+            write_state(
+                workspace,
+                ManagerState(
+                    enabled=False,
+                    pid=st.pid,
+                    started_at=st.started_at,
+                    host=st.host,
+                    port=st.port,
+                ),
+            )
     return 0
 
 

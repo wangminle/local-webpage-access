@@ -133,8 +133,8 @@ select:focus-visible,
   font-size: 16px; /* 与 h1 同字号，logo 以 em 为单位随其缩放 */
 }
 .topbar-logo {
-  height: 2em; /* 放大至标题字高 2 倍（约 32px） */
-  width: 2em;
+  height: 2.4em; /* 放大至标题字高 2.4 倍（约 38px） */
+  width: 2.4em;
   flex: none;
   display: block;
   border-radius: 3px;

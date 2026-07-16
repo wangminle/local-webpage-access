@@ -37,3 +37,22 @@ def fmt_bytes(n: int | None) -> str:
             return f"{n:.1f}{unit}"
         n /= 1024
     return f"{n:.1f}PiB"
+
+
+def coordinated_autostart_disable(ws, service_name: str) -> tuple[str | None, bool]:
+    """IMP-030/030.b：``lwa X off`` 前若自启动单元已加载/启用则先停用，避免被立刻拉回。
+
+    返回 ``(note, ok)``：``note`` 为提示文本（有动作时）；``ok=False`` 表示停用失败，
+    调用方应**阻断后续 stop**（KeepAlive/Restart 会立即把进程拉回，off 无法生效，
+    应提示用户先 ``lwa autostart disable`` 再停服，BUG-147）。
+    """
+    try:
+        from local_webpage_access import autostart as asm
+
+        res = asm.coordinated_disable(ws, service_name)
+        return res.note, res.ok
+    except Exception:  # noqa: BLE001 — 状态未知时 fail-closed，阻断后续 stop（BUG-154）
+        return (
+            "⚠️ 自启动协调异常，停用状态未知；请先 `lwa autostart disable` 再停服",
+            False,
+        )

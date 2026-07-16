@@ -397,6 +397,94 @@ def maybe_start_gateway(workspace: Workspace, config: Config) -> int | None:
         return None
 
 
+def run_gateway_foreground(
+    workspace: Workspace,
+    config: Config,
+    *,
+    poll_interval: float = 10.0,
+) -> int:
+    """前台监管入口（IMP-030）：启动并持有 Caddy master，崩溃自愈，信号优雅退出。
+
+    供 systemd/launchd 作为 ``Type=simple`` 的 ``ExecStart`` 监管（030.c：Caddy 由
+    LWA 托管）。与 ``lwa gateway on`` 的 detached 启动不同：本函数前台常驻，周期
+    确认 admin :2019 在线，掉线则重启 master；收到 SIGTERM/SIGINT 时停止 master 后
+    退出（systemd ``Restart=on-failure`` 在异常退出时将其拉回）。
+    """
+    import signal
+    import threading
+
+    if config.staticGateway != "caddy":
+        log.error(
+            "run_gateway_foreground 仅在 staticGateway=caddy 时有意义（当前 %s）",
+            config.staticGateway,
+        )
+        return 2
+
+    stop_event = threading.Event()
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        log.info("gateway 前台进程收到信号 %s，准备退出", signum)
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, _on_signal)
+
+    workspace.ensure_workspace_dirs()
+    try:
+        start_gateway(workspace, config)
+    except LifecycleError as exc:
+        log.error("网关首次启动失败：%s", exc)
+        return 1
+
+    log.info(
+        "gateway 前台监管就绪（admin=127.0.0.1:%d），每 %ss 探活一次",
+        ADMIN_PORT,
+        poll_interval,
+    )
+    while not stop_event.is_set():
+        # wait 既作轮询节拍又能在收到信号时立即唤醒。
+        if stop_event.wait(timeout=poll_interval):
+            break
+        if not is_gateway_running(workspace, config):
+            log.warning("Caddy master 掉线，尝试重启")
+            with contextlib.suppress(LifecycleError):
+                start_gateway(workspace, config)
+
+    log.info("gateway 前台进程退出，停止 master")
+    with contextlib.suppress(Exception):  # noqa: BLE001
+        stop_gateway(workspace, config)
+    return 0
+
+
+def run_service_main() -> int:
+    """网关前台监管子进程入口（``python -m local_webpage_access.gateway_service``）。"""
+    import argparse
+
+    from local_webpage_access.config import load_config
+    from local_webpage_access.logging import setup_logging
+
+    parser = argparse.ArgumentParser(
+        prog="lwa-gateway", description="lwa gateway foreground supervisor (IMP-030)"
+    )
+    parser.add_argument("--workspace", "-w", required=True, help="工作区根目录")
+    parser.add_argument("--poll", type=float, default=10.0, help="admin 探活间隔（秒）")
+    parser.add_argument("--log-level", default="INFO", help="日志级别")
+    args = parser.parse_args()
+
+    setup_logging(level=args.log_level.upper())  # type: ignore[arg-type]
+    workspace = Workspace(Path(args.workspace).resolve())
+    if not workspace.config_path.is_file():
+        log.error("工作区未初始化：%s", workspace.root)
+        return 2
+    config = load_config(workspace)
+    return run_gateway_foreground(workspace, config, poll_interval=args.poll)
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_service_main())
+
+
 __all__ = [
     "GatewayState",
     "ADMIN_PORT",
@@ -406,4 +494,6 @@ __all__ = [
     "gateway_status",
     "maybe_start_gateway",
     "gateway_start_lock",
+    "run_gateway_foreground",
+    "run_service_main",
 ]

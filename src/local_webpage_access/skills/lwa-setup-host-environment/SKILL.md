@@ -71,14 +71,16 @@
 
 ## 开机自启（可选）
 
-工作区就绪后，用户希望开机/登录自动拉起 daemon + manager（+ 可选 Caddy）：
+工作区就绪后，用户希望开机/登录自动拉起 daemon + manager（+ 可选 Caddy），统一用
+`lwa autostart`（IMP-030，跨平台前台监管；详见 [lwa-setup-autostart](../lwa-setup-autostart/SKILL.md)）：
 
-- **macOS**：在工作区目录执行 `lwa setup --autostart [--with-caddy]`，生成
-  `~/Library/LaunchAgents/com.fenix.lwa.{daemon,manager[,gateway]}.plist`，再按提示
-  `launchctl load <plist>` 启用（OPS-025）。plist 登录时幂等执行对应 `on` 命令，
-  不与 `lwa X off` 冲突。
-- **Linux / Windows**：`lwa setup --autostart` 会报错并指引；参考 [开机自启文档](../../../../docs/autostart.md)
-  的 systemd user service / 任务计划程序模板自行配置。
+- 在工作区目录执行 `lwa autostart install [--with-caddy]`（默认即启用），再
+  `lwa autostart check` 复核完备性。
+- **macOS**：launchd LaunchAgent，登录触发；**Linux/WSL**：systemd user 服务，建议
+  `sudo loginctl enable-linger $USER`；**WSL** 额外需 Windows 登录任务唤醒发行版。
+- 停服前先 `lwa autostart disable`（`lwa X off` 已内置协调）；`lwa setup --autostart`
+  仍可用但已委托给 `lwa autostart install`。
+- 完整说明见 [开机自启文档](../../../../docs/autostart.md)。
 
 ## 示例对话
 

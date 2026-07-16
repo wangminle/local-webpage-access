@@ -946,7 +946,18 @@ def _main() -> int:
     # 抢占单实例锁；已有 daemon 在跑则直接退出
     try:
         with daemon_lock(workspace):
-            # 锁内启动，状态文件由 ``lwa daemon on`` 写好；watcher 读 enabled 决定运行
+            # IMP-030/BUG-146：前台入口（含 launchd/systemd 监管与 detached spawn）
+            # 抢到锁后立即把自身 pid 回写 daemon.json，使 is_running / `lwa daemon off`
+            # 能识别前台 watcher——不再依赖 `lwa daemon on` 事后补写。
+            write_state(
+                workspace,
+                DaemonState(
+                    enabled=True,
+                    pid=os.getpid(),
+                    started_at=now_iso(),
+                    poll_interval=args.poll,
+                ),
+            )
             reg = Registry(workspace.db_path)
             reg.open()
             try:

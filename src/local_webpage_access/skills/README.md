@@ -6,7 +6,7 @@
 "判断不准"或"需要修复"的环节。每个 skill 只负责**判断、生成、修复配置**，
 最终执行（构建、启动、停端口）仍由 `lwa` 完成（设计 §18）。
 
-**命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 15 个），避免与其他项目的 skill 撞名。
+**命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 16 个），避免与其他项目的 skill 撞名。
 
 日常运维（网关选型、冗余清理、容器别名、浏览量）见仓库 [`docs/operations-playbook.md`](../../../../docs/operations-playbook.md)。
 
@@ -29,6 +29,7 @@
 | [`lwa-fix-port-binding`](lwa-fix-port-binding/SKILL.md) | 端口冲突 | 修改端口映射 |
 | [`lwa-diagnose-health-check`](lwa-diagnose-health-check/SKILL.md) | 健康检查失败 | 诊断说明 + 修复建议 |
 | [`lwa-setup-host-environment`](lwa-setup-host-environment/SKILL.md) | 新机器首次部署 / 环境缺失 | 宿主机工具安装指引 + init/doctor 流程 |
+| [`lwa-setup-autostart`](lwa-setup-autostart/SKILL.md) | 开机/登录自启 / 重启后没起来 | `lwa autostart install/check/repair` 跨平台前台监管指引（IMP-030） |
 
 ## 输入约定
 

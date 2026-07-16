@@ -1,125 +1,170 @@
-# 开机自启
+# 开机自启（IMP-030）
 
-让 `daemon`（inbox 自动导入 + 自愈 reconcile）、`manager`（管理页）以及可选的
-Caddy 网关在开机/登录后自动拉起。三条 `on` 命令本身幂等——已运行则无操作，进程
-崩溃恢复由 daemon 的 `reconcile` 与心跳锁保证，故自启只需"登录时跑一次"。
+让 `daemon`、`manager`（以及可选的 Caddy `gateway`）在开机/登录后自动可用，并由
+**服务管理器直接监管前台进程**——崩溃即拉起（修复 BUG-138：旧方案把
+`lwa daemon/manager on` 这种"快速返回的 detached 启动器"当作 `ExecStart`，监管的是
+秒退的 CLI 而非真实 watcher/uvicorn）。
 
-## macOS（launchd，推荐）
-
-在工作区目录执行：
+## 统一命令：`lwa autostart`
 
 ```bash
-lwa setup --autostart            # 生成 daemon + manager plist
-lwa setup --autostart --with-caddy   # 额外含 caddy 网关（仅 staticGateway=caddy）
+lwa autostart install [--with-caddy] [--no-enable] [--linger]  # 生成并默认启用
+lwa autostart enable | disable                                  # 加载/卸载单元
+lwa autostart status                                            # 单元 + 前台进程状态
+lwa autostart check [--json]                                    # 完备性深检
+lwa autostart repair [--with-caddy]                             # 重写路径/迁移旧单元/重新启用
+lwa autostart uninstall [--purge-linger]                        # 停服务 + 删单元
+lwa autostart doctor-hints                                      # 人工待办（Docker Desktop/WSL）
 ```
 
-生成物位于 `~/Library/LaunchAgents/`：
+`install` 生成的单元用**前台入口**：
+
+```
+python -m local_webpage_access.<daemon|manager_service|gateway_service> --workspace <工作区根>
+```
+
+并固化 `sys.executable`、工作区绝对路径、`PATH`（含 Homebrew，修复 BUG-139：caddy
+不在 launchd/systemd 默认 PATH 中）。**真正启用时**（默认 `install` 或随后
+`enable`）会把 `daemon` 置 `enabled=true`，前台 watcher 才会在监管下运行；
+`install --no-enable` **只生成单元**，不改 `daemon.json` 运行意图。
+
+> `lwa setup --autostart` 仍可用，但已**委托**给 `lwa autostart install`（行为一致，
+> 推荐直接用新命令）。
+
+## 平台支持
+
+| 平台 | 后端 | 级别 | 说明 |
+| --- | --- | --- | --- |
+| macOS | launchd LaunchAgent | 用户登录触发 | `RunAtLoad` + `KeepAlive`（前台进程）；非无人值守系统服务 |
+| Linux（Ubuntu 24.04+） | systemd user unit | 用户服务 | `Type=simple` + `Restart=on-failure`；建议 `enable-linger` 登出保活 |
+| WSL 2.7+ | systemd user unit | 用户服务 | 同 Linux；发行版不随 Windows 开机自启，需 Windows 登录任务唤醒 |
+| Windows（原生） | 任务计划程序 | 登录触发 | 见文末手动配置（本期不自动生成任务） |
+
+## macOS（launchd）
+
+```bash
+cd <工作区根>
+lwa autostart install            # daemon + manager（managerEnabled 时）
+lwa autostart install --with-caddy   # 额外监管 gateway（仅 staticGateway=caddy）
+```
+
+生成物 `~/Library/LaunchAgents/`：
 
 - `com.fenix.lwa.daemon.plist`
 - `com.fenix.lwa.manager.plist`（`managerEnabled=true` 时）
 - `com.fenix.lwa.gateway.plist`（`--with-caddy` 且 `staticGateway=caddy` 时）
 
-启用 / 取消：
+plist 要点：`RunAtLoad=true`、`KeepAlive={SuccessfulExit:false}`（前台进程异常退出即
+拉起）、`EnvironmentVariables.PATH` 含 `/opt/homebrew/bin` 等。`lwa autostart install`
+默认即 `bootstrap` 加载单元；也可手动：
 
 ```bash
-launchctl load   ~/Library/LaunchAgents/com.fenix.lwa.daemon.plist
-launchctl unload ~/Library/LaunchAgents/com.fenix.lwa.daemon.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fenix.lwa.daemon.plist
+launchctl bootout      gui/$(id -u)/com.fenix.lwa.daemon
 ```
 
-plist 用绝对 python 路径执行 `python -m local_webpage_access <daemon|manager|gateway> on`，
-`WorkingDirectory` 指向工作区根，`RunAtLoad=true`、**不设 `KeepAlive`**（避免与
-`lwa X off` 冲突）。stdout/stderr 写入 `<workspace>/logs/launchd-*.out|err`。
-
-## Linux（systemd user service）
-
-`lwa setup --autostart` 在 Linux 会报错指引到此。手写 user unit（无需 root），
-放入 `~/.config/systemd/user/`：
-
-`lwa-daemon.service`：
-
-```ini
-[Unit]
-Description=lwa inbox watcher (daemon)
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/path/to/workspace
-# 与 macOS launchd 一致：走 CLI 入口（python -m local_webpage_access <cmd> on）
-ExecStart=/usr/bin/python3 -m local_webpage_access daemon on
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-`lwa-manager.service`（`managerEnabled=true` 时）：
-
-```ini
-[Unit]
-Description=lwa manager page
-After=network.target lwa-daemon.service
-
-[Service]
-Type=simple
-WorkingDirectory=/path/to/workspace
-ExecStart=/usr/bin/python3 -m local_webpage_access manager on
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-> **注意**：不要写成 `python -m local_webpage_access.daemon on` 或
-> `python -m local_webpage_access.manager on`——`daemon` / `manager` 不是独立可执行模块。
-> 若直接调用子进程入口（`python -m local_webpage_access.daemon` /
-> `python -m local_webpage_access.manager_service`），必须传 `--workspace /path/to/workspace`，
-> 且该入口是前台 watcher/uvicorn，语义与 `lwa daemon on` / `lwa manager on`（后台拉起）不同。
-> 开机自启请优先用上面的 CLI 形式。
-
-启用（登录后自启 + linger 保证未登录也运行）：
+## Linux / WSL（systemd user）
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now lwa-daemon.service lwa-manager.service
-loginctl enable-linger "$USER"   # 允许用户服务在未登录时运行
+cd <工作区根>
+lwa autostart install            # 生成 ~/.config/systemd/user/lwa-*.service 并 enable --now
+sudo loginctl enable-linger $USER   # 登出后 user 服务仍保活（强烈建议）
 ```
 
-> `WorkingDirectory` 必须是含 `local-web.yml` 的工作区根（`lwa daemon/manager on`
-> 通过当前目录定位工作区）。`ExecStart` 的 python 路径换成实际解释器
-> （`which python3`，虚拟环境用绝对 venv 路径）。Caddy 网关建议直接用系统
-> `caddy` service，或在 `lwa-gateway.service` 里跑 `python -m local_webpage_access gateway on`。
+单元 `~/.config/systemd/user/lwa-daemon.service`、`lwa-manager.service`、
+`lwa-gateway.service`：`Type=simple`、`Restart=on-failure`、`RestartSec=5`、
+`After=network-online.target`（manager 额外 `After=lwa-daemon.service`）。WSL 需
+`/etc/wsl.conf` 启用 `[boot] systemd=true`，否则 `lwa autostart` 报 systemd 不可用。
 
-## Windows（任务计划程序）
+> Python 必须用固定 venv（≥3.13），`install` 固化的是 `sys.executable`。Ubuntu 自带
+> 3.12 不满足门槛——`check` 会报 fail，请用 pyenv/uv/Deadsnakes 的 3.13 venv 后 `repair`。
 
-`lwa setup --autostart` 在 Windows 会报错指引到此。用任务计划程序创建三个任务，
-触发器"登录时"，操作均为"启动程序"：
+### WSL 的 Windows 侧
 
-| 任务 | 程序 | 参数 | 起始于 |
-| --- | --- | --- | --- |
-| lwa-daemon | `C:\path\to\python.exe` | `-m local_webpage_access daemon on` | 工作区根 |
-| lwa-manager | `C:\path\to\python.exe` | `-m local_webpage_access manager on` | 工作区根 |
-| lwa-gateway（可选） | `C:\path\to\python.exe` | `-m local_webpage_access gateway on` | 工作区根 |
-
-PowerShell 等价（示例）：
+WSL 发行版不会随 Windows 开机自动启动。`lwa autostart install` 在 WSL 下会打印一段
+Windows 登录任务用的 PowerShell 脚本（也可用 `doctor-hints` 查看），核心是唤醒发行版：
 
 ```powershell
-$ws = "D:\path\to\workspace"
-$py  = "C:\path\to\python.exe"
-Register-ScheduledTask -TaskName "lwa-daemon" -Trigger (New-ScheduledTaskTrigger -AtLogOn) `
-  -Action (New-ScheduledTaskAction -Execute $py -Argument "-m local_webpage_access daemon on" -WorkingDirectory $ws)
+# 唤醒发行版并长驻保活：sleep infinity 维持生命周期，systemd 拉起 lwa-*.service
+wsl.exe -d <Distro> -- bash -c 'sleep infinity'
 ```
 
-> "起始于/WorkingDirectory" 必须设为工作区根。Windows 下 daemon 的 `O_EXCL`
-> 单实例锁同样生效，重复触发安全。
+把它注册到 Windows 任务计划程序（触发器"登录时"）。WSL 网络可能变化，IP 变更后执行
+`lwa access refresh` + `lwa access review`。
+
+## 停服与自启的协调（重要）
+
+由于单元 `KeepAlive`/`Restart` 会把崩溃的进程拉回，**停服前必须先停用自启**，否则
+`lwa daemon/manager/gateway off` 后进程会被立刻拉起：
+
+```bash
+lwa autostart disable     # 先停用单元（macOS 持久 launchctl disable + bootout；systemd disable --now）
+lwa daemon off            # 再停进程
+```
+
+为避免踩坑，`lwa daemon/manager/gateway off` 已内置协调（`coordinated_disable`）：若对应
+自启单元已**加载或启用**（含"已启用但当前 inactive"），会先尝试停用它；**停用成功**才继续
+停进程，**停用失败则阻断**（退出码 1，提示先 `lwa autostart disable`）——否则停掉的进程会被
+KeepAlive/Restart 立刻拉回，`off` 形同未生效。
+
+## Caddy 所有权
+
+Caddy 由 **LWA 托管**（`lwa-gateway` 单元跑 `gateway_service` 前台，持有 master +
+admin :2019）。**切勿同时启用发行版 `caddy.service`**——会争用 `:2019`，`check` 会判
+fail。若你已用系统 `caddy.service`，请停用它再 `lwa autostart install --with-caddy`。
+
+## 完备性检查 `lwa autostart check`
+
+逐项检查（任一 fail → 退出码 1；`--json` 供脚本/Skill 消费）：
+
+- 平台 / systemd 可用性（WSL）
+- 单元内 Python ≥3.13 且能 `import local_webpage_access`
+- 工作区含 `local-web.yml`
+- 单元形态为**前台入口**（旧 `… on` 启动器 → fail，可 `repair`）
+- 单元已加载/启用，且前台进程真正存活（单元 active 但 MainPID 已死 / **身份不符本工作区前台模块** / 服务进程探测不到 → fail，杜绝假绿）
+- 单元 PATH 已固化且**可用**（目录真实存在、含解释器或基础系统目录；gateway 须能按该 PATH 解析 caddy）
+- Caddy 二进制可执行；**无系统 `caddy.service` 与外部 `:2019` 占用冲突**（`staticGateway=caddy` 时）
+- linger（Linux/WSL：未 linger → warn）
+- WSL 发行版 / `/mnt/×` 工作区 / 网络变化提示
+- Docker 引擎可达（有容器实例时，warn）
+
+> 重复 `install` 缩减服务集合（如去掉 `--with-caddy`，或关闭 `managerEnabled`）时会
+> **差量卸载**不再需要的单元，避免 manifest 外孤儿。迁移 detached 失败时**不会**再
+> `enable`/`bootstrap` 该服务，以免监管抢锁失败形成重启循环。
+
+## 旧配置迁移
+
+曾按旧文档（`lwa daemon on` 作 `ExecStart`）安装的单元没有崩溃恢复。`lwa autostart check`
+会识别为旧 detached 启动器并报 fail；`lwa autostart repair` 把它改写为前台监管单元并
+重新启用。
+
+## Windows（原生，手动配置）
+
+`lwa autostart` 暂不自动生成 Windows 任务（本期非目标）。用任务计划程序创建任务，
+触发器"登录时"，操作"启动程序"，**起始于设工作区根**：
+
+| 任务 | 程序 | 参数 |
+| --- | --- | --- |
+| lwa-daemon | `python.exe` | `-m local_webpage_access.daemon --workspace <工作区根>` |
+| lwa-manager | `python.exe` | `-m local_webpage_access.manager_service --workspace <工作区根>` |
+| lwa-gateway（可选） | `python.exe` | `-m local_webpage_access.gateway_service --workspace <工作区根>` |
+
+> Windows 下 daemon 的 `O_EXCL` 单实例锁同样生效，重复触发安全。任务计划程序需在
+> "操作"里设"起始于(WorkingDirectory)"为工作区根。
+
+## 手工验收清单（不进 CI）
+
+- macOS：`lwa autostart install --with-caddy` 后重新登录 → daemon/manager/gateway 前台
+  进程在跑；`lwa autostart check` 全绿。
+- Linux：`systemctl --user kill` 杀进程后 `Restart` 自动拉起；`lwa manager off` 不会被
+  立刻拉回（协调先 disable）。
+- 旧配置：`check` 报 fail，`repair` 后变前台监管。
+- WSL：`detect_platform()=="wsl"`；`check` 输出 Windows 唤醒与网络待办。
 
 ## 验证
 
 ```bash
-lwa daemon status     # watcher 运行中
-lwa manager status    # 管理页运行中
-lwa gateway status    # staticGateway=caddy 时 master 在线
+lwa autostart status          # 单元 + 前台进程
+lwa autostart check           # 完备性
 curl -s http://127.0.0.1:<managerPort>/api/health   # version 字段确认运行版本
 ```

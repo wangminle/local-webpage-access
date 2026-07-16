@@ -577,6 +577,15 @@ def test_is_page_view_excludes_probe_marker() -> None:
     assert not _is_page_view("GET", "/?__lwa_probe=2", 200)  # 任意取值
 
 
+def test_is_page_view_decodes_percent_encoded_path() -> None:
+    """URL 编码的资源/API 路径应先 decode 再判定，不计为页面（BUG-145）。"""
+    assert not _is_page_view("GET", "/a%2Ejs", 200)       # /a.js → 资源
+    assert not _is_page_view("GET", "/img%2Epng", 200)    # /img.png → 资源
+    assert not _is_page_view("GET", "/api%2Fdata", 200)   # /api/data → API
+    # 未编码的正常页面仍计为 page（回归保护）
+    assert _is_page_view("GET", "/about%20us", 200)       # /about us → 无扩展名 → page
+
+
 def test_record_hits_filters_to_pages_and_aggregates_ips(
     store: PageviewStore,
 ) -> None:

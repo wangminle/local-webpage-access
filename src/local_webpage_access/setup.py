@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import platform
 import plistlib
 import shutil
 import sys
@@ -82,17 +81,16 @@ class SetupReport:
 
 # ---- 平台识别 ---------------------------------------------------------------
 
+# 平台识别集中在 :mod:`platform_detect`（IMP-030 增补 ``wsl``），此处再导出以保持
+# 向后兼容——``tests/test_setup.py`` 仍按 ``setup.detect_platform`` 做 monkeypatch，
+# 且模块内多处直接调用 ``detect_platform()``（解析为模块全局名，monkeypatch 生效）。
+from local_webpage_access.platform_detect import detect_platform  # noqa: E402
 
-def detect_platform() -> str:
-    """返回 ``macos`` / ``linux`` / ``windows`` / ``unknown``。"""
-    system = platform.system()
-    if system == "Darwin":
-        return "macos"
-    if system == "Linux":
-        return "linux"
-    if system in ("Windows", "Microsoft"):
-        return "windows"
-    return "unknown"
+
+def _hint_platform(plat: str | None = None) -> str:
+    """安装指引用的平台：WSL 复用 Linux 指引。"""
+    p = plat or detect_platform()
+    return "linux" if p == "wsl" else p
 
 
 # ---- 检测项 -----------------------------------------------------------------
@@ -110,15 +108,16 @@ def _check_lwa_package() -> SetupItem:
     )
 
 
-def _check_node(runner: SubprocessRunner) -> SetupItem:
+def _check_node(runner: SubprocessRunner, plat: str | None = None) -> SetupItem:
     """Node.js 用于前端 SPA 构建；纯静态/容器后端可不装。"""
+    node_hint_plat = _hint_platform(plat)
     if shutil.which("node") is None:
         return SetupItem(
             name="nodejs",
             status=STATUS_WARN,
             message="未检测到 node 命令",
             required=f"Node.js ≥ {MIN_NODE_VERSION}",
-            install_hint=_node_install_hint(detect_platform()),
+            install_hint=_node_install_hint(node_hint_plat),
             optional=True,
         )
     result = runner(["node", "--version"])
@@ -129,7 +128,7 @@ def _check_node(runner: SubprocessRunner) -> SetupItem:
             status=STATUS_WARN,
             message=f"Node.js {version or '?'} 低于推荐版本 ≥ {MIN_NODE_VERSION}",
             required=f"Node.js ≥ {MIN_NODE_VERSION}",
-            install_hint=_node_install_hint(detect_platform()),
+            install_hint=_node_install_hint(node_hint_plat),
             optional=True,
         )
     return SetupItem(
@@ -169,6 +168,7 @@ def run_setup(
 ) -> SetupReport:
     """检测宿主机环境并生成安装指引（不需要已初始化工作区）。"""
     plat = detect_platform()
+    hint_plat = _hint_platform(plat)  # WSL 复用 Linux 安装指引
     from local_webpage_access.config import Config
 
     config = Config(staticGateway=static_gateway)
@@ -177,7 +177,7 @@ def run_setup(
             check_python_version,
             name="python",
             required="Python ≥ 3.13",
-            install_hint=_python_install_hint(plat),
+            install_hint=_python_install_hint(hint_plat),
         ),
         _check_lwa_package(),
         _from_doctor_check(
@@ -195,7 +195,7 @@ def run_setup(
             check_docker,
             name="docker",
             required=f"Docker ≥ {MIN_DOCKER_VERSION}",
-            install_hint=_docker_install_hint(plat),
+            install_hint=_docker_install_hint(hint_plat),
             runner=runner,
         ),
         _from_doctor_check(
@@ -205,19 +205,19 @@ def run_setup(
                 f"Docker Compose ≥ {MIN_COMPOSE_VERSION}"
                 f"（推荐 ≥ {RECOMMENDED_COMPOSE_VERSION}）"
             ),
-            install_hint=_compose_install_hint(plat),
+            install_hint=_compose_install_hint(hint_plat),
             runner=runner,
         ),
         _from_doctor_check(
             check_caddy,
             name="caddy",
             required=f"Caddy ≥ {MIN_CADDY_VERSION}（缺失时降级 builtin）",
-            install_hint=_caddy_install_hint(plat),
+            install_hint=_caddy_install_hint(hint_plat),
             optional=static_gateway != "caddy",
             config=config,
             runner=runner,
         ),
-        _check_node(runner),
+        _check_node(runner, hint_plat),
     ]
     return SetupReport(platform=plat, items=items)
 
@@ -325,7 +325,7 @@ def format_setup_report(report: SetupReport) -> str:
 
 def render_setup_script(plat: str | None = None) -> str:
     """生成当前平台的参考安装脚本（注释为主，需人工审阅后执行）。"""
-    plat = plat or detect_platform()
+    plat = _hint_platform(plat)
     if plat == "macos":
         return _SCRIPT_MACOS
     if plat == "linux":
@@ -444,32 +444,9 @@ _SCRIPT_GENERIC = """\
 """
 
 
-# ---- 开机自启（OPS-022 / OPS-025：launchd plist 生成）-----------------------
+# ---- 开机自启（IMP-030：launchd 前台监管 plist 生成）------------------------
 
 LAUNCHD_LABEL_PREFIX = "com.fenix.lwa"
-
-
-def _launchd_plist_dict(
-    label: str,
-    program_args: list[str],
-    workspace_root: Path,
-    log_name: str,
-) -> dict[str, Any]:
-    """构造单个 launchd agent 的 plist 字典。
-
-    ``RunAtLoad=true`` 登录即触发；不设 ``KeepAlive``——daemon/manager/gateway 的
-    ``on`` 命令本身幂等且自管理 detached 子进程，KeepAlive 会在 ``lwa X off`` 后
-    把进程重新拉起，与显式停止冲突。
-    """
-    logs = workspace_root / "logs"
-    return {
-        "Label": label,
-        "ProgramArguments": program_args,
-        "WorkingDirectory": str(workspace_root),
-        "RunAtLoad": True,
-        "StandardOutPath": str(logs / f"launchd-{log_name}.out"),
-        "StandardErrorPath": str(logs / f"launchd-{log_name}.err"),
-    }
 
 
 def generate_launchd_plists(
@@ -480,19 +457,27 @@ def generate_launchd_plists(
     include_caddy: bool = False,
     dest_dir: Path | None = None,
 ) -> list[tuple[str, Path]]:
-    """OPS-022/025：生成 macOS launchd plist，登录时自启 daemon + manager（+ 可选 caddy）。
+    """生成 macOS launchd plist（**前台监管**，IMP-030）。
 
     返回 ``[(服务名, plist 路径)]``。非 macOS 抛错；dest_dir 默认
-    ``~/Library/LaunchAgents/``。生成的 plist 用绝对 python 路径 + ``-m
-    local_webpage_access <daemon|manager|gateway> on``，幂等命令登录即拉起，
-    不与 ``lwa X off`` 冲突（无 KeepAlive）。
+    ``~/Library/LaunchAgents/``。生成的 plist 用绝对 python 路径执行前台入口
+    ``python -m local_webpage_access.<daemon|manager_service|gateway_service>
+    --workspace <root>``，并固化 ``EnvironmentVariables.PATH``（含 Homebrew）+
+    ``KeepAlive``——launchd 直接监管真实前台进程，崩溃即拉起（修复 BUG-138/139）。
+    生成逻辑复用 :mod:`autostart`，避免两套实现（030.h）；与 ``lwa X off`` 的冲突
+    由 ``lwa autostart disable`` / off 协调先 bootout 单元解决（030.b）。
     """
+    from local_webpage_access.autostart import (
+        build_launchd_plist,
+        launchd_label,
+        select_services,
+    )
     from local_webpage_access.errors import LifecycleError
 
     if detect_platform() != "macos":
         raise LifecycleError(
-            "launchd 开机自启仅支持 macOS；Linux 请用 systemd user service，"
-            "Windows 请用任务计划程序（参考 docs/autostart.md）",
+            "launchd 开机自启仅支持 macOS；Linux/WSL 请用 `lwa autostart install`"
+            "（systemd user service），Windows 请用任务计划程序（参考 docs/autostart.md）",
         )
     python = python_exe or sys.executable
     dest = dest_dir or (Path.home() / "Library" / "LaunchAgents")
@@ -500,23 +485,12 @@ def generate_launchd_plists(
     # launchd 写 stdout/stderr 到 logs/，确保目录存在
     (workspace_root / "logs").mkdir(parents=True, exist_ok=True)
 
-    plans: list[tuple[str, str]] = [
-        ("daemon", [python, "-m", "local_webpage_access", "daemon", "on"]),
-    ]
-    if config.managerEnabled:
-        plans.append(
-            ("manager", [python, "-m", "local_webpage_access", "manager", "on"])
-        )
-    if include_caddy and config.staticGateway == "caddy":
-        plans.append(
-            ("gateway", [python, "-m", "local_webpage_access", "gateway", "on"])
-        )
-
     written: list[tuple[str, Path]] = []
-    for name, args in plans:
-        label = f"{LAUNCHD_LABEL_PREFIX}.{name}"
-        plist = _launchd_plist_dict(label, args, workspace_root, name)
-        path = dest / f"{label}.plist"
+    for name in select_services(config, with_caddy=include_caddy):
+        plist = build_launchd_plist(
+            name, python_exe=python, workspace_root=workspace_root, keep_alive=True
+        )
+        path = dest / f"{launchd_label(name)}.plist"
         path.write_bytes(
             plistlib.dumps(plist, fmt=plistlib.FMT_XML, sort_keys=False)
         )
@@ -529,23 +503,27 @@ def format_autostart_report(
     *,
     skipped_caddy: bool = False,
 ) -> str:
-    """渲染开机自启报告（生成的 plist + launchctl load/unload 指引）。"""
-    lines: list[str] = ["── 开机自启（macOS launchd）──"]
+    """渲染开机自启报告（生成的 plist + 启用/完备性检查指引）。"""
+    lines: list[str] = ["── 开机自启（macOS launchd，前台监管）──"]
     for name, path in written:
         lines.append(f"  · {name}: {path}")
     if skipped_caddy:
         lines.append("  （未生成 caddy 自启：staticGateway 非 caddy；如需请先切换后重跑）")
     lines.append("")
-    lines.append("启用（登录后或立即生效）：")
+    lines.append("推荐用新命令完成启用 + 完备性检查（IMP-030）：")
+    lines.append("  lwa autostart enable     # bootstrap 加载单元（KeepAlive 拉起前台进程）")
+    lines.append("  lwa autostart check      # 深检解释器/PATH/进程/Caddy 是否完备")
+    lines.append("")
+    lines.append("或手动 launchctl：")
     for _name, path in written:
-        lines.append(f"  launchctl load {path}")
+        lines.append(f"  launchctl bootstrap gui/$(id -u) {path}")
     lines.append("取消自启：")
     for _name, path in written:
-        lines.append(f"  launchctl unload {path}")
+        lines.append(f"  launchctl bootout gui/$(id -u)/$(basename {path} .plist)")
     lines.append("")
     lines.append(
-        "提示：plist 登录时幂等执行 `lwa daemon/manager/gateway on`，不会与 "
-        "`lwa X off` 冲突；进程崩溃恢复由 daemon 自愈（reconcile）与心跳锁保证。"
+        "提示：plist 以 KeepAlive 直接监管前台 watcher/uvicorn，崩溃即拉起（BUG-138）；"
+        "停服前请先 `lwa autostart disable`，否则会被立刻拉回（030.b）。"
     )
     return "\n".join(lines)
 

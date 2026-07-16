@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LwaError
@@ -294,7 +294,9 @@ def _is_page_view(method: str, path: str, status: int) -> bool:
     parts = urlsplit(path)
     if _has_probe_marker(parts.query):
         return False
-    seg_path = parts.path or "/"
+    # 先 URL decode 再判定后缀/前缀：``/a%2Ejs``→``/a.js``、``/api%2Fdata``→``/api/data``
+    # 否则编码后的资源/API 路径会被误记为页面访问（BUG-145）。
+    seg_path = unquote(parts.path) or "/"
     if seg_path in _NON_PAGE_PATHS or seg_path.startswith("/api/"):
         return False
     last_seg = seg_path.rstrip("/").rsplit("/", 1)[-1]

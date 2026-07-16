@@ -1,7 +1,7 @@
-# 新增功能点计划 IMP-025 / IMP-026（202607）
+# 新增功能点计划 IMP-025～IMP-028 / IMP-030（202607）
 
-> **状态**：2026-07-15 规划文档，尚未实施；同日完成实现前审阅并补强统计口径、IP 真相表、迁移原子性与本机地址判定。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）。
-> **范围**：管理页浏览量统计的两处改进；会补充内部 HTTP 探针标记，但不涉及运行形态识别与生命周期编排。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查。
 
 ---
 
@@ -221,5 +221,212 @@ demo-static 这类 `shared-static` 实例由 Caddy 独立站点块（`:{host_por
 - **别名实例的直连端口流量不计**：有别名的实例（3d-demo 等）不在 `port_to_id`，其直连端口访问日志被读但归属不到任何实例即丢弃（与既有口径一致，不改其计数）。
 - 极端边角：在某实例端口上请求 `/<其他别名>/` 路径会被前缀规则误归到别名实例——属既有"按路径前缀归属"的固有特性，直连端口开启日志后理论上同样存在，但正常访问不会触发。
 - schema 不变（无新表/新列），无需迁移；已运行的 `caddy-shared` 游标继续向前推进，仅统计日志开启后的新增流量。
+
+---
+
+## 10. IMP-030 — macOS / Linux 自启动配置与完备性检查
+
+> **状态**：2026-07-16 规划，2026-07-16 落地（DEV-073～076，关闭 BUG-138/139）。承接 CHK-048 三平台自启动评估结论；关联 BUG-138 / BUG-139 / DEV-073。
+> **产品口径（已确认）**：
+>
+> | 平台 | LWA 运行 | 当前一键配置 | 目标（IMP-030） |
+> | --- | --- | --- | --- |
+> | macOS | 支持 | 部分（仅写 LaunchAgent plist） | 登录触发型自启动：**可安装 / 启用 / 检查 / 修复 / 卸载**；崩溃恢复与 PATH 完备 |
+> | Ubuntu 24.04+ | 支持 | 不支持（仅文档模板，且模板有监管缺陷） | systemd user 服务一键配置 + linger；**直接监管前台进程** |
+> | WSL 2.7.0+ | 支持 | 不支持、不识别 | 识别 WSL；Linux 侧同 Ubuntu；Windows 唤醒任务与网络检查给出明确指引（本期可生成脚本/检查清单，不强制改 Windows 注册表） |
+>
+> **不宣称**：macOS LaunchAgent ≠ 无人值守系统级服务；WSL systemd ≠ Windows 开机自动保活发行版。
+
+### 10.1 评估结论确认（CHK-048）
+
+以下结论经源码与文档复核，**予以确认**，作为本需求的事实基线：
+
+1. **`--with-caddy` 非 manager 绝对必需**：`manager on` 成功后会 `maybe_start_gateway()`（`manager_service.py`）；但显式 gateway 自启仍更清晰，且当前存在 Caddy PATH 风险（BUG-139）。
+2. **Compose `restart: unless-stopped`**（`compose.py`）在 Docker 引擎自启后可恢复未被显式停止的容器——**正确**；不依赖 LWA daemon 在线。
+3. **现有 systemd 模板不具备崩溃恢复**（BUG-138）：`ExecStart=… daemon/manager on` 会拉起脱离子进程后迅速退出；`Restart=on-failure` 监管的是快速退出的 CLI，不是真实 watcher/uvicorn。
+4. **daemon `reconcile` 只恢复 `desired=running` 的业务实例**，不复活 daemon / manager / Caddy 自身。
+5. **macOS**：`lwa setup --autostart` 只生成 plist（绝对 Python + 工作区 + `RunAtLoad`），无 `KeepAlive`、无 PATH、无 enable/status/repair/uninstall；适合「用户登录后恢复」，不适合无人值守高可用。
+6. **Ubuntu**：适合 `systemd --user` + `loginctl enable-linger`；但 CLI 直接拒绝 Linux，文档模板有上述监管缺陷；Python 须用固定 venv（≥3.13），不可假设 `/usr/bin/python3`。
+7. **WSL**：systemd 能力满足，但发行版生命周期由 Windows 侧决定；完整链路需「Windows 登录任务 → 唤醒发行版 → systemd → LWA」。当前不探测 WSL、不生成 Windows 任务。
+8. **Caddy 所有权**：Linux 上不能同时启用发行版 `caddy.service` 与 `lwa gateway on`（争用 `:2019`）。必须二选一：**由 LWA 托管**（推荐，与现有 admin API / PID / 状态一致）或 **由 systemd 托管且 LWA 只消费**（本期不选，避免双轨）。
+
+页面恢复依赖分层（实现验收时按层检查）：
+
+| 层 | 恢复条件 |
+| --- | --- |
+| Docker 实例 | Docker 引擎自启 + 容器 `unless-stopped` + bind mount 路径仍在 |
+| builtin 静态 | daemon 受服务管理器监管并成功启动 → reconcile |
+| Caddy 静态 / 别名 | Caddy 可执行且路径稳定；Caddyfile/站点可读；`:2019` 无冲突 |
+| manager | uvicorn 前台进程受监管 |
+| 网络 | IP/端口/防火墙/WSL 转发正确；IP 变更后需 `lwa access refresh` + `review` |
+
+### 10.2 需求描述
+
+#### 10.2.1 用户故事
+
+1. 作为 macOS / Ubuntu 用户，我希望用一条命令完成「安装 + 启用」自启动，重启或重新登录后 daemon、manager（及按需 gateway）自动可用，管理页与业务页面可访问。
+2. 作为运维/排查者，我希望用一条命令**检查自启动是否完备**（配置存在、已启用、解释器/路径有效、服务管理器状态、关键依赖、与运行态一致性），并得到可执行的修复建议或一键 `repair`。
+3. 作为 WSL 用户，我希望工具识别我在 WSL 中，配置 Linux 侧自启动，并明确告知还缺哪些 Windows 侧步骤（唤醒发行版、Docker Desktop、网络）。
+
+#### 10.2.2 功能范围
+
+| 能力 | 必须 | 说明 |
+| --- | --- | --- |
+| 统一 CLI `lwa autostart …` | 是 | 见 §10.4；逐步替代 `lwa setup --autostart` 的「只写文件」语义 |
+| 服务管理器**直接监管前台进程** | 是 | 修复 BUG-138；macOS / Linux 同源策略 |
+| 完备性检查 `status` / `check` | 是 | 结构化报告（文本 + `--json`） |
+| `install` / `enable` / `disable` / `uninstall` / `repair` | 是 | 生命周期完整 |
+| 固化绝对 Python（venv）与工作区路径 | 是 | 路径移动后 `repair` 可重写 |
+| 固化 Caddy 绝对路径或 `PATH`（macOS Homebrew） | 是 | 修复 BUG-139 |
+| WSL 探测 + Windows 唤醒指引/脚本生成 | 是（指引）；脚本生成为强烈建议 | 不强制静默改 Windows |
+| 崩溃后由服务管理器重启真实进程 | 是 | launchd KeepAlive / systemd `Restart=` 作用于**前台入口** |
+| 无人登录的 macOS 系统级 LaunchDaemon | 否（本期） | 产品口径保持「登录触发」 |
+| 改写 Docker Desktop「登录时启动」 | 否 | 仅检查并提示用户手动开启 |
+| 同时托管发行版 `caddy.service` | 否 | 禁止双重托管 |
+
+#### 10.2.3 非目标
+
+- 不把自启动做成管理页 UI（CLI + Skill 优先）。
+- 不保证 NAT 模式下 WSL IP 永久不变；只检查并提示 `access refresh`。
+- 不降低 Docker ≥29 / Python ≥3.13 门槛；Ubuntu 24.04 官方 python3.12 / 旧 docker.io 在检查项中明确提示改用官方源或固定 venv。
+- 不在本期实现完整 Windows 原生（非 WSL）任务计划一键安装（文档模板可保留；WSL 的 `.ps1`/`.bat` 生成优先）。
+
+### 10.3 关键决策
+
+| 编号 | 决策点 | 方案 |
+| --- | --- | --- |
+| **030.a** | 监管对象 | **前台入口**：`python -m local_webpage_access.daemon --workspace <abs>`、`…manager_service --workspace <abs>`、以及 LWA 持有的 Caddy 前台（现有 gateway 子进程入口或 `caddy run --config …`，须与 `gateway_service` 状态机一致）。**禁止**再把 `lwa daemon/manager/gateway on`（快速返回的 detached 启动器）作为 systemd/launchd 的主 `ExecStart`/`ProgramArguments`。 |
+| **030.b** | 与 `lwa X off` 的关系 | `off` 必须先 disable 自启动单元或写入「用户显式停止」标记，再停进程，避免 KeepAlive/Restart 立刻拉回。`autostart disable` 与运行态 `off` 语义分离但可组合。 |
+| **030.c** | Caddy 所有权 | **LWA 所有**：自启只拉起 LWA gateway 前台；`status/check` 若发现系统 `caddy.service` active 且争用 `:2019`，判 fail 并提示停用系统单元。 |
+| **030.d** | macOS 级别 | 继续 **LaunchAgent（用户登录）**；可选后续文档说明 LaunchDaemon，但不纳入 CLI 默认路径。 |
+| **030.e** | Linux 级别 | **systemd user unit** + 推荐 `loginctl enable-linger`；`check` 对未 linger 给出 warn（登出后服务会停）。 |
+| **030.f** | 平台探测 | `detect_platform()` 扩展：`macos` / `linux` / `wsl` / `windows`。WSL 依据 `/proc/version`、`WSL_INTEROP`、`/run/WSL` 等启发式。 |
+| **030.g** | 兼容旧 plist / 旧文档模板 | `install`/`repair` 检测旧「`… on` 启动器」配置 → 迁移为前台监管；`docs/autostart.md` 同步改写并去掉错误的崩溃恢复表述。 |
+| **030.h** | `setup --autostart` | 保留为薄封装：调用 `autostart install`（或打印弃用提示指向新命令）；行为与文档对齐，避免两套生成逻辑。 |
+
+### 10.4 CLI 开发计划
+
+新增子命令组（建议模块 `cli/autostart.py` + 核心库 `autostart.py` 或扩展 `setup.py`）：
+
+```text
+lwa autostart install [--with-caddy] [--linger]   # 生成并可选启用
+lwa autostart enable | disable
+lwa autostart status | check [--json]             # check = 完备性深检
+lwa autostart repair [--with-caddy]
+lwa autostart uninstall [--purge-linger]          # 卸载单元；linger 默认不动
+lwa autostart doctor-hints                        # 可选：只输出人工步骤（Docker Desktop / WSL 网络）
+```
+
+| 子命令 | 行为要点 |
+| --- | --- |
+| `install` | 探测平台；写入 LaunchAgent plist 或 `~/.config/systemd/user/lwa-*.service`；固化 `sys.executable`、workspace、`Environment=PATH=…` 或 `CaddyBinary=`；可选 `--enable` 默认 true；Linux 打印 linger 建议，`--linger` 时尝试 `loginctl enable-linger`（失败则指引）。WSL 额外写出 `windows/lwa-wsl-autostart.ps1`（或打印到 stdout）供用户在 Windows 注册登录任务。 |
+| `enable`/`disable` | macOS：`launchctl bootstrap/bootout`（或 load/unload，按当前 macOS 版本选稳定 API）；Linux：`systemctl --user enable/disable --now`。 |
+| `status` | 单元是否存在/enabled/loaded；对应 PID 是否为前台入口；与 `lwa daemon/manager/gateway status` 对照。 |
+| `check` | **完备性清单**（见 §10.5）；任一项 fail → 非零退出码，便于脚本/CI。 |
+| `repair` | 重写失效绝对路径、补 PATH/Caddy、迁移旧启动器单元、重新 enable；不擅自改 Docker Desktop 设置。 |
+| `uninstall` | 停服务、删 plist/unit、`daemon-reload`；不删除工作区数据。 |
+
+退出码约定：`0` 完备；`1` 配置/运行不完备；`2` 平台不支持或前置缺失（无工作区 / 无 Python）。
+
+### 10.5 完备性检查项（`autostart check`）
+
+| 类别 | 检查项 | fail / warn |
+| --- | --- | --- |
+| 平台 | 识别 macos/linux/wsl；WSL 时 systemd 是否可用 | systemd 不可用 → fail |
+| 解释器 | 单元内 Python 绝对路径存在且 `≥3.13`、可 import `local_webpage_access` | fail |
+| 工作区 | `WorkingDirectory`/`--workspace` 存在且含 `local-web.yml` | fail |
+| 单元形态 | ExecStart/ProgramArguments 为**前台入口**，不是 `… on` | 旧模板 → fail（可 repair） |
+| 启用态 | launchd/systemd enabled + loaded（systemd 仅认 `enabled`/`enabled-runtime`，不含 `static`） | 未启用 → fail |
+| 进程 | MainPID 存活且 cmdline 含本工作区前台模块；服务状态可探测 | 单元 active 但进程死/身份不符 → fail |
+| PATH | 单元 PATH 目录真实存在；含解释器目录或 `/usr/bin`/`/bin`；gateway 须能按该 PATH 解析 caddy | 无效 PATH → fail |
+| Caddy | 若 `staticGateway=caddy`：二进制可执行；`:2019` 无外国进程；无系统 caddy.service 冲突 | 冲突 → fail |
+| Docker | 有容器实例时：引擎可达；提示 Desktop「登录时启动」/ Engine enable | 引擎不可达 → warn/fail 视场景 |
+| linger | Linux：`loginctl show-user` Linger=yes | 否 → warn |
+| WSL | 发行版名；是否建议 mirrored networking；关键端口入站提示；工作区是否在 `/mnt/c`（warn） | 指引性 warn |
+| 业务恢复 | `desired=running` 实例抽样：Docker 容器 Up / builtin 可探活 / Caddy 站点可 GET（带 `__lwa_probe=1`） | 抽样失败 → warn（配置完备但业务未起） |
+
+输出格式对齐 `lwa doctor`：分项 `ok/warn/fail` + 修复命令建议；`--json` 供 Skill 消费。
+
+### 10.6 Skill 开发计划
+
+| Skill | 动作 | 内容 |
+| --- | --- | --- |
+| **新建 `lwa-setup-autostart`** | Create | 触发：用户要开机自启、登录后页面没起来、问「怎么设置自启动」。流程：读 `lwa autostart check --json` → 按平台给出最小命令序列 → **允许**指导用户执行 `lwa autostart install/enable/repair`（写用户级单元，非 sudo 改系统）；WSL 时分「Linux 侧 / Windows 侧」两段清单；明确禁止同时启用系统 `caddy.service`；崩溃恢复与 Docker Desktop 登录启动的边界说明。禁止事项：不代替用户改 Windows 任务计划（除非用户明确要求并已提供管理员权限语境）；不宣称无人值守 macOS。 |
+| **`lwa-setup-host-environment`** | Modify | 「开机自启」一节改为指向 `lwa autostart` + 新 Skill；删除「Linux 仅文档模板」的过时表述。 |
+| **`lwa-diagnose-health-check` / doctor 相关** | Modify | 若 `autostart check` 有 fail，在排障路径中建议先修自启；避免只修实例不修 OS 服务。 |
+| **（可选）`lwa-repair-autostart`** | Create 或并入上者 | 若 `setup-autostart` 过长，可拆「仅修复」Skill：只消费 `check --json` 的 fail 项跑 `repair` 并复核。 |
+
+Skill 输出必须包含：**产品口径一句**（登录触发 vs 系统服务 vs WSL 需 Windows 唤醒），避免用户误解 SLA。
+
+### 10.7 实施拆分
+
+#### 阶段 A — 根基：前台监管 + 平台探测（修复 BUG-138 心智）
+
+| 子任务 | 触点 | 说明 |
+| --- | --- | --- |
+| **030.01** | `setup.py` / 新 `platform_detect.py` | `detect_platform` 区分 `wsl`；单测 mock `/proc/version` 等。 |
+| **030.02** | `autostart.py`（新） | 抽象 `AutostartBackend`：`MacLaunchdBackend` / `SystemdUserBackend`；生成前台 `ProgramArguments`/`ExecStart`；单元名 `com.fenix.lwa.*` / `lwa-daemon.service` 等保持稳定。 |
+| **030.03** | daemon / manager_service / gateway | 确认前台模块入口适合 Type=simple；必要时补 `--foreground` 文档化约定；保证信号可优雅退出以便 Restart 干净。 |
+| **030.04** | `docs/autostart.md` | 重写：删除「on + Restart=on-failure 即崩溃恢复」；改为前台监管示例；标明 Caddy 所有权。 |
+
+#### 阶段 B — macOS 完备化（修复 BUG-139）
+
+| 子任务 | 触点 | 说明 |
+| --- | --- | --- |
+| **030.05** | plist 生成 | `EnvironmentVariables.PATH` 含 `/opt/homebrew/bin:/usr/local/bin:…`；若 `which caddy` 成功则写入专用键或 gateway 参数绝对路径。 |
+| **030.06** | KeepAlive / ThrottleInterval | 对**前台** daemon/manager/gateway 启用 KeepAlive（或等价）；与 `autostart disable` + `lwa X off` 联调，防止「off 被拉回」。 |
+| **030.07** | CLI `autostart *` macOS 路径 | install/enable/status/check/repair/uninstall 全流程；`setup --autostart` 委托。 |
+| **030.08** | 测试 | plist 含 PATH/绝对 caddy；拒绝旧 `on` 启动器；check 对缺失 PATH 报 fail。 |
+
+#### 阶段 C — Linux / Ubuntu 一键自启
+
+| 子任务 | 触点 | 说明 |
+| --- | --- | --- |
+| **030.09** | systemd user unit 模板 | `Type=simple`、`Restart=on-failure`、`WorkingDirectory`、`ExecStart` 前台；`After=network-online.target`；manager `After=lwa-daemon.service`（可选）。 |
+| **030.10** | linger 处理 | install 提示；`--linger` 调用；check 读 Linger 状态。 |
+| **030.11** | CLI Linux 路径 | 不再对 Linux `raise`「仅 macOS」；全量子命令可用。 |
+| **030.12** | 测试 | unit 文件内容断言；旧模板检测；假 `systemctl` runner 测 enable/disable 调用序列。 |
+
+#### 阶段 D — WSL 与完备性深检 + Skill
+
+| 子任务 | 触点 | 说明 |
+| --- | --- | --- |
+| **030.13** | WSL 附加产物 | 生成 Windows 侧唤醒示例脚本 + 文档段落（`wsl.exe -d <distro> -- …` 或 `wsl.exe -d <distro>` 空启动）；check 列出 Windows 待办。 |
+| **030.14** | `autostart check` 全表 | 实现 §10.5；与 `lwa doctor` 字段风格一致；可被 doctor 摘要引用（可选一行「自启动：ok/warn/fail」）。 |
+| **030.15** | Skill | 新建 `lwa-setup-autostart`；更新 `lwa-setup-host-environment`；按需更新诊断类 Skill。 |
+| **030.16** | 回归门禁 | 单测覆盖生成物与 check 矩阵；**不**把真实重启/登录列入 CI；手工验收清单写入 `docs/autostart.md`（登录一次 / `systemctl --user` 杀进程看 Restart / WSL 从 Windows 唤醒）。 |
+
+### 10.8 验收标准
+
+- macOS：`lwa autostart install --with-caddy && enable` 后，用户重新登录（或模拟 bootout/bootstrap）→ daemon/manager/gateway 前台进程在跑；拔掉 PATH 中的 caddy 仅留绝对路径仍能起 gateway；`check` 全绿。
+- Ubuntu：同一 CLI 在 Linux 成功；`systemctl --user kill` 后进程被 Restart 拉起；`lwa manager off` 前先 `autostart disable`（或 off 自动协调）不会被立刻拉回。
+- 旧配置：曾按旧文档安装的 `… on` 单元，`check` 报 fail，`repair` 后变为前台监管。
+- WSL：`detect_platform()=="wsl"`；`check` 输出 Windows 唤醒与网络待办；Linux 侧单元行为与 Ubuntu 一致。
+- 文档与 Skill：不再声称「当前 systemd 模板具备崩溃恢复」；产品口径与 §10 表一致。
+- 测试：`pytest` 覆盖生成与 check；全量回归绿；task-list 关闭 BUG-138/139，DEV-073 按阶段拆分为完成态子项（或本号收口）。
+
+### 10.9 风险与边界
+
+| 风险 | 处理 |
+| --- | --- |
+| KeepAlive 与用户 `off` 冲突 | disable 自启与 stop 进程的顺序写进 CLI；单测模拟 |
+| Caddy 双重托管 | check 硬失败；Skill 明确禁止 |
+| Ubuntu 自带 Python 3.12 | check 校验单元内解释器版本；install 使用 `sys.executable`（须为 3.13+ venv） |
+| Docker Desktop 默认不登录启动 | check warn + 文档截图级说明（文字） |
+| WSL 网络/IP 变化 | check warn + 指向 `lwa access refresh` |
+| 真实重启无法进 CI | 文档手工验收清单；单测保证生成物正确 |
+
+### 10.10 落地节奏与编号映射
+
+建议顺序：**A（前台监管根基）→ B（macOS 修 PATH + CLI）→ C（Linux systemd）→ D（WSL + check 深检 + Skill）**。
+
+| task-list | 关系 |
+| --- | --- |
+| CHK-048 | 评估已完成，本计划输入 |
+| BUG-138 | 阶段 A/C 修复 |
+| BUG-139 | 阶段 B 修复 |
+| DEV-073 | 本 IMP 主开发项；可按阶段拆 DEV-074+ 或在备注中勾选阶段 |
+
+预计主要触点：`setup.py`、新 `autostart.py`、`cli/autostart.py`（或 `cli/system.py` 扩展）、`docs/autostart.md`、`skills/lwa-setup-autostart/SKILL.md`、`skills/lwa-setup-host-environment/SKILL.md`、`tests/test_setup.py` / 新 `tests/test_autostart.py`。
 
 
