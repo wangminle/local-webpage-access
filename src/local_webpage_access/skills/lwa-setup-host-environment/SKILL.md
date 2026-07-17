@@ -52,14 +52,26 @@
 
 ```text
 1. 让用户运行：lwa setup（或 lwa setup --json）
-2. 按 fail 项逐条给出平台相关安装命令（可参考 lwa setup --script）
+2. 按 fail 项逐条给出平台相关安装命令
+   - 优先：内置脚本（见 lwa setup --script）或一次装齐 `lwa setup --full --yes`
+   - Docker：install-docker-linux.sh / install-docker-macos.sh（默认阿里云 docker-ce 源）
+   - Caddy：install-caddy-linux.sh / install-caddy-macos.sh
 3. 安装 lwa：pip install -e .
 4. 复核：lwa setup → 全部必需项 ok
-5. 初始化工作区：lwa init
+5. 初始化工作区：lwa init（或 `lwa init --full --yes` 初始化并装齐 Caddy/Docker/Compose）
 6. 完整诊断：lwa doctor（含端口池、registry、磁盘）
 7. 导入样例：lwa import inbox/xxx.zip → lwa start
 8. **升级 lwa 源码后**：优先运行 `lwa update`；需要 AI 协助时见 [lwa-update-runtime](../lwa-update-runtime/SKILL.md)
 ```
+
+### 装配档位（IMP-032）
+
+| 档位 | 命令 | 行为 |
+| --- | --- | --- |
+| default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 询问是否跑内置脚本 |
+| full | `lwa setup --full` / `lwa init --full` | 检查 Caddy+Docker+Compose，不达标则安装（非 TTY 需 `--yes`） |
+
+`--default` 与 `--full` 互斥。CI 请用 `--default` 或预装镜像，避免无 `--yes` 的 `--full` 改机器。
 
 若用户**只做静态 HTML**、不用容器：
 
@@ -105,4 +117,5 @@ lwa init
 lwa doctor
 ```
 
-需要脚本参考时：`lwa setup --script > setup-host.sh`，审阅后执行。
+需要脚本参考时：`lwa setup --script` 打印内置 Docker/Caddy 脚本路径；一次装齐用
+`lwa setup --full --yes`（需管理员权限，macOS 可能仍要手动开一次 Docker Desktop）。

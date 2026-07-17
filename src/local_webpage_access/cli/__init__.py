@@ -45,7 +45,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.6.0-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.6.1-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -60,17 +60,93 @@ def init(
         help="工作区根目录，默认当前目录",
     ),
     force: bool = typer.Option(False, "--force", help="已存在时仍重新生成配置和模板"),
+    default_profile: bool = typer.Option(
+        False,
+        "--default",
+        help="装配档位：仅初始化工作区（缺省；可询问安装 Docker）",
+    ),
+    full_profile: bool = typer.Option(
+        False,
+        "--full",
+        help="装配档位：初始化后检查并安装 Caddy + Docker Engine + Compose",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="full 档跳过确认直接安装（非 TTY 时必须）"
+    ),
+    install_docker: bool = typer.Option(
+        False,
+        "--install-docker",
+        help="default 档：强制执行内置 Docker 安装脚本",
+    ),
+    no_install_docker: bool = typer.Option(
+        False,
+        "--no-install-docker",
+        help="default 档：跳过 Docker 安装询问",
+    ),
+    static_gateway: str | None = typer.Option(
+        None,
+        "--static-gateway",
+        help="写入 local-web.yml 的 staticGateway（full 默认 caddy）",
+    ),
 ) -> None:
     f"""初始化 {PRODUCT_NAME} 工作区（目录 / 配置 / SQLite registry）。"""
     from pathlib import Path
 
+    from local_webpage_access.host_bootstrap import (
+        maybe_offer_docker_install,
+        resolve_profile,
+        run_full_bootstrap,
+    )
     from local_webpage_access.init_workspace import init_workspace
 
     try:
+        profile = resolve_profile(default=default_profile, full=full_profile)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    if install_docker and no_install_docker:
+        typer.secho(
+            "--install-docker 与 --no-install-docker 互斥",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    gateway = static_gateway
+    if gateway is None and profile == "full":
+        gateway = "caddy"
+
+    try:
         ws = Path(workspace).resolve()
-        summary = init_workspace(ws, force=force)
+        summary = init_workspace(ws, force=force, static_gateway=gateway)
         typer.secho(f"已初始化工作区：{ws}", fg=typer.colors.GREEN)
         typer.echo(summary)
+
+        if profile == "full":
+            typer.secho("\n── 完整装配（--full）──", fg=typer.colors.CYAN)
+            boot = run_full_bootstrap(yes=yes)
+            for msg in boot.messages:
+                typer.echo(msg)
+            if not boot.ok:
+                raise typer.Exit(code=1)
+        else:
+            flag: bool | None
+            if install_docker:
+                flag = True
+            elif no_install_docker:
+                flag = False
+            else:
+                flag = None
+            offer = maybe_offer_docker_install(install_docker=flag)
+            for msg in offer.messages:
+                typer.echo(msg)
+            # BUG-197：安装失败或复检失败时非零退出
+            if offer.attempted and (
+                offer.script_ok is False or offer.recheck_ok is False
+            ):
+                raise typer.Exit(code=1)
+
         typer.echo("\n下一步：把 zip 放入 inbox/ 后执行 `lwa import inbox/xxx.zip`")
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)

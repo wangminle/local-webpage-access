@@ -1,7 +1,7 @@
-# 新增功能点计划 IMP-025～IMP-028 / IMP-030（202607）
+# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～032（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
-> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位。
 
 ---
 
@@ -428,5 +428,223 @@ Skill 输出必须包含：**产品口径一句**（登录触发 vs 系统服务
 | DEV-073 | 本 IMP 主开发项；可按阶段拆 DEV-074+ 或在备注中勾选阶段 |
 
 预计主要触点：`setup.py`、新 `autostart.py`、`cli/autostart.py`（或 `cli/system.py` 扩展）、`docs/autostart.md`、`skills/lwa-setup-autostart/SKILL.md`、`skills/lwa-setup-host-environment/SKILL.md`、`tests/test_setup.py` / 新 `tests/test_autostart.py`。
+
+---
+
+## 11. IMP-031 — setup / init 内置 Docker Engine + Compose 国内源安装脚本
+
+> **状态**：2026-07-17 规划，**已落地（DEV-074）**。
+> **背景**：`lwa setup` 当前仅给出官方文档链接与参考脚本片段（`setup.py` 的 `_docker_install_hint` / `_SCRIPT_MACOS` / `_SCRIPT_LINUX`），国内环境拉官方源常超时；`lwa init` 只初始化工作区，不探测 Docker，用户常到 `import` / `start` 容器实例时才发现引擎未装。
+> **目标**：在包内提供 **macOS / Linux 两套**可执行安装脚本（Docker Engine + Compose 插件），默认配置 **阿里云国内源**；在 `setup` / `init` 流程中检测本地是否已有 Docker Engine，若缺失则**主动询问**用户是否执行内置脚本协助安装。
+
+### 11.1 需求描述
+
+#### 11.1.1 用户故事
+
+1. 作为国内 macOS / Linux 用户，我希望在 `lwa setup` 或 `lwa init` 时，若本机没有 Docker Engine，工具能明确告知并**询问是否用内置脚本安装**，而不是只甩官方外网链接。
+2. 作为运维/开发者，我希望脚本分开维护（macOS 一份、Linux 一份），安装 Engine 与 Compose 插件，并预先配好阿里云 apt/yum（或等价）与镜像加速，减少手动改源。
+3. 作为已安装 Docker 的用户，我希望流程**静默跳过**，不被反复打扰。
+
+#### 11.1.2 功能范围
+
+| 能力 | 必须 | 说明 |
+| --- | --- | --- |
+| 内置安装脚本 ×2 | 是 | `install-docker-macos.sh`、`install-docker-linux.sh`（路径建议见 §11.3） |
+| 安装 Docker Engine | 是 | 满足 `MIN_DOCKER_VERSION`（当前 ≥ 29.0.0） |
+| 安装 Compose 插件 | 是 | `docker compose` 插件，满足 `MIN_COMPOSE_VERSION`（推荐线仍提示） |
+| 配置阿里云国内源 | 是 | 包仓库源 + daemon `registry-mirrors`（见 §11.2） |
+| setup / init 检测 Engine | 是 | 无 Engine（或 `docker` 不可用）时进入询问分支 |
+| 交互询问是否执行脚本 | 是 | 默认否（保守）；用户确认后才执行；非 TTY / `--yes`/`--no` 有明确行为 |
+| Windows 原生一键安装脚本 | 否（本期） | 仍指向 Docker Desktop 文档；WSL 走 Linux 脚本 |
+| 静默改 Docker Desktop「登录时启动」 | 否 | 与 IMP-030 一致，仅提示 |
+
+#### 11.1.3 非目标
+
+- 不替代 Docker Desktop 的 GUI 许可与首次启动向导（macOS 装完仍可能需用户打开一次 Desktop）。
+- 不保证覆盖全部 Linux 发行版；本期以 **Debian/Ubuntu（含 WSL Ubuntu）** 为主路径，其他发行版脚本内明确报错或给出手动指引。
+- 不在非交互 CI 中默认自动装 Docker（无 TTY 且未传 `--install-docker` 时跳过询问并打印脚本路径）。
+- 不把镜像加速地址写成不可配置硬编码唯一值；允许环境变量 / 脚本参数覆盖，默认值为阿里云文档推荐地址。
+
+### 11.2 关键决策
+
+| 编号 | 决策点 | 方案 |
+| --- | --- | --- |
+| **031.a** | 脚本形态 | **仓库内独立 `.sh` 文件**（随包分发 / `importlib.resources` 定位），非仅 `setup.py` 字符串常量；`lwa setup --script` 可打印路径或 cat 内容。 |
+| **031.b** | macOS 安装方式 | 优先 **Docker Desktop**（Homebrew cask 或官方 pkg）；脚本内配置 `~/.docker/daemon.json`（或 Desktop settings 等价路径）的 `registry-mirrors` 为阿里云加速；Compose 随 Desktop 捆绑，脚本结束用 `docker compose version` 校验。 |
+| **031.c** | Linux 安装方式 | 使用 **阿里云 Docker CE 镜像站** 配置 apt/yum 源，安装 `docker-ce`、`docker-ce-cli`、`containerd.io`、`docker-compose-plugin`；写 `/etc/docker/daemon.json` 的 `registry-mirrors`；`usermod -aG docker` 并提示重新登录。 |
+| **031.d** | 阿里云源范围 | **双源**：(1) **软件包源**（docker-ce 安装包）；(2) **镜像拉取加速**（`registry-mirrors`）。具体 URL 以阿里云当前文档为准，脚本顶部常量集中维护，便于失效时一处替换。 |
+| **031.e** | 触发时机 | **`lwa setup` 与 `lwa init` 均检测**。`setup`：检测报告后若 docker fail 则询问；`init`：工作区初始化成功后、打印「下一步」之前询问。已安装且 `docker version` 可达则跳过。 |
+| **031.f** | 询问交互 | 文案示例：「未检测到 Docker Engine。是否执行内置安装脚本（阿里云源，macOS/Linux）？[y/N]」。确认后：选平台脚本 → 打印将执行命令 → 再确认一次（或 `--yes` 一次过）→ `subprocess` 调用 bash。拒绝则打印脚本路径与 `bash <path>` 手动命令。 |
+| **031.g** | 权限 | Linux 脚本内需要 `sudo`；macOS Desktop 安装可能需管理员密码。LWA **不**自己提权，由脚本内 `sudo` 交互。 |
+| **031.h** | 与现有参考脚本关系 | 现有 `_SCRIPT_*` 中 Docker 段改为「调用 / 指向」新脚本；安装 hint 文案同步改为内置脚本优先、官方文档兜底。 |
+| **031.i** | CLI 开关 | 细粒度开关（`--install-docker` 等）可保留作调试；**产品主入口以 IMP-032 的 `--default` / `--full` 为准**（见 §12）。无 profile 时：TTY 对缺失 Docker 询问，非 TTY 跳过。 |
+
+### 11.3 脚本与代码触点
+
+| 产物 / 触点 | 说明 |
+| --- | --- |
+| `scripts/install-docker-macos.sh`（或 `src/local_webpage_access/scripts/…`） | macOS：检测已装则 exit 0；装 Desktop；写 registry-mirrors；校验 `docker` + `docker compose` |
+| `scripts/install-docker-linux.sh` | Linux：发行版探测；配阿里云 docker-ce 源；装 Engine + compose-plugin；daemon.json；用户组；校验版本 ≥ 门槛 |
+| `setup.py` / 新 `docker_install.py` | 探测、定位脚本路径、询问、执行、更新 hint/`render_setup_script` |
+| `cli/__init__.py` `init`、`cli/system.py` `setup` | 接线探测与 flags |
+| `docs/` / `lwa-setup-host-environment` Skill | 文档化国内源安装路径与「拒绝后如何手动跑」 |
+| `tests/test_setup.py` 等 | mock 无 docker → 询问分支；`--no-install-docker` 不执行；脚本内容含阿里云关键字与 compose 包名断言 |
+
+### 11.4 实施拆分
+
+| 子任务 | 触点 | 说明 |
+| --- | --- | --- |
+| **031.01** | 两份 shell 脚本 | 实现 macOS / Linux 安装 + 阿里云双源；`set -euo pipefail`；幂等（已装且版本够则跳过安装步骤仍可补配 mirror） |
+| **031.02** | 脚本打包与定位 | 确保 `pip install` / editable 后 CLI 能找到脚本；失败时给出仓库相对路径兜底 |
+| **031.03** | `detect_docker_engine()` | 复用或薄封装 `check_docker`：区分「未安装」「已装但 daemon 未起」「版本过低」——仅「未安装 / 命令不存在」默认进入安装询问；daemon 未起提示启动而非重装；版本过低提示升级路径 |
+| **031.04** | setup / init 询问流 | 实现 §11.2.e/f/i；TTY/`--yes`/`--no`/`--install-docker` 矩阵 |
+| **031.05** | 文案与 `--script` | hint 与参考脚本指向内置安装器；执行前后打印校验命令 |
+| **031.06** | Skill / README | 更新宿主机环境 setup 说明；强调国内源与手动执行方式 |
+| **031.07** | 测试 | 单元：探测分支、flag 短路、脚本存在性与关键片段；不在 CI 真实安装 Docker |
+
+### 11.5 验收标准
+
+- 干净 macOS / Ubuntu（无 docker）：`lwa init`（或 `setup`）提示询问；选 N → 打印脚本路径且不改系统；选 Y（或 `--install-docker`）→ 跑对应平台脚本后 `docker version` 与 `docker compose version` 可用且满足最低版本。
+- 已安装 Docker：setup/init **不询问**安装。
+- 脚本默认使用阿里云包源与 `registry-mirrors`；可用参数/环境变量覆盖。
+- 非 TTY 默认不自动安装；`--install-docker` 可显式触发。
+- 现有 `lwa setup` 检测项与 doctor 的 Docker 检查不被破坏；全量相关单测绿。
+
+### 11.6 风险与边界
+
+| 风险 | 处理 |
+| --- | --- |
+| 阿里云镜像站 URL / 加速器策略变更 | 脚本顶部常量 + 文档注明核对官方镜像站页；失效时 hint 回退官方文档 |
+| macOS 仅装 CLI 无 Desktop 体验差 | 本期明确走 Desktop；不承诺 colima/rancher 等替代运行时（可后续扩展） |
+| Linux 非 Debian 系 | 脚本检测后友好退出并给手动指引，不半装损坏源列表 |
+| sudo / 图形密码打断自动化 | 文档说明需交互终端；CI 用 `--no-install-docker` |
+| 装完 daemon 未启动误判失败 | 脚本末尾 `docker info` 重试/提示启动 Desktop 或 `systemctl start docker` |
+| 与用户已有 `daemon.json` 冲突 | 合并写入 `registry-mirrors`，不粗暴覆盖整个文件；无法解析则备份后写入并告警 |
+
+### 11.7 落地节奏与编号映射
+
+建议顺序：**031.01 脚本 → 031.02 打包定位 → 031.03/031.04 CLI 询问 → 031.05/031.06 文案 Skill → 031.07 测试**。
+
+| task-list | 关系 |
+| --- | --- |
+| PLN-012 / DOC-038 | 本 §11 规划与文档记录 |
+| DEV-074 | 本 IMP 主开发项，落地时按子任务拆分或本号收口 |
+| 关联 | 增强现有 `setup` 安装 hint；与 IMP-030 的 Docker Desktop「登录时启动」检查互补（本项负责「装上」，030 负责「自启提示」） |
+
+预计主要触点：`scripts/install-docker-*.sh`、`setup.py`（或新 `docker_install.py`）、`cli/__init__.py`、`cli/system.py`、`skills/lwa-setup-host-environment/SKILL.md`、相关 docs 与测试。
+
+---
+
+## 12. IMP-032 — setup / init 环境装配档位：`--default` 与 `--full`
+
+> **状态**：2026-07-17 规划，**已落地（DEV-075）**。与 IMP-031（Docker 安装脚本）配套；本项定义 **CLI 档位语义** 与 **full 路径下 Caddy + Docker Engine + Compose 的检查/安装闭环**。
+> **背景**：当前 `lwa setup` 只检测并打印指引，`lwa init` 只建工作区；缺 Docker / Caddy 时用户要自行翻文档安装。国内环境还需通用、可内置的下载安装脚本。用户希望用两个明确档位区分「维持现状」与「一次装齐容器托管全套前置」。
+> **目标**：`lwa setup` 与 `lwa init` 均支持 `--default` / `--full`；**default = 当前行为**；**full = 按最低版本要求检查并装齐 Caddy、Docker Engine、Compose**（内置最通用的分平台下载/安装脚本）。
+
+### 12.1 需求描述
+
+#### 12.1.1 用户故事
+
+1. 作为新用户，我执行 `lwa init --default`（或不带参数，等价 default）时，行为与今天一致：初始化工作区 / 检测环境并给指引，不强制装 Caddy/Docker。
+2. 作为要跑容器实例 + Caddy 别名的用户，我执行 `lwa setup --full` 或 `lwa init --full`，希望工具**检查** Caddy / Docker Engine / Compose 是否达到 `MIN_*` 门槛；任一缺失或过低则用**内置通用脚本**装好（国内源优先，见 IMP-031），而不是只给外链。
+3. 作为 CI / 脚本调用方，我希望档位语义稳定、可非交互（`--full` 在无 TTY 时需显式确认策略，见 §12.2）。
+
+#### 12.1.2 档位定义
+
+| 档位 | CLI | 行为摘要 |
+| --- | --- | --- |
+| **default** | `--default`（**缺省即此档**） | **等同当前** `setup` / `init`：检测 Python、lwa、Docker、Compose、Caddy、Node 并输出报告/hint；Caddy 缺失可降级 builtin；Docker 缺失不阻断工作区初始化。可叠加 IMP-031：缺失 Docker 时 **TTY 询问**是否装，默认不自动装。 |
+| **full** | `--full` | 在 default 检测基础上，将 **Caddy、Docker Engine、Docker Compose** 视为本阶段**必须达标**项：对照 `MIN_CADDY_VERSION` / `MIN_DOCKER_VERSION` / `MIN_COMPOSE_VERSION`；未安装或低于最低要求 → **执行内置安装脚本装齐**（装后复检）。Python / Node / lwa 包仍按现有规则检测（本期 full **不**自动装 Python/Node，除非后续单列）。 |
+
+互斥：`--default` 与 `--full` 不能同时传；同时传则 CLI 报错退出。
+
+#### 12.1.3 功能范围
+
+| 能力 | default | full | 说明 |
+| --- | --- | --- | --- |
+| 工作区初始化（仅 `init`） | 是 | 是 | 目录 / 配置 / registry 逻辑不变 |
+| 环境检测报告 | 是 | 是 | 复用 `run_setup` / doctor 同源检查 |
+| Caddy 低于门槛 → 自动安装 | 否 | **是** | 内置 macOS/Linux 通用安装脚本 |
+| Docker Engine 低于门槛 → 自动安装 | 否（可询问，IMP-031） | **是** | 复用 / 扩展 IMP-031 脚本 |
+| Compose 低于门槛 → 自动安装 | 否（可询问） | **是** | 通常随 Engine/Desktop；Linux 显式装 plugin |
+| 阿里云等国内源 | 询问安装时用 | 安装脚本默认用 | 与 IMP-031 一致 |
+| 自动装 Python / Node | 否 | 否（本期） | 仍只给 hint |
+| Windows 原生 full 一键装 | 否 | 否（本期） | WSL 走 Linux 脚本；Win 原生给 Desktop 指引 |
+
+#### 12.1.4 非目标
+
+- full 不保证装完即可无人值守跑业务（macOS 仍可能要手动开一次 Docker Desktop；Linux 可能要重新登录以生效 `docker` 组）。
+- full 不把 `staticGateway` 强制改成 caddy 写回配置以外的隐式行为；建议 full 成功后提示「已具备 Caddy，可将 `staticGateway` 设为 caddy」或在 `init --full` 时默认生成 `staticGateway: caddy`（**决策见 032.d**）。
+- 不在 full 中静默升级「已达标但低于推荐线」的 Compose（推荐线仍 WARN，与 BUG-051 口径一致）。
+
+### 12.2 关键决策
+
+| 编号 | 决策点 | 方案 |
+| --- | --- | --- |
+| **032.a** | 缺省档位 | **default**。不传 `--default`/`--full` 时行为与现网完全一致，避免破坏脚本与文档。 |
+| **032.b** | full 安装触发条件 | 对 Caddy / Docker / Compose 三项：`command` 缺失 **或** 已装但 `version < MIN_*` → 进入安装；daemon 未起但二进制达标 → **不重装**，提示启动。 |
+| **032.c** | full 交互 | TTY：列出将安装组件 → 一次确认 `[y/N]`（可用 `--yes` 跳过）；非 TTY：**必须** `--yes` 才执行安装，否则打印脚本路径并以非零退出（避免 CI 静默改机器）。 |
+| **032.d** | `init --full` 与 `staticGateway` | **推荐**：`init --full` 在生成 `local-web.yml` 时默认 `staticGateway: caddy`（因已承诺装 Caddy）；`init --default` 保持现有默认。若用户显式 `--static-gateway builtin` 则尊重。 |
+| **032.e** | 脚本集合 | 在 IMP-031 Docker 脚本之外，增加 **Caddy** 最通用安装脚本（macOS：`brew install caddy` 或官方二进制；Linux：官方 apt 仓库或静态二进制 + 校验 `MIN_CADDY_VERSION`）。尽量少分支、可幂等。 |
+| **032.f** | 与 IMP-031 关系 | IMP-031 = 安装器实现；IMP-032 = **档位编排**。`--full` 调用同一套脚本且对缺失项**默认执行**（经确认），不再逐项反复问「是否装 Docker」。 |
+| **032.g** | 退出码 | default：与现网一致（必需项未就绪 → 1）。full：安装或复检仍未达标 → 1；用户拒绝确认 → 1；成功且三项均 ≥ MIN → 0。 |
+| **032.h** | `setup --script` | 可增加 `--full` 时输出「完整装配」脚本（串联 Caddy+Docker+Compose）；或分别打印各脚本路径。 |
+
+### 12.3 CLI 形态（示意）
+
+```text
+lwa setup [--default | --full] [--yes] [--script] ...
+lwa init  [--default | --full] [--yes] [--force] [--workspace ...]
+```
+
+| 命令示例 | 预期 |
+| --- | --- |
+| `lwa setup` / `lwa setup --default` | 仅检测 + hint（+ IMP-031 询问 Docker） |
+| `lwa setup --full` | 检测 → 确认 → 装缺失的 Caddy/Docker/Compose → 复检 |
+| `lwa init --full --yes` | 建工作区 + 非交互装齐三项（需 root/sudo 场景仍可能停在密码提示） |
+| `lwa init --default` | 仅建工作区；可选询问 Docker |
+
+### 12.4 实施拆分
+
+| 子任务 | 触点 | 说明 |
+| --- | --- | --- |
+| **032.01** | `cli/system.py`、`cli/__init__.py` | 增加互斥的 `--default` / `--full`；`--yes`；接线编排函数 |
+| **032.02** | `setup.py` 或 `host_bootstrap.py` | `BootstrapProfile = default \| full`；full 路径：检查 → 计划 → 确认 → 调脚本 → 复检 |
+| **032.03** | Caddy 安装脚本 ×2 | macOS / Linux 最通用路径；版本校验；国内可访问的下载优先（文档注明） |
+| **032.04** | 对接 IMP-031 | full 复用 Docker/Compose 脚本；统一日志与失败回滚文案（失败不留下半配置源为佳） |
+| **032.05** | `init` + `staticGateway` | 实现 032.d；单测覆盖 default/full 生成配置差异 |
+| **032.06** | 文档 / Skill | README、`lwa-setup-host-environment`：两档对比表；强调 full 权限与 Desktop 首次启动 |
+| **032.07** | 测试 | profile 互斥、default 不调安装器、full+yes mock 调用序列、复检失败退出码；不在 CI 真装 |
+
+### 12.5 验收标准
+
+- `lwa setup` / `lwa init` 不传参与显式 `--default` 行为与改前一致（含退出码）。
+- `lwa setup --full`（TTY 确认或 `--yes`）后：`caddy version`、`docker version`、`docker compose version` 均 ≥ 对应 `MIN_*`；已达标组件不被无故重装。
+- `lwa init --full` 工作区可用且（按 032.d）默认倾向 caddy；`--default` 不强制改网关。
+- `--default --full` 同时出现 → 清晰错误、非零退出。
+- 非 TTY 的 `--full` 无 `--yes` → 不改装系统，给出可执行脚本路径。
+- 相关单测绿；task-list 落地记 DEV- 完成态。
+
+### 12.6 风险与边界
+
+| 风险 | 处理 |
+| --- | --- |
+| full 权限/交互打断 | 文档写明需管理员密码；CI 用 default 或预装镜像 |
+| 装齐后 Desktop 未启动 | 复检区分「二进制 OK / daemon 不可达」，提示启动而非报「安装失败」 |
+| Caddy 与系统 `caddy.service` 冲突 | 安装后提示与 IMP-030 一致：由 LWA 托管时勿并行启用系统单元 |
+| 脚本「最通用」仍覆盖不全 | 非目标发行版失败时打印手动步骤，不假装成功 |
+| 与旧 `--install-docker` 并存 | 文档标明 deprecated 或映射到 full 子集；避免三套语义 |
+
+### 12.7 落地节奏与编号映射
+
+建议：**先 IMP-031 脚本可跑 → 再 IMP-032 档位编排 + Caddy 脚本 → 文档/Skill**。亦可同一迭代交付，但测试上先单测安装器再测 profile。
+
+| task-list | 关系 |
+| --- | --- |
+| PLN-013 / DOC-039 | 本 §12 规划与文档记录 |
+| DEV-075 | 本 IMP 主开发项（依赖 / 并行 DEV-074） |
+| DEV-074（IMP-031） | Docker/Compose 安装器；被 `--full` 调用 |
+
+预计主要触点：`cli/system.py`、`cli/__init__.py`、`setup.py`（或 `host_bootstrap.py`）、`scripts/install-caddy-*.sh`、`scripts/install-docker-*.sh`、Skill/README、测试。
 
 

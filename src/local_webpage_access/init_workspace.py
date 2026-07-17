@@ -23,12 +23,18 @@ _BUNDLED_TEMPLATES = Path(__file__).parent / "templates"
 _BUNDLED_SKILLS = Path(__file__).parent / "skills"
 
 
-def init_workspace(root: Path, *, force: bool = False) -> str:
+def init_workspace(
+    root: Path,
+    *,
+    force: bool = False,
+    static_gateway: str | None = None,
+) -> str:
     """初始化工作区。
 
     Args:
         root: 工作区根目录。
         force: 为 True 时强制覆盖配置文件和模板。
+        static_gateway: 若给出，写入 ``local-web.yml`` 的 ``staticGateway``（IMP-032）。
 
     Returns:
         初始化摘要文本（供 CLI 输出）。
@@ -40,7 +46,9 @@ def init_workspace(root: Path, *, force: bool = False) -> str:
     ws.ensure_workspace_dirs()
 
     # 2. 写入默认配置
-    config_written = _write_default_config(ws, force=force)
+    config_written = _write_default_config(
+        ws, force=force, static_gateway=static_gateway
+    )
 
     # 3. 复制默认模板（用于用户编辑）
     templates_written = _copy_default_templates(ws, force=force)
@@ -76,11 +84,19 @@ def init_workspace(root: Path, *, force: bool = False) -> str:
     )
 
 
-def _write_default_config(ws: Workspace, *, force: bool) -> bool:
+def _write_default_config(
+    ws: Workspace,
+    *,
+    force: bool,
+    static_gateway: str | None = None,
+) -> bool:
     if ws.config_path.exists() and not force:
         log.debug("配置文件已存在，跳过：%s", ws.config_path)
         return False
-    ws.config_path.write_text(example_config_text(), encoding="utf-8")
+    ws.config_path.write_text(
+        example_config_text(static_gateway=static_gateway),
+        encoding="utf-8",
+    )
     log.info("已写入默认配置：%s", ws.config_path)
     return True
 

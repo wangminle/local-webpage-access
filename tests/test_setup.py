@@ -125,7 +125,9 @@ def test_render_setup_script_per_platform() -> None:
 
 def test_cli_setup_command() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["setup", "--static-gateway", "builtin"])
+    result = runner.invoke(
+        app, ["setup", "--static-gateway", "builtin", "--no-install-docker"]
+    )
     assert result.exit_code in (0, 1)
     assert "宿主机环境检测" in result.output or "python" in result.output.lower()
 
@@ -134,19 +136,147 @@ def test_cli_setup_script_flag() -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["setup", "--script"])
     assert result.exit_code == 0
+    assert "install-docker-" in result.output
     plat = detect_platform()
     if plat == "macos":
         assert "brew install" in result.output
     elif plat == "windows":
-        assert "winget" in result.output
+        # Windows 无内置 docker 脚本时仍可能输出历史参考段
+        assert "winget" in result.output or "内置" in result.output or "平台" in result.output
+
+
+def test_cli_setup_rejects_default_and_full() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["setup", "--default", "--full"])
+    assert result.exit_code == 2
+    assert "互斥" in result.output
+
+
+def test_cli_setup_full_without_yes_non_tty(monkeypatch) -> None:
+    """非 TTY 的 --full 无 --yes 应跳过安装并以非零退出（若有待装项）。"""
+    from local_webpage_access.host_bootstrap import FullBootstrapResult, InstallPlanItem
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.run_full_bootstrap",
+        lambda **kwargs: FullBootstrapResult(
+            ok=False,
+            planned=[
+                InstallPlanItem(
+                    kind="docker",
+                    script=Path("/tmp/x.sh"),
+                    reason="missing",
+                )
+            ],
+            ran=[],
+            messages=["非交互终端且未传 --yes"],
+            skipped_no_confirm=True,
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["setup", "--full"])
+    assert result.exit_code == 1
+    assert "--yes" in result.output or "非交互" in result.output
 
 
 def test_cli_setup_json() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["setup", "--json", "--static-gateway", "builtin"])
+    result = runner.invoke(
+        app, ["setup", "--json", "--static-gateway", "builtin", "--no-install-docker"]
+    )
     assert result.exit_code in (0, 1)
     assert '"platform"' in result.output
     assert '"items"' in result.output
+
+
+def test_cli_setup_full_json_stdout_is_pure_json(monkeypatch) -> None:
+    """BUG-196：--full --json 的 stdout 必须可被 json.loads（不被标题/过程散文污染）。"""
+    import json
+
+    from local_webpage_access.host_bootstrap import FullBootstrapResult
+
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.run_full_bootstrap",
+        lambda **kwargs: FullBootstrapResult(
+            ok=True, planned=[], ran=[], messages=["装配过程日志"]
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["setup", "--full", "--yes", "--json", "--static-gateway", "builtin"]
+    )
+    # 关键：stdout 以 JSON 对象开头（无「── 完整装配」等散文前缀）
+    stripped = result.stdout.lstrip()
+    assert stripped.startswith("{"), result.stdout[:200]
+    data = json.loads(result.stdout)
+    assert data["profile"] == "full"
+    assert data["bootstrap"]["messages"] == ["装配过程日志"]
+    assert "── 完整装配" not in result.stdout
+
+
+def test_cli_setup_install_docker_failure_exits_nonzero(monkeypatch) -> None:
+    """BUG-197：安装脚本失败时 setup 必须 exit 1。"""
+    from local_webpage_access.host_bootstrap import DockerOfferResult
+    from local_webpage_access.setup import SetupReport
+
+    monkeypatch.setattr(
+        "local_webpage_access.setup.run_setup",
+        lambda **kwargs: SetupReport(platform="macos", items=[]),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.maybe_offer_docker_install",
+        lambda **kwargs: DockerOfferResult(
+            messages=["fail"],
+            attempted=True,
+            script_ok=False,
+            recheck_ok=False,
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["setup", "--install-docker", "--static-gateway", "builtin"])
+    assert result.exit_code == 1
+
+
+def test_cli_setup_install_docker_success_rechecks(monkeypatch) -> None:
+    """BUG-197：安装成功后复检，ready 用新报告。"""
+    from local_webpage_access.doctor import STATUS_OK
+    from local_webpage_access.host_bootstrap import DockerOfferResult
+    from local_webpage_access.setup import SetupItem, SetupReport
+
+    calls = {"n": 0}
+
+    def fake_setup(**kwargs):
+        calls["n"] += 1
+        # 第一次 fail，复检 ok
+        status = STATUS_OK if calls["n"] > 1 else "fail"
+        return SetupReport(
+            platform="macos",
+            items=[
+                SetupItem(
+                    name="docker",
+                    status=status,
+                    message="x",
+                    required="y",
+                    install_hint="z",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("local_webpage_access.setup.run_setup", fake_setup)
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.maybe_offer_docker_install",
+        lambda **kwargs: DockerOfferResult(
+            messages=["installed"],
+            attempted=True,
+            script_ok=True,
+            recheck_ok=True,
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["setup", "--install-docker", "--static-gateway", "builtin"])
+    assert calls["n"] == 2
+    assert result.exit_code == 0
+    assert "安装后复检" in result.output
 
 
 # ---- OPS-022/025：launchd 开机自启 plist 生成 ---------------------------------

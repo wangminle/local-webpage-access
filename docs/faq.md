@@ -6,8 +6,16 @@
 
 ```bash
 lwa setup             # 检测宿主机工具，打印安装指引（无需工作区）
-lwa setup --script    # 输出当前平台参考安装脚本（需人工审阅后执行）
+lwa setup --script    # 打印内置 Docker/Caddy 安装脚本路径（需人工审阅后执行）
+lwa setup --full --yes  # 检查并安装 Caddy + Docker Engine + Compose（非 TTY 必须 --yes）
 ```
+
+| 档位 | 命令 | 行为 |
+| --- | --- | --- |
+| default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 可询问是否跑内置脚本 |
+| full | `lwa setup --full` / `lwa init --full` | 按最低版本检查 Caddy/Docker/Compose，不达标则安装 |
+
+`--default` 与 `--full` 互斥。内置脚本覆盖 macOS / Linux（含 WSL）；Windows 原生请按 `lwa setup` 打印的指引手动安装。详见 [运维手册 · 宿主机装配](operations-playbook.md#零宿主机装配imp-031032)。
 
 遇到问题时，第一步永远是：
 
@@ -38,6 +46,7 @@ lwa doctor --json   # 机器可读报告，便于脚本化
 * 确认 `docker` 命令在 PATH 中：`docker version`。
 * Linux：确认 dockerd 已启动（`systemctl status docker`），当前用户在 `docker` 组。
 * macOS / Windows：确认 Docker Desktop 已启动。
+* 未安装时可用内置脚本：`lwa setup --script` 查看路径，或 `lwa setup --full --yes` / `lwa setup --install-docker`（macOS/Linux）。
 * 静态/前端实例不需要 Docker，可继续使用。
 
 ### Docker Compose 不可用

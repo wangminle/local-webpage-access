@@ -205,6 +205,9 @@
 | BUG-192 | 修复 | updater 忽略 stop_manager/stop_daemon 返回值：stop 失败被报成重启成功，旧进程仍在跑或产生重复 watcher | 2026-07-17 12:03 | 2026-07-17 13:19 | 已修复 | 【修复】updater restart_daemon/restart_manager 检查 stop 返回值，失败时抛错（run_update 标 failed，不再误报重启成功）；stop_daemon 仅在终止成功（stopped=True）时删锁文件，失败保留供重试（daemon.py）。配套回归测试 |
 | BUG-193 | 修复 | run_service_main 启动无条件覆盖 manager.json、退出按 pid 写 disabled：两个 manager 并发启动时互踩状态，off 假报已停止而管理页实际仍在运行 | 2026-07-17 12:03 | 2026-07-17 13:19 | 已修复 | 【修复】manager_service 新增 manager_instance_lock（O_CREAT\|O_EXCL + 死 PID/超龄回收 + acquired 标志，对照 daemon_lock/BUG-173）；run_service_main 在整个生命周期持该锁，已有存活实例时本入口 return 0 退出（不再起第二个 uvicorn）。配套回归测试 |
 | BUG-194 | 修复 | BUG-169 修复后 /api/health 仅对 localhost 返回 workspaceRoot：managerHost 配 LAN IP 或双栈 :: 时 health 归属校验失效，start 误报"端口被其他工作区占用"、stop 归属校验失效后误标已停 | 2026-07-17 12:03 | 2026-07-17 13:19 | 已修复 | 【修复】manager_api 新增 _is_loopback_host（用 ipaddress.is_loopback，正确识别 ::ffff:127.0.0.1/::1/整个 127.x 段）+ _normalize_client_host（剥 ::ffff: 前缀）+ _is_self_connection（managerHost=LAN IP 时本机自连 client.host==bind 视为可信）；/api/health 对回环或自连返回 workspaceRoot，局域网他机仍不泄露。配套回归测试 |
+| BUG-195 | 修复 | IMP-031 Docker 安装脚本默认不配置 registry-mirrors，与阿里云双源验收口径不符 | 2026-07-17 17:41 | 2026-07-17 17:48 | 已修复 | 【修复】install-docker-{linux,macos}.sh 默认 registry-mirrors=https://docker.m.daocloud.io（可换阿里云个人加速器；none 跳过）；双源默认写入。回归 test_docker_scripts_default_registry_mirrors_nonempty。 |
+| BUG-196 | 修复 | lwa setup --full --json 在 JSON 前输出人类可读装配日志，导致输出无法被 JSON 解析 | 2026-07-17 17:41 | 2026-07-17 17:48 | 已修复 | 【修复】setup --full --json：装配过程日志改 stderr，stdout 仅 JSON（含 bootstrap 字段）。回归 test_cli_setup_full_json_stdout_is_pure_json。 |
+| BUG-197 | 修复 | default 档 Docker 安装不传播执行结果且不复检，setup/init 可能返回错误退出状态 | 2026-07-17 17:41 | 2026-07-17 17:48 | 已修复 | 【修复】maybe_offer_docker_install 返回 DockerOfferResult；setup 安装后复检并用新报告决定退出码；脚本失败/复检失败 exit 1；init 同步。回归 test_cli_setup_install_docker_* / test_maybe_offer_*。 |
 
 ## 调整事项
 
@@ -238,6 +241,7 @@
 | ADJ-026 | 调整 | 将黄色内环光束扩展为整圈白色上喷圆点光线 | 2026-07-10 19:12 | 2026-07-10 19:12 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：删除局部7条黄色光束，改为10条白色#FFFFFF细圆点光束，覆盖黄色内环的侧边、下半与上半多点并统一向上延伸；光束置于圆环之后，不改既有网页和圆环；xmllint、源代码定位与 git diff --check 通过；本机PNG渲染器仍不可用。 |
 | ADJ-027 | 调整 | 回退网页网络 Logo 整圈白色光束至黄色局部托举光束 | 2026-07-10 19:15 | 2026-07-10 19:15 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：移除10条白色整圈光束，恢复黄色内环上方7条细圆点发散光束；三层网页、同心三环及基础设施配色不变；xmllint、源代码定位与 git diff --check 通过；本机PNG渲染器仍不可用。 |
 | ADJ-028 | 调整 | 在网页网络 Logo 黄色椭圆内沿七条射线补充七个节点 | 2026-07-15 12:05 | 2026-07-15 12:05 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：沿7条黄色射线的延长方向，在黄色内环内部加入7个#FFD43B实心圆点；同步更新无障碍描述。xmllint、射线/节点数量与椭圆内间隙几何校验、Quick Look 1000px PNG渲染、diff-check均通过。 |
+| ADJ-029 | 调整 | 清理 IMP-032 规划写入时误追加的重复 PLN-014/DOC-040/DEV-076 行 | 2026-07-17 17:12 | 2026-07-17 17:12 | 已完成 | 保留 PLN-013/DOC-039/DEV-075 为权威记录；删除内容完全相同的后三个重复行；plan §12 编号映射不变。 |
 
 ## 检查事项
 
@@ -308,6 +312,7 @@
 | CHK-064 | 检查 | 核对今天已修复 BUG-167～194 落地是否正确 | 2026-07-17 14:16 | 2026-07-17 14:16 | 已完成 | 对照源码+抽测回归：BUG-167～185、187～194 共 27 条 OK；BUG-186 仅 write_instance_log 接线滚动，主流量 build/run/gateway/manager 仍直写未滚动，改回待修复。BUG-176/182 缺专用回归但实现正确；BUG-194 有 helper 测缺 LAN bind E2E。未改业务代码。 |
 | CHK-065 | 检查 | 补全 BUG-186 主流量日志滚动与高效尾读 | 2026-07-17 14:27 | 2026-07-17 14:27 | 已完成 | open_append 接线 run_command/_execute/_start_builtin/_spawn_manager；tail_text_file 用于 read_log/read_manager_log；相关切片 pytest 全绿。 |
 | CHK-066 | 检查 | 复核全部未提交变更并撰写 V0.6.0 commit message（≤300字） | 2026-07-17 14:42 | 2026-07-17 14:42 | 已完成 | 对照 git status/diff/log：53 文件 +2117/-264；含 BUG-166～194、版本 0.6.0、docs/skills/task-list。建议主题 V0.6.0-Build1123-20260717（Build=当前 pytest collect 1123）；正文约 220 字。未执行 git commit。 |
+| CHK-067 | 检查 | 核对新增功能点2607与task-list完成状态并复查实现缺陷 | 2026-07-17 17:41 | 2026-07-17 17:41 | 已完成 | 逐项核对 IMP-025～032 与 DEV-068～075；全量 pytest 通过（4项真实Docker门控跳过），bash -n、git diff --check、wheel脚本打包检查通过；发现 BUG-195～197，故账面开发项均完成但 IMP-031/032 尚不能判定验收完成。未改业务代码。 |
 
 ## 测试数据
 
@@ -355,6 +360,11 @@
 | DOC-035 | 文档 | 规划 IMP-030：macOS/Linux 自启动配置与完备性检查（含 CLI/Skill） | 2026-07-16 10:43 | 2026-07-16 10:43 | 已完成 | 在 design/plan/local-webpage-access-新增功能点2607.md 新增 §10 IMP-030：确认 CHK-048 评估口径；需求含 install/enable/status/check/repair/uninstall；服务管理器直接监管前台进程（修 BUG-138）；macOS PATH/Caddy（修 BUG-139）；Linux systemd+linger；WSL 探测与 Windows 唤醒指引；新建 Skill lwa-setup-autostart；阶段 A→D 实施拆分。关联 DEV-073。 |
 | DOC-036 | 文档 | 同步 BUG-159～165 修复后的自启动文档与 Skill 口径 | 2026-07-16 16:25 | 2026-07-16 16:25 | 已完成 | 更新 docs/autostart.md（--no-enable 语义、MainPID 身份、PATH 可用性、孤儿差量卸载、迁移失败不 enable）、README 命令表、design/plan §10.5 完备性表、skills/lwa-setup-autostart 示例。 |
 | DOC-037 | 文档 | 同步 runtime/运维手册/update·autostart skill：自启协调与 IMP-030 主路径（对照 BUG-191） | 2026-07-17 14:33 | 2026-07-17 14:33 | 已完成 | runtime-workspace 重载节、operations-playbook §五、lwa-update-runtime、lwa-setup-autostart：标明 lwa update coordinated_restart；手搓 off/on 须先 autostart disable；运维手册改指向 lwa autostart。 |
+| DOC-038 | 文档 | 规划 IMP-031：setup/init 内置 Docker 国内源安装脚本（macOS/Linux） | 2026-07-17 17:08 | 2026-07-17 17:08 | 已完成 | 在 design/plan/local-webpage-access-新增功能点2607.md 新增 §11 IMP-031：两套 shell 安装 Docker Engine+Compose、配置阿里云源；setup/init 检测缺失并询问执行；TTY/--install-docker/--no-install-docker 矩阵；验收与风险边界。关联 PLN-012 / DEV-074。 |
+| DOC-039 | 文档 | 规划 IMP-032：setup/init --default/--full 档位与全量组件安装闭环 | 2026-07-17 17:11 | 2026-07-17 17:11 | 已完成 | 在 design/plan/local-webpage-access-新增功能点2607.md 新增 §12；与 §11 IMP-031 交叉引用；含 CLI 示意、决策、验收与风险。关联 PLN-013 / DEV-075。 |
+| DOC-040 | 文档 | 落地 IMP-031.01：按官方 Ubuntu 文档撰写 Docker 安装脚本（Linux+macOS） | 2026-07-17 17:21 | 2026-07-17 17:21 | 已完成 | 新增 src/local_webpage_access/scripts/install-docker-linux.sh（对齐 docs.docker.com/engine/install/ubuntu/，默认阿里云 docker-ce）与 install-docker-macos.sh（brew cask）；tests/test_install_docker_scripts.py 5 passed。DEV-074→进行中。 |
+| DOC-041 | 文档 | 落地 IMP-031/032：内置安装脚本与 setup/init --default/--full 档位 | 2026-07-17 17:32 | 2026-07-17 17:32 | 已完成 | host_bootstrap.py + Docker/Caddy 四脚本；CLI 接线；README/Skill；计划文档状态改为已落地。关联 DEV-074/075。 |
+| DOC-042 | 文档 | 同步 V0.6.1 文档：README/faq/operations-playbook/runtime-workspace/known-limitations/release-checklist 与 setup/update skills 对齐 IMP-031/032 | 2026-07-17 18:23 | 2026-07-17 18:23 | 已完成 | 运维手册新增§零宿主机装配；faq 补 --full/--script；known-limitations 注明 Windows 无内置安装脚本。 |
 
 ## 功能开发
 
@@ -433,6 +443,8 @@
 | DEV-071 | 开发 | 管理页大标题左侧 logo 放大 200%（1em→2em，约 32px） | 2026-07-15 19:44 | 2026-07-15 19:44 | 已完成 | app.js 顶部 logo img width/height 16→32；style.css .topbar-logo height/width 1em→2em 并更新注释。.topbar-title flex 居中保持，h1 与 version span 不受影响。前端实时上线，curl 确认 width=32 与 2em。 |
 | DEV-072 | 开发 | IMP-028 无别名的直连端口静态站点（如 demo-static）浏览量按端口归属统计 | 2026-07-15 20:42 | 2026-07-15 20:42 | 已完成 | 根因：demo-static 走 Caddy 独立站点 :18000（sites/demo-static.conf 无 log 指令），流量不写共享 static-access.log，而摄入器只读该日志 → 永不统计。方案 b：①静态站点模板（src 与 runtime 的 caddy_site.conf.tpl 及 _FALLBACK_TEMPLATE）加 log 块写共享 access log；generate_site_config 传 access_log 变量。②pageviews：AccessHit 加 host 字段、parse_caddy_json_line 提取 request.host；新增 _port_from_host 与 _static_host_port；_instance_sources 为无别名 caddy 静态站点填 host_port；ingest_all 建 port_to_id；_ingest_caddy_shared 别名前缀未命中时按 host 端口归属。有别名实例仍按前缀归属（不变，无双计）。test_pageviews 加端口解析/host 捕获/按端口归属 3 测试，test_static_gateway 加 log 指令断言。应用：重新生成 demo-static.conf 并 caddy reload，重启 manager(pid 42030，token 保留)；API 验证 demo-static source=caddy hits=8 uniqueIpList 127.0.0.1(本机)。全量 pytest 全绿。关联 IMP-024(DEV-061)/IMP-027(DEV-070)。 |
 | DEV-073 | 开发 | 跨平台自启动管理：macOS、Ubuntu 24.04+、WSL 2.7.0+ 的 install/enable/status/repair/uninstall 与平台探测 | 2026-07-16 10:20 | 2026-07-16 11:51 | 已完成 | 对应 IMP-030（design/plan/local-webpage-access-新增功能点2607.md §10）。本号收口：新增 platform_detect.py（detect_platform 含 wsl）、autostart.py（MacLaunchd/SystemdUser 后端 + 前台监管生成 + install/enable/disable/status/check/repair/uninstall + 完备性检查矩阵 + WSL 唤醒脚本）、cli/autostart.py（lwa autostart 子命令组）；gateway_service 加 run_gateway_foreground 前台入口；setup --autostart 委托 autostart install；daemon/manager/gateway off 协调先卸载单元（030.b）；docs/autostart.md 重写；新建 skill lwa-setup-autostart；tests/test_autostart.py 25 用例 + test_setup/test_init 同步。前台监管修 BUG-138，PATH 修 BUG-139 |
+| DEV-074 | 开发 | IMP-031：内置 macOS/Linux Docker Engine+Compose 阿里云源安装脚本，并在 setup/init 缺失时询问协助安装 | 2026-07-17 17:08 | 2026-07-17 17:32 | 已完成 | IMP-031 收口：scripts/install-docker-{linux,macos}.sh；host_bootstrap.detect/maybe_offer；setup/init 接线；hint/Skill/README；tests/test_host_bootstrap +test_install_docker_scripts。默认阿里云源，对齐官方 Ubuntu apt 流程。 |
+| DEV-075 | 开发 | IMP-032：setup/init 实现 --default/--full；full 路径检查并安装 Caddy+Docker Engine+Compose | 2026-07-17 17:11 | 2026-07-17 17:32 | 已完成 | IMP-032 收口：--default/--full/--yes；host_bootstrap.run_full_bootstrap；install-caddy-{linux,macos}.sh；init --full 默认 staticGateway=caddy；CLI 互斥与非 TTY 需 --yes；文档/Skill 已同步。 |
 
 ## 配置运维
 
@@ -484,6 +496,8 @@
 | OPS-044 | 运维 | 本地运行时更新部署至 V0.5.5（提交 V0.5.5-Build0979-20260716）：pip editable 重装 0.5.3→0.5.5；lwa update 同步 skills（新增 lwa-setup-autostart、更新 5）并重启 manager/daemon；手动重启 gateway 使 gateway_service.py 新代码生效；lwa version 与 /api/health 均显示 V0.5.5，doctor OK | 2026-07-16 17:13 | 2026-07-16 17:14 | 已完成 | manager pid 71800、daemon pid 71806、gateway pid 72360。gateway 因 lwa update 默认不重启而手动 off/on（gateway_service.py 改动较大）。lwa version 取 git HEAD 主题 V0.5.5-Build0979-20260716。 |
 | OPS-045 | 运维 | 重启后四项处置：恢复 demo-static、Docker AutoStart、autostart install、修 BUG-166 | 2026-07-16 18:34 | 2026-07-16 18:34 | 已完成 | lwa start demo-static→running；Docker settings AutoStart=true 并启动引擎后 prd-workflow running；runtime 下 lwa autostart install --with-caddy，check overall=ok；BUG-166 代码+测试落地。doctor OK。 |
 | OPS-046 | 运维 | 应用版本号提升至 V0.6.0：pyproject.toml、version_info（_FALLBACK_VERSION + 3 处 docstring）、cli version 命令 docstring、test_version_info fallback 断言、skills/lwa-update-runtime SKILL.md、docs/release-checklist.md 示例同步；并据 BUG-189~194 代码更新 docs（autostart.md 补 lwa update 重启协调、runtime-workspace.md 补 manager 单实例锁文件） | 2026-07-17 14:29 | 2026-07-17 14:29 | 已完成 | 全仓 0.5.5 活跃引用清零（仅 task-list 历史 OPS-043/044 不可改）。lwa version 取 git HEAD 主题（当前仍 V0.5.5-Build0979），提交 V0.6.0-BuildXXXX 后即显示 V0.6.0。test_version_info 中 0.5.3/0.5.2 为 resolve 优先级夹具，保留不动。docs 复核结论：security-boundary/manager-page/known-limitations/faq 无需改（BUG-194 workspaceRoot 为内部字段未文档化、BUG-189/190/192 为内部健壮性改进）；仅 autostart.md 与 runtime-workspace.md 需更新。test_version_info 5 passed。 |
+| OPS-047 | 运维 | 本地运行时更新部署至 V0.6.0（git 已在 V0.6.0-Build1099-20260717）：lwa update 刷新 editable 安装、同步 skills、协调重启 manager/daemon、doctor OK | 2026-07-17 14:54 | 2026-07-17 14:55 | 已完成 | pip 成功安装 local-webpage-access-0.6.0；syncSkills 新增0/更新2/未变15；manager(pid 8452)、daemon(pid 8458，原 56758) 均经自启动单元协调重启（coordinated_restart→launchd kickstart，BUG-191 修复首次在生产生效，监督器保证单一进程）；doctor 总体 OK；3d-demo-family-wakeup(18003) 未受影响仍 HTTP 200。/api/health version=V0.6.0 与 lwa version 一致。本次未手动重启 gateway（无 gateway 代码改动）。 |
+| OPS-048 | 运维 | 应用版本号提升至 V0.6.1：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步；README/docs/skills 对齐 IMP-031/032 | 2026-07-17 18:23 | 2026-07-17 18:23 | 已完成 | 全仓活跃 0.6.0→0.6.1；faq/operations-playbook/runtime-workspace/known-limitations/skills README 补宿主机装配档位与内置脚本；历史 task-list/OPS-046～047 与 resolve 优先级夹具保留。lwa version 仍取 git HEAD 主题，提交 V0.6.1-BuildXXXX 后即显示 V0.6.1。 |
 
 ## 规划事项
 
@@ -500,17 +514,19 @@
 | PLN-009 | 规划 | 综合 7/7、7/8 六份文档与源码核对，编制待整改与待开发综合 WBS（27 项 / 6 阶段） | 2026-07-08 13:21 | 2026-07-08 14:01 | 已完成 | design/plan/local-webpage-access-整改与开发WBS-20260708.md；核对确认 IMP-010~023/BUG-069~071 等未落地，BUG-068 已完成；P0 网关根因（BUG-069+IMP-010）先行，续接 BUG-070/071、DEV-042~060、OPS-022、CHK-013、DOC-016/017 |
 | PLN-010 | 规划 | WBS 阶段4 增补 IMP-024：管理页网页浏览量统计（可点击展开访问明细），子任务 4.5/4.6 与 §2.4/§七映射同步 | 2026-07-08 20:10 | 2026-07-08 20:10 | 已完成 | design/plan/local-webpage-access-整改与开发WBS-20260708.md；对应待开发 DEV-061 |
 | PLN-011 | 规划 | IMP-030 跨平台自启动：统一 lwa autostart CLI + 完备性检查 + Skill | 2026-07-16 10:43 | 2026-07-16 10:43 | 已完成 | 产品口径：macOS 登录触发；Ubuntu 一键 systemd user；WSL 需 Windows 唤醒。详见 design/plan/local-webpage-access-新增功能点2607.md §10；落地对应 DEV-073 / BUG-138 / BUG-139。 |
+| PLN-012 | 规划 | IMP-031：setup/init 内置 Docker Engine+Compose 国内源安装脚本（macOS/Linux）与交互询问 | 2026-07-17 17:08 | 2026-07-17 17:08 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §11；macOS/Linux 分脚本、阿里云包源+registry-mirrors；setup/init 无 Engine 时询问是否执行内置脚本。落地对应 DEV-074。 |
+| PLN-013 | 规划 | IMP-032：setup/init 增加 --default/--full 环境装配档位（full 检查并安装 Caddy+Docker+Compose） | 2026-07-17 17:11 | 2026-07-17 17:11 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §12；default=现网行为；full=按 MIN_* 检查并内置脚本装齐。依赖 IMP-031/DEV-074；落地对应 DEV-075。 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 194 | 194 | 0 | 100% |
-| 调整事项 | 28 | 28 | 0 | 100% |
-| 检查事项 | 64 | 64 | 0 | 100% |
+| 代码 Bug | 197 | 197 | 0 | 100% |
+| 调整事项 | 29 | 29 | 0 | 100% |
+| 检查事项 | 66 | 66 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 37 | 37 | 0 | 100% |
-| 功能开发 | 73 | 73 | 0 | 100% |
-| 配置运维 | 46 | 46 | 0 | 100% |
-| 规划事项 | 11 | 11 | 0 | 100% |
-| **总计** | 453 | 453 | 0 | 100% |
+| 文档维护 | 42 | 42 | 0 | 100% |
+| 功能开发 | 75 | 75 | 0 | 100% |
+| 配置运维 | 48 | 48 | 0 | 100% |
+| 规划事项 | 13 | 13 | 0 | 100% |
+| **总计** | 470 | 470 | 0 | 100% |

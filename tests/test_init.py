@@ -38,6 +38,20 @@ def test_init_writes_default_config(tmp_path: Path) -> None:
     assert cfg.portPool.start == 18000
 
 
+def test_init_static_gateway_override(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    init_workspace(root, static_gateway="builtin")
+    cfg = load_config(Workspace(root))
+    assert cfg.staticGateway == "builtin"
+
+
+def test_init_full_default_gateway_caddy(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    init_workspace(root, static_gateway="caddy")
+    cfg = load_config(Workspace(root))
+    assert cfg.staticGateway == "caddy"
+
+
 def test_init_creates_sqlite_db(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     init_workspace(root)

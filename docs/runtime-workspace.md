@@ -8,8 +8,8 @@
 
 ```bash
 cd runtime          # 进入工作区（示例路径）
-lwa setup           # 可选：检查宿主机工具
-lwa init            # 首次：生成目录与配置（已 init 可跳过）
+lwa setup           # 可选：检查宿主机工具（或 lwa setup --full --yes 一次装齐）
+lwa init            # 首次：生成目录与配置（已 init 可跳过；也可用 lwa init --full --yes）
 lwa manager on      # 管理页（默认 init 后自动拉起，端口 17800）
 lwa import inbox/xxx.zip --name my-app
 lwa start my-app

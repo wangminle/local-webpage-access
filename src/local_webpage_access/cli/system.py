@@ -13,13 +13,36 @@ from local_webpage_access.errors import LwaError
 
 def setup_cmd(
     script: bool = typer.Option(
-        False, "--script", help="输出当前平台的参考安装脚本（不自动执行）"
+        False, "--script", help="输出当前平台内置安装脚本路径（不自动执行）"
     ),
     json_output: bool = typer.Option(False, "--json", help="输出 JSON 报告"),
     static_gateway: str = typer.Option(
         "caddy",
         "--static-gateway",
         help="预期静态网关（caddy 优先；未安装 Caddy 时降级 builtin）",
+    ),
+    default_profile: bool = typer.Option(
+        False,
+        "--default",
+        help="装配档位：仅检测+指引（缺省行为；可询问安装 Docker）",
+    ),
+    full_profile: bool = typer.Option(
+        False,
+        "--full",
+        help="装配档位：检查并安装 Caddy + Docker Engine + Compose 至最低版本",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="full 档跳过确认直接安装（非 TTY 时必须）"
+    ),
+    install_docker: bool = typer.Option(
+        False,
+        "--install-docker",
+        help="default 档：强制执行内置 Docker 安装脚本",
+    ),
+    no_install_docker: bool = typer.Option(
+        False,
+        "--no-install-docker",
+        help="default 档：跳过 Docker 安装询问",
     ),
     autostart: bool = typer.Option(
         False,
@@ -35,6 +58,7 @@ def setup_cmd(
     """检测宿主机工具环境并给出安装指引（可在 ``lwa init`` 之前运行）。
 
     检查 Python、lwa 包、Docker、Compose、Caddy、Node；不依赖工作区。
+    ``--default`` / ``--full``（IMP-032）：环境装配档位；缺省即 default。
     工作区就绪后用 ``lwa doctor`` 做完整诊断（含端口池与 registry）。
 
     ``--autostart``（OPS-025）：基于当前工作区生成 launchd plist，开机自启
@@ -42,13 +66,36 @@ def setup_cmd(
     """
     import json as json_mod
 
+    from local_webpage_access.host_bootstrap import (
+        format_script_catalog,
+        maybe_offer_docker_install,
+        resolve_profile,
+        run_full_bootstrap,
+    )
     from local_webpage_access.setup import (
         format_setup_report,
         render_setup_script,
         run_setup,
     )
 
+    try:
+        profile = resolve_profile(default=default_profile, full=full_profile)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    if install_docker and no_install_docker:
+        typer.secho(
+            "--install-docker 与 --no-install-docker 互斥",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     if script:
+        catalog = format_script_catalog(full=profile == "full")
+        typer.echo(catalog)
+        typer.echo("# —— 以下为历史参考脚本（注释为主）——")
         typer.echo(render_setup_script())
         return
 
@@ -97,21 +144,86 @@ def setup_cmd(
         )
         return
 
+    boot = None
+    if profile == "full":
+        boot = run_full_bootstrap(yes=yes)
+        if not json_output:
+            typer.secho("── 完整装配（--full）──", fg=typer.colors.CYAN)
+            for msg in boot.messages:
+                typer.echo(msg)
+        else:
+            # BUG-196：人类可读日志走 stderr，stdout 仅 JSON
+            for msg in boot.messages:
+                typer.echo(msg, err=True)
+        if not boot.ok:
+            if json_output:
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "profile": profile,
+                            "ready": False,
+                            "bootstrap": {
+                                "ok": False,
+                                "messages": boot.messages,
+                                "skipped_no_confirm": boot.skipped_no_confirm,
+                            },
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            raise typer.Exit(code=1)
+
     report = run_setup(static_gateway=static_gateway)
-    if json_output:
-        typer.echo(
-            json_mod.dumps(
-                {
-                    "platform": report.platform,
-                    "ready": report.ready,
-                    "items": [i.to_dict() for i in report.items],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-    else:
+    if not json_output:
         typer.echo(format_setup_report(report))
+
+    docker_offer = None
+    if profile == "default":
+        flag: bool | None
+        if install_docker:
+            flag = True
+        elif no_install_docker:
+            flag = False
+        else:
+            flag = None
+        docker_offer = maybe_offer_docker_install(install_docker=flag)
+        if not json_output:
+            for msg in docker_offer.messages:
+                typer.echo(msg)
+        # BUG-197：安装成功后复检，用新报告决定退出码
+        if docker_offer.attempted and docker_offer.script_ok:
+            report = run_setup(static_gateway=static_gateway)
+            if not json_output:
+                typer.echo("── 安装后复检 ──")
+                typer.echo(format_setup_report(report))
+
+    if json_output:
+        payload: dict = {
+            "platform": report.platform,
+            "profile": profile,
+            "ready": report.ready,
+            "items": [i.to_dict() for i in report.items],
+        }
+        if boot is not None:
+            payload["bootstrap"] = {
+                "ok": boot.ok,
+                "messages": boot.messages,
+            }
+        if docker_offer is not None:
+            payload["docker_offer"] = {
+                "attempted": docker_offer.attempted,
+                "script_ok": docker_offer.script_ok,
+                "recheck_ok": docker_offer.recheck_ok,
+                "messages": docker_offer.messages,
+            }
+        typer.echo(json_mod.dumps(payload, ensure_ascii=False, indent=2))
+
+    # BUG-197：安装脚本失败或复检失败 → 非零退出
+    if docker_offer is not None and docker_offer.attempted:
+        if docker_offer.script_ok is False or docker_offer.recheck_ok is False:
+            raise typer.Exit(code=1)
+
     if not report.ready:
         raise typer.Exit(code=1)
 

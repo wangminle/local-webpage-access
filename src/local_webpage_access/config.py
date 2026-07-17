@@ -180,9 +180,22 @@ def load_config(workspace: Workspace) -> Config:
     return default_config()
 
 
-def example_config_text() -> str:
-    """返回用于写入 ``local-web.yml`` 的示例文本（带注释）。"""
-    return CONFIG_EXAMPLE
+def example_config_text(*, static_gateway: str | None = None) -> str:
+    """返回用于写入 ``local-web.yml`` 的示例文本（带注释）。
+
+    ``static_gateway`` 若给出，则覆盖示例中的 ``staticGateway`` 行（IMP-032）。
+    """
+    text = CONFIG_EXAMPLE
+    if static_gateway is not None:
+        import re
+
+        text = re.sub(
+            r"(?m)^staticGateway:\s*\S+",
+            f"staticGateway: {static_gateway}",
+            text,
+            count=1,
+        )
+    return text
 
 
 CONFIG_EXAMPLE = """\

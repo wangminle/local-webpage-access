@@ -6,6 +6,34 @@ lwa 在局域网小主机上的日常运维、选型与排障速查。面向已 
 
 ---
 
+## 零、宿主机装配（IMP-031/032）
+
+首次部署或换机时，用 `lwa setup` / `lwa init` 的装配档位装齐依赖（**无需先有工作区**也可跑 `setup`）：
+
+| 档位 | 命令 | 行为 |
+| --- | --- | --- |
+| default（缺省） | `lwa setup` / `lwa init` | 检测 Python / Docker / Compose / Caddy / Node 并打印指引；缺 Docker Engine 时 TTY 询问是否执行内置安装脚本 |
+| full | `lwa setup --full` / `lwa init --full` | 按 `MIN_*` 检查 Caddy + Docker Engine + Compose，不达标则跑内置脚本安装；非 TTY 必须加 `--yes` |
+
+常用开关：
+
+```bash
+lwa setup --script                 # 打印内置脚本路径（不自动执行）
+lwa setup --install-docker         # default 档强制跑 Docker 安装脚本
+lwa setup --no-install-docker      # default 档跳过询问
+lwa setup --full --yes             # CI / 无人值守一次装齐
+lwa init --full --yes              # 初始化工作区并装齐；默认写入 staticGateway: caddy
+```
+
+内置脚本（包内 `scripts/`，默认国内源）：
+
+- **Docker**：`install-docker-linux.sh`（官方 apt 流程 + 默认阿里云 docker-ce；`--official` 切官方源；默认写入 `registry-mirrors`）、`install-docker-macos.sh`（brew cask Docker Desktop）。
+- **Caddy**：`install-caddy-linux.sh` / `install-caddy-macos.sh`。
+
+Windows 原生无内置安装脚本，请按 `lwa setup` 输出的指引手动安装。装完后建议 `lwa setup` 复核，再 `lwa doctor`（需已 `init`）。
+
+---
+
 ## 一、静态网关选型：Caddy vs builtin
 
 lwa 的静态站点 / 路径别名由"静态网关"承载，两种后端二选一（`local-web.yml` → `staticGateway`）：
@@ -202,3 +230,4 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 - [管理页说明](manager-page.md) — 筛选 / 冗余清理 / 路径别名 / 浏览量
 - [开机自启](autostart.md) — launchd 细节
 - [已知限制](known-limitations.md)
+- [排障 FAQ](faq.md) — 含 `setup --full` / 内置安装脚本入口

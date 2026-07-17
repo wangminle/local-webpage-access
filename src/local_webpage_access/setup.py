@@ -236,15 +236,22 @@ def _python_install_hint(plat: str) -> str:
 
 
 def _docker_install_hint(plat: str) -> str:
+    try:
+        from local_webpage_access.host_bootstrap import resolve_install_script
+
+        script = resolve_install_script("docker", plat)
+        builtin = f"内置脚本：`bash {script}`（默认阿里云源；或 `lwa setup --full`）"
+    except FileNotFoundError:
+        builtin = "内置安装脚本不可用时见下方官方文档"
     if plat == "macos":
         return (
-            "安装 Docker Desktop（含 Compose 插件）："
+            f"{builtin}；或 Docker Desktop："
             "https://docs.docker.com/desktop/setup/install/mac-install/"
         )
     if plat == "linux":
         return (
-            "按官方文档安装 Docker Engine + compose 插件："
-            "https://docs.docker.com/engine/install/"
+            f"{builtin}；或官方文档："
+            "https://docs.docker.com/engine/install/ubuntu/"
         )
     if plat == "windows":
         return (
@@ -258,16 +265,24 @@ def _compose_install_hint(plat: str) -> str:
     return (
         f"需要 Docker Compose 插件（`docker compose`），版本 ≥ {MIN_COMPOSE_VERSION}，"
         f"推荐 ≥ {RECOMMENDED_COMPOSE_VERSION}。"
-        f"{_docker_install_hint(plat)}（Desktop 通常已捆绑；Linux 可 `apt install docker-compose-plugin`）"
+        f"{_docker_install_hint(plat)}（Desktop 通常已捆绑；随 Docker 内置脚本一并安装）"
     )
 
 
 def _caddy_install_hint(plat: str) -> str:
+    try:
+        from local_webpage_access.host_bootstrap import resolve_install_script
+
+        script = resolve_install_script("caddy", plat)
+        builtin = f"内置脚本：`bash {script}`（或 `lwa setup --full`）"
+    except FileNotFoundError:
+        builtin = "内置 Caddy 安装脚本不可用"
     if plat == "macos":
-        return f"推荐：`brew install caddy`（需 ≥ {MIN_CADDY_VERSION}）"
+        return f"{builtin}；或 `brew install caddy`（需 ≥ {MIN_CADDY_VERSION}）"
     if plat == "linux":
         return (
-            f"官方 apt/yum 仓库：https://caddyserver.com/docs/install#debian-ubuntu-raspbian "
+            f"{builtin}；或官方 apt："
+            "https://caddyserver.com/docs/install#debian-ubuntu-raspbian "
             f"（需 ≥ {MIN_CADDY_VERSION}）"
         )
     if plat == "windows":
@@ -311,7 +326,8 @@ def format_setup_report(report: SetupReport) -> str:
     else:
         lines.append("请先按上方「安装」指引补齐必需组件，然后执行：")
         lines.append("  lwa setup            # 重新检测")
-        lines.append("  lwa setup --script   # 查看当前平台参考安装脚本")
+        lines.append("  lwa setup --script   # 查看内置 Docker/Caddy 安装脚本路径")
+        lines.append("  lwa setup --full     # 检查并安装 Caddy + Docker + Compose")
     lines.append("")
     lines.append(
         "提示：`lwa setup` 检测宿主机工具；`lwa init` 初始化工作区；"
