@@ -56,3 +56,22 @@ def coordinated_autostart_disable(ws, service_name: str) -> tuple[str | None, bo
             "⚠️ 自启动协调异常，停用状态未知；请先 `lwa autostart disable` 再停服",
             False,
         )
+
+
+def coordinated_autostart_restart(
+    ws, service_name: str
+) -> tuple[str | None, bool, bool]:
+    """IMP-030/BUG-191：``lwa update`` 重启前若自启动单元已加载/启用，则交监督器重启
+    （单一进程），避免 stop 杀后 KeepAlive/Restart 立即拉回与 detached spawn 抢锁。
+
+    返回 ``(note, ok, managed)``：``managed=True`` 表示自启动已接管重启，调用方
+    **不应** 再 stop+start（否则额外 detached 出第二个进程）。``managed=False`` 时
+    按原 stop+start 流程。
+    """
+    try:
+        from local_webpage_access import autostart as asm
+
+        res = asm.coordinated_restart(ws, service_name)
+        return res.note, res.ok, res.managed
+    except Exception:  # noqa: BLE001 — 协调异常时回退 stop+start（managed=False）
+        return None, True, False

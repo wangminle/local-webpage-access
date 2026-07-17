@@ -363,6 +363,34 @@ def test_start_builtin_does_not_keep_log_handle(
     assert not log_file.exists()
 
 
+def test_start_builtin_rotates_gateway_log_before_open(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-186：_start_builtin 须经 open_append 打开 gateway.log（先滚动再追加）。"""
+    from local_webpage_access import logs as logs_mod
+
+    calls: list[Path] = []
+    real = logs_mod.open_append
+
+    def spy(path, **kwargs):
+        calls.append(Path(path))
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(logs_mod, "open_append", spy)
+    public = workspace.app_public("demo")
+    public.mkdir(parents=True)
+    (public / "index.html").write_text("<html>hi</html>")
+    log_file = workspace.app_logs("demo") / "gateway.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text("old-gateway\n", encoding="utf-8")
+    port = _free_port()
+    try:
+        gateway.enable("demo", port, public)
+    finally:
+        gateway.disable("demo")
+    assert any(c.name == "gateway.log" for c in calls)
+
+
 # ---- 回归测试：BUG-014 / BUG-020 -----------------------------------------
 #
 # BUG-014：_assemble_main_config 此前输出 ``admin off`` 全局块，首次加载后

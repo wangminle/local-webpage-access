@@ -306,6 +306,7 @@ def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
     原本 stopped 不自动开启（避免意外拉起用户故意关闭的服务）。
     返回 ``{"wasRunning": bool, "pid": int|None, "message": str}``。
     """
+    from local_webpage_access.cli._common import coordinated_autostart_restart
     from local_webpage_access.manager_service import (
         is_running,
         start_manager,
@@ -315,7 +316,21 @@ def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
     was_running = is_running(ws, config)
     if not was_running:
         return {"wasRunning": False, "pid": None, "message": "管理页原本未运行，跳过重启"}
-    stop_manager(ws)
+    # BUG-191：自启动在管时交监督器重启（单一进程），否则 stop 杀掉后被
+    # KeepAlive/Restart 立即拉回、再与 start_manager 的 detached spawn 抢状态。
+    note, _ok, managed = coordinated_autostart_restart(ws, "manager")
+    if managed:
+        return {
+            "wasRunning": True,
+            "pid": None,
+            "message": note or "管理页已通过自启动重启",
+        }
+    # BUG-192：stop 失败不得报成重启成功（旧进程仍在跑）；抛错由 run_update 标 failed。
+    if not stop_manager(ws):
+        raise RuntimeError(
+            "管理页停止失败（旧进程可能仍在运行），已跳过重启；"
+            "可 `lwa manager off` 后重试 `lwa manager on`"
+        )
     pid = start_manager(ws, config)
     return {"wasRunning": True, "pid": pid, "message": f"管理页已重启（pid={pid}）"}
 
@@ -326,11 +341,26 @@ def restart_daemon(ws: Workspace, config: Config) -> dict[str, Any]:
     原本 stopped 不自动开启。
     """
     from local_webpage_access import daemon as daemon_mod
+    from local_webpage_access.cli._common import coordinated_autostart_restart
 
     was_running = daemon_mod.is_running(ws)
     if not was_running:
         return {"wasRunning": False, "pid": None, "message": "daemon 原本未运行，跳过重启"}
-    daemon_mod.stop_daemon(ws)
+    # BUG-191：自启动在管时交监督器重启，避免 KeepAlive/Restart 拉回 + detached 抢锁
+    # 产生重复 watcher（叠加 BUG-173）。
+    note, _ok, managed = coordinated_autostart_restart(ws, "daemon")
+    if managed:
+        return {
+            "wasRunning": True,
+            "pid": None,
+            "message": note or "daemon 已通过自启动重启",
+        }
+    # BUG-192：stop 失败不得报成重启成功（旧进程/锁仍在，重复 watcher 风险）。
+    if not daemon_mod.stop_daemon(ws):
+        raise RuntimeError(
+            "daemon 停止失败（pid 仍存活），已跳过重启；"
+            "可 `lwa daemon off` 后重试 `lwa daemon on`"
+        )
     pid = daemon_mod.start_daemon(ws, config)
     return {"wasRunning": True, "pid": pid, "message": f"daemon 已重启（pid={pid}）"}
 

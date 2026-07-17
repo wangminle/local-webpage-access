@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import threading
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import GatewayError, RecognitionError
+from local_webpage_access.errors import GatewayError, LifecycleError, RecognitionError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import (
     InstanceManifest,
@@ -21,6 +26,10 @@ from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
 
 log = get_logger("path_alias")
+
+# BUG-167：工作区级别名锁，串行化「查唯一性 → 写 manifest/子表/Caddy」全流程。
+_ALIAS_LOCK_TIMEOUT = 30.0
+_alias_thread_lock = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -209,6 +218,57 @@ def _apply_gateway_alias(
     return False, False
 
 
+def _alias_lock_path(workspace: Workspace):
+    return workspace.run / "path-alias.lock"
+
+
+def _alias_lock_is_stale(lock_path) -> bool:
+    """别名锁是否可回收（进程已死或超时）。"""
+    from local_webpage_access.lifecycle import _lock_is_stale
+
+    return _lock_is_stale(lock_path)
+
+
+@contextlib.contextmanager
+def path_alias_lock(
+    workspace: Workspace, *, timeout: float = _ALIAS_LOCK_TIMEOUT
+) -> Iterator[None]:
+    """工作区级路径别名互斥锁（BUG-167）。
+
+    双层锁：进程内 ``RLock`` + 跨进程文件锁。须在 :func:`instance_lock` **之前**
+    获取，避免与生命周期锁交叉死锁。
+    """
+    if not _alias_thread_lock.acquire(timeout=timeout):
+        raise LifecycleError(f"路径别名锁等待超时（{timeout}s）")
+    file_acquired = False
+    lock_path = _alias_lock_path(workspace)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            except FileExistsError:
+                if _alias_lock_is_stale(lock_path):
+                    with contextlib.suppress(FileNotFoundError):
+                        lock_path.unlink()
+                    continue
+                if time.monotonic() >= deadline:
+                    raise LifecycleError(f"路径别名锁被占用，等待超时（{timeout}s）")
+                time.sleep(0.05)
+                continue
+            os.write(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
+            os.close(fd)
+            file_acquired = True
+            break
+        yield
+    finally:
+        if file_acquired:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                lock_path.unlink()
+        _alias_thread_lock.release()
+
+
 def set_instance_path_alias(
     workspace: Workspace,
     config: Config,
@@ -216,10 +276,31 @@ def set_instance_path_alias(
     instance_id: str,
     alias: str | None,
 ) -> PathAliasResult:
-    """设置或清除实例的路径别名 slug（IMP-006 静态站点 / IMP-014 容器实例）。"""
+    """设置或清除实例的路径别名 slug（IMP-006 静态站点 / IMP-014 容器实例）。
+
+    BUG-167：持工作区别名锁 + 实例生命周期锁，并在锁内重新校验唯一性，
+    避免并发「先查后写」写入重复别名或丢失 manifest 更新。
+    """
+    from local_webpage_access.lifecycle import instance_lock
+
     if alias is not None:
         alias = alias.strip() or None
 
+    with path_alias_lock(workspace):
+        with instance_lock(workspace, instance_id):
+            return _set_instance_path_alias_locked(
+                workspace, config, registry, instance_id, alias
+            )
+
+
+def _set_instance_path_alias_locked(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    alias: str | None,
+) -> PathAliasResult:
+    """锁内实现：重新加载 manifest 后校验并落盘。"""
     mpath = workspace.app_manifest_path(instance_id)
     manifest = InstanceManifest.load(mpath)
 
@@ -243,6 +324,7 @@ def set_instance_path_alias(
         )
 
     if alias is not None:
+        # 锁内再查一次，消除 TOCTOU（BUG-167）
         existing = set(registry.list_route_hosts(exclude_instance=instance_id).keys())
         validate_path_alias(alias, existing_aliases=existing)
         # IMP-022（WBS-20260708 阶段4.1）：路径别名依赖 Caddy 统一入口
@@ -298,4 +380,4 @@ def set_instance_path_alias(
     )
 
 
-__all__ = ["PathAliasResult", "set_instance_path_alias"]
+__all__ = ["PathAliasResult", "path_alias_lock", "set_instance_path_alias"]

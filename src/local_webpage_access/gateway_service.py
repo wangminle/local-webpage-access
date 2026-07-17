@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from local_webpage_access.config import Config
+from local_webpage_access.daemon import is_pid_alive
 from local_webpage_access.errors import LifecycleError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
@@ -42,6 +43,9 @@ log = get_logger("gateway")
 STATE_FILENAME = "gateway.json"
 START_LOCK_FILENAME = "gateway-start.lock"
 GATEWAY_START_LOCK_TIMEOUT = 5.0
+# BUG-175：启动锁陈旧回收阈值——持锁进程被 SIGKILL 后锁文件残留，超过该秒数或
+# holder pid 已死即回收，避免网关从此无法启动只能人工删文件（对齐 manager_start_lock）。
+GATEWAY_START_LOCK_STALE_SECONDS = 60.0
 
 # Caddy admin API 固定监听 IPv4 loopback（reload/stop 走它，BUG-068 显式 127.0.0.1）。
 ADMIN_PORT = 2019
@@ -139,7 +143,7 @@ def is_gateway_running(workspace: Workspace, config: Config) -> bool:
 def gateway_start_lock(
     workspace: Workspace, *, timeout: float = GATEWAY_START_LOCK_TIMEOUT
 ) -> Iterator[None]:
-    """串行化 ``lwa gateway on``，避免并发 ``caddy start``。"""
+    """串行化 ``lwa gateway on``，避免并发 ``caddy start``；回收陈旧启动锁（BUG-175）。"""
     path = start_lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
@@ -150,6 +154,24 @@ def gateway_start_lock(
             os.write(fd, f"{os.getpid()}\n".encode())
             break
         except FileExistsError:
+            # BUG-175：回收陈旧锁——holder pid 已死，或锁文件年龄超阈值
+            # （持锁进程被 SIGKILL 后残留）。否则 SIGKILL 后锁永久残留，网关再无法启动。
+            stale = False
+            try:
+                content = path.read_text(encoding="utf-8").strip().splitlines()
+                holder_pid = int(content[0]) if content else 0
+                stale = not is_pid_alive(holder_pid)
+                if not stale:
+                    stale = (
+                        time.time() - path.stat().st_mtime
+                        > GATEWAY_START_LOCK_STALE_SECONDS
+                    )
+            except (OSError, ValueError):
+                stale = True
+            if stale:
+                with contextlib.suppress(FileNotFoundError, PermissionError):
+                    path.unlink()
+                continue
             if time.monotonic() >= deadline:
                 raise LifecycleError("网关启动锁被占用，稍后重试")
             time.sleep(0.05)

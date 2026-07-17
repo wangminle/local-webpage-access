@@ -772,8 +772,14 @@ def _check_subresources(
 
 
 def _fetch_text(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | None:
-    """GET url 返回响应正文文本；失败返回 None。"""
-    req = urllib.request.Request(url, headers={"User-Agent": "lwa-access-review"})
+    """GET url 返回响应正文文本；失败返回 None。
+
+    BUG-179：带 ``__lwa_probe=1`` 探针标记，避免 access review / gateway on /
+    rebuild 复检拉取别名入口 HTML 时被 pageviews 计为真实浏览（与 _http_get 一致）。
+    """
+    req = urllib.request.Request(
+        mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if not (200 <= resp.status < 300):

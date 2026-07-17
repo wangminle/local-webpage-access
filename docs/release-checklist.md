@@ -4,7 +4,7 @@
 
 ## 代码与版本
 
-- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.5.5` / `1.0.0`）。
+- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.0` / `1.0.0`）。
 - [ ] `src/local_webpage_access/cli/` 包入口（`cli/__init__.py` 的 `version` 命令 / `version_info.py`）读取该版本号；`python -m local_webpage_access` 与 `python -m local_webpage_access.cli` 均可调用。
 - [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart` 索引；skills 数为 16）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。

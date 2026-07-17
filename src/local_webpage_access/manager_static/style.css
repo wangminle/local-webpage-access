@@ -363,12 +363,33 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 
 .cell-name {
   font-weight: 500;
-  cursor: pointer;
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.cell-name:hover { color: var(--primary); }
+.cell-name-btn {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cell-name-btn:hover,
+.cell-name-btn:focus-visible {
+  color: var(--primary);
+  outline: none;
+}
+.cell-name-btn:focus-visible {
+  text-decoration: underline;
+}
 .cell-url a { color: var(--primary); text-decoration: none; }
 .cell-url a:hover { text-decoration: underline; }
 .cell-muted { color: var(--text-muted); }

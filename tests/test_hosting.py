@@ -206,10 +206,55 @@ def test_run_command_success(tmp_path: Path) -> None:
     assert log.is_file()
 
 
+def test_run_command_rotates_log_before_append(tmp_path: Path, monkeypatch) -> None:
+    """BUG-186：run_command 写日志须经 open_append（先滚动再追加）。"""
+    from local_webpage_access import logs as logs_mod
+
+    calls: list[Path] = []
+    real = logs_mod.open_append
+
+    def spy(path, **kwargs):
+        calls.append(Path(path))
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(logs_mod, "open_append", spy)
+    log = tmp_path / "out.log"
+    log.write_text("old", encoding="utf-8")
+    run_command("echo hi", cwd=tmp_path, log_path=log)
+    assert any(c == log or c.resolve() == log.resolve() for c in calls)
+
+
 def test_run_command_failure(tmp_path: Path) -> None:
     log = tmp_path / "out.log"
     with pytest.raises(BuildError):
         run_command("exit 7", cwd=tmp_path, log_path=log)
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="POSIX 进程组语义",
+)
+def test_run_command_timeout_kills_child_tree(tmp_path: Path) -> None:
+    """BUG-183：超时时杀整个进程树，不残留孙进程孤儿。"""
+    import os
+    import sys
+    import time
+
+    log = tmp_path / "out.log"
+    child_pid_file = tmp_path / "child.pid"
+    # shell 启动后台 sleep 子进程、记录其 pid，然后 wait（阻塞直到超时触发）
+    cmd = f"sleep 30 & echo $! > {child_pid_file}; wait"
+    with pytest.raises(BuildError, match="超时"):
+        run_command(cmd, cwd=tmp_path, log_path=log, timeout=2)
+    time.sleep(0.5)  # 等 SIGKILL 生效
+    assert child_pid_file.exists()
+    child_pid = int(child_pid_file.read_text().strip())
+    alive = True
+    try:
+        os.kill(child_pid, 0)
+    except (ProcessLookupError, PermissionError):
+        alive = False
+    assert not alive, f"孙进程 {child_pid} 超时后仍存活（孤儿，BUG-183 未修）"
 
 
 # ---- WBS-10 纯静态托管（端到端）------------------------------------------

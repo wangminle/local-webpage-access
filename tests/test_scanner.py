@@ -204,6 +204,24 @@ def test_detect_python_flask_port(tmp_path: Path) -> None:
     assert "flask" in result.entry.start
 
 
+def test_python_multi_framework_port_command_consistent() -> None:
+    """BUG-181：flask+gunicorn 等多框架下 internalPort 与启动命令端口须一致，
+    且与 matched（源自 set 迭代）顺序无关。"""
+    from local_webpage_access.scanner import (
+        _infer_python_port,
+        _python_start_command,
+        _select_python_framework,
+    )
+
+    for order in (["flask", "gunicorn"], ["gunicorn", "flask"]):
+        assert _select_python_framework(order) == "flask"
+        assert _infer_python_port(None, order) == 5000
+        cmd = _python_start_command(order, None)
+        assert cmd is not None
+        assert "--port 5000" in cmd
+        assert "flask" in cmd
+
+
 def test_detect_python_streamlit_is_medium(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("streamlit\n")
     result = Scanner().detect(tmp_path)

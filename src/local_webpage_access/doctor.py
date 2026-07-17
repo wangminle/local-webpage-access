@@ -436,9 +436,25 @@ def check_static_gateway(ws: Workspace) -> CheckResult:
 
 
 def _pid_alive_local(pid: int) -> bool:
-    """跨平台 pid 存活探测（os.kill 0 探测，不依赖 psutil）。"""
+    """跨平台 pid 存活探测（不依赖 psutil）。
+
+    BUG-178：Windows 上 ``os.kill(pid, 0)`` 走 TerminateProcess 会真的杀掉进程，
+    只读诊断（check_caddy_health 的 caddy.pid 存活探测）会误杀运行中的 Caddy
+    master。改用 ``OpenProcess(SYNCHRONIZE)``，与 lifecycle/static_gateway 的
+    ``is_pid_alive`` 实现一致；Unix 侧 ``os.kill(pid, 0)`` 仍是安全探针。
+    """
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        SYNCHRONIZE = 0x00100000
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+        if not handle:
+            return False
+        kernel32.CloseHandle(handle)
+        return True
     try:
         os.kill(pid, 0)
     except OSError:

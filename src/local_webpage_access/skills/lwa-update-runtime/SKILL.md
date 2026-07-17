@@ -16,7 +16,7 @@
 | `lwa init` | **首次**创建工作区（目录、registry、配置） |
 | **`lwa update`（V0.4.0 起）** | 已有工作区 + **lwa 包升级** + skills/config 同步 + 重启 manager/daemon |
 
-当前已实现 `lwa update` CLI（V0.5.5 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
+当前已实现 `lwa update` CLI（V0.6.0 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
 执行失败、需要定位具体步骤，或用户明确要求手动处理时，才使用下方手动兜底步骤。
 
 ## 输入
@@ -52,9 +52,12 @@ lwa update --json
 - 工作区 `skills/` 已同步新增/更新的内置 skill；
 - 新增配置字段已非破坏性补齐，并在需要时生成 `.bak`；
 - manager / daemon 仅在原本启用或运行时重启；
+- **自启单元在管时**由 `coordinated_restart` 交监督器重启（`kickstart -k` / `systemctl restart`），不 stop+detached spawn，避免与 KeepAlive 抢锁；
 - 默认不重启业务实例，除非显式传 `--restart-instances`。
 
 ## 手动兜底流程
+
+仅当 `lwa update` 失败或用户明确要求逐步操作时使用。**自启在管时优先继续用 `lwa update`，不要手搓 `off && on`。**
 
 ```bash
 # ── A. 刷新 lwa Python 包（editable 安装）──
@@ -67,9 +70,12 @@ pip install -e .
 
 # ── C. 重启 lwa 自有后台服务（必须，否则仍跑旧代码）──
 cd /path/to/runtime   # 含 local-web.yml 的目录
+# 若已 lwa autostart install：先 disable，再 off/on；否则 KeepAlive 会立刻拉回
+lwa autostart disable
 lwa manager off && lwa manager on
 # 若使用过 inbox 自动导入：
 lwa daemon off && lwa daemon on
+# 需要继续自启：lwa autostart enable
 
 # ── D. 业务实例（默认不必重启）──
 # 仅当静态网关、import、构建逻辑变更时：
@@ -86,17 +92,20 @@ curl -s http://127.0.0.1:17800/api/health   # version 字段应已更新
 - **不要**对业务实例执行 `remove --purge` 作为「更新」手段。
 - **不要**在无备份需求时 `lwa init --force` 覆盖整个工作区配置。
 - **不要**假设 `pip install -e .` alone 足够——必须通过 `lwa update` 或手动命令重启 **manager/daemon 子进程**。
+- **不要**在自启单元仍启用时手搓 `manager/daemon off && on` 做「升级重启」——会与 KeepAlive/Restart 抢锁；用 `lwa update` 或先 `lwa autostart disable`。
 
 ## 故障排查
 
 | 现象 | 处理 |
 | --- | --- |
-| 管理页仍显示旧版本 | 先运行 `lwa update`；若仍异常，再确认 `lwa manager off/on` 已执行并检查 17800 端口 PID |
+| 管理页仍显示旧版本 | 先运行 `lwa update`（自启在管时由其协调重启）；勿直接 `manager off/on` 除非已 `autostart disable`；再查 17800 端口 PID |
 | `lwa version` 已新但页面旧 | 浏览器强刷；确认访问的是本机 127.0.0.1 而非旧 tab 缓存 |
 | 代码变更后实例行为异常 | `lwa restart <id>` 或 `lwa update --restart-instances` |
+| update 后出现双 daemon/manager | 多为自启未协调的旧路径残留；改用 `lwa update`，或 `autostart disable` 后清理进程再 enable |
 
 ## 相关文档
 
 - [待改进 IMP-008](../../../../docs/plan/待改进功能点记录-20260706.md)
 - [Runtime 工作区说明](../../../../docs/runtime-workspace.md)
+- [开机自启（停服/update 协调）](../../../../docs/autostart.md)
 - [lwa-setup-host-environment](../lwa-setup-host-environment/SKILL.md)

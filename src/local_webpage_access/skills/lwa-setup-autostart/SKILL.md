@@ -27,7 +27,7 @@
 
 - **不修改任何工作区业务文件**；只指导用户执行 `lwa autostart …`（写用户级单元，非 sudo 改系统）。
 - 分平台给出最小命令序列；WSL 时分「Linux 侧 / Windows 侧」两段清单。
-- 必含：停服前先 `lwa autostart disable`（否则 `lwa X off` 被立刻拉回）；Caddy 由 LWA 托管、
+- 必含：停服前先 `lwa autostart disable`（否则 `lwa X off` 被立刻拉回）；**`lwa update` 重启已内置 `coordinated_restart`（自启在管时交监督器重启，勿手搓 stop+detached start）**；Caddy 由 LWA 托管、
   **禁止同时启用系统 `caddy.service`**。
 
 ## 可修改文件
@@ -42,6 +42,7 @@
 - **不宣称 macOS 无人值守高可用**（LaunchAgent 是登录触发）。
 - **不建议同时启用发行版 `caddy.service`**（与 LWA gateway 争用 `:2019`）。
 - **不**为绕过 Python ≥3.13 门槛而改用系统旧 Python；指导用 3.13 venv 后 `repair`。
+- **不**在自启仍启用时教用户用 `manager/daemon off && on` 做代码升级——应走 `lwa update`。
 
 ## 处理流程
 
@@ -53,7 +54,8 @@
    - wsl  ：Linux 侧同上 + Windows 侧注册登录任务（lwa autostart install 会打印脚本）
 3. 旧 detached 单元（check 报 unit 身份 fail）：lwa autostart repair
 4. 停服说明：lwa autostart disable 再 lwa X off
-5. 复核：lwa autostart status / curl /api/health
+5. 升级/热重载：优先 lwa update（自启在管时 coordinated_restart，无需手动 off/on）
+6. 复核：lwa autostart status / curl /api/health
 ```
 
 ## 平台要点

@@ -131,6 +131,41 @@ def test_audit_compose_detects_host_sensitive_nested() -> None:
     assert "host_sensitive_mount" in _critical_codes(findings)
 
 
+def test_audit_compose_expansion_var_sensitive_is_critical() -> None:
+    """BUG-184：${VAR}/~ 形式的敏感宿主路径不得按命名卷放行。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        '      - ../data:/app/data\n      - ${HOME}/.ssh:/root/.ssh:ro',
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" in _critical_codes(findings)
+
+    text2 = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - ~/.aws:/root/.aws:ro",
+    )
+    assert "host_sensitive_mount" in _critical_codes(audit_compose(text2))
+
+
+def test_audit_compose_expansion_var_nonsensitive_warns() -> None:
+    """BUG-184：${VAR}/~ 非敏感宿主路径至少 warn，不再静默按命名卷放行。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - ${HOME}/some-data:/data",
+    )
+    findings = audit_compose(text)
+    codes = _codes(findings)
+    assert "unexpected_host_mount" in codes
+    assert "host_sensitive_mount" not in _critical_codes(findings)
+    # 真命名卷仍放行（不误报）
+    text_named = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - my_named_vol:/app/extra",
+    )
+    named_findings = audit_compose(text_named)
+    assert "unexpected_host_mount" not in _codes(named_findings)
+
+
 def test_audit_compose_detects_dict_volume_host_sensitive() -> None:
     """BUG-032：Compose dict 格式 volumes 的宿主路径也要审计。"""
     text = """\

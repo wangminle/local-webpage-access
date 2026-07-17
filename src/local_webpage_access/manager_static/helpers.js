@@ -187,6 +187,7 @@
 
   // IMP-024（DEV-061）：浏览量单元格——命中数可点击展开详情。
   LWA.pageviewHtml = function (i, pageviewMap) {
+    // 浏览量按钮：图标/数字入口须有可访问名称（BUG-170）
     var pv = pageviewMap && pageviewMap[i.id];
     if (!pv || !pv.hits) {
       return '<span class="cell-muted" title="暂无访问记录（静态站点访问后即统计）">—</span>';
@@ -198,6 +199,8 @@
       '<button class="pageview-btn" data-op="pageview" data-id="' +
       LWA.esc(i.id) +
       '" title="' +
+      LWA.esc(tip) +
+      '" aria-label="' +
       LWA.esc(tip) +
       '">' +
       Number(pv.hits).toLocaleString() +
@@ -218,6 +221,7 @@
   // ---- 操作区按钮 ----
 
   LWA.opBtn = function (id, op, label, disabled, title) {
+    var accessible = title || label;
     return (
       '<button class="btn btn-sm" data-op="' +
       op +
@@ -226,6 +230,7 @@
       '"' +
       (disabled ? " disabled" : "") +
       (title ? ' title="' + LWA.esc(title) + '"' : "") +
+      (accessible ? ' aria-label="' + LWA.esc(accessible) + '"' : "") +
       ">" +
       label +
       "</button>"
@@ -287,15 +292,19 @@
       classes.push("row-warn");
     if (i.redundant) classes.push("row-redundant");
     var rowClass = classes.join(" ");
+    var displayName = LWA.esc(i.name || i.id);
     var nameCell =
-      '<td class="cell-name" data-detail="' +
+      '<td class="cell-name">' +
+      '<button type="button" class="cell-name-btn" data-detail="' +
       LWA.esc(i.id) +
-      '">' +
-      LWA.esc(i.name || i.id) +
+      '" aria-label="查看 ' +
+      displayName +
+      ' 详情">' +
+      displayName +
       (i.redundant
         ? ' <span class="redundant-badge" title="与同源 zip 的更早实例重复">冗余</span>'
         : "") +
-      "</td>";
+      "</button></td>";
     return (
       '<tr class="' + rowClass + '">' +
       nameCell +

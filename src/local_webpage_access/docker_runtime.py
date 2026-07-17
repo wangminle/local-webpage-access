@@ -137,8 +137,10 @@ def _execute(
     out = cp.stdout or ""
     err = cp.stderr or ""
     if log_path is not None:
+        from local_webpage_access.logs import open_append
+
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as fh:
+        with open_append(log_path) as fh:
             fh.write(f"\n$ {' '.join(args)}\n")
             if out:
                 fh.write(out)

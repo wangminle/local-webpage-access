@@ -202,7 +202,11 @@ def test_python_uv_sync_path(workspace: Workspace) -> None:
         start="uvicorn main:app --host 0.0.0.0 --port 8000",
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
-    assert "pip install uv && uv sync --frozen --no-dev" in content
+    # BUG-185：依赖层只 COPY lock+pyproject，uv sync 须 --no-install-project，
+    # 否则带 [build-system] 的 packaged 项目构建本体时缺源码必然失败。
+    assert (
+        "pip install uv && uv sync --frozen --no-dev --no-install-project" in content
+    )
     assert "--mount=type=cache,target=/root/.cache/pip" in content
     assert "--mount=type=cache,target=/root/.cache/uv" in content
     # 启动命令自动包 uv run

@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -465,10 +468,10 @@ def test_maybe_start_gateway_noop_when_already_running(
 
 
 def test_gateway_start_lock_serializes(workspace: Workspace, monkeypatch) -> None:
-    """锁文件被占用时应抛 LifecycleError。"""
+    """锁文件被活进程占用时应抛 LifecycleError（活锁不回收）。"""
     lock = start_lock_path(workspace)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text("0\n", encoding="utf-8")  # 模拟他人持锁
+    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")  # 模拟活进程持锁
     # 缩短超时避免拖慢测试
     monkeypatch.setattr("time.sleep", lambda *_: None)
     with pytest.raises(LifecycleError):
@@ -480,3 +483,18 @@ def test_gateway_start_lock_cleans_up_on_success(workspace: Workspace) -> None:
     with gateway_start_lock(workspace):
         assert start_lock_path(workspace).exists()
     assert not start_lock_path(workspace).exists()
+
+
+def test_gateway_start_lock_recovers_stale(workspace: Workspace) -> None:
+    """BUG-175：死 PID 或超龄的网关启动锁可立即回收（对齐 manager_start_lock）。"""
+    workspace.ensure_workspace_dirs()
+    lock = start_lock_path(workspace)
+    lock.write_text("999999\n", encoding="utf-8")
+    old = time.time() - 120
+    os.utime(lock, (old, old))
+    with patch(
+        "local_webpage_access.gateway_service.is_pid_alive", return_value=False
+    ):
+        with gateway_start_lock(workspace, timeout=0.1):
+            assert lock.is_file()
+    assert not lock.exists()

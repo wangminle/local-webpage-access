@@ -93,6 +93,12 @@ _HOST_SENSITIVE_DIRS = (
 _WINDOWS_HOST_SENSITIVE_DIRS = (
     "c:/", "c:/windows", "c:/users", "c:/program files", "c:/programdata",
 )
+# BUG-184：~ 与 ${VAR} 形式的 bind 源经 docker compose 渲染为宿主路径，无法静态展开，
+# 用已知敏感名片段（凭据/密钥目录）保守判 critical，避免绕过 host_sensitive_mount。
+_SENSITIVE_HOME_FRAGMENTS = (
+    ".ssh", ".aws", ".gnupg", ".docker", ".kube", ".config",
+    ".netrc", ".npmrc", ".pypirc", ".env",
+)
 
 # Compose 中允许的 host bind mount 源（实例自己的 data/，相对 compose 文件）
 _DEFAULT_ALLOWED_HOST_MOUNTS = frozenset(
@@ -268,6 +274,28 @@ def _audit_volume(
             return
 
     is_windows_abs = _is_windows_abs_path(src_norm)
+
+    # BUG-184：~ / ${VAR} 形式的 source 经 docker compose 渲染为 bind 挂载，
+    # 不得按"命名卷"放行。无法静态展开：命中已知敏感名片段 → critical；其余 → warn。
+    if src.startswith("~") or src.startswith("$"):
+        if any(frag in src_lower for frag in _SENSITIVE_HOME_FRAGMENTS):
+            out.append(
+                SecurityFinding(
+                    LEVEL_CRITICAL,
+                    "host_sensitive_mount",
+                    f"服务 {svc} 挂载了（经变量/家目录展开的）宿主敏感目录：{src}",
+                )
+            )
+        else:
+            out.append(
+                SecurityFinding(
+                    LEVEL_WARN,
+                    "unexpected_host_mount",
+                    f"服务 {svc} 挂载了经变量/家目录展开的宿主路径：{src}",
+                    detail="实例只应挂载自己的 data/ 目录",
+                )
+            )
+        return
 
     # 命名卷（不以 /、. 或 Windows 盘符开头）允许
     if not src.startswith("/") and not src.startswith(".") and not is_windows_abs:

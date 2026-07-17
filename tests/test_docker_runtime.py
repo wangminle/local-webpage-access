@@ -530,6 +530,28 @@ def test_execute_writes_log_file(tmp_path: Path) -> None:
     assert "$" in content  # 命令头
 
 
+def test_execute_rotates_log_before_append(tmp_path: Path, monkeypatch) -> None:
+    """BUG-186：docker _execute 写日志须经 open_append（先滚动再追加）。"""
+    from local_webpage_access import logs as logs_mod
+
+    calls: list[Path] = []
+    real = logs_mod.open_append
+
+    def spy(path, **kwargs):
+        calls.append(Path(path))
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(logs_mod, "open_append", spy)
+    log = tmp_path / "run.log"
+    log.write_text("old", encoding="utf-8")
+    if sys.platform == "win32":
+        args = ["cmd", "/c", "echo hello"]
+    else:
+        args = ["echo", "hello"]
+    _execute(args, cwd=tmp_path, log_path=log)
+    assert any(c == log or c.resolve() == log.resolve() for c in calls)
+
+
 def test_execute_nonzero_returncode_recorded(tmp_path: Path) -> None:
     if sys.platform == "win32":
         args = ["cmd", "/c", "exit 3"]

@@ -45,6 +45,13 @@ PYTHON_WEB = {
     "sanic": ("sanic", 8000),
     "tornado": ("tornado", 8000),
 }
+# 选择主导框架的固定优先级（BUG-181）：_infer_python_port 与 _python_start_command
+# 必须按同一优先级挑框架。否则 flask+gunicorn 等多框架项目会因 matched（源自 set
+# 迭代）顺序随机，出现 internalPort 推断与启动命令端口不一致，部署出不可达实例。
+_PYTHON_FRAMEWORK_PRIORITY = (
+    "fastapi", "flask", "django", "streamlit", "gradio", "uvicorn",
+    "gunicorn", "starlette", "sanic", "tornado",
+)
 HEAVY_DATABASES = {"psycopg2", "psycopg", "asyncpg", "pymysql", "mysqlclient", "redis", "aiomysql", "aioredis"}
 SQLITE_MARKERS = {"sqlite3", "better-sqlite3", "sqlalchemy", "peewee", "tortoise-orm", "aiosqlite"}
 SQLITE_FILE_EXT = (".sqlite", ".sqlite3", ".db")
@@ -535,11 +542,19 @@ def _extract_port_from_scripts(scripts: dict) -> int | None:
     return None
 
 
+def _select_python_framework(matched: list[str]) -> str | None:
+    """按固定优先级挑出主导框架（消除 set 迭代顺序导致的端口/命令不一致，BUG-181）。"""
+    lower = {m.lower() for m in matched}
+    for fw in _PYTHON_FRAMEWORK_PRIORITY:
+        if fw in lower:
+            return fw
+    return matched[0].lower() if matched else None
+
+
 def _infer_python_port(summary: FileSummary, matched: list[str]) -> int:
-    for dep in matched:
-        key = dep.lower()
-        if key in PYTHON_WEB:
-            return PYTHON_WEB[key][1]
+    fw = _select_python_framework(matched)
+    if fw and fw in PYTHON_WEB:
+        return PYTHON_WEB[fw][1]
     return 8000
 
 
@@ -559,19 +574,17 @@ def _python_install_command(summary: FileSummary) -> str:
 
 
 def _python_start_command(matched: list[str], summary: FileSummary) -> str | None:
-    lower = {m.lower() for m in matched}
-    if "fastapi" in lower:
+    fw = _select_python_framework(matched)
+    if fw in ("fastapi", "uvicorn"):
         return 'uvicorn main:app --host 0.0.0.0 --port 8000'
-    if "flask" in lower:
+    if fw == "flask":
         return 'flask --app app run --host 0.0.0.0 --port 5000'
-    if "django" in lower:
+    if fw == "django":
         return "python manage.py runserver 0.0.0.0:8000"
-    if "streamlit" in lower:
+    if fw == "streamlit":
         return "streamlit run app.py --server.port 8501"
-    if "gradio" in lower:
+    if fw == "gradio":
         return "python app.py"
-    if "uvicorn" in lower:
-        return 'uvicorn main:app --host 0.0.0.0 --port 8000'
     return None
 
 

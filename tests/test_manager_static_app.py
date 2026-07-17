@@ -171,6 +171,69 @@ assert.ok(html2.indexOf("cell-muted") !== -1, html2);
     )
 
 
+def test_helpers_rowhtml_detail_entry_is_keyboard_accessible() -> None:
+    """BUG-170：详情入口须为可聚焦按钮（非仅 click 的 td）。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const h = context.window.__LWA_TEST_HOOKS__;
+var html = h.rowHtml({{ id: "demo", name: "演示站", status: "running", runtime: "shared-static", servingMode: "shared-static", stack: [], redundant: false }}, {{}});
+assert.ok(html.indexOf("<button") !== -1, html);
+assert.ok(html.indexOf('data-detail="demo"') !== -1, html);
+assert.ok(html.indexOf("aria-label") !== -1, html);
+assert.ok(html.indexOf('type="button"') !== -1, html);
+"""
+    )
+
+
+def test_vue_template_has_basic_a11y_hooks() -> None:
+    """BUG-170：筛选控件、图标按钮与 toast 须有基础无障碍属性。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: function () {{ throw new Error("no fetch"); }},
+  location: {{ hostname: "127.0.0.1", search: "", pathname: "/" }},
+  sessionStorage: {{ getItem: function () {{ return null; }}, setItem: function () {{}}, removeItem: function () {{}} }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let capturedRoot = null;
+context.window.LWA.createManagerApp(
+  {{ createApp: function (root) {{ capturedRoot = root; return {{ mount: function () {{}} }}; }} }},
+  {{
+    document: null,
+    fetch: function () {{ throw new Error("no fetch"); }},
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+const t = capturedRoot.template;
+assert.ok(t.indexOf('aria-label="搜索实例"') !== -1 || t.indexOf("aria-label='搜索实例'") !== -1, t);
+assert.ok(t.indexOf('aria-label="按状态筛选"') !== -1, t);
+assert.ok(t.indexOf('aria-label="按形态筛选"') !== -1, t);
+assert.ok(t.indexOf('aria-live="polite"') !== -1, t);
+assert.ok(t.indexOf('aria-label="立即刷新"') !== -1, t);
+assert.ok(t.indexOf('aria-label="关闭详情"') !== -1, t);
+"""
+    )
+
+
 def test_vue_app_factory_builds_valid_root_component() -> None:
     """DEV-046：createManagerApp 用桩 createApp 构造组件，结构与方法齐全（冒烟）。
 

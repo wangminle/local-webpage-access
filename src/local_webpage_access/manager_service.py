@@ -33,6 +33,7 @@ log = get_logger("manager")
 
 STATE_FILENAME = "manager.json"
 START_LOCK_FILENAME = "manager-start.lock"
+INSTANCE_LOCK_FILENAME = "manager.instance.lock"
 LOG_FILENAME = "manager.log"
 MANAGER_START_TIMEOUT = 15.0
 MANAGER_START_LOCK_STALE_SECONDS = 60.0
@@ -60,6 +61,11 @@ def start_lock_path(workspace: Workspace) -> Path:
     return workspace.run / START_LOCK_FILENAME
 
 
+def instance_lock_path(workspace: Workspace) -> Path:
+    """管理页单实例锁路径（BUG-193）。"""
+    return workspace.run / INSTANCE_LOCK_FILENAME
+
+
 def log_file_path(workspace: Workspace) -> Path:
     """管理页运行时日志路径（``logs/manager.log``）。"""
     return workspace.logs / LOG_FILENAME
@@ -67,15 +73,9 @@ def log_file_path(workspace: Workspace) -> Path:
 
 def read_manager_log(workspace: Workspace, *, tail: int = 200) -> str:
     """读取管理页日志；``tail<=0`` 返回全文，文件不存在返回空串。"""
-    path = log_file_path(workspace)
-    if not path.is_file():
-        return ""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if tail is None or tail <= 0:
-        return text
-    lines = text.splitlines()
-    return "\n".join(lines[-tail:])
+    from local_webpage_access.logs import tail_text_file
 
+    return tail_text_file(log_file_path(workspace), 0 if tail is None else tail)
 
 def read_state(workspace: Workspace) -> ManagerState | None:
     path = state_path(workspace)
@@ -186,6 +186,8 @@ def is_running(workspace: Workspace, config: Config) -> bool:
 
 def _spawn_manager(workspace: Workspace) -> int:
     """以独立子进程启动管理页，stdout/stderr 追加到 ``logs/manager.log``。"""
+    from local_webpage_access.logs import open_append
+
     root = str(workspace.root)
     cmd = [
         sys.executable,
@@ -196,7 +198,8 @@ def _spawn_manager(workspace: Workspace) -> int:
     ]
     log_path = log_file_path(workspace)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = log_path.open("a", encoding="utf-8")
+    # BUG-186：打开前按大小滚动
+    log_fh = open_append(log_path)
     from local_webpage_access.logging import secure_chmod
 
     secure_chmod(log_path)
@@ -319,6 +322,60 @@ def manager_start_lock(workspace: Workspace, *, timeout: float = 5.0) -> Iterato
                 os.close(fd)
         with contextlib.suppress(FileNotFoundError, PermissionError):
             path.unlink()
+
+
+@contextlib.contextmanager
+def manager_instance_lock(workspace: Workspace) -> Iterator[None]:
+    """管理页单实例锁（BUG-193）：run_service_main 在其整个生命周期持有。
+
+    与 :func:`manager_start_lock`（仅串行化 ``lwa manager on``、start 后即释放）
+    不同，本锁由管理页子进程入口持有到退出，保证同一工作区只有一个 manager
+    uvicorn 进程——避免两个 manager 并发启动互踩 manager.json（后写者覆盖先写者
+    pid），导致 ``off`` 假报已停止而另一实例仍在端口上运行。
+
+    持有进程已死（崩溃残留）→ 回收；持有进程存活 → 抛 :class:`LifecycleError`
+    （入口据此退出，不再起第二个实例）。持有标识为本进程 PID，避免误删他人锁。
+    """
+    path = instance_lock_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = False
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        acquired = True
+        os.write(fd, f"{os.getpid()}\n".encode())
+    except FileExistsError:
+        stale = False
+        try:
+            content = path.read_text(encoding="utf-8").strip().splitlines()
+            holder_pid = int(content[0]) if content else 0
+            stale = holder_pid <= 0 or not is_pid_alive(holder_pid)
+            if not stale:
+                # 存活但锁文件极旧（卡死进程）→ 视为陈旧回收
+                stale = (
+                    time.time() - path.stat().st_mtime
+                    > MANAGER_START_LOCK_STALE_SECONDS
+                )
+        except (OSError, ValueError):
+            stale = True
+        if stale:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                path.unlink()
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            acquired = True
+            os.write(fd, f"{os.getpid()}\n".encode())
+        else:
+            raise LifecycleError("管理页已有实例在运行")
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        # BUG-173 同款：仅删除自己获取的锁，避免误删他人（含后到的）实例锁
+        if acquired:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                path.unlink()
 
 
 def _wait_for_health(config: Config, *, timeout: float = MANAGER_START_TIMEOUT) -> bool:
@@ -501,37 +558,46 @@ def run_service_main() -> int:
     reg.open()
     reg.close()
 
-    # IMP-030/BUG-147：前台入口回写自身 pid 到 manager.json，使 manager_status /
-    # `lwa manager off` 能识别前台监管进程（不再依赖 `lwa manager on` 事后补写）。
-    write_state(
-        workspace,
-        ManagerState(
-            enabled=True,
-            pid=os.getpid(),
-            started_at=now_iso(),
-            host=config.managerHost,
-            port=config.managerPort,
-        ),
-    )
+    # BUG-193：单实例锁——保证同一工作区只有一个 manager 进程。否则两个 manager
+    # 并发启动会互踩 manager.json（后写者覆盖先写者 pid），导致 `off` 假报已停止
+    # 而另一实例仍在端口上运行。已有实例存活时本入口直接退出（return 0，避免
+    # 监督器 KeepAlive 反复拉起第二个实例）。
     try:
-        run_manager(workspace, config)
-    except Exception:
-        log.exception("管理页子进程异常退出")
-        return 1
-    finally:
-        # 进程退出（含 uvicorn 收到 SIGTERM 正常返回）后标记未运行，避免状态残留。
-        st = read_state(workspace)
-        if st is not None and st.pid == os.getpid():
+        with manager_instance_lock(workspace):
+            # IMP-030/BUG-147：前台入口回写自身 pid 到 manager.json，使 manager_status /
+            # `lwa manager off` 能识别前台监管进程（不再依赖 `lwa manager on` 事后补写）。
             write_state(
                 workspace,
                 ManagerState(
-                    enabled=False,
-                    pid=st.pid,
-                    started_at=st.started_at,
-                    host=st.host,
-                    port=st.port,
+                    enabled=True,
+                    pid=os.getpid(),
+                    started_at=now_iso(),
+                    host=config.managerHost,
+                    port=config.managerPort,
                 ),
             )
+            try:
+                run_manager(workspace, config)
+            except Exception:
+                log.exception("管理页子进程异常退出")
+                return 1
+            finally:
+                # 进程退出（含 uvicorn 收到 SIGTERM 正常返回）后标记未运行，避免状态残留。
+                st = read_state(workspace)
+                if st is not None and st.pid == os.getpid():
+                    write_state(
+                        workspace,
+                        ManagerState(
+                            enabled=False,
+                            pid=st.pid,
+                            started_at=st.started_at,
+                            host=st.host,
+                            port=st.port,
+                        ),
+                    )
+    except LifecycleError:
+        log.warning("已有管理页实例在运行，退出")
+        return 0
     return 0
 
 

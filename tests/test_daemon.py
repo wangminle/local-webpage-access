@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import subprocess
 import threading
 import time
 import zipfile
@@ -214,6 +216,27 @@ def test_daemon_lock_reclaims_stale_heartbeat(workspace: Workspace) -> None:
         assert daemon_mod.lock_path(workspace).exists()
 
 
+def test_daemon_lock_failed_acquire_keeps_live_lock(workspace: Workspace) -> None:
+    """BUG-173：获取失败（他人持活锁）时 finally 不得删除其锁文件。
+
+    旧行为：finally 无条件 unlink，第二个 watcher 的获取失败会删掉活跃 watcher
+    的锁，is_running 假阴性、后续再次获取成功 → 重复 watcher 并发扫 inbox。
+    """
+    import os
+
+    # 模拟活跃 watcher：本进程 PID（存活）+ 新鲜心跳（不陈旧）
+    _write_lock(workspace, os.getpid(), time.time())
+    assert daemon_mod.lock_path(workspace).exists()
+
+    # 获取应失败（活锁、心跳新鲜，不可回收）
+    with pytest.raises(OSError):
+        with daemon_mod.daemon_lock(workspace):
+            pass
+
+    # 关键：获取失败后锁文件必须仍在（BUG-173），否则活跃 watcher 失去互斥
+    assert daemon_mod.lock_path(workspace).exists()
+
+
 def test_touch_lock_heartbeat_updates_timestamp(workspace: Workspace) -> None:
     """BUG-030：touch_lock_heartbeat 刷新心跳并保留 PID。"""
     import os
@@ -318,6 +341,46 @@ def test_process_zip_failure_does_not_raise(
     summary = daemon_mod.process_zip(workspace, config, registry, zip_path)
     assert summary["action"] == "failed"
     assert summary["note"]
+
+
+def test_process_zip_transient_failure_retries_not_conflict(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-187：claim 后的瞬时失败（IO/SQLite locked）应 action=failed（下轮重试），
+    而非被误判为 slug 冲突（永久归档 + 给已清理实例记 import_conflict 孤儿事件）。"""
+    import local_webpage_access.importer as importer_mod
+
+    zip_path = workspace.inbox / "static.zip"
+    _make_zip(zip_path, {"index.html": "<h1>hi</h1>"})
+
+    def boom(*_a, **_k):
+        raise OSError("模拟瞬时错误（IO/SQLite locked）")
+
+    monkeypatch.setattr(importer_mod, "safe_extract", boom)
+    summary = daemon_mod.process_zip(workspace, config, registry, zip_path)
+    assert summary["action"] == "failed"
+    assert summary["instance_id"] is None  # 未被误判为冲突
+
+
+def test_process_zip_autostart_failure_archives_and_defers(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-188：导入成功但自动启动失败时以终态归档 zip（不重导致冲突），
+    并置期望运行交自愈 reconcile 重试，而非停在 stopped 被孤儿。"""
+    zip_path = workspace.inbox / "static.zip"
+    _make_zip(zip_path, {"index.html": "<h1>hi</h1>"})
+
+    def boom(*_a, **_k):
+        raise RuntimeError("启动模拟失败")
+
+    monkeypatch.setattr("local_webpage_access.lifecycle.start_instance", boom)
+    summary = daemon_mod.process_zip(workspace, config, registry, zip_path)
+    assert summary["action"] == "imported"  # 终态 → watcher 归档 zip（不重导）
+    iid = summary["instance_id"]
+    assert iid is not None
+    row = registry.get_instance(iid)
+    assert row is not None
+    assert row["desired_state"] == "running"  # 供自愈重试
 
 
 # ---- processed 集合 --------------------------------------------------------
@@ -657,6 +720,58 @@ def test_stop_daemon_refuses_foreign_reused_pid(
     assert daemon_mod.read_state(workspace).enabled is False
 
 
+def test_stop_daemon_keeps_lock_when_termination_fails(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-192：stop_daemon 终止失败（pid 仍存活）时不得删锁文件，否则其他 watcher
+    会误判无主并发启动，叠加 stuck/重复进程产生无锁 watcher。"""
+    import os
+
+    daemon_mod.write_state(
+        workspace,
+        daemon_mod.DaemonState(enabled=True, pid=os.getpid(), started_at="now"),
+    )
+    # 持锁进程 = 本进程（身份匹配 → 走 _terminate_pid 分支）
+    lock = daemon_mod.lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(f"{os.getpid()}\n{time.time():.3f}\n", encoding="utf-8")
+    monkeypatch.setattr(daemon_mod, "pid_cmdline_contains", lambda *a, **k: True)
+    monkeypatch.setattr(daemon_mod, "is_pid_alive", lambda pid: True)
+    monkeypatch.setattr(daemon_mod, "_terminate_pid", lambda pid, **k: False)  # 终止失败
+
+    stopped = daemon_mod.stop_daemon(workspace)
+    assert stopped is False
+    # 关键：终止失败时锁文件必须保留
+    assert lock.exists()
+
+
+def test_read_pid_cmdline_windows_powershell(monkeypatch) -> None:
+    """BUG-177：Windows 上 read_pid_cmdline 用 PowerShell 读 CommandLine，不再恒 None。
+
+    旧实现落到 ``ps`` 分支恒返回 None（Windows 无 ps），致 pid_cmdline_contains
+    恒 False、停止 builtin 静态服务时误判身份不匹配而 orphan http.server。
+    """
+    monkeypatch.setattr(daemon_mod.sys, "platform", "win32")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="C:\\py\\python.exe -m http.server --directory C:\\apps\\x\\public",
+            stderr="",
+        )
+
+    monkeypatch.setattr(daemon_mod.subprocess, "run", fake_run)
+    cmdline = daemon_mod.read_pid_cmdline(1234)
+    assert cmdline is not None
+    assert "http.server" in cmdline
+    assert captured["cmd"][0] == "powershell"
+    # 身份校验在 Windows 上现可命中（不再恒 False）
+    assert daemon_mod.pid_cmdline_contains(1234, "http.server", "C:\\apps\\x\\public")
+
+
 # ---- IMP-011：inbox 防污染（on_conflict=error + processed 归档）-------------
 
 
@@ -843,8 +958,9 @@ def test_reconcile_restarts_desired_running_offline(
 def test_reconcile_skips_in_progress_and_truly_running(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:
-    """pending/queued/building 跳过；running 经 observe 确认真实运行中也跳过。"""
+    """pending/queued/有活跃构建的 building 跳过；running 经 observe 确认也跳过。"""
     from local_webpage_access.models import Status
+    from local_webpage_access.logging import now_iso
 
     for iid, st in [
         ("p", "pending"),
@@ -853,6 +969,8 @@ def test_reconcile_skips_in_progress_and_truly_running(
         ("r", "running"),
     ]:
         _seed_instance(registry, workspace, iid, status=st)
+    # 活跃构建中的 building 仍应跳过（BUG-166 边界）
+    registry.add_build("bld", status="running", started_at=now_iso())
     # "r" 经 observe 确认真实运行中 → 不恢复
     monkeypatch.setattr(
         "local_webpage_access.lifecycle.observe_status",
@@ -866,6 +984,27 @@ def test_reconcile_skips_in_progress_and_truly_running(
         restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
     )
     assert restarted == []
+
+
+def test_reconcile_recovers_orphan_building_without_active_build(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-166：无活跃 builds 的 building 不得跳过；observe 掉线后应恢复。"""
+    from local_webpage_access.models import Status
+
+    _seed_instance(registry, workspace, "demo", status="building")
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.observe_status",
+        lambda ws, cfg, reg, iid: Status.STOPPED,
+    )
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert restarted == ["demo"]
 
 
 def test_reconcile_recovers_stale_running(
@@ -976,4 +1115,72 @@ def test_run_watcher_invokes_supervise_periodically(
         supervise_interval=60.0,
     )
     assert len(calls) >= 1
+
+
+def test_run_watcher_heartbeat_thread_refreshes_during_long_round(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """BUG-190：后台心跳线程在长轮次（单轮超 LOCK_HEARTBEAT_TIMEOUT）期间持续刷新，
+    不仅每轮起始刷新一次——否则长构建期间锁被 _lock_is_stale 误判 stale、产生
+    重复 watcher（对照 instance_lock 的独立心跳线程 BUG-046）。"""
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=True, pid=0, poll_interval=0.01)
+    )
+
+    calls: list[float] = []
+
+    def heartbeat() -> None:
+        calls.append(time.monotonic())
+
+    stop = threading.Event()
+    # 主循环第一轮会阻塞在 stop_event.wait(poll_interval=5)；期间仅后台线程刷新。
+    timer = threading.Timer(0.4, stop.set)
+    timer.start()
+    try:
+        daemon_mod.run_watcher(
+            workspace,
+            config,
+            registry,
+            stop_event=stop,
+            poll_interval=5.0,  # 长阻塞，靠 stop 退出
+            heartbeat=heartbeat,
+            heartbeat_interval=0.03,  # 30ms → 0.4s 内后台刷新 ~10 次
+        )
+    finally:
+        timer.cancel()
+        timer.join(timeout=1.0)
+
+    # 若无后台线程，整个阻塞期间只有轮首那 1 次；有线程则 ≥3 次
+    assert len(calls) >= 3, f"后台心跳未持续刷新（仅 {len(calls)} 次）"
+
+
+def test_attach_daemon_log_handler_writes_daemon_log(workspace: Workspace) -> None:
+    """BUG-189：attach_daemon_log_handler 给 root logger 追加 logs/daemon.log 的
+    FileHandler，detached watcher 子进程（stdout/stderr=DEVNULL）日志不再丢失。"""
+    import logging
+
+    root = logging.getLogger()
+    before = set(id(h) for h in root.handlers)
+    try:
+        daemon_mod.attach_daemon_log_handler(workspace)
+        added = [h for h in root.handlers if id(h) not in before]
+        assert any(
+            isinstance(h, logging.FileHandler)
+            and str(workspace.logs / daemon_mod.LOG_FILENAME) == h.baseFilename
+            for h in added
+        ), "未为 logs/daemon.log 追加 FileHandler"
+
+        logging.getLogger("lwa.bug189.test").warning("BUG-189 marker line")
+        for h in added:
+            h.flush()
+        content = (workspace.logs / daemon_mod.LOG_FILENAME).read_text(encoding="utf-8")
+        assert "BUG-189 marker line" in content
+    finally:
+        # 清理：移除本测试追加的 handler，避免污染后续用例
+        for h in list(root.handlers):
+            if id(h) not in before:
+                root.removeHandler(h)
+                with contextlib.suppress(Exception):
+                    h.close()
+
 

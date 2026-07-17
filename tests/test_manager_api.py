@@ -68,19 +68,17 @@ def manager_env(workspace_root: Path):
 
     token = ensure_token(ws)
     app = create_app(ws, config, reg, token=token)
-    client = TestClient(app)
-
-    yield EnvBundle(
-        workspace=ws,
-        config=config,
-        registry=reg,
-        app=app,
-        client=client,
-        token=token,
-        instance_id=instance_id,
-    )
-
-    client.close()  # 触发 lifespan shutdown（关闭 registry）
+    # BUG-171：须以 context manager 进入 lifespan，teardown 才会关闭 registry
+    with TestClient(app) as client:
+        yield EnvBundle(
+            workspace=ws,
+            config=config,
+            registry=reg,
+            app=app,
+            client=client,
+            token=token,
+            instance_id=instance_id,
+        )
 
 
 class EnvBundle:
@@ -236,7 +234,66 @@ def test_health_endpoint_no_auth(manager_env: EnvBundle) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert body["workspaceRoot"] == str(manager_env.workspace.root.resolve())
+    assert "version" in body
+    # TestClient 默认 client host 为 testclient（非回环）→ 不泄露路径（BUG-169）
+    assert "workspaceRoot" not in body
+
+
+def test_is_loopback_host_handles_ipv4_mapped_ipv6() -> None:
+    """BUG-194：::ffff:127.0.0.1 与整个 127.x 段都判为回环，不再仅认字面集合。"""
+    from local_webpage_access.manager_api import _is_loopback_host
+
+    for h in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "127.0.0.2", "localhost"):
+        assert _is_loopback_host(h) is True, h
+    for h in ("10.0.0.8", "192.168.1.5", "::ffff:10.0.0.8", ""):
+        assert _is_loopback_host(h) is False, h
+
+
+def test_is_localhost_client_recognizes_mapped_loopback() -> None:
+    """BUG-194：双栈 :: 监听下 IPv4 回环 client.host=::ffff:127.0.0.1 视为本机，
+    使 /api/health 仍回 workspaceRoot 供 manager_service 归属校验。"""
+    from unittest.mock import Mock
+
+    from local_webpage_access.manager_api import _is_localhost_client
+
+    request = Mock()
+    request.client = Mock(host="::ffff:127.0.0.1")
+    assert _is_localhost_client(request) is True
+
+
+def test_is_self_connection_matches_lan_bind_host() -> None:
+    """BUG-194：managerHost=LAN IP 时，本机自连（client.host==bind）判为自连；
+    他机 LAN 源 IP 不匹配；通配绑定交由 localhost 判定。"""
+    from unittest.mock import Mock
+
+    from local_webpage_access.manager_api import _is_self_connection
+
+    cfg_lan = Config(managerHost="192.168.1.10", portPool=PortPool(start=21000, end=21050))
+    req_self = Mock()
+    req_self.client = Mock(host="192.168.1.10")
+    assert _is_self_connection(req_self, cfg_lan) is True
+
+    req_other = Mock()
+    req_other.client = Mock(host="192.168.1.55")
+    assert _is_self_connection(req_other, cfg_lan) is False
+
+    cfg_wild = Config(managerHost="0.0.0.0", portPool=PortPool(start=21000, end=21050))
+    req_wild = Mock()
+    req_wild.client = Mock(host="0.0.0.0")
+    assert _is_self_connection(req_wild, cfg_wild) is False
+
+
+def test_health_workspace_root_only_for_localhost(manager_env: EnvBundle) -> None:
+    """BUG-169：仅本机回环客户端可见 workspaceRoot。"""
+    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
+        body = local_client.get("/api/health").json()
+        assert body["ok"] is True
+        assert body["workspaceRoot"] == str(manager_env.workspace.root.resolve())
+
+    with TestClient(manager_env.app, client=("10.0.0.8", 50000)) as lan_client:
+        body = lan_client.get("/api/health").json()
+        assert body["ok"] is True
+        assert "workspaceRoot" not in body
 
 
 # ---- 统计（WBS-22.05/06）----------------------------------------------------

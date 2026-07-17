@@ -101,6 +101,28 @@ def log_file_path(workspace: Workspace) -> Path:
     return workspace.logs / LOG_FILENAME
 
 
+def attach_daemon_log_handler(workspace: Workspace) -> None:
+    """为 watcher 进程补 ``logs/daemon.log`` FileHandler（BUG-189 / WBS-21.10）。
+
+    watcher 子进程的 stdout/stderr 被 :func:`_spawn_watcher` 设为 DEVNULL，
+    而 ``_main`` 的 ``setup_logging`` 默认仅控制台 handler —— 两者叠加使导入失败等
+    日志全部丢失。这里给根 logger 补一个 FileHandler，使 daemon 有持久可排查痕迹。
+    文件不可写等异常不得阻断 watcher 主流程。
+    """
+    import logging as _stdlog
+
+    try:
+        dpath = log_file_path(workspace)
+        dpath.parent.mkdir(parents=True, exist_ok=True)
+        fh = _stdlog.FileHandler(dpath, encoding="utf-8")
+        fh.setFormatter(
+            _stdlog.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        _stdlog.getLogger().addHandler(fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def read_state(workspace: Workspace) -> DaemonState | None:
     """读取持久化的 daemon 状态；不存在或损坏返回 ``None``。"""
     path = state_path(workspace)
@@ -164,7 +186,14 @@ def is_pid_alive(pid: int) -> bool:
 
 
 def read_pid_cmdline(pid: int) -> str | None:
-    """读取进程完整命令行；不可读或进程已退出时返回 ``None``（BUG-125）。"""
+    """读取进程完整命令行；不可读或进程已退出时返回 ``None``（BUG-125）。
+
+    BUG-177：Windows 无 ``/proc`` 也无 ``ps``——旧实现落到 ``ps`` 分支恒返回
+    None，导致 ``pid_cmdline_contains`` 恒 False，停止 builtin 静态服务时
+    ``_kill_process`` 误判"身份不匹配"而 return True 并删 pidfile，真正的
+    http.server 进程成孤儿继续占端口。改用 PowerShell ``Get-CimInstance`` 读
+    ``Win32_Process.CommandLine``；pid 已强制 int，无注入风险。
+    """
     if pid <= 0:
         return None
     proc_cmdline = Path(f"/proc/{pid}/cmdline")
@@ -175,6 +204,28 @@ def read_pid_cmdline(pid: int) -> str | None:
             return text or None
         except OSError:
             return None
+    if sys.platform == "win32":
+        # Windows：用 PowerShell 读 CommandLine（BUG-177）。pid 强制 int，安全拼接。
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "(Get-CimInstance Win32_Process -Filter "
+                    f"'ProcessId={int(pid)}').CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-ww", "-o", "command="],
@@ -261,6 +312,7 @@ def daemon_lock(workspace: Workspace) -> Iterator[int]:
     path = lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
+    acquired = False
     try:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
@@ -274,13 +326,18 @@ def daemon_lock(workspace: Workspace) -> Iterator[int]:
         os.write(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
         os.close(fd)
         fd = None
+        acquired = True
         yield os.getpid()
     finally:
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)
-        with contextlib.suppress(FileNotFoundError, PermissionError):
-            path.unlink()
+        # BUG-173：仅当本进程成功获取锁时才在退出时删除锁文件。
+        # 否则获取失败（他人持活锁）也会 unlink 掉活跃 watcher 的锁，
+        # is_running 假阴性、后续进程再次获取成功 → 重复 watcher 并发扫 inbox。
+        if acquired:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                path.unlink()
 
 
 def _lock_is_stale(
@@ -508,10 +565,27 @@ def process_zip(
             return summary
 
         # 可确定且轻量：自动启动（WBS-21.08）
-        start_instance(workspace, config, registry, iid)
-        summary["action"] = "started"
-        summary["note"] = f"已自动启动（profile={profile}）"
-        log.info("daemon: %s → 自动启动（profile=%s）", iid, profile)
+        # BUG-188：自动启动与导入解耦——启动失败不再冒泡到外层 except 被判 "failed"，
+        # 从而在下轮重导（撞 slug 冲突、误报 import_conflict、实例停在 stopped 被孤儿）。
+        # 导入已成功即以终态归档 zip；启动失败置期望运行，交自愈 reconcile 后续轮次重试。
+        try:
+            start_instance(workspace, config, registry, iid)
+            summary["action"] = "started"
+            summary["note"] = f"已自动启动（profile={profile}）"
+            log.info("daemon: %s → 自动启动（profile=%s）", iid, profile)
+        except Exception as exc:  # noqa: BLE001 — 导入已成功，启动失败不重导
+            try:
+                registry.update_status(iid, "stopped", desired_state="running")
+                registry.add_event(
+                    iid,
+                    "start",
+                    f"daemon 自动启动失败，已置期望运行待自愈重试：{exc}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            summary["action"] = "imported"
+            summary["note"] = f"已导入；自动启动失败（待自愈重试）：{exc}"
+            log.warning("daemon: %s 导入成功但自动启动失败，置期望运行待自愈：%s", iid, exc)
         return summary
     except ZipImportError as exc:
         # IMP-011：区分"slug 冲突"（携带 instance_id）与"zip 校验/解压失败"。
@@ -547,8 +621,9 @@ def process_zip(
 # ---- DEV-042：开机/守护自愈 reconcile ---------------------------------------
 
 
-# 这些态不应被 reconcile 强拉（进行中或人工介入中），交给对应流程收尾
-_RECONCILE_SKIP_STATUSES = {"pending", "queued", "building"}
+# 这些态不应被 reconcile 强拉（进行中或人工介入中），交给对应流程收尾。
+# building 仅在仍有活跃 builds 时跳过（见 reconcile 内 has_active_build，BUG-166）。
+_RECONCILE_SKIP_STATUSES = {"pending", "queued"}
 
 
 def reconcile(
@@ -568,7 +643,7 @@ def reconcile(
     跳过条件：
 
     * ``desired_state≠running``（用户已停止，不该被拉起）；
-    * ``status ∈ {pending, queued, building}``（过渡态，交给对应流程收尾）；
+    * ``status ∈ {pending, queued}``，或 ``building`` 且仍有活跃 builds 行；
     * registry 标 ``running`` 且 :func:`~local_webpage_access.lifecycle.observe_status`
       仍判定为 running（含 BUG-079：陈旧 running 经观测验证后才恢复）；
     * Caddy 后端且网关被显式关闭（``run/gateway.json enabled=false``）——此时静态
@@ -603,12 +678,19 @@ def reconcile(
         iid = row["id"]
         runtime = row.get("runtime")
         registry_status = row.get("status")
-        # pending/queued/building：过渡态，交给对应流程收尾，不 observe 不强拉
-        if registry_status in _RECONCILE_SKIP_STATUSES:
+        # pending/queued：过渡态，交给对应流程收尾，不 observe 不强拉。
+        # building：若仍有活跃 builds 则跳过；无活跃构建（关机打断的 host_static 等）
+        # 不得永久挡住自愈（BUG-166）。
+        if registry_status in ("pending", "queued"):
             continue
+        if registry_status == "building":
+            from local_webpage_access.status import has_active_build
+
+            if has_active_build(registry, iid):
+                continue
         # BUG-079：registry 标 running 可能陈旧（宿主机重启/进程异常退出后未刷新），
         # observe 验证真实状态——若实际已掉线则按偏离处理；其余非 running 态
-        # （stopped/failed/gateway_down/config_invalid）本就是已知未运行，直接恢复。
+        # （stopped/failed/gateway_down/config_invalid/孤儿 building）本就是已知未运行，直接恢复。
         actual_status = registry_status
         if registry_status == "running":
             try:
@@ -616,6 +698,13 @@ def reconcile(
             except Exception as exc:  # noqa: BLE001 — 观测失败保守视为仍 running，跳过
                 log.debug("daemon reconcile: 观测 %s 失败，保守跳过：%s", iid, exc)
                 continue
+        elif registry_status == "building":
+            # 无活跃构建的 building：先 observe；若已可探活则不必 start。
+            try:
+                actual_status = observe_status(workspace, config, registry, iid).value
+            except Exception as exc:  # noqa: BLE001
+                log.debug("daemon reconcile: 观测 building %s 失败：%s", iid, exc)
+                actual_status = registry_status
         if actual_status == "running":
             continue
         if caddy_gateway_off and runtime == "shared-static":
@@ -656,12 +745,20 @@ def run_watcher(
     heartbeat: Callable[[], None] | None = None,
     supervise: Callable[[Workspace, Config, Registry], Any] | None = None,
     supervise_interval: float = DEFAULT_SUPERVISE_INTERVAL,
+    heartbeat_interval: float | None = None,
 ) -> None:
     """watcher 主循环（可注入 stop_event/process_fn/heartbeat/supervise，便于单测）。
 
     退出条件：``stop_event`` 被置位，或状态文件 ``enabled`` 被外部置为 False
     （``lwa daemon off`` 设置）。每轮起始调用 ``heartbeat``（若提供），刷新
     锁心跳以供 :func:`_lock_is_stale` 超时回收判定（BUG-030）。
+
+    BUG-190：``heartbeat`` 还由一个独立后台线程按 ``heartbeat_interval`` 周期
+    调用（默认 :data:`LOCK_HEARTBEAT_TIMEOUT` / 4）。单轮 ``process_fn``
+    （容器构建、多实例 reconcile）可能远超锁心跳超时（60s），仅靠轮间刷新会让
+    锁被 :func:`_lock_is_stale` 误判 stale、产生重复 watcher。后台线程在
+    run_watcher 生命周期内持续刷新，与每轮起始的回调互补（对照 instance_lock
+    的心跳线程 BUG-046，lifecycle.py）。
 
     DEV-042：``supervise`` 每隔 ``supervise_interval`` 秒调用一次（默认
     :func:`reconcile`），周期恢复 ``desired=running`` 但掉线的实例，实现
@@ -672,58 +769,80 @@ def run_watcher(
         poll_interval if poll_interval is not None else DEFAULT_POLL_INTERVAL
     )
     process_fn = process_fn or process_zip
+    if heartbeat_interval is None:
+        heartbeat_interval = LOCK_HEARTBEAT_TIMEOUT / 4
     fingerprints: dict[str, _FileFingerprint] = {}
 
     log.info("daemon watcher 启动（poll=%.1fs）", poll_interval)
     last_supervise = clock()
-    while not stop_event.is_set():
-        # 每轮起始刷新心跳，让卡死可被 _lock_is_stale 探测
-        if heartbeat is not None:
-            heartbeat()
-        # 外部 off：状态文件 enabled=False → 退出
-        state = read_state(workspace)
-        if state is not None and not state.enabled:
-            log.info("daemon 状态为 disabled，退出 watcher")
-            break
+    # BUG-190：后台心跳线程——单轮超 LOCK_HEARTBEAT_TIMEOUT 时持续刷新锁，
+    # 避免被误判 stale 触发重复 watcher。
+    hb_stop = threading.Event()
+    if heartbeat is not None and heartbeat_interval > 0:
 
-        # DEV-042：周期自愈——定期恢复 desired=running 但掉线的实例
-        if supervise is not None and (clock() - last_supervise) >= supervise_interval:
-            last_supervise = clock()
-            try:
-                supervise(workspace, config, registry)
-            except Exception:  # noqa: BLE001 — 自愈失败不中断 watcher
-                log.exception("daemon supervise（reconcile）失败")
+        def _hb_loop() -> None:
+            while not hb_stop.wait(heartbeat_interval):
+                try:
+                    heartbeat()
+                except Exception:  # noqa: BLE001 — 心跳失败不中断 watcher
+                    log.exception("daemon 心跳刷新失败")
 
-        processed = load_processed_set(workspace)
-        for zip_path in scan_inbox(workspace):
-            key = processed_key(zip_path)
-            if key in processed:
-                continue
-            previous = fingerprints.get(str(zip_path))
-            stable, fp = is_file_stable(
-                zip_path, previous, now_ts=clock(), stable_seconds=stable_seconds
-            )
-            fingerprints[str(zip_path)] = fp
-            if not stable:
-                log.debug("daemon: %s 尚未稳定，等待", zip_path.name)
-                continue
-            log.info("daemon: 处理 %s", zip_path.name)
-            summary = process_fn(workspace, config, registry, zip_path)
-            if isinstance(summary, dict) and summary.get("action") == "failed":
-                log.warning("daemon: %s 处理失败，保留待下轮重试", zip_path.name)
-            else:
-                processed.add(key)
-                processed.add(str(zip_path))
-                save_processed_set(workspace, processed)
-                # IMP-011：终态（started/pending/conflict）后把 zip 物理移入
-                # inbox/processed/，从扫描视野移除，避免重复导入与 -2/-3 冗余。
-                if _archive_processed_zip(workspace, zip_path) is not None:
-                    log.info("daemon: %s 已归档至 inbox/processed/", zip_path.name)
-            # 处理完成后从指纹表移除，避免无界增长
-            fingerprints.pop(str(zip_path), None)
+        hb_thread = threading.Thread(
+            target=_hb_loop, name="lwa-daemon-hb", daemon=True
+        )
+        hb_thread.start()
+    try:
+        while not stop_event.is_set():
+            # 每轮起始刷新心跳，让卡死可被 _lock_is_stale 探测
+            if heartbeat is not None:
+                heartbeat()
+            # 外部 off：状态文件 enabled=False → 退出
+            state = read_state(workspace)
+            if state is not None and not state.enabled:
+                log.info("daemon 状态为 disabled，退出 watcher")
+                break
 
-        if stop_event.wait(poll_interval):
-            break
+            # DEV-042：周期自愈——定期恢复 desired=running 但掉线的实例
+            if supervise is not None and (clock() - last_supervise) >= supervise_interval:
+                last_supervise = clock()
+                try:
+                    supervise(workspace, config, registry)
+                except Exception:  # noqa: BLE001 — 自愈失败不中断 watcher
+                    log.exception("daemon supervise（reconcile）失败")
+
+            processed = load_processed_set(workspace)
+            for zip_path in scan_inbox(workspace):
+                key = processed_key(zip_path)
+                if key in processed:
+                    continue
+                previous = fingerprints.get(str(zip_path))
+                stable, fp = is_file_stable(
+                    zip_path, previous, now_ts=clock(), stable_seconds=stable_seconds
+                )
+                fingerprints[str(zip_path)] = fp
+                if not stable:
+                    log.debug("daemon: %s 尚未稳定，等待", zip_path.name)
+                    continue
+                log.info("daemon: 处理 %s", zip_path.name)
+                summary = process_fn(workspace, config, registry, zip_path)
+                if isinstance(summary, dict) and summary.get("action") == "failed":
+                    log.warning("daemon: %s 处理失败，保留待下轮重试", zip_path.name)
+                else:
+                    processed.add(key)
+                    processed.add(str(zip_path))
+                    save_processed_set(workspace, processed)
+                    # IMP-011：终态（started/pending/conflict）后把 zip 物理移入
+                    # inbox/processed/，从扫描视野移除，避免重复导入与 -2/-3 冗余。
+                    if _archive_processed_zip(workspace, zip_path) is not None:
+                        log.info("daemon: %s 已归档至 inbox/processed/", zip_path.name)
+                # 处理完成后从指纹表移除，避免无界增长
+                fingerprints.pop(str(zip_path), None)
+
+            if stop_event.wait(poll_interval):
+                break
+    finally:
+        # BUG-190：退出 watcher 时停后台心跳线程
+        hb_stop.set()
 
     log.info("daemon watcher 已停止")
 
@@ -897,10 +1016,15 @@ def stop_daemon(workspace: Workspace) -> bool:
             stopped = True
         else:
             stopped = _terminate_pid(state.pid)
-    # 清理锁文件；状态文件保留为 disabled 供 status 查询
-    with contextlib.suppress(FileNotFoundError, PermissionError):
-        lock_path(workspace).unlink()
-    log.info("daemon 已停止（pid=%s）", state.pid)
+    # BUG-192：仅当确实终止成功才清理锁文件。终止失败（进程仍存活、持锁——可能被
+    # 监督器抢救）时删锁会让其他 watcher 误判无主并发启动，叠加 stuck/重复进程产生
+    # 无锁 watcher。状态文件保留为 disabled 供 status 查询与重试。
+    if stopped:
+        with contextlib.suppress(FileNotFoundError, PermissionError):
+            lock_path(workspace).unlink()
+        log.info("daemon 已停止（pid=%s）", state.pid)
+    else:
+        log.warning("daemon 终止失败（pid=%s 仍存活），保留锁文件供重试", state.pid)
     return stopped
 
 
@@ -942,6 +1066,8 @@ def _main() -> int:
 
     config = load_config(workspace)
     workspace.ensure_workspace_dirs()
+    # BUG-189：watcher 子进程 stdout/stderr 被 DEVNULL，补 logs/daemon.log 持久化
+    attach_daemon_log_handler(workspace)
 
     # 抢占单实例锁；已有 daemon 在跑则直接退出
     try:
@@ -969,6 +1095,8 @@ def _main() -> int:
                         log.info("daemon 启动自愈：恢复 %d 个实例 %s", len(recovered), recovered)
                 except Exception:  # noqa: BLE001 — 自愈失败不阻断 watcher
                     log.exception("daemon 启动 reconcile 失败")
+                # BUG-190：watcher 在 run_watcher 内部启动后台心跳线程，
+                # 持续刷新锁心跳（详见 run_watcher）。
                 run_watcher(
                     workspace,
                     config,

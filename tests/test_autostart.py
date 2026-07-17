@@ -118,6 +118,24 @@ def test_build_systemd_unit_foreground_restart(tmp_path) -> None:
     assert "After=network-online.target" in daemon_unit
 
 
+def test_build_systemd_unit_quotes_path_with_spaces(tmp_path, monkeypatch) -> None:
+    """BUG-174：systemd Environment=PATH 须整体加引号，否则含空格目录被截断。"""
+    monkeypatch.setattr(
+        asm, "_build_path_env", lambda *a, **k: "/usr/bin:/mnt/c/Program Files/app"
+    )
+    unit = asm.build_systemd_unit(
+        "daemon", python_exe="/usr/bin/python3", workspace_root=tmp_path
+    )
+    env_lines = [ln for ln in unit.splitlines() if ln.startswith("Environment=")]
+    assert env_lines, "unit 缺少 Environment= 行"
+    line = env_lines[0].rstrip()
+    # 整体加引号：Environment="PATH=..."
+    assert line.startswith('Environment="PATH='), line
+    assert line.endswith('"'), line
+    # 含空格目录完整保留在引号内（未被 systemd 按空格截断）
+    assert "/mnt/c/Program Files/app" in line
+
+
 def test_is_legacy_detection() -> None:
     # 旧 detached 启动器
     assert asm.is_legacy_program_arguments(
@@ -226,7 +244,7 @@ def _fake_runner(record=None):
             else:
                 stdout = "enabled"
         elif "print-disabled" in joined:
-            lines = "\n".join(f'\t"{lab}" => true' for lab in sorted(disabled) if lab)
+            lines = "\n".join(f'\t"{lab}" => disabled' for lab in sorted(disabled) if lab)
             stdout = f"disabled services = {{\n{lines}\n}}\n"
         elif "print" in joined:
             label = cmd[-1].rsplit("/", 1)[-1] if cmd else ""
@@ -318,7 +336,7 @@ def test_coordinated_disable_when_loaded(tmp_path, monkeypatch) -> None:
         if "bootout" in joined or (cmd[:2] == ["launchctl", "disable"]):
             state["disabled"] = True
         if "print-disabled" in joined:
-            body = f'\t"{label}" => true\n' if state["disabled"] else ""
+            body = f'\t"{label}" => disabled\n' if state["disabled"] else ""
             return CompletedProcess(
                 args=cmd, returncode=0,
                 stdout=f"disabled services = {{\n{body}}}\n", stderr="",
@@ -360,6 +378,84 @@ def test_coordinated_disable_no_unit(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     res = asm.coordinated_disable(ws, "daemon")
     assert res.note is None
+
+
+# ---- coordinated_restart（BUG-191）-----------------------------------------
+
+
+def test_coordinated_restart_managed_when_loaded(tmp_path, monkeypatch) -> None:
+    """BUG-191：单元已加载/启用时 coordinated_restart 交监督器重启，managed=True。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    backend.write_unit(
+        "daemon", backend.render("daemon", python_exe="/py", workspace_root=root)
+    )
+    record: list[list[str]] = []
+    res = asm.coordinated_restart(ws, "daemon", runner=_fake_runner(record))
+    assert res.managed is True
+    assert res.ok is True
+    assert any(c[:3] == ["launchctl", "kickstart", "-k"] for c in record)
+
+
+def test_coordinated_restart_no_unit(tmp_path, monkeypatch) -> None:
+    """无单元文件时 managed=False（调用方按 stop+start 处理）。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    res = asm.coordinated_restart(ws, "daemon")
+    assert res.managed is False
+    assert res.note is None
+
+
+def test_coordinated_restart_failure_falls_back(tmp_path, monkeypatch) -> None:
+    """BUG-191：监督器重启失败时 managed=False 回退 stop+start，并如实报 ok=False。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    backend.write_unit(
+        "daemon", backend.render("daemon", python_exe="/py", workspace_root=root)
+    )
+
+    def runner(cmd, **kwargs):
+        joined = " ".join(cmd)
+        if "kickstart" in joined:
+            return CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+        if "print-disabled" in joined:
+            return CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "print" in cmd:
+            return CompletedProcess(
+                args=cmd, returncode=0, stdout="pid = 1\ndisabled = false\n", stderr=""
+            )
+        return CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    res = asm.coordinated_restart(ws, "daemon", runner=runner)
+    assert res.managed is False
+    assert res.ok is False
+    assert res.note is not None and "失败" in res.note
+
+
+def test_mac_launchd_restart_uses_kickstart() -> None:
+    """BUG-191：MacLaunchdBackend.restart 用 launchctl kickstart -k（监督下单一进程）。"""
+    backend = asm.MacLaunchdBackend()
+    record: list[list[str]] = []
+    _outcomes, ok = backend.restart("daemon", _fake_runner(record))
+    assert ok is True
+    kicks = [c for c in record if c[:3] == ["launchctl", "kickstart", "-k"]]
+    assert len(kicks) == 1
+
+
+def test_systemd_restart_uses_systemctl_restart(monkeypatch) -> None:
+    """BUG-191：SystemdUserBackend.restart 用 systemctl --user restart。"""
+    monkeypatch.setattr(asm, "detect_platform", lambda: "linux")
+    backend = asm.SystemdUserBackend()
+    record: list[list[str]] = []
+    _outcomes, ok = backend.restart("daemon", _fake_runner(record))
+    assert ok is True
+    restarts = [c for c in record if c[:2] == ["systemctl", "--user"] and "restart" in c]
+    assert len(restarts) == 1
 
 
 # ---- 完备性检查 ------------------------------------------------------------
@@ -888,7 +984,7 @@ def test_macos_is_enabled_via_print_disabled_when_unloaded(tmp_path, monkeypatch
             # 不在 disabled 列表 → 默认启用
             return CompletedProcess(
                 args=cmd, returncode=0,
-                stdout="disabled services = {\n\t\"com.other\" => true\n}\n",
+                stdout="disabled services = {\n\t\"com.other\" => disabled\n}\n",
                 stderr="",
             )
         if "print" in joined:
@@ -902,7 +998,7 @@ def test_macos_is_enabled_via_print_disabled_when_unloaded(tmp_path, monkeypatch
         if "print-disabled" in joined:
             return CompletedProcess(
                 args=cmd, returncode=0,
-                stdout=f'disabled services = {{\n\t"{label}" => true\n}}\n',
+                stdout=f'disabled services = {{\n\t"{label}" => disabled\n}}\n',
                 stderr="",
             )
         if "print" in joined:
@@ -1168,6 +1264,27 @@ def test_check_active_rejects_alive_but_wrong_identity(tmp_path, monkeypatch) ->
     item = asm._check_active(ws, config, backend, "daemon", _fake_runner())
     assert item.status == "fail"
     assert "身份" in item.message or "MainPID" in item.message
+
+
+def test_installed_services_includes_disk_orphans_outside_manifest(
+    tmp_path, monkeypatch
+) -> None:
+    """BUG-168：manifest 存在时仍须检出磁盘上的孤儿单元。"""
+    root, ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    # 磁盘上有 daemon + gateway，manifest 仅记录 daemon
+    for name in ("daemon", "gateway"):
+        backend.write_unit(
+            name,
+            backend.render(name, python_exe=sys.executable, workspace_root=root),
+        )
+    asm.write_manifest(ws, ["daemon"])
+
+    detected = asm.installed_services(ws, backend)
+    assert "daemon" in detected
+    assert "gateway" in detected, "孤儿 gateway 单元不得被 manifest 屏蔽"
 
 
 def test_reinstall_removes_orphan_services(tmp_path, monkeypatch) -> None:

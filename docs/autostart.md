@@ -107,6 +107,11 @@ lwa daemon off            # 再停进程
 停进程，**停用失败则阻断**（退出码 1，提示先 `lwa autostart disable`）——否则停掉的进程会被
 KeepAlive/Restart 立刻拉回，`off` 形同未生效。
 
+`lwa update` 重启 manager/daemon 时**同样协调**（`coordinated_restart`）：若自启单元在管，
+改用监督器原语重启（macOS `launchctl kickstart -k` / Linux `systemctl --user restart`），由
+监督器全程保证单一进程，避免"stop 杀掉后被 KeepAlive/Restart 立刻拉回、再与新 spawn 的
+detached 进程抢锁"产生重复 watcher/manager；单元未在管时退回 stop→start。
+
 ## Caddy 所有权
 
 Caddy 由 **LWA 托管**（`lwa-gateway` 单元跑 `gateway_service` 前台，持有 master +

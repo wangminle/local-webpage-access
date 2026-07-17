@@ -368,6 +368,11 @@ def test_manager_restart_runs_for_legacy_health_without_workspace_root(
     )
     calls = {"stop": 0, "start": 0}
 
+    # 自启动不在管（managed=False）→ 走 stop+start 路径
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
     monkeypatch.setattr(
         "local_webpage_access.manager_service._fetch_health",
         lambda *a, **k: {"ok": True},
@@ -396,6 +401,11 @@ def test_manager_restart_failure_captured(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:
     """manager 重启失败标记 failed，但不中断 doctor 等后续步骤。"""
+    # 自启动不在管 → 走 stop+start 路径
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
     monkeypatch.setattr(
         "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
     )
@@ -440,6 +450,53 @@ def test_daemon_not_started_when_stopped(
     step = report.step("restartDaemon")
     assert step.status == "skipped"
     assert started["count"] == 0
+
+
+def test_daemon_restart_via_autostart_when_managed(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-191：自启动在管 daemon 时重启走监督器（managed=True），不 stop+start
+    detached，避免 KeepAlive/Restart 拉回与新 spawn 抢锁产生重复 watcher。"""
+    import local_webpage_access.daemon as dmod
+
+    calls = {"stop": 0, "start": 0}
+    monkeypatch.setattr(dmod, "is_running", lambda ws: True)
+    monkeypatch.setattr(dmod, "stop_daemon", lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True)
+    monkeypatch.setattr(dmod, "start_daemon", lambda ws, cfg, **kw: calls.__setitem__("start", calls["start"] + 1) or 555)
+    # 自启动接管重启 → managed=True
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: ("已通过自启动单元重启 daemon", True, True),
+    )
+
+    report = run_update(workspace, config, registry, options=_opts(restart_daemon=True))
+    step = report.step("restartDaemon")
+    assert step.status == "ok"
+    assert calls["stop"] == 0  # 未走 stop
+    assert calls["start"] == 0  # 未走 detached start
+
+
+def test_daemon_restart_stop_failure_marks_failed(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-192：stop_daemon 返回 False（终止失败）时步骤标 failed，且不 start，
+    不再把停止失败报成重启成功。"""
+    import local_webpage_access.daemon as dmod
+
+    started = {"n": 0}
+    monkeypatch.setattr(dmod, "is_running", lambda ws: True)
+    monkeypatch.setattr(dmod, "stop_daemon", lambda ws: False)  # 终止失败
+    monkeypatch.setattr(dmod, "start_daemon", lambda ws, cfg, **kw: started.__setitem__("n", started["n"] + 1) or 555)
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
+
+    report = run_update(workspace, config, registry, options=_opts(restart_daemon=True))
+    step = report.step("restartDaemon")
+    assert step.status == "failed"
+    assert started["n"] == 0  # 终止失败不得 start
+    assert "停止失败" in step.message
 
 
 # ---- run_update: restart-instances ----------------------------------------

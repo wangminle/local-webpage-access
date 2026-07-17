@@ -34,6 +34,23 @@ log = logging.getLogger("lwa.status")
 # build_queue 默认 wait_timeout=1800s，Docker build 本身可能更长，故阈值取
 # 3600s（1 小时）以明显大于真实最长构建，避免误杀正常进行中的构建。
 _STALE_BUILDING_SECONDS = 3600.0
+# 无 builds 行的 building（host_static 等）不会真的跑长构建；关机打断后
+# 若仍等 3600s 才回收，UI 会长时间假绿「构建中」。缩短兜底窗口（BUG-166）。
+_STALE_BUILDING_NO_BUILD_SECONDS = 120.0
+
+
+def has_active_build(registry: Registry, instance_id: str) -> bool:
+    """是否存在未超时的 ``running`` 构建行（正在进行的真实构建）。"""
+    builds = registry.list_builds(instance_id, limit=1)
+    if not builds:
+        return False
+    latest = builds[0]
+    if latest.get("status") != "running":
+        return False
+    started_at = latest.get("started_at")
+    if not started_at:
+        return True
+    return _age_seconds(started_at) <= _STALE_BUILDING_SECONDS
 
 
 @dataclass
@@ -216,7 +233,18 @@ def sync_status(
             # 本函数看不到 running，实例会继续卡在 building。
             if _recover_stale_building(registry, iid):
                 changed[iid] = Status.FAILED.value
+                _recover_orphan_running_builds(registry, iid)
+                continue
             _recover_orphan_running_builds(registry, iid)
+            # BUG-166：无活跃构建时允许 observe——关机打断的 host_static 可能
+            # 站点已可探活，或应回写 gateway_down/stopped 以便 reconcile 自愈。
+            if not has_active_build(registry, iid):
+                try:
+                    observed = observe_status(workspace, config, registry, iid)
+                except Exception:  # noqa: BLE001 — 单实例观测失败不影响其它
+                    continue
+                if observed.value != before:
+                    changed[iid] = observed.value
             continue
         # BUG-119：非 building 实例也要回收被后续成功记录遮蔽的超时 running 行。
         _recover_orphan_running_builds(registry, iid)
@@ -307,13 +335,17 @@ def _recover_stale_building(registry: Registry, instance_id: str) -> bool:
                     f"但 building 状态仍停留 {_age_seconds(finished_at):.0f}s"
                 )
     else:
-        # 无 builds 行：用 instances.updated_at 兜底（host_static 路径）
+        # 无 builds 行：用 instances.updated_at 兜底（host_static 路径）。
+        # 阈值短于有 builds 的长构建窗口（BUG-166）。
         row = registry.get_instance(instance_id)
         if row:
             updated_at = row.get("updated_at")
-            if updated_at and _age_seconds(updated_at) > _STALE_BUILDING_SECONDS:
+            if (
+                updated_at
+                and _age_seconds(updated_at) > _STALE_BUILDING_NO_BUILD_SECONDS
+            ):
                 is_stale = True
-                detail = f"building 状态已停留 {_age_seconds(updated_at):.0f}s"
+                detail = f"building 状态已停留 {_age_seconds(updated_at):.0f}s（无 builds 行）"
 
     if not is_stale:
         return False
@@ -468,6 +500,7 @@ def _parse_stack(raw: Any) -> list[str]:
 
 __all__ = [
     "InstanceStatus",
+    "has_active_build",
     "instance_status",
     "all_statuses",
     "sync_status",

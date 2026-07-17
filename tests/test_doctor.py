@@ -102,6 +102,47 @@ def test_check_python_version_ok() -> None:
     assert "Python" in r.message
 
 
+def test_pid_alive_local_windows_does_not_os_kill(monkeypatch) -> None:
+    """BUG-178：Windows 上 _pid_alive_local 用 OpenProcess(SYNCHRONIZE)，不调 os.kill。
+
+    os.kill(pid, 0) 在 Windows 走 TerminateProcess 会真的杀进程；只读诊断
+    （check_caddy_health 探 caddy.pid）若走它将误杀 Caddy master。
+    """
+    import ctypes
+    import os
+
+    import local_webpage_access.doctor as doc
+
+    monkeypatch.setattr(doc.sys, "platform", "win32")
+    killed: list[tuple] = []
+    monkeypatch.setattr(doc.os, "kill", lambda *a, **k: killed.append(a))
+
+    class _FakeKernelAlive:
+        def OpenProcess(self, access, inherit, pid):
+            return 42  # 非零句柄 → 视为存活
+
+        def CloseHandle(self, handle):
+            return 1
+
+    class _FakeKernelDead:
+        def OpenProcess(self, access, inherit, pid):
+            return 0  # 零句柄 → 进程不存在
+
+        def CloseHandle(self, handle):
+            return 1
+
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda name, **kw: _FakeKernelAlive(), raising=False
+    )
+    assert doc._pid_alive_local(1234) is True
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda name, **kw: _FakeKernelDead(), raising=False
+    )
+    assert doc._pid_alive_local(1234) is False
+    # 关键：win32 分支绝不走 os.kill（否则 TerminateProcess 误杀）
+    assert killed == []
+
+
 # ---- WBS-26.03 Docker -----------------------------------------------------
 
 

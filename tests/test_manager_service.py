@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,8 @@ from local_webpage_access.errors import LifecycleError
 from local_webpage_access.manager_service import (
     ManagerState,
     manager_start_lock,
+    manager_instance_lock,
+    instance_lock_path,
     health_matches_workspace,
     health_ok,
     is_running,
@@ -226,6 +229,45 @@ def test_manager_start_lock_recovers_stale_file(workspace: Workspace) -> None:
     assert not lock.exists()
 
 
+def test_manager_instance_lock_exclusive_when_live_holder(
+    workspace: Workspace,
+) -> None:
+    """BUG-193：已有存活实例持锁时第二次获取抛 LifecycleError，且不删他人锁。"""
+    workspace.ensure_workspace_dirs()
+    lock = instance_lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    # 存活持有者 = 本进程 PID
+    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    with pytest.raises(LifecycleError):
+        with manager_instance_lock(workspace):
+            pass
+    # 关键：失败获取不得删活跃实例的锁（BUG-173 同款）
+    assert lock.exists()
+
+
+def test_manager_instance_lock_reclaims_stale(workspace: Workspace) -> None:
+    """BUG-193：持有进程已死 → 回收陈旧锁后正常获取。"""
+    workspace.ensure_workspace_dirs()
+    lock = instance_lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("999999\n", encoding="utf-8")  # 死 PID
+    with patch("local_webpage_access.manager_service.is_pid_alive", return_value=False):
+        with manager_instance_lock(workspace):
+            assert lock.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert not lock.exists()  # 退出后释放
+
+
+def test_manager_instance_lock_released_on_exit(workspace: Workspace) -> None:
+    """BUG-193：正常获取并退出后释放锁文件。"""
+    workspace.ensure_workspace_dirs()
+    lock = instance_lock_path(workspace)
+    assert not lock.exists()
+    with manager_instance_lock(workspace):
+        assert lock.exists()
+        assert lock.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert not lock.exists()
+
+
 def test_health_ok_false_on_closed_port() -> None:
     assert health_ok("127.0.0.1", 1, timeout=0.2) is False
 
@@ -331,6 +373,34 @@ def test_spawn_manager_redirects_stdout_to_manager_log(workspace: Workspace) -> 
     # 句柄应指向 manager.log；父进程关闭自己的副本（避免泄漏）
     assert log_file_path(workspace).is_file()
     assert getattr(kwargs["stdout"], "closed", False) is True
+
+
+def test_spawn_manager_rotates_manager_log_before_open(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-186：_spawn_manager 须经 open_append 打开 manager.log。"""
+    from local_webpage_access import logs as logs_mod
+
+    workspace.ensure_workspace_dirs()
+    calls: list[Path] = []
+    real = logs_mod.open_append
+
+    def spy(path, **kwargs):
+        calls.append(Path(path))
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(logs_mod, "open_append", spy)
+
+    class FakeProc:
+        pid = 424243
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.subprocess.Popen",
+        lambda *a, **k: FakeProc(),
+    )
+    log_file_path(workspace).write_text("old-manager\n", encoding="utf-8")
+    assert _spawn_manager(workspace) == 424243
+    assert any(c.name == "manager.log" for c in calls)
 
 
 def test_read_manager_log_tail(workspace: Workspace) -> None:

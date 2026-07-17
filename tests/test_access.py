@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from local_webpage_access.access import (
+    _fetch_text,
     format_review_report,
     instance_still_has_imp023,
     instances_needing_rebuild,
@@ -676,4 +677,33 @@ def test_enumerate_workspace_builtin_pids_parses_pgrep_lf(
         "local_webpage_access.static_gateway.subprocess.run", fake_af
     )
     assert gateway._enumerate_workspace_builtin_pids() == []
+
+
+def test_fetch_text_marks_probe_param(monkeypatch) -> None:
+    """BUG-179：_fetch_text 带 __lwa_probe=1，不被 pageviews 计为真实浏览。"""
+    from local_webpage_access import access as access_mod
+
+    captured = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b"<html>alias entry</html>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(access_mod.urllib.request, "urlopen", fake_urlopen)
+    text = _fetch_text("http://10.0.0.1:8080/my-app/")
+    assert text == "<html>alias entry</html>"
+    assert "__lwa_probe=" in captured["url"]
+    assert "/my-app/" in captured["url"]
 

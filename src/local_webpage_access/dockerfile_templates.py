@@ -194,9 +194,13 @@ def _render_python(
     needs_early_full_copy = False
 
     if uses_uv:
+        # BUG-185：uv sync 默认会构建并安装项目本体，需要完整源码；但依赖层只 COPY 了
+        # uv.lock+pyproject.toml，带 [build-system] 的 packaged 项目必然构建失败。
+        # --no-install-project 只装依赖、不构建项目本体，源码在后续 final_copy 拷入，
+        # 运行时 uv run 直接从工作目录导入（main:app 等模块无需作为包安装）。
         deps_block = (
             "COPY current/uv.lock current/pyproject.toml ./\n"
-            + _pip_run("pip install uv && uv sync --frozen --no-dev")
+            + _pip_run("pip install uv && uv sync --frozen --no-dev --no-install-project")
             + "\n"
         )
         run_prefix = "uv run "

@@ -469,6 +469,32 @@ def test_sync_status_keeps_recent_building(workspace, registry, config, monkeypa
     assert registry.get_instance("api")["status"] == "building"
 
 
+def test_sync_status_observes_building_without_active_build(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-166：无活跃 builds 的 building（如 host_static 被关机打断）应允许 observe 回写。"""
+    from local_webpage_access import status as status_mod
+    from local_webpage_access.models import Status as St
+
+    _seed_static(workspace, registry, "demo", host_port=21177)
+    registry.update_status("demo", Status.BUILDING.value)
+    # 无 builds 行；updated_at 很新 → 未到 stale 阈值，旧逻辑会永久跳过 observe
+    monkeypatch.setattr(status_mod, "_STALE_BUILDING_SECONDS", 999999.0)
+
+    def _fake_observe(ws, cfg, reg, iid):
+        reg.update_status(iid, St.RUNNING.value)
+        return St.RUNNING
+
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.observe_status", _fake_observe
+    )
+
+    changed = sync_status(workspace, config, registry, "demo")
+
+    assert changed == {"demo": "running"}
+    assert registry.get_instance("demo")["status"] == "running"
+
+
 def test_sync_status_recovers_stale_building_no_build_row(
     workspace, registry, config, monkeypatch
 ) -> None:

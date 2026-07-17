@@ -75,7 +75,8 @@ runtime/                      ← 工作区根（Runtime 根目录）
 
 - **用途**：运行态元数据，例如：
   - `manager-token.json` — 管理页 API token
-  - `manager.json` — 管理页后台进程状态
+  - `manager.json` — 管理页后台进程状态；`manager-start.lock` 串行化 `manager on`，
+    `manager.instance.lock` 为管理页运行态单实例锁（BUG-193，避免并发实例互踩状态）
   - `daemon.json` / `daemon.lock` — daemon 开关与 watcher 锁
   - `gateway.json` — Caddy 网关后台服务态（IMP-010）
   - `caddy.pid` — Caddy master pid（`caddy start --pidfile` 写入）
@@ -181,19 +182,23 @@ lwa alias clear <id>
 
 ## 开发期：lwa 源码更新后如何重载
 
-V0.4.0 起优先运行 `lwa update`。当前实现已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon 等后台子进程仍跑旧代码；下面命令仅作为手动兜底：
+V0.4.0 起优先运行 `lwa update`。当前实现已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon；**若开机自启单元在管，会走 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`），保证单一进程**，勿再手搓 `off && on` 与 KeepAlive 抢锁。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon 等后台子进程仍跑旧代码。
 
 ```bash
-# 推荐：一条命令完成工作区热重载
+# 推荐：一条命令完成工作区热重载（已与自启协调）
 lwa update
 
+# ── 仅当 lwa update 失败时的手动兜底 ──
 # 仓库根：刷新 editable 安装
 pip install -e .
 
 # 工作区：重启 lwa 自有服务
 cd runtime
+# 自启在管时：先停用再手搓 off/on，否则 KeepAlive/Restart 会立刻拉回旧进程
+lwa autostart disable
 lwa manager off && lwa manager on
 lwa daemon off && lwa daemon on    # 若启用了 daemon
+# 需要继续自启时再：lwa autostart enable
 
 # 可选：托管/import 逻辑变更时重启业务实例
 lwa restart <instance-id>
@@ -201,7 +206,7 @@ lwa restart <instance-id>
 lwa version && lwa doctor
 ```
 
-AI 助手可参照 Skill **`lwa-update-runtime`**（`lwa init` 后会复制到工作区 `skills/`）。V0.4.0 起优先使用 `lwa update` 自动完成上述步骤；升级后请确认管理页 `/api/health` 的 `version` 与 `lwa version` 输出一致，且实例列表可见「路径别名」按钮。手动命令仅作为排障兜底。
+AI 助手可参照 Skill **`lwa-update-runtime`**（`lwa init` 后会复制到工作区 `skills/`）。V0.4.0 起优先使用 `lwa update` 自动完成上述步骤；升级后请确认管理页 `/api/health` 的 `version` 与 `lwa version` 输出一致，且实例列表可见「路径别名」按钮。手动命令仅作为排障兜底；细节见 [开机自启](autostart.md)「停服与自启的协调」。
 
 ---
 

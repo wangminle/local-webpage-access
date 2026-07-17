@@ -45,7 +45,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.5.5-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.6.0-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())

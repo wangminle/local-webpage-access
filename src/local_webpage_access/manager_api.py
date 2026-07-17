@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -206,12 +207,54 @@ class _Ctx:
 _LOCALHOST_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
+def _normalize_client_host(host: str) -> str:
+    """剥除 IPv4-mapped IPv6 的 ``::ffff:`` 前缀（BUG-194）。
+
+    双栈（``::``）监听下，IPv4 回环连接的 client.host 形如 ``::ffff:127.0.0.1``，
+    直接比对 ``_LOCALHOST_HOSTS`` 永不命中；剥前缀后与 IPv4 回环统一判定。
+    """
+    if host.startswith("::ffff:"):
+        return host[len("::ffff:"):]
+    return host
+
+
+def _is_loopback_host(host: str) -> bool:
+    """host 是否为本机回环（含 IPv4-mapped IPv6 与整个 ``127.0.0.0/8``，BUG-194）。
+
+    ``ipaddress`` 的 ``is_loopback`` 已正确识别 ``::ffff:127.0.0.1``、``::1``、
+    ``127.x.x.x`` 全段；字面量 ``localhost`` 单独兜底。
+    """
+    if host in _LOCALHOST_HOSTS or _normalize_client_host(host) in _LOCALHOST_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_self_connection(request: Request, config: Config) -> bool:
+    """请求是否为 manager 经自身绑定地址的自连（managerHost=LAN IP 时探活，BUG-194）。
+
+    ``managerHost`` 配具体 LAN IP 时，manager_service 必须经该地址探活（绑定未覆盖
+    回环）。本机连自己的 LAN IP 时连接源地址等于绑定地址；局域网他机源 IP 不同，
+    故比对相等即可识别"manager 探自己"，安全地返回 workspaceRoot 做归属校验。
+    通配绑定（``0.0.0.0``/``::``）由 :func:`_is_localhost_client` 覆盖，此处跳过。
+    """
+    client = request.client
+    if client is None:
+        return False
+    bind = getattr(config, "managerHost", "") or ""
+    if not bind or bind in {"0.0.0.0", "::"}:
+        return False
+    return _normalize_client_host(client.host) == _normalize_client_host(bind)
+
+
 def _is_localhost_client(request: Request) -> bool:
     """请求是否来自本机 loopback（IMP-003：本机免 token）。"""
     client = request.client
     if client is None:
         return False
-    return client.host in _LOCALHOST_HOSTS
+    return _is_loopback_host(client.host)
 
 
 def require_token(request: Request) -> None:
@@ -322,13 +365,22 @@ def _register_routes(app: FastAPI) -> None:
 
     # ---- /api/health（无鉴权，供存活探测）----
     @app.get("/api/health", tags=["health"])
-    def health() -> dict[str, Any]:
+    def health(request: Request) -> dict[str, Any]:
         ws: Workspace = app.state.workspace
-        return {
+        body: dict[str, Any] = {
             "ok": True,
             "version": _app_version(),
-            "workspaceRoot": str(ws.root.resolve()),
         }
+        # BUG-169：workspaceRoot 仅回环可见；局域网免鉴权客户端不得窥探绝对路径。
+        # BUG-194：manager 从本机探活需拿 workspaceRoot 做归属校验。除回环外，
+        # managerHost 配 LAN IP / 双栈 :: 时，本机经该地址自连的 client.host 等于
+        # 绑定地址（或呈 ::ffff:127.0.0.1），也算可信——仅本机自连能命中，局域网他机源
+        # IP 不同，不会泄露。
+        if _is_localhost_client(request) or _is_self_connection(
+            request, app.state.config
+        ):
+            body["workspaceRoot"] = str(ws.root.resolve())
+        return body
 
     # ---- 顶部统计（WBS-22.05/06）----
     @app.get("/api/stats", dependencies=[api], tags=["stats"])

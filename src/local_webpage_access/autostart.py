@@ -226,7 +226,10 @@ def build_systemd_unit(
         "[Service]",
         "Type=simple",
         f"WorkingDirectory={workspace_root}",
-        f"Environment=PATH={_build_path_env(caddy_dir)}",
+        # BUG-174：PATH 值整体加引号——systemd 的 Environment= 按空格分割多个赋值，
+        # 未加引号时含空格目录（WSL 默认 PATH 必含 /mnt/c/Program Files 之类）会被截断，
+        # 监管进程拿到损坏 PATH。_unit_path_env 已兼容带引号读取。
+        f'Environment="PATH={_build_path_env(caddy_dir)}"',
         f"ExecStart={exec_start}",
         "Restart=on-failure",
         "RestartSec=5",
@@ -293,6 +296,9 @@ class AutostartBackend:
         raise NotImplementedError
 
     def uninstall(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
+        raise NotImplementedError
+
+    def restart(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
         raise NotImplementedError
 
     def is_loaded(self, name: str, runner: SubprocessRunner) -> bool:  # pragma: no cover
@@ -378,6 +384,18 @@ class MacLaunchdBackend(AutostartBackend):
         ok = dis.returncode == 0 and not self.is_enabled(name, runner)
         return outcomes, ok
 
+    def restart(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
+        target = self._target(name)
+        # kickstart -k：先终止再在监督下重新拉起，全程由 launchd 保证单一进程
+        # （BUG-191），不会出现 stop 杀掉后 KeepAlive 抢救与 detached 抢锁。
+        res = runner(["launchctl", "kickstart", "-k", target], capture_output=True)
+        outcomes = [
+            CmdOutcome(["launchctl", "kickstart", "-k", target], res.returncode,
+                       res.stdout or "", res.stderr or "")
+        ]
+        ok = res.returncode == 0 and self.is_loaded(name, runner)
+        return outcomes, ok
+
     def uninstall(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
         outcomes, disabled_ok = self.disable(name, runner)
         if not disabled_ok:
@@ -415,12 +433,14 @@ class MacLaunchdBackend(AutostartBackend):
             return self.unit_path(name).is_file()
         label = launchd_label(name)
         out = dis.stdout or ""
-        # `"com.fenix.lwa.daemon" => true` 表示被持久 disable。
+        # `launchctl print-disabled` 实际输出 `"label" => enabled` / `=> disabled`
+        # （BUG-172：旧正则只认 true/false 永不匹配，兜底恒返回 True，
+        # 导致 macOS 下 disable/uninstall 与 off 协调全部失效）。
         m = re.search(
-            rf'"{re.escape(label)}"\s*=>\s*(true|false)', out
+            rf'"{re.escape(label)}"\s*=>\s*(enabled|disabled)', out
         )
         if m:
-            return m.group(1) == "false"
+            return m.group(1) == "enabled"
         # 未出现在 disabled 列表 → 未被持久 disable，视为仍启用（BUG-153）。
         return True
 
@@ -482,6 +502,16 @@ class SystemdUserBackend(AutostartBackend):
             and not self.is_loaded(name, runner)
             and not self.is_enabled(name, runner)
         )
+        return outcomes, ok
+
+    def restart(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
+        unit = systemd_unit_name(name)
+        # systemctl restart 在监督下停+起，全程单一进程（BUG-191），不会与 detached
+        # spawn 抢锁。
+        res = runner(["systemctl", "--user", "restart", unit], capture_output=True)
+        outcomes = [CmdOutcome(["systemctl", "--user", "restart", unit],
+                               res.returncode, res.stdout or "", res.stderr or "")]
+        ok = res.returncode == 0 and self.is_loaded(name, runner)
         return outcomes, ok
 
     def uninstall(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
@@ -631,12 +661,16 @@ def _clear_manifest(ws: Workspace) -> None:
 
 
 def installed_services(ws: Workspace, backend: AutostartBackend | None = None) -> list[str]:
-    """实际已安装的服务：manifest 优先，缺失（旧版/手装）则扫描磁盘单元文件。"""
+    """实际已安装的服务：以磁盘单元文件为准（BUG-168）。
+
+    manifest 记录「上次有意安装」集合，供差量缩减等参考；探测时若仍以
+    manifest 为 candidates，会屏蔽磁盘上的孤儿单元，导致 status/disable/
+    uninstall/重复 install 均无法管理它们。
+    """
     if backend is None:
         backend = select_backend()
-    mani = read_manifest(ws)
-    candidates = mani if mani is not None else list(ALL_SERVICES)
-    return [s for s in ALL_SERVICES if s in candidates and backend.unit_path(s).is_file()]
+    # 始终扫描磁盘：manifest 外孤儿也须纳入管理（BUG-168）
+    return [s for s in ALL_SERVICES if backend.unit_path(s).is_file()]
 
 
 def _install_render_kwargs(
@@ -915,10 +949,13 @@ def is_service_loaded(
 
 @dataclass
 class CoordinatedResult:
-    """``lwa X off`` 协调结果。"""
+    """``lwa X off`` / 重启协调结果。"""
 
     note: str | None = None
     ok: bool = True
+    #: 仅 ``coordinated_restart`` 使用：True 表示自启动单元已接管重启（监督器保证
+    #: 单一进程），调用方不应再 stop+start detached（BUG-191）。
+    managed: bool = False
 
 
 def coordinated_disable(
@@ -962,6 +999,61 @@ def coordinated_disable(
             "请先 `lwa autostart disable` 再停服"
         ),
         ok=False,
+    )
+
+
+def coordinated_restart(
+    ws: Workspace, service_name: str, *, runner: SubprocessRunner = _default_runner
+) -> CoordinatedResult:
+    """``lwa update`` 重启协调（BUG-191）：若该服务单元已加载/启用，则交监督器重启
+    （launchd kickstart -k / systemctl restart），由监督器全程保证单一进程，避免
+    stop 杀掉进程后被 KeepAlive/Restart 立即拉回、再与 detached spawn 抢锁产生重复
+    watcher/manager。
+
+    返回 :class:`CoordinatedResult`：``managed=True`` 表示自启动已接管重启，调用方
+    **不应** 再走 stop+start（否则会额外 detached 出第二个进程）。``managed=False``
+    时调用方按原 stop+start 流程处理。
+    """
+    try:
+        backend = select_backend()
+    except AutostartError:
+        return CoordinatedResult()
+    if not backend.unit_path(service_name).is_file():
+        return CoordinatedResult()
+    try:
+        loaded = backend.is_loaded(service_name, runner)
+    except Exception:  # noqa: BLE001
+        loaded = False
+    try:
+        enabled = backend.is_enabled(service_name, runner)
+    except Exception:  # noqa: BLE001
+        enabled = False
+    if not (loaded or enabled):
+        return CoordinatedResult()
+    try:
+        _outcomes, ok = backend.restart(service_name, runner)
+    except Exception:  # noqa: BLE001 — 重启异常则回退 stop+start
+        return CoordinatedResult(
+            note=(
+                f"⚠️ {service_name} 自启动重启异常，已回退 stop+start（KeepAlive/Restart"
+                " 可能短暂重复，可稍后 `lwa autostart disable` 后重试）"
+            ),
+            ok=False,
+            managed=False,
+        )
+    if ok:
+        return CoordinatedResult(
+            note=f"已通过自启动单元重启 {service_name}（监督器保证单一进程）",
+            ok=True,
+            managed=True,
+        )
+    return CoordinatedResult(
+        note=(
+            f"⚠️ {service_name} 自启动重启失败，回退 stop+start（KeepAlive/Restart"
+            " 可能短暂重复）"
+        ),
+        ok=False,
+        managed=False,
     )
 
 

@@ -107,6 +107,15 @@ def write_instance_log(
     """
     log_dir = instance_log_dir(apps_dir, instance_id)
     path = log_dir / f"{category}.log"
+    # BUG-186：写入前若当前文件已超阈值（默认 10MB）则先滚动，使本次写入落到新的
+    # 当前文件——既治理无限增长，又保证当前文件总有近期内容供 read_log 读取。
+    # 滚动失败不得影响日志写入主流程。
+    try:
+        from local_webpage_access.logs import rotate_path
+
+        rotate_path(path)
+    except Exception:  # noqa: BLE001
+        pass
     ts = datetime.now().astimezone().strftime(_DATE_FORMAT)
     mode = "a" if append else "w"
     with path.open(mode, encoding="utf-8") as fh:

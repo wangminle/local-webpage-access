@@ -733,8 +733,20 @@ class StaticGateway:
 
         显式走 IPv4（``127.0.0.1:2019``），规避 macOS 上 ``caddy stop`` 默认连
         ``localhost``→``::1`` 的 IPv6 问题（与 BUG-068 同源）。
+
+        BUG-176：POST /stop 前校验 :2019 归属本工作区。admin 在线但
+        ``run/caddy.pid`` 不指向存活进程时，视为外部/其他工作区 Caddy，**不**
+        执行 POST /stop（仅清本工作区陈旧 pid），避免关停用户自建或其他工作区
+        的 master。start 侧已有归属校验（BUG-102），此处补齐 stop 侧对称防护。
         """
         if not self._admin_alive():
+            self._clear_stale_caddy_pid()
+            return True
+        if not self._workspace_caddy_pid_alive():
+            log.warning(
+                "admin :2019 在线但非本工作区 Caddy（caddy.pid 不指向存活进程），"
+                "跳过 POST /stop 以免关停外部/其他工作区 Caddy（BUG-176）"
+            )
             self._clear_stale_caddy_pid()
             return True
         try:
@@ -937,9 +949,12 @@ class StaticGateway:
 
     def _start_builtin(self, instance_id: str, host_port: int, root: Path) -> None:
         """启动一个 ``python -m http.server`` 子进程。"""
+        from local_webpage_access.logs import open_append
+
         log_path = self.ws.app_logs(instance_id) / "gateway.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_fh = log_path.open("a", encoding="utf-8")
+        # BUG-186：打开前按大小滚动，避免 gateway.log 无限增长
+        log_fh = open_append(log_path)
 
         cmd = [
             sys.executable,

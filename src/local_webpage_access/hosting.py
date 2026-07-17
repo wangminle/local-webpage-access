@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -557,7 +560,7 @@ def _ensure_static_port(
     config: Config,
     registry: Registry,
     instance_id: str,
-) -> int:
+) -> tuple[int, bool]:
     """静态端口分配：优先复用已登记端口，否则新分配。
 
     与 :func:`_ensure_container_port` 对称（BUG-045）。``stop_instance`` 不再
@@ -566,6 +569,10 @@ def _ensure_static_port(
     的并发安全语义确认归属后直接复用，保持 lanUrl 稳定。
 
     若旧端口被外部进程占用或归属已丢失（极端情况），回退到全新分配。
+
+    返回 ``(port, fresh)``：``fresh=False`` 表示复用了上一轮成功部署的登记，
+    调用方在本次启用失败时**不得**释放它（否则破坏 BUG-045 端口保留语义、
+    可致跨实例内容混淆，BUG-182）。
     """
     allocator = PortAllocator(config, registry)
     row = registry.get_static_site(instance_id)
@@ -573,7 +580,7 @@ def _ensure_static_port(
     if existing and not is_port_listening(int(existing)):
         if registry.allocate_port(instance_id, int(existing)):
             log.info("复用静态实例 %s 的端口 %d", instance_id, existing)
-            return int(existing)
+            return int(existing), False
         log.warning(
             "实例 %s 的旧端口 %d 已被其他实例占用，重新分配",
             instance_id,
@@ -581,7 +588,7 @@ def _ensure_static_port(
         )
     # 全新分配：先清掉该实例可能残留的端口登记
     allocator.release_instance(instance_id)
-    return allocator.allocate(instance_id)
+    return allocator.allocate(instance_id), True
 
 
 def _wait_for_http(
@@ -647,16 +654,18 @@ def _enable_static(
     if gateway.is_enabled(instance_id):
         gateway.disable(instance_id)
     # 端口分配：优先复用已登记端口（stop 后保留），否则全新分配（BUG-045）
-    host_port = _ensure_static_port(config, registry, instance_id)
+    host_port, fresh_port = _ensure_static_port(config, registry, instance_id)
     allocator = PortAllocator(config, registry)
 
     backend = gateway.detect_backend()
     try:
         gateway.enable(instance_id, host_port, public_dir, alias=path_alias)
     except Exception:
-        # 网关启用失败：释放刚分配的端口，避免连续失败耗尽端口池（BUG-016）。
-        # gateway.enable 内部已对其子进程/站点配置做了回滚，端口是唯一残留。
-        allocator.release(host_port)
+        # 网关启用失败：仅释放本轮新分配的端口，避免连续失败耗尽端口池（BUG-016）。
+        # 复用的旧端口是上一轮成功部署的登记，释放会破坏 BUG-045 端口保留语义、
+        # 可致跨实例内容混淆（BUG-182）。gateway.enable 已对其子进程/站点配置回滚。
+        if fresh_port:
+            allocator.release(host_port)
         raise
 
     manifest.static = StaticConfig(
@@ -754,6 +763,50 @@ def _promote_to_root(src: Path, public_dir: Path) -> None:
         _copy_item(item, public_dir / item.name)
 
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """终止整个进程树（BUG-183）。
+
+    旧 ``subprocess.run(shell=True, timeout=...)`` 超时只 kill 直接 shell 子进程，
+    npm/pnpm/node 等孙进程成孤儿继续跑（构建槽位已释放后与后续 rebuild 并发，
+    击穿 buildConcurrency=1 的 OOM 保护；Windows 上孤儿还锁住 build.log 致
+    --purge 删除失败）。新进程组 + 组级 SIGKILL（POSIX）/ taskkill /T（Windows）
+    一并清掉子孙。
+    """
+    if proc.poll() is not None:
+        return
+    pid = proc.pid
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        else:
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                return
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    return
+                except PermissionError:
+                    break
+                try:
+                    proc.wait(timeout=5)
+                    return
+                except subprocess.TimeoutExpired:
+                    continue
+    except Exception:  # noqa: BLE001 — best-effort 清理，兜底 kill 直接进程
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def run_command(
     cmd: str,
     *,
@@ -764,36 +817,56 @@ def run_command(
 ) -> subprocess.CompletedProcess:
     """运行 shell 命令，stdout/stderr 追加写入 log_path。
 
-    命令来自项目识别器的确定性推断，``shell=True`` 可接受。
+    命令来自项目识别器的确定性推断，``shell=True`` 可接受。超时时杀整个进程树
+    （BUG-183），不残留 npm/node 孙进程孤儿。
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as fh:
+    popen_kwargs: dict = {
+        "cwd": str(cwd),
+        "shell": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "env": env,
+        "text": True,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    from local_webpage_access.logs import open_append
+
+    with open_append(log_path) as fh:
         fh.write(f"\n$ {cmd}\n")
         fh.flush()
+        proc = subprocess.Popen(cmd, **popen_kwargs)
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(cwd),
-                shell=True,
-                stdout=fh,
-                stderr=subprocess.STDOUT,
-                timeout=timeout,
-                env=env,
-            )
-        except subprocess.TimeoutExpired as exc:
+            stdout_data, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            try:
+                stdout_data, _ = proc.communicate(timeout=10)
+            except Exception:  # noqa: BLE001
+                stdout_data = ""
+            if stdout_data:
+                fh.write(stdout_data)
+            fh.flush()
             raise BuildError(
                 f"命令超时（{timeout}s）：{cmd}",
                 command=cmd,
                 timeout=timeout,
-            ) from exc
-    if result.returncode != 0:
+            )
+        if stdout_data:
+            fh.write(stdout_data)
+        fh.flush()
+    if proc.returncode != 0:
         raise BuildError(
-            f"命令失败（exit {result.returncode}）：{cmd}",
+            f"命令失败（exit {proc.returncode}）：{cmd}",
             command=cmd,
-            exit_code=result.returncode,
+            exit_code=proc.returncode,
             log_path=str(log_path),
         )
-    return result
+    return subprocess.CompletedProcess(args=cmd, returncode=proc.returncode, stdout="")
 
 
 def _load_manifest(workspace: Workspace, instance_id: str) -> InstanceManifest:

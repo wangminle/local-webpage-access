@@ -1161,6 +1161,26 @@ def test_kind_changed_helper() -> None:
     )
     assert Importer._kind_changed(m, diff_dr) is True
 
+    # BUG-180：容器实例 + pending（未识别）zip → 判为形态变化。
+    # 否则 pending 草稿会把运行中容器改写成 static、删 containers 登记却不停容器，孤儿化。
+    from local_webpage_access.models import ContainerConfig
+
+    container_m = InstanceManifest(
+        id="c",
+        name="c",
+        version="1",
+        kind=Kind.PYTHON,
+        runtime=Runtime.DOCKER_COMPOSE,
+        servingMode=ServingMode.CONTAINER,
+        container=ContainerConfig(
+            projectName="c",
+            internalPort=5000,
+            composePath="docker/compose.yaml",
+            dockerfilePath="docker/Dockerfile",
+        ),
+    )
+    assert Importer._kind_changed(container_m, pending_dr) is True
+
 
 # ---- IMP-018：build_manifest 注入资源档位限制 ------------------------------
 

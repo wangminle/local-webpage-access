@@ -138,3 +138,61 @@ def test_rotate_all_processes_all_categories(workspace) -> None:
     _write(workspace, "api", "gateway", "g")  # 小文件，不滚动
     rotated = rotate_all(workspace, "api", max_bytes=50, keep=2)
     assert set(rotated) == {"build", "run"}
+
+
+def test_write_instance_log_rotates_over_threshold(workspace, monkeypatch) -> None:
+    """BUG-186：write_instance_log 写入前对超阈值日志滚动（接线 rotate_path）。"""
+    from local_webpage_access import logs as logs_mod
+    from local_webpage_access.logging import write_instance_log
+
+    # 用极小阈值覆盖 rotate_path，避免在测试里写 10MB
+    real_rotate = logs_mod.rotate_path
+
+    def small_rotate(path, *, max_bytes=50, keep=3):
+        return real_rotate(path, max_bytes=max_bytes, keep=keep)
+
+    # write_instance_log 懒导入 logs.rotate_path，patch 模块属性即生效
+    monkeypatch.setattr(logs_mod, "rotate_path", small_rotate)
+
+    # 先写一份超 50 字节的旧日志
+    write_instance_log(workspace.apps, "api", "build", "x" * 200)
+    build_path = log_path(workspace, "api", "build")
+    assert build_path.is_file()
+
+    # 再写：写入前应触发滚动（旧内容 → build.log.1，当前文件为本次新内容）
+    write_instance_log(workspace.apps, "api", "build", "new line")
+    rotated = build_path.with_name("build.log.1")
+    assert rotated.is_file()
+    assert ("x" * 200) in rotated.read_text(encoding="utf-8")
+    current = build_path.read_text(encoding="utf-8")
+    assert "new line" in current
+    assert ("x" * 200) not in current
+
+
+def test_open_append_rotates_then_writes(tmp_path: Path) -> None:
+    """BUG-186：open_append 对超阈值文件先滚动再追加。"""
+    from local_webpage_access import logs as logs_mod
+
+    path = tmp_path / "build.log"
+    path.write_text("x" * 200, encoding="utf-8")
+    with logs_mod.open_append(path, max_bytes=50) as fh:
+        fh.write("fresh\n")
+    assert path.read_text(encoding="utf-8").endswith("fresh\n")
+    assert ("x" * 200) in path.with_name("build.log.1").read_text(encoding="utf-8")
+    assert ("x" * 200) not in path.read_text(encoding="utf-8")
+
+def test_read_log_tail_avoids_full_read_text(workspace, monkeypatch) -> None:
+    """BUG-186：tail>0 时不得 Path.read_text 全量读入。"""
+    _write(workspace, "api", "build", "keep-me\n" + ("noise\n" * 5000) + "TAIL-A\nTAIL-B\n")
+    path = log_path(workspace, "api", "build")
+
+    real_read_text = Path.read_text
+
+    def boom(self, *args, **kwargs):  # noqa: ANN001
+        if self.resolve() == path.resolve():
+            raise AssertionError("read_log(tail>0) 不应全量 read_text")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    text = read_log(workspace, "api", "build", tail=2)
+    assert text == "TAIL-A\nTAIL-B"

@@ -298,10 +298,11 @@ class Importer:
             self._cleanup_failed(instance_id)
             if isinstance(exc, ZipImportError):
                 raise
-            raise ZipImportError(
-                f"导入失败：{exc}",
-                instance_id=instance_id,
-            ) from exc
+            # BUG-187：瞬时失败（IO/SQLite locked/扫描异常）不得携带 instance_id——
+            # daemon process_zip 据 instance_id 是否存在区分"slug 冲突（归档）"与
+            # "失败（下轮重试）"。携带 instance_id 会让瞬时失败被误判为冲突、永久归档
+            # 并给已清理的实例记孤儿事件。这里只保留错误信息，由 daemon 走重试分支。
+            raise ZipImportError(f"导入失败：{exc}") from exc
 
     # ---- 原地更新（IMP-009）-------------------------------------------------
 
@@ -646,14 +647,18 @@ class Importer:
     ) -> bool:
         """新扫描结果与旧 manifest 的 kind/runtime 是否不一致。
 
-        pending（未识别）视为可更新（沿用 static 草稿），不算形态变化。
+        pending（未识别）视为可更新（沿用 static 草稿），不算形态变化；
+        但旧实例为容器（docker-compose）时例外——pending 会把运行中容器改写成
+        static 草稿、删 containers 登记却不停容器，造成孤儿（BUG-180）。此时判为
+        形态变化，交由 force_kind_change 的拒绝/停机流程处理，避免静默孤儿化。
         """
-        if detection.pending or detection.kind is None:
-            return False
-        old_kind = old.kind.value if hasattr(old.kind, "value") else old.kind
         old_rt = (
             old.runtime.value if hasattr(old.runtime, "value") else old.runtime
         )
+        if detection.pending or detection.kind is None:
+            # 容器实例被 pending zip 改写为 static 草稿 = 跨形态（BUG-180）
+            return old_rt == "docker-compose"
+        old_kind = old.kind.value if hasattr(old.kind, "value") else old.kind
         new_rt = (
             detection.runtime.value
             if hasattr(detection.runtime, "value")

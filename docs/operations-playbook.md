@@ -95,20 +95,25 @@ lwa remove --redundant --purge  # 确认后连磁盘一起清
 
 ---
 
-## 五、开机自启（OPS-025）
+## 五、开机自启（IMP-030）
 
-macOS：
+跨平台统一入口是 **`lwa autostart`**（前台监管单元，非旧版 detached `on`）：
 
 ```bash
-lwa setup --autostart             # 生成 daemon + manager 的 launchd plist
-lwa setup --autostart --with-caddy  # 额外含 caddy 网关（仅 staticGateway=caddy）
-# 按提示 launchctl load <plist> 启用；unload 取消
+lwa autostart install                  # 生成并启用 daemon + manager（managerEnabled 时）
+lwa autostart install --with-caddy      # 额外监管 gateway（仅 staticGateway=caddy）
+lwa autostart check                     # 完备性深检（解释器 / 单元 / 进程身份 / Caddy…）
+lwa autostart status
 ```
 
-生成于 `~/Library/LaunchAgents/com.fenix.lwa.{daemon,manager[,gateway]}.plist`，登录时幂等执行对应 `on` 命令。
+`lwa setup --autostart` 仍可用，但已**委托**给 `lwa autostart install`（行为一致）。完整平台差异、停服协调与验收见 [开机自启](autostart.md)。
 
-- daemon 自愈（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例（builtin 静态进程重 spawn、容器轻量 start）。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态，避免与手动停止冲突。
-- Linux：systemd user service；Windows：任务计划程序（见平台文档）。
+要点：
+
+- **停服**：先 `lwa autostart disable`，再 `lwa daemon/manager/gateway off`（`off` 已内置 `coordinated_disable`）。
+- **升级重启**：`lwa update` 重启 manager/daemon 时走 `coordinated_restart`——自启在管则交监督器（`kickstart -k` / `systemctl restart`），避免与 KeepAlive 抢锁。
+- **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。
+- **Linux**：systemd user + 建议 `enable-linger`；**WSL** 另需 Windows 登录任务唤醒；**Windows 原生**见任务计划程序（[autostart.md](autostart.md)）。
 
 ---
 

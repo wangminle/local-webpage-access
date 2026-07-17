@@ -1163,3 +1163,81 @@ def test_alias_clear_allows_builtin(workspace, registry, config, monkeypatch) ->
     reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
     assert reloaded.container.routeHost is None
     assert reloaded.container.routeMode == "port"
+
+
+# ---- BUG-167：路径别名并发唯一性 --------------------------------------------
+
+
+def test_concurrent_path_alias_rejects_duplicate(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-167：双线程同时设同一别名时，仅一方成功，另一方报冲突。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.errors import PathError
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    _seed_static(workspace, registry, "one")
+    _seed_static(workspace, registry, "two")
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def is_enabled(self, iid):
+            return True
+
+        def generate_alias_config(self, iid, alias, hp):
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            pass
+
+        def remove_alias_config(self, iid):
+            p = self.ws.app_alias_config(iid)
+            if p.is_file():
+                p.unlink()
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+
+    # 拉长网关写入窗口，放大「先查后写」竞态（修复前双双成功）。
+    real_apply = path_alias._apply_gateway_alias
+
+    def slow_apply(*args, **kwargs):
+        import time as _t
+
+        _t.sleep(0.05)
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(path_alias, "_apply_gateway_alias", slow_apply)
+
+    successes: list[str] = []
+    errors: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker(iid: str) -> None:
+        barrier.wait()
+        try:
+            set_instance_path_alias(
+                workspace, config, registry, iid, "same-alias"
+            )
+            successes.append(iid)
+        except PathError:
+            errors.append(iid)
+
+    t1 = threading.Thread(target=worker, args=("one",))
+    t2 = threading.Thread(target=worker, args=("two",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert len(successes) == 1, successes
+    assert len(errors) == 1, errors
+    hosts = registry.list_route_hosts()
+    assert hosts.get("same-alias") == successes[0]
+    assert list(hosts.values()).count(successes[0]) == 1
