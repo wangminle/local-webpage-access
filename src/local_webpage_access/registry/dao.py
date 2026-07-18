@@ -15,7 +15,12 @@ from typing import Any, Iterator
 from local_webpage_access.errors import RegistryError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.models import InstanceManifest
-from local_webpage_access.registry.connection import init_db, locked_connection, transaction
+from local_webpage_access.registry.connection import (
+    init_db,
+    locked_connection,
+    release_connection_lock,
+    transaction,
+)
 
 log = get_logger("registry.dao")
 
@@ -46,6 +51,7 @@ class Registry:
 
     def close(self) -> None:
         if self._conn is not None:
+            release_connection_lock(self._conn)
             self._conn.close()
             self._conn = None
 
@@ -460,6 +466,12 @@ class Registry:
         last_memory_bytes: int | None = None,
         last_cpu_percent: float | None = None,
     ) -> None:
+        """写入资源统计。``None`` 表示「本次不更新该列」，冲突时保留旧值。
+
+        importer / update_zip 通常只传 source/data 体积；daemon 采集的
+        ``image_size_bytes`` / ``last_memory_bytes`` / ``last_cpu_percent``
+        不得被全量覆盖清成 NULL。
+        """
         row = {
             "instance_id": instance_id,
             "source_size_bytes": source_size_bytes,
@@ -472,7 +484,16 @@ class Registry:
         }
         cols = ", ".join(row.keys())
         placeholders = ", ".join(["?"] * len(row))
-        updates = ", ".join(f"{c}=excluded.{c}" for c in row if c != "instance_id")
+        # updated_at 始终刷新；其余列 COALESCE 保留已有非空值
+        updates = ", ".join(
+            (
+                f"{c}=excluded.{c}"
+                if c == "updated_at"
+                else f"{c}=COALESCE(excluded.{c}, resources.{c})"
+            )
+            for c in row
+            if c != "instance_id"
+        )
         sql = (
             f"INSERT INTO resources ({cols}) VALUES ({placeholders})"
             f" ON CONFLICT(instance_id) DO UPDATE SET {updates}"

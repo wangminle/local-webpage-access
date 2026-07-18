@@ -45,6 +45,18 @@ def test_linux_script_follows_official_ubuntu_apt_flow() -> None:
     assert "registry-mirrors" in text
 
 
+def test_linux_script_checks_apt_pkg() -> None:
+    """BUG-203：预检 apt_pkg，避免 Python 3.13 宿主上 apt-get update 假死。"""
+    text = _LINUX.read_text(encoding="utf-8")
+    assert "check_apt_pkg" in text
+    assert "import apt_pkg" in text
+    assert "LWA_APT_PKG_BROKEN" in text
+    assert "APT::Update::Post-Invoke" in text
+    assert "apt_get()" in text
+    # main 调用预检
+    assert "check_apt_pkg" in text.split("main()")[1]
+
+
 @pytest.mark.parametrize("path", [_LINUX, _MACOS], ids=["linux", "macos"])
 def test_docker_scripts_default_registry_mirrors_nonempty(path: Path) -> None:
     """BUG-195：默认必须配置镜像拉取加速，不能空跳过。"""
@@ -82,3 +94,20 @@ def test_caddy_scripts_exist() -> None:
         text = path.read_text(encoding="utf-8")
         assert "set -euo pipefail" in text
         assert MIN_CADDY_VERSION in text
+
+
+def test_caddy_linux_guards_against_ubuntu_old_package() -> None:
+    """BUG-209：Cloudsmith 未就绪时不得静默装 Ubuntu universe 旧包；需候选门禁 + GitHub 回退。"""
+    text = (_SCRIPTS / "install-caddy-linux.sh").read_text(encoding="utf-8")
+    assert "dl.cloudsmith.io/public/caddy/stable" in text
+    assert "cloudsmith_candidate_ok" in text
+    assert "apt-cache policy caddy" in text
+    assert "install_via_github_release" in text
+    assert "github.com/caddyserver/caddy/releases" in text
+    assert "chmod o+r" in text
+    assert "disable --now caddy.service" in text
+    assert "refresh_apt_with_retry" in text
+    # 安装前必须确认候选 ≥ MIN，避免 apt 落到 universe 2.6.x
+    assert "避免 apt 静默装上 Ubuntu universe 旧包" in text
+    # curl 须带 -S，避免 -s 静默失败导致「无报错就回到 shell」
+    assert "curl -1sSfL" in text

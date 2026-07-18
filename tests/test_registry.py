@@ -270,6 +270,32 @@ def test_upsert_resources(registry: Registry) -> None:
     assert res2["source_size_bytes"] == 4096
 
 
+def test_upsert_resources_preserves_unspecified_metrics(registry: Registry) -> None:
+    """仅传部分字段时不得把 daemon 已采集的运行指标清成 NULL。"""
+    registry.upsert_from_manifest(_static_manifest())
+    registry.upsert_resources(
+        "demo",
+        source_size_bytes=1024,
+        image_size_bytes=50_000_000,
+        last_memory_bytes=128_000_000,
+        last_cpu_percent=12.5,
+    )
+    # importer / update_zip 只传 source/data 体积
+    registry.upsert_resources(
+        "demo",
+        source_size_bytes=4096,
+        data_size_bytes=512,
+    )
+    res = registry.get_resources("demo")
+    assert res is not None
+    assert res["source_size_bytes"] == 4096
+    assert res["data_size_bytes"] == 512
+    assert res["image_size_bytes"] == 50_000_000
+    assert res["last_memory_bytes"] == 128_000_000
+    assert res["last_cpu_percent"] == 12.5
+    assert res["public_size_bytes"] is None
+
+
 # ---- 统计 -------------------------------------------------------------------
 
 

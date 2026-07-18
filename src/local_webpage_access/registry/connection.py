@@ -164,7 +164,7 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     """事务上下文：成功 commit，异常 rollback。"""
     lock = _get_lock(conn)
     with lock:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
             conn.execute("COMMIT")
@@ -173,7 +173,10 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
             raise
 
 
-# 每个连接绑定一个锁，避免同连接并发写
+# 每个连接绑定一个锁，避免同连接并发写。
+# sqlite3.Connection 既不可弱引用、也不可 setattr，故用 id(conn) 字典。
+# 实践中每个 Registry 长持一个连接，条目≈活跃 Registry；短生命周期测试
+# 场景下泄漏有限，可接受（无法用 WeakKeyDictionary / 实例属性）。
 _LOCKS: dict[int, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -184,6 +187,13 @@ def _get_lock(conn: sqlite3.Connection) -> threading.RLock:
         if key not in _LOCKS:
             _LOCKS[key] = threading.RLock()
         return _LOCKS[key]
+
+
+def release_connection_lock(conn: sqlite3.Connection) -> None:
+    """连接关闭时清理对应锁条目，避免 ``_LOCKS`` 无限增长。"""
+    key = id(conn)
+    with _LOCKS_GUARD:
+        _LOCKS.pop(key, None)
 
 
 @contextmanager

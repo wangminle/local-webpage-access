@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import json
 import posixpath
+import re
 import shlex
 from pathlib import Path
 
+from local_webpage_access.config import BuildMirrors, Config, default_config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest, Kind
 from local_webpage_access.paths import Workspace
@@ -31,6 +33,7 @@ _NODE_IMAGE = "node:24-alpine"
 # Python 全栈镜像内嵌 Node 官方二进制版本（与 _NODE_IMAGE major 对齐，OPS-001 / BUG-114）
 _NODE_DIST_VERSION = "24.16.0"
 _PYTHON_IMAGE = "python:3.13-slim"
+_OFFICIAL_NODE_DIST = "https://nodejs.org/dist"
 
 # 启动命令缺省时的兜底（与 scanner 推断保持一致）
 _NODE_DEFAULT_START = "node server.js"
@@ -46,8 +49,16 @@ _HEADER = """\
 """
 
 
-def generate_dockerfile(manifest: InstanceManifest, workspace: Workspace) -> Path:
+def generate_dockerfile(
+    manifest: InstanceManifest,
+    workspace: Workspace,
+    *,
+    config: Config | None = None,
+) -> Path:
     """根据 manifest 渲染 Dockerfile 到 ``apps/<id>/docker/Dockerfile``（WBS-12.10）。
+
+    ``config.buildMirrors``（BUG-200）控制 pip/npm/Node/apt 镜像；默认启用国内源，
+    每次 regenerate 仍带镜像（BUG-201），无需手改 Dockerfile。
 
     Returns:
         写入的 Dockerfile 路径。
@@ -61,11 +72,12 @@ def generate_dockerfile(manifest: InstanceManifest, workspace: Workspace) -> Pat
     # 构建上下文是 apps/<id>/，业务源码在 current/（IMP-016/017 据此探测
     # package.json / requirements-prod.txt，决定是否追加 Node 工具链与剥离 pytest）。
     source_dir = workspace.app_current(manifest.id)
+    mirrors = (config or default_config()).buildMirrors.resolved()
 
     if manifest.kind == Kind.NODE:
-        content = _render_node(manifest, internal_port)
+        content = _render_node(manifest, internal_port, mirrors=mirrors)
     elif manifest.kind == Kind.PYTHON:
-        content = _render_python(manifest, internal_port, source_dir)
+        content = _render_python(manifest, internal_port, source_dir, mirrors=mirrors)
     else:
         # 容器实例只可能是 node/python；兜底用通用 shell 启动
         content = _render_generic(manifest, internal_port)
@@ -126,7 +138,12 @@ def generate_dockerignore(
 # ---- Node -------------------------------------------------------------------
 
 
-def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
+def _render_node(
+    manifest: InstanceManifest,
+    internal_port: int,
+    *,
+    mirrors: BuildMirrors | None = None,
+) -> str:
     install = (manifest.entry.install or "npm install").strip()
     start = (manifest.entry.start or _NODE_DEFAULT_START).strip()
     header = _HEADER.format(
@@ -140,6 +157,7 @@ def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
     if manifest.entry.build:
         build_step = f"RUN {manifest.entry.build}\n"
     dependency_copy = _node_dependency_copy_block(install)
+    install_run = _with_npm_registry(install, mirrors)
 
     # BUG-122：安装/构建阶段不可设 NODE_ENV=production，否则 npm 会 omit
     # devDependencies，导致 tsc/vite 等构建工具缺失。运行期再切 production。
@@ -148,7 +166,7 @@ def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
         f"FROM {_NODE_IMAGE}",
         "WORKDIR /app",
         dependency_copy,
-        f"RUN {install}",
+        f"RUN {install_run}",
         "COPY current/ ./",
         build_step,
         "ENV NODE_ENV=production",
@@ -163,21 +181,119 @@ def _render_node(manifest: InstanceManifest, internal_port: int) -> str:
 # ---- Python -----------------------------------------------------------------
 
 
-def _pip_run(shell_cmd: str) -> str:
-    """把 pip/uv 安装命令包成带 BuildKit cache mount 的 RUN（BUG-117）。
+def _pip_run(shell_cmd: str, *, mirrors: BuildMirrors | None = None) -> str:
+    """把 pip/uv/pipenv 安装命令包成带 BuildKit cache mount 的 RUN（BUG-117）。
 
     有 cache mount 时去掉 ``--no-cache-dir``，让下载留在挂载缓存里跨构建复用。
+    BUG-200：``mirrors.pip`` 非空时给 ``pip install`` 追加 ``-i``。
+    BUG-207：仅给安装 uv/Pipenv 本体的 ``pip install`` 加镜像不够——实际解析项目
+    依赖时 ``uv sync`` / ``pipenv install`` 仍访问官方 PyPI。故对 uv 段注入
+    ``UV_DEFAULT_INDEX``、pipenv 段注入 ``PIPENV_PYPI_MIRROR``（uv / Pipenv 官方
+    索引配置变量），使其依赖解析也走镜像。
     """
     cmd = shell_cmd.replace("pip install --no-cache-dir", "pip install").strip()
+    if mirrors and mirrors.pip:
+        idx = mirrors.pip.rstrip("/")
+
+        def _inject_segment(seg: str) -> str:
+            seg = seg.strip()
+            if not seg:
+                return seg
+            if seg.startswith("pip install") and "-i " not in seg:
+                return f"{seg} -i {idx}"
+            if (seg.startswith("uv ") or seg == "uv") and "UV_DEFAULT_INDEX=" not in seg:
+                return f"UV_DEFAULT_INDEX={idx} {seg}"
+            if seg.startswith("pipenv") and "PIPENV_PYPI_MIRROR=" not in seg:
+                return f"PIPENV_PYPI_MIRROR={idx} {seg}"
+            return seg
+
+        # 同时处理 ``&&`` / ``||`` / ``;`` 连接的多段命令（与 _with_npm_registry 对齐）
+        def _split_inject(cmd_part: str, sep: str) -> str:
+            parts = [_inject_segment(s) for s in cmd_part.split(sep)]
+            return f" {sep} ".join(p for p in parts if p)
+
+        and_parts: list[str] = []
+        for and_seg in cmd.split("&&"):
+            seg = and_seg
+            if "||" in seg:
+                seg = _split_inject(seg, "||")
+            elif ";" in seg:
+                seg = _split_inject(seg, ";")
+            else:
+                seg = _inject_segment(seg)
+            and_parts.append(seg)
+        cmd = " && ".join(p for p in and_parts if p)
     mounts = ["--mount=type=cache,target=/root/.cache/pip"]
-    if "uv sync" in cmd or cmd.startswith("uv "):
+    if "uv sync" in cmd or cmd.startswith("uv ") or "UV_DEFAULT_INDEX=" in cmd:
         mounts.append("--mount=type=cache,target=/root/.cache/uv")
     mount_prefix = " ".join(mounts)
     return f"RUN {mount_prefix} \\\n  {cmd}"
 
 
+def _with_npm_registry(cmd: str, mirrors: BuildMirrors | None) -> str:
+    """给 npm/pnpm/yarn 安装命令追加 registry（BUG-200）。"""
+    if not mirrors or not mirrors.npm:
+        return cmd
+    registry = mirrors.npm.rstrip("/")
+
+    def _one(segment: str) -> str:
+        seg = segment.strip()
+        if "--registry" in seg:
+            return seg
+        if "pnpm install" in seg:
+            return seg.replace("pnpm install", f"pnpm install --registry={registry}", 1)
+        if "yarn install" in seg:
+            return seg.replace("yarn install", f"yarn install --registry={registry}", 1)
+        for token in ("npm ci", "npm install"):
+            if token in seg:
+                return seg.replace(token, f"{token} --registry={registry}", 1)
+        return seg
+
+    if "||" in cmd:
+        return " || ".join(_one(part) for part in cmd.split("||"))
+    return _one(cmd)
+
+
+_APT_MIRROR_HOST_RE = re.compile(
+    r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
+
+
+def _validate_apt_mirror_host(host: str) -> str:
+    """校验 aptMirror 为安全 hostname（拒绝 shell 元字符注入）。"""
+    host = host.strip()
+    if not host or not _APT_MIRROR_HOST_RE.fullmatch(host):
+        raise ValueError(
+            f"非法 aptMirror：{host!r}（仅允许 hostname，如 mirrors.aliyun.com）"
+        )
+    return host
+
+
+def _apt_mirror_prefix(mirrors: BuildMirrors | None) -> str:
+    """在 apt-get 前切换 Debian 源（可选）。"""
+    if not mirrors or not mirrors.aptMirror:
+        return ""
+    host = _validate_apt_mirror_host(mirrors.aptMirror)
+    return (
+        f"sed -i 's/deb.debian.org/{host}/g' "
+        "/etc/apt/sources.list.d/debian.sources 2>/dev/null || "
+        f"sed -i 's/deb.debian.org/{host}/g' /etc/apt/sources.list || true; \\\n  "
+    )
+
+
+def _node_dist_base(mirrors: BuildMirrors | None) -> str:
+    if mirrors and mirrors.nodeDistBase:
+        return mirrors.nodeDistBase.rstrip("/")
+    return _OFFICIAL_NODE_DIST
+
+
 def _render_python(
-    manifest: InstanceManifest, internal_port: int, source_dir: Path | None = None
+    manifest: InstanceManifest,
+    internal_port: int,
+    source_dir: Path | None = None,
+    *,
+    mirrors: BuildMirrors | None = None,
 ) -> str:
     install = (manifest.entry.install or "pip install -r requirements.txt").strip()
     start = (manifest.entry.start or _PYTHON_DEFAULT_START).strip()
@@ -200,7 +316,10 @@ def _render_python(
         # 运行时 uv run 直接从工作目录导入（main:app 等模块无需作为包安装）。
         deps_block = (
             "COPY current/uv.lock current/pyproject.toml ./\n"
-            + _pip_run("pip install uv && uv sync --frozen --no-dev --no-install-project")
+            + _pip_run(
+                "pip install uv && uv sync --frozen --no-dev --no-install-project",
+                mirrors=mirrors,
+            )
             + "\n"
         )
         run_prefix = "uv run "
@@ -210,7 +329,7 @@ def _render_python(
         needs_early_full_copy = True
         deps_block = (
             "COPY current/ ./\n"
-            + _pip_run(install)
+            + _pip_run(install, mirrors=mirrors)
             + "\n"
         )
     elif "pipenv" in install:
@@ -220,7 +339,7 @@ def _render_python(
         install_cmd = install_cmd.replace("pip install --no-cache-dir", "pip install")
         deps_block = (
             "COPY current/Pipfile* ./\n"
-            + _pip_run(install_cmd)
+            + _pip_run(install_cmd, mirrors=mirrors)
             + "\n"
         )
     elif install.startswith("pip install -r"):
@@ -245,7 +364,10 @@ def _render_python(
         else:
             # requirements-prod.txt 已是生产子集，无需剥离。
             strip_step = ""
-        deps_block = f"{req_copy}\n{strip_step}{_pip_run(f'pip install -r {req_file}')}\n"
+        deps_block = (
+            f"{req_copy}\n{strip_step}"
+            f"{_pip_run(f'pip install -r {req_file}', mirrors=mirrors)}\n"
+        )
     else:
         # 兜底（无法解析的 install）：按 requirements.txt 处理
         fallback = install.replace("pip install --no-cache-dir", "pip install")
@@ -253,7 +375,7 @@ def _render_python(
             pass
         deps_block = (
             "COPY current/requirements.txt ./\n"
-            + _pip_run(fallback)
+            + _pip_run(fallback, mirrors=mirrors)
             + "\n"
         )
 
@@ -270,32 +392,42 @@ def _render_python(
     node_toolchain = ""
     npm_block = ""
     if source_dir is not None and (source_dir / "package.json").is_file():
+        node_base = _node_dist_base(mirrors)
+        apt_prefix = _apt_mirror_prefix(mirrors)
         node_toolchain = (
             "RUN set -eux; \\\n"
-            "  apt-get update; \\\n"
+            f"  {apt_prefix}"
+            "apt-get update; \\\n"
             "  apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \\\n"
             "  ARCH=\"$(dpkg --print-architecture)\"; \\\n"
             "  case \"$ARCH\" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;"
             " *) echo \"unsupported arch: $ARCH\" >&2; exit 1;; esac; \\\n"
             "  curl -fsSL"
-            f" \"https://nodejs.org/dist/v{_NODE_DIST_VERSION}/"
+            f" \"{node_base}/v{_NODE_DIST_VERSION}/"
             f"node-v{_NODE_DIST_VERSION}-linux-${{NODE_ARCH}}.tar.xz\""
             " | tar -xJ -C /usr/local --strip-components=1; \\\n"
             "  rm -rf /var/lib/apt/lists/*; \\\n"
             "  node -v && npm -v\n"
         )
+        npm_install = _with_npm_registry(
+            "npm ci --omit=dev || npm install --omit=dev", mirrors
+        )
         if needs_early_full_copy:
             # 源码已整包拷入，只需 npm 安装。
-            npm_block = "RUN npm ci --omit=dev || npm install --omit=dev\n"
+            npm_block = f"RUN {npm_install}\n"
         else:
             npm_block = (
                 "COPY current/package*.json ./\n"
-                "RUN npm ci --omit=dev || npm install --omit=dev\n"
+                f"RUN {npm_install}\n"
             )
 
     sqlite_mkdir = ""
     if _is_sqlite(manifest):
-        sqlite_mkdir = "RUN mkdir -p /app/data\n"
+        # BUG-198：RUNTIME_ROOT 型应用写 /app/runtime/data；其余仍用 /app/data
+        if _uses_runtime_root_layout(manifest, source_dir):
+            sqlite_mkdir = "RUN mkdir -p /app/runtime/data\n"
+        else:
+            sqlite_mkdir = "RUN mkdir -p /app/data\n"
 
     # 常见 FastAPI 布局：入口在 src/main.py（如 start.sh 用 PYTHONPATH=src）。
     # exec 形式 CMD 无法携带 ``VAR=val`` 前缀，因此用 ENV 注入。
@@ -322,6 +454,18 @@ def _render_python(
         f"CMD {_to_exec_form(start)}",
     ]
     return "\n".join(line for line in lines if line) + "\n"
+
+
+def _uses_runtime_root_layout(
+    manifest: InstanceManifest, source_dir: Path | None
+) -> bool:
+    """BUG-198：应用是否用 RUNTIME_ROOT / runtime/data 落库。
+
+    与 :func:`local_webpage_access.compose.uses_runtime_root` 共用同一判定。
+    """
+    from local_webpage_access.compose import uses_runtime_root
+
+    return uses_runtime_root(source_dir, manifest)
 
 
 def _extract_requirements_file(install: str) -> str:

@@ -505,6 +505,10 @@ def test_render_wsl_windows_script() -> None:
     # BUG-150：长驻保活，而非 /bin/true 立即退出
     assert "sleep infinity" in script
     assert "/bin/true" not in script
+    # 同时拉起 daemon / manager / gateway（未安装时 2>/dev/null 忽略）
+    assert "lwa-daemon.service" in script
+    assert "lwa-manager.service" in script
+    assert "lwa-gateway.service" in script
 
 
 # ---- manifest / 已安装服务集合（BUG-149）-----------------------------------

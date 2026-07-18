@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from local_webpage_access.dockerfile_templates import generate_dockerfile
 from local_webpage_access.models import (
     ContainerConfig,
@@ -97,7 +99,8 @@ def test_node_dockerfile_supports_pnpm_lockfile(workspace: Workspace) -> None:
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "COPY current/package.json current/pnpm-lock.yaml ./" in content
-    assert "RUN corepack enable && pnpm install --frozen-lockfile" in content
+    assert "pnpm install" in content
+    assert "--frozen-lockfile" in content
     assert "COPY current/package*.json ./" not in content
 
 
@@ -112,7 +115,8 @@ def test_node_dockerfile_supports_yarn_lockfile(workspace: Workspace) -> None:
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "COPY current/package.json current/yarn.lock ./" in content
-    assert "RUN corepack enable && yarn install --frozen-lockfile" in content
+    assert "yarn install" in content
+    assert "--frozen-lockfile" in content
     assert "COPY current/package*.json ./" not in content
 
 
@@ -204,9 +208,8 @@ def test_python_uv_sync_path(workspace: Workspace) -> None:
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     # BUG-185：依赖层只 COPY lock+pyproject，uv sync 须 --no-install-project，
     # 否则带 [build-system] 的 packaged 项目构建本体时缺源码必然失败。
-    assert (
-        "pip install uv && uv sync --frozen --no-dev --no-install-project" in content
-    )
+    assert "uv sync --frozen --no-dev --no-install-project" in content
+    assert "pip install uv" in content
     assert "--mount=type=cache,target=/root/.cache/pip" in content
     assert "--mount=type=cache,target=/root/.cache/uv" in content
     # 启动命令自动包 uv run
@@ -228,6 +231,32 @@ def test_python_pipfile_install_path(workspace: Workspace) -> None:
     assert "COPY current/requirements.txt ./" not in content
 
 
+def test_python_uv_sync_injects_uv_default_index(workspace: Workspace) -> None:
+    """BUG-207：uv sync 项目须注入 UV_DEFAULT_INDEX，否则依赖解析仍走官方 PyPI。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="uv sync", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    # uv 段带 UV_DEFAULT_INDEX=<pip 镜像>（uv 读该变量做依赖解析）
+    assert "UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync" in content
+    # 安装 uv 本体的 pip 段仍走 -i
+    assert "pip install uv -i https://mirrors.aliyun.com/pypi/simple" in content
+    # uv 缓存挂载保留
+    assert "--mount=type=cache,target=/root/.cache/uv" in content
+
+
+def test_python_pipenv_injects_pipenv_mirror(workspace: Workspace) -> None:
+    """BUG-207：pipenv 项目须注入 PIPENV_PYPI_MIRROR，否则依赖解析仍走官方 PyPI。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pipenv install --system --skip-lock",
+        start="uvicorn main:app",
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "PIPENV_PYPI_MIRROR=https://mirrors.aliyun.com/pypi/simple pipenv install" in content
+    # 安装 pipenv 本体的 pip 段仍走 -i
+    assert "pip install pipenv -i https://mirrors.aliyun.com/pypi/simple" in content
+
+
 # ---- SQLite 数据目录约定 -----------------------------------------------------
 
 
@@ -242,6 +271,25 @@ def test_sqlite_project_creates_data_dir(workspace: Workspace) -> None:
     )
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "RUN mkdir -p /app/data" in content
+
+
+def test_sqlite_runtime_paths_creates_runtime_data_dir(workspace: Workspace) -> None:
+    """BUG-198：runtime_paths 布局 mkdir /app/runtime/data。"""
+    workspace.ensure_app_dirs("api")
+    rp = workspace.app_current("api") / "src" / "app"
+    rp.mkdir(parents=True, exist_ok=True)
+    (rp / "runtime_paths.py").write_text("x=1\n")
+    m = _mk_manifest(
+        kind=Kind.PYTHON,
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+        has_database=True,
+        database_type="sqlite",
+    )
+    m.database.dataDir = "runtime/data"
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "RUN mkdir -p /app/runtime/data" in content
+    assert "RUN mkdir -p /app/data\n" not in content
     assert "数据库：sqlite" in content
 
 
@@ -289,13 +337,47 @@ def test_dockerfile_python_with_node(workspace: Workspace) -> None:
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     # base 仍为 python
     assert "FROM python:3.13-slim" in content
-    # 追加 Node 工具链（官方二进制，避免 apt npm 元包 OOM）
-    assert "nodejs.org/dist" in content
+    # 追加 Node 工具链（默认国内 nodejs-release 镜像，BUG-200）
+    assert "mirrors.aliyun.com/nodejs-release" in content
     # BUG-114：与纯 Node 基线 node:24-alpine 同一 major（非 v22）
-    assert "nodejs.org/dist/v24." in content
+    assert "/v24." in content
     assert "node-v24." in content
     assert "v22.19.0" not in content
-    assert "npm ci --omit=dev" in content
+    assert "npm ci" in content
+    assert "--omit=dev" in content
+
+
+def test_dockerfile_python_with_node_official_when_mirrors_disabled(
+    workspace: Workspace,
+) -> None:
+    """BUG-200：buildMirrors.enabled=false 时回退官方 nodejs.org。"""
+    from local_webpage_access.config import BuildMirrors, Config
+
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "package.json").write_text(
+        '{"name":"pi-agent","dependencies":{}}'
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    cfg = Config(buildMirrors=BuildMirrors(enabled=False, preset="none"))
+    content = generate_dockerfile(m, workspace, config=cfg).read_text(encoding="utf-8")
+    assert "nodejs.org/dist/v24." in content
+    assert "mirrors.aliyun.com/nodejs-release" not in content
+    assert "pip install -r requirements.txt" in content
+    assert "-i https://mirrors.aliyun.com" not in content
+
+
+def test_dockerfile_uses_china_mirrors_by_default(workspace: Workspace) -> None:
+    """BUG-200 / BUG-201：默认注入 pip/npm 国内源，regenerate 仍带镜像。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "package.json").write_text('{"name":"x"}')
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "-i https://mirrors.aliyun.com/pypi/simple" in content
+    assert "registry.npmmirror.com" in content
+    # 再生成一次仍含国内源（不依赖手改 Dockerfile）
+    content2 = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "-i https://mirrors.aliyun.com/pypi/simple" in content2
+    assert "registry.npmmirror.com" in content2
 
 
 def test_dockerfile_python_src_main_sets_pythonpath(workspace: Workspace) -> None:
@@ -395,8 +477,10 @@ def test_python_node_toolchain_before_full_source_copy(workspace: Workspace) -> 
     )
     m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
-    idx_node = content.find("nodejs.org/dist")
-    idx_npm = content.find("npm ci --omit=dev")
+    idx_node = content.find("nodejs-release")
+    if idx_node < 0:
+        idx_node = content.find("nodejs.org/dist")
+    idx_npm = content.find("npm ci")
     # 取「完整源码拷贝」层：排除 package*.json / requirements 的局部 COPY
     idx_full = content.find("COPY current/ ./")
     assert idx_node >= 0
@@ -470,3 +554,35 @@ def test_dockerignore_dist_only_for_build_entry(workspace: Workspace) -> None:
     generate_dockerfile(without_build, workspace)
     ignore = (workspace.app_dir("without-build") / ".dockerignore").read_text()
     assert "**/dist" not in ignore
+
+
+def test_pip_run_injects_mirror_for_semicolon_segments() -> None:
+    """_pip_run 须同时处理 ``;`` 分隔段，不只 ``&&``。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(
+        enabled=True,
+        preset="china",
+        pip="https://mirrors.aliyun.com/pypi/simple/",
+    )
+    out = _pip_run(
+        "pip install pipenv ; pipenv install --system --skip-lock",
+        mirrors=mirrors,
+    )
+    assert "pip install pipenv -i https://mirrors.aliyun.com/pypi/simple" in out
+    assert "PIPENV_PYPI_MIRROR=https://mirrors.aliyun.com/pypi/simple" in out
+
+
+def test_apt_mirror_rejects_shell_injection() -> None:
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _apt_mirror_prefix
+
+    with pytest.raises(ValueError, match="非法 aptMirror"):
+        _apt_mirror_prefix(
+            BuildMirrors(enabled=True, aptMirror="evil.com/$(curl x)")
+        )
+    with pytest.raises(ValueError, match="非法 aptMirror"):
+        _apt_mirror_prefix(BuildMirrors(enabled=True, aptMirror="a; rm -rf /"))
+    ok = _apt_mirror_prefix(BuildMirrors(enabled=True, aptMirror="mirrors.aliyun.com"))
+    assert "mirrors.aliyun.com" in ok

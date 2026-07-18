@@ -172,6 +172,94 @@ def test_env_sqlite_includes_database_url(workspace: Workspace) -> None:
     assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in text
 
 
+def test_compose_runtime_root_volume_and_env(workspace: Workspace) -> None:
+    """BUG-198：runtime_paths 应用挂载 ../data:/app/runtime/data 并注入 RUNTIME_ROOT。"""
+    workspace.ensure_app_dirs("api")
+    rp = workspace.app_current("api") / "src" / "app"
+    rp.mkdir(parents=True, exist_ok=True)
+    (rp / "runtime_paths.py").write_text("def get_runtime_root(): ...\n")
+    (workspace.app_current("api") / "src" / "main.py").write_text("app=None\n")
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.database.dataDir = "runtime/data"
+    content = generate_compose(m, workspace, host_port=18004).read_text(encoding="utf-8")
+    assert "../data:/app/runtime/data" in content
+    assert "RUNTIME_ROOT=/app/runtime" in content
+    assert "PYTHONPATH=src" in content
+    env = generate_env(m, workspace, host_port=18004).read_text(encoding="utf-8")
+    assert "DATABASE_URL" not in env
+
+
+def test_env_local_jwt_secret_auto_generated(workspace: Workspace) -> None:
+    """BUG-199：有空 JWT_SECRET 的 .env.example 时自动生成 .env.local。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / ".env.example").write_text(
+        "JWT_SECRET=\nOPENAI_API_KEY=\n", encoding="utf-8"
+    )
+    m = _mk_manifest()
+    generate_env(m, workspace, host_port=18000)
+    local = workspace.app_dir("api") / "docker" / ".env.local"
+    assert local.is_file()
+    text = local.read_text(encoding="utf-8")
+    assert "JWT_SECRET=" in text
+    secret = text.split("JWT_SECRET=", 1)[1].strip().splitlines()[0]
+    assert len(secret) >= 32
+    # 不覆盖已有
+    local.write_text("JWT_SECRET=keep-me\n", encoding="utf-8")
+    generate_env(m, workspace, host_port=18000)
+    assert "keep-me" in local.read_text(encoding="utf-8")
+
+
+def test_env_local_generated_after_project_update_adds_jwt(workspace: Workspace) -> None:
+    """BUG-208：项目更新后 current/.env.example 新增 JWT_SECRET 时仍要生成 .env.local。
+
+    复现：首次导入时 current/.env.example 不含 JWT_SECRET，generate_env 把它复制为
+    docker/.env.example（缓存）。项目更新后 current/.env.example 新增空的
+    JWT_SECRET，但上方 copy 仅在 docker/.env.example 缺失时复制——旧缓存（无
+    JWT_SECRET）不会被刷新。密钥检测必须读"当前源" current/.env.example，否则漏
+    生成 .env.local，重建后 token 失效。
+    """
+    workspace.ensure_app_dirs("api")
+    src = workspace.app_current("api") / ".env.example"
+    # v1：无 JWT_SECRET
+    src.write_text("OPENAI_API_KEY=\n", encoding="utf-8")
+    m = _mk_manifest()
+    generate_env(m, workspace, host_port=18000)
+    cached = workspace.app_dir("api") / "docker" / ".env.example"
+    assert cached.is_file()
+    assert "JWT_SECRET" not in cached.read_text(encoding="utf-8")
+    # v1 阶段无 .env.local（example 无 JWT_SECRET）
+    local = workspace.app_dir("api") / "docker" / ".env.local"
+    assert not local.exists()
+
+    # v2：项目更新，current/.env.example 新增空 JWT_SECRET（docker/.env.example 仍为旧缓存）
+    src.write_text("JWT_SECRET=\nOPENAI_API_KEY=\n", encoding="utf-8")
+    generate_env(m, workspace, host_port=18000)
+    # 旧缓存未被刷新（copy 仅在缺失时复制）
+    assert "JWT_SECRET" not in cached.read_text(encoding="utf-8")
+    # BUG-208 修复后：读源 example → 仍生成 .env.local
+    assert local.is_file()
+    assert "JWT_SECRET=" in local.read_text(encoding="utf-8")
+
+
+def test_container_data_paths_order_by_layout(workspace: Workspace) -> None:
+    """BUG-205：候选容器内数据路径——以新挂载目标优先，兜底历史布局。"""
+    from local_webpage_access.compose import container_data_paths
+
+    # 非 RUNTIME_ROOT：新挂载目标是 /app/data，兜底 /app/runtime/data
+    m_plain = _mk_manifest(has_database=True, database_type="sqlite")
+    assert container_data_paths(workspace.app_current("api"), m_plain) == [
+        "/app/data",
+        "/app/runtime/data",
+    ]
+    # RUNTIME_ROOT（dataDir 以 runtime 开头）：新挂载目标是 /app/runtime/data
+    m_rt = _mk_manifest(has_database=True, database_type="sqlite")
+    m_rt.database.dataDir = "runtime/data"
+    assert container_data_paths(workspace.app_current("api"), m_rt) == [
+        "/app/runtime/data",
+        "/app/data",
+    ]
+
+
 def test_env_non_sqlite_omits_database_url(workspace: Workspace) -> None:
     m = _mk_manifest(has_database=False)
     text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")

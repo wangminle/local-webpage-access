@@ -12,7 +12,8 @@
 1. **stop 不删容器**（WBS-14.07/验收#2）：``stop`` 用 ``docker compose stop``，
    ``down`` 作为内部能力单独提供，不作为停止默认。
 2. **stdout/stderr 落实例日志**（WBS-14.13）：build → ``logs/build.log``，
-   up/start/restop → ``logs/run.log``，统一通过模块级 :func:`_execute` 追加写入。
+   up/start/restop → ``logs/run.log``，统一通过模块级 :func:`_execute` **流式**
+   追加写入（BUG-229：命令结束前即可观察进度，避免误判卡死）。
 3. **超时与失败**（WBS-14.12）：超时抛 :class:`DockerError`，非零退出抛
    :class:`DockerError` 并带 stderr 摘要。
 4. **builds/events 落表**（WBS-14.14/15）：构造时传入 :class:`Registry` 即自动
@@ -25,8 +26,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import queue
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +55,53 @@ _QUERY_TIMEOUT = 60
 # 实例日志文件名约定（与 hosting.py 保持一致）
 _BUILD_LOG = "build.log"
 _RUN_LOG = "run.log"
+
+# BUG-204 / BUG-230：docker.sock 权限不足时的统一处置指引。
+DOCKER_PERMISSION_HINT = (
+    "请执行 `newgrp docker` 或注销后重新登录，"
+    "然后执行 `lwa manager off && lwa manager on` 与 "
+    "`lwa daemon off && lwa daemon on`，"
+    "使 docker 组对 CLI / manager / daemon 同时生效"
+)
+
+
+def is_docker_permission_error(text: str | None) -> bool:
+    """识别 docker.sock 权限失败（permission denied / 中文权限不足提示）。"""
+    blob = (text or "").lower()
+    if not blob:
+        return False
+    if "权限不足" in (text or ""):
+        return True
+    return (
+        "permission denied" in blob
+        or "connect: permission denied" in blob
+        or ("docker.sock" in blob and "permission" in blob)
+    )
+
+
+def probe_docker_permission() -> str | None:
+    """探测当前进程是否能访问 Docker。
+
+    Returns:
+        ``None`` 表示可达或非权限类失败（由调用方决定是否再查版本）；
+        非空字符串表示本进程 docker.sock 权限不足，内容为可展示提示。
+    """
+    try:
+        result = _execute(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            cwd=Path.cwd(),
+            timeout=3,
+        )
+    except DockerError:
+        return None
+    if result.ok:
+        return None
+    blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+    if is_docker_permission_error(blob):
+        return (
+            "Docker 权限不足（无法访问 docker.sock）：" + DOCKER_PERMISSION_HINT
+        )
+    return None
 
 
 # ---- 结果数据类 --------------------------------------------------------------
@@ -103,7 +155,8 @@ def _execute(
     Args:
         args: 命令参数列表（不走 shell，避免注入）。
         cwd: 工作目录。
-        log_path: 若提供，把命令与 stdout/stderr 追加写入该文件。
+        log_path: 若提供，把命令与 stdout/stderr **流式**追加写入该文件
+            （BUG-229：构建期即可 ``lwa logs --category build`` 观察进度）。
         timeout: 超时秒数。
 
     Returns:
@@ -112,6 +165,18 @@ def _execute(
     Raises:
         DockerError: 命令未找到、超时。
     """
+    if log_path is not None:
+        return _execute_streaming(args, cwd=cwd, log_path=log_path, timeout=timeout)
+    return _execute_captured(args, cwd=cwd, timeout=timeout)
+
+
+def _execute_captured(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+) -> ComposeResult:
+    """无日志路径时整段捕获（查询类短命令）。"""
     try:
         cp = subprocess.run(
             args,
@@ -133,20 +198,129 @@ def _execute(
             command=list(args),
             timeout=timeout,
         ) from exc
+    return ComposeResult(
+        args=list(args),
+        returncode=cp.returncode,
+        stdout=cp.stdout or "",
+        stderr=cp.stderr or "",
+    )
 
-    out = cp.stdout or ""
-    err = cp.stderr or ""
-    if log_path is not None:
-        from local_webpage_access.logs import open_append
 
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+def _execute_streaming(
+    args: list[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    timeout: int,
+) -> ComposeResult:
+    """有日志路径时先写命令头，再边跑边追加输出（BUG-229）。
+
+    stderr 合并进 stdout 写入日志；``ComposeResult.stderr`` 置空，
+    ``_require_ok`` 仍可通过 ``stderr or stdout`` 取到摘要。
+
+    读侧用后台线程 + ``queue``，避免 ``readline`` 阻塞导致超时无法触发。
+    """
+    from local_webpage_access.logs import open_append
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    chunks: list[str] = []
+    try:
         with open_append(log_path) as fh:
             fh.write(f"\n$ {' '.join(args)}\n")
-            if out:
-                fh.write(out)
-            if err:
-                fh.write(err)
-    return ComposeResult(args=list(args), returncode=cp.returncode, stdout=out, stderr=err)
+            fh.flush()
+            try:
+                proc = subprocess.Popen(
+                    args,
+                    cwd=str(cwd),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+            except FileNotFoundError as exc:
+                raise DockerError(
+                    "docker 命令未找到：请确认 Docker 已安装且 docker 在 PATH 中",
+                    command=list(args),
+                ) from exc
+
+            assert proc.stdout is not None
+            line_q: queue.Queue[str | None] = queue.Queue()
+
+            def _reader() -> None:
+                try:
+                    for line in iter(proc.stdout.readline, ""):
+                        line_q.put(line)
+                finally:
+                    line_q.put(None)
+
+            reader = threading.Thread(
+                target=_reader, name="lwa-docker-exec-reader", daemon=True
+            )
+            reader.start()
+
+            deadline = time.monotonic() + timeout
+            timed_out = False
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    try:
+                        line = line_q.get(timeout=min(0.2, remaining))
+                    except queue.Empty:
+                        continue
+                    if line is None:
+                        break
+                    chunks.append(line)
+                    fh.write(line)
+                    fh.flush()
+            finally:
+                if timed_out:
+                    _terminate_execute_process(proc)
+                # 排空队列残留
+                while True:
+                    try:
+                        item = line_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is None:
+                        break
+                    chunks.append(item)
+                    fh.write(item)
+                    fh.flush()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    _terminate_execute_process(proc)
+                    with contextlib.suppress(Exception):
+                        proc.wait(timeout=5)
+                reader.join(timeout=5.0)
+
+            if timed_out:
+                raise DockerError(
+                    f"命令超时（{timeout}s）：{' '.join(args)}",
+                    command=list(args),
+                    timeout=timeout,
+                )
+            returncode = proc.returncode if proc.returncode is not None else -1
+    except DockerError:
+        raise
+
+    out = "".join(chunks)
+    return ComposeResult(args=list(args), returncode=returncode, stdout=out, stderr="")
+
+
+def _terminate_execute_process(proc: subprocess.Popen) -> None:
+    """尽力终止 ``_execute_streaming`` 子进程（超时/异常路径）。"""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _require_ok(result: ComposeResult, *, action: str, instance_id: str) -> ComposeResult:
@@ -199,8 +373,16 @@ class DockerRuntime:
             timeout=10,
         )
         if not docker_result.ok:
+            err_blob = f"{docker_result.stderr or ''}\n{docker_result.stdout or ''}"
+            # BUG-204 / BUG-230：组权限未刷新时给出 newgrp + 重启 manager/daemon 指引
+            if is_docker_permission_error(err_blob):
+                raise DockerError(
+                    "Docker 权限不足（无法访问 docker.sock）："
+                    + DOCKER_PERMISSION_HINT,
+                )
             raise DockerError(
-                "Docker 不可用：请确认 Docker 已安装、dockerd 正在运行、且当前用户在 docker 组中",
+                "Docker 不可用：请确认 Docker 已安装、dockerd 正在运行、且当前用户在 docker 组中"
+                "（刚装完可试 `newgrp docker` 或重新登录，并重启 manager/daemon）",
             )
         docker_version = (docker_result.stdout or "").strip()
         if not version_ge(docker_version, MIN_DOCKER_VERSION):
@@ -368,6 +550,61 @@ class DockerRuntime:
         self._event(instance_id, "down", "容器已 down（容器与网络已清理）")
         return result
 
+    # ---- 数据迁移（BUG-205）------------------------------------------------
+
+    def rescue_container_data(
+        self,
+        instance_id: str,
+        host_data: Path,
+        candidate_paths: list[str],
+        *,
+        log_path: Path | None = None,
+    ) -> int:
+        """重建 ``down`` 前把容器内数据 best-effort 救出到宿主 ``data/``（BUG-205）。
+
+        既有实例的数据库可能写在容器可写层（旧版未挂载 data/，或挂载路径与新版不同），
+        直接 ``down`` 删容器会丢失。本方法在宿主 ``host_data`` 为空时，按候选容器内
+        路径（见 :func:`compose.container_data_paths`）用 ``docker cp`` 拷出，命中第一个
+        非空路径即止；``host_data`` 已有内容则跳过（挂载本身已持久化，无需迁移）。
+
+        ``docker cp`` 对已停止但未删除的容器同样可用，故容器 running 与否均可。
+        返回救出的文件数（0 表示无需/未能迁移）。任何失败仅记日志、不抛错——迁移是
+        保护性措施，不得阻断重建。
+        """
+        # 宿主 data/ 已有内容 → 挂载已持久化，无需迁移
+        try:
+            if host_data.is_dir() and any(host_data.iterdir()):
+                return 0
+        except OSError:
+            return 0
+        cid = self.container_id(instance_id)
+        if not cid:
+            return 0
+        host_data.mkdir(parents=True, exist_ok=True)
+        run_log = log_path or self.workspace.app_logs(instance_id) / _RUN_LOG
+        for src in candidate_paths:
+            # "src/." 拷目录内容到 host_data（而非把 src 自身作为子目录）
+            cp_src = src.rstrip("/") + "/."
+            result = _execute(
+                ["docker", "cp", f"{cid}:{cp_src}", str(host_data) + "/"],
+                cwd=self.workspace.app_dir(instance_id),
+                log_path=run_log,
+                timeout=_QUERY_TIMEOUT,
+            )
+            if result.ok and any(host_data.iterdir()):
+                count = sum(1 for p in host_data.rglob("*") if p.is_file())
+                log.warning(
+                    "BUG-205：从容器 %s:%s 救出 %d 个数据文件 → %s",
+                    cid, src, count, host_data,
+                )
+                self._event(
+                    instance_id,
+                    "migrate",
+                    f"重建前救出容器数据 {count} 个文件（{src}）→ {host_data}",
+                )
+                return count
+        return 0
+
     # ---- 日志（WBS-14.08）-------------------------------------------------
 
     def logs(
@@ -439,13 +676,23 @@ class DockerRuntime:
         return None
 
     def status(self, instance_id: str) -> ContainerStatus | None:
-        """容器状态观测（WBS-14.11）。无容器时返回 None。"""
+        """容器状态观测（WBS-14.11）。无容器时返回 None。
+
+        BUG-230：docker.sock 权限不足时抛 :class:`DockerError`，避免调用方把
+        「查不到」误当成「已停止」。
+        """
         result = _execute(
             self._compose_cmd(instance_id, "ps", "--format", "json", "--all"),
             cwd=self.workspace.app_dir(instance_id),
             timeout=_QUERY_TIMEOUT,
         )
         if not result.ok:
+            err_blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+            if is_docker_permission_error(err_blob):
+                raise DockerError(
+                    "Docker 权限不足（无法访问 docker.sock）："
+                    + DOCKER_PERMISSION_HINT,
+                )
             return None
         for data in _iter_ps_json(result.stdout):
             return ContainerStatus(
@@ -462,7 +709,10 @@ class DockerRuntime:
         return None
 
     def is_running(self, instance_id: str) -> bool:
-        """容器是否处于 running 状态。"""
+        """容器是否处于 running 状态。
+
+        权限不足时向上抛 :class:`DockerError`（见 :meth:`status`）。
+        """
         st = self.status(instance_id)
         return st is not None and st.is_running
 
@@ -579,9 +829,12 @@ def _tail(text: str, n: int) -> str:
 
 
 __all__ = [
-    "DockerRuntime",
     "ComposeResult",
     "ContainerStatus",
-    "is_available",
+    "DOCKER_PERMISSION_HINT",
+    "DockerRuntime",
     "ensure_available",
+    "is_available",
+    "is_docker_permission_error",
+    "probe_docker_permission",
 ]

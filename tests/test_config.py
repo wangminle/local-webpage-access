@@ -25,6 +25,20 @@ def test_default_config_values() -> None:
     assert cfg.buildConcurrency == 1
     assert cfg.defaultResourceLimits.memory == "512m"
     assert cfg.managerEnabled is True
+    assert cfg.buildMirrors.enabled is True
+    assert cfg.buildMirrors.preset == "china"
+    resolved = cfg.buildMirrors.resolved()
+    assert resolved.pip and "aliyun" in resolved.pip
+    assert resolved.npm and "npmmirror" in resolved.npm
+
+
+def test_build_mirrors_disabled_resolves_empty() -> None:
+    from local_webpage_access.config import BuildMirrors
+
+    m = BuildMirrors(enabled=False, preset="none").resolved()
+    assert m.enabled is False
+    assert m.pip is None
+    assert m.nodeDistBase is None
 
 
 def test_port_pool_range() -> None:

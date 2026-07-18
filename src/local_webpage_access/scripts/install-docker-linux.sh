@@ -64,6 +64,34 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"
 }
 
+# BUG-203：宿主 Python 3.13 与 python3-apt（仅提供 cpython-312 .so）不匹配时，
+# apt 的 command-not-found 钩子会在 apt-get update 阶段 import apt_pkg 失败。
+check_apt_pkg() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  if python3 -c "import apt_pkg" 2>/dev/null; then
+    return 0
+  fi
+  warn "当前 python3 无法 import apt_pkg（常见于 Python 3.13 + 仅含 3.12 的 python3-apt）。"
+  warn "将设置 APT::Update::Post-Invoke-Success 跳过 command-not-found 钩子后继续。"
+  export LWA_APT_PKG_BROKEN=1
+  # 尽量让本会话 apt 跳过会炸的钩子（不改系统配置文件，避免越权写盘失败）
+  export APT_CONFIG="${APT_CONFIG:-}"
+}
+
+apt_get() {
+  # 包装 apt-get：apt_pkg 损坏时用 -o 关掉 Update Post-Invoke hooks
+  if [[ "${LWA_APT_PKG_BROKEN:-0}" == "1" ]]; then
+    run_sudo apt-get \
+      -o "APT::Update::Post-Invoke-Success::=" \
+      -o "APT::Update::Post-Invoke::=" \
+      "$@"
+  else
+    run_sudo apt-get "$@"
+  fi
+}
+
 version_ge() {
   # 返回 0 表示 $1 >= $2
   local a="$1" b="$2" IFS=.
@@ -143,7 +171,7 @@ uninstall_conflicts() {
   pkgs="$(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc 2>/dev/null | cut -f1 || true)"
   if [[ -n "${pkgs}" ]]; then
     # shellcheck disable=SC2086
-    run_sudo apt-get remove -y $pkgs || true
+    apt_get remove -y $pkgs || true
   else
     log "未发现冲突包，跳过"
   fi
@@ -166,8 +194,8 @@ setup_apt_repo() {
   fi
 
   log "安装 ca-certificates / curl…"
-  run_sudo apt-get update -y
-  run_sudo apt-get install -y ca-certificates curl
+  apt_get update -y
+  apt_get install -y ca-certificates curl
 
   run_sudo install -m 0755 -d /etc/apt/keyrings
   key_path=/etc/apt/keyrings/docker.asc
@@ -188,12 +216,12 @@ Architectures: ${arch}
 Signed-By: ${key_path}
 EOF
 
-  run_sudo apt-get update -y
+  apt_get update -y
 }
 
 install_packages() {
   log "安装 docker-ce / cli / containerd / buildx / compose 插件…"
-  run_sudo apt-get install -y \
+  apt_get install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
@@ -296,12 +324,15 @@ verify_install() {
 
   log "完成：Docker Engine $engine_ver，Compose $compose_ver"
   warn "若尚未重新登录，请执行：newgrp docker   或注销后重登，再免 sudo 使用 docker"
+  warn "若已运行 lwa manager/daemon：须执行 lwa manager off && lwa manager on 与 lwa daemon off && lwa daemon on"
+  warn "（或 systemctl --user restart lwa-manager.service lwa-daemon.service），否则后台进程仍无 docker 组、管理页会误标容器 stopped"
 }
 
 main() {
   need_cmd curl
   need_cmd apt-get
   need_cmd dpkg
+  check_apt_pkg
 
   local codename
   codename="$(detect_ubuntu)"

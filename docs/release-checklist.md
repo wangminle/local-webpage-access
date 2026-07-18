@@ -50,6 +50,7 @@
 - [ ] 更新 CHANGELOG（如有）。
 - [ ] 打 tag：`git tag -a v1.0.0 -m "V1 release"`。
 - [ ] 推送 tag 与分支。
+- [ ] **源码发布 zip（BUG-202）**：在仓库根执行 `bash scripts/pack-release-zip.sh`，产物必须含 `pyproject.toml` + `src/`（可选 `docs/`）。禁止只打 `src/`+`docs/` 的残缺包（会导致 `pip install -e` 丢失 `lwa` 入口）。
 - [ ]（可选）构建 wheel：`python -m build`，校验产物。
 - [ ]（可选）发布到 PyPI / 内部源。
 - [ ] 在仓库 Release Notes 中链接到 `docs/acceptance-checklist.md` 的验收记录。

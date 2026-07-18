@@ -155,6 +155,9 @@ buildConcurrency: 1         # 构建并发数（小主机建议保持 1）
 defaultResourceLimits:
   memory: 512m
   cpus: "0.75"
+buildMirrors:               # 容器构建国内镜像（BUG-200；海外可 enabled: false）
+  enabled: true
+  preset: china
 lanIpStrategy: auto         # auto（自动探测）| manual
 manualLanIp: null
 logLevel: INFO

@@ -394,6 +394,17 @@ def start_manager(workspace: Workspace, config: Config) -> int:
             "managerEnabled=false，管理页未启用；可在 local-web.yml 设为 true 后执行 lwa manager on",
         )
 
+    # BUG-230：本进程若无 docker 组，子进程同样无法观测容器——启动前提醒，不阻断
+    # （静态站仍可用）。装完 Docker 后须 newgrp/重登并重启 manager。
+    try:
+        from local_webpage_access.docker_runtime import probe_docker_permission
+
+        perm = probe_docker_permission()
+        if perm:
+            log.warning("启动管理页前检测到：%s", perm)
+    except Exception:  # noqa: BLE001 — 探测失败不阻断管理页
+        pass
+
     bind_host = config.managerHost
     bind_port = config.managerPort
 

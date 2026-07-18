@@ -49,6 +49,30 @@ lwa doctor --json   # 机器可读报告，便于脚本化
 * 未安装时可用内置脚本：`lwa setup --script` 查看路径，或 `lwa setup --full --yes` / `lwa setup --install-docker`（macOS/Linux）。
 * 静态/前端实例不需要 Docker，可继续使用。
 
+### Docker 权限不足（管理页显示 stopped，容器实际在跑）
+
+```
+[fail] docker: Docker 权限不足（无法访问 docker.sock）
+```
+
+或实例 `last_error` 含「Docker 权限不足」。
+
+常见于刚执行 `usermod -aG docker` 后：**当前 shell / manager / daemon 尚未继承 docker 组**。
+
+1. `newgrp docker` 或注销后重新登录；
+2. 重启后台进程，使与 CLI 权限一致：
+
+```bash
+lwa manager off && lwa manager on
+lwa daemon off && lwa daemon on
+# 若用了自启动：
+# systemctl --user restart lwa-manager.service lwa-daemon.service
+```
+
+3. 再 `lwa status <实例>` / 刷新管理页。
+
+LWA 以安装用户身份运行，不要求 root；CLI、manager、daemon 须共享同一 docker 组身份。Docker 不可达时不应把运行中容器标成已停止（会写 `last_error` 提示）。
+
 ### Docker Compose 不可用
 
 ```

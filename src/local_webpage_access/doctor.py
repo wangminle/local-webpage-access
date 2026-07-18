@@ -179,12 +179,31 @@ def check_docker(runner: SubprocessRunner = _default_runner) -> CheckResult:
     result = runner(["docker", "version", "--format", "{{.Server.Version}}"])
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        blob = f"{stderr}\n{stdout}"
+        from local_webpage_access.docker_runtime import (
+            DOCKER_PERMISSION_HINT,
+            is_docker_permission_error,
+        )
+
+        # BUG-230：区分 sock 权限与引擎未启动，避免只写笼统「不可用」
+        if is_docker_permission_error(blob):
+            return CheckResult(
+                "docker",
+                STATUS_FAIL,
+                "Docker 权限不足（无法访问 docker.sock）",
+                detail=(stderr or stdout)[:200] or None,
+                suggestion=DOCKER_PERMISSION_HINT,
+            )
         return CheckResult(
             "docker",
             STATUS_FAIL,
             "Docker 不可用",
             detail=stderr[:200] or None,
-            suggestion="安装 Docker 并启动 dockerd，或确认当前用户在 docker 组中",
+            suggestion=(
+                "安装 Docker 并启动 dockerd，或确认当前用户在 docker 组中；"
+                "刚 usermod -aG docker 后须 newgrp/重登，并重启 lwa manager/daemon"
+            ),
         )
     version = (result.stdout or "").strip()
     if not version_ge(version, MIN_DOCKER_VERSION):

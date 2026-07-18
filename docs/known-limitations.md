@@ -11,6 +11,7 @@
 * **Docker**：要求 Docker + Docker Compose 插件（`docker compose` 子命令）。
   Compose v1 独立二进制不支持；低于推荐版本时仅告警，不阻断已满足最低线的环境。
   `lwa setup --full` / 内置安装脚本覆盖 **macOS / Linux（含 WSL）**；**Windows 原生**无内置脚本，需按 `lwa setup` 指引手动安装。
+  Linux 上 LWA 以安装用户身份访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，否则管理页可能无法观测容器（见 FAQ「Docker 权限不足」）。
 * **架构**：基线镜像 `node:24-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
   其他架构需用户自备镜像或调整模板。
 

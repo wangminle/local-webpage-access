@@ -208,7 +208,40 @@
 | BUG-195 | 修复 | IMP-031 Docker 安装脚本默认不配置 registry-mirrors，与阿里云双源验收口径不符 | 2026-07-17 17:41 | 2026-07-17 17:48 | 已修复 | 【修复】install-docker-{linux,macos}.sh 默认 registry-mirrors=https://docker.m.daocloud.io（可换阿里云个人加速器；none 跳过）；双源默认写入。回归 test_docker_scripts_default_registry_mirrors_nonempty。 |
 | BUG-196 | 修复 | lwa setup --full --json 在 JSON 前输出人类可读装配日志，导致输出无法被 JSON 解析 | 2026-07-17 17:41 | 2026-07-17 17:48 | 已修复 | 【修复】setup --full --json：装配过程日志改 stderr，stdout 仅 JSON（含 bootstrap 字段）。回归 test_cli_setup_full_json_stdout_is_pure_json。 |
 | BUG-197 | 修复 | default 档 Docker 安装不传播执行结果且不复检，setup/init 可能返回错误退出状态 | 2026-07-17 17:41 | 2026-07-17 17:48 | 已修复 | 【修复】maybe_offer_docker_install 返回 DockerOfferResult；setup 安装后复检并用新报告决定退出码；脚本失败/复检失败 exit 1；init 同步。回归 test_cli_setup_install_docker_* / test_maybe_offer_*。 |
-
+| BUG-198 | 修复 | SQLite 容器挂载 /app/data + DATABASE_URL，但 RUNTIME_ROOT 型应用写 /app/runtime/data，重建容器后业务库丢失 | 2026-07-17 19:51 | 2026-07-17 20:55 | 已修复 | 【修复】compose/dockerfile 检测 runtime_paths：挂载 ../data:/app/runtime/data + RUNTIME_ROOT=/app/runtime；scanner dataDir=runtime/data。回归 test_compose_runtime_root_* / test_sqlite_runtime_paths_*。 |
+| BUG-199 | 修复 | 容器 .env 未注入 JWT_SECRET 等业务密钥，应用每次进程启动临时生成 JWT，重建后既有 token 失效 | 2026-07-17 19:51 | 2026-07-17 20:55 | 已修复 | 【修复】generate_env 在缺 .env.local 且 example 含空 JWT_SECRET 时自动生成持久密钥（chmod 0600）。回归 test_env_local_jwt_secret_auto_generated。 |
+| BUG-200 | 修复 | Python+Node Dockerfile 构建依赖 nodejs.org/PyPI/npm 官方源，国内网络下易卡住 building 无进展 | 2026-07-17 20:31 | 2026-07-17 20:55 | 已修复 | 【修复】local-web.yml buildMirrors（默认 china）：dockerfile 注入 pip -i / npm --registry / nodejs-release / apt 镜像。回归 test_dockerfile_uses_china_mirrors_*。 |
+| BUG-201 | 修复 | start/rebuild 每次 regenerate Dockerfile，用户手工改国内源会被覆盖 | 2026-07-17 20:31 | 2026-07-17 20:55 | 已修复 | 【修复】host_container 传 config.buildMirrors；每次 regenerate 仍带国内源，无需手改 Dockerfile。与 BUG-200 同测。 |
+| BUG-202 | 修复 | 发布用 归档.zip 仅含 src/docs，缺 pyproject.toml，editable pip 安装后入口脚本丢失 | 2026-07-17 20:31 | 2026-07-17 20:55 | 已修复 | 【修复】scripts/pack-release-zip.sh 强制含 pyproject.toml；release-checklist 发布动作补校验。 |
+| BUG-203 | 修复 | install-docker-linux.sh 在 Python3.13 宿主上 apt_pkg 不匹配导致 apt-get update/cnf-update-db 失败 | 2026-07-17 20:31 | 2026-07-17 20:55 | 已修复 | 【修复】install-docker-linux.sh check_apt_pkg + apt_get 包装跳过 Post-Invoke 钩子。回归 test_linux_script_checks_apt_pkg。 |
+| BUG-204 | 修复 | Docker 安装后 docker 组未生效时 ensure_available 仅报不可用，未引导 newgrp/重登 | 2026-07-17 20:31 | 2026-07-17 20:55 | 已修复 | 【修复】docker_runtime 识别 docker.sock permission denied，提示 newgrp docker。回归 test_ensure_available_permission_denied_suggests_newgrp。 |
+| BUG-205 | 修复 | RUNTIME_ROOT 既有实例首次 rebuild 无数据迁移：down 先删除旧容器，容器层 /app/runtime/data 数据未复制到新 bind mount | 2026-07-18 21:49 | 2026-07-18 22:14 | 已修复 | 【修复】hosting.host_container 在 down 前调用 _rescue_container_data_before_rebuild（仅 SQLite）：docker_runtime.rescue_container_data 用 docker cp 把容器内 /app/runtime/data 与 /app/data 候选路径（compose.container_data_paths 给顺序）救出到宿主 data/，宿主空才迁、命中即止、best-effort 不阻断重建。回归 test_rescue_container_data_* / test_host_container_rescues_data_before_down_on_rebuild / test_container_data_paths_order_by_layout。 |
+| BUG-206 | 修复 | pack-release-zip.sh 在 set -o pipefail 下执行 unzip -l \| head，归档条目较多时因 SIGPIPE 返回 141 | 2026-07-18 21:49 | 2026-07-18 22:14 | 已修复 | 【修复】unzip -l 结果先重定向到 STAGING 临时文件（unzip 正常写完、无管道）再 head/rg，消除 SIGPIPE→141。回归 test_pack_release_zip_exits_zero（脚本 rc=0；本机无真实 rg 时注入 rg→grep 垫片跑完整流程）。 |
+| BUG-207 | 修复 | buildMirrors 只给 pip 安装 uv/Pipenv 本体加镜像，uv sync 与 pipenv install 仍未配置国内依赖索引 | 2026-07-18 21:49 | 2026-07-18 22:14 | 已修复 | 【修复】_pip_run 仅给 pip install uv/Pipenv 本体加 -i 不够——依赖解析仍走官方 PyPI；对 uv 段注入 UV_DEFAULT_INDEX、pipenv 段注入 PIPENV_PYPI_MIRROR。回归 test_python_uv_sync_injects_uv_default_index / test_python_pipenv_injects_pipenv_mirror。 |
+| BUG-208 | 修复 | 源码更新新增 JWT_SECRET 后，docker/.env.example 缓存不覆盖，自动密钥逻辑读取旧缓存而漏生成 .env.local | 2026-07-18 21:49 | 2026-07-18 22:14 | 已修复 | 【修复】generate_env 的 ensure_env_local_secrets 改读当前源 current/.env.example（原读首次导入缓存的 docker/.env.example，项目更新新增 JWT_SECRET 后不刷新、漏生成 .env.local）。回归 test_env_local_generated_after_project_update_adds_jwt。 |
+| BUG-209 | 修复 | install-caddy-linux.sh 在 Cloudsmith 未就绪时可能装上 Ubuntu universe 旧包(2.6.x)，且网络失败时中途退出无 GitHub 回退 | 2026-07-18 21:54 | 2026-07-18 22:05 | 已修复 | 【根因】原脚本在 curl\|gpg 失败时 set -e 中途退出；Cloudsmith 索引暂不可达时 apt 会落到 universe 2.6.2。非「没跑 apt update」（脚本本就有 update）。【修复】候选门禁 cloudsmith_candidate_ok、apt update 重试、verify 诊断、官方 chmod o+r、disable caddy.service、GitHub Release 回退。回归 test_caddy_linux_guards_against_ubuntu_old_package。 |
+| BUG-210 | 修复 | upsert_resources 全量覆盖导致运行指标丢失：importer 只传 source_size_bytes+data_size_bytes，其余 None；ON CONFLICT DO UPDATE SET 全量覆盖会把 daemon 已采集的 image_size_bytes/last_memory_bytes/last_cpu_percent 清零。update_zip 路径尤其严重——运行中实例监控指标被静默抹掉 | 2026-07-18 23:30 | 2026-07-18 23:50 | 已完成 | 【已修复】registry/dao.py:452-481, importer.py:245/562; 修复：只 UPDATE 非 None 字段，或先读旧行 merge |
+| BUG-211 | 修复 | sanic/tornado/starlette/gunicorn 被 scanner 识别为高置信度但无启动命令：PYTHON_WEB 字典包含这些框架→confidence=high，但 _python_start_command 对它们返回 None→entry.start=None，容器 CMD 为空部署必然失败 | 2026-07-18 23:30 | 2026-07-18 23:50 | 已完成 | 【已修复】scanner.py:589-601; 修复：补充启动命令模板，或 start 为 None 时降级 confidence 并标记 pending |
+| BUG-212 | 修复 | 容器 build/up 失败时 release_instance(instance_id) 不区分新分配还是复用旧端口，释放了本不应释放的端口登记。与 _enable_static 的 fresh_port 条件逻辑不对称，破坏 lanUrl 稳定性 | 2026-07-18 23:30 | 2026-07-18 23:50 | 已完成 | 【已修复】hosting.py:342-348; 修复：仅当 _ensure_container_port 返回新端口时才释放，复用旧端口不回滚 |
+| BUG-213 | 修复 | lifecycle instance_lock 陈旧锁回收存在 TOCTOU 竞态：stale 判定→unlink→O_EXCL 三步非原子，两进程可同时判定 stale、同时 unlink、同时 recreate，都认为自己持锁，互斥保证失效 | 2026-07-18 23:30 | 2026-07-18 23:50 | 已完成 | 【已修复 2026-07-18 23:50】新增 file_lock（POSIX flock / Windows msvcrt，惰性导入）；lifecycle/daemon 释放不 unlink，保持同 inode；回归 test_instance_lock_does_not_unlink_on_release / daemon 锁用例。 |
+| BUG-214 | 修复 | recover_instance 加载 manifest、探测网关等前置操作在 instance_lock 之外，与并发 remove_instance 存在竞态——可能读取到已被删除的 manifest | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复】lifecycle.py:316-346; 修复：将前置操作纳入锁保护范围 |
+| BUG-215 | 修复 | run_watcher 先 save_processed_set 再归档 zip；归档失败时 key 已标记 processed，zip 留在 inbox 但被永久跳过，无法自动重试 | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复】daemon.py:830-839; 修复：先归档成功再标记 processed，或归档失败时从 processed set 回退该 key |
+| BUG-216 | 修复 | _enable_static 先 gateway.disable() 再 enable()；enable 抛异常后旧配置已被 disable 清除但新配置未生效，实例处于既没旧也没新的悬空状态 | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复 2026-07-18 23:50】StaticGateway.enable 变更前备份站点/别名；失败时恢复旧片段，builtin 按旧 port/root 重拉起；回归 test_enable_failure_restores_previous_*。 |
+| BUG-217 | 修复 | BuildQueue.cancel() 仅设内存状态，run() 获槽后不检查 task.status，被取消的任务仍完整执行，取消机制形同虚设 | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复】build_queue.py:293-343; 修复：run() 获槽后检查 task.status==cancelled 则跳过构建 |
+| BUG-218 | 修复 | CrossProcessBuildGate.release() 只 DELETE WHERE slot=?，不校验持有者 PID。双重 release 会误删其他进程刚获取的槽位，导致并发超标 | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复】build_queue.py:238-243; 修复：DELETE 加上 AND pid=? 校验 |
+| BUG-219 | 修复 | config.aptMirror 接受任意字符串直接拼入 Dockerfile sed 命令，恶意配置可注入 shell 命令（如 ） | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复】dockerfile_templates.py:231-239; 修复：对 aptMirror 做 hostname 格式校验 |
+| BUG-220 | 优化 | compose.py:_uses_runtime_root 与 dockerfile_templates.py:_uses_runtime_root_layout 是几乎相同的函数（仅参数顺序和 None 处理不同），分别在两个文件中独立定义。修改一处忘改另一处会导致 Dockerfile mkdir 目录与 Compose volumes 挂载点不一致 | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】compose.py:66 / dockerfile_templates.py:417; 修复：提取到公共模块 |
+| BUG-221 | 修复 | _pip_run 镜像注入只按 && 分段处理，不处理 \|\| 回退链。与 _with_npm_registry 不一致。虽然当前 scanner 不生成含 \|\| 的 pip 命令，但用户自定义 install 可能含 \|\| | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】dockerfile_templates.py:189-199; 修复：与 _with_npm_registry 对齐处理 \|\| |
+| BUG-222 | 修复 | render_wsl_windows_script 硬编码只启动 daemon+manager，不含 lwa-gateway.service。--with-caddy 安装的 gateway 在 Windows 重启后无法自动恢复 | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】autostart.py:1120-1121; 修复：接收 services 列表参数并据此生成脚本 |
+| BUG-223 | 修复 | path_alias_lock 中 os.open 成功后若 os.write 抛异常（磁盘满），fd 未关闭。对比 daemon.py daemon_lock 有 if fd is not None: os.close(fd) 兜底 | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】path_alias.py:250-263; 修复：try/finally 中 close fd |
+| BUG-224 | 修复 | daemon 单行锁文件（仅 PID、无心跳）在 PID 存活时永不超时回收，缺少 mtime 兜底 | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复】_lock_is_stale 无心跳行时用 st_mtime 兜底；超 stale_after 判陈旧。回归 test_lock_is_stale_single_line_uses_mtime。 |
+| BUG-225 | 修复 | generate_alias_config 直接内插 alias 到 Caddyfile，函数自身无白名单校验，新调用路径若绕过 validate_path_alias 可注入 Caddy 指令 | 2026-07-18 23:32 | 2026-07-18 23:50 | 已完成 | 【已修复】generate_alias_config 入口调用 validate_path_alias。 |
+| BUG-226 | 优化 | registry transaction 使用 BEGIN（DEFERRED）而非 BEGIN IMMEDIATE，端口分配等高并发场景增加 SQLITE_BUSY 概率 | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】connection.transaction 改 BEGIN IMMEDIATE。 |
+| BUG-227 | 优化 | registry _LOCKS 按 id(conn) 永不清理，连接关闭后条目残留 | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】Registry.close 调用 release_connection_lock 清理；sqlite3.Connection 不可弱引用故不用 WeakKeyDictionary。 |
+| BUG-228 | 修复 | importer._claim_unique_id 中 ensure_app_dirs 异常时已 mkdir 的实例根目录不清理，遗留孤儿目录 | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】ensure_app_dirs 失败时 rmtree 已占用的 app_dir。 |
+| BUG-229 | 修复 | docker_runtime._execute 用 capture_output 等命令结束后才写 build.log，长耗时 docker compose build 期间日志为空，易误判为构建调度卡死 | 2026-07-18 23:02 | 2026-07-18 23:15 | 已完成 | 【修复】有 log_path 时改为流式：先写命令头再边跑边追加；读线程+queue 保证超时可触发。回归 test_execute_streams_log_while_command_running / test_execute_streaming_timeout_writes_cmd_header。 |
+| BUG-230 | 修复 | 容器状态观测把 Docker 权限或连接失败等未知状态降级为 stopped，manager/daemon 会将实际运行容器错误回写为已停止 | 2026-07-18 23:18 | 2026-07-18 23:25 | 已完成 | 【已修复 P0】status() 权限失败抛 DockerError；_observe_container_status：HTTP 兜底，否则保留原状态并写 last_error（含 newgrp+重启 manager/daemon）。【P1】probe_docker_permission + manager/daemon 启动 WARN；doctor/autostart check 区分权限不足。【P2】faq/autostart/known-limitations + install-docker 脚本提示。回归 test_observe_container_docker_permission_* / test_status_raises_on_docker_permission_denied / test_check_docker_permission_denied_suggests_newgrp。 |
+| BUG-231 | 修复 | Full Profile 可能误认并 reload 系统 caddy.service：版本已达标安装路径跳过停用服务，admin 在线又未校验 owner/euid/workspace，系统 caddy 用户无法访问用户工作区 | 2026-07-18 23:42 | - | 待修复 | Ubuntu 实机：设置路径别名时 Caddy reload 报 mkdir /home/.../local-webpage-access permission denied。根因不是应递归开放 ACL，而是 LWA 误用 User=caddy 的外部 master。需所有安装路径严格处理 caddy.service，admin 操作前校验 pid/euid/config/workspace，owner mismatch fail closed，并以 serviceUser 接管。对应 IMP-033 WBS-033.07。 |
 ## 调整事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -313,6 +346,15 @@
 | CHK-065 | 检查 | 补全 BUG-186 主流量日志滚动与高效尾读 | 2026-07-17 14:27 | 2026-07-17 14:27 | 已完成 | open_append 接线 run_command/_execute/_start_builtin/_spawn_manager；tail_text_file 用于 read_log/read_manager_log；相关切片 pytest 全绿。 |
 | CHK-066 | 检查 | 复核全部未提交变更并撰写 V0.6.0 commit message（≤300字） | 2026-07-17 14:42 | 2026-07-17 14:42 | 已完成 | 对照 git status/diff/log：53 文件 +2117/-264；含 BUG-166～194、版本 0.6.0、docs/skills/task-list。建议主题 V0.6.0-Build1123-20260717（Build=当前 pytest collect 1123）；正文约 220 字。未执行 git commit。 |
 | CHK-067 | 检查 | 核对新增功能点2607与task-list完成状态并复查实现缺陷 | 2026-07-17 17:41 | 2026-07-17 17:41 | 已完成 | 逐项核对 IMP-025～032 与 DEV-068～075；全量 pytest 通过（4项真实Docker门控跳过），bash -n、git diff --check、wheel脚本打包检查通过；发现 BUG-195～197，故账面开发项均完成但 IMP-031/032 尚不能判定验收完成。未改业务代码。 |
+| CHK-068 | 检查 | 以 prd-draft-review-workflow v0.3.5 zip 走通内置 Docker 构建全流程（import→generate Dockerfile/compose→build→start→探活） | 2026-07-17 19:43 | 2026-07-17 19:52 | 已完成 | 新建实例 prd-review-v035；识别 fullstack-sqlite/python；构建约 5.5min 成功；HTTP / 与 /api/health 200；admin/admin@2026 可登录；doctor 全绿。发现持久化与密钥注入缺口，另立 BUG。 |
+| CHK-069 | 检查 | 审阅 Ubuntu/WSL 问题收集（LWA-安装使用记录 + logs.zip），梳理使用过程并提出修复改进建议 | 2026-07-17 20:31 | 2026-07-17 20:35 | 已完成 | 对照记录与 lwa/manager/static-access 日志；确认主痛点为构建期国外源、Dockerfile 被覆盖、发布包缺 pyproject、安装脚本 sudo/apt_pkg/docker 组刷新、缺宿主机 Python 运行时。另立 BUG-200～204。 |
+| CHK-070 | 检查 | 落地并回归 BUG-198～204（构建镜像源/持久化/JWT/发布包/apt_pkg/docker 组提示） | 2026-07-17 20:40 | 2026-07-17 20:55 | 已完成 | 全量 pytest 通过（4 项 Docker 集成跳过）；pack-release-zip 冒烟含 pyproject.toml。 |
+| CHK-071 | 检查 | 再次深度复审 BUG-198～204 与发布/真实 Docker 闭环，检查是否仍有 bug、功能是否完整 | 2026-07-18 21:49 | 2026-07-18 21:49 | 已完成 | 1159 passed/4 skipped；真实 Docker 4 项通过；compileall/node/bash/git diff/task-list check 通过；mypy 10 项既有类型错误、ruff/shellcheck 未安装；新增 4 项待修复问题 |
+| CHK-072 | 检查 | 落地并回归 BUG-205~208（重建前数据迁移/打包 SIGPIPE/uv·pipenv 镜像/JWT 缓存刷新） | 2026-07-18 22:14 | 2026-07-18 22:14 | 已完成 | 全量 pytest 1169 passed/4 skipped（4 项真实 Docker 集成跳过）；新增 9 条回归测试覆盖 4 个 bug；compileall 通过；prd-review-v035 按复审意见未执行 rebuild。 |
+| CHK-073 | 检查 | 深度审查全量源码与未提交变更（BUG-198~204），查找 bug、逻辑漏洞、竞态条件与安全问题 | 2026-07-18 23:30 | 2026-07-18 23:30 | 已完成 | 全量 1169+ 测试通过/4 skip；compileall/node/bash/git diff/task-list check 通过；新发现 14 项 bug（BUG-210~223），含 4 项严重 |
+| CHK-074 | 检查 | 复核 2026-07-18 列出的全部 BUG-205～228 是否真正修复 | 2026-07-18 23:00 | 2026-07-18 23:50 | 已完成 | 逐条核对：确认 BUG-213、BUG-216 当时未修好并曾退回待修复；同日 23:50 已补修并回归（跨平台 file_lock、enable 失败恢复）。其余 22 项未发现明确反例；相关定向测试通过。 |
+| CHK-075 | 检查 | 分析 Ubuntu 后台进程 Docker 权限漂移并设计 LWA 分层权限模型 | 2026-07-18 23:18 | 2026-07-18 23:18 | 已完成 | 结论：LWA 主进程坚持非 root；容器能力按运行身份显式校验；systemd user manager 需重登刷新 supplementary groups；观测错误进入 unknown/degraded 而非 stopped；安装、自启动、API、doctor 均报告能力状态。新增 BUG-230。 |
+| CHK-076 | 检查 | 分析 Ubuntu Caddy reload 权限失败及系统 caddy.service 与 LWA 网关所有权冲突 | 2026-07-18 23:42 | 2026-07-18 23:42 | 已完成 | 核对 static_gateway/gateway_service/install-caddy-linux/autostart：确认 already_good 可跳过 disable，disable 失败被忽略，admin 在线缺完整 owner 校验；确定 Full 默认应由 serviceUser 接管，不以递归 ACL/chown 放开 home。新增 BUG-231。 |
 
 ## 测试数据
 
@@ -365,6 +407,10 @@
 | DOC-040 | 文档 | 落地 IMP-031.01：按官方 Ubuntu 文档撰写 Docker 安装脚本（Linux+macOS） | 2026-07-17 17:21 | 2026-07-17 17:21 | 已完成 | 新增 src/local_webpage_access/scripts/install-docker-linux.sh（对齐 docs.docker.com/engine/install/ubuntu/，默认阿里云 docker-ce）与 install-docker-macos.sh（brew cask）；tests/test_install_docker_scripts.py 5 passed。DEV-074→进行中。 |
 | DOC-041 | 文档 | 落地 IMP-031/032：内置安装脚本与 setup/init --default/--full 档位 | 2026-07-17 17:32 | 2026-07-17 17:32 | 已完成 | host_bootstrap.py + Docker/Caddy 四脚本；CLI 接线；README/Skill；计划文档状态改为已落地。关联 DEV-074/075。 |
 | DOC-042 | 文档 | 同步 V0.6.1 文档：README/faq/operations-playbook/runtime-workspace/known-limitations/release-checklist 与 setup/update skills 对齐 IMP-031/032 | 2026-07-17 18:23 | 2026-07-17 18:23 | 已完成 | 运维手册新增§零宿主机装配；faq 补 --full/--script；known-limitations 注明 Windows 无内置安装脚本。 |
+| DOC-043 | 文档 | 在新增功能点2607中记录 Full Profile 权限讨论、功能设计、解决方案与可执行 WBS | 2026-07-18 23:33 | 2026-07-18 23:33 | 已完成 | 更新文档标题/状态/范围，新增 IMP-033 §13；明确对 IMP-032 旧非目标的口径覆盖，并映射 BUG-230、PLN-014、DEV-076。 |
+| DOC-044 | 文档 | 补充 IMP-033 §13：macOS/Ubuntu 权限差异、IMP-032 旧边界废止、reconcile 禁自动纠正、health/API JSON 草案、验收不以 Mac 代 Ubuntu | 2026-07-18 23:38 | 2026-07-18 23:40 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §13.1.3/13.1.4/13.5.3/13.7.1 与 033.13～14、§13.10 风险行。 |
+| DOC-045 | 文档 | 补充 IMP-033 的系统 Caddy 身份侵入事故、所有权校验、serviceUser 接管方案与验收 WBS | 2026-07-18 23:42 | 2026-07-18 23:42 | 已完成 | 更新 §13.1.5、13.3.3、CapabilityReport、setup 流程、API 草案、WBS-033.07/11/12/13、验收/风险/编号映射；明确 ACL/chown/home other+rx 不是 Full 默认解法。 |
+| DOC-046 | 文档 | 在新增功能点2607中新增 IMP-034 §14 日志可观测性补强计划 | 2026-07-18 23:43 | 2026-07-18 23:45 | 已完成 | 更新文首状态/范围；§14 含问题分析、决策、P0～P2 WBS、验收、与 Ubuntu 故障对照。 |
 
 ## 功能开发
 
@@ -445,6 +491,8 @@
 | DEV-073 | 开发 | 跨平台自启动管理：macOS、Ubuntu 24.04+、WSL 2.7.0+ 的 install/enable/status/repair/uninstall 与平台探测 | 2026-07-16 10:20 | 2026-07-16 11:51 | 已完成 | 对应 IMP-030（design/plan/local-webpage-access-新增功能点2607.md §10）。本号收口：新增 platform_detect.py（detect_platform 含 wsl）、autostart.py（MacLaunchd/SystemdUser 后端 + 前台监管生成 + install/enable/disable/status/check/repair/uninstall + 完备性检查矩阵 + WSL 唤醒脚本）、cli/autostart.py（lwa autostart 子命令组）；gateway_service 加 run_gateway_foreground 前台入口；setup --autostart 委托 autostart install；daemon/manager/gateway off 协调先卸载单元（030.b）；docs/autostart.md 重写；新建 skill lwa-setup-autostart；tests/test_autostart.py 25 用例 + test_setup/test_init 同步。前台监管修 BUG-138，PATH 修 BUG-139 |
 | DEV-074 | 开发 | IMP-031：内置 macOS/Linux Docker Engine+Compose 阿里云源安装脚本，并在 setup/init 缺失时询问协助安装 | 2026-07-17 17:08 | 2026-07-17 17:32 | 已完成 | IMP-031 收口：scripts/install-docker-{linux,macos}.sh；host_bootstrap.detect/maybe_offer；setup/init 接线；hint/Skill/README；tests/test_host_bootstrap +test_install_docker_scripts。默认阿里云源，对齐官方 Ubuntu apt 流程。 |
 | DEV-075 | 开发 | IMP-032：setup/init 实现 --default/--full；full 路径检查并安装 Caddy+Docker Engine+Compose | 2026-07-17 17:11 | 2026-07-17 17:32 | 已完成 | IMP-032 收口：--default/--full/--yes；host_bootstrap.run_full_bootstrap；install-caddy-{linux,macos}.sh；init --full 默认 staticGateway=caddy；CLI 互斥与非 TTY 需 --yes；文档/Skill 已同步。 |
+| DEV-076 | 开发 | IMP-033：实现 Full Profile 权限契约及 LWA/Caddy/Docker 全链路能力闭环（WBS-033.01～033.14） | 2026-07-18 23:33 | - | 待开发 | 依 design/plan/local-webpage-access-新增功能点2607.md §13 推进；以已完成的 BUG-230 止血修复为基线，继续实现正式观测状态、统一 CapabilityReport、后台真实上下文自检、Linux 持久 Docker 权限、BUG-231 Caddy owner/serviceUser 接管、setup --resume 与实机验收。 |
+| DEV-077 | 开发 | IMP-034：实现日志可观测性补强（WBS-034.01～07） | 2026-07-18 23:43 | - | 待开发 | 依 design/plan/...2607.md §14；可与 DEV-076 并行；034.05 对齐 CapabilityReport 字段。 |
 
 ## 配置运维
 
@@ -498,6 +546,8 @@
 | OPS-046 | 运维 | 应用版本号提升至 V0.6.0：pyproject.toml、version_info（_FALLBACK_VERSION + 3 处 docstring）、cli version 命令 docstring、test_version_info fallback 断言、skills/lwa-update-runtime SKILL.md、docs/release-checklist.md 示例同步；并据 BUG-189~194 代码更新 docs（autostart.md 补 lwa update 重启协调、runtime-workspace.md 补 manager 单实例锁文件） | 2026-07-17 14:29 | 2026-07-17 14:29 | 已完成 | 全仓 0.5.5 活跃引用清零（仅 task-list 历史 OPS-043/044 不可改）。lwa version 取 git HEAD 主题（当前仍 V0.5.5-Build0979），提交 V0.6.0-BuildXXXX 后即显示 V0.6.0。test_version_info 中 0.5.3/0.5.2 为 resolve 优先级夹具，保留不动。docs 复核结论：security-boundary/manager-page/known-limitations/faq 无需改（BUG-194 workspaceRoot 为内部字段未文档化、BUG-189/190/192 为内部健壮性改进）；仅 autostart.md 与 runtime-workspace.md 需更新。test_version_info 5 passed。 |
 | OPS-047 | 运维 | 本地运行时更新部署至 V0.6.0（git 已在 V0.6.0-Build1099-20260717）：lwa update 刷新 editable 安装、同步 skills、协调重启 manager/daemon、doctor OK | 2026-07-17 14:54 | 2026-07-17 14:55 | 已完成 | pip 成功安装 local-webpage-access-0.6.0；syncSkills 新增0/更新2/未变15；manager(pid 8452)、daemon(pid 8458，原 56758) 均经自启动单元协调重启（coordinated_restart→launchd kickstart，BUG-191 修复首次在生产生效，监督器保证单一进程）；doctor 总体 OK；3d-demo-family-wakeup(18003) 未受影响仍 HTTP 200。/api/health version=V0.6.0 与 lwa version 一致。本次未手动重启 gateway（无 gateway 代码改动）。 |
 | OPS-048 | 运维 | 应用版本号提升至 V0.6.1：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步；README/docs/skills 对齐 IMP-031/032 | 2026-07-17 18:23 | 2026-07-17 18:23 | 已完成 | 全仓活跃 0.6.0→0.6.1；faq/operations-playbook/runtime-workspace/known-limitations/skills README 补宿主机装配档位与内置脚本；历史 task-list/OPS-046～047 与 resolve 优先级夹具保留。lwa version 仍取 git HEAD 主题，提交 V0.6.1-BuildXXXX 后即显示 V0.6.1。 |
+| OPS-049 | 运维 | 本地运行时更新部署至 V0.6.1（git HEAD 3314dd6 V0.6.1-Build1144）：归档.zip 与仓库 src/docs 逐字节一致（已是 0.6.1，无需解压）；lwa update 重装 0.6.1 + 重启 manager/daemon；补重启 stale gateway | 2026-07-17 18:48 | 2026-07-17 18:50 | 已完成 | 归档.zip(src+docs)经 diff -rq 与仓库完全一致，确认仓库已在 0.6.1，故不解压（避免引入 __MACOSX/.DS_Store）。pip 成功安装 0.6.1（新增 host_bootstrap 模块+安装脚本）；syncSkills 更新3；manager(27715)/daemon(27720) 经自启动 coordinated_restart 重启。纠正 OPS-047 遗漏：gateway 持有进程 56763 为 7/16 启动、早于 gateway_service.py 的 0.6.0 改动(+23/-1,BUG-175/176)，经 launchctl kickstart -k gui/UID/com.fenix.lwa.gateway 重启→新 holder 28270/caddy 28276。4 实例+别名均 HTTP 200，doctor OK，/api/health=V0.6.1。归档.zip 现为冗余（未删，留待用户处置）。 |
+| OPS-050 | 运维 | 将仓库根目录 问题收集/ 加入 .gitignore（本地排障材料不同步 GitHub） | 2026-07-19 00:18 | 2026-07-19 00:18 | 已完成 | .gitignore 新增 /问题收集/；git check-ignore 命中。 |
 
 ## 规划事项
 
@@ -516,17 +566,19 @@
 | PLN-011 | 规划 | IMP-030 跨平台自启动：统一 lwa autostart CLI + 完备性检查 + Skill | 2026-07-16 10:43 | 2026-07-16 10:43 | 已完成 | 产品口径：macOS 登录触发；Ubuntu 一键 systemd user；WSL 需 Windows 唤醒。详见 design/plan/local-webpage-access-新增功能点2607.md §10；落地对应 DEV-073 / BUG-138 / BUG-139。 |
 | PLN-012 | 规划 | IMP-031：setup/init 内置 Docker Engine+Compose 国内源安装脚本（macOS/Linux）与交互询问 | 2026-07-17 17:08 | 2026-07-17 17:08 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §11；macOS/Linux 分脚本、阿里云包源+registry-mirrors；setup/init 无 Engine 时询问是否执行内置脚本。落地对应 DEV-074。 |
 | PLN-013 | 规划 | IMP-032：setup/init 增加 --default/--full 环境装配档位（full 检查并安装 Caddy+Docker+Compose） | 2026-07-17 17:11 | 2026-07-17 17:11 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §12；default=现网行为；full=按 MIN_* 检查并内置脚本装齐。依赖 IMP-031/DEV-074；落地对应 DEV-075。 |
+| PLN-014 | 规划 | IMP-033：Full Profile 权限契约与 LWA/Caddy/Docker 能力闭环 WBS | 2026-07-18 23:33 | 2026-07-18 23:33 | 已完成 | 已在 design/plan/local-webpage-access-新增功能点2607.md §13 完成问题分析、强制能力契约、统一 service identity、Docker/Caddy 权限、状态语义、原子 setup 流程、14 项 WBS、验收与风险设计。 |
+| PLN-015 | 规划 | IMP-034：日志可观测性补强 WBS（CLI/daemon 落盘、生命周期阶段事件、能力探测结构化日志） | 2026-07-18 23:43 | 2026-07-18 23:45 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §14；优先 034.01～02，对齐 IMP-033 CapabilityReport。 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 197 | 197 | 0 | 100% |
+| 代码 Bug | 231 | 230 | 1 | 100% |
 | 调整事项 | 29 | 29 | 0 | 100% |
-| 检查事项 | 66 | 66 | 0 | 100% |
+| 检查事项 | 75 | 75 | 0 | 100% |
 | 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 42 | 42 | 0 | 100% |
-| 功能开发 | 75 | 75 | 0 | 100% |
-| 配置运维 | 48 | 48 | 0 | 100% |
-| 规划事项 | 13 | 13 | 0 | 100% |
-| **总计** | 470 | 470 | 0 | 100% |
+| 文档维护 | 46 | 46 | 0 | 100% |
+| 功能开发 | 77 | 75 | 2 | 97% |
+| 配置运维 | 50 | 50 | 0 | 100% |
+| 规划事项 | 15 | 15 | 0 | 100% |
+| **总计** | 523 | 520 | 3 | 99% |

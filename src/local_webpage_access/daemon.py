@@ -16,7 +16,7 @@ watcher 主循环（WBS-21.05~11）：
 5. uncertain（识别为 pending）与 heavy/medium 项目保持 pending/stopped，
    等待人工或大模型 skill 介入（WBS-21.09，设计 §16.5）；
 6. 全过程写入 ``logs/daemon.log``（WBS-21.10）；
-7. 单实例 ``O_EXCL`` 文件锁确保同一工作区只有一个 watcher（WBS-21.11）。
+7. 单实例跨平台文件锁确保同一工作区只有一个 watcher（WBS-21.11 / BUG-213）。
 
 systemd user service 安装说明见 ``docs/daemon-systemd.md``（WBS-21.12）。
 
@@ -41,6 +41,12 @@ from typing import Any, Callable, Iterator
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LifecycleError, ZipImportError
+from local_webpage_access.file_lock import (
+    ensure_lockable,
+    release_exclusive,
+    try_acquire_exclusive,
+    write_lock_payload,
+)
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
@@ -301,43 +307,56 @@ def is_running(workspace: Workspace, *, now_ts: float | None = None) -> bool:
 
 # ---- 单实例锁（WBS-21.11）---------------------------------------------------
 
+# file_lock 在同进程多 fd 上可重入；用进程内标志防止同进程二次持锁。
+_daemon_lock_held = False
+_daemon_lock_guard = threading.Lock()
+
 
 @contextlib.contextmanager
 def daemon_lock(workspace: Workspace) -> Iterator[int]:
-    """watcher 单实例文件锁（``O_CREAT | O_EXCL``）。
+    """watcher 单实例文件锁（跨平台 :mod:`file_lock`）。
 
-    持有进程 PID 写入锁文件；已存在的陈旧锁（PID 已死）会被回收。
+    持有进程 PID 与心跳写入锁文件；进程崩溃时内核自动释放锁。
+    释放时**不 unlink**（BUG-213），避免新旧 inode 并行持锁。
     获取失败抛 :class:`OSError`（调用方据此判定"已有 daemon 在跑"）。
     """
+    global _daemon_lock_held
     path = lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
     acquired = False
-    try:
+    with _daemon_lock_guard:
+        if _daemon_lock_held:
+            raise OSError(f"daemon 锁已被本进程持有：{path}")
         try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-        except FileExistsError:
-            if _lock_is_stale(path):
-                with contextlib.suppress(FileNotFoundError):
-                    path.unlink()
-                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            else:
-                raise
-        os.write(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
-        os.close(fd)
-        fd = None
-        acquired = True
+            fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+            ensure_lockable(fd)
+            try:
+                try_acquire_exclusive(fd)
+            except BlockingIOError as exc:
+                os.close(fd)
+                fd = None
+                raise OSError(f"daemon 锁被占用：{path}") from exc
+            write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
+            _daemon_lock_held = True
+            acquired = True
+        except Exception:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
+            raise
+    try:
         yield os.getpid()
     finally:
-        if fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        # BUG-173：仅当本进程成功获取锁时才在退出时删除锁文件。
-        # 否则获取失败（他人持活锁）也会 unlink 掉活跃 watcher 的锁，
-        # is_running 假阴性、后续进程再次获取成功 → 重复 watcher 并发扫 inbox。
-        if acquired:
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                path.unlink()
+        with _daemon_lock_guard:
+            if acquired:
+                _daemon_lock_held = False
+            if fd is not None:
+                release_exclusive(fd)
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                # BUG-213：不 unlink，保持同一 inode
 
 
 def _lock_is_stale(
@@ -346,16 +365,17 @@ def _lock_is_stale(
     stale_after: float = LOCK_HEARTBEAT_TIMEOUT,
     now_ts: float | None = None,
 ) -> bool:
-    """锁是否陈旧（可回收）。
+    """锁是否陈旧（可观测 / 诊断）。
 
     陈旧的两种情形（BUG-030）：
 
     1. 持有进程已死（PID 探测失败）；
     2. 进程仍存活但**心跳超时**——watcher 可能卡死/死锁，PID 在但不再轮询更新心跳。
 
-    此前只判 PID 存活，卡死的 watcher 会让锁永远无法回收，``lwa daemon on``
-    无法恢复。锁文件第二行为心跳时间戳（获取时写入、watcher 每轮由
-    :func:`touch_lock_heartbeat` 更新）。心跳缺失或格式损坏时保守判为陈旧。
+    单行锁文件（仅 PID、无心跳）且 PID 存活时，用文件 mtime 作兜底；
+    mtime 超过 ``stale_after`` 则判陈旧。
+
+    互斥本身由 :mod:`file_lock` 保证；本函数不再用于抢锁。
     """
     try:
         content = path.read_text(encoding="utf-8").strip().splitlines()
@@ -364,12 +384,12 @@ def _lock_is_stale(
         return True
     if not is_pid_alive(pid):
         return True
+    now_ts = now_ts if now_ts is not None else time.time()
     if len(content) >= 2:
         try:
             heartbeat = float(content[1])
         except ValueError:
             return True
-        now_ts = now_ts if now_ts is not None else time.time()
         age = now_ts - heartbeat
         if age > stale_after:
             log.warning(
@@ -380,28 +400,40 @@ def _lock_is_stale(
                 stale_after,
             )
             return True
+        return False
+    # 单行锁文件：mtime 兜底
+    try:
+        age = now_ts - path.stat().st_mtime
+    except OSError:
+        return True
+    if age > stale_after:
+        log.warning(
+            "daemon 锁 %s 无心跳行且 mtime 超时（%.1fs > %.1fs），判陈旧",
+            path,
+            age,
+            stale_after,
+        )
+        return True
     return False
 
 
 def touch_lock_heartbeat(workspace: Workspace) -> None:
     """更新锁文件心跳时间戳（watcher 每轮调用）。
 
-    用临时文件 + ``os.replace`` 原子替换，避免并发 ``_lock_is_stale`` 读到半写内容。
+    原地改写同一 inode（不得 ``os.replace`` / unlink），以免打断持有者的文件锁。
     锁文件不存在或不可读时为空操作（不应在持有锁时发生，但保守跳过）。
     """
     path = lock_path(workspace)
     try:
-        content = path.read_text(encoding="utf-8").strip().splitlines()
+        with open(path, "r+", encoding="utf-8") as fh:
+            content = fh.read().strip().splitlines()
+            pid_line = content[0] if content else str(os.getpid())
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{pid_line}\n{time.time():.3f}\n")
+            fh.flush()
     except OSError:
         return
-    pid_line = content[0] if content else str(os.getpid())
-    tmp = path.with_name(path.name + ".hb")
-    try:
-        tmp.write_text(f"{pid_line}\n{time.time():.3f}\n", encoding="utf-8")
-        os.replace(str(tmp), str(path))
-    except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
 
 
 # ---- inbox 扫描与文件稳定性（WBS-21.05/06）--------------------------------
@@ -828,13 +860,19 @@ def run_watcher(
                 if isinstance(summary, dict) and summary.get("action") == "failed":
                     log.warning("daemon: %s 处理失败，保留待下轮重试", zip_path.name)
                 else:
-                    processed.add(key)
-                    processed.add(str(zip_path))
-                    save_processed_set(workspace, processed)
-                    # IMP-011：终态（started/pending/conflict）后把 zip 物理移入
-                    # inbox/processed/，从扫描视野移除，避免重复导入与 -2/-3 冗余。
-                    if _archive_processed_zip(workspace, zip_path) is not None:
+                    # 先归档成功再标记 processed，避免归档失败后 zip 留在 inbox
+                    # 却被永久跳过。
+                    archived = _archive_processed_zip(workspace, zip_path)
+                    if archived is not None:
+                        processed.add(key)
+                        processed.add(str(zip_path))
+                        save_processed_set(workspace, processed)
                         log.info("daemon: %s 已归档至 inbox/processed/", zip_path.name)
+                    else:
+                        log.warning(
+                            "daemon: %s 归档失败，本轮不标记 processed，下轮重试",
+                            zip_path.name,
+                        )
                 # 处理完成后从指纹表移除，避免无界增长
                 fingerprints.pop(str(zip_path), None)
 
@@ -948,6 +986,16 @@ def start_daemon(
 
     若已有 watcher 在跑，直接返回其 PID。返回当前 watcher PID。
     """
+    # BUG-230：本进程无 docker 组时 reconcile 会误判容器状态——启动前提醒，不阻断。
+    try:
+        from local_webpage_access.docker_runtime import probe_docker_permission
+
+        perm = probe_docker_permission()
+        if perm:
+            log.warning("启动 daemon 前检测到：%s", perm)
+    except Exception:  # noqa: BLE001
+        pass
+
     with daemon_start_lock(workspace):
         state = read_state(workspace)
         if state and state.enabled and state.pid and is_running(workspace):

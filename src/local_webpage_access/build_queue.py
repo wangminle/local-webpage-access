@@ -240,7 +240,11 @@ class CrossProcessBuildGate:
             return
         with self._lock:
             conn = self._conn_or_open()
-            conn.execute("DELETE FROM build_slots WHERE slot=?", (slot,))
+            # 仅释放本进程持有的槽位，避免双重 release 误删他人刚获取的槽
+            conn.execute(
+                "DELETE FROM build_slots WHERE slot=? AND pid=?",
+                (slot, os.getpid()),
+            )
 
     def active_slots(self) -> int:
         """当前已占用的槽位数（跨进程可见，DEBUG/观测用）。"""
@@ -315,6 +319,12 @@ class BuildQueue:
         slot = self._gate.acquire(instance_id, 0.0)
         if slot is None:
             # 需要排队
+            with self._guard:
+                if task.status == "cancelled":
+                    raise LifecycleError(
+                        f"实例 {instance_id} 构建已取消",
+                        instance_id=instance_id,
+                    )
             self._mark_queued(instance_id, task)
             slot = self._gate.acquire(instance_id, timeout)
             if slot is None:
@@ -325,7 +335,19 @@ class BuildQueue:
                 )
 
         try:
-            task.status = "building"
+            # 获槽后再次检查：排队期间可能已被 cancel；与 cancel() 同锁切换状态，
+            # 避免 check→building 窗口被 cancel 写入后又被覆盖。
+            with self._guard:
+                if task.status == "cancelled":
+                    self.registry.add_event(
+                        instance_id, "build_cancel", "排队任务已取消，跳过构建"
+                    )
+                    log.info("实例 %s 构建已取消，跳过 builder", instance_id)
+                    raise LifecycleError(
+                        f"实例 {instance_id} 构建已取消",
+                        instance_id=instance_id,
+                    )
+                task.status = "building"
             task.started_at = time.time()
             self.registry.add_event(
                 instance_id, "build_start", "获得构建槽位，开始构建"
@@ -335,27 +357,27 @@ class BuildQueue:
             task.finished_at = time.time()
             return result
         except Exception as exc:
-            task.status = "failed"
-            task.error = str(exc)
-            task.finished_at = time.time()
+            if task.status != "cancelled":
+                task.status = "failed"
+                task.error = str(exc)
+                task.finished_at = time.time()
             raise
         finally:
             self._gate.release(slot)
 
     def cancel(self, instance_id: str) -> bool:
-        """取消构建（WBS-20.08 预留）。
+        """取消构建（WBS-20.08）。
 
-        V1 仅记录取消事件；**不抢占进行中的构建**（构建一旦开始应自然完成或超时）。
-        排队中的任务可在下次获得槽位前被外部状态检查识别为 cancelled。
+        排队中的任务在获槽后、执行 builder 前会被跳过；**不抢占进行中的构建**。
         """
         with self._guard:
             task = self._tasks.get(instance_id)
             if task and task.status == "queued":
                 task.status = "cancelled"
         self.registry.add_event(
-            instance_id, "build_cancel", "构建取消（V1 占位：不抢占进行中构建）"
+            instance_id, "build_cancel", "构建取消（排队中可跳过；进行中不抢占）"
         )
-        log.info("实例 %s 构建取消（占位）", instance_id)
+        log.info("实例 %s 构建取消", instance_id)
         return True
 
     def in_flight(self) -> int:
@@ -389,7 +411,10 @@ class BuildQueue:
         return task
 
     def _mark_queued(self, instance_id: str, task: BuildTask) -> None:
-        task.status = "queued"
+        with self._guard:
+            if task.status == "cancelled":
+                return
+            task.status = "queued"
         try:
             self.registry.update_status(instance_id, Status.QUEUED.value)
             self.registry.add_event(

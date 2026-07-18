@@ -163,6 +163,11 @@ class _FakeRuntime:
     def status(self, iid):
         return None
 
+    def rescue_container_data(self, iid, host_data, candidates, *, log_path=None, **kw):
+        """BUG-205：记录调用（重建 down 前的数据救出）。"""
+        type(self).calls.append("rescue")
+        return 0
+
 
 @pytest.fixture()
 def fake_runtime(monkeypatch):
@@ -242,6 +247,24 @@ def test_host_container_downs_old_container_on_rebuild(
     # down 后继续 build + up
     assert "build" in fake_runtime.calls
     assert "up" in fake_runtime.calls
+
+
+def test_host_container_rescues_data_before_down_on_rebuild(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-205：SQLite 容器重建时，down 前先把容器内数据救出到宿主 data/。
+
+    顺序硬约束：rescue 必须在 down 之前——容器删除后数据无法再救出。
+    """
+    _seed_container_instance(
+        workspace, registry, "api", has_database=True, database_type="sqlite"
+    )
+    fake_runtime._running_state = True  # 旧容器在跑 → 触发 down 重建
+
+    host_container(workspace, config, registry, "api")
+    assert "rescue" in fake_runtime.calls
+    assert "down" in fake_runtime.calls
+    assert fake_runtime.calls.index("rescue") < fake_runtime.calls.index("down")
 
 
 def test_host_container_health_check_recorded(
@@ -439,7 +462,8 @@ def test_stop_instance_dispatches_to_stop_container(
 def test_ensure_container_port_allocates_new(workspace, registry, config) -> None:
     """无历史端口时新分配。"""
     _seed_container_instance(workspace, registry, "api")
-    port = _ensure_container_port(config, registry, "api")
+    port, fresh = _ensure_container_port(config, registry, "api")
+    assert fresh is True
     assert port in range(21000, 21051)
     assert port in registry.allocated_ports()
 
@@ -450,7 +474,8 @@ def test_ensure_container_port_reuses_existing(workspace, registry, config) -> N
     registry.upsert_container("api", {"projectName": "lwa-api", "internalPort": 8000,
                                        "composePath": "x", "dockerfilePath": "y",
                                        "hostPort": 21500})
-    port = _ensure_container_port(config, registry, "api")
+    port, fresh = _ensure_container_port(config, registry, "api")
+    assert fresh is False
     assert port == 21500
 
 

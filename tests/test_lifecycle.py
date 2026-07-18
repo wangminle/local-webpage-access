@@ -198,28 +198,54 @@ def test_instance_lock_serializes_concurrent_ops(workspace) -> None:
 
 
 def test_instance_lock_timeout_raises(workspace) -> None:
-    """锁被"活跃进程"持有且超时 → LifecycleError。"""
+    """锁被其他持有者占用且超时 → LifecycleError。"""
     import os
-    import time as _t
+    import time as time_mod
+
+    from local_webpage_access.file_lock import (
+        ensure_lockable,
+        release_exclusive,
+        try_acquire_exclusive,
+        write_lock_payload,
+    )
 
     lock_path = workspace.run / "lifecycle-api.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # 当前 PID + 当前时间戳 → 锁被视为"活跃持有"，不会被回收，只能等超时
-    lock_path.write_text(f"{os.getpid()}\n{_t.time():.3f}\n", encoding="utf-8")
-    with pytest.raises(LifecycleError, match="超时"):
-        with instance_lock(workspace, "api", timeout=0.3):
-            pass
+    # 真正持有跨平台文件锁，才能阻塞同路径的 instance_lock
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    write_lock_payload(fd, f"{os.getpid()}\n{time_mod.time():.3f}\n".encode())
+    try:
+        with pytest.raises(LifecycleError, match="超时"):
+            with instance_lock(workspace, "api", timeout=0.3):
+                pass
+    finally:
+        release_exclusive(fd)
+        os.close(fd)
+
+
+def test_instance_lock_does_not_unlink_on_release(workspace) -> None:
+    """BUG-213：释放后保留锁文件 inode，避免新旧 inode 并行持锁。"""
+    lock_path = workspace.run / "lifecycle-keep.lock"
+    with instance_lock(workspace, "keep", timeout=2):
+        assert lock_path.exists()
+        inode = lock_path.stat().st_ino
+    assert lock_path.exists()
+    assert lock_path.stat().st_ino == inode
+    with instance_lock(workspace, "keep", timeout=2):
+        assert lock_path.stat().st_ino == inode
 
 
 def test_instance_lock_reclaims_stale(workspace, monkeypatch) -> None:
-    """陈旧锁（持有进程已死）应被回收，新操作可获取。"""
+    """无文件锁持有者时，残留锁文件可被立即获取（进程崩溃后内核已释锁）。"""
     lock_path = workspace.run / "lifecycle-api.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # 用一个绝对不存在的 PID
+    # 用一个绝对不存在的 PID（仅残留文件内容，无人持锁）
     lock_path.write_text("999999\n0.0\n", encoding="utf-8")
     monkeypatch.setattr("local_webpage_access.lifecycle._STALE_LOCK_SECONDS", 999999)
     with instance_lock(workspace, "api", timeout=2):
-        pass  # 不抛异常即说明陈旧锁已被回收
+        pass  # 不抛异常即说明可获取
 
 
 def test_lock_is_stale_dead_pid(tmp_path: Path) -> None:
@@ -503,6 +529,77 @@ def test_observe_status_container_stopped(
     assert registry.get_instance("api")["status"] == "stopped"
 
 
+def test_observe_container_docker_permission_preserves_running(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-230：docker.sock 权限不足时不得把 running 误标为 stopped。"""
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    m = InstanceManifest.load(workspace.app_manifest_path("api"))
+    m.status = S.RUNNING
+    m.save(workspace.app_manifest_path("api"))
+    registry.update_status("api", S.RUNNING.value)
+
+    class _PermDeniedRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            raise DockerError(
+                "Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`"
+            )
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.health.http_ok", lambda port, **kw: (False, None)
+    )
+
+    observed = observe_status(workspace, config, registry, "api")
+    assert observed == Status.RUNNING
+    row = registry.get_instance("api")
+    assert row["status"] == "running"
+    assert row["last_error"] and "权限" in row["last_error"]
+    assert "newgrp" in row["last_error"] or "manager" in row["last_error"]
+
+
+def test_observe_container_docker_permission_http_fallback_running(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-230：Docker 权限不足但 hostPort HTTP 可达时按 running。"""
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    m = InstanceManifest.load(workspace.app_manifest_path("api"))
+    m.status = S.STOPPED
+    m.save(workspace.app_manifest_path("api"))
+    registry.update_status("api", S.STOPPED.value)
+
+    class _PermDeniedRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            raise DockerError(
+                "Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`"
+            )
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.health.http_ok", lambda port, **kw: (True, 200)
+    )
+
+    observed = observe_status(workspace, config, registry, "api")
+    assert observed == Status.RUNNING
+    assert registry.get_instance("api")["status"] == "running"
+
+
 def test_observe_status_no_change_no_event(
     workspace, registry, config, fake_runtime
 ) -> None:
@@ -666,7 +763,7 @@ def test_recover_instance_brings_up_gateway_then_restarts(
     )
     monkeypatch.setattr(
         lifecycle,
-        "restart_instance",
+        "_restart_instance_locked",
         lambda *a, **kw: calls.append("restart") or _seed_enabled_static(
             workspace, registry, "demo"
         ),
@@ -701,7 +798,7 @@ def test_recover_instance_skips_gateway_when_admin_already_up(
         gateway_service, "maybe_start_gateway", lambda *a, **kw: calls.append("gateway")
     )
     monkeypatch.setattr(
-        lifecycle, "restart_instance", lambda *a, **kw: calls.append("restart")
+        lifecycle, "_restart_instance_locked", lambda *a, **kw: calls.append("restart")
     )
     lifecycle.recover_instance(workspace, config, registry, "demo")
     assert calls == ["restart"]
@@ -1024,7 +1121,9 @@ def test_rebuild_syncs_drifted_alias_port(
 
     monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
     # 模拟端口漂移：rebuild 时 host_container 分配到新端口 21001
-    monkeypatch.setattr(hosting, "_ensure_container_port", lambda *a, **kw: 21001)
+    monkeypatch.setattr(
+        hosting, "_ensure_container_port", lambda *a, **kw: (21001, True)
+    )
 
     rebuild_instance(workspace, config, registry, "api")
 

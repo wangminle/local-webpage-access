@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -765,7 +766,13 @@ class Importer:
                 candidate = f"{base_slug}-{n}"
                 n += 1
                 continue
-            self.ws.ensure_app_dirs(candidate)
+            try:
+                self.ws.ensure_app_dirs(candidate)
+            except Exception:
+                # ensure_app_dirs 失败时清理已占用的实例根目录，避免孤儿目录
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(self.ws.app_dir(candidate), ignore_errors=True)
+                raise
             return candidate
 
     def _resolve_unique_id(self, base_slug: str) -> str:

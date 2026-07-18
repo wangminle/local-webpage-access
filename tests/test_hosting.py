@@ -727,6 +727,49 @@ def test_host_container_releases_port_on_build_failure(
     assert registry.allocated_ports() == []
 
 
+def test_host_container_keeps_reused_port_on_build_failure(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """复用旧端口时 build 失败不得释放端口登记（与静态网关 BUG-182 对称）。"""
+    from local_webpage_access.hosting import host_container
+    from tests._helpers import make_container_manifest
+
+    workspace.ensure_app_dirs("api")
+    m = make_container_manifest("api")
+    m.container.hostPort = 18080
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+    assert registry.allocate_port("api", 18080)
+
+    class _FakeRuntime:
+        ensure_available = staticmethod(lambda: None)
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def is_running(self, iid):
+            return False
+
+        def down(self, iid, **kw):
+            pass
+
+        def build(self, iid, **kw):
+            raise DockerError("build boom")
+
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr(
+        "local_webpage_access.hosting.is_port_listening", lambda _p: False
+    )
+
+    with pytest.raises(DockerError, match="build boom"):
+        host_container(workspace, config, registry, "api")
+
+    assert 18080 in registry.allocated_ports()
+    row = registry.get_container("api")
+    assert row is not None
+    assert int(row["host_port"]) == 18080
+
+
 # ---- IMP-006 路径别名端到端 ------------------------------------------------
 #
 # 覆盖 WBS 006.06 的"端口 + 路径并存"流程：带 path_alias 的静态实例经

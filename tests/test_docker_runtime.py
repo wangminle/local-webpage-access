@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -158,6 +160,50 @@ def test_ensure_available_raises_when_unavailable(workspace, monkeypatch) -> Non
     fake.default = ComposeResult(args=[], returncode=127)
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
     with pytest.raises(DockerError, match="不可用"):
+        ensure_available()
+
+
+def test_status_raises_on_docker_permission_denied(workspace, monkeypatch) -> None:
+    """BUG-230：compose ps 权限失败须抛 DockerError，不得静默返回 None。"""
+    from local_webpage_access.docker_runtime import ComposeResult, DockerRuntime
+
+    def fake(args, *, cwd, log_path=None, timeout=60):
+        return ComposeResult(
+            args=list(args),
+            returncode=1,
+            stdout="",
+            stderr=(
+                "permission denied while trying to connect to the Docker daemon "
+                "socket at unix:///var/run/docker.sock"
+            ),
+        )
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    ws = workspace
+    ws.ensure_app_dirs("api")
+    (ws.app_dir("api") / "docker").mkdir(parents=True, exist_ok=True)
+    (ws.app_compose_path("api")).write_text("services: {}\n", encoding="utf-8")
+    rt = DockerRuntime(ws)
+    with pytest.raises(DockerError, match="权限不足|newgrp"):
+        rt.status("api")
+
+
+def test_ensure_available_permission_denied_suggests_newgrp(workspace, monkeypatch) -> None:
+    """BUG-204：docker.sock 权限不足时提示 newgrp docker。"""
+
+    class _PermFake(_FakeExecute):
+        def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+            if tuple(args[:2]) == ("docker", "version"):
+                return ComposeResult(
+                    args=list(args),
+                    returncode=1,
+                    stdout="",
+                    stderr="permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+                )
+            return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _PermFake())
+    with pytest.raises(DockerError, match="newgrp docker"):
         ensure_available()
 
 
@@ -530,6 +576,40 @@ def test_execute_writes_log_file(tmp_path: Path) -> None:
     assert "$" in content  # 命令头
 
 
+def test_execute_streams_log_while_command_running(tmp_path: Path) -> None:
+    """BUG-229：有 log_path 时须在命令结束前把命令头与输出落到日志。
+
+    旧实现 ``subprocess.run(capture_output=True)`` 等进程结束后才写 build.log，
+    长耗时 ``docker compose build`` 期间日志一直为空，易误判为调度卡死。
+    """
+    log = tmp_path / "build.log"
+    marker = "STREAM_MARKER_VISIBLE"
+    code = (
+        "import sys, time; "
+        f"print({marker!r}, flush=True); "
+        "time.sleep(3)"
+    )
+    args = [sys.executable, "-c", code]
+    seen = threading.Event()
+
+    def _watch() -> None:
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            if log.is_file():
+                text = log.read_text(encoding="utf-8", errors="replace")
+                if marker in text and "$" in text:
+                    seen.set()
+                    return
+            time.sleep(0.05)
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    r = _execute(args, cwd=tmp_path, log_path=log, timeout=10)
+    watcher.join(timeout=5)
+    assert r.ok
+    assert seen.is_set(), "命令仍在运行时 build.log 就应含命令头与输出"
+
+
 def test_execute_rotates_log_before_append(tmp_path: Path, monkeypatch) -> None:
     """BUG-186：docker _execute 写日志须经 open_append（先滚动再追加）。"""
     from local_webpage_access import logs as logs_mod
@@ -569,6 +649,17 @@ def test_execute_timeout_raises_docker_error(tmp_path: Path) -> None:
         args = ["sleep", "10"]
     with pytest.raises(DockerError, match="超时"):
         _execute(args, cwd=tmp_path, timeout=1)
+
+
+def test_execute_streaming_timeout_writes_cmd_header(tmp_path: Path) -> None:
+    """BUG-229：流式路径超时仍须先落盘命令头，并抛出超时错误。"""
+    log = tmp_path / "build.log"
+    args = [sys.executable, "-c", "import time; time.sleep(10)"]
+    with pytest.raises(DockerError, match="超时"):
+        _execute(args, cwd=tmp_path, log_path=log, timeout=1)
+    content = log.read_text(encoding="utf-8")
+    assert "$" in content
+    assert "time.sleep" in content
 
 
 def test_execute_missing_binary_raises_docker_error(tmp_path: Path) -> None:
@@ -612,3 +703,92 @@ def test_extract_ports_legacy_string() -> None:
 
 def test_extract_ports_empty() -> None:
     assert _extract_ports({}) == []
+
+
+# ---- BUG-205：重建前从容器救出数据 ------------------------------------------
+
+
+class _RescueCopyFake(_FakeExecute):
+    """模拟 docker cp：命中目标候选路径时把数据文件写入宿主目录。"""
+
+    def __init__(self, *, cid: str = "deadbeef", ps_stdout: str | None = None) -> None:
+        super().__init__()
+        self._cid = cid
+        self._ps_stdout = ps_stdout if ps_stdout is not None else f"{cid}\n"
+        self.cp_targets: list[str] = []
+
+    def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+        # container_id 查询（docker compose ps -q）返回容器 id
+        if "ps" in args:
+            return ComposeResult(
+                args=list(args), returncode=0, stdout=self._ps_stdout, stderr=""
+            )
+        # docker cp：<cid>:<src>/. <host>/ —— 模拟写入数据文件
+        if tuple(args[:2]) == ("docker", "cp"):
+            target = args[-1].rstrip("/")
+            self.cp_targets.append(target)
+            Path(target).mkdir(parents=True, exist_ok=True)
+            (Path(target) / "app.sqlite").write_bytes(b"sqlite-data")
+            return ComposeResult(args=list(args), returncode=0, stdout="", stderr="")
+        return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+
+def test_rescue_container_data_copies_when_host_empty(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-205：宿主 data/ 为空、容器存在 → down 前从容器救出数据文件。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+
+    fake = _RescueCopyFake()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    rt = DockerRuntime(workspace, registry)
+    rescued = rt.rescue_container_data("api", host_data, ["/app/data", "/app/runtime/data"])
+    # 救出 app.sqlite 一个文件
+    assert rescued == 1
+    assert (host_data / "app.sqlite").is_file()
+    # 第一个候选路径命中即止：docker cp 只调用一次
+    assert len(fake.cp_targets) == 1
+    # 记录 migrate 事件
+    events = registry.list_events("api")
+    assert any(e["event_type"] == "migrate" for e in events)
+
+
+def test_rescue_container_data_skips_when_host_has_content(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-205：宿主 data/ 已有内容（挂载已持久化）→ 跳过迁移、不调 docker。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+    (host_data / "app.sqlite").write_bytes(b"already-here")
+
+    fake = _RescueCopyFake()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    rt = DockerRuntime(workspace, registry)
+    assert rt.rescue_container_data("api", host_data, ["/app/data"]) == 0
+    # 挂载已持久化：一次 docker 调用都没有
+    assert fake.calls == []
+    assert fake.cp_targets == []
+
+
+def test_rescue_container_data_no_container_returns_zero(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-205：容器不存在（ps 无输出）→ 返回 0、不抛错、不 cp。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+
+    fake = _RescueCopyFake(ps_stdout="")  # 无容器
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    rt = DockerRuntime(workspace, registry)
+    assert rt.rescue_container_data("api", host_data, ["/app/data", "/app/runtime/data"]) == 0
+    assert fake.cp_targets == []

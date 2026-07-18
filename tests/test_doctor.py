@@ -180,6 +180,27 @@ def test_check_docker_daemon_down() -> None:
     assert r.status == STATUS_FAIL
 
 
+def test_check_docker_permission_denied_suggests_newgrp() -> None:
+    """BUG-230：docker.sock 权限不足时 doctor 给出 newgrp + 重启 manager/daemon 指引。"""
+    runner = _runner_from_map(
+        {
+            ("docker", "version"): _proc(
+                1,
+                stderr=(
+                    "permission denied while trying to connect to the Docker daemon "
+                    "socket at unix:///var/run/docker.sock"
+                ),
+            )
+        }
+    )
+    r = check_docker(runner=runner)
+    assert r.status == STATUS_FAIL
+    assert "权限不足" in r.message
+    assert r.suggestion is not None
+    assert "newgrp" in r.suggestion
+    assert "manager" in r.suggestion
+
+
 # ---- WBS-26.04 Docker Compose ---------------------------------------------
 
 

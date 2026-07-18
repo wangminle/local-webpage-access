@@ -384,6 +384,63 @@ def test_cancel_records_event(registry, config) -> None:
     assert any(e["event_type"] == "build_cancel" for e in events)
 
 
+def test_cancel_skips_queued_builder(registry, config) -> None:
+    """cancel 后获槽的排队任务不得再执行 builder。"""
+    _seed_instance(registry, "api")
+    _seed_instance(registry, "api2")
+    q = BuildQueue(config, registry, concurrency=1)
+    release = threading.Event()
+    ran: list[str] = []
+    errors: list[BaseException] = []
+
+    def blocking_builder(iid):
+        release.wait(2.0)
+        ran.append(iid)
+        return iid
+
+    def queued_builder(iid):
+        ran.append(iid)
+        return iid
+
+    def run_api2() -> None:
+        try:
+            q.run("api2", queued_builder, wait_timeout=2.0)
+        except BaseException as exc:  # noqa: BLE001 — 收集线程异常
+            errors.append(exc)
+
+    t1 = threading.Thread(target=lambda: q.run("api", blocking_builder))
+    t1.start()
+    # 等 api 占住槽位
+    deadline = time.time() + 2
+    while time.time() < deadline and q.in_flight() < 1:
+        time.sleep(0.01)
+
+    t2 = threading.Thread(target=run_api2)
+    t2.start()
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        # 确认已进入闸门等待（active_slots 被 api 占满且 api2 在 tasks 中）
+        if q.global_in_flight() >= 1:
+            with q._guard:
+                task = q._tasks.get("api2")
+                if task is not None:
+                    break
+        time.sleep(0.01)
+    # 给 api2 一点时间走到 acquire 等待
+    time.sleep(0.15)
+
+    assert q.cancel("api2") is True
+    release.set()
+    t1.join(timeout=3)
+    t2.join(timeout=3)
+    assert "api2" not in ran
+    with q._guard:
+        assert q._tasks["api2"].status == "cancelled"
+    assert len(errors) == 1
+    assert isinstance(errors[0], LifecycleError)
+    assert "已取消" in str(errors[0])
+
+
 def test_pending_lists_queued_tasks(registry, config) -> None:
     _seed_instance(registry, "api")
     _seed_instance(registry, "api2")

@@ -148,13 +148,49 @@ def test_daemon_lock_is_exclusive(workspace: Workspace) -> None:
 
 
 def test_daemon_lock_released_after_context(workspace: Workspace) -> None:
+    path = daemon_mod.lock_path(workspace)
     with daemon_mod.daemon_lock(workspace):
-        pass
-    # 退出后锁文件被清理
-    assert not daemon_mod.lock_path(workspace).exists()
-    # 可以再次获取
+        assert path.exists()
+        inode = path.stat().st_ino
+    # BUG-213：释放后保留锁文件，但可再次获取同一 inode
+    assert path.exists()
+    assert path.stat().st_ino == inode
     with daemon_mod.daemon_lock(workspace):
-        pass
+        assert path.stat().st_ino == inode
+
+
+def test_daemon_lock_failed_acquire_keeps_live_lock(workspace: Workspace) -> None:
+    """BUG-173：获取失败（他人持活锁）时 finally 不得删除其锁文件。
+
+    旧行为：finally 无条件 unlink，第二个 watcher 的获取失败会删掉活跃 watcher
+    的锁，is_running 假阴性、后续再次获取成功 → 重复 watcher 并发扫 inbox。
+    """
+    import os
+    import time as time_mod
+
+    from local_webpage_access.file_lock import (
+        ensure_lockable,
+        release_exclusive,
+        try_acquire_exclusive,
+        write_lock_payload,
+    )
+
+    path = daemon_mod.lock_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    write_lock_payload(fd, f"{os.getpid()}\n{time_mod.time():.3f}\n".encode())
+    try:
+        assert path.exists()
+        with pytest.raises(OSError):
+            with daemon_mod.daemon_lock(workspace):
+                pass
+        # 关键：获取失败后锁文件必须仍在（BUG-173）
+        assert path.exists()
+    finally:
+        release_exclusive(fd)
+        os.close(fd)
 
 
 # ---- 锁心跳超时回收（BUG-030）---------------------------------------------
@@ -191,6 +227,24 @@ def test_lock_is_not_stale_with_fresh_heartbeat() -> None:
         path.unlink(missing_ok=True)
 
 
+def test_lock_is_stale_single_line_uses_mtime() -> None:
+    """单行锁文件（仅 PID）用 mtime 兜底：过期则陈旧。"""
+    import os
+
+    path = Path(".bug-single-line.lock")
+    try:
+        path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        old = time.time() - 9999
+        os.utime(path, (old, old))
+        assert daemon_mod._lock_is_stale(path, stale_after=60.0) is True
+        # 新鲜 mtime → 不陈旧
+        now = time.time()
+        os.utime(path, (now, now))
+        assert daemon_mod._lock_is_stale(path, stale_after=60.0) is False
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def test_is_running_false_when_heartbeat_expired(workspace: Workspace) -> None:
     """BUG-030：watcher 卡死（PID 存活但心跳超时）→ is_running 返回 False。"""
     import os
@@ -210,31 +264,10 @@ def test_daemon_lock_reclaims_stale_heartbeat(workspace: Workspace) -> None:
     import os
 
     # 模拟一个卡死的 watcher：本进程 PID（存活）但心跳早已超时
+    # 无人持文件锁时（仅残留内容）可直接获取
     _write_lock(workspace, os.getpid(), time.time() - 9999)
-    # daemon_lock 应判定陈旧、回收并重新获取（不抛 OSError）
     with daemon_mod.daemon_lock(workspace):
         assert daemon_mod.lock_path(workspace).exists()
-
-
-def test_daemon_lock_failed_acquire_keeps_live_lock(workspace: Workspace) -> None:
-    """BUG-173：获取失败（他人持活锁）时 finally 不得删除其锁文件。
-
-    旧行为：finally 无条件 unlink，第二个 watcher 的获取失败会删掉活跃 watcher
-    的锁，is_running 假阴性、后续再次获取成功 → 重复 watcher 并发扫 inbox。
-    """
-    import os
-
-    # 模拟活跃 watcher：本进程 PID（存活）+ 新鲜心跳（不陈旧）
-    _write_lock(workspace, os.getpid(), time.time())
-    assert daemon_mod.lock_path(workspace).exists()
-
-    # 获取应失败（活锁、心跳新鲜，不可回收）
-    with pytest.raises(OSError):
-        with daemon_mod.daemon_lock(workspace):
-            pass
-
-    # 关键：获取失败后锁文件必须仍在（BUG-173），否则活跃 watcher 失去互斥
-    assert daemon_mod.lock_path(workspace).exists()
 
 
 def test_touch_lock_heartbeat_updates_timestamp(workspace: Workspace) -> None:

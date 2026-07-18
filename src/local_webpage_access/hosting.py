@@ -279,6 +279,38 @@ def build_and_host_frontend(
 # ---- WBS-15 / WBS-16 容器托管（Node / Python / SQLite）---------------------
 
 
+def _rescue_container_data_before_rebuild(
+    workspace: Workspace,
+    manifest: InstanceManifest,
+    instance_id: str,
+    runtime: DockerRuntime,
+) -> None:
+    """BUG-205：重建 ``down`` 前把容器内数据救出到宿主 ``data/``。
+
+    既有容器实例的数据库可能写在容器可写层（旧版未挂载 ``data/``、或挂载路径与新
+    版不同），重建 ``down`` 删容器会丢库。此处 best-effort 用 ``docker cp`` 把候选
+    路径的内容拷出；宿主 ``data/`` 已有内容（挂载已持久化）或无容器时跳过。失败仅
+    记日志、不抛错——迁移是保护性措施，不得阻断重建。
+    """
+    from local_webpage_access.compose import _is_sqlite, container_data_paths
+
+    if not _is_sqlite(manifest):
+        return  # 非 SQLite 文件库无 data/ 挂载，无需迁移
+    try:
+        host_data = workspace.app_data(instance_id)
+        candidates = container_data_paths(workspace.app_current(instance_id), manifest)
+        rescued = runtime.rescue_container_data(instance_id, host_data, candidates)
+        if rescued:
+            log.warning(
+                "BUG-205：实例 %s 宿主 data/ 原为空，已从旧容器救出 %d 个文件，"
+                "重建将复用（避免丢库）",
+                instance_id,
+                rescued,
+            )
+    except Exception:  # noqa: BLE001 — 迁移失败不阻断重建
+        log.exception("BUG-205 重建前数据迁移异常（忽略，继续重建）")
+
+
 def host_container(
     workspace: Workspace,
     config: Config,
@@ -317,8 +349,12 @@ def host_container(
     build_id = registry.add_build(
         instance_id, status="running", log_path=str(build_log)
     )
+    fresh_port = False
 
     try:
+        # BUG-205：重建 down 前先把容器内数据救出到宿主 data/，避免旧库随容器删除丢失
+        _rescue_container_data_before_rebuild(workspace, manifest, instance_id, runtime)
+
         # 2. 重建场景：先停掉旧容器，释放端口绑定
         try:
             if runtime.is_running(instance_id):
@@ -326,13 +362,13 @@ def host_container(
         except DockerError as exc:  # 旧容器清理失败不阻塞重建，仅记录
             log.warning("重建前清理旧容器失败（忽略）：%s", exc)
 
-        # 3. 生成 Dockerfile
-        generate_dockerfile(manifest, workspace)
+        # 3. 生成 Dockerfile（BUG-200：注入 config.buildMirrors，避免手改被覆盖）
+        generate_dockerfile(manifest, workspace, config=config)
 
         # 4. 分配/复用端口
-        host_port = _ensure_container_port(config, registry, instance_id)
+        host_port, fresh_port = _ensure_container_port(config, registry, instance_id)
 
-        # 5. 生成 Compose + .env（含 SQLite DATABASE_URL 与 data/ 挂载）
+        # 5. 生成 Compose + .env（含 SQLite DATABASE_URL / RUNTIME_ROOT 与 data/ 挂载）
         generate_compose(manifest, workspace, host_port=host_port)
         generate_env(manifest, workspace, host_port=host_port)
 
@@ -340,12 +376,13 @@ def host_container(
         runtime.build(instance_id, build_id=build_id)
         runtime.up(instance_id)
     except Exception as exc:
-        # 端口回滚：build/up 失败时释放本轮回收的端口，避免 FAILED 实例长期
-        # 占住端口、连续失败耗尽端口池（BUG-016）。
-        try:
-            PortAllocator(config, registry).release_instance(instance_id)
-        except Exception:  # noqa: BLE001
-            log.warning("失败回滚释放实例 %s 端口失败", instance_id)
+        # 端口回滚：仅释放本轮新分配的端口（与 _enable_static / BUG-182 对称）。
+        # 复用旧端口是上一轮成功部署的登记，失败时清掉会破坏 lanUrl 稳定性。
+        if fresh_port:
+            try:
+                PortAllocator(config, registry).release_instance(instance_id)
+            except Exception:  # noqa: BLE001
+                log.warning("失败回滚释放实例 %s 端口失败", instance_id)
         # DockerRuntime.build 成功/失败都会 finish 该 build 行；
         # 这里只兜底"build 尚未执行就被打断"的情况（如生成文件/分配端口失败），
         # 此时 build 行仍为 running，需要标记 failed。避免与 build() 双重 finish。
@@ -438,7 +475,7 @@ def start_container(
     # 端口：复用此前部署登记的 hostPort
     host_port = manifest.container.hostPort
     if not host_port:
-        host_port = _ensure_container_port(config, registry, instance_id)
+        host_port, _fresh = _ensure_container_port(config, registry, instance_id)
         manifest.container.hostPort = host_port
 
     # 观测 containerId / imageId
@@ -532,12 +569,16 @@ def _ensure_container_port(
     config: Config,
     registry: Registry,
     instance_id: str,
-) -> int:
+) -> tuple[int, bool]:
     """容器端口分配：优先复用已登记端口，否则新分配。
 
     复用保证重建后 lanUrl 稳定；端口被外部占用时回退到新分配。复用登记用
     :meth:`Registry.allocate_port` 的并发安全语义：若旧端口已被其他实例抢走
     （BUG-017），返回 False，回退到全新分配。
+
+    返回 ``(port, fresh)``：``fresh=False`` 表示复用了上一轮成功部署的登记，
+    调用方在本次 build/up 失败时**不得**释放它（与 :func:`_ensure_static_port`
+    / BUG-182 对称）。
     """
     allocator = PortAllocator(config, registry)
     row = registry.get_container(instance_id)
@@ -545,7 +586,7 @@ def _ensure_container_port(
     if existing and not is_port_listening(int(existing)):
         if registry.allocate_port(instance_id, int(existing)):
             log.info("复用容器实例 %s 的端口 %d", instance_id, existing)
-            return int(existing)
+            return int(existing), False
         log.warning(
             "实例 %s 的旧端口 %d 已被其他实例占用，重新分配",
             instance_id,
@@ -553,7 +594,7 @@ def _ensure_container_port(
         )
     # 全新分配：先清掉该实例可能残留的端口登记
     allocator.release_instance(instance_id)
-    return allocator.allocate(instance_id)
+    return allocator.allocate(instance_id), True
 
 
 def _ensure_static_port(
@@ -649,14 +690,12 @@ def _enable_static(
         and existing_static.routeHost
     ):
         path_alias = existing_static.routeHost
-    # 重启用场景：先停掉可能仍在运行的旧静态进程，
-    # 否则旧进程会成为孤儿（PID 文件被新进程覆盖）、旧端口继续被占用
-    if gateway.is_enabled(instance_id):
-        gateway.disable(instance_id)
     # 端口分配：优先复用已登记端口（stop 后保留），否则全新分配（BUG-045）
     host_port, fresh_port = _ensure_static_port(config, registry, instance_id)
     allocator = PortAllocator(config, registry)
 
+    # 不在 enable 前 disable：enable 会覆盖站点配置并停掉残留 builtin；
+    # 若先 disable 再 enable 失败，会留下「既无旧也无新」的悬空实例。
     backend = gateway.detect_backend()
     try:
         gateway.enable(instance_id, host_port, public_dir, alias=path_alias)

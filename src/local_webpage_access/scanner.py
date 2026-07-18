@@ -80,6 +80,7 @@ class FileSummary:
     has_pipfile: bool = False
     has_uv_lock: bool = False
     has_manage_py: bool = False
+    has_runtime_paths: bool = False  # BUG-198：src/app/runtime_paths.py 等
     node_deps: dict[str, str] = field(default_factory=dict)  # 包名 -> 版本（含 devDependencies，BUG-019）
     node_scripts: dict[str, str] = field(default_factory=dict)
     python_deps: set[str] = field(default_factory=set)
@@ -125,6 +126,14 @@ def summarize(root: Path) -> FileSummary:
             if path.name.lower().endswith(SQLITE_FILE_EXT):
                 rel = path.relative_to(root)
                 summary.sqlite_files.append(str(rel).replace("\\", "/"))
+            if path.name == "runtime_paths.py" and "app" in path.parts:
+                summary.has_runtime_paths = True
+
+    if (
+        (root / "src" / "app" / "runtime_paths.py").is_file()
+        or (root / "app" / "runtime_paths.py").is_file()
+    ):
+        summary.has_runtime_paths = True
 
     if summary.has_package_json:
         pkg = _read_package_json(root / "package.json")
@@ -375,12 +384,16 @@ class Scanner:
         )
         if summary.sqlite_files or has_sqlite_dep:
             result.hasDatabase = True
+            # BUG-198：RUNTIME_ROOT 应用写 runtime/data，compose 据此挂载
+            data_dir = "runtime/data" if summary.has_runtime_paths else "data"
             result.database = DatabaseConfig(
                 type="sqlite",
-                dataDir="data",
+                dataDir=data_dir,
             )
             if summary.sqlite_files:
                 result.notes.append(f"发现 SQLite 文件：{', '.join(summary.sqlite_files[:3])}")
+            if summary.has_runtime_paths:
+                result.notes.append("检测到 runtime_paths，SQLite 持久化目录为 runtime/data")
 
     # ---- 静态 --------------------------------------------------------------
 
@@ -471,12 +484,21 @@ class Scanner:
             )
             # IMP-018：重运行时依赖（lancedb/pyarrow/torch/openai …）自动升 medium。
             self._detect_heavy_deps(summary, result)
+            start = _python_start_command(matched, summary)
             result.entry = EntryConfig(
                 install=_python_install_command(summary),
                 build=None,
-                start=_python_start_command(matched, summary),
+                start=start,
             )
-            result.confidence = "high"
+            if start is None:
+                # 已识别框架但无启动模板：不得标高置信度，否则容器 CMD 为空必失败
+                result.pending = True
+                result.confidence = "medium"
+                result.notes.append(
+                    f"已识别框架 {sorted(set(matched))} 但缺少启动命令模板，标记 pending"
+                )
+            else:
+                result.confidence = "high"
         else:
             result.pending = True
             result.confidence = "low"
@@ -575,7 +597,8 @@ def _python_install_command(summary: FileSummary) -> str:
 
 def _python_start_command(matched: list[str], summary: FileSummary) -> str | None:
     fw = _select_python_framework(matched)
-    if fw in ("fastapi", "uvicorn"):
+    if fw in ("fastapi", "uvicorn", "starlette"):
+        # starlette 应用通常经 uvicorn 托管
         return 'uvicorn main:app --host 0.0.0.0 --port 8000'
     if fw == "flask":
         return 'flask --app app run --host 0.0.0.0 --port 5000'
@@ -584,6 +607,12 @@ def _python_start_command(matched: list[str], summary: FileSummary) -> str | Non
     if fw == "streamlit":
         return "streamlit run app.py --server.port 8501"
     if fw == "gradio":
+        return "python app.py"
+    if fw == "gunicorn":
+        return "gunicorn -b 0.0.0.0:8000 app:app"
+    if fw == "sanic":
+        return "sanic app.app --host=0.0.0.0 --port=8000"
+    if fw == "tornado":
         return "python app.py"
     return None
 

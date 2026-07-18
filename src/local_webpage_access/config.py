@@ -67,6 +67,57 @@ class StaticRateLimit(BaseModel):
     burst: int = Field(default=6, ge=1, le=100000)
 
 
+# BUG-200：容器构建期国内镜像（与 install-docker 阿里云默认口径一致）。
+_CHINA_PIP = "https://mirrors.aliyun.com/pypi/simple/"
+_CHINA_NPM = "https://registry.npmmirror.com"
+_CHINA_NODE_DIST = "https://mirrors.aliyun.com/nodejs-release"
+_CHINA_APT = "mirrors.aliyun.com"
+
+
+class BuildMirrors(BaseModel):
+    """Dockerfile 构建依赖镜像源（BUG-200 / BUG-201）。
+
+    面向国内小主机：默认 ``enabled=true``，注入 pip/npm/Node 发行包与 apt 镜像。
+    海外环境可设 ``enabled: false`` 走官方源。字段非空时覆盖 preset 默认值。
+    """
+
+    enabled: bool = True
+    preset: str = "china"  # china | none
+    pip: str | None = None
+    npm: str | None = None
+    nodeDistBase: str | None = None
+    aptMirror: str | None = None
+
+    @field_validator("preset")
+    @classmethod
+    def _validate_preset(cls, v: str) -> str:
+        allowed = {"china", "none"}
+        lower = (v or "none").lower()
+        if lower not in allowed:
+            raise ValueError(f"buildMirrors.preset 必须是 {allowed} 之一，得到 {v!r}")
+        return lower
+
+    def resolved(self) -> BuildMirrors:
+        """返回已展开 URL 的副本（enabled=false 时各源为 None）。"""
+        if not self.enabled or self.preset == "none":
+            return BuildMirrors(
+                enabled=False,
+                preset="none",
+                pip=None,
+                npm=None,
+                nodeDistBase=None,
+                aptMirror=None,
+            )
+        return BuildMirrors(
+            enabled=True,
+            preset="china",
+            pip=self.pip or _CHINA_PIP,
+            npm=self.npm or _CHINA_NPM,
+            nodeDistBase=(self.nodeDistBase or _CHINA_NODE_DIST).rstrip("/"),
+            aptMirror=self.aptMirror or _CHINA_APT,
+        )
+
+
 class Config(BaseModel):
     """``local-web.yml`` 的完整配置模型。"""
 
@@ -82,6 +133,7 @@ class Config(BaseModel):
     buildConcurrency: int = Field(default=1, ge=1, le=8)
     defaultResourceLimits: ResourceLimits = Field(default_factory=ResourceLimits)
     staticRateLimit: StaticRateLimit = Field(default_factory=StaticRateLimit)
+    buildMirrors: BuildMirrors = Field(default_factory=BuildMirrors)
     lanIpStrategy: str = "auto"
     manualLanIp: str | None = None
     logLevel: str = "INFO"
@@ -236,6 +288,15 @@ staticRateLimit:
   rps: 3        # 每客户端每秒平均请求数
   burst: 6      # 令牌桶容量（瞬时突发上限）
 
+# 容器构建镜像源（BUG-200）：默认启用国内源；海外可设 enabled: false
+buildMirrors:
+  enabled: true
+  preset: china
+  # pip: https://mirrors.aliyun.com/pypi/simple/
+  # npm: https://registry.npmmirror.com
+  # nodeDistBase: https://mirrors.aliyun.com/nodejs-release
+  # aptMirror: mirrors.aliyun.com
+
 # 局域网 IP 获取策略：auto（自动探测）| manual（手动指定）
 lanIpStrategy: auto
 manualLanIp: null
@@ -246,6 +307,7 @@ logLevel: INFO
 
 
 __all__ = [
+    "BuildMirrors",
     "Config",
     "PortPool",
     "ResourceLimits",

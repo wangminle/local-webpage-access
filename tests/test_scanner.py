@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from local_webpage_access.models import Kind, ResourceProfile, Runtime, ServingMode
 from local_webpage_access.scanner import Scanner, summarize
 
@@ -220,6 +222,28 @@ def test_python_multi_framework_port_command_consistent() -> None:
         assert cmd is not None
         assert "--port 5000" in cmd
         assert "flask" in cmd
+
+
+@pytest.mark.parametrize(
+    "framework,needle",
+    [
+        ("sanic", "sanic"),
+        ("tornado", "python app.py"),
+        ("starlette", "uvicorn"),
+        ("gunicorn", "gunicorn"),
+    ],
+)
+def test_python_secondary_frameworks_have_start_command(
+    tmp_path: Path, framework: str, needle: str
+) -> None:
+    """PYTHON_WEB 内框架须有启动命令，避免高置信度却 CMD 为空。"""
+    (tmp_path / "requirements.txt").write_text(f"{framework}\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.confidence == "high"
+    assert result.entry is not None
+    assert result.entry.start is not None
+    assert needle in result.entry.start
 
 
 def test_detect_python_streamlit_is_medium(tmp_path: Path) -> None:

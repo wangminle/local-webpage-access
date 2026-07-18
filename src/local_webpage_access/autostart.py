@@ -230,6 +230,9 @@ def build_systemd_unit(
         # 未加引号时含空格目录（WSL 默认 PATH 必含 /mnt/c/Program Files 之类）会被截断，
         # 监管进程拿到损坏 PATH。_unit_path_env 已兼容带引号读取。
         f'Environment="PATH={_build_path_env(caddy_dir)}"',
+        # BUG-230：systemd --user 无法可靠设置 SupplementaryGroups=docker；
+        # 用户须在 usermod -aG docker 后重新登录，再 systemctl --user restart 本单元，
+        # 否则 manager/daemon 无 docker.sock 权限，会把运行中容器误标 stopped。
         f"ExecStart={exec_start}",
         "Restart=on-failure",
         "RestartSec=5",
@@ -1118,7 +1121,7 @@ def render_wsl_windows_script(ws: Workspace, config: Config) -> str:
         "# 停止保活：在任务计划程序里结束本任务（发行版随后可空闲关机）。\n"
         f"$distro = \"{distro}\"\n"
         "wsl.exe -d $distro -- bash -lc 'systemctl --user start lwa-daemon.service "
-        "lwa-manager.service 2>/dev/null; exec sleep infinity'\n"
+        "lwa-manager.service lwa-gateway.service 2>/dev/null; exec sleep infinity'\n"
     )
 
 
@@ -1650,9 +1653,24 @@ def _check_docker(ws: Workspace) -> CheckItem:
                          "有容器实例但 docker 命令缺失",
                          fix="安装 Docker Engine/Desktop")
     try:
-        res = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
+        res = subprocess.run(["docker", "info"], capture_output=True, timeout=10, text=True)
         if res.returncode == 0:
             return CheckItem("docker", "docker", STATUS_OK, "Docker 引擎可达")
+        blob = f"{res.stderr or ''}\n{res.stdout or ''}"
+        from local_webpage_access.docker_runtime import (
+            DOCKER_PERMISSION_HINT,
+            is_docker_permission_error,
+        )
+
+        # BUG-230：权限不足时给出 newgrp + 重启 manager/daemon 指引
+        if is_docker_permission_error(blob):
+            return CheckItem(
+                "docker",
+                "docker",
+                STATUS_WARN,
+                "Docker 权限不足（docker.sock），manager/daemon 无法观测容器",
+                fix=DOCKER_PERMISSION_HINT,
+            )
         return CheckItem("docker", "docker", STATUS_WARN,
                          "docker info 返回非零，引擎可能未启动",
                          fix="启动 Docker Desktop/Engine（建议设为登录/开机启动）")

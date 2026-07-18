@@ -1,7 +1,7 @@
-# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～032（202607）
+# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～034（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
-> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环待开发**；**IMP-034 日志可观测性补强待开发**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强（CLI/daemon 落盘、生命周期阶段事件、能力探测结构化日志）。
 
 ---
 
@@ -648,3 +648,508 @@ lwa init  [--default | --full] [--yes] [--force] [--workspace ...]
 预计主要触点：`cli/system.py`、`cli/__init__.py`、`setup.py`（或 `host_bootstrap.py`）、`scripts/install-caddy-*.sh`、`scripts/install-docker-*.sh`、Skill/README、测试。
 
 
+## 13. IMP-033 — Full Profile 权限契约与 LWA / Caddy / Docker 能力闭环
+
+> **提出背景（2026-07-18）**：Ubuntu 实机通过 `sg docker` 执行 `lwa start` 后，容器实际运行，但 systemd user 启动的 manager / daemon 未继承 `docker` 组权限；后台 `docker compose ps` 访问 Docker socket 失败，LWA 又把“无权观测”误判并回写为 `stopped`，造成 CLI、管理页、Docker 实际状态互相矛盾。
+>
+> **与 IMP-032 的关系**：IMP-032 已完成“安装 Caddy / Docker / Compose 并检查版本”的第一阶段；IMP-033 将 `--full` 从“组件安装档”提升为“完整运行能力契约”。本节口径覆盖 §12.1.4 中“full 不保证装完即可无人值守跑业务”以及仅提示重新登录的旧边界：今后 `full` 未完成运行身份、权限继承、后台能力和重启验收时，必须判定为 `unready`，不得宣称安装成功。
+>
+> **当前止血状态**：BUG-230 已于 2026-07-18 完成首轮修复——Docker 权限失败不再直接回写 stopped，并补充后台权限探测与诊断提示；IMP-033 仍需把该点提升为统一 `CapabilityReport`、正式 observed/unknown 状态语义和 Full Profile 原子验收，不能把单点修复视为整项完成。
+
+### 13.1 问题分析
+
+#### 13.1.1 已复现故障链
+
+1. Docker 安装脚本执行 `usermod -aG docker <user>`，但已经运行的 shell、`systemd --user` 和其子进程不会自动刷新 supplementary groups。
+2. 用户用 `sg docker` 或 `newgrp docker` 启动 CLI，只让该临时子进程获得 Docker 权限；既有 manager / daemon 仍使用旧权限上下文。
+3. CLI 能成功执行 `docker compose build/up`，manager / daemon 却无法访问 `/var/run/docker.sock`。
+4. `DockerRuntime.status()` 把 `docker compose ps` 的任何非零结果压缩为 `None`，没有区分“容器不存在”和“权限不足 / daemon 不可达 / 超时”。
+5. `_observe_container_status()` 再把 `None` 或异常统一解释为 `STOPPED`，覆盖最后一次可信运行态；管理页因此显示已停止，即使 Docker 中容器仍在运行。
+6. 当前 setup / doctor 多数检查发生在 CLI 当前进程，只能证明“当前终端可用”，不能证明 manager / daemon / gateway 的真实运行上下文可用。
+
+#### 13.1.2 根因归类
+
+| 类别 | 根因 | 后果 |
+| --- | --- | --- |
+| 档位语义 | `--full` 只保证组件安装与版本，不保证整体可运行 | 安装结果假绿 |
+| 身份分裂 | CLI、manager、daemon 可能由不同权限上下文启动 | 同一 LWA 对 Docker 的结论不一致 |
+| 权限刷新 | `docker` 组变更未传播到已有会话 / user manager | 后台永久 permission denied |
+| 状态建模 | “观测失败”与“确认 stopped”没有区分 | 实际运行容器被错误回写 stopped |
+| Caddy 策略 | 显式 `staticGateway: caddy` 仍可能降级 builtin | full 对外入口能力不确定 |
+| 验收缺口 | 缺少后台进程自检、重启后检查和最小真实闭环 | 当前会话可用但重启后失效 |
+
+#### 13.1.3 为何 macOS 不易复现、Ubuntu 易踩中
+
+本故障**不是**「LWA 在 macOS 上更正确」，而是平台 Docker 权限模型不同：
+
+| 平台 | Docker 形态 | 权限特点 | 与本次故障关系 |
+| --- | --- | --- | --- |
+| **macOS** | Docker Desktop，用户态 socket（如 `~/.docker/run/docker.sock`） | 登录用户天然可访问；一般无 `usermod -aG docker` + 重登刷新组 | CLI / launchd 拉起的 manager/daemon 通常同属已登录用户会话，**很少出现「CLI 有权、后台无权」** |
+| **Ubuntu / Linux** | Docker Engine，系统 socket `/var/run/docker.sock`（`root:docker`） | 须加入 `docker` 组；组变更**只对之后新建登录会话**生效 | 中途加组 + CLI 用 `sg docker` 临时提权，而 systemd `--user` 仍持旧组 → **正是本次复现路径** |
+| **WSL** | 常对接 Docker Desktop 或 WSL 内 Engine | Desktop 路径接近 macOS；Engine 路径接近 Ubuntu | 验收须标明实际后端，勿用「WSL 一次绿」覆盖两种模型 |
+
+设计含义：
+
+1. **macOS 验收不能代替 Ubuntu Full 权限闭环**：Desktop「能跑」只证明用户态 socket 路径，不证明 Linux `docker` 组 + 后台进程继承已修好。
+2. **IMP-033 主验收机以 Ubuntu（含可选 WSL-Engine）为准**；macOS 侧重 Desktop 启动慢、二进制/daemon 区分（见 §13.10）。
+3. 文档与 Skill 须写清：用户在 Mac 上「从没遇到权限问题」**不能**作为 Full Profile 已完成的证据。
+
+#### 13.1.4 对 IMP-032 旧边界的覆盖（口径废止）
+
+§12.1.4 / §12.6 中下列表述在 **IMP-033 落地后对 Full Profile 不再成立**（Default Profile 仍可保留宽松语义）：
+
+| IMP-032 旧表述 | IMP-033 新口径 |
+| --- | --- |
+| full 不保证装完即可无人值守跑业务（Linux 可能要重登才生效 docker 组） | Full **必须**把「重登 / resume / 后台复检」纳入安装状态机；未闭环 → `session_refresh_required` 或 `unready`，**不得** exit 0 假绿 |
+| full 成功后仅「提示」可将 `staticGateway` 设为 caddy | `init --full` 默认 caddy（032.d）且运行期 **禁止** caddy→builtin 静默降级（§13.3.3） |
+| doctor / setup 在 CLI 进程检查 Docker 即可 | 必须分别验证 **CLI / manager / daemon** 真实上下文（§13.5、§13.7） |
+
+§12 作为「装组件」史仍保留；实现与文档引用 Full 语义时以 **本节为准**。
+
+#### 13.1.5 Ubuntu 新复现：系统 Caddy 身份侵入 LWA 工作区
+
+第二台 Ubuntu 在管理页设置路径别名时出现 `[GATEWAY_ERROR] Caddy reload 失败`，核心错误为：
+
+```text
+mkdir /home/<serviceUser>/local-webpage-access: permission denied
+```
+
+现场身份与资源关系：
+
+| 对象 | 实际身份 / 权限 | 需要访问 | 结果 |
+| --- | --- | --- | --- |
+| LWA manager / daemon | 登录用户 `serviceUser` | 工作区、Docker socket | Docker 权限问题修复后可用 |
+| 发行版 `caddy.service` | 系统用户 `caddy`（如 UID 997） | 用户 home 下的 Caddyfile、aliases、sites、`logs/static-access.log` | home 为 `0750/0700` 时无法穿越或写入，reload 失败 |
+| Docker daemon | root（由 socket 授权控制） | 容器运行资源 | 与 Caddy 文件权限相互独立 |
+
+这不是简单的“日志目录少一个 ACL”，而是 **Caddy master 所有权错误**：LWA 预期自行启动并管理工作区 Caddy，但 `:2019` 上实际可能已经是发行版 systemd 以 `caddy` 用户启动的 master。当前风险点包括：
+
+1. Linux Caddy 安装脚本在“已安装版本达标”的 `already_good` 快速路径直接退出，没有执行 `disable_system_caddy_service`。
+2. 禁用系统 `caddy.service` 使用 best-effort `|| true`，失败也可能继续宣称安装完成。
+3. `ensure_caddy_running()` 只要发现 admin `:2019` 在线就返回成功，没有同时要求本工作区 pidfile、进程身份和配置根归属匹配。
+4. reload 会向在线 admin 推送 LWA 工作区配置；若 master 属于 `caddy` 用户，它既无法访问用户 home，也可能让 LWA误操作用户原有的系统 Caddy。
+
+**不采用的默认修复**：不应默认递归 `setfacl -R`、把工作区 `chown` 给 `caddy:caddy`，也不应执行 `chmod o+rx /home/<user>`。这些做法会扩大整个用户工作区和 home 的可见范围，破坏 LWA service identity 与文件所有权，且不能解决“LWA 正在借用外部 Caddy master”的控制权问题。
+
+**正确口径**：Full Profile 的 Caddy master 必须由 LWA 明确认领并以 `serviceUser` 运行；若检测到外部/系统 Caddy，先进入 `caddy_owner_mismatch`，在用户确认的安装阶段完成停用、接管和复检。在未来明确支持“外部 Caddy 集成模式”之前，不把 ACL 共享工作区作为 Full 默认方案。
+
+### 13.2 产品口径：Full Profile 是强制基础能力集合
+
+`--default` 与 `--full` 是两套整体运行契约，而不是同一契约上的临时安装选项：
+
+| 契约 | 强制基础能力 | 不满足时行为 |
+| --- | --- | --- |
+| **Default Profile** | 工作区、CLI、manager、daemon、builtin gateway、非特权端口静态托管 | 按现有必需项决定 ready；Docker / Caddy 可缺失 |
+| **Full Profile** | Default 全部能力 + Caddy + Docker Engine + Docker Compose + CLI/manager/daemon 的统一 Docker 控制权 + Caddy 严格托管 + 自启动与重启后恢复 | 任一强制项不满足即 `unready` / `degraded`，安装命令非零退出，不允许假绿 |
+
+核心规则：
+
+1. **选择前可选，选择后强制**：Docker / Caddy 在用户选择档位前是可选能力；执行 `setup/init --full` 后即成为该工作区和该安装实例的基础能力。
+2. **LWA 是统一控制面**：Caddy 与 Docker 不互相管理，统一由 LWA 编排、观测、启停与诊断。
+3. **权限必须覆盖整体**：不能只让 CLI 临时获得权限；manager、daemon 也必须在其真实后台上下文中具备相同 Docker 能力。
+4. **运行期不依赖临时提权**：禁止把 `sudo lwa ...`、`sg docker lwa ...` 或 `chmod 666 /var/run/docker.sock` 当成正式运行方案。
+5. **安装期与运行期分离**：安装系统包、写系统单元可在用户确认后临时使用 sudo；安装完成后的 LWA 业务进程仍以确定的非 root 运行身份常驻。
+
+### 13.3 统一运行身份与权限边界
+
+#### 13.3.1 LWA service identity
+
+一次 Full Profile 安装必须固化唯一的 `serviceUser`（默认发起安装的真实登录用户，而非临时 sudo 的 root）：
+
+```text
+LWA serviceUser
+├── lwa CLI
+├── lwa manager
+├── lwa daemon
+├── lwa gateway（Caddy 控制器）
+└── lwa runtime controller（Docker 控制器）
+```
+
+工作区配置或安装状态中记录：`profile=full`、`serviceUser`、`workspaceRoot`、Docker endpoint、Caddy executable/config root、安装版本和最近一次能力验收时间。启动任何后台单元时必须校验这些身份信息与当前进程一致，发现 workspace / user 漂移即拒绝假启动。
+
+#### 13.3.2 Docker 权限
+
+优先级建议：
+
+1. **Rootless Docker（优先）**：使用 serviceUser 自己的 socket，并固化 `DOCKER_HOST` 到 LWA 单元环境；权限天然与用户一致。
+2. **Rootful Docker + docker 组（兼容主路径）**：把 serviceUser 加入 `docker` 组；所有需要容器能力的后台进程必须实际继承该 supplementary group。
+3. **Linux Full 推荐监管方式**：安装 system-level LWA unit，但用 `User=<serviceUser>`、`Group=<primaryGroup>`、`SupplementaryGroups=docker` 启动 LWA 进程；systemd 管理单元不等于业务进程以 root 运行，可避免既有 `systemd --user` 组缓存导致权限漂移。若继续使用 user unit，则 `setup --full` 必须进入 `session_refresh_required`，在重新登录 / 重启并复检前不得 ready。
+
+安全说明：rootful Docker 的 `docker` 组近似宿主机 root 能力。Full Profile 必须在安装确认页明确告知；仅允许受信任用户导入受信任项目，继续保留 Compose 敏感挂载、Docker socket、宿主路径等安全审计。
+
+#### 13.3.3 Caddy 权限
+
+- 默认监听 LWA 约定的非特权端口（如 `staticGatewayPort` 和实例 hostPort），以 serviceUser 运行，不需要 root。
+- 若未来直接监听 80/443，只向 Caddy 进程精确授予 `CAP_NET_BIND_SERVICE` 或交给独立系统代理；不得因此让 manager / daemon / CLI 全体 root 化。
+- Full Profile 由 `lwa-gateway` 唯一托管 Caddy，安装流程应检测并处理发行版自带 `caddy.service` 冲突，避免两个 master 争用 admin `:2019` 或业务端口。
+- `staticGateway: auto` 才允许降级 builtin；`staticGateway: caddy` 和 Full Profile 必须严格使用 Caddy，启动或 reload 失败即整体 degraded，不静默降级。
+- Caddy 所有权不能仅凭“`:2019` 可连接”判断；必须同时验证：本工作区 `run/caddy.pid` 存活、进程可执行文件为预期 Caddy、进程 euid 等于 `serviceUser`、启动参数/config root 指向本工作区、gateway state 的 workspaceRoot 一致。
+- LWA 启动 Caddy 前应以 `serviceUser` 对 Caddyfile、sites、aliases 做读测试，对 `logs/static-access.log` 及其父目录做创建/追加测试；任一失败返回 `workspace_access_denied`，禁止执行 reload。
+- 检测到 `caddy.service` active/enabled 或外部 `:2019` 时，Full setup 必须 fail closed：展示 PID/euid/unit/config，取得确认后 `disable --now`，确认 admin 端口释放，再由 `lwa-gateway` 接管；停用失败不得继续 ready。
+- 独立系统用户 `caddy` 访问 LWA 工作区仅作为未来显式 `external-caddy` 模式研究项；该模式需独立配置根、日志传递与最小 ACL 设计，不与当前 Full Profile 混用。
+
+#### 13.3.4 文件与密钥权限
+
+| 对象 | 建议权限 | 所有者 |
+| --- | --- | --- |
+| 工作区根、`apps/`、`data/`、`run/` | `0700`（需要协作时显式放宽） | serviceUser |
+| token、`.env.local`、状态密钥 | `0600` | serviceUser |
+| 普通配置、Caddy 片段 | `0600` 或最小可读 | serviceUser |
+| 日志 | 默认 `0600`，按现有滚动策略管理 | serviceUser |
+| 系统 unit | `0644` | root（仅定义如何以 serviceUser 启动） |
+
+### 13.4 LWA / Caddy / Docker 协作模型
+
+```text
+用户 / 管理页
+      │
+      ▼
+LWA Manager ───────► LWA lifecycle / registry
+      │                        │
+      │                        ├──► Docker Engine / Compose（容器实例）
+      │                        │
+      └────────────────────────└──► LWA Gateway / Caddy（统一入口、别名、静态实例）
+
+LWA Daemon ─► 导入 / 调度 ─► 同一 lifecycle
+LWA Doctor ─► 分别验证 CLI、manager、daemon、gateway 的真实能力
+```
+
+协作约束：
+
+- manager / daemon 不自行拼接另一套 Docker 或 Caddy 行为，统一调用 lifecycle/runtime 层。
+- Docker 负责镜像、容器、网络和容器日志；Caddy 负责统一入口、静态站点、路径别名和访问日志；registry 保存 LWA 的期望状态与最后可信观测。
+- Full Profile 启停顺序：Docker daemon ready → LWA runtime capability ready → Caddy ready → manager / daemon ready → 实例 reconcile。
+- Docker 或 Caddy 暂时不可用时，LWA 控制面仍应可打开并展示 degraded 原因，但不得执行会扩大状态偏差的自动纠正。
+
+### 13.5 能力模型与状态语义
+
+#### 13.5.1 能力状态
+
+建议增加统一 `CapabilityReport`，至少包含：
+
+```text
+profile: default | full
+overall: ready | degraded | unready
+dockerEngine: ready | unavailable | version_unsupported
+dockerCompose: ready | unavailable | version_unsupported
+dockerAccess: ready | permission_denied | daemon_unavailable | timeout | unknown
+caddyBinary: ready | unavailable | version_unsupported
+caddyRuntime: ready | admin_unavailable | config_invalid | port_conflict | owner_mismatch | workspace_access_denied | unknown
+caddyOwner: lwa_service_user | system_caddy | foreign_process | unknown
+caddyProcessUser: <user-or-uid>
+caddyWorkspaceAccess: ready | read_denied | write_denied | unknown
+managerDockerAccess: ...
+daemonDockerAccess: ...
+gatewayAccess: ...
+sessionRefreshRequired: true | false
+```
+
+该报告由 setup、doctor、autostart check、manager `/api/health` 共用同一判定源，避免四套口径漂移。
+
+#### 13.5.2 实例状态必须区分“停止”与“观测失败”
+
+建议把现有单一 status 语义拆开：
+
+```text
+desiredState: running | stopped
+observedState: running | stopped | exited | missing | unknown
+observationError: null | permission_denied | daemon_unavailable | timeout | ...
+lastObservedAt: timestamp
+lastTrustedState: running | stopped | ...
+```
+
+兼容现有 API 时可以先增加 `runtimeAccess` / `observationError` 字段，并遵循：
+
+- `docker compose ps` 明确返回无容器，才能判 `missing/stopped`。
+- 权限不足、Docker daemon 不可达、超时、输出无法解析均判 `unknown`。
+- `unknown` 不覆盖 `lastTrustedState`，不得写成 stopped，不触发自动 stop/start/rebuild。
+- 管理页显示“运行状态未知：manager 无 Docker 权限”，并给出可执行修复命令。
+- `desiredState` 始终只表达用户意图，不因观测失败被反向修改。
+
+#### 13.5.3 daemon reconcile 与观测失败的交互
+
+`daemon.reconcile` 在 Full / 容器路径上必须遵守：
+
+| `observationError` / `runtimeAccess` | reconcile 行为 |
+| --- | --- |
+| `null` 且 `observedState=stopped\|exited\|missing`，且 `desiredState=running` | 允许按现有逻辑尝试轻量恢复（`start` / restart） |
+| `permission_denied` / `daemon_unavailable` / `timeout` / `unknown` | **禁止**自动 start/stop/rebuild；记事件；保持 `lastTrustedState` |
+| Full Profile 且 `CapabilityReport.overall≠ready` | 整轮 reconcile **跳过容器实例**的自动纠正；静态 builtin 是否自愈可另议，但不得因 Docker 不可用以「恢复」名义写 stopped |
+
+理由：权限/引擎故障属于**控制面降级**，自动 reconcile 只会放大 CLI 与管理页的状态分裂（正是 Ubuntu 故障的放大器）。
+
+### 13.6 `setup --full` 原子安装与验收流程
+
+```text
+解析 full 契约
+  → 确定 serviceUser / workspace
+  → 安装并校验 Docker、Compose、Caddy
+  → 配置 serviceUser 的持久 Docker 权限
+  → 安装/更新 LWA 后台监管单元
+  → 检测并停用冲突的系统 Caddy，确认 :2019 释放
+  → 以 serviceUser 启动 LWA Caddy，验证 owner + workspace 读写 + reload
+  → 启动/确认 Docker
+  → 从 CLI、manager、daemon 的真实上下文分别做能力自检
+  → 执行最小 Docker build/up/ps/down 闭环
+  → 执行 Caddy validate/reload/HTTP 闭环
+  → 执行系统/会话重启后的 autostart 复检
+  → 全部通过才写 profile=full、overall=ready
+```
+
+必须支持幂等与可恢复：若 Linux 组权限需要重新登录，保存 `full-setup-state`（已完成步骤、待刷新原因、serviceUser），返回明确非零状态和 `lwa setup --full --resume` 指引；恢复后从能力复检继续，而不是重复安装或假装完成。
+
+建议退出语义：
+
+| 结果 | 退出码建议 | 含义 |
+| --- | --- | --- |
+| `ready` | 0 | Full 契约全部满足 |
+| `session_refresh_required` | 2 | 系统变更已完成，但权限上下文尚未生效，需要重登/重启后 resume |
+| `unready` | 1 | 安装、版本、权限或闭环验收失败 |
+
+### 13.7 CLI、管理页与诊断设计
+
+新增或增强：
+
+```text
+lwa setup --full [--resume] [--yes]
+lwa doctor --profile full
+lwa autostart check --profile full
+lwa capabilities [--json]
+```
+
+Full doctor 输出至少包括：
+
+```text
+Workspace                 ready
+Service identity          ready (user=...)
+Docker Engine             ready
+Docker Compose            ready
+CLI Docker access         ready
+Manager Docker access     ready
+Daemon Docker access      ready
+Caddy binary              ready
+Caddy admin/reload        ready
+Gateway ownership         ready
+Autostart                 ready
+Overall                   READY
+```
+
+管理页顶部增加 Full Profile 健康状态；若 degraded，实例列表仍可读，但容器操作按钮禁用并显示原因。权限修复后支持“重新检测能力”，检测通过再恢复操作。
+
+#### 13.7.1 最小 API / health JSON 草案（实现契约）
+
+`GET /api/health`（及 `lwa capabilities --json`）在 Full 相关字段上建议兼容扩展：
+
+```json
+{
+  "version": "V0.x.x",
+  "workspaceRoot": "/path/to/workspace",
+  "profile": "full",
+  "overall": "degraded",
+  "serviceUser": "fenix",
+  "capabilities": {
+    "dockerEngine": "ready",
+    "dockerCompose": "ready",
+    "cliDockerAccess": "ready",
+    "managerDockerAccess": "permission_denied",
+    "daemonDockerAccess": "permission_denied",
+    "caddyBinary": "ready",
+    "caddyRuntime": "owner_mismatch",
+    "caddyOwner": "system_caddy",
+    "caddyProcessUser": "caddy",
+    "caddyWorkspaceAccess": "write_denied",
+    "sessionRefreshRequired": true
+  },
+  "action": "refresh login/systemd user session, then: lwa setup --full --resume"
+}
+```
+
+实例详情 / 列表项建议增加（可与现有 `status` 并存一个版本周期）：
+
+```json
+{
+  "id": "prd-...",
+  "desiredState": "running",
+  "status": "running",
+  "observedState": "unknown",
+  "runtimeAccess": "permission_denied",
+  "lastTrustedState": "running",
+  "lastError": "Docker 权限不足：manager 无法访问 docker.sock"
+}
+```
+
+兼容规则：旧前端只读 `status` 时，**不得**在 `runtimeAccess=permission_denied` 时把 `status` 写成 `stopped`（BUG-230 止血约束）；新前端优先展示 `observedState` + `runtimeAccess`。
+
+### 13.8 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **033.01** | P0 | 固化 Full Profile 强契约与持久安装状态 | `config.py`、`models.py`、`host_bootstrap.py` | 能持久区分 default/full，记录 serviceUser、endpoint、验收时间；旧配置平滑迁移 |
+| **033.02** | P0 | 在 BUG-230 止血修复上补全正式观测状态模型 | `docker_runtime.py`、`lifecycle.py`、`status.py`、registry schema | 权限/daemon/timeout/解析失败统一进入 unknown；持久化最后可信状态、lastObservedAt 与 observationError，API 兼容迁移 |
+| **033.03** | P0 | 建立统一 `CapabilityReport` | 新建 capability 模块，接入 setup/doctor/status | CLI 当前进程可准确区分版本、权限、daemon、超时和 Caddy 故障 |
+| **033.04** | P0 | manager / daemon 真实上下文能力自检 | `manager_service.py`、`daemon.py`、`manager_api.py` | 后台进程自行探测 Docker；健康 API 与状态文件可查询，不能用 CLI 结果冒充 |
+| **033.05** | P0 | Linux 持久 Docker 权限与 service identity 编排 | Docker 安装脚本、`autostart.py`、systemd unit | rootless 或 `User` + `SupplementaryGroups=docker` 路径可用；无 `sg docker` 依赖；运行进程非 root |
+| **033.06** | P0 | `setup --full` 分阶段状态机与 `--resume` | `host_bootstrap.py`、`setup.py`、CLI | session refresh 可恢复；未闭环不写 ready；退出码与提示稳定可测 |
+| **033.07** | P0 | Caddy 严格模式、唯一所有权与 serviceUser 接管 | `config.py`、`static_gateway.py`、`gateway_service.py`、安装脚本 | full / 显式 caddy 不降级；所有 install 路径处理 caddy.service；admin 在线须校验 pid/euid/workspace；owner mismatch fail closed；以 serviceUser 接管后读写日志并 reload 成功 |
+| **033.08** | P1 | Full autostart 依赖顺序与重启恢复 | `autostart.py`、systemd/launchd 生成器 | Docker/Caddy/LWA 顺序正确；重启后 manager/daemon 仍有权限且只运行一份 |
+| **033.09** | P1 | `doctor --profile full` / `capabilities --json` | `doctor.py`、CLI | 输出组件、身份、各后台上下文能力、修复建议与整体结论 |
+| **033.10** | P1 | 管理页 degraded 展示与危险操作阻断 | `manager_api.py`、`manager_static/*` | 权限未知时不显示 stopped、不允许误操作；原因和恢复入口清晰 |
+| **033.11** | P1 | 文件、token、日志与 Caddy 配置权限收紧 | paths/setup/logging/gateway 相关模块 | 新建文件权限符合 §13.3.4；Caddy 以 serviceUser 访问，无递归开放 home/工作区或转移所有权；升级不破坏用户数据 |
+| **033.12** | P0 | 单元与集成测试 | `tests/` | 覆盖 permission denied、daemon down、timeout、身份漂移、session refresh、系统 caddy.service 已启用、foreign :2019、owner/euid 不匹配、工作区读写拒绝、严格 Caddy、resume |
+| **033.13** | P0 | Ubuntu / WSL / macOS 实机验收 | 验收脚本、`docs/acceptance-checklist.md` | Ubuntu 主路径：预启系统 caddy.service → full 接管 → alias reload/log 写入 → 重启 → 容器/管理页一致；**macOS 不替代 Ubuntu 权限验收**（§13.1.3）；WSL 须标明 Desktop vs Engine |
+| **033.14** | P1 | 文档与 Skill 同步 | README、autostart/operations/security 文档、setup Skill | 明确 Full 权限含义、Docker 组风险、故障恢复；写明 Mac「很少遇权限问题」≠ Full 已验收 |
+
+#### 13.8.1 建议实施阶段
+
+| 阶段 | 范围 | 前置 / 交付门槛 |
+| --- | --- | --- |
+| **A：停止错误扩散** | 033.02～04、033.12 对应用例 | 先修“权限失败→stopped”；管理页不再污染状态 |
+| **B：权限与安装闭环** | 033.01、033.05～06 | Full 可持久识别 serviceUser，安装可 resume，后台真实具备 Docker 权限 |
+| **C：Caddy 与自启动闭环** | 033.07～08、033.11 | Caddy 严格托管，重启后 Docker/Caddy/LWA 全链路恢复 |
+| **D：产品化与验收** | 033.09～10、033.13～14 | doctor/API/UI/文档一致，三平台验收完成 |
+
+推荐执行顺序：**A（P0 止血）→ B（权限根治）→ C（完整协作）→ D（产品化）**。A 完成前不得继续把权限失败按 stopped 处理；B/C 完成前 `setup --full` 应明确标记 legacy/incomplete，不得使用新的 `ready` 口径。
+
+### 13.9 验收标准
+
+1. Ubuntu 新机执行 `lwa setup --full` 后，CLI、manager、daemon 在各自真实上下文中均可访问 Docker；不依赖每次手工 `sudo` / `sg docker` / `newgrp docker`。
+2. Full Profile 下 Caddy、Docker、Compose 任一强制能力不满足时，overall 不得为 ready，命令不得以成功退出码假绿。
+3. Docker 权限不足时，实际运行容器不得被回写 stopped；API/管理页显示 unknown/degraded 与明确原因。
+4. `staticGateway: caddy` 和 Full Profile 不得静默降级 builtin；Caddy reload 失败要保留旧可用配置并报告 degraded。
+5. 系统重启或用户重新登录后，Docker、Caddy、manager、daemon 自动恢复且保持单实例；管理页状态与 `docker compose ps` 一致。
+6. 最小真实闭环通过：build → up → ps/health → manager 展示 running → stop → start → remove；构建日志持续可见。
+7. `lwa doctor --profile full` 与 `/api/health` 对同一能力给出一致结论，JSON 输出可供自动化验收。
+8. 安装脚本幂等；中途失败或 session refresh 后可 `--resume`，不重复破坏系统源、用户组、工作区和单元文件。
+9. Ubuntu 预先启用发行版 `caddy.service`（`User=caddy`）时，Full setup 必须识别 owner mismatch，未经确认不得 reload；接管后实际 Caddy euid 为 serviceUser，可读取站点/别名配置并追加 `logs/static-access.log`，且不修改 home 的 other 权限、不把工作区 chown 给 caddy。
+
+### 13.10 风险与边界
+
+| 风险 | 处理 |
+| --- | --- |
+| `docker` 组近似 root | Full 安装前显式告知并确认；优先 Rootless；只接受受信任项目；安全审计保持 critical 阻断 |
+| system unit 由 root 写入被误解为 LWA 以 root 运行 | 文档与 doctor 同时展示 unit owner 与进程 euid；业务进程必须是 serviceUser |
+| Linux 发行版和 WSL 的 systemd 差异 | 能力探测后选 backend；不支持时走可恢复 user-unit + session refresh 路径，不假绿 |
+| macOS Docker Desktop 启动较慢 | capability 状态区分 binary/desktop daemon；后台有限重试，超时 degraded 并提示启动 Desktop |
+| **用 macOS 绿路径误判 Linux Full 已完成** | 验收清单强制 Ubuntu（或 WSL-Engine）权限继承项；§13.1.3 写入 Skill「禁止以 Mac 代替」 |
+| Caddy 系统服务冲突 | Full 安装前检测；用户确认后 disable 冲突单元，LWA gateway 保持唯一所有权 |
+| 用 ACL/chown 快速放行系统 caddy | 不作为默认方案；避免扩大 home 暴露和双所有者漂移。Full 统一以 serviceUser 接管；未来 external-caddy 另立模式 |
+| 状态 schema 迁移影响旧 API | 先兼容新增字段并保留 status，再分阶段引入 observedState；管理页兼容两版 |
+| 控制面 degraded 时是否可用 | manager 保持只读与诊断可用；只禁用依赖故障能力的变更操作 |
+| BUG-230 止血被误当成 IMP-033 完成 | task-list / 本节文首明确：正式 unknown 模型与 CapabilityReport 仍属 DEV-076 |
+
+### 13.11 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-014` | IMP-033 问题分析、功能设计与 WBS 规划 |
+| `DOC-043` | 本文 §13 权限与能力闭环文档 |
+| `BUG-230` | WBS-033.02 的已完成止血基线：Docker 权限失败不再误写 stopped；正式状态模型仍归 DEV-076 |
+| `BUG-231` | WBS-033.07：系统 caddy.service / 外部 admin 被误当 LWA Caddy，导致 owner 与工作区权限不一致 |
+| `DEV-076` | IMP-033 主开发项，按 WBS-033.01～14 推进 |
+
+
+## 14. IMP-034 — 日志可观测性补强（排障可读）
+
+> **提出背景（2026-07-18）**：Ubuntu 实机排障时，全局 `logs/` 常看不到 CLI 操作痕迹；构建期曾出现 `build.log` 长时间为空（BUG-229 已流式止血）；Docker 权限失败时难从日志一眼区分「卡在锁/排队/构建/权限」。现有分类日志与 registry events **骨架已在**，但关键路径可观测性仍偏弱。
+>
+> **与既有项关系**：BUG-229（build 流式落盘）为实例构建日志基线；IMP-033 `CapabilityReport` / `observationError` 为本项结构化能力日志的数据源；本项**不替代** IMP-033，只保证「人能读、机器能对账」。
+>
+> **状态**：待开发。
+
+### 14.1 问题分析
+
+| 缺口 | 现状 | 排障后果 |
+| --- | --- | --- |
+| CLI 不落盘 | `cli/_common.bootstrap()` 调用 `setup_logging(level=...)` **未传 `log_dir`**，多数 CLI 操作只进终端 | 关终端后 `logs/lwa.log` 空或陈旧，无法事后复盘 |
+| daemon 文件日志路径分裂 | watcher 有 `daemon.log` FileHandler（BUG-189），但入口 `setup_logging` 仍常不带工作区 `logs/` | 命名空间/级别与 manager 不完全一致 |
+| 生命周期少阶段心跳 | `host_container` 在生成文件 → 获构建槽 → `compose build` 之间 INFO/事件不足 | 长时间无 `build.log` 时误判「调度卡死」 |
+| 权限/能力不可读 | BUG-230 有 `last_error` + 启动 WARN；缺统一「谁探测、结论、建议动作」的结构化记录 | CLI 有权、manager 无权时日志对不上 |
+| 排障地图缺失 | 文档列了目录，但无「按症状看哪个文件」索引 | 用户不知先看 build / run / manager / events |
+
+### 14.2 目标与非目标
+
+**目标**：
+
+1. CLI、manager、daemon、gateway **凡绑定工作区的进程**，默认把 `local_webpage_access.*` 日志追加到工作区 `logs/` 下约定文件（权限 `0600`，沿用滚动策略）。
+2. 容器/静态关键路径输出**可检索的阶段 INFO**，并写入 registry `events`（稳定 `event_type`），使「卡在哪一步」不依赖猜。
+3. 能力探测（Docker/Caddy）输出**结构化一行日志 + 可选 events**，字段对齐 IMP-033 `CapabilityReport`（即便 Full 未全落地，也可先落最小子集）。
+4. 文档 / FAQ / Skill 增加「症状 → 日志文件 → 命令」索引。
+
+**非目标（本期）**：
+
+- 不上集中式日志栈（ELK/Loki）；不改默认把 DEBUG 刷满磁盘。
+- 不把完整 token、`.env.local` 密钥写入任何日志（保持现有安全边界）。
+- 不替代 `docker compose` 自身输出；实例 `build.log`/`run.log` 仍是命令 stdout 真源（BUG-229）。
+- 不在本期做管理页「实时日志 tail WebSocket」（可后续单列）；现有 `lwa logs` / API tail 足够。
+
+### 14.3 关键决策
+
+| 编号 | 决策点 | 方案 |
+| --- | --- | --- |
+| **034.a** | 工作区文件落盘 | `open_workspace_registry` / 各前台入口在已知 `workspace.logs` 后调用 `setup_logging(..., log_dir=workspace.logs, force=…)`；CLI 主文件 **`logs/lwa.log`**；daemon **`logs/daemon.log`**（已有则统一格式）；manager **`logs/manager.log`**；gateway 保持现有或并入约定名 |
+| **034.b** | 幂等与多进程 | 同一进程内 handler 不重复添加（现有 `_CONFIGURED`）；多进程各写各文件，**禁止**多进程共写同一 `lwa.log` 无锁——CLI 短生命周期可接受；长驻进程只用自己的文件 |
+| **034.c** | 级别 | 默认跟 `config.logLevel` / CLI `--log-level`；阶段心跳用 **INFO**；能力探测失败用 **WARNING**；不在 INFO 打印 compose 全量 stdout（仍进实例 log） |
+| **034.d** | 生命周期事件类型 | 稳定枚举（示例）：`lifecycle_stage`（message 含 stage=…）、或细分为 `dockerfile_ready` / `compose_ready` / `build_slot_acquired` / `compose_build_start` / `compose_build_done` / `compose_up_start` / `observe_degraded`；实现时选「少量稳定类型 + message 结构化」或「多类型」，须在 Skill/文档固定，避免随意字符串 |
+| **034.e** | 能力日志格式 | 单行可 grep，建议：`capability probe role=manager dockerAccess=permission_denied sessionRefreshRequired=true hint=...`；与 `/api/health.capabilities` 字段名一致（IMP-033 §13.7.1） |
+| **034.f** | 与 IMP-033 顺序 | **可并行**：034.01～02 不依赖 Full 闭环；034.03 在 CapabilityReport 落地前可用 `probe_docker_permission()` 过渡，Report 就绪后改读同一判定源 |
+
+### 14.4 优先级与实施拆分（建议三档）
+
+#### P0 — ① CLI / daemon 统一写入工作区文件日志
+
+| WBS | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- |
+| **034.01** | CLI bootstrap 绑定工作区后写入 `logs/lwa.log` | `cli/_common.py`、`logging.py` | 任意 `lwa start/status/...` 后 `logs/lwa.log` 有带时间戳的对应记录；权限 0600 |
+| **034.02** | daemon / gateway 入口与 FileHandler 格式对齐 | `daemon.py`、`gateway_service.py` | 与 manager 相同 formatter；启动一行写明 log 路径；单测不依赖真实长跑 |
+
+#### P1 — ② 生命周期阶段 INFO + registry 事件
+
+| WBS | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- |
+| **034.03** | `host_container` / `host_static` / `host_frontend` 阶段心跳 | `hosting.py`、`lifecycle.py`、`build_queue.py` | 至少覆盖：开始托管、Dockerfile/compose 已生成、获得构建槽、compose build 开始/结束、up 开始/结束、观测降级；INFO 与 events 双写 |
+| **034.04** | 构建排队/锁等待可观测 | `build_queue.py`、`lifecycle.instance_lock` | 进入排队、排队超时、锁等待超时均有 WARNING + event，避免「只有空 build.log」 |
+
+#### P2 — ③ 权限/能力探测结构化日志（对齐 CapabilityReport）
+
+| WBS | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- |
+| **034.05** | 统一 `log_capability_probe(role, report_or_subset)` | 新建小模块或放 `logging.py` / 未来 `capability.py` | manager/daemon 启动、doctor、observe 降级路径复用；字段名与 IMP-033 一致 |
+| **034.06** | observe 降级写 event | `lifecycle._observe_container_status` | `observationError=permission_denied` 时 event + WARNING 含 role 暗示（manager sync vs CLI） |
+| **034.07** | 文档排障地图 | `docs/faq.md`、`docs/runtime-workspace.md`、`docs/operations-playbook.md`、相关 Skill | 「构建无输出 / 管理页 stopped 容器在跑 / daemon 不导入」→ 看哪个文件 + 哪条 `lwa logs` / `lwa doctor` |
+
+### 14.5 验收标准
+
+1. 执行 `lwa status`（或任意写路径命令）后，工作区 `logs/lwa.log` 出现本命令相关 INFO/WARNING，而不仅是终端输出。
+2. `lwa start` 容器实例时，在 `build.log` 仍为空的时间窗内，`lwa.log` 或 `events` 至少能看到「已生成 compose / 等待槽位 / 开始 build」之一。
+3. 模拟 Docker 权限失败：`last_error`、WARNING 行、registry event 三者信息一致，且能 grep 到 `permission_denied` 或等价字段。
+4. manager/daemon 启动时各写一条 capability 探测摘要到各自 log 文件。
+5. FAQ 增加排障地图；相关单测覆盖「带 log_dir 的 setup_logging」与阶段 event 写入（可用 tmp workspace）。
+6. 不引入密钥/token 落盘回归（现有安全测试保持绿）。
+
+### 14.6 风险与边界
+
+| 风险 | 处理 |
+| --- | --- |
+| 小主机磁盘被 INFO 打满 | 沿用 10MB×3 滚动；阶段日志短消息；禁止把 compose 全文打进 `lwa.log` |
+| CLI 与 daemon 抢写同一文件 | 分文件：`lwa.log` / `daemon.log` / `manager.log` |
+| event_type 膨胀导致前端难展示 | 固定白名单；管理页可先只展示 message |
+| 与 IMP-033 字段日后更名 | 034.f：以 CapabilityReport 为单一命名源，本项跟随 |
+
+### 14.7 与 Ubuntu 故障的对应关系
+
+| 当时现象 | 本项对应 |
+| --- | --- |
+| 全局日志没有 build 相关 | 034.01 落盘 + 034.03 阶段事件 |
+| `build.log` 空却以为没 build | BUG-229 流式 + 034.03/034.04 阶段/排队 |
+| manager 无 Docker 权限看不出 | 034.05/034.06 结构化 capability + observe 事件 |
+| 不知先看哪个文件 | 034.07 排障地图 |
+
+### 14.8 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-015` | 本 §14 规划 |
+| `DOC-046` | 本文 §14 写入 |
+| `DEV-077` | IMP-034 主开发项（WBS-034.01～07） |
+| `BUG-229` | 构建流式日志基线（已完成，本项不重复实现） |
+| `BUG-230` / `DEV-076` | 权限观测与 CapabilityReport；034.05 对齐其字段 |

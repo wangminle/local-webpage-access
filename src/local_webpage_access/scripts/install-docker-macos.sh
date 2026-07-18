@@ -213,6 +213,7 @@ verify_install() {
 
   log "完成：Docker Engine $engine_ver，Compose $compose_ver"
   warn "建议在 Docker Desktop → Settings → General 勾选「Start Docker Desktop when you sign in」（LWA 自启检查会提示）"
+  warn "若已运行 lwa manager/daemon：重启它们以使本机 Docker 环境变更生效（lwa manager off/on、lwa daemon off/on）"
 }
 
 main() {

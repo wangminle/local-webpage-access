@@ -246,6 +246,7 @@ def path_alias_lock(
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout
         while True:
+            fd: int | None = None
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
             except FileExistsError:
@@ -257,10 +258,16 @@ def path_alias_lock(
                     raise LifecycleError(f"路径别名锁被占用，等待超时（{timeout}s）")
                 time.sleep(0.05)
                 continue
-            os.write(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
-            os.close(fd)
-            file_acquired = True
-            break
+            try:
+                os.write(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
+                os.close(fd)
+                fd = None
+                file_acquired = True
+                break
+            finally:
+                if fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
         yield
     finally:
         if file_acquired:

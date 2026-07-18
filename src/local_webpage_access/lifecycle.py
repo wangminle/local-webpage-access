@@ -26,6 +26,12 @@ from typing import Any, Iterator
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LifecycleError, LwaError
+from local_webpage_access.file_lock import (
+    ensure_lockable,
+    release_exclusive,
+    try_acquire_exclusive,
+    write_lock_payload,
+)
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest, Status
 from local_webpage_access.paths import Workspace
@@ -34,7 +40,7 @@ from local_webpage_access.registry import Registry
 log = get_logger("lifecycle")
 
 _LOCK_TIMEOUT = 30.0  # 实例级锁默认等待上限（秒）
-# 进程崩溃未释放锁时的兜底回收阈值：超过该时长视为陈旧锁。
+# 进程崩溃未释放锁时的兜底观测阈值（心跳超时提示）；互斥本身由 file_lock 保证。
 _STALE_LOCK_SECONDS = 1800.0
 # 心跳刷新间隔：明显小于 _STALE_LOCK_SECONDS，确保长耗时 rebuild/build
 # 期间锁不会被误判陈旧（BUG-046）。取 staleness 的 1/3 且上限 300s。
@@ -61,22 +67,19 @@ def _get_thread_lock(instance_id: str) -> threading.RLock:
 def _touch_lock_heartbeat(lock_path: Path) -> None:
     """刷新锁文件的心跳时间戳（BUG-046）。
 
-    用临时文件 + ``os.replace`` 原子替换，避免并发 ``_lock_is_stale`` 读到半写
-    内容。锁文件不存在或不可读时为空操作（仅在已持锁时调用，故不应发生）。
-    参考实现：``daemon.touch_lock_heartbeat``（BUG-030）。
+    原地改写同一 inode（不得 ``os.replace`` / unlink），以免打断持有者的文件锁。
+    锁文件不存在或不可读时为空操作（仅在已持锁时调用，故不应发生）。
     """
     try:
-        content = lock_path.read_text(encoding="utf-8").strip().splitlines()
+        with open(lock_path, "r+", encoding="utf-8") as fh:
+            content = fh.read().strip().splitlines()
+            pid_line = content[0] if content else str(os.getpid())
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{pid_line}\n{time.time():.3f}\n")
+            fh.flush()
     except OSError:
         return
-    pid_line = content[0] if content else str(os.getpid())
-    tmp = lock_path.with_name(lock_path.name + ".hb")
-    try:
-        tmp.write_text(f"{pid_line}\n{time.time():.3f}\n", encoding="utf-8")
-        os.replace(str(tmp), str(lock_path))
-    except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -90,14 +93,11 @@ def instance_lock(
 
     双层锁：
     1. 进程内 ``threading.RLock`` —— 同进程多线程（如 daemon）串行；
-    2. 跨进程文件锁（``O_CREAT | O_EXCL``）—— 多个 ``lwa`` 进程串行。
+    2. 跨进程 :mod:`file_lock`（POSIX flock / Windows msvcrt）—— 多进程串行。
 
-    锁文件写入持有进程 PID 与时间戳，进程崩溃未释放时按
-    :data:`_STALE_LOCK_SECONDS` 回收。超时仍拿不到锁抛
-    :class:`LifecycleError`。
-
-    长耗时操作（rebuild/build）期间以独立线程周期性刷新时间戳（BUG-046），
-    避免超过 ``_STALE_LOCK_SECONDS`` 后被另一进程误回收导致跨进程并发。
+    锁文件写入持有进程 PID 与时间戳，供观测与心跳（BUG-046）。释放时**不
+    unlink**，避免等待者锁旧 inode、第三者新建并锁新 inode 的并行持锁竞态
+    （BUG-213）。超时仍拿不到锁抛 :class:`LifecycleError`。
 
     实例 ID 在入口校验（BUG-025），避免 ``..`` / ``/`` 等片段把锁文件
     写到 ``run/`` 之外。
@@ -111,6 +111,7 @@ def instance_lock(
             f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）",
             instance_id=instance_id,
         )
+    fd: int | None = None
     file_acquired = False
     lock_path = workspace.run / f"lifecycle-{instance_id}.lock"
     heartbeat_stop: threading.Event | None = None
@@ -118,30 +119,25 @@ def instance_lock(
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
         while True:
             try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            except FileExistsError:
-                if _lock_is_stale(lock_path):
-                    with contextlib.suppress(FileNotFoundError):
-                        lock_path.unlink()
-                    continue
+                ensure_lockable(fd)
+                try_acquire_exclusive(fd)
+                write_lock_payload(
+                    fd, f"{os.getpid()}\n{time.time():.3f}\n".encode()
+                )
+                break
+            except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise LifecycleError(
                         f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）",
                         instance_id=instance_id,
                     )
                 time.sleep(0.1)
-                continue
-            os.write(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
-            os.close(fd)
-            file_acquired = True
-            break
+        file_acquired = True
 
-        # 启动心跳线程：长耗时 rebuild/build 期间持续刷新时间戳，
-        # 避免锁被误判陈旧（BUG-046）。daemon 锁采用轮询回调刷新
-        # （watcher 本身是循环），lifecycle 的阻塞式 yield 无法轮询，
-        # 故用后台线程。
+        # 启动心跳线程：长耗时 rebuild/build 期间持续刷新时间戳（BUG-046）
         heartbeat_stop = threading.Event()
 
         def _heartbeat_loop() -> None:
@@ -162,15 +158,21 @@ def instance_lock(
                 heartbeat_stop.set()
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=5.0)
-            if file_acquired:
-                with contextlib.suppress(FileNotFoundError, PermissionError):
-                    lock_path.unlink()
+            if file_acquired and fd is not None:
+                release_exclusive(fd)
+                # BUG-213：释放后不 unlink，保持同一 inode 供后续竞争者复用
     finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
         tlock.release()
 
 
 def _lock_is_stale(lock_path: Path) -> bool:
-    """锁是否可回收：持有进程已不存活，或存活但超过 :data:`_STALE_LOCK_SECONDS`。"""
+    """锁是否可视为陈旧（观测用）：持有进程已不存活，或存活但超过 :data:`_STALE_LOCK_SECONDS`。
+
+    互斥已由 :mod:`file_lock` 保证；本函数保留供测试与诊断，不再用于抢锁。
+    """
     try:
         content = lock_path.read_text(encoding="utf-8").strip().splitlines()
         pid = int(content[0]) if content else 0
@@ -178,7 +180,13 @@ def _lock_is_stale(lock_path: Path) -> bool:
     except (OSError, ValueError):
         return True
     if pid and _pid_alive(pid):
-        # 进程仍在：仅超时才回收，避免误抢活跃锁
+        # 进程仍在：仅超时才视为陈旧
+        if ts <= 0.0:
+            # 无心跳行：用 mtime 兜底
+            try:
+                ts = lock_path.stat().st_mtime
+            except OSError:
+                return True
         return (time.time() - ts) > _STALE_LOCK_SECONDS
     return True
 
@@ -289,28 +297,38 @@ def restart_instance(
     在同一把锁内完成，保证原子性。已部署的容器走轻量 start，不重建镜像。
     IMP-021：重启后若实例有路径别名且 hostPort 发生漂移，重写别名片段并 reload。
     """
+    with instance_lock(workspace, instance_id):
+        return _restart_instance_locked(workspace, config, registry, instance_id)
+
+
+def _restart_instance_locked(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> InstanceManifest:
+    """``restart_instance`` 的已持锁实现（供 recover 等复用，避免文件锁重入）。"""
     from local_webpage_access.hosting import (
         host_instance,
         start_container,
         stop_instance,
     )
 
-    with instance_lock(workspace, instance_id):
-        manifest = _load(workspace, instance_id)
-        deployed_container = _is_deployed_container(manifest)
-        # 先停：容忍"本来就没在跑"的噪声（含 Docker/网关不可用等 stop 失败）
-        try:
-            stop_instance(workspace, config, registry, instance_id)
-        except LwaError as exc:
-            log.warning("restart 前停止失败（忽略并继续启动）：%s", exc)
+    manifest = _load(workspace, instance_id)
+    deployed_container = _is_deployed_container(manifest)
+    # 先停：容忍"本来就没在跑"的噪声（含 Docker/网关不可用等 stop 失败）
+    try:
+        stop_instance(workspace, config, registry, instance_id)
+    except LwaError as exc:
+        log.warning("restart 前停止失败（忽略并继续启动）：%s", exc)
 
-        if deployed_container:
-            manifest = start_container(workspace, config, registry, instance_id)
-        else:
-            manifest = host_instance(workspace, config, registry, instance_id)
-        # IMP-021：容器别名入口 reverse_proxy 到 hostPort，端口漂移时同步别名片段。
-        _sync_alias_port(workspace, config, instance_id, manifest)
-        return manifest
+    if deployed_container:
+        manifest = start_container(workspace, config, registry, instance_id)
+    else:
+        manifest = host_instance(workspace, config, registry, instance_id)
+    # IMP-021：容器别名入口 reverse_proxy 到 hostPort，端口漂移时同步别名片段。
+    _sync_alias_port(workspace, config, instance_id, manifest)
+    return manifest
 
 
 def recover_instance(
@@ -323,27 +341,32 @@ def recover_instance(
 
     针对管理页"一键 recover"：对静态实例，若 Caddy master 离线，先
     :func:`~local_webpage_access.gateway_service.maybe_start_gateway` 拉起 master
-    （失败不阻断，可降级 builtin），再 :func:`restart_instance` 重新托管——后者
+    （失败不阻断，可降级 builtin），再 restart 重新托管——后者
     的 reload 会把站点/别名片段重新注入主配置。容器实例等价于 restart。
     最终 ``desiredState=running``。
+
+    全程在 ``instance_lock`` 内执行，避免与并发 ``remove_instance`` 竞态。
     """
     from local_webpage_access.gateway_service import maybe_start_gateway
 
-    manifest = _load(workspace, instance_id)
-    if manifest.runtime.value == "shared-static":
-        try:
-            from local_webpage_access.static_gateway import StaticGateway
+    with instance_lock(workspace, instance_id):
+        manifest = _load(workspace, instance_id)
+        if manifest.runtime.value == "shared-static":
+            try:
+                from local_webpage_access.static_gateway import StaticGateway
 
-            gw = StaticGateway(workspace, config)
-            if gw.detect_backend() == "caddy" and not gw._admin_alive():
-                log.info(
-                    "recover %s: Caddy master 离线，先 maybe_start_gateway",
-                    instance_id,
+                gw = StaticGateway(workspace, config)
+                if gw.detect_backend() == "caddy" and not gw._admin_alive():
+                    log.info(
+                        "recover %s: Caddy master 离线，先 maybe_start_gateway",
+                        instance_id,
+                    )
+                    maybe_start_gateway(workspace, config)
+            except Exception as exc:  # noqa: BLE001 — 网关拉起失败不阻断 restart
+                log.warning(
+                    "recover %s: 拉起网关失败（继续 restart）：%s", instance_id, exc
                 )
-                maybe_start_gateway(workspace, config)
-        except Exception as exc:  # noqa: BLE001 — 网关拉起失败不阻断 restart
-            log.warning("recover %s: 拉起网关失败（继续 restart）：%s", instance_id, exc)
-    return restart_instance(workspace, config, registry, instance_id)
+        return _restart_instance_locked(workspace, config, registry, instance_id)
 
 
 def rebuild_instance(
@@ -652,15 +675,71 @@ def observe_status(
 def _observe_container_status(
     workspace: Workspace, registry: Registry, instance_id: str
 ) -> Status:
-    from local_webpage_access.docker_runtime import DockerRuntime
+    """观测容器真实状态（WBS-17.07；BUG-230 权限失败不得误标 stopped）。
+
+    * ``docker compose ps`` 成功且 running → ``RUNNING``；
+    * 成功且非 running / 无容器 → ``STOPPED``；
+    * docker.sock 权限不足：优先 hostPort HTTP 探活；仍不可达则**保留原状态**，
+      并写 ``last_error`` 提示 newgrp + 重启 manager/daemon。
+    """
+    from local_webpage_access.docker_runtime import (
+        DOCKER_PERMISSION_HINT,
+        DockerRuntime,
+        is_docker_permission_error,
+    )
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.health import http_ok
+
+    row = registry.get_instance(instance_id) or {}
+    current_raw = row.get("status") or Status.STOPPED.value
+    try:
+        current = Status(current_raw)
+    except ValueError:
+        current = Status.STOPPED
+
+    host_port: int | None = None
+    crow = registry.get_container(instance_id)
+    if crow and crow.get("host_port") is not None:
+        try:
+            host_port = int(crow["host_port"])
+        except (TypeError, ValueError):
+            host_port = None
+
+    def _note_docker_perm(status: Status, *, via_http: bool) -> None:
+        suffix = "（观测已降级为 HTTP 探活）" if via_http else ""
+        msg = f"Docker 权限不足，无法用 compose ps 观测{suffix}；{DOCKER_PERMISSION_HINT}"
+        with contextlib.suppress(Exception):
+            registry.update_status(instance_id, status.value, last_error=msg[:500])
 
     try:
         runtime = DockerRuntime(workspace, registry)
         if runtime.is_running(instance_id):
             return Status.RUNNING
+        return Status.STOPPED
+    except DockerError as exc:
+        if is_docker_permission_error(str(exc)):
+            if host_port is not None:
+                ok, _code = http_ok(host_port)
+                if ok:
+                    log.warning(
+                        "实例 %s：Docker 权限不足，但 HTTP :%s 可达，按 running 处理",
+                        instance_id,
+                        host_port,
+                    )
+                    _note_docker_perm(Status.RUNNING, via_http=True)
+                    return Status.RUNNING
+            log.warning(
+                "实例 %s：Docker 权限不足且无法 HTTP 确认，保留状态 %s（不误标 stopped）",
+                instance_id,
+                current.value,
+            )
+            _note_docker_perm(current, via_http=False)
+            return current
+        log.warning("观测容器状态失败（%s），按 stopped 处理", exc)
+        return Status.STOPPED
     except Exception as exc:  # noqa: BLE001 — 观测失败不抛
         log.warning("观测容器状态失败（%s），按 stopped 处理", exc)
-    return Status.STOPPED
+        return Status.STOPPED
 
 
 def _observe_static_status(

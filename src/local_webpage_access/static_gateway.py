@@ -14,6 +14,7 @@ V1 静态托管的两条路径：
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -34,6 +35,10 @@ log = get_logger("gateway")
 _HEALTH_TIMEOUT = 5
 _START_WAIT = 3.0
 _KILL_TIMEOUT = 10
+
+# 从站点片段解析 :port / root（BUG-216 失败恢复用）
+_SITE_PORT_RE = re.compile(r"^:(\d+)\s*\{", re.MULTILINE)
+_SITE_ROOT_RE = re.compile(r"^\s*root\s+\*\s+(.+)$", re.MULTILINE)
 
 # ---- Caddy master 生命周期（IMP-010 / BUG-069 / BUG-070）-------------------
 # admin API 固定走 IPv4 loopback（macOS 上 localhost 常解析为 ::1，而 Caddy admin
@@ -100,6 +105,44 @@ def _caddy_quote(path: str) -> str:
         escaped = path.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     return f"`{path}`"
+
+
+def _read_text_optional(path: Path) -> str | None:
+    """读取文本文件；不存在或读失败返回 ``None``。"""
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return None
+
+
+def _unquote_caddy_path(token: str) -> str:
+    """去掉 Caddyfile 路径的反引号或双引号包裹。"""
+    token = token.strip()
+    if len(token) >= 2 and token[0] == "`" and token[-1] == "`":
+        return token[1:-1]
+    if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
+        return token[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return token
+
+
+def _parse_site_binding(site_conf: str) -> tuple[int | None, Path | None]:
+    """从站点片段解析 ``:port`` 与 ``root *``（BUG-216 恢复 builtin 用）。"""
+    port: int | None = None
+    root: Path | None = None
+    m_port = _SITE_PORT_RE.search(site_conf)
+    if m_port:
+        try:
+            port = int(m_port.group(1))
+        except ValueError:
+            port = None
+    m_root = _SITE_ROOT_RE.search(site_conf)
+    if m_root:
+        raw = _unquote_caddy_path(m_root.group(1))
+        if raw:
+            root = Path(raw)
+    return port, root
 
 
 class StaticGateway:
@@ -286,6 +329,10 @@ class StaticGateway:
             ``import_zip`` 已把别名限制为 ``shared-static`` 纯静态形态，前端
             SPA 构建形态（``build_and_host_frontend``）当前不强制注入别名。
         """
+        from local_webpage_access.paths import validate_path_alias
+
+        # 防御性校验：即使上游漏调 validate_path_alias，也拒绝注入 Caddy 指令
+        validate_path_alias(alias)
         content = (
             f"# IMP-006 路径别名：/{alias}/ → 127.0.0.1:{host_port}"
             f"（实例 {instance_id}，handle_path 去前缀）\n"
@@ -323,11 +370,14 @@ class StaticGateway:
         """启用静态站点（WBS-09.04/05/06/07）。
 
         builtin 模式：启动 http.server 子进程，随后做健康检查；
-        健康检查失败时回滚（停掉进程、删除配置）。
-        Caddy 模式：生成站点配置并 reload，reload 失败回滚。
+        健康检查失败时回滚（恢复旧配置 / 旧进程，而非留下悬空状态）。
+        Caddy 模式：生成站点配置并 reload，reload 失败同样恢复旧片段。
 
         ``alias`` 非 ``None`` 时（IMP-006）在 Caddy 模式下额外生成路径别名
         路由片段。builtin 模式不支持别名入口，仅记 WARN 提示用户仍只走端口。
+
+        BUG-216：变更前备份已有站点/别名配置；若本轮停掉了存活 builtin，
+        失败时按备份端口与 root 重新拉起，避免「既无旧也无新」。
         """
         root = Path(root)
         if not root.is_dir():
@@ -336,54 +386,121 @@ class StaticGateway:
                 instance_id=instance_id,
                 root=str(root),
             )
+
+        site_path = self.site_config_path(instance_id)
+        alias_path = self.ws.app_alias_config(instance_id)
+        prev_site = _read_text_optional(site_path)
+        prev_alias = _read_text_optional(alias_path)
+        prev_port, prev_root = _parse_site_binding(prev_site) if prev_site else (None, None)
+
         # BUG-070：清理切换 builtin↔caddy 或上次崩溃遗留的死 pid，避免状态误判。
         self._clear_stale_static_pid(instance_id)
-        # G3（gateway-switch-access-review 建议 A）：切换 builtin→caddy 或上次崩溃后，
-        # 该实例可能仍有**存活**的 builtin http.server 进程占用 hostPort（不只是死 pid）。
-        # 旧代码只清 stale（死）pid，活进程残留 → builtin + caddy 在同一 hostPort 双开，
-        # 行为不确定、排障极难。启用新服务前先停掉它。
-        self._stop_live_builtin_if_any(instance_id)
-        self.generate_site_config(instance_id, host_port, root)
+        # G3：启用新服务前先停掉残留存活的 builtin，避免同端口双开。
+        stopped_builtin = self._stop_live_builtin_if_any(instance_id)
 
         backend = self.detect_backend()
-        # IMP-006：别名片段仅在 Caddy 模式下生成；builtin 多端口模式无统一入口。
-        if alias is not None and backend == "caddy":
-            self.generate_alias_config(instance_id, alias, host_port)
-        elif alias is not None:
-            log.warning(
-                "实例 %s 配置了路径别名 %s，但当前静态后端为 %s，别名入口未启用"
-                "（builtin 模式暂不支持，仅通过端口 %d 访问）",
-                instance_id, alias, backend, host_port,
-            )
-
-        if backend == "builtin":
-            self._start_builtin(instance_id, host_port, root)
-            if wait_health and not self._wait_until_healthy(host_port):
-                # 回滚
-                self._stop_builtin(instance_id)
-                self.remove_site_config(instance_id)
-                if alias is not None:
-                    self.remove_alias_config(instance_id)
-                raise GatewayError(
-                    f"静态站点启动后健康检查失败（端口 {host_port}）",
-                    instance_id=instance_id,
-                    host_port=host_port,
+        try:
+            self.generate_site_config(instance_id, host_port, root)
+            # IMP-006：别名片段仅在 Caddy 模式下生成；builtin 多端口模式无统一入口。
+            if alias is not None and backend == "caddy":
+                self.generate_alias_config(instance_id, alias, host_port)
+            elif alias is not None:
+                log.warning(
+                    "实例 %s 配置了路径别名 %s，但当前静态后端为 %s，别名入口未启用"
+                    "（builtin 模式暂不支持，仅通过端口 %d 访问）",
+                    instance_id, alias, backend, host_port,
                 )
-        else:
-            # Caddy 模式：reload 主配置，失败则回滚站点配置与别名片段
-            try:
+
+            if backend == "builtin":
+                self._start_builtin(instance_id, host_port, root)
+                if wait_health and not self._wait_until_healthy(host_port):
+                    raise GatewayError(
+                        f"静态站点启动后健康检查失败（端口 {host_port}）",
+                        instance_id=instance_id,
+                        host_port=host_port,
+                    )
+            else:
                 self.reload_all()
-            except GatewayError:
-                self.remove_site_config(instance_id)
-                if alias is not None:
-                    self.remove_alias_config(instance_id)
-                # BUG-069：删片段后按磁盘实际文件重组主 Caddyfile，杜绝悬空 import。
-                # reload_all 回滚到的 previous 仍含 ``import sites/<id>.conf``，若不
-                # 重组，主配置会引用刚刚被删除的文件，导致后续 caddy validate/start
-                # 全部失败（7/8 事故根因）。_sync_main_config 无条件按实际文件重写。
-                self._sync_main_config()
-                raise
+        except Exception:
+            self._restore_after_enable_failure(
+                instance_id,
+                backend=backend,
+                prev_site=prev_site,
+                prev_alias=prev_alias,
+                restore_builtin=stopped_builtin,
+                prev_port=prev_port,
+                prev_root=prev_root,
+            )
+            raise
         log.info("静态站点已启用：%s（%s，端口 %d）", instance_id, backend, host_port)
+
+    def _restore_after_enable_failure(
+        self,
+        instance_id: str,
+        *,
+        backend: str,
+        prev_site: str | None,
+        prev_alias: str | None,
+        restore_builtin: bool,
+        prev_port: int | None,
+        prev_root: Path | None,
+    ) -> None:
+        """enable 失败后恢复旧站点/别名配置，并尽量拉回旧 builtin（BUG-216）。"""
+        site_path = self.site_config_path(instance_id)
+        alias_path = self.ws.app_alias_config(instance_id)
+        try:
+            if backend == "builtin":
+                # 停掉本轮可能已拉起的半成品进程
+                self._stop_builtin(instance_id)
+
+            if prev_site is not None:
+                site_path.parent.mkdir(parents=True, exist_ok=True)
+                site_path.write_text(prev_site, encoding="utf-8")
+            else:
+                self.remove_site_config(instance_id)
+
+            if prev_alias is not None:
+                alias_path.parent.mkdir(parents=True, exist_ok=True)
+                alias_path.write_text(prev_alias, encoding="utf-8")
+            else:
+                self.remove_alias_config(instance_id)
+
+            if backend == "caddy":
+                # BUG-069：按磁盘实际文件重组，杜绝悬空 import；再 best-effort reload
+                self._sync_main_config()
+                try:
+                    if prev_site is not None:
+                        self.reload_all()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "恢复实例 %s 旧 Caddy 配置后 reload 失败（忽略）：%s",
+                        instance_id,
+                        exc,
+                    )
+            elif restore_builtin and prev_port is not None and prev_root is not None:
+                if prev_root.is_dir():
+                    try:
+                        self._start_builtin(instance_id, prev_port, prev_root)
+                        log.info(
+                            "已恢复实例 %s 旧 builtin（port=%d root=%s）",
+                            instance_id,
+                            prev_port,
+                            prev_root,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "恢复实例 %s 旧 builtin 失败（忽略）：%s",
+                            instance_id,
+                            exc,
+                        )
+                else:
+                    log.warning(
+                        "实例 %s 旧 root 不存在，无法恢复 builtin：%s",
+                        instance_id,
+                        prev_root,
+                    )
+        except Exception:  # noqa: BLE001 — 恢复失败不掩盖原始 enable 异常
+            log.exception("实例 %s enable 失败后的配置恢复又出错", instance_id)
 
     def disable(self, instance_id: str) -> None:
         """禁用静态站点（WBS-09.07）。

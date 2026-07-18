@@ -824,24 +824,12 @@ def test_disable_removes_alias_fragment(gateway: StaticGateway, workspace: Works
 def test_enable_failure_leaves_no_dangling_import(
     gateway: StaticGateway, workspace: Workspace, monkeypatch
 ) -> None:
-    """BUG-069 核心：已启用实例再次 enable 且 reload 失败时，主 Caddyfile 不得残留悬空 import。
-
-    场景：demo 此前已成功启用（main 含 ``import sites/demo.conf``，文件存在）；
-    再次 enable 时 reload 失败 → enable catch 删片段 + ``_sync_main_config`` 重组。
-    重组后主 Caddyfile 基于磁盘实际文件（demo.conf 已删）→ 不再 import 它。
-    """
+    """首次 enable（无旧配置）且 reload 失败时，主 Caddyfile 不得残留悬空 import。"""
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
-    # 预置"已启用"状态
     root = workspace.app_public("demo")
     root.mkdir(parents=True)
     (root / "index.html").write_text("hi")
-    gateway.generate_site_config("demo", 18001, root)
-    main = gateway.main_config_path()
-    main.parent.mkdir(parents=True, exist_ok=True)
-    main.write_text(gateway._assemble_main_config(), encoding="utf-8")  # 含 import demo.conf
-    assert "demo.conf" in main.read_text()
 
-    # reload 全部失败（master 不可达）——_sync_main_config 仍会按实际文件重写主配置
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
     monkeypatch.setattr(gateway, "caddy_start", lambda: False)
 
@@ -857,10 +845,86 @@ def test_enable_failure_leaves_no_dangling_import(
     with pytest.raises(GatewayError):
         gateway.enable("demo", 18001, root)
 
-    # 主 Caddyfile 不再 import 已删除的 demo.conf（无悬空 import）
     assert not gateway.site_config_path("demo").exists()
-    assert "demo.conf" not in main.read_text()
+    main = gateway.main_config_path()
+    if main.exists():
+        assert "demo.conf" not in main.read_text()
 
+
+def test_enable_failure_restores_previous_site_and_alias(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-216：已启用实例再次 enable 失败时，须恢复旧站点配置与别名，而非悬空删除。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    (root / "index.html").write_text("hi")
+    old_site = gateway.generate_site_config("demo", 18001, root).read_text(
+        encoding="utf-8"
+    )
+    gateway.generate_alias_config("demo", "blog", 18001)
+    old_alias = workspace.app_alias_config("demo").read_text(encoding="utf-8")
+    main = gateway.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(gateway._assemble_main_config(), encoding="utf-8")
+    assert "demo.conf" in main.read_text()
+
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "caddy_start", lambda: False)
+
+    class _Fail:
+        returncode = 1
+        stderr = b"reload error"
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run",
+        lambda *a, **kw: _Fail(),
+    )
+
+    with pytest.raises(GatewayError):
+        gateway.enable("demo", 18002, root, alias="blog")
+
+    assert gateway.site_config_path("demo").read_text(encoding="utf-8") == old_site
+    assert workspace.app_alias_config("demo").read_text(encoding="utf-8") == old_alias
+    assert "demo.conf" in main.read_text()
+    assert ":18001" in old_site
+    assert ":18001" in gateway.site_config_path("demo").read_text(encoding="utf-8")
+
+
+def test_enable_builtin_health_failure_restores_previous_process(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-216：builtin 重启用健康检查失败时，恢复旧站点配置并重新拉起旧进程。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "builtin")
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    (root / "index.html").write_text("hi")
+    gateway.generate_site_config("demo", 18011, root)
+    old_site = gateway.site_config_path("demo").read_text(encoding="utf-8")
+
+    # 模拟：已有存活 builtin → enable 会先停掉；新进程健康检查失败
+    monkeypatch.setattr(gateway, "_read_pid", lambda iid: 4242)
+    monkeypatch.setattr(gateway, "_pid_alive", staticmethod(lambda pid: pid == 4242))
+    stops: list[str] = []
+    starts: list[tuple[str, int, str]] = []
+
+    def _fake_stop(iid: str) -> None:
+        stops.append(iid)
+
+    def _fake_start(iid: str, port: int, r: Path) -> None:
+        starts.append((iid, port, str(r)))
+
+    monkeypatch.setattr(gateway, "_stop_builtin", _fake_stop)
+    monkeypatch.setattr(gateway, "_start_builtin", _fake_start)
+    monkeypatch.setattr(gateway, "_wait_until_healthy", lambda port, **kw: False)
+
+    with pytest.raises(GatewayError, match="健康检查失败"):
+        gateway.enable("demo", 18012, root)
+
+    assert gateway.site_config_path("demo").read_text(encoding="utf-8") == old_site
+    # 至少停过一次旧进程，并按旧 port/root 再 start
+    assert "demo" in stops
+    assert any(p == 18011 and Path(r) == root for _, p, r in starts)
 
 def test_disable_leaves_no_dangling_import(
     gateway: StaticGateway, workspace: Workspace, monkeypatch
