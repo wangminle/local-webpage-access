@@ -107,6 +107,16 @@ defaultResourceLimits:
 
 容器内进程不具备 root 权限，即便应用有漏洞也降低了逃逸面。
 
+## Full Profile 权限契约（IMP-033）
+
+* LWA 控制面（CLI / manager / daemon / gateway）以 **`serviceUser`** 运行，不要求 root。
+* Docker 权限：通过 docker 组（或 Rootless / Desktop socket）获得；能力不足时观测写 `unknown`，
+  **禁止**把运行中容器误标 stopped；管理页与 API 对容器生命周期 **fail-closed**（`capability_denied`）。
+* Caddy：Full 下必须由本工作区 LWA 托管；系统 `caddy.service` / 外部 `:2019` fail-closed，
+  不以 ACL 共享工作区给系统 Caddy 作为默认解法。
+* `/api/health` 的完整 `capabilities` 仅对本机或已鉴权客户端可见；未鉴权局域网只见 `overall`。
+* `run/capability-*.json`、`full-setup-state.json`、token 等敏感运行态文件默认 `0600`。
+
 ## V1 不做的安全承诺
 
 详见 [已知限制](known-limitations.md)。重点：

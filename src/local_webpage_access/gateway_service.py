@@ -494,12 +494,37 @@ def run_service_main() -> int:
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     args = parser.parse_args()
 
-    setup_logging(level=args.log_level.upper())  # type: ignore[arg-type]
     workspace = Workspace(Path(args.workspace).resolve())
+    setup_logging(
+        level=args.log_level.upper(),  # type: ignore[arg-type]
+        log_dir=workspace.logs if workspace.config_path.is_file() else None,
+        log_filename="gateway.log",
+    )
     if not workspace.config_path.is_file():
         log.error("工作区未初始化：%s", workspace.root)
         return 2
     config = load_config(workspace)
+
+    # BUG-233/235：gateway 进程写入 capability-gateway.json（含 Caddy runtime）
+    try:
+        from local_webpage_access.capability import (
+            collect_capability_report,
+            log_capability_probe,
+            write_capability_cache,
+        )
+
+        report = collect_capability_report(
+            workspace_root=workspace.root,
+            role="gateway",
+            config_profile=getattr(config, "profile", None),
+            include_backend_cached=False,
+        )
+        level = "WARNING" if report.gateway_access != "ready" else "INFO"
+        log_capability_probe("gateway", report, level=level)
+        write_capability_cache(workspace.root, "gateway", report)
+    except Exception:  # noqa: BLE001
+        log.exception("gateway 能力自检失败")
+
     return run_gateway_foreground(workspace, config, poll_interval=args.poll)
 
 

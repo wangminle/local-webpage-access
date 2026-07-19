@@ -35,6 +35,7 @@ lwa manager off         # 停止
 
 * 所有 `/api/*` 路由（`/api/health` 除外）默认要求请求头 `Authorization: Bearer <token>`（WBS-22.12）。
 * **本机调试例外（IMP-003）**：从 `127.0.0.1` / `localhost` / `::1` 访问时免 token；从局域网 IP 访问时仍须 token。
+* `/api/health` **无需 token 即可探活**；但完整 CapabilityReport（`capabilities` / `action` 等）仅对本机客户端或**携带有效 token** 的局域网请求返回（BUG-236）。未鉴权 LAN 仅见 `profile` / `overall`；`workspaceRoot` 仍仅本机可见（BUG-169）。
 * 缺失或错误 token 返回 `401`，统一错误格式 `{"error": {"code": "unauthorized", "message": "..."}}`。
 * token 为一次性生成的随机串，仅在本工作区有效；重置方式：删除 `run/` 下的 token 文件后重启管理页。
 
@@ -42,17 +43,17 @@ lwa manager off         # 停止
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 健康检查（无需 token） |
+| GET | `/api/health` | 健康检查（无需 token；能力细节见上文鉴权说明） |
 | GET | `/api/stats` | 顶部统计：实例计数、类型分布、数据库实例数、端口池、主机资源 |
 | GET | `/api/instances` | 实例列表（先观测回写状态再取快照；含 `redundant` 布尔字段，IMP-019） |
 | GET | `/api/instances/{id}` | 实例详情：状态快照 + manifest + 构建/事件/资源记录 |
 | GET | `/api/instances/{id}/logs?category=&tail=` | 日志内容（build/run/gateway/import/scan） |
 | GET | `/api/instances/{id}/resources` | 实例级资源占用 |
-| POST | `/api/instances/{id}/start` | 启动实例 |
-| POST | `/api/instances/{id}/stop` | 停止实例 |
-| POST | `/api/instances/{id}/restart` | 重启实例 |
-| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流） |
-| POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid` 实例（DEV-043）：先拉起 Caddy master 再 restart |
+| POST | `/api/instances/{id}/start` | 启动实例；容器在 Docker 能力降级时返回 `409 capability_denied`（BUG-237） |
+| POST | `/api/instances/{id}/stop` | 停止实例（同上） |
+| POST | `/api/instances/{id}/restart` | 重启实例（同上） |
+| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上） |
+| POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁 |
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019）；默认仅清 registry，`purge=true` 删磁盘，非空 `data/` 需 `force=true` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
@@ -71,8 +72,28 @@ lwa manager off         # 停止
 {"error": {"code": "not_found", "message": "实例 xxx 不存在"}}
 ```
 
-常见 code：`unauthorized`、`not_found`、`bad_request`、`lifecycle_error`、`recognition_error`、`internal`。
+常见 code：`unauthorized`、`not_found`、`bad_request`、`lifecycle_error`、`capability_denied`、`recognition_error`、`internal`。
 
+### 能力降级（IMP-033）
+
+`GET /api/health`（本机或已鉴权）可含：
+
+```json
+{
+  "ok": true,
+  "profile": "full",
+  "overall": "unready",
+  "capabilities": {
+    "managerDockerAccess": "permission_denied",
+    "daemonDockerAccess": "unknown",
+    "caddyRuntime": "owner_mismatch",
+    "sessionRefreshRequired": false
+  },
+  "action": "执行：lwa doctor --profile full 与 lwa setup --full --resume"
+}
+```
+
+前端据此显示降级横幅并禁用容器按钮；**后端**对容器 start/stop/restart/rebuild/recover 同样拒绝，避免绕过 UI。静态实例不受 Docker 能力门禁影响。实例快照可含 `observedState` / `observationError` / `runtimeAccess`（观测失败 ≠ stopped）。
 ### 实例更新（IMP-009）
 
 ```http
@@ -168,14 +189,13 @@ Authorization: Bearer <token>
 
 单页前端（`/`，Vue 3）提供：
 
-* **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用。
-* **实例列表**：每行显示名称（冗余实例带「冗余」徽章与行高亮）、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **删除**；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043）。
+* **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）。
+* **实例列表**：每行显示名称（冗余实例带「冗余」徽章与行高亮）、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **删除**；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043）。
 * **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」。
 * **路径别名对话框**：`shared-static` 与 `docker-compose` 实例操作区「路径别名」按钮可用（pending/building/queued 态禁用）；输入 slug 保存或清除；校验错误在对话框内展示。builtin 后端下设置会失败并展示后端错误信息（IMP-022）。
 * **浏览量**：列表列展示累计访问；点击打开按天分布与最近命中弹窗（IMP-024）。
 
-> **状态说明（DEV-043 / BUG-071）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例。
-
+> **状态说明（DEV-043 / BUG-071 / IMP-033）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。Docker 观测失败时显示 unknown / 权限提示，不误写 stopped。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例（容器路径仍受能力门禁）。
 * **实例详情**：manifest、构建记录、事件流、资源占用、分类日志查看器；含路径别名说明与 CLI 等价命令提示。
 * **待处理区**：pending 实例（可重扫 `lwa scan`）与 failed 实例（显示 `lastError`）。
 

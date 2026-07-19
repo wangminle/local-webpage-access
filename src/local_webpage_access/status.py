@@ -83,6 +83,12 @@ class InstanceStatus:
     last_started_at: str | None = None
     last_health_check_at: str | None = None
     updated_at: str | None = None
+    # IMP-033：观测态（与 status 兼容并存）
+    observed_state: str | None = None
+    observation_error: str | None = None
+    last_trusted_state: str | None = None
+    last_observed_at: str | None = None
+    runtime_access: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -138,6 +144,11 @@ class InstanceStatus:
             "lastStartedAt": self.last_started_at,
             "lastHealthCheckAt": self.last_health_check_at,
             "updatedAt": self.updated_at,
+            "observedState": self.observed_state,
+            "observationError": self.observation_error,
+            "lastTrustedState": self.last_trusted_state,
+            "lastObservedAt": self.last_observed_at,
+            "runtimeAccess": self.runtime_access,
             **self.extra,
         }
 
@@ -190,6 +201,11 @@ def instance_status(
         last_started_at=row.get("last_started_at"),
         last_health_check_at=row.get("last_health_check_at"),
         updated_at=row.get("updated_at"),
+        observed_state=row.get("observed_state"),
+        observation_error=row.get("observation_error"),
+        last_trusted_state=row.get("last_trusted_state"),
+        last_observed_at=row.get("last_observed_at"),
+        runtime_access=row.get("runtime_access"),
     )
 
 

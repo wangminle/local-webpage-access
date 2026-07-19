@@ -176,8 +176,18 @@ class Registry:
         *,
         last_error: str | None = None,
         desired_state: str | None = None,
+        observed_state: str | None = None,
+        observation_error: str | None = ...,  # type: ignore[assignment]
+        last_trusted_state: str | None = None,
+        last_observed_at: str | None = None,
+        runtime_access: str | None = None,
+        clear_observation_error: bool = False,
     ) -> None:
-        """更新实例状态（WBS-05.11）。"""
+        """更新实例状态（WBS-05.11；IMP-033 扩展观测字段）。
+
+        ``observation_error`` 默认哨兵 ``...`` 表示不改该列；传 ``None`` 且
+        ``clear_observation_error=True`` 时清空。
+        """
         sets = ["status = ?", "updated_at = ?"]
         params: list[Any] = [status, now_iso()]
         if last_error is not None:
@@ -186,6 +196,24 @@ class Registry:
         if desired_state is not None:
             sets.append("desired_state = ?")
             params.append(desired_state)
+        if observed_state is not None:
+            sets.append("observed_state = ?")
+            params.append(observed_state)
+        if observation_error is not ...:
+            sets.append("observation_error = ?")
+            params.append(observation_error)
+        elif clear_observation_error:
+            sets.append("observation_error = ?")
+            params.append(None)
+        if last_trusted_state is not None:
+            sets.append("last_trusted_state = ?")
+            params.append(last_trusted_state)
+        if last_observed_at is not None:
+            sets.append("last_observed_at = ?")
+            params.append(last_observed_at)
+        if runtime_access is not None:
+            sets.append("runtime_access = ?")
+            params.append(runtime_access)
         params.append(instance_id)
         with self.txn() as tx:
             tx.execute(f"UPDATE instances SET {', '.join(sets)} WHERE id = ?", tuple(params))

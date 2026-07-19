@@ -147,6 +147,8 @@
           ["lanUrl", "访问地址"], ["hostPort", "宿主端口"], ["internalPort", "内部端口"],
           ["portMappingLabel", "端口映射"], ["routeHost", "路径别名"],
           ["routeUrl", "路径入口"], ["lastError", "最近错误"],
+          ["observedState", "观测状态"], ["runtimeAccess", "运行时访问"],
+          ["observationError", "观测错误"], ["lastTrustedState", "最后可信状态"],
           ["lastHealthCheckAt", "最近健康检查"], ["updatedAt", "更新时间"],
         ])
       );
@@ -352,6 +354,7 @@
           pathAlias: { open: false, title: "", value: "", error: "", instanceId: null },
           pageview: { open: false, title: "", body: "", instanceId: null },
           toastState: { show: false, msg: "", kind: "" },
+          capability: null,
           _detailReq: 0, // 详情请求竞态令牌（旧响应到达时丢弃）
           _pageviewReq: 0,
         };
@@ -363,6 +366,38 @@
         needsRecover: function () {
           var c = this.counts;
           return (c.gateway_down || 0) + (c.config_invalid || 0);
+        },
+        capabilityBanner: function () {
+          var c = this.capability;
+          if (!c || !c.overall || c.overall === "ready") return null;
+          var caps = c.capabilities || {};
+          var reason =
+            caps.managerDockerAccess === "permission_denied"
+              ? "manager 无 Docker 权限"
+              : caps.daemonDockerAccess === "permission_denied"
+                ? "daemon 无 Docker 权限"
+                : caps.caddyRuntime === "owner_mismatch"
+                  ? "Caddy 所有权不匹配"
+                  : c.overall === "degraded"
+                    ? "能力降级"
+                    : "能力未就绪";
+          return {
+            overall: c.overall,
+            reason: reason,
+            action: c.action || "执行 lwa doctor --profile full",
+            profile: c.profile || "default",
+          };
+        },
+        dockerOpsBlocked: function () {
+          var c = this.capability;
+          if (!c || !c.capabilities) return false;
+          var caps = c.capabilities;
+          return (
+            caps.managerDockerAccess === "permission_denied" ||
+            caps.daemonDockerAccess === "permission_denied" ||
+            caps.dockerAccess === "permission_denied" ||
+            caps.sessionRefreshRequired === true
+          );
         },
         statPortsText: function () {
           var pp = this.stats.portPool || {};
@@ -442,6 +477,13 @@
           if (this._timer) { clearIntervalFn(this._timer); this._timer = null; }
           apiFetch(this, "/api/health").then(function (data) {
             self.version = data.version || "";
+            self.capability = {
+              profile: data.profile,
+              overall: data.overall,
+              capabilities: data.capabilities || {},
+              action: data.action,
+              serviceUser: data.serviceUser,
+            };
           }).catch(function () {});
           this.refresh();
           this._timer = setIntervalFn(function () { self.refresh(); }, POLL_MS);
@@ -485,6 +527,19 @@
 
         doOperation: function (id, op) {
           var self = this;
+          var dangerous = { start: 1, stop: 1, restart: 1, rebuild: 1, recover: 1 };
+          if (dangerous[op] && this.dockerOpsBlocked) {
+            var inst = (this.instances || []).find(function (x) { return x.id === id; });
+            if (inst && inst.runtime === "docker-compose") {
+              var banner = this.capabilityBanner;
+              this.toast(
+                "Docker 能力不可用，已阻断容器操作：" +
+                  ((banner && banner.action) || "请先修复权限"),
+                "error"
+              );
+              return;
+            }
+          }
           this.toast("正在" + opLabel(op) + "…");
           apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/" + op, { method: "POST" })
             .then(function () { self.toast(opLabel(op) + "完成", "success"); self.refresh(); })
@@ -685,6 +740,12 @@
     '    <button class="btn btn-ghost" title="立即刷新" aria-label="立即刷新" @click="refresh">↻ 刷新</button>',
     "  </div>",
     "</header>",
+    // IMP-033：Full / 能力降级横幅
+    '<div class="capability-banner" v-if="capabilityBanner" role="status" :data-overall="capabilityBanner.overall">',
+    '  <strong>{{ capabilityBanner.profile === "full" ? "Full Profile" : "能力" }}：{{ capabilityBanner.reason }}</strong>',
+    '  <span>{{ capabilityBanner.action }}</span>',
+    '  <button class="btn btn-sm btn-ghost" type="button" @click="bootstrap">重新检测</button>',
+    "</div>",
     // 顶部统计
     '<section class="stats" aria-label="整机与实例统计">',
     '  <div class="stat-cards">',

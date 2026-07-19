@@ -38,6 +38,10 @@
    - **404**：应用起来了但探测路径不存在 → 改健康路径为 `/health` 等。
    - **5xx**：应用内部错误 → 查 `run.log`，建议修业务代码或依赖。
    - **超时**：启动慢（Java/Next）→ 延长启动宽限时间或超时。
+   - **管理页显示 stopped / unknown 但容器其实在跑**：先查 `runtimeAccess` /
+     `observationError=permission_denied` 与 `lwa capabilities --json`，
+     勿按「已停止」去 start；转 Docker 权限排障（FAQ / `lwa-setup-host-environment`）。
+   - **API 409 capability_denied**：Docker 能力未 ready，先修权限再操作。
 2. 给出最小修改：
    - 路径不对 → `local-web.json` 设健康路径。
    - 超时 → 调整 `healthCheck.timeout` / `startPeriod`。

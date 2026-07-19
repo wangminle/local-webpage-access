@@ -675,13 +675,15 @@ def observe_status(
 def _observe_container_status(
     workspace: Workspace, registry: Registry, instance_id: str
 ) -> Status:
-    """观测容器真实状态（WBS-17.07；BUG-230 权限失败不得误标 stopped）。
+    """观测容器真实状态（WBS-17.07；IMP-033 正式观测模型）。
 
     * ``docker compose ps`` 成功且 running → ``RUNNING``；
     * 成功且非 running / 无容器 → ``STOPPED``；
-    * docker.sock 权限不足：优先 hostPort HTTP 探活；仍不可达则**保留原状态**，
-      并写 ``last_error`` 提示 newgrp + 重启 manager/daemon。
+    * 权限不足 / daemon 不可达 / 超时 / 解析失败 → ``observed_state=unknown``，
+      **不覆盖** ``status`` / ``last_trusted_state``（BUG-230 止血升级）。
+    * 权限不足时优先 hostPort HTTP 探活；可达则按 running 并记降级原因。
     """
+    from local_webpage_access.capability import classify_docker_observation_error
     from local_webpage_access.docker_runtime import (
         DOCKER_PERMISSION_HINT,
         DockerRuntime,
@@ -689,6 +691,7 @@ def _observe_container_status(
     )
     from local_webpage_access.errors import DockerError
     from local_webpage_access.health import http_ok
+    from local_webpage_access.logging import now_iso
 
     row = registry.get_instance(instance_id) or {}
     current_raw = row.get("status") or Status.STOPPED.value
@@ -696,6 +699,7 @@ def _observe_container_status(
         current = Status(current_raw)
     except ValueError:
         current = Status.STOPPED
+    trusted = row.get("last_trusted_state") or current.value
 
     host_port: int | None = None
     crow = registry.get_container(instance_id)
@@ -705,19 +709,65 @@ def _observe_container_status(
         except (TypeError, ValueError):
             host_port = None
 
-    def _note_docker_perm(status: Status, *, via_http: bool) -> None:
+    def _record_ok(status: Status) -> Status:
+        registry.update_status(
+            instance_id,
+            status.value,
+            last_error="",
+            observed_state=status.value,
+            observation_error=None,
+            clear_observation_error=True,
+            last_trusted_state=status.value,
+            last_observed_at=now_iso(),
+            runtime_access="ready",
+        )
+        return status
+
+    def _record_unknown(
+        *,
+        error: str,
+        msg: str,
+        keep: Status,
+        via_http: bool = False,
+    ) -> Status:
         suffix = "（观测已降级为 HTTP 探活）" if via_http else ""
-        msg = f"Docker 权限不足，无法用 compose ps 观测{suffix}；{DOCKER_PERMISSION_HINT}"
+        full_msg = f"{msg}{suffix}"
+        observed_label = keep.value if via_http else "unknown"
+        registry.update_status(
+            instance_id,
+            keep.value,  # 兼容字段：不把 unknown 写入旧 status
+            last_error=full_msg[:500],
+            observed_state=observed_label,
+            observation_error=error,
+            last_trusted_state=trusted,
+            last_observed_at=now_iso(),
+            runtime_access=error,
+        )
         with contextlib.suppress(Exception):
-            registry.update_status(instance_id, status.value, last_error=msg[:500])
+            registry.add_event(
+                instance_id,
+                "observe_degraded",
+                f"observationError={error} observedState={observed_label} "
+                f"lastTrustedState={trusted} role=observer {full_msg[:200]}",
+            )
+        log.warning(
+            "实例 %s：观测降级 observationError=%s，保留 status=%s",
+            instance_id,
+            error,
+            keep.value,
+        )
+        return keep
 
     try:
         runtime = DockerRuntime(workspace, registry)
         if runtime.is_running(instance_id):
-            return Status.RUNNING
-        return Status.STOPPED
+            return _record_ok(Status.RUNNING)
+        return _record_ok(Status.STOPPED)
     except DockerError as exc:
-        if is_docker_permission_error(str(exc)):
+        err_text = str(exc)
+        kind = classify_docker_observation_error(err_text) or "unknown"
+        if kind == "permission_denied" or is_docker_permission_error(err_text):
+            kind = "permission_denied"
             if host_port is not None:
                 ok, _code = http_ok(host_port)
                 if ok:
@@ -726,21 +776,50 @@ def _observe_container_status(
                         instance_id,
                         host_port,
                     )
-                    _note_docker_perm(Status.RUNNING, via_http=True)
+                    registry.update_status(
+                        instance_id,
+                        Status.RUNNING.value,
+                        last_error=(
+                            f"Docker 权限不足，无法用 compose ps 观测"
+                            f"（观测已降级为 HTTP 探活）；{DOCKER_PERMISSION_HINT}"
+                        )[:500],
+                        observed_state=Status.RUNNING.value,
+                        observation_error="permission_denied",
+                        last_trusted_state=Status.RUNNING.value,
+                        last_observed_at=now_iso(),
+                        runtime_access="permission_denied",
+                    )
+                    with contextlib.suppress(Exception):
+                        registry.add_event(
+                            instance_id,
+                            "observe_degraded",
+                            "observationError=permission_denied via=http "
+                            f"observedState=running {DOCKER_PERMISSION_HINT[:120]}",
+                        )
                     return Status.RUNNING
-            log.warning(
-                "实例 %s：Docker 权限不足且无法 HTTP 确认，保留状态 %s（不误标 stopped）",
-                instance_id,
-                current.value,
+            return _record_unknown(
+                error="permission_denied",
+                msg=f"Docker 权限不足，无法用 compose ps 观测；{DOCKER_PERMISSION_HINT}",
+                keep=current,
             )
-            _note_docker_perm(current, via_http=False)
-            return current
-        log.warning("观测容器状态失败（%s），按 stopped 处理", exc)
-        return Status.STOPPED
+        if kind in ("daemon_unavailable", "timeout", "parse_error", "unknown"):
+            return _record_unknown(
+                error=kind,
+                msg=f"Docker 观测失败（{kind}）：{err_text}",
+                keep=current,
+            )
+        return _record_unknown(
+            error="unknown",
+            msg=f"Docker 观测失败（unknown）：{err_text}",
+            keep=current,
+        )
     except Exception as exc:  # noqa: BLE001 — 观测失败不抛
-        log.warning("观测容器状态失败（%s），按 stopped 处理", exc)
-        return Status.STOPPED
-
+        kind = classify_docker_observation_error(str(exc)) or "unknown"
+        return _record_unknown(
+            error=kind,
+            msg=f"Docker 观测异常：{exc}",
+            keep=current,
+        )
 
 def _observe_static_status(
     workspace: Workspace, config: Config, registry: Registry, instance_id: str

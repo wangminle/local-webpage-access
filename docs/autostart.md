@@ -131,18 +131,20 @@ fail。若你已用系统 `caddy.service`，请停用它再 `lwa autostart insta
 - Caddy 二进制可执行；**无系统 `caddy.service` 与外部 `:2019` 占用冲突**（`staticGateway=caddy` 时）
 - linger（Linux/WSL：未 linger → warn）
 - WSL 发行版 / `/mnt/×` 工作区 / 网络变化提示
-- Docker 引擎可达（有容器实例时，warn）；**权限不足时提示 newgrp + 重启 manager/daemon**
+- Docker 引擎可达（有容器实例时，warn）；**权限不足时提示 newgrp + 重启 manager/daemon**，并建议 `lwa doctor --profile full` / `lwa capabilities`
 
 ## Docker 组与后台进程（重要）
 
 LWA 的 manager / daemon 继承**启动时**的用户组。刚执行 `usermod -aG docker` 后：
 
 1. 须 `newgrp docker` 或重新登录；
-2. 再重启 `lwa manager` / `lwa daemon`（或 `systemctl --user restart lwa-manager.service lwa-daemon.service`）。
+2. 若 `setup --full` 曾以 exit 2 结束：执行 `lwa setup --full --resume`；
+3. 再重启 `lwa manager` / `lwa daemon`（或 `systemctl --user restart lwa-manager.service lwa-daemon.service`）。
 
-否则 CLI（经 `sg docker`）能操作容器，管理页却因无 docker.sock 权限把实例误显示为 stopped。
+否则 CLI（经 `sg docker`）能操作容器，管理页却因无 docker.sock 权限把实例观测失败（unknown / permission_denied），或 API 返回 `capability_denied`。
 
-> systemd `--user` 单元无法可靠设置 `SupplementaryGroups=docker`，因此依赖登录会话组 + 重启单元，而不是在 unit 文件里硬编码组。
+> systemd `--user` 单元无法可靠设置 `SupplementaryGroups=docker`，因此依赖登录会话组 + 重启单元。  
+> **Full Profile 推荐（进阶）**：改用 system-level unit，`User=<serviceUser>` + `SupplementaryGroups=docker`，可绕过重登；`lwa autostart` 当前默认仍生成 user unit，完整 system unit 路径可后续补强。
 
 > 重复 `install` 缩减服务集合（如去掉 `--with-caddy`，或关闭 `managerEnabled`）时会
 > **差量卸载**不再需要的单元，避免 manifest 外孤儿。迁移 detached 失败时**不会**再

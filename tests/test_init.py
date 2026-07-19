@@ -151,3 +151,37 @@ def test_cli_init_e2e(tmp_path: Path) -> None:
     assert "已初始化工作区" in result.output
     assert (tmp_path / "cli-ws" / "local-web.yml").is_file()
     assert (tmp_path / "cli-ws" / "registry" / "local-web.db").is_file()
+
+
+def test_cli_init_full_passes_workspace_root(tmp_path: Path, monkeypatch) -> None:
+    """BUG-251：init --full 必须把新工作区传给 run_full_bootstrap（含 -w 异于 cwd）。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+    from local_webpage_access.host_bootstrap import FullBootstrapResult
+
+    captured: dict = {}
+
+    def _fake_boot(**kwargs):
+        captured.update(kwargs)
+        return FullBootstrapResult(
+            ok=False,
+            planned=[],
+            ran=[],
+            messages=["session refresh needed"],
+            overall="session_refresh_required",
+            exit_code=2,
+        )
+
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.run_full_bootstrap",
+        _fake_boot,
+    )
+    ws = tmp_path / "full-ws"
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["init", "--workspace", str(ws), "--full", "--yes"]
+    )
+    assert result.exit_code == 2, result.output
+    assert captured.get("workspace_root") == ws.resolve()
+    assert captured.get("yes") is True

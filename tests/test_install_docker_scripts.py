@@ -107,6 +107,9 @@ def test_caddy_linux_guards_against_ubuntu_old_package() -> None:
     assert "chmod o+r" in text
     assert "disable --now caddy.service" in text
     assert "refresh_apt_with_retry" in text
+    # IMP-033 / BUG-231：already_good 路径也必须 disable 系统 caddy
+    assert "仍检查并停用系统 caddy.service" in text
+    assert "Full Profile 禁止与系统 Caddy 双托管" in text
     # 安装前必须确认候选 ≥ MIN，避免 apt 落到 universe 2.6.x
     assert "避免 apt 静默装上 Ubuntu universe 旧包" in text
     # curl 须带 -S，避免 -s 静默失败导致「无报错就回到 shell」

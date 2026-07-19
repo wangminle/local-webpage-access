@@ -564,6 +564,10 @@ def test_observe_container_docker_permission_preserves_running(
     assert row["status"] == "running"
     assert row["last_error"] and "权限" in row["last_error"]
     assert "newgrp" in row["last_error"] or "manager" in row["last_error"]
+    assert row.get("observed_state") == "unknown"
+    assert row.get("observation_error") == "permission_denied"
+    assert row.get("runtime_access") == "permission_denied"
+    assert row.get("last_trusted_state") == "running"
 
 
 def test_observe_container_docker_permission_http_fallback_running(
@@ -598,6 +602,34 @@ def test_observe_container_docker_permission_http_fallback_running(
     observed = observe_status(workspace, config, registry, "api")
     assert observed == Status.RUNNING
     assert registry.get_instance("api")["status"] == "running"
+
+
+def test_observe_container_programming_error_preserves_trusted_state(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-240：TypeError 等编程异常不得伪装成干净 stopped。"""
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    registry.update_status("api", S.RUNNING.value)
+
+    class _BrokenRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            raise TypeError("programming bug")
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime", _BrokenRuntime
+    )
+    observed = observe_status(workspace, config, registry, "api")
+    row = registry.get_instance("api")
+    assert observed == Status.RUNNING
+    assert row["status"] == "running"
+    assert row["observed_state"] == "unknown"
+    assert row["observation_error"] == "unknown"
+    assert row["runtime_access"] == "unknown"
 
 
 def test_observe_status_no_change_no_event(

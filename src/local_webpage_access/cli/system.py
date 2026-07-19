@@ -5,6 +5,8 @@ DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 
 from __future__ import annotations
 
+from typing import Any
+
 import typer
 
 from local_webpage_access.cli._common import log, open_workspace_registry
@@ -33,6 +35,11 @@ def setup_cmd(
     ),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="full 档跳过确认直接安装（非 TTY 时必须）"
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="full 档：从上次未完成的 Full Profile 安装继续（IMP-033）",
     ),
     install_docker: bool = typer.Option(
         False,
@@ -146,7 +153,14 @@ def setup_cmd(
 
     boot = None
     if profile == "full":
-        boot = run_full_bootstrap(yes=yes)
+        ws_root = None
+        try:
+            from local_webpage_access.paths import find_workspace_root
+
+            ws_root = find_workspace_root()
+        except Exception:  # noqa: BLE001
+            ws_root = None
+        boot = run_full_bootstrap(yes=yes, resume=resume, workspace_root=ws_root)
         if not json_output:
             typer.secho("── 完整装配（--full）──", fg=typer.colors.CYAN)
             for msg in boot.messages:
@@ -160,19 +174,18 @@ def setup_cmd(
                 typer.echo(
                     json_mod.dumps(
                         {
+                            "ok": False,
                             "profile": profile,
-                            "ready": False,
-                            "bootstrap": {
-                                "ok": False,
-                                "messages": boot.messages,
-                                "skipped_no_confirm": boot.skipped_no_confirm,
-                            },
+                            "overall": boot.overall,
+                            "sessionRefreshRequired": boot.session_refresh_required,
+                            "exitCode": boot.exit_code,
+                            "messages": boot.messages,
                         },
                         ensure_ascii=False,
                         indent=2,
                     )
                 )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=boot.exit_code or 1)
 
     report = run_setup(static_gateway=static_gateway)
     if not json_output:
@@ -235,11 +248,17 @@ def doctor_cmd(
     json_output: bool = typer.Option(
         False, "--json", help="输出 JSON 报告（便于脚本解析）"
     ),
+    profile: str = typer.Option(
+        None,
+        "--profile",
+        help="档位：default|full（IMP-033；full 附加能力契约检查）",
+    ),
 ) -> None:
     """诊断环境与实例问题（WBS-26）。
 
     检查 Python/Docker/Compose/端口/registry/磁盘/内存；提供 instance_id 时
     附加该实例的 manifest、状态、最近事件与日志诊断，并给出修复建议。
+    ``--profile full`` 时额外输出 CapabilityReport 并按 Full 契约判定整体。
     """
     import json as json_mod
 
@@ -249,24 +268,111 @@ def doctor_cmd(
         ws, config, _reg = open_workspace_registry()
         _reg.close()  # doctor 自行打开 registry
         report = run_doctor(ws, config, instance_id=instance_id)
-        if json_output:
-            typer.echo(
-                json_mod.dumps(
-                    {
-                        "overall": report.overall,
-                        "instance_id": report.instance_id,
-                        "checks": [c.to_dict() for c in report.checks],
-                        "instance_checks": [
-                            c.to_dict() for c in report.instance_checks
-                        ],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
+        cap_payload: dict[str, Any] | None = None
+        if profile in ("full", "default") or getattr(config, "profile", None) == "full":
+            from typing import Literal, cast
+
+            from local_webpage_access.capability import collect_capability_report
+
+            raw_profile = profile or getattr(config, "profile", None) or "default"
+            use_profile = cast(
+                Literal["default", "full"],
+                raw_profile if raw_profile in ("full", "default") else "default",
+            )
+            cap = collect_capability_report(
+                workspace_root=ws.root,
+                profile=use_profile,
+                role="cli",
+                config_profile=getattr(config, "profile", None),
+            )
+            cap_payload = cap.to_dict()
+            if use_profile == "full" and not json_output:
+                typer.secho(
+                    f"\n[Full Profile] overall={cap.overall} "
+                    f"serviceUser={cap.service_user} "
+                    f"sessionRefreshRequired={cap.session_refresh_required}",
+                    fg=(
+                        typer.colors.GREEN
+                        if cap.overall == "ready"
+                        else typer.colors.YELLOW
+                        if cap.overall == "degraded"
+                        else typer.colors.RED
+                    ),
                 )
+                for label, val in (
+                    ("CLI Docker", cap.cli_docker_access),
+                    ("Manager Docker", cap.manager_docker_access),
+                    ("Daemon Docker", cap.daemon_docker_access),
+                    ("Caddy binary", cap.caddy_binary),
+                    ("Caddy runtime", cap.caddy_runtime),
+                    ("Caddy owner", cap.caddy_owner),
+                ):
+                    typer.echo(f"  {label:18s} {val}")
+                if cap.action:
+                    typer.echo(f"  建议：{cap.action}")
+        if json_output:
+            payload: dict[str, Any] = {
+                "overall": report.overall,
+                "instance_id": report.instance_id,
+                "checks": [c.to_dict() for c in report.checks],
+                "instance_checks": [
+                    c.to_dict() for c in report.instance_checks
+                ],
+            }
+            if cap_payload is not None:
+                payload["capabilities"] = cap_payload
+            typer.echo(
+                json_mod.dumps(payload, ensure_ascii=False, indent=2)
             )
         else:
             typer.echo(format_report(report))
-        if report.has_failures:
+        fail = report.has_failures
+        if cap_payload and (profile == "full" or getattr(config, "profile", None) == "full"):
+            if cap_payload.get("overall") in ("unready", "degraded"):
+                fail = True
+        if fail:
+            raise typer.Exit(code=1)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+def capabilities_cmd(
+    json_output: bool = typer.Option(
+        False, "--json", help="输出 CapabilityReport JSON"
+    ),
+) -> None:
+    """输出当前工作区能力报告（IMP-033 ``lwa capabilities``）。"""
+    import json as json_mod
+
+    from local_webpage_access.capability import collect_capability_report
+
+    try:
+        ws, config, reg = open_workspace_registry()
+        reg.close()
+        report = collect_capability_report(
+            workspace_root=ws.root,
+            role="cli",
+            config_profile=getattr(config, "profile", None),
+        )
+        if json_output:
+            typer.echo(
+                json_mod.dumps(report.to_dict(), ensure_ascii=False, indent=2)
+            )
+        else:
+            typer.echo(
+                f"profile={report.profile} overall={report.overall} "
+                f"serviceUser={report.service_user}"
+            )
+            caps = report.to_dict()["capabilities"]
+            for k, v in caps.items():
+                typer.echo(f"  {k}: {v}")
+            if report.action:
+                typer.echo(f"action: {report.action}")
+        if report.overall == "unready":
+            raise typer.Exit(code=1)
+        if report.overall == "degraded":
             raise typer.Exit(code=1)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
@@ -377,4 +483,5 @@ def register(app: typer.Typer) -> None:
     """把本模块命令注册到根 app（保持顶层命令名不变）。"""
     app.command("setup")(setup_cmd)
     app.command("doctor")(doctor_cmd)
+    app.command("capabilities")(capabilities_cmd)
     app.command("update")(update_cmd)

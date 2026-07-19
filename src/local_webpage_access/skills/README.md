@@ -28,8 +28,8 @@
 | [`lwa-fix-container-startup-failure`](lwa-fix-container-startup-failure/SKILL.md) | 容器启动失败 | 诊断 + 修复启动配置 |
 | [`lwa-fix-port-binding`](lwa-fix-port-binding/SKILL.md) | 端口冲突 | 修改端口映射 |
 | [`lwa-diagnose-health-check`](lwa-diagnose-health-check/SKILL.md) | 健康检查失败 | 诊断说明 + 修复建议 |
-| [`lwa-setup-host-environment`](lwa-setup-host-environment/SKILL.md) | 新机器首次部署 / 环境缺失 | 宿主机工具安装指引 + `--default`/`--full` 档位 + init/doctor 流程 |
-| [`lwa-setup-autostart`](lwa-setup-autostart/SKILL.md) | 开机/登录自启 / 重启后没起来 | `lwa autostart install/check/repair` 跨平台前台监管指引（IMP-030） |
+| [`lwa-setup-host-environment`](lwa-setup-host-environment/SKILL.md) | 新机器首次部署 / 环境缺失 / Full Profile | 宿主机工具安装 + `--default`/`--full`/`--resume` + `doctor --profile full` / `capabilities` |
+| [`lwa-setup-autostart`](lwa-setup-autostart/SKILL.md) | 开机/登录自启 / 重启后没起来 | `lwa autostart install/check/repair` 跨平台前台监管指引（IMP-030）；含 docker 组与 session refresh |
 
 ## 输入约定
 
@@ -65,7 +65,9 @@ skill 的输出**只**落到以下位置（设计 §18）：
 ## pending 实例处理流程（WBS-24.15）
 
 **新环境首次部署**请先走 [`lwa-setup-host-environment`](lwa-setup-host-environment/SKILL.md)：
-`lwa setup`（或 `lwa setup --full --yes`）→ 安装缺失工具 → `pip install -e .` → `lwa init` → `lwa doctor`。
+`lwa setup`（default）→ 安装缺失工具 → `pip install -e .` → `lwa init`
+（Full 用 `lwa init --full --yes`，或先 init 再 `lwa setup --full --yes`）→
+`lwa doctor`（Full 再加 `--profile full` / `lwa capabilities --json`；exit 2 则 `--resume`）。
 
 当 `lwa import` 或 `lwa daemon` 把实例标记为 `pending` 时，按以下流程处理：
 

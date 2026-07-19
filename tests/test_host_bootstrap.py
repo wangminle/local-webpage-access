@@ -159,7 +159,7 @@ def test_plan_full_install_lists_missing(monkeypatch) -> None:
     assert "caddy" in kinds
 
 
-def test_run_full_bootstrap_requires_yes_without_tty(monkeypatch) -> None:
+def test_run_full_bootstrap_requires_yes_without_tty(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.plan_full_install",
         lambda **_: [
@@ -181,6 +181,7 @@ def test_run_full_bootstrap_requires_yes_without_tty(monkeypatch) -> None:
         yes=False,
         confirm=None,
         runner=fake_run,
+        workspace_root=tmp_path,
     )
     assert result.ok is False
     assert result.skipped_no_confirm is True
@@ -188,6 +189,8 @@ def test_run_full_bootstrap_requires_yes_without_tty(monkeypatch) -> None:
 
 
 def test_run_full_bootstrap_yes_runs_scripts(monkeypatch, tmp_path: Path) -> None:
+    from local_webpage_access.capability import CapabilityReport
+
     script = tmp_path / "install-docker-linux.sh"
     script.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
     monkeypatch.setattr(
@@ -208,6 +211,14 @@ def test_run_full_bootstrap_yes_runs_scripts(monkeypatch, tmp_path: Path) -> Non
         "local_webpage_access.host_bootstrap.detect_caddy",
         lambda **_: ComponentNeed(name="caddy", status="ok", version=MIN_CADDY_VERSION),
     )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap._try_start_backends_for_capability",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report",
+        lambda **_: CapabilityReport(profile="full", overall="ready"),
+    )
     ran: list[Path] = []
 
     def fake_run(cmd, **kwargs):
@@ -219,9 +230,145 @@ def test_run_full_bootstrap_yes_runs_scripts(monkeypatch, tmp_path: Path) -> Non
         yes=True,
         confirm=lambda _msg: False,
         runner=fake_run,
+        workspace_root=tmp_path,
     )
     assert result.ok is True
     assert ran == [script]
+
+
+def test_run_full_bootstrap_requires_initialized_workspace(monkeypatch) -> None:
+    """BUG-248：没有工作区时不得以 components-only 结果假报 Full ready。"""
+    called = {"plan": False}
+
+    def fake_plan(**kwargs):
+        called["plan"] = True
+        return []
+
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.plan_full_install", fake_plan
+    )
+    result = run_full_bootstrap(platform="linux", yes=True, workspace_root=None)
+    assert result.ok is False
+    assert result.overall == "unready"
+    assert result.exit_code == 1
+    assert called["plan"] is False
+    assert any("先执行 lwa init" in msg for msg in result.messages)
+
+
+def test_run_full_bootstrap_resume_reinstalls_missing_components(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """BUG-242：已记 components_installed 但组件缺失时 resume 必须重装。"""
+    from local_webpage_access.capability import CapabilityReport, save_profile_state
+
+    script = tmp_path / "install-caddy-linux.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    save_profile_state(
+        tmp_path,
+        {
+            "profile": "full",
+            "completedSteps": ["components_installed"],
+        },
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.plan_full_install",
+        lambda **_: [
+            type("P", (), {"kind": "caddy", "script": script, "reason": "missing"})()
+        ],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.detect_docker_engine",
+        lambda **_: DockerEngineState(status="ok", version=MIN_DOCKER_VERSION),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.detect_docker_compose",
+        lambda **_: ComponentNeed(name="compose", status="ok", version=MIN_COMPOSE_VERSION),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.detect_caddy",
+        lambda **_: ComponentNeed(name="caddy", status="ok", version=MIN_CADDY_VERSION),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap._try_start_backends_for_capability",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report",
+        lambda **_: CapabilityReport(profile="full", overall="ready"),
+    )
+    ran: list[Path] = []
+    result = run_full_bootstrap(
+        platform="linux",
+        yes=True,
+        resume=True,
+        workspace_root=tmp_path,
+        runner=lambda cmd, **_: ran.append(Path(cmd[1])) or _proc(0),
+    )
+    assert result.ok is True
+    assert ran == [script]
+
+
+def test_run_full_bootstrap_rejects_without_backend_capability_loop(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """BUG-234：有工作区时不得仅凭 CLI Docker/Caddy 二进制假绿成功退出。"""
+    from local_webpage_access.capability import CapabilityReport
+    from local_webpage_access.config import example_config_text
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path)
+    ws.ensure_workspace_dirs()
+    ws.config_path.write_text(example_config_text(), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.plan_full_install",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.detect_docker_engine",
+        lambda **_: DockerEngineState(status="ok", version=MIN_DOCKER_VERSION),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.detect_docker_compose",
+        lambda **_: ComponentNeed(name="compose", status="ok", version=MIN_COMPOSE_VERSION),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.detect_caddy",
+        lambda **_: ComponentNeed(name="caddy", status="ok", version=MIN_CADDY_VERSION),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_docker_access_state",
+        lambda: "ready",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap._try_start_backends_for_capability",
+        lambda *_a, **_k: None,
+    )
+    # CLI ready，但 manager/daemon/gateway 仍 unknown → overall unready
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report",
+        lambda **kwargs: CapabilityReport(
+            profile="full",
+            overall="unready",
+            cli_docker_access="ready",
+            caddy_binary="ready",
+            manager_docker_access="unknown",
+            daemon_docker_access="unknown",
+            gateway_access="unknown",
+            action="启动 manager/daemon 后 resume",
+        ),
+    )
+
+    result = run_full_bootstrap(
+        platform="linux",
+        yes=True,
+        workspace_root=tmp_path,
+        runner=lambda *a, **k: _proc(0),
+    )
+    assert result.ok is False
+    assert result.exit_code == 1
+    assert result.overall == "unready"
+    assert any("强制闭环" in m or "能力验收未通过" in m for m in result.messages)
 
 
 def test_maybe_offer_propagates_script_failure(monkeypatch, tmp_path: Path) -> None:

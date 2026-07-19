@@ -11,8 +11,21 @@ log = get_logger("cli")
 
 
 def bootstrap(level: str = "INFO") -> None:
-    """在每条命令执行前初始化日志（幂等）。"""
-    setup_logging(level=level)  # type: ignore[arg-type]
+    """在每条命令执行前初始化日志（幂等）。
+
+    IMP-034.01：若已能定位工作区，把 ``local_webpage_access.*`` 追加到
+    ``logs/lwa.log``（0600）；尚未 init 的命令仍仅控制台。
+    """
+    log_dir = None
+    try:
+        from local_webpage_access.paths import Workspace, find_workspace_root
+
+        root = find_workspace_root()
+        if root is not None:
+            log_dir = Workspace(root).logs
+    except Exception:  # noqa: BLE001 — 日志初始化不得阻断 CLI
+        log_dir = None
+    setup_logging(level=level, log_dir=log_dir)  # type: ignore[arg-type]
 
 
 def open_workspace_registry():

@@ -5,17 +5,21 @@
 **首次部署**请先运行：
 
 ```bash
-lwa setup             # 检测宿主机工具，打印安装指引（无需工作区）
+lwa setup             # 检测宿主机工具，打印安装指引（default，无需工作区）
 lwa setup --script    # 打印内置 Docker/Caddy 安装脚本路径（需人工审阅后执行）
-lwa setup --full --yes  # 检查并安装 Caddy + Docker Engine + Compose（非 TTY 必须 --yes）
+lwa init              # 初始化工作区
+# Full 二选一：
+lwa init --full --yes              # 初始化并装齐依赖 + 能力闭环（非 TTY 必须 --yes）
+# 或先 init，再在工作区内：
+lwa setup --full --yes             # 装齐依赖并做 Full 能力闭环（需要已 init）
+lwa setup --full --resume          # 重登后继续验收（exit 2 时）
 ```
-
 | 档位 | 命令 | 行为 |
 | --- | --- | --- |
-| default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 可询问是否跑内置脚本 |
-| full | `lwa setup --full` / `lwa init --full` | 按最低版本检查 Caddy/Docker/Compose，不达标则安装 |
+| default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 可询问是否跑内置脚本；`setup` 无需工作区 |
+| full | `lwa setup --full` / `lwa init --full` | 安装 Caddy/Docker/Compose，并验收 Full 能力闭环（见下）；**需已初始化工作区**；非 TTY 必须 `--yes` |
 
-`--default` 与 `--full` 互斥。内置脚本覆盖 macOS / Linux（含 WSL）；Windows 原生请按 `lwa setup` 打印的指引手动安装。详见 [运维手册 · 宿主机装配](operations-playbook.md#零宿主机装配imp-031032)。
+`--default` 与 `--full` 互斥。内置脚本覆盖 macOS / Linux（含 WSL）；Windows 原生请按 `lwa setup` 打印的指引手动安装。详见 [运维手册 · 宿主机装配](operations-playbook.md#零宿主机装配imp-031032033)。
 
 遇到问题时，第一步永远是：
 
@@ -26,6 +30,34 @@ lwa doctor --json   # 机器可读报告，便于脚本化
 ```
 
 `doctor` 有 fail 时退出码为 1，可在脚本/CI 中用作门禁。
+
+### Full Profile（IMP-033）
+
+```bash
+lwa doctor --profile full     # 输出 overall / 各上下文 Docker / Caddy owner / 建议动作
+lwa capabilities --json       # 与 doctor full 同源 CapabilityReport
+lwa setup --full --resume     # 组权限刷新后继续；exit 2=session_refresh_required，exit 1=unready
+```
+
+| overall | 含义 | 常见动作 |
+| --- | --- | --- |
+| `ready` | Full 强制能力均已证明 | 可无人值守跑容器与 Caddy |
+| `session_refresh_required` / exit 2 | 已加 docker 组但当前会话未继承 | 重登或 `newgrp docker` 后 `--resume`，并重启 manager/daemon |
+| `unready` / `degraded` | 缺组件、权限不足、Caddy owner 不匹配、后台缓存未闭环等 | 按 `action` 字段提示修复；**不得**当作安装成功 |
+
+Full 下系统 `caddy.service` / 外部占用 `:2019` 会 fail-closed；须由 LWA gateway 以 `serviceUser` 托管。
+
+## 症状 → 日志文件 → 命令（IMP-034）
+
+| 症状 | 先看哪个文件 | 命令 |
+| --- | --- | --- |
+| CLI 操作后无痕迹 / 关终端丢日志 | 工作区 `logs/lwa.log` | 任意 `lwa status` / `lwa start` 后再 `tail logs/lwa.log` |
+| daemon 不导入 inbox | `logs/daemon.log` | `lwa daemon status`；`lwa doctor` |
+| 管理页异常 / 能力降级横幅 | `logs/manager.log`、`/api/health`（须本机或带 token） | `lwa manager status`；`lwa capabilities --json` |
+| 构建无输出、`build.log` 长时间为空 | `apps/<id>/logs/build.log` + `logs/lwa.log`（阶段事件）+ registry events | `lwa logs <id> --category build`；`lwa doctor <id>` |
+| 管理页显示 stopped 但容器仍在跑 | `observationError` / `runtimeAccess=permission_denied`；`capability probe` | `lwa doctor --profile full`；`newgrp docker` 后重启 manager/daemon |
+| 容器 API 返回 409 `capability_denied` | 管理页或 curl 直调生命周期 | 先修 Docker 能力再操作；静态实例不受此阻断 |
+| Caddy reload 权限失败 / owner 不匹配 | `logs/gateway.log`；系统 `caddy.service` | `lwa gateway status`；`lwa setup --full --resume` |
 
 ## 环境类问题
 
@@ -60,7 +92,8 @@ lwa doctor --json   # 机器可读报告，便于脚本化
 常见于刚执行 `usermod -aG docker` 后：**当前 shell / manager / daemon 尚未继承 docker 组**。
 
 1. `newgrp docker` 或注销后重新登录；
-2. 重启后台进程，使与 CLI 权限一致：
+2. 若刚跑过 `setup --full` 且 exit 2：执行 `lwa setup --full --resume`；
+3. 重启后台进程，使与 CLI 权限一致：
 
 ```bash
 lwa manager off && lwa manager on
@@ -69,9 +102,11 @@ lwa daemon off && lwa daemon on
 # systemctl --user restart lwa-manager.service lwa-daemon.service
 ```
 
-3. 再 `lwa status <实例>` / 刷新管理页。
+4. 再 `lwa capabilities --json` / `lwa status <实例>` / 刷新管理页。
 
-LWA 以安装用户身份运行，不要求 root；CLI、manager、daemon 须共享同一 docker 组身份。Docker 不可达时不应把运行中容器标成已停止（会写 `last_error` 提示）。
+LWA 以安装用户（`serviceUser`）身份运行，不要求 root；CLI、manager、daemon 须共享同一 docker 组身份。观测失败时 registry 写 `observedState=unknown` / `runtimeAccess=permission_denied`，**不会**把运行中容器误标成 stopped；daemon reconcile 也会跳过自动纠正。管理页与 API 在能力降级时阻断容器启停（前端横幅 + 后端 `409 capability_denied`）。
+
+macOS 通常走 Docker Desktop 用户态 socket，较少出现 Linux 式 docker 组问题；权限异常时仍以 `lwa doctor --profile full` 为准。
 
 ### Docker Compose 不可用
 

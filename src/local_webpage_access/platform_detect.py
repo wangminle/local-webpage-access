@@ -11,6 +11,9 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import subprocess
+import sys
+from typing import Any
 
 PLATFORM_MACOS = "macos"
 PLATFORM_LINUX = "linux"
@@ -90,6 +93,18 @@ def systemd_available() -> bool:
     return os.path.isdir("/run/systemd/system")
 
 
+def subprocess_hidden_kwargs() -> dict[str, Any]:
+    """Windows 下给 ``subprocess.run/Popen`` 追加 ``CREATE_NO_WINDOW``。
+
+    无控制台父进程（如 ``lwa daemon`` DETACHED）再拉起 ``powershell`` /
+    ``taskkill`` 时，若缺此标志，Windows 会周期性弹出短暂可见黑窗（BUG-250）。
+    非 Windows 返回空 dict，可直接 ``subprocess.run(..., **kwargs)``。
+    """
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 __all__ = [
     "PLATFORM_MACOS",
     "PLATFORM_LINUX",
@@ -100,5 +115,6 @@ __all__ = [
     "is_wsl",
     "is_unix_like",
     "systemd_available",
+    "subprocess_hidden_kwargs",
     "wsl_distro",
 ]

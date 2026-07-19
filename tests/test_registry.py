@@ -102,7 +102,7 @@ def test_migrate_runs_on_fresh_db(workspace_root: Path) -> None:
     workspace_root.mkdir(parents=True, exist_ok=True)
     reg = Registry(db_path)
     reg.open()
-    assert get_schema_version(reg.conn) == 1
+    assert get_schema_version(reg.conn) == 2
     reg.close()
 
 

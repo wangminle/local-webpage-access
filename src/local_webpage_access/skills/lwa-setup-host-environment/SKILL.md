@@ -45,33 +45,45 @@
 | fastapi / uvicorn | ≥ 0.138.0 / ≥ 0.45.0 | 始终（`pip install -e .`） |
 | Docker | ≥ 29.0.0 | 容器实例 |
 | Docker Compose | ≥ 2.40.2，推荐 ≥ 5.2.0（[docker/compose](https://github.com/docker/compose)） | 容器实例 |
-| Caddy | ≥ 2.10.0 | **路径别名 / 统一入口 / 别名入口浏览量（IMP-024）** 的硬依赖：需 `staticGateway=caddy`、Caddy 在 PATH、并 `lwa gateway on`。仅临时预览、不用别名时，缺失会降级 `builtin`（每实例独立 hostPort；`lwa alias set` 会被 IMP-022 拦截） |
+| Caddy | ≥ 2.10.0 | **路径别名 / 统一入口 / 别名入口浏览量（IMP-024）** 的硬依赖：需 `staticGateway=caddy`、Caddy 在 PATH、并 `lwa gateway on`。仅临时预览、不用别名时，**default** 档缺失会降级 `builtin`（每实例独立 hostPort；`lwa alias set` 会被 IMP-022 拦截）。**Full** 档要求 Caddy 严格可用，不静默降级 |
 | Node.js | ≥ 24（推荐） | 前端 SPA 构建 |
 
 ## 处理流程
 
 ```text
-1. 让用户运行：lwa setup（或 lwa setup --json）
+1. 让用户运行：lwa setup（或 lwa setup --json）（default，无需工作区）
 2. 按 fail 项逐条给出平台相关安装命令
-   - 优先：内置脚本（见 lwa setup --script）或一次装齐 `lwa setup --full --yes`
+   - 优先：内置脚本（见 lwa setup --script）
    - Docker：install-docker-linux.sh / install-docker-macos.sh（默认阿里云 docker-ce 源）
    - Caddy：install-caddy-linux.sh / install-caddy-macos.sh
 3. 安装 lwa：pip install -e .
 4. 复核：lwa setup → 全部必需项 ok
-5. 初始化工作区：lwa init（或 `lwa init --full --yes` 初始化并装齐 Caddy/Docker/Compose）
-6. 完整诊断：lwa doctor（含端口池、registry、磁盘）
+5. 初始化工作区：
+   - default：lwa init
+   - Full：优先 `lwa init --full --yes`（一次完成 init + 安装 + 能力闭环）
+   - 或先 `lwa init`，再在工作区内 `lwa setup --full --yes`
+   - 注意：`lwa setup --full` **需要已初始化工作区**，不可在 init 前单独跑通
+6. Full 环境：lwa doctor --profile full / lwa capabilities --json
+   - exit 2 / sessionRefreshRequired → 重登或 newgrp 后 lwa setup --full --resume
 7. 导入样例：lwa import inbox/xxx.zip → lwa start
 8. **升级 lwa 源码后**：优先运行 `lwa update`；需要 AI 协助时见 [lwa-update-runtime](../lwa-update-runtime/SKILL.md)
 ```
 
-### 装配档位（IMP-032）
+### 装配档位（IMP-032/033）
 
 | 档位 | 命令 | 行为 |
 | --- | --- | --- |
-| default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 询问是否跑内置脚本 |
-| full | `lwa setup --full` / `lwa init --full` | 检查 Caddy+Docker+Compose，不达标则安装（非 TTY 需 `--yes`） |
+| default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 询问是否跑内置脚本；`setup` 无需工作区 |
+| full | `lwa setup --full` / `lwa init --full` | 安装 Caddy+Docker+Compose，并验收 Full 能力闭环（CLI/manager/daemon/gateway + Caddy owner）；**需已初始化工作区**；非 TTY 需 `--yes` |
 
 `--default` 与 `--full` 互斥。CI 请用 `--default` 或预装镜像，避免无 `--yes` 的 `--full` 改机器。
+
+Full 闭环要点（对用户输出时必提）：
+
+1. 退出码：`0=ready`，`2=session_refresh_required`（重登/`newgrp docker` 后 `lwa setup --full --resume`），`1=unready`。
+2. 验收看 `lwa doctor --profile full` / `lwa capabilities --json`，**不要**只凭「脚本跑完」判断成功。
+3. Linux：manager/daemon 须与 CLI 同属 docker 组；改组后重启后台；禁止用系统 `caddy.service` 冒充 LWA Caddy。
+4. 日志：`logs/lwa.log` / `manager.log` / `daemon.log` / `gateway.log`（见 FAQ 症状表）。
 
 若用户**只做静态 HTML**、不用容器：
 
@@ -117,5 +129,7 @@ lwa init
 lwa doctor
 ```
 
-需要脚本参考时：`lwa setup --script` 打印内置 Docker/Caddy 脚本路径；一次装齐用
-`lwa setup --full --yes`（需管理员权限，macOS 可能仍要手动开一次 Docker Desktop）。
+需要脚本参考时：`lwa setup --script` 打印内置 Docker/Caddy 脚本路径。Full 一次装齐并闭环：
+优先 `lwa init --full --yes`，或先 `lwa init` 再 `lwa setup --full --yes`
+（需管理员权限，macOS 可能仍要手动开一次 Docker Desktop）。
+权限刷新后续跑：`lwa setup --full --resume`；验收：`lwa doctor --profile full`。

@@ -8,15 +8,17 @@
 
 ```bash
 cd runtime          # 进入工作区（示例路径）
-lwa setup           # 可选：检查宿主机工具（或 lwa setup --full --yes 一次装齐）
-lwa init            # 首次：生成目录与配置（已 init 可跳过；也可用 lwa init --full --yes）
+lwa setup           # 可选：检查宿主机工具（default，无需工作区）
+lwa init            # 首次：生成目录与配置（已 init 可跳过）
+# Full：lwa init --full --yes，或先 init 再 lwa setup --full --yes
+lwa doctor --profile full   # Full 环境建议
 lwa manager on      # 管理页（默认 init 后自动拉起，端口 17800）
 lwa import inbox/xxx.zip --name my-app
 lwa start my-app
 lwa list
 ```
 
-管理页：本机 http://127.0.0.1:17800/（本机免 token）；局域网 http://\<LAN-IP\>:17800/（需 token）。
+管理页：本机 http://127.0.0.1:17800/（本机免 token）；局域网 http://\<LAN-IP\>:17800/（需 token；`/api/health` 带 token 才返回完整 capabilities）。
 
 ---
 
@@ -24,13 +26,13 @@ lwa list
 
 ```
 runtime/                      ← 工作区根（Runtime 根目录）
-├── local-web.yml             ← 全局配置（端口池、管理页、静态网关等）
+├── local-web.yml             ← 全局配置（端口池、管理页、静态网关、profile/serviceUser 等）
 ├── inbox/                    ← 待导入 zip 投放区（daemon 也会监听；成功后可归档到 processed/）
 ├── apps/                     ← 已导入实例（每个子目录一个实例）
 ├── registry/                 ← SQLite 全局索引（local-web.db）与构建闸门（build-locks.db）
 ├── static-gateway/           ← 静态网关配置（Caddy 站点/别名片段等）
-├── logs/                     ← 工作区级日志（daemon.log、Caddy 别名入口 static-access.log）
-├── run/                      ← 运行态文件（token、daemon/manager/gateway 状态、pageviews.db）
+├── logs/                     ← 工作区级日志：lwa.log / manager.log / daemon.log / gateway.log / static-access.log
+├── run/                      ← token、daemon/manager/gateway 状态、pageviews.db、capability-*.json、full-setup-state.json
 ├── templates/                ← 用户可编辑的 Dockerfile/Compose 模板副本
 └── skills/                   ← 从包内复制的大模型 Skill 文档
 ```
@@ -69,7 +71,11 @@ runtime/                      ← 工作区根（Runtime 根目录）
 
 ### `logs/`
 
-- **用途**：工作区级日志，例如 `daemon.log`（inbox 自动导入守护进程）、`static-access.log`（Caddy 别名入口 JSON access log，供浏览量统计）。
+- **用途**：工作区级日志（IMP-034）：
+  - `lwa.log` — CLI / 通用操作
+  - `manager.log` / `daemon.log` / `gateway.log` — 各后台进程
+  - `static-access.log` — Caddy 别名入口 JSON access log（浏览量）
+- 排障对照见 [FAQ · 症状→日志](faq.md#症状--日志文件--命令imp-034)。
 
 ### `run/`
 
@@ -81,20 +87,22 @@ runtime/                      ← 工作区根（Runtime 根目录）
   - `gateway.json` — Caddy 网关后台服务态（IMP-010）
   - `caddy.pid` — Caddy master pid（`caddy start --pidfile` 写入）
   - `pageviews.db` — 浏览量聚合与摄入游标（IMP-024）
+  - `capability-manager.json` / `capability-daemon.json` / `capability-gateway.json` — 各进程真实身份写入的能力缓存（IMP-033；CLI 不得冒充）
+  - `full-setup-state.json` — Full Profile 安装进度与 `sessionRefreshRequired` 等状态
 
 ## 网关与开机自启
 
 - **Caddy 网关生命周期（IMP-010）**：`lwa gateway on/off/status` 管理 Caddy master
   （admin :2019 探活为存活信据）；`lwa manager on` 成功后会联动 `maybe_start_gateway`
-  拉起网关，失败只降级 builtin 不阻断业务。
-- **daemon 自愈（DEV-042）**：watcher 启动时与每 `DEFAULT_SUPERVISE_INTERVAL`（60s）
+  拉起网关。**default** 档失败可降级 builtin 不阻断业务；**Full** 档要求 Caddy 严格可用，不静默降级。
+- **daemon 自愈（DEV-042 / IMP-033）**：watcher 启动时与每 `DEFAULT_SUPERVISE_INTERVAL`（60s）
   执行一次 `reconcile()`，恢复 `desired=running` 但状态偏离（stopped/failed/gateway_down
-  等）的实例——builtin 静态进程死了重新 spawn、容器走轻量 start。Caddy 后端且网关被
-  显式关闭（`lwa gateway off`）时跳过 caddy 静态实例，避免与手动停止冲突。
-- **开机自启（OPS-025，macOS）**：`lwa setup --autostart [--with-caddy]` 在
-  `~/Library/LaunchAgents/` 生成 `com.fenix.lwa.{daemon,manager[,gateway]}.plist`，
-  登录时幂等执行对应 `on` 命令；随后按提示 `launchctl load <plist>` 启用、`unload` 取消。
-  Linux/Windows 见对应平台文档（systemd user service / 任务计划程序）。
+  等）的实例——builtin 静态进程死了重新 spawn、容器走轻量 start。观测失败
+  （`permission_denied` / timeout / unknown）或 Full Profile `overall≠ready` 时**跳过容器自动纠正**。
+  Caddy 后端且网关被显式关闭（`lwa gateway off`）时跳过 caddy 静态实例，避免与手动停止冲突。
+- **开机自启（IMP-030）**：优先 `lwa autostart install [--with-caddy]`（见 [autostart.md](autostart.md)）；
+  `lwa setup --autostart` 为兼容旧入口。macOS launchd / Linux·WSL systemd user unit；
+  Windows 见任务计划程序说明。
 
 ### `templates/`、`skills/`
 

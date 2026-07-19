@@ -56,6 +56,8 @@
 4. 停服说明：lwa autostart disable 再 lwa X off
 5. 升级/热重载：优先 lwa update（自启在管时 coordinated_restart，无需手动 off/on）
 6. 复核：lwa autostart status / curl /api/health
+7. Linux + 容器：确认 docker 组已生效（newgrp/重登）并重启 manager/daemon；
+   Full 环境再跑 lwa doctor --profile full / lwa capabilities --json
 ```
 
 ## 平台要点
@@ -63,9 +65,11 @@
 | 平台 | 一键命令 | 关键点 |
 | --- | --- | --- |
 | macOS | `lwa autostart install --with-caddy` | LaunchAgent，登录触发；KeepAlive 崩溃即拉起 |
-| Linux | `lwa autostart install` + `enable-linger` | systemd user；Python 须 3.13 venv |
+| Linux | `lwa autostart install` + `enable-linger` | systemd **user** 单元；docker 组靠登录会话（非 SupplementaryGroups）；Python 须 3.13 venv |
 | WSL | 同 Linux + Windows 唤醒任务 | 需 `/etc/wsl.conf` `[boot] systemd=true` |
 | Windows 原生 | 任务计划程序（手动） | 见 [开机自启文档](../../../../docs/autostart.md) |
+
+> Full Profile 进阶：若改用 **system** unit 并以 `User=` + `SupplementaryGroups=docker` 启动，可减少「重登才继承 docker 组」问题；当前 `lwa autostart` 默认仍生成 user unit。
 
 ## 示例对话
 

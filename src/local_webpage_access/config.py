@@ -137,6 +137,9 @@ class Config(BaseModel):
     lanIpStrategy: str = "auto"
     manualLanIp: str | None = None
     logLevel: str = "INFO"
+    # IMP-033：安装档位与运行身份（缺省 default；full 由 setup --full 写入）
+    profile: str = "default"
+    serviceUser: str | None = None
 
     @field_validator("staticGateway")
     @classmethod
@@ -145,6 +148,15 @@ class Config(BaseModel):
         if v not in allowed:
             raise ValueError(f"staticGateway 必须是 {allowed} 之一，得到 {v!r}")
         return v
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, v: str) -> str:
+        allowed = {"default", "full"}
+        lower = (v or "default").lower()
+        if lower not in allowed:
+            raise ValueError(f"profile 必须是 {allowed} 之一，得到 {v!r}")
+        return lower
 
     @field_validator("logLevel")
     @classmethod

@@ -160,16 +160,44 @@ class StaticGateway:
     # ---- 后端探测 -----------------------------------------------------------
 
     def detect_backend(self) -> str:
-        """返回 ``"caddy"`` 或 ``"builtin"``，遵循 ``config.staticGateway``（BUG-003）。"""
+        """返回 ``"caddy"`` 或 ``"builtin"``，遵循 ``config.staticGateway``。
+
+        IMP-033：仅 Full Profile **禁止**静默降级 builtin；default 档即使配置
+        ``staticGateway=caddy``，缺少二进制时仍按 BUG-003 的兼容承诺降级。
+        """
+        from local_webpage_access.capability import load_profile_state
+        from local_webpage_access.errors import GatewayError
+
         configured = self.config.staticGateway
+        profile = getattr(self.config, "profile", None) or "default"
+        if profile != "full":
+            state = load_profile_state(self.ws.root)
+            if state.get("profile") == "full":
+                profile = "full"
+        strict = profile == "full"
+
         if configured == "builtin":
+            if profile == "full":
+                raise GatewayError(
+                    "Full Profile 要求 Caddy，但 staticGateway=builtin；"
+                    "请改为 caddy 或执行 lwa setup --full --resume",
+                )
             return "builtin"
         if configured == "caddy":
             if shutil.which("caddy"):
                 return "caddy"
+            if strict:
+                raise GatewayError(
+                    "配置 staticGateway=caddy 但未找到 caddy 可执行文件"
+                    "（Full/严格模式禁止降级 builtin）",
+                )
             log.warning("配置 staticGateway=caddy 但未找到 caddy 可执行文件，降级 builtin")
             return "builtin"
-        # nginx 等尚未实现的网关：暂降级 builtin
+        # nginx 等尚未实现的网关
+        if strict:
+            raise GatewayError(
+                f"staticGateway={configured} 尚未实现，Full/严格模式禁止降级 builtin",
+            )
         log.warning("staticGateway=%s 尚未实现，降级 builtin", configured)
         return "builtin"
 
@@ -591,8 +619,30 @@ class StaticGateway:
         if self.detect_backend() != "caddy":
             return
 
-        # IMP-010/0.3：reload 前确保 master/admin 在线，否则 reload 必失败。
-        self.ensure_caddy_running()
+        access = self.verify_workspace_caddy_access()
+        if access:
+            raise GatewayError(
+                f"工作区 Caddy 路径不可访问（{access}），禁止 reload",
+                detail=access,
+            )
+
+        # IMP-033：admin 已在线时必须确认归属本工作区，禁止误操外部/系统 Caddy。
+        if self._admin_alive():
+            owner = self.inspect_caddy_owner()
+            if owner.get("owner") != "lwa_service_user" or not owner.get(
+                "workspace_match"
+            ):
+                raise GatewayError(
+                    "Caddy master 所有权不匹配，禁止 reload",
+                    detail=(
+                        f"owner={owner.get('owner')} "
+                        f"user={owner.get('process_user')} "
+                        f"pid={owner.get('pid')}"
+                    ),
+                )
+        else:
+            # admin 不在线：尽力拉起；失败后仍走 reload，由下方统一报「reload 失败」
+            self.ensure_caddy_running()
 
         main = self.main_config_path()
         main.parent.mkdir(parents=True, exist_ok=True)
@@ -884,16 +934,118 @@ class StaticGateway:
         return stopped
 
     def ensure_caddy_running(self) -> bool:
-        """确保 Caddy admin 在线；不可达则尝试 ``caddy start``（IMP-010/0.3）。
+        """确保 Caddy admin 在线且归属本工作区（IMP-010/0.3；IMP-033 owner 校验）。
 
-        reload 前调用：master 缺失时 reload 必失败，故先拉起。start 失败返回 False，
-        调用方（如 :meth:`reload_all` 的自愈路径）可据此决定是否再试。
+        reload 前调用：master 缺失时 reload 必失败，故先拉起。
+        admin 在线但 owner 不是本工作区 LWA Caddy 时返回 False（fail-closed）。
         """
         if self._admin_alive():
-            return True
+            owner = self.inspect_caddy_owner()
+            if owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"):
+                return True
+            log.warning(
+                "Caddy admin :2019 在线但所有权不匹配：owner=%s euid=%s pid=%s",
+                owner.get("owner"),
+                owner.get("process_user"),
+                owner.get("pid"),
+            )
+            return False
         self._clear_stale_caddy_pid()
         log.warning("Caddy admin 不在线，尝试拉起 master")
         return self.caddy_start()
+
+    def inspect_caddy_owner(self) -> dict:
+        """检查 :2019 上 Caddy master 的所有权（IMP-033 / BUG-231）。
+
+        返回 dict：``owner`` / ``process_user`` / ``pid`` / ``workspace_match`` /
+        ``admin_alive`` / ``runtime``。
+        """
+        import getpass
+
+        result: dict = {
+            "owner": "unknown",
+            "process_user": None,
+            "pid": None,
+            "workspace_match": False,
+            "admin_alive": self._admin_alive(),
+            "runtime": "unknown",
+        }
+        if not result["admin_alive"]:
+            return result
+
+        pid = None
+        path = self.caddy_pid_path()
+        if path.is_file():
+            try:
+                pid = int(path.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                pid = None
+        if pid is not None and self._pid_alive(pid):
+            result["pid"] = pid
+            result["workspace_match"] = True
+            # 尽量读 euid
+            try:
+                if hasattr(os, "stat"):
+                    # Linux: /proc/<pid>/status Uid
+                    status_path = Path(f"/proc/{pid}/status")
+                    if status_path.is_file():
+                        for line in status_path.read_text(encoding="utf-8").splitlines():
+                            if line.startswith("Uid:"):
+                                euid = int(line.split()[1])
+                                result["process_user"] = str(euid)
+                                try:
+                                    import pwd
+
+                                    result["process_user"] = pwd.getpwuid(euid).pw_name
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                break
+            except Exception:  # noqa: BLE001
+                pass
+            service_user = getattr(self.config, "serviceUser", None) or getpass.getuser()
+            proc_user = result["process_user"]
+            if proc_user is None:
+                # 无法证明进程身份时必须 fail-closed，不能把外来 Caddy 误认成本服务。
+                result["owner"] = "unknown"
+            elif str(proc_user) == str(service_user):
+                result["owner"] = "lwa_service_user"
+            else:
+                result["owner"] = "foreign_process"
+            result["runtime"] = (
+                "ready" if result["owner"] == "lwa_service_user" else "owner_mismatch"
+            )
+            return result
+
+        # admin 在线但无本工作区 pid → 系统/外部 Caddy
+        result["owner"] = "system_caddy"
+        result["workspace_match"] = False
+        result["runtime"] = "owner_mismatch"
+        # 尝试从 ss/lsof 猜 PID（best-effort，可空）
+        return result
+
+    def verify_workspace_caddy_access(self) -> str | None:
+        """以当前用户预检工作区 Caddy 相关路径读写。
+
+        返回 None 表示 OK；否则返回 ``read_denied`` / ``write_denied`` /
+        ``workspace_access_denied``。
+        """
+        main = self.main_config_path()
+        try:
+            if main.is_file():
+                main.read_text(encoding="utf-8")
+            sites = self.ws.static_gateway / "sites"
+            if sites.is_dir():
+                next(sites.iterdir(), None)
+        except OSError:
+            return "read_denied"
+        log_path = self.ws.logs / "static-access.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write("")
+        except OSError:
+            return "write_denied"
+        return None
 
     def _clear_stale_caddy_pid(self) -> None:
         """清理指向已死进程的 Caddy master pid 文件（BUG-070）。"""
@@ -1175,10 +1327,13 @@ class StaticGateway:
                 return True
         try:
             if os.name == "nt":
+                from local_webpage_access.platform_detect import subprocess_hidden_kwargs
+
                 result = subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     capture_output=True,
                     timeout=_KILL_TIMEOUT,
+                    **subprocess_hidden_kwargs(),
                 )
                 if result.returncode != 0:
                     stderr = result.stderr.decode("utf-8", "replace").strip()

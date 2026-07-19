@@ -121,11 +121,30 @@ refresh_apt_with_retry() {
 }
 
 disable_system_caddy_service() {
-  # apt 包会启用 caddy.service，与 lwa gateway on 争用 :2019；由 LWA 托管时先停掉
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl list-unit-files caddy.service >/dev/null 2>&1; then
-      log "禁用系统 caddy.service（避免与 lwa gateway 争用 :2019）…"
-      run_sudo systemctl disable --now caddy.service 2>/dev/null || true
+  # apt 包会启用 caddy.service，与 lwa gateway on 争用 :2019；由 LWA 托管时必须停掉。
+  # IMP-033 / BUG-231：fail-closed——disable 失败不得假装成功。
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+    return 0
+  fi
+  local active=""
+  active="$(systemctl is-active caddy.service 2>/dev/null || true)"
+  local enabled=""
+  enabled="$(systemctl is-enabled caddy.service 2>/dev/null || true)"
+  if [[ "$active" != "active" && "$enabled" != "enabled" && "$enabled" != "enabled-runtime" ]]; then
+    log "系统 caddy.service 未启用（active=$active enabled=$enabled），跳过停用"
+    return 0
+  fi
+  log "禁用系统 caddy.service（避免与 lwa gateway 争用 :2019）…"
+  if ! run_sudo systemctl disable --now caddy.service; then
+    die "无法停用系统 caddy.service（active=$active）。请手动：sudo systemctl disable --now caddy.service 后重跑。Full Profile 禁止与系统 Caddy 双托管。"
+  fi
+  # 确认 admin 端口释放（best-effort 探测）
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltn 2>/dev/null | grep -qE ':2019\s'; then
+      warn ":2019 仍被占用；若非即将由 LWA 接管的进程，请手动排查"
     fi
   fi
 }
@@ -260,7 +279,12 @@ main() {
   need_cmd apt-get
   need_cmd tar
   detect_ubuntu
-  if already_good; then exit 0; fi
+  # IMP-033 / BUG-231：版本已达标也必须处理系统 caddy.service，不得跳过 disable
+  if already_good; then
+    log "Caddy 版本已达标，仍检查并停用系统 caddy.service…"
+    disable_system_caddy_service
+    exit 0
+  fi
 
   if install_via_cloudsmith; then
     verify

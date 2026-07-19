@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -351,7 +352,14 @@ def host_container(
     )
     fresh_port = False
 
+    def _stage(name: str) -> None:
+        msg = f"stage={name}"
+        log.info("lifecycle_stage instance=%s %s", instance_id, msg)
+        with contextlib.suppress(Exception):
+            registry.add_event(instance_id, "lifecycle_stage", msg)
+
     try:
+        _stage("host_start")
         # BUG-205：重建 down 前先把容器内数据救出到宿主 data/，避免旧库随容器删除丢失
         _rescue_container_data_before_rebuild(workspace, manifest, instance_id, runtime)
 
@@ -364,6 +372,7 @@ def host_container(
 
         # 3. 生成 Dockerfile（BUG-200：注入 config.buildMirrors，避免手改被覆盖）
         generate_dockerfile(manifest, workspace, config=config)
+        _stage("dockerfile_ready")
 
         # 4. 分配/复用端口
         host_port, fresh_port = _ensure_container_port(config, registry, instance_id)
@@ -371,10 +380,15 @@ def host_container(
         # 5. 生成 Compose + .env（含 SQLite DATABASE_URL / RUNTIME_ROOT 与 data/ 挂载）
         generate_compose(manifest, workspace, host_port=host_port)
         generate_env(manifest, workspace, host_port=host_port)
+        _stage("compose_ready")
 
         # 6. build + up
+        _stage("compose_build_start")
         runtime.build(instance_id, build_id=build_id)
+        _stage("compose_build_done")
+        _stage("compose_up_start")
         runtime.up(instance_id)
+        _stage("compose_up_done")
     except Exception as exc:
         # 端口回滚：仅释放本轮新分配的端口（与 _enable_static / BUG-182 对称）。
         # 复用旧端口是上一轮成功部署的登记，失败时清掉会破坏 lanUrl 稳定性。
@@ -816,11 +830,14 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
     pid = proc.pid
     try:
         if sys.platform == "win32":
+            from local_webpage_access.platform_detect import subprocess_hidden_kwargs
+
             subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 timeout=15,
                 check=False,
+                **subprocess_hidden_kwargs(),
             )
         else:
             try:

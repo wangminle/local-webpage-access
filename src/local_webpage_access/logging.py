@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from rich.console import Console
 from rich.logging import RichHandler
 
 _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
@@ -27,12 +28,14 @@ def setup_logging(
     level: _LogLevel = "INFO",
     log_dir: Path | None = None,
     *,
+    log_filename: str = "lwa.log",
     force: bool = False,
 ) -> logging.Logger:
     """配置全局日志。
 
     多次调用默认幂等（除非 ``force=True``），避免重复添加 handler。
-    当提供 ``log_dir`` 时，会额外写入 ``<log_dir>/lwa.log``（权限 0600）。
+    当提供 ``log_dir`` 时，会额外写入 ``<log_dir>/<log_filename>``（权限 0600）。
+    IMP-034：CLI→``lwa.log``，manager→``manager.log``，daemon→``daemon.log``。
     """
     global _CONFIGURED
 
@@ -47,6 +50,7 @@ def setup_logging(
         root.removeHandler(handler)
 
     console = RichHandler(
+        console=Console(stderr=True),
         show_time=True,
         show_level=True,
         show_path=False,
@@ -58,12 +62,13 @@ def setup_logging(
 
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "lwa.log"
+        log_path = log_dir / (log_filename or "lwa.log")
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
         file_handler.setLevel(level)
         root.addHandler(file_handler)
         secure_chmod(log_path)
+        root.info("文件日志：%s", log_path)
 
     root.propagate = False
     _CONFIGURED = True

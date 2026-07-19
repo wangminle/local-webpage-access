@@ -241,7 +241,27 @@
 | BUG-228 | 修复 | importer._claim_unique_id 中 ensure_app_dirs 异常时已 mkdir 的实例根目录不清理，遗留孤儿目录 | 2026-07-18 23:33 | 2026-07-18 23:50 | 已完成 | 【已修复】ensure_app_dirs 失败时 rmtree 已占用的 app_dir。 |
 | BUG-229 | 修复 | docker_runtime._execute 用 capture_output 等命令结束后才写 build.log，长耗时 docker compose build 期间日志为空，易误判为构建调度卡死 | 2026-07-18 23:02 | 2026-07-18 23:15 | 已完成 | 【修复】有 log_path 时改为流式：先写命令头再边跑边追加；读线程+queue 保证超时可触发。回归 test_execute_streams_log_while_command_running / test_execute_streaming_timeout_writes_cmd_header。 |
 | BUG-230 | 修复 | 容器状态观测把 Docker 权限或连接失败等未知状态降级为 stopped，manager/daemon 会将实际运行容器错误回写为已停止 | 2026-07-18 23:18 | 2026-07-18 23:25 | 已完成 | 【已修复 P0】status() 权限失败抛 DockerError；_observe_container_status：HTTP 兜底，否则保留原状态并写 last_error（含 newgrp+重启 manager/daemon）。【P1】probe_docker_permission + manager/daemon 启动 WARN；doctor/autostart check 区分权限不足。【P2】faq/autostart/known-limitations + install-docker 脚本提示。回归 test_observe_container_docker_permission_* / test_status_raises_on_docker_permission_denied / test_check_docker_permission_denied_suggests_newgrp。 |
-| BUG-231 | 修复 | Full Profile 可能误认并 reload 系统 caddy.service：版本已达标安装路径跳过停用服务，admin 在线又未校验 owner/euid/workspace，系统 caddy 用户无法访问用户工作区 | 2026-07-18 23:42 | - | 待修复 | Ubuntu 实机：设置路径别名时 Caddy reload 报 mkdir /home/.../local-webpage-access permission denied。根因不是应递归开放 ACL，而是 LWA 误用 User=caddy 的外部 master。需所有安装路径严格处理 caddy.service，admin 操作前校验 pid/euid/config/workspace，owner mismatch fail closed，并以 serviceUser 接管。对应 IMP-033 WBS-033.07。 |
+| BUG-231 | 修复 | Full Profile 可能误认并 reload 系统 caddy.service：版本已达标安装路径跳过停用服务，admin 在线又未校验 owner/euid/workspace，系统 caddy 用户无法访问用户工作区 | 2026-07-18 23:42 | 2026-07-19 01:10 | 已完成 | 已在 feat/imp033-034 落地：already_good 仍 disable、inspect_caddy_owner、reload fail-closed、工作区读写预检。详见 BUG-232/DEV-078。 |
+| BUG-232 | 修复 | 关闭 BUG-231：already_good 仍 disable 系统 caddy；admin 在线须校验 owner；reload 前工作区读写预检与 owner mismatch fail-closed | 2026-07-19 01:12 | 2026-07-19 01:10 | 已完成 | 对应 IMP-033 WBS-033.07；install-caddy-linux.sh + static_gateway.inspect_caddy_owner/ensure_caddy_running/reload_all。 |
+| BUG-233 | 修复 | Full Profile 能力汇总允许 Caddy runtime=unknown，且未纳入 owner、工作区访问和 gatewayAccess，可能在网关未验收时报告 ready | 2026-07-19 08:55 | 2026-07-19 09:25 | 已完成 | `_compute_overall` Full 强制 caddyRuntime/owner/workspace/gateway；`probe_caddy_runtime_fields` + gateway 写 capability-gateway.json；回归 test_full_overall_requires_caddy_gateway_and_backends |
+| BUG-234 | 修复 | setup --full 只校验 CLI Docker 与 Caddy 二进制便写 overall=ready，未要求 manager/daemon 真实上下文能力闭环 | 2026-07-19 08:55 | 2026-07-19 09:25 | 已完成 | run_full_bootstrap 按 CapabilityReport.overall==ready 验收；验收前尝试拉起 gateway/manager/daemon；未闭环 exit 1；回归 test_run_full_bootstrap_rejects_without_backend_capability_loop |
+| BUG-235 | 修复 | manager/daemon 能力缓存由启动它们的父 CLI 进程探测并冒充后台角色，服务进程入口本身没有自检 | 2026-07-19 08:55 | 2026-07-19 09:25 | 已完成 | 移除 start_manager/start_daemon 父进程冒充写入；改由 run_service_main/_main/gateway run_service_main 以真实身份 collect+write_capability_cache |
+| BUG-236 | 修复 | 已鉴权的局域网管理页从公开 health 接口拿不到 capabilities，前端无法显示真实降级原因或禁用容器按钮 | 2026-07-19 08:55 | 2026-07-19 09:25 | 已完成 | /api/health 对本机或带有效 token 的客户端返回完整 capabilities；未鉴权 LAN 仍仅 profile/overall；回归 test_health_capabilities_for_authenticated_lan |
+| BUG-237 | 修复 | Docker 能力降级时仅由管理页 JavaScript 阻断操作，后端生命周期 API 仍可被直接调用 | 2026-07-19 08:55 | 2026-07-19 09:25 | 已完成 | `_lifecycle_op` 对容器实例按 manager/daemon/dockerAccess 与 sessionRefresh fail-closed 返回 409 capability_denied；静态实例不受影响；回归 test_container_lifecycle_blocked_when_docker_permission_denied |
+| BUG-238 | 修复 | IMP-033 detect_backend 在 default profile + 默认 staticGateway=caddy + 未装 caddy 时抛 GatewayError，废弃 BUG-003 builtin 兜底承诺，default 档用户静态托管不可用 | 2026-07-19 21:40 | 2026-07-19 20:20 | 已修复 | strict 改为仅 Full Profile 生效；default+caddy 缺二进制恢复 builtin 兜底，Full 仍 fail-closed；新增双向回归。 |
+| BUG-239 | 修复 | IMP-033 manager /api/health 视角 cli_docker_access 无写入路径（write_capability_cache 仅 manager/daemon/gateway 调用），full profile _compute_overall 因 cli_docker_access=unknown 永远返回 unready，管理页横幅永久不可用 | 2026-07-19 21:40 | 2026-07-19 20:20 | 已修复 | Full overall 按采集角色判定：CLI 视角强制 cliDockerAccess，manager/daemon/gateway 后台视角不再因无 CLI 缓存永久 unready；回归通过。 |
+| BUG-240 | 修复 | _observe_container_status 的 except Exception 兜底把非 DockerError 编程异常(TypeError/KeyError) 当作干净 stopped 写入，清空 observation_error、覆盖 last_trusted_state=stopped、runtime_access=ready，掩盖编程 bug | 2026-07-19 21:40 | 2026-07-19 20:20 | 已修复 | DockerError 未分类分支与通用 Exception 均改走 _record_unknown，保留 status/lastTrustedState 并记录 unknown；TypeError 回归通过。 |
+| BUG-241 | 修复 | lwa doctor --json --profile full 在 JSON 输出前先向 stdout 打印 Full Profile 人类可读文本，导致 stdout 非纯 JSON，脚本解析失败 | 2026-07-19 21:40 | 2026-07-19 20:20 | 已修复 | JSON 模式不再输出 Full 人类摘要；Rich 控制台日志统一走 stderr，stdout 可直接 json.loads；回归通过。 |
+| BUG-242 | 修复 | run_full_bootstrap --resume 在 completedSteps 含 components_installed 时无条件 planned=[]，组件被卸载/损坏也不重装；复检失败不删 completedSteps，形成死循环 | 2026-07-19 21:40 | 2026-07-19 20:20 | 已修复 | resume 始终尊重实时安装规划，不再因旧 completedSteps 跳过；复检失败清除 components_installed/components_verified；重装回归通过。 |
+| BUG-243 | 修复 | daemon.reconcile 用陈旧 observation_error/runtime_access 对非 running 容器永久跳过自愈：仅 running/building 才 observe，stopped+desired=running 时过期 permission_denied 永不清除也不 start | 2026-07-19 19:42 | 2026-07-19 20:20 | 已修复 | desired=running 的容器在套用观测错误门闩前统一实时 observe，成功观测会清除陈旧错误并恢复自愈；回归通过。 |
+| BUG-244 | 修复 | daemon.reconcile 声称落实 IMP-033 §13.5.3，但未实现「Full Profile 且 CapabilityReport.overall≠ready 时整轮跳过容器自动纠正」 | 2026-07-19 19:42 | 2026-07-19 20:20 | 已修复 | reconcile 每轮采集 daemon 能力；Full overall 非 ready 或探测失败时整轮跳过容器自动纠正，静态实例仍独立恢复；回归通过。 |
+| BUG-245 | 修复 | attach_daemon_log_handler(force=True, level=INFO) 覆盖 _main 已按 --log-level 配置的日志级别，DEBUG 等参数失效 | 2026-07-19 19:42 | 2026-07-19 20:20 | 已修复 | attach_daemon_log_handler 接收并沿用 --log-level，_main 只初始化一次文件日志；daemon 全模块 60 passed。 |
+| BUG-246 | 修复 | manager `/api/health` 与 `_docker_ops_blocked_reason` 调用 `collect_capability_report(role=manager)` 时默认 `include_backend_cached=True`，会用启动时写入的 `capability-manager.json` 覆盖本进程刚探测的 managerDockerAccess | 2026-07-19 19:44 | 2026-07-19 20:20 | 已修复 | 缓存合并显式跳过 current_role，自身实时探测优先、只合并其他后台角色；live=ready/旧缓存失败回归通过。 |
+| BUG-247 | 修复 | `_docker_ops_blocked_reason` 在 live 能力已恢复时仍因实例陈旧 `runtime_access=permission_denied` 直接 409，且 start 前不 `sync_status`/observe，无法自清 | 2026-07-19 19:44 | 2026-07-19 20:20 | 已修复 | 人工生命周期操作以 manager 实时 Docker 能力为准，不再被实例或 daemon 陈旧权限字段阻断；恢复后 start API 回归通过。 |
+| BUG-248 | 修复 | `run_full_bootstrap` 在 `workspace_root is None`（`setup --full` 于 init 前 / 找不到 local-web.yml）时跳过能力闭环，仍返回 `ok=True overall=ready`，且不写 profile/serviceUser | 2026-07-19 19:44 | 2026-07-19 20:20 | 已修复 | 无工作区时在安装规划前直接返回 unready/exit 1，并提示先 lwa init；不再出现 components-only 假 ready。 |
+| BUG-249 | 修复 | `inspect_caddy_owner` 在 pid 存活但读不到 `/proc/.../Uid`（`process_user is None`）时 fail-open 判为 `lwa_service_user`/`ready`，可能误认外来 Caddy | 2026-07-19 19:44 | 2026-07-19 20:20 | 已修复 | process_user 未知时 owner=unknown、runtime=owner_mismatch，保持 fail-closed；回归通过。 |
+| BUG-250 | 修复 | Windows 上无控制台的 lwa daemon 周期性调用 powershell/taskkill 未设 CREATE_NO_WINDOW，约每 60s 弹出短暂黑窗 | 2026-07-19 20:57 | 2026-07-19 20:57 | 已修复 | 新增 platform_detect.subprocess_hidden_kwargs；daemon read_pid_cmdline/_terminate_pid、static_gateway/hosting taskkill、conftest 清理路径全部加 CREATE_NO_WINDOW；回归 test_read_pid_cmdline_windows_powershell 断言 creationflags |
+| BUG-251 | 修复 | lwa init --full 未传 workspace_root，run_full_bootstrap 恒 unready；失败退出码未透传 boot.exit_code | 2026-07-19 22:34 | 2026-07-19 22:34 | 已修复 | BUG-251：cli/__init__.py 传 workspace_root=ws 且 Exit(boot.exit_code)；回归 test_cli_init_full_passes_workspace_root |
 ## 调整事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -355,11 +375,18 @@
 | CHK-074 | 检查 | 复核 2026-07-18 列出的全部 BUG-205～228 是否真正修复 | 2026-07-18 23:00 | 2026-07-18 23:50 | 已完成 | 逐条核对：确认 BUG-213、BUG-216 当时未修好并曾退回待修复；同日 23:50 已补修并回归（跨平台 file_lock、enable 失败恢复）。其余 22 项未发现明确反例；相关定向测试通过。 |
 | CHK-075 | 检查 | 分析 Ubuntu 后台进程 Docker 权限漂移并设计 LWA 分层权限模型 | 2026-07-18 23:18 | 2026-07-18 23:18 | 已完成 | 结论：LWA 主进程坚持非 root；容器能力按运行身份显式校验；systemd user manager 需重登刷新 supplementary groups；观测错误进入 unknown/degraded 而非 stopped；安装、自启动、API、doctor 均报告能力状态。新增 BUG-230。 |
 | CHK-076 | 检查 | 分析 Ubuntu Caddy reload 权限失败及系统 caddy.service 与 LWA 网关所有权冲突 | 2026-07-18 23:42 | 2026-07-18 23:42 | 已完成 | 核对 static_gateway/gateway_service/install-caddy-linux/autostart：确认 already_good 可跳过 disable，disable 失败被忽略，admin 在线缺完整 owner 校验；确定 Full 默认应由 serviceUser 接管，不以递归 ACL/chown 放开 home。新增 BUG-231。 |
+| CHK-077 | 检查 | 审查 IMP-033/034 未提交代码并验证是否仍有 bug | 2026-07-19 08:55 | 2026-07-19 08:55 | 已完成 | 对照 Full Profile 设计契约审阅约 1000 行差异；新增 BUG-233～237。完整 pytest 120 秒超时；定向测试分别受 Windows 既有 lock 文件读取与 os.killpg 平台用例阻断；ruff 检出本次新增 2 个 F541，mypy 含新增 cli/system 类型错误。 |
+| CHK-079 | 检查 | 继 CHK-077/078+BUG-233~237 后再次审查 IMP-033/034 未提交改动是否仍有 bug | 2026-07-19 20:30 | 2026-07-19 21:40 | 已完成 | 3 并行 agent + 交叉验证 + 当前工作树复核。确认仍成立：BUG-238 detect_backend strict 废弃 builtin 兜底(P0)、BUG-239 manager 视角 cli_docker_access 无缓存写入致 full overall 永远 unready(P1，CHK-078#1 遗留)、BUG-240 lifecycle:822 编程异常伪装干净 stopped、BUG-241 doctor --json --profile full 混入文本(CHK-078#4 遗留)、BUG-242 resume 死循环。本次排除(已被前一轮修)：caddy_runtime=unknown(BUG-233)、缓存父进程冒充(BUG-235)。待核对次要项：inspect_caddy_owner 不验 cmdline、pidfile 缺失 reload 永久失败、verify_workspace 跨用户写探针、state profile 无回退、daemon log handler force 覆盖级别、--resume 非 full 静默丢弃。既有非本次：3 Windows 测试失败(os.killpg 测试可移植性/lock PermissionError)经 stash 验证为既有 flaky。注：CHK-078 被前一轮误录入 ## 测试数据 区块，建议后续 ADJ 移回 ## 检查事项 |
+| CHK-080 | 检查 | 核对 task-list 全部 BUG 是否已修复清理：对照源码复核待修复项真伪 | 2026-07-19 09:25 | 2026-07-19 09:25 | 已完成 | BUG 共 242 条：已完成 155 + 已修复 82 = 237 已收口；仍待修复 5 条（BUG-238~242，均来自 CHK-079）。对照工作树源码确认仍成立：238 detect_backend strict=caddy\|full 废弃 builtin 兜底；239 full overall 强制 cli_docker_access 且无 cli 缓存写入；240 lifecycle except Exception 仍可 _record_ok(STOPPED)；241 doctor --json 前先 stdout 打印 Full Profile；242 resume 见 components_installed 即 planned=[]。清单内无其他「待修复/进行中」条目；状态用词「已完成/已修复」并存属命名不一致，非未修。 |
+| CHK-081 | 检查 | 只读缺陷审查：host_bootstrap/lifecycle/daemon/cli/system/config 相对 HEAD 未提交改动 | 2026-07-19 19:42 | 2026-07-19 19:42 | 已完成 | 范围限定上述文件+对应 tests；确认仍成立 BUG-240/241/242；新发现 BUG-243（reconcile 陈旧观测阻断自愈 P1）、BUG-244（缺 Full overall 门闩 P2）、BUG-245（daemon log force 覆盖级别 P3）。config.py 无缺陷。 |
+| CHK-082 | 检查 | 再次审查当前未提交 IMP-033/034 改动是否仍有 bug（交叉复核 CHK-079/081 + 新路径） | 2026-07-19 19:44 | 2026-07-19 19:44 | 已完成 | 复核仍成立：BUG-238(P0)～245；新发现 BUG-246（manager 自缓存覆盖 live 探测）、BUG-247（API 陈旧 runtime_access 阻断）、BUG-248（无工作区 setup --full 假 ready）、BUG-249（owner process_user=None fail-open）。定向 pytest capability/host_bootstrap/manager_api 相关通过；Windows 上 lifecycle lock / killpg / chmod 失败属既有平台 flaky，非本次引入。 |
+| CHK-083 | 检查 | 全量对照文档与最新代码：Full 流程/降级口径/CLI 与 README·docs·skills 一致性 | 2026-07-19 22:35 | 2026-07-19 22:35 | 已完成 | CHK-083：审计发现 docs 误写 setup --full 可无工作区、init 前跑 full；runtime 误写失败只降级 builtin；顺带修 BUG-251。已改 README/faq/operations-playbook/runtime-workspace/known-limitations/setup-host skill。manager-page/autostart/security/release 主体已对齐。design/plan 规划体保留。 |
 
 ## 测试数据
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
+| CHK-078 | 检查 | 独立验证 IMP-033 Full Profile 相关 4 个候选问题真伪（/api/health manager 口径、gateway 能力缓存、run_full_bootstrap ready 判定、doctor --json --profile full 输出契约） | 2026-07-19 08:58 | 2026-07-19 08:58 | 已完成 | 结合源码静态核查 + 最小运行时复现实验确认 4 条均成立：1) manager 视角 capability report 缺 CLI 缓存，full overall 永不到 ready；2) gateway 缓存只有读路径无写路径，caddyRuntime/caddyOwner 长期 unknown；3) run_full_bootstrap 仅检查 cli_docker_access/caddy_binary，忽略 report.overall 仍持久化 ready；4) doctor_cmd 在 --json 分支前先输出 Full Profile 文本，导致 --json --profile full 混入非 JSON 文本。未改业务代码。 |
 
 ## 文档维护
 
@@ -411,6 +438,9 @@
 | DOC-044 | 文档 | 补充 IMP-033 §13：macOS/Ubuntu 权限差异、IMP-032 旧边界废止、reconcile 禁自动纠正、health/API JSON 草案、验收不以 Mac 代 Ubuntu | 2026-07-18 23:38 | 2026-07-18 23:40 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §13.1.3/13.1.4/13.5.3/13.7.1 与 033.13～14、§13.10 风险行。 |
 | DOC-045 | 文档 | 补充 IMP-033 的系统 Caddy 身份侵入事故、所有权校验、serviceUser 接管方案与验收 WBS | 2026-07-18 23:42 | 2026-07-18 23:42 | 已完成 | 更新 §13.1.5、13.3.3、CapabilityReport、setup 流程、API 草案、WBS-033.07/11/12/13、验收/风险/编号映射；明确 ACL/chown/home other+rx 不是 Full 默认解法。 |
 | DOC-046 | 文档 | 在新增功能点2607中新增 IMP-034 §14 日志可观测性补强计划 | 2026-07-18 23:43 | 2026-07-18 23:45 | 已完成 | 更新文首状态/范围；§14 含问题分析、决策、P0～P2 WBS、验收、与 Ubuntu 故障对照。 |
+| DOC-047 | 文档 | 同步 V0.6.3 / IMP-033·034 用户文档：README、faq、operations-playbook、known-limitations、manager-page、runtime-workspace、autostart、security-boundary、release-checklist 与 setup/diagnose/autostart skills | 2026-07-19 09:18 | 2026-07-19 09:30 | 已完成 | 对齐 Full Profile 能力闭环、--resume、capabilities、日志分文件、capability_denied、SupplementaryGroups 说明；历史 DOC-042 不动。 |
+| DOC-048 | 文档 | V0.6.3 文档复核：修正计划文档 §13「止血状态」过时表述；确认用户文档已对齐 IMP-033/034，无需再改版本号 | 2026-07-19 22:28 | 2026-07-19 22:28 | 已完成 | design/plan §13 改为主路径已落地；pack-release-zip 示例改 0.6.3；问题收集历史记录不动。 |
+| DOC-049 | 文档 | 按代码修正 Full 需工作区与 default/Full 降级口径文档 | 2026-07-19 22:34 | 2026-07-19 22:34 | 已完成 | DOC-049：README/faq/operations-playbook/runtime-workspace/known-limitations + lwa-setup-host-environment/skills README |
 
 ## 功能开发
 
@@ -491,8 +521,10 @@
 | DEV-073 | 开发 | 跨平台自启动管理：macOS、Ubuntu 24.04+、WSL 2.7.0+ 的 install/enable/status/repair/uninstall 与平台探测 | 2026-07-16 10:20 | 2026-07-16 11:51 | 已完成 | 对应 IMP-030（design/plan/local-webpage-access-新增功能点2607.md §10）。本号收口：新增 platform_detect.py（detect_platform 含 wsl）、autostart.py（MacLaunchd/SystemdUser 后端 + 前台监管生成 + install/enable/disable/status/check/repair/uninstall + 完备性检查矩阵 + WSL 唤醒脚本）、cli/autostart.py（lwa autostart 子命令组）；gateway_service 加 run_gateway_foreground 前台入口；setup --autostart 委托 autostart install；daemon/manager/gateway off 协调先卸载单元（030.b）；docs/autostart.md 重写；新建 skill lwa-setup-autostart；tests/test_autostart.py 25 用例 + test_setup/test_init 同步。前台监管修 BUG-138，PATH 修 BUG-139 |
 | DEV-074 | 开发 | IMP-031：内置 macOS/Linux Docker Engine+Compose 阿里云源安装脚本，并在 setup/init 缺失时询问协助安装 | 2026-07-17 17:08 | 2026-07-17 17:32 | 已完成 | IMP-031 收口：scripts/install-docker-{linux,macos}.sh；host_bootstrap.detect/maybe_offer；setup/init 接线；hint/Skill/README；tests/test_host_bootstrap +test_install_docker_scripts。默认阿里云源，对齐官方 Ubuntu apt 流程。 |
 | DEV-075 | 开发 | IMP-032：setup/init 实现 --default/--full；full 路径检查并安装 Caddy+Docker Engine+Compose | 2026-07-17 17:11 | 2026-07-17 17:32 | 已完成 | IMP-032 收口：--default/--full/--yes；host_bootstrap.run_full_bootstrap；install-caddy-{linux,macos}.sh；init --full 默认 staticGateway=caddy；CLI 互斥与非 TTY 需 --yes；文档/Skill 已同步。 |
-| DEV-076 | 开发 | IMP-033：实现 Full Profile 权限契约及 LWA/Caddy/Docker 全链路能力闭环（WBS-033.01～033.14） | 2026-07-18 23:33 | - | 待开发 | 依 design/plan/local-webpage-access-新增功能点2607.md §13 推进；以已完成的 BUG-230 止血修复为基线，继续实现正式观测状态、统一 CapabilityReport、后台真实上下文自检、Linux 持久 Docker 权限、BUG-231 Caddy owner/serviceUser 接管、setup --resume 与实机验收。 |
-| DEV-077 | 开发 | IMP-034：实现日志可观测性补强（WBS-034.01～07） | 2026-07-18 23:43 | - | 待开发 | 依 design/plan/...2607.md §14；可与 DEV-076 并行；034.05 对齐 CapabilityReport 字段。 |
+| DEV-076 | 开发 | IMP-033：实现 Full Profile 权限契约及 LWA/Caddy/Docker 全链路能力闭环（WBS-033.01～033.14） | 2026-07-18 23:33 | 2026-07-19 01:10 | 已完成 | 主路径已落地（CapabilityReport、观测 unknown、Caddy owner、--resume、doctor/capabilities、UI banner）。033.05 system unit SupplementaryGroups 完整路径与 033.13 Ubuntu 实机验收仍建议后续补强；收口见 DEV-078。 |
+| DEV-077 | 开发 | IMP-034：实现日志可观测性补强（WBS-034.01～07） | 2026-07-18 23:43 | 2026-07-19 01:10 | 已完成 | CLI/daemon/manager/gateway 分文件落盘、lifecycle_stage、capability probe、FAQ 排障地图已落地；收口见 DEV-079。 |
+| DEV-078 | 开发 | IMP-033：落地 Full Profile CapabilityReport、观测 unknown 模型、Caddy owner fail-closed、setup --full --resume、doctor/capabilities、管理页 degraded 横幅（DEV-076 主路径） | 2026-07-19 01:12 | 2026-07-19 01:10 | 已完成 | 分支 feat/imp033-034-full-profile-observability；含 capability.py、registry schema v2、lifecycle observe_degraded、install-caddy already_good disable、strict detect_backend。033.13 实机验收与 system unit SupplementaryGroups 完整路径仍可后续补强。 |
+| DEV-079 | 开发 | IMP-034：CLI/daemon/manager/gateway 分文件落盘、lifecycle_stage 事件、capability probe 日志、FAQ 排障地图（DEV-077） | 2026-07-19 01:12 | 2026-07-19 01:10 | 已完成 | setup_logging 支持 log_filename；bootstrap 写 lwa.log；observe_degraded 与 capability probe 对齐 CapabilityReport 字段名。 |
 
 ## 配置运维
 
@@ -548,6 +580,9 @@
 | OPS-048 | 运维 | 应用版本号提升至 V0.6.1：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步；README/docs/skills 对齐 IMP-031/032 | 2026-07-17 18:23 | 2026-07-17 18:23 | 已完成 | 全仓活跃 0.6.0→0.6.1；faq/operations-playbook/runtime-workspace/known-limitations/skills README 补宿主机装配档位与内置脚本；历史 task-list/OPS-046～047 与 resolve 优先级夹具保留。lwa version 仍取 git HEAD 主题，提交 V0.6.1-BuildXXXX 后即显示 V0.6.1。 |
 | OPS-049 | 运维 | 本地运行时更新部署至 V0.6.1（git HEAD 3314dd6 V0.6.1-Build1144）：归档.zip 与仓库 src/docs 逐字节一致（已是 0.6.1，无需解压）；lwa update 重装 0.6.1 + 重启 manager/daemon；补重启 stale gateway | 2026-07-17 18:48 | 2026-07-17 18:50 | 已完成 | 归档.zip(src+docs)经 diff -rq 与仓库完全一致，确认仓库已在 0.6.1，故不解压（避免引入 __MACOSX/.DS_Store）。pip 成功安装 0.6.1（新增 host_bootstrap 模块+安装脚本）；syncSkills 更新3；manager(27715)/daemon(27720) 经自启动 coordinated_restart 重启。纠正 OPS-047 遗漏：gateway 持有进程 56763 为 7/16 启动、早于 gateway_service.py 的 0.6.0 改动(+23/-1,BUG-175/176)，经 launchctl kickstart -k gui/UID/com.fenix.lwa.gateway 重启→新 holder 28270/caddy 28276。4 实例+别名均 HTTP 200，doctor OK，/api/health=V0.6.1。归档.zip 现为冗余（未删，留待用户处置）。 |
 | OPS-050 | 运维 | 将仓库根目录 问题收集/ 加入 .gitignore（本地排障材料不同步 GitHub） | 2026-07-19 00:18 | 2026-07-19 00:18 | 已完成 | .gitignore 新增 /问题收集/；git check-ignore 命中。 |
+| OPS-051 | 运维 | 应用版本号提升至 V0.6.3：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步 | 2026-07-19 09:14 | 2026-07-19 09:16 | 已完成 | 全仓活跃 0.6.1→0.6.3；历史 task-list/OPS-048～049 与 resolve 优先级夹具(0.5.3/0.5.2)保留。lwa version 仍取 git HEAD 主题，提交 V0.6.3-BuildXXXX 后即显示 V0.6.3。 |
+| OPS-052 | 运维 | 复核 V0.6.3 全仓活跃版本引用并补齐遗漏示例 | 2026-07-19 22:28 | 2026-07-19 22:28 | 已完成 | 确认 pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 已为 0.6.3；补 scripts/pack-release-zip.sh 示例 0.6.1→0.6.3；问题收集/与 task-list 历史条目保留不动。 |
+| OPS-053 | 运维 | 将 feat/imp033-034-full-profile-observability 快进合并入 main 并删除本地功能分支 | 2026-07-19 22:56 | 2026-07-19 23:00 | 已完成 | 本地：main 快进 e321d32→5a6f461（V0.6.3-Build1349），本地功能分支已删除。远程：因代理 CONNECT 502 / GitHub 不可达，origin/main 推送与远程分支删除未完成，待网络恢复后执行 git push origin main && git push origin --delete feat/imp033-034-full-profile-observability。 |
 
 ## 规划事项
 
@@ -573,12 +608,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 231 | 230 | 1 | 100% |
+| 代码 Bug | 251 | 251 | 0 | 100% |
 | 调整事项 | 29 | 29 | 0 | 100% |
-| 检查事项 | 75 | 75 | 0 | 100% |
-| 测试数据 | 0 | 0 | 0 | 0% |
-| 文档维护 | 46 | 46 | 0 | 100% |
-| 功能开发 | 77 | 75 | 2 | 97% |
-| 配置运维 | 50 | 50 | 0 | 100% |
+| 检查事项 | 81 | 81 | 0 | 100% |
+| 测试数据 | 1 | 1 | 0 | 100% |
+| 文档维护 | 49 | 49 | 0 | 100% |
+| 功能开发 | 79 | 79 | 0 | 100% |
+| 配置运维 | 53 | 53 | 0 | 100% |
 | 规划事项 | 15 | 15 | 0 | 100% |
-| **总计** | 523 | 520 | 3 | 99% |
+| **总计** | 558 | 558 | 0 | 100% |

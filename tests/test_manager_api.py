@@ -296,6 +296,121 @@ def test_health_workspace_root_only_for_localhost(manager_env: EnvBundle) -> Non
         assert "workspaceRoot" not in body
 
 
+def test_health_capabilities_for_authenticated_lan(manager_env: EnvBundle) -> None:
+    """BUG-236：已鉴权局域网客户端应拿到完整 capabilities，未鉴权仅 overall。"""
+    with TestClient(manager_env.app, client=("10.0.0.8", 50000)) as lan_client:
+        bare = lan_client.get("/api/health").json()
+        assert bare["ok"] is True
+        assert "capabilities" not in bare
+        assert "overall" in bare
+
+        authed = lan_client.get(
+            "/api/health", headers=manager_env.auth_headers()
+        ).json()
+        assert authed["ok"] is True
+        assert "capabilities" in authed
+        assert "workspaceRoot" not in authed  # 路径仍仅本机可见
+
+
+def test_container_lifecycle_blocked_when_docker_permission_denied(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-237：Docker 能力降级时后端拒绝容器 start/stop，不可仅靠前端阻断。"""
+    from local_webpage_access.capability import CapabilityReport
+    from tests._helpers import make_container_manifest
+
+    ws = manager_env.workspace
+    cid = "api-cap-block"
+    ws.ensure_app_dirs(cid)
+    manifest = make_container_manifest(cid)
+    manifest.container.hostPort = 21101
+    manifest.save(ws.app_manifest_path(cid))
+    manager_env.registry.upsert_from_manifest(manifest)
+
+    denied = CapabilityReport(
+        profile="full",
+        overall="unready",
+        docker_access="permission_denied",
+        manager_docker_access="permission_denied",
+        daemon_docker_access="permission_denied",
+        cli_docker_access="ready",
+        action="newgrp docker",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report",
+        lambda **kwargs: denied,
+    )
+    called: list[str] = []
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.start_instance",
+        lambda *a, **k: called.append("start"),
+    )
+    resp = manager_env.client.post(
+        f"/api/instances/{cid}/start",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "capability_denied"
+    assert called == []
+
+    # 静态实例不受 Docker 权限阻断
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.start_instance",
+        lambda *a, **k: called.append("static-start"),
+    )
+    resp_static = manager_env.client.post(
+        f"/api/instances/{manager_env.instance_id}/start",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp_static.status_code == 200, resp_static.text
+    assert called == ["static-start"]
+
+
+def test_container_lifecycle_ignores_stale_instance_permission_when_live_ready(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-247：manager 实时 Docker 已恢复时，陈旧 runtimeAccess 不再 409。"""
+    from local_webpage_access.capability import CapabilityReport
+    from tests._helpers import make_container_manifest
+
+    ws = manager_env.workspace
+    iid = "api-cap-recovered"
+    ws.ensure_app_dirs(iid)
+    manifest = make_container_manifest(iid)
+    manifest.container.hostPort = 21102
+    manifest.save(ws.app_manifest_path(iid))
+    manager_env.registry.upsert_from_manifest(manifest)
+    manager_env.registry.update_status(
+        iid,
+        "stopped",
+        observation_error="permission_denied",
+        runtime_access="permission_denied",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report",
+        lambda **_: CapabilityReport(
+            profile="full",
+            overall="ready",
+            docker_access="ready",
+            manager_docker_access="ready",
+            daemon_docker_access="permission_denied",
+        ),
+    )
+    called: list[str] = []
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.start_instance",
+        lambda *a, **k: called.append("start"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.status.sync_status", lambda *a, **k: None
+    )
+    response = manager_env.client.post(
+        f"/api/instances/{iid}/start", headers=manager_env.auth_headers()
+    )
+    assert response.status_code == 200, response.text
+    assert called == ["start"]
+
+
 # ---- 统计（WBS-22.05/06）----------------------------------------------------
 
 

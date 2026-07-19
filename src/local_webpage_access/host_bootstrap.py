@@ -76,6 +76,10 @@ class FullBootstrapResult:
     ran: list[InstallPlanItem]
     messages: list[str]
     skipped_no_confirm: bool = False
+    overall: str = "unready"  # ready | unready | session_refresh_required
+    session_refresh_required: bool = False
+    exit_code: int = 1
+    service_user: str | None = None
 
 
 def resolve_profile(*, default: bool, full: bool) -> BootstrapProfile:
@@ -264,15 +268,51 @@ def run_full_bootstrap(
     *,
     platform: str | None = None,
     yes: bool = False,
+    resume: bool = False,
+    workspace_root: Path | None = None,
     confirm: Callable[[str], bool] | None = None,
     runner: Callable[..., subprocess.CompletedProcess] | None = None,
     detect_runner: SubprocessRunner = _default_runner,
 ) -> FullBootstrapResult:
-    """执行 full 装配：确认 → 跑脚本 → 复检。"""
+    """执行 full 装配：确认 → 跑脚本 → 复检 → 能力验收（IMP-033）。
+
+    ``resume=True`` 时跳过已完成安装步骤，从能力复检继续。
+    退出语义：ready→exit_code 0；session_refresh_required→2；unready→1。
+    """
+    from local_webpage_access.capability import (
+        collect_capability_report,
+        current_service_user,
+        load_profile_state,
+        probe_docker_access_state,
+        save_profile_state,
+    )
+
     plat = platform or detect_platform()
-    planned = plan_full_install(platform=plat, runner=detect_runner)
+    service_user = current_service_user()
+    if workspace_root is None:
+        return FullBootstrapResult(
+            ok=False,
+            planned=[],
+            ran=[],
+            messages=[
+                "Full Profile 需要已初始化的工作区；请先执行 lwa init，再运行 "
+                "lwa setup --full。"
+            ],
+            overall="unready",
+            exit_code=1,
+            service_user=service_user,
+        )
+    state = load_profile_state(workspace_root) if workspace_root else {}
+    completed = set(state.get("completedSteps") or [])
     messages: list[str] = []
 
+    if resume and state:
+        messages.append(
+            f"恢复 Full Profile 安装（serviceUser={state.get('serviceUser') or service_user}）…"
+        )
+        service_user = state.get("serviceUser") or service_user
+
+    planned = plan_full_install(platform=plat, runner=detect_runner)
     docker = detect_docker_engine(runner=detect_runner)
     if docker.status == "daemon_down":
         messages.append(
@@ -280,80 +320,303 @@ def run_full_bootstrap(
             "`sudo systemctl start docker`，本期不会因此重装。"
         )
 
+    ran: list[InstallPlanItem] = []
     if not planned:
         messages.append("Caddy / Docker Engine / Compose 均已达到最低要求，无需安装。")
-        # daemon_down 仍算未完备
-        ok = docker.status == "ok" and detect_caddy(runner=detect_runner).status == "ok"
-        if docker.status == "daemon_down":
-            ok = False
-        return FullBootstrapResult(ok=ok, planned=[], ran=[], messages=messages)
-
-    listing = "\n".join(f"  · {p.kind}: {p.script} ({p.reason})" for p in planned)
-    prompt = (
-        "将安装/升级以下组件（需管理员权限，可能调用 sudo / brew）：\n"
-        f"{listing}\n是否继续？[y/N] "
-    )
-
-    confirmed = yes
-    if not confirmed:
-        if confirm is not None:
-            confirmed = confirm(prompt)
-        elif _stdin_is_interactive():
-            confirmed = input(prompt).strip().lower() in {"y", "yes"}
-        else:
-            messages.append(
-                "非交互终端且未传 --yes：跳过自动安装。可手动执行：\n" + listing
-            )
+        completed.add("components_installed")
+    else:
+        listing = "\n".join(f"  · {p.kind}: {p.script} ({p.reason})" for p in planned)
+        prompt = (
+            "将安装/升级以下组件（需管理员权限，可能调用 sudo / brew）：\n"
+            f"{listing}\n是否继续？[y/N] "
+        )
+        confirmed = yes
+        if not confirmed:
+            if confirm is not None:
+                confirmed = confirm(prompt)
+            elif _stdin_is_interactive():
+                confirmed = input(prompt).strip().lower() in {"y", "yes"}
+            else:
+                messages.append(
+                    "非交互终端且未传 --yes：跳过自动安装。可手动执行：\n" + listing
+                )
+                return FullBootstrapResult(
+                    ok=False,
+                    planned=planned,
+                    ran=[],
+                    messages=messages,
+                    skipped_no_confirm=True,
+                    overall="unready",
+                    exit_code=1,
+                    service_user=service_user,
+                )
+        if not confirmed:
+            messages.append("用户取消安装。")
             return FullBootstrapResult(
                 ok=False,
                 planned=planned,
                 ran=[],
                 messages=messages,
                 skipped_no_confirm=True,
+                overall="unready",
+                exit_code=1,
+                service_user=service_user,
             )
+        run = runner or _default_subprocess_run
+        for item in planned:
+            messages.append(f"执行：bash {item.script}")
+            result = run(["bash", str(item.script)])
+            if result.returncode != 0:
+                messages.append(f"脚本失败（exit {result.returncode}）：{item.script}")
+                if workspace_root:
+                    save_profile_state(
+                        workspace_root,
+                        {
+                            "profile": "full",
+                            "serviceUser": service_user,
+                            "overall": "unready",
+                            "sessionRefreshRequired": False,
+                            "completedSteps": sorted(completed),
+                            "action": "修复安装失败后重试：lwa setup --full --resume",
+                        },
+                    )
+                return FullBootstrapResult(
+                    ok=False,
+                    planned=planned,
+                    ran=ran,
+                    messages=messages,
+                    overall="unready",
+                    exit_code=1,
+                    service_user=service_user,
+                )
+            ran.append(item)
+        completed.add("components_installed")
 
-    if not confirmed:
-        messages.append("用户取消安装。")
-        return FullBootstrapResult(
-            ok=False,
-            planned=planned,
-            ran=[],
-            messages=messages,
-            skipped_no_confirm=True,
-        )
-
-    run = runner or _default_subprocess_run
-    ran: list[InstallPlanItem] = []
-    for item in planned:
-        messages.append(f"执行：bash {item.script}")
-        result = run(["bash", str(item.script)])
-        if result.returncode != 0:
-            messages.append(f"脚本失败（exit {result.returncode}）：{item.script}")
-            return FullBootstrapResult(
-                ok=False, planned=planned, ran=ran, messages=messages
-            )
-        ran.append(item)
-
-    # 复检
+    # 版本复检
     docker_after = detect_docker_engine(runner=detect_runner)
     compose_after = detect_docker_compose(runner=detect_runner)
     caddy_after = detect_caddy(runner=detect_runner)
-    ok = (
+    components_ok = (
         docker_after.status == "ok"
-        and compose_after.status in ("ok",)
+        and compose_after.status == "ok"
         and caddy_after.status == "ok"
     )
     if docker_after.status == "daemon_down":
         messages.append("安装完成但 Docker daemon 未起，请启动后再验。")
-        ok = False
-    if not ok:
+        components_ok = False
+    if not components_ok:
+        # 复检已证明安装完成标记过期；清掉后 --resume 才能重新规划/安装。
+        completed.discard("components_installed")
+        completed.discard("components_verified")
         messages.append(
             f"复检未全绿：docker={docker_after.status} "
             f"compose={compose_after.status} caddy={caddy_after.status}"
         )
-    else:
-        messages.append("复检通过：Caddy / Docker Engine / Compose 均满足最低版本。")
-    return FullBootstrapResult(ok=ok, planned=planned, ran=ran, messages=messages)
+        if workspace_root:
+            save_profile_state(
+                workspace_root,
+                {
+                    "profile": "full",
+                    "serviceUser": service_user,
+                    "overall": "unready",
+                    "sessionRefreshRequired": False,
+                    "completedSteps": sorted(completed),
+                    "action": "lwa setup --full --resume",
+                },
+            )
+        return FullBootstrapResult(
+            ok=False,
+            planned=planned,
+            ran=ran,
+            messages=messages,
+            overall="unready",
+            exit_code=1,
+            service_user=service_user,
+        )
+    messages.append("复检通过：Caddy / Docker Engine / Compose 均满足最低版本。")
+    completed.add("components_verified")
+
+    # 权限/能力验收（当前 CLI 进程）
+    docker_access = probe_docker_access_state()
+    if docker_access == "permission_denied":
+        messages.append(
+            "当前进程仍无 Docker 权限（常见于刚加入 docker 组）。"
+            "请重新登录或 newgrp docker 后执行：lwa setup --full --resume"
+        )
+        if workspace_root:
+            save_profile_state(
+                workspace_root,
+                {
+                    "profile": "full",
+                    "serviceUser": service_user,
+                    "overall": "session_refresh_required",
+                    "sessionRefreshRequired": True,
+                    "completedSteps": sorted(completed),
+                    "action": "重新登录后执行：lwa setup --full --resume",
+                },
+            )
+            _persist_full_config(workspace_root, service_user, ready=False)
+        return FullBootstrapResult(
+            ok=False,
+            planned=planned,
+            ran=ran,
+            messages=messages,
+            overall="session_refresh_required",
+            session_refresh_required=True,
+            exit_code=2,
+            service_user=service_user,
+        )
+
+    if workspace_root:
+        # BUG-234：尽量拉起 gateway/manager/daemon，让后台以真实身份写能力缓存后再验收
+        _try_start_backends_for_capability(workspace_root, messages)
+        report = collect_capability_report(
+            workspace_root=workspace_root,
+            profile="full",
+            role="cli",
+            include_backend_cached=True,
+        )
+        if report.overall != "ready":
+            messages.append(
+                "能力验收未通过（Full 强制闭环）："
+                f"overall={report.overall} "
+                f"cliDocker={report.cli_docker_access} "
+                f"managerDocker={report.manager_docker_access} "
+                f"daemonDocker={report.daemon_docker_access} "
+                f"caddyBinary={report.caddy_binary} "
+                f"caddyRuntime={report.caddy_runtime} "
+                f"caddyOwner={report.caddy_owner} "
+                f"caddyWorkspace={report.caddy_workspace_access} "
+                f"gatewayAccess={report.gateway_access}"
+            )
+            if report.action:
+                messages.append(f"建议：{report.action}")
+            save_profile_state(
+                workspace_root,
+                {
+                    "profile": "full",
+                    "serviceUser": service_user,
+                    "overall": report.overall,
+                    "sessionRefreshRequired": bool(report.session_refresh_required),
+                    "completedSteps": sorted(completed),
+                    "action": report.action or "lwa doctor --profile full",
+                },
+            )
+            _persist_full_config(workspace_root, service_user, ready=False)
+            exit_overall = (
+                "session_refresh_required"
+                if report.session_refresh_required
+                else "unready"
+            )
+            return FullBootstrapResult(
+                ok=False,
+                planned=planned,
+                ran=ran,
+                messages=messages,
+                overall=exit_overall,
+                session_refresh_required=bool(report.session_refresh_required),
+                exit_code=2 if report.session_refresh_required else 1,
+                service_user=service_user,
+            )
+        completed.add("capability_closed_loop")
+        save_profile_state(
+            workspace_root,
+            {
+                "profile": "full",
+                "serviceUser": service_user,
+                "overall": "ready",
+                "sessionRefreshRequired": False,
+                "completedSteps": sorted(completed),
+                "action": None,
+            },
+        )
+        _persist_full_config(workspace_root, service_user, ready=True)
+        messages.append(
+            "Full Profile 能力验收通过（CLI + manager + daemon + Caddy + gateway）。"
+        )
+
+    return FullBootstrapResult(
+        ok=True,
+        planned=planned,
+        ran=ran,
+        messages=messages,
+        overall="ready",
+        exit_code=0,
+        service_user=service_user,
+    )
+
+
+def _try_start_backends_for_capability(
+    workspace_root: Path, messages: list[str]
+) -> None:
+    """setup --full 验收前尽量启动后台，以便写入真实能力缓存（BUG-234/235）。"""
+    import time
+
+    from local_webpage_access.config import load_config
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(Path(workspace_root))
+    if not ws.config_path.is_file():
+        messages.append("工作区尚无 local-web.yml，跳过后台能力闭环拉起。")
+        return
+    try:
+        config = load_config(ws)
+    except Exception as exc:  # noqa: BLE001
+        messages.append(f"加载配置失败，跳过后台拉起：{exc}")
+        return
+
+    # gateway → manager → daemon（与 Full 启停顺序一致）
+    try:
+        from local_webpage_access.gateway_service import start_gateway
+
+        start_gateway(ws, config)
+        messages.append("已尝试启动 gateway（Caddy 监管）。")
+    except Exception as exc:  # noqa: BLE001
+        messages.append(f"启动 gateway 未成功（继续验收）：{exc}")
+
+    try:
+        from local_webpage_access.manager_service import start_manager
+
+        if getattr(config, "managerEnabled", True):
+            start_manager(ws, config)
+            messages.append("已尝试启动 manager。")
+    except Exception as exc:  # noqa: BLE001
+        messages.append(f"启动 manager 未成功（继续验收）：{exc}")
+
+    try:
+        from local_webpage_access.daemon import start_daemon
+
+        start_daemon(ws, config)
+        messages.append("已尝试启动 daemon。")
+    except Exception as exc:  # noqa: BLE001
+        messages.append(f"启动 daemon 未成功（继续验收）：{exc}")
+
+    # 给子进程写入 capability-*.json 的短窗口
+    time.sleep(1.5)
+
+
+def _persist_full_config(
+    workspace_root: Path, service_user: str, *, ready: bool
+) -> None:
+    """把 profile/serviceUser 写回 local-web.yml（平滑，不破坏其它字段）。"""
+    try:
+        from local_webpage_access.config import load_config
+        from local_webpage_access.paths import Workspace
+
+        ws = Workspace(workspace_root)
+        cfg = load_config(ws)
+        cfg.profile = "full"
+        cfg.serviceUser = service_user
+        if ready and cfg.staticGateway == "builtin":
+            # Full ready 仍尊重用户显式 builtin；能力验收已在上层处理
+            pass
+        cfg.save(ws.config_path)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger("local_webpage_access.host_bootstrap").warning(
+            "写回 local-web.yml profile 失败：%s", exc
+        )
 
 
 def maybe_offer_docker_install(
@@ -458,7 +721,7 @@ def format_script_catalog(*, full: bool = False, plat: str | None = None) -> str
 
     docker = resolve_install_script("docker", script_plat)
     lines.append(f"# Docker Engine + Compose（{script_plat}）")
-    lines.append(f"# 参考：https://docs.docker.com/engine/install/ubuntu/")
+    lines.append("# 参考：https://docs.docker.com/engine/install/ubuntu/")
     lines.append(f"bash {docker}")
     lines.append("")
     if full:

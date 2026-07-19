@@ -45,7 +45,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.6.1-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.6.3-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -125,11 +125,13 @@ def init(
 
         if profile == "full":
             typer.secho("\n── 完整装配（--full）──", fg=typer.colors.CYAN)
-            boot = run_full_bootstrap(yes=yes)
+            # 必须显式传入工作区：init -w 可能与 cwd 不同；且 run_full_bootstrap
+            # 在 workspace_root=None 时会直接 unready（BUG-251）。
+            boot = run_full_bootstrap(yes=yes, workspace_root=ws)
             for msg in boot.messages:
                 typer.echo(msg)
             if not boot.ok:
-                raise typer.Exit(code=1)
+                raise typer.Exit(code=boot.exit_code or 1)
         else:
             flag: bool | None
             if install_docker:

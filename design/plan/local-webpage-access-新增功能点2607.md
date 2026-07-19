@@ -1,6 +1,6 @@
 # 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～034（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环待开发**；**IMP-034 日志可观测性补强待开发**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
 > **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强（CLI/daemon 落盘、生命周期阶段事件、能力探测结构化日志）。
 
 ---
@@ -654,7 +654,7 @@ lwa init  [--default | --full] [--yes] [--force] [--workspace ...]
 >
 > **与 IMP-032 的关系**：IMP-032 已完成“安装 Caddy / Docker / Compose 并检查版本”的第一阶段；IMP-033 将 `--full` 从“组件安装档”提升为“完整运行能力契约”。本节口径覆盖 §12.1.4 中“full 不保证装完即可无人值守跑业务”以及仅提示重新登录的旧边界：今后 `full` 未完成运行身份、权限继承、后台能力和重启验收时，必须判定为 `unready`，不得宣称安装成功。
 >
-> **当前止血状态**：BUG-230 已于 2026-07-18 完成首轮修复——Docker 权限失败不再直接回写 stopped，并补充后台权限探测与诊断提示；IMP-033 仍需把该点提升为统一 `CapabilityReport`、正式 observed/unknown 状态语义和 Full Profile 原子验收，不能把单点修复视为整项完成。
+> **当前状态（2026-07-19）**：BUG-230 止血之后，IMP-033 **主路径已落地**（CapabilityReport、观测 unknown、Caddy owner fail-closed、`setup --full --resume`、doctor/capabilities、管理页 degraded；见 DEV-076/078）。**可后续补强**：033.13 Ubuntu 实机验收全链路、system unit `SupplementaryGroups=docker` 完整路径。不得把「仅组件安装成功」写成 Full ready。
 
 ### 13.1 问题分析
 

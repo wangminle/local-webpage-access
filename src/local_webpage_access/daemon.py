@@ -107,24 +107,20 @@ def log_file_path(workspace: Workspace) -> Path:
     return workspace.logs / LOG_FILENAME
 
 
-def attach_daemon_log_handler(workspace: Workspace) -> None:
-    """为 watcher 进程补 ``logs/daemon.log`` FileHandler（BUG-189 / WBS-21.10）。
+def attach_daemon_log_handler(workspace: Workspace, *, level: str = "INFO") -> None:
+    """为 watcher 进程写入 ``logs/daemon.log``（BUG-189 / IMP-034.02）。
 
-    watcher 子进程的 stdout/stderr 被 :func:`_spawn_watcher` 设为 DEVNULL，
-    而 ``_main`` 的 ``setup_logging`` 默认仅控制台 handler —— 两者叠加使导入失败等
-    日志全部丢失。这里给根 logger 补一个 FileHandler，使 daemon 有持久可排查痕迹。
-    文件不可写等异常不得阻断 watcher 主流程。
+    与 :func:`setup_logging` 共用 formatter；挂到 ``local_webpage_access`` 命名空间。
     """
-    import logging as _stdlog
+    from local_webpage_access.logging import setup_logging
 
     try:
-        dpath = log_file_path(workspace)
-        dpath.parent.mkdir(parents=True, exist_ok=True)
-        fh = _stdlog.FileHandler(dpath, encoding="utf-8")
-        fh.setFormatter(
-            _stdlog.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        setup_logging(
+            level=level,  # type: ignore[arg-type]
+            log_dir=workspace.logs,
+            log_filename=LOG_FILENAME,
+            force=True,
         )
-        _stdlog.getLogger().addHandler(fh)
     except Exception:  # noqa: BLE001
         pass
 
@@ -212,6 +208,9 @@ def read_pid_cmdline(pid: int) -> str | None:
             return None
     if sys.platform == "win32":
         # Windows：用 PowerShell 读 CommandLine（BUG-177）。pid 强制 int，安全拼接。
+        # BUG-250：无控制台父进程必须 CREATE_NO_WINDOW，否则每轮 reconcile 弹黑窗。
+        from local_webpage_access.platform_detect import subprocess_hidden_kwargs
+
         try:
             result = subprocess.run(
                 [
@@ -226,6 +225,7 @@ def read_pid_cmdline(pid: int) -> str | None:
                 text=True,
                 timeout=5,
                 check=False,
+                **subprocess_hidden_kwargs(),
             )
         except (FileNotFoundError, subprocess.SubprocessError, OSError):
             return None
@@ -263,12 +263,15 @@ def _terminate_pid(pid: int, *, timeout: float = 5.0) -> bool:
         return True
     try:
         if sys.platform == "win32":
-            # Windows: taskkill 整个进程树
+            # Windows: taskkill 整个进程树（BUG-250：隐藏控制台窗口）
+            from local_webpage_access.platform_detect import subprocess_hidden_kwargs
+
             subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 timeout=timeout,
                 check=False,
+                **subprocess_hidden_kwargs(),
             )
         else:
             os.kill(pid, 15)  # SIGTERM
@@ -689,6 +692,29 @@ def reconcile(
 
     restarter = restarter or start_instance
 
+    # Full Profile：后台能力闭环未 ready 时，容器自动纠正整轮 fail-closed；
+    # 静态实例仍可按自身网关状态恢复。
+    full_containers_blocked = False
+    try:
+        from local_webpage_access.capability import collect_capability_report
+
+        cap = collect_capability_report(
+            workspace_root=workspace.root,
+            role="daemon",
+            config_profile=getattr(config, "profile", None),
+        )
+        full_containers_blocked = cap.profile == "full" and cap.overall != "ready"
+        if full_containers_blocked:
+            log.warning(
+                "daemon reconcile: Full Profile 能力未闭环（overall=%s），"
+                "本轮跳过容器自动纠正",
+                cap.overall,
+            )
+    except Exception as exc:  # noqa: BLE001
+        if getattr(config, "profile", None) == "full":
+            full_containers_blocked = True
+            log.warning("daemon reconcile: Full 能力探测失败，跳过容器自动纠正：%s", exc)
+
     # Caddy 后端：判断网关是否被显式关闭（避免与 lwa gateway off 冲突）
     caddy_gateway_off = False
     try:
@@ -703,6 +729,15 @@ def reconcile(
     except Exception:  # noqa: BLE001 — 探测失败不影响主流程，按可恢复处理
         pass
 
+    # IMP-033 §13.5.3：Full / 容器路径上观测失败时禁止自动纠正
+    _OBS_BLOCK = {
+        "permission_denied",
+        "daemon_unavailable",
+        "timeout",
+        "unknown",
+        "parse_error",
+    }
+
     restarted: list[str] = []
     for row in registry.list_instances():
         if row.get("desired_state") != "running":
@@ -710,6 +745,8 @@ def reconcile(
         iid = row["id"]
         runtime = row.get("runtime")
         registry_status = row.get("status")
+        if runtime == "docker-compose" and full_containers_blocked:
+            continue
         # pending/queued：过渡态，交给对应流程收尾，不 observe 不强拉。
         # building：若仍有活跃 builds 则跳过；无活跃构建（关机打断的 host_static 等）
         # 不得永久挡住自愈（BUG-166）。
@@ -724,7 +761,7 @@ def reconcile(
         # observe 验证真实状态——若实际已掉线则按偏离处理；其余非 running 态
         # （stopped/failed/gateway_down/config_invalid/孤儿 building）本就是已知未运行，直接恢复。
         actual_status = registry_status
-        if registry_status == "running":
+        if runtime == "docker-compose" or registry_status == "running":
             try:
                 actual_status = observe_status(workspace, config, registry, iid).value
             except Exception as exc:  # noqa: BLE001 — 观测失败保守视为仍 running，跳过
@@ -737,6 +774,22 @@ def reconcile(
             except Exception as exc:  # noqa: BLE001
                 log.debug("daemon reconcile: 观测 building %s 失败：%s", iid, exc)
                 actual_status = registry_status
+        # 观测后重新读 row：permission/timeout 等不得自动 start/stop/rebuild
+        fresh = registry.get_instance(iid) or row
+        obs_err = fresh.get("observation_error") or fresh.get("runtime_access")
+        if runtime == "docker-compose" and obs_err in _OBS_BLOCK:
+            log.warning(
+                "daemon reconcile: 跳过容器 %s（observationError=%s，保持 lastTrustedState）",
+                iid,
+                obs_err,
+            )
+            with contextlib.suppress(Exception):
+                registry.add_event(
+                    iid,
+                    "reconcile_skipped",
+                    f"观测失败禁止自动纠正 observationError={obs_err}",
+                )
+            continue
         if actual_status == "running":
             continue
         if caddy_gateway_off and runtime == "shared-static":
@@ -986,15 +1039,7 @@ def start_daemon(
 
     若已有 watcher 在跑，直接返回其 PID。返回当前 watcher PID。
     """
-    # BUG-230：本进程无 docker 组时 reconcile 会误判容器状态——启动前提醒，不阻断。
-    try:
-        from local_webpage_access.docker_runtime import probe_docker_permission
-
-        perm = probe_docker_permission()
-        if perm:
-            log.warning("启动 daemon 前检测到：%s", perm)
-    except Exception:  # noqa: BLE001
-        pass
+    # BUG-235：能力缓存改由 watcher 子进程 _main 以真实身份写入，父 CLI 不得冒充
 
     with daemon_start_lock(workspace):
         state = read_state(workspace)
@@ -1104,18 +1149,37 @@ def _main() -> int:
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     args = parser.parse_args()
 
-    setup_logging(level=args.log_level.upper())  # type: ignore[arg-type]
     workspace = Workspace(Path(args.workspace).resolve())
     if not workspace.config_path.is_file():
+        # 尚无工作区时只能控制台报错
+        setup_logging(level=args.log_level.upper())  # type: ignore[arg-type]
         log.error("工作区未初始化：%s", workspace.root)
         return 2
 
+    workspace.ensure_workspace_dirs()
+    attach_daemon_log_handler(workspace, level=args.log_level.upper())
     from local_webpage_access.config import load_config
 
     config = load_config(workspace)
-    workspace.ensure_workspace_dirs()
-    # BUG-189：watcher 子进程 stdout/stderr 被 DEVNULL，补 logs/daemon.log 持久化
-    attach_daemon_log_handler(workspace)
+    # BUG-235：watcher 进程自身探测并写入 capability-daemon.json
+    try:
+        from local_webpage_access.capability import (
+            collect_capability_report,
+            log_capability_probe,
+            write_capability_cache,
+        )
+
+        report = collect_capability_report(
+            workspace_root=workspace.root,
+            role="daemon",
+            config_profile=getattr(config, "profile", None),
+            include_backend_cached=False,
+        )
+        level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
+        log_capability_probe("daemon", report, level=level)
+        write_capability_cache(workspace.root, "daemon", report)
+    except Exception:  # noqa: BLE001
+        log.exception("daemon 能力自检失败")
 
     # 抢占单实例锁；已有 daemon 在跑则直接退出
     try:

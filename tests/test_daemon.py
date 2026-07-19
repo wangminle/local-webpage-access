@@ -789,6 +789,7 @@ def test_read_pid_cmdline_windows_powershell(monkeypatch) -> None:
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=0,
@@ -801,6 +802,8 @@ def test_read_pid_cmdline_windows_powershell(monkeypatch) -> None:
     assert cmdline is not None
     assert "http.server" in cmdline
     assert captured["cmd"][0] == "powershell"
+    # BUG-250：Windows 必须传 CREATE_NO_WINDOW，避免无控制台父进程弹黑窗
+    assert captured["kwargs"].get("creationflags") == subprocess.CREATE_NO_WINDOW
     # 身份校验在 Windows 上现可命中（不再恒 False）
     assert daemon_mod.pid_cmdline_contains(1234, "http.server", "C:\\apps\\x\\public")
 
@@ -1061,6 +1064,67 @@ def test_reconcile_recovers_stale_running(
     assert restarted == ["demo"]
 
 
+def test_reconcile_refreshes_stale_container_observation_before_blocking(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-243：stopped 容器的陈旧 permission_denied 不得永久阻断自愈。"""
+    from local_webpage_access.models import Status
+
+    _seed_instance(
+        registry, workspace, "container", runtime="docker-compose", status="stopped"
+    )
+    registry.update_status(
+        "container",
+        "stopped",
+        observation_error="permission_denied",
+        runtime_access="permission_denied",
+    )
+
+    def refreshed(*args):
+        registry.update_status(
+            "container",
+            "stopped",
+            clear_observation_error=True,
+            runtime_access="ready",
+        )
+        return Status.STOPPED
+
+    monkeypatch.setattr("local_webpage_access.lifecycle.observe_status", refreshed)
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert restarted == ["container"]
+
+
+def test_reconcile_full_unready_skips_containers_but_keeps_static(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-244：Full overall 非 ready 时整轮禁止容器自动纠正。"""
+    from local_webpage_access.capability import CapabilityReport
+
+    config.profile = "full"
+    _seed_instance(
+        registry, workspace, "container", runtime="docker-compose", status="stopped"
+    )
+    _seed_instance(registry, workspace, "static", status="stopped")
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report",
+        lambda **_: CapabilityReport(profile="full", overall="unready"),
+    )
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert restarted == ["static"]
+
+
 def test_reconcile_continues_on_individual_failure(
     workspace: Workspace, config: Config, registry: Registry
 ) -> None:
@@ -1188,32 +1252,45 @@ def test_run_watcher_heartbeat_thread_refreshes_during_long_round(
 
 
 def test_attach_daemon_log_handler_writes_daemon_log(workspace: Workspace) -> None:
-    """BUG-189：attach_daemon_log_handler 给 root logger 追加 logs/daemon.log 的
+    """BUG-189：attach_daemon_log_handler 给 LWA logger 追加 logs/daemon.log 的
     FileHandler，detached watcher 子进程（stdout/stderr=DEVNULL）日志不再丢失。"""
     import logging
 
-    root = logging.getLogger()
-    before = set(id(h) for h in root.handlers)
+    logger = logging.getLogger("local_webpage_access")
+    before = set(id(h) for h in logger.handlers)
     try:
         daemon_mod.attach_daemon_log_handler(workspace)
-        added = [h for h in root.handlers if id(h) not in before]
+        added = [h for h in logger.handlers if id(h) not in before]
         assert any(
             isinstance(h, logging.FileHandler)
             and str(workspace.logs / daemon_mod.LOG_FILENAME) == h.baseFilename
             for h in added
         ), "未为 logs/daemon.log 追加 FileHandler"
 
-        logging.getLogger("lwa.bug189.test").warning("BUG-189 marker line")
+        logging.getLogger("local_webpage_access.bug189.test").warning(
+            "BUG-189 marker line"
+        )
         for h in added:
             h.flush()
         content = (workspace.logs / daemon_mod.LOG_FILENAME).read_text(encoding="utf-8")
         assert "BUG-189 marker line" in content
     finally:
         # 清理：移除本测试追加的 handler，避免污染后续用例
-        for h in list(root.handlers):
+        for h in list(logger.handlers):
             if id(h) not in before:
-                root.removeHandler(h)
+                logger.removeHandler(h)
                 with contextlib.suppress(Exception):
                     h.close()
 
 
+def test_attach_daemon_log_handler_preserves_requested_level(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-245：watcher 的 --log-level 不得被第二次强制重置为 INFO。"""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "local_webpage_access.logging.setup_logging",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    daemon_mod.attach_daemon_log_handler(workspace, level="DEBUG")
+    assert captured["level"] == "DEBUG"

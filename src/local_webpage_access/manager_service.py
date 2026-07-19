@@ -394,16 +394,7 @@ def start_manager(workspace: Workspace, config: Config) -> int:
             "managerEnabled=false，管理页未启用；可在 local-web.yml 设为 true 后执行 lwa manager on",
         )
 
-    # BUG-230：本进程若无 docker 组，子进程同样无法观测容器——启动前提醒，不阻断
-    # （静态站仍可用）。装完 Docker 后须 newgrp/重登并重启 manager。
-    try:
-        from local_webpage_access.docker_runtime import probe_docker_permission
-
-        perm = probe_docker_permission()
-        if perm:
-            log.warning("启动管理页前检测到：%s", perm)
-    except Exception:  # noqa: BLE001 — 探测失败不阻断管理页
-        pass
+    # BUG-235：能力缓存改由子进程 run_service_main 以真实身份写入，父 CLI 不得冒充
 
     bind_host = config.managerHost
     bind_port = config.managerPort
@@ -554,7 +545,11 @@ def run_service_main() -> int:
 
     workspace = Workspace(Path(args.workspace).resolve())
     # BUG-116：写入 logs/lwa.log；uvicorn 等 stdout 由父进程重定向到 manager.log。
-    setup_logging(level=args.log_level.upper(), log_dir=workspace.logs)  # type: ignore[arg-type]
+    setup_logging(
+        level=args.log_level.upper(),  # type: ignore[arg-type]
+        log_dir=workspace.logs,
+        log_filename="manager.log",
+    )
     if not workspace.config_path.is_file():
         log.error("工作区未初始化：%s", workspace.root)
         return 2
@@ -563,6 +558,26 @@ def run_service_main() -> int:
     if not config.managerEnabled:
         log.error("managerEnabled=false，拒绝启动管理页子进程")
         return 2
+
+    # BUG-235：服务进程自身探测并写入 capability-manager.json
+    try:
+        from local_webpage_access.capability import (
+            collect_capability_report,
+            log_capability_probe,
+            write_capability_cache,
+        )
+
+        report = collect_capability_report(
+            workspace_root=workspace.root,
+            role="manager",
+            config_profile=getattr(config, "profile", None),
+            include_backend_cached=False,
+        )
+        level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
+        log_capability_probe("manager", report, level=level)
+        write_capability_cache(workspace.root, "manager", report)
+    except Exception:  # noqa: BLE001 — 探测失败不阻断管理页
+        log.exception("manager 能力自检失败")
 
     workspace.ensure_workspace_dirs()
     reg = Registry(workspace.db_path)

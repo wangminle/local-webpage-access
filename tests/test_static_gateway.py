@@ -111,10 +111,59 @@ def test_detect_backend_builtin_config_forces_builtin(
 def test_detect_backend_caddy_config_falls_back_when_missing(
     workspace: Workspace, monkeypatch
 ) -> None:
-    """BUG-003：配置 caddy 但环境无 caddy → 降级 builtin，不报错。"""
+    """BUG-238：default 档配置 caddy 但缺二进制时保持 builtin 兼容兜底。"""
     monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: None)
     gw = StaticGateway(workspace, Config(staticGateway="caddy"))
     assert gw.detect_backend() == "builtin"
+
+
+def test_detect_backend_full_profile_fails_when_caddy_missing(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-238：Full Profile 仍严格要求 Caddy。"""
+    from local_webpage_access.errors import GatewayError
+
+    monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: None)
+    gw = StaticGateway(workspace, Config(profile="full", staticGateway="caddy"))
+    with pytest.raises(GatewayError, match="禁止降级"):
+        gw.detect_backend()
+
+
+def test_ensure_caddy_running_rejects_foreign_admin(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """IMP-033：admin 在线但非本工作区 pid → ensure 失败（owner mismatch）。"""
+    gw = StaticGateway(workspace, Config(staticGateway="caddy"))
+    monkeypatch.setattr(gw, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(
+        gw,
+        "inspect_caddy_owner",
+        lambda: {
+            "owner": "system_caddy",
+            "process_user": "caddy",
+            "pid": None,
+            "workspace_match": False,
+            "admin_alive": True,
+            "runtime": "owner_mismatch",
+        },
+    )
+    assert gw.ensure_caddy_running() is False
+
+
+def test_inspect_caddy_owner_fails_closed_when_process_user_unknown(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-249：PID 存活但进程用户不可读时不得误认 LWA Caddy。"""
+    gw = StaticGateway(workspace, Config(staticGateway="caddy"))
+    gw.caddy_pid_path().parent.mkdir(parents=True, exist_ok=True)
+    gw.caddy_pid_path().write_text("987654\n", encoding="utf-8")
+    monkeypatch.setattr(gw, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gw, "_pid_alive", lambda pid: True)
+
+    owner = gw.inspect_caddy_owner()
+    assert owner["process_user"] is None
+    assert owner["owner"] == "unknown"
+    assert owner["runtime"] == "owner_mismatch"
 
 
 def test_detect_backend_caddy_config_uses_caddy_when_present(
@@ -1041,9 +1090,21 @@ def test_ensure_caddy_running_starts_when_admin_down(
 def test_ensure_caddy_running_returns_true_when_admin_up(
     gateway: StaticGateway, monkeypatch
 ) -> None:
-    """IMP-010/0.3：admin 已在线时直接返回 True，不重复 start。"""
+    """IMP-010/0.3 + IMP-033：admin 在线且归属本工作区时直接 True，不重复 start。"""
     started = {"n": 0}
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(
+        gateway,
+        "inspect_caddy_owner",
+        lambda: {
+            "owner": "lwa_service_user",
+            "process_user": "test",
+            "pid": 1234,
+            "workspace_match": True,
+            "admin_alive": True,
+            "runtime": "ready",
+        },
+    )
     monkeypatch.setattr(gateway, "caddy_start", lambda: started.__setitem__("n", started["n"] + 1) or True)
     assert gateway.ensure_caddy_running() is True
     assert started["n"] == 0  # admin 在线，不触发 start

@@ -4,9 +4,9 @@
 
 ## 代码与版本
 
-- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.1` / `1.0.0`）。
+- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.3` / `1.0.0`）。
 - [ ] `src/local_webpage_access/cli/` 包入口（`cli/__init__.py` 的 `version` 命令 / `version_info.py`）读取该版本号；`python -m local_webpage_access` 与 `python -m local_webpage_access.cli` 均可调用。
-- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart` / 宿主机装配 `setup|init --default|--full` 索引；skills 数为 16）。
+- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart` / 宿主机装配 `setup|init --default|--full|--resume` / `doctor --profile full` / `lwa capabilities` / Full Profile 能力闭环；skills 数为 16）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。
 
 ## 测试
@@ -19,8 +19,8 @@
 
 ## 文档
 
-- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、skills、浏览量、冗余、运维手册、`setup|init --full` 索引）。
-- [ ] [docs/manager-page.md](manager-page.md) API 端点表与实际路由一致（含 pageviews / redundant / remove / path-alias IMP-022）。
+- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、capabilities、Full Profile、skills、浏览量、冗余、运维手册、`setup|init --full --resume` 索引）。
+- [ ] [faq.md](faq.md) / [operations-playbook.md](operations-playbook.md) / [known-limitations.md](known-limitations.md) / [manager-page.md](manager-page.md) / [autostart.md](autostart.md) 与 IMP-033/034 行为一致。- [ ] [docs/manager-page.md](manager-page.md) API 端点表与实际路由一致（含 pageviews / redundant / remove / path-alias IMP-022）。
 - [ ] [docs/operations-playbook.md](operations-playbook.md) 与网关选型 / 宿主机装配档位 / 冗余 / 容器别名 / Caddy 排障一致。
 - [ ] [docs/faq.md](faq.md) 覆盖导入/容器/管理页/端口/磁盘各类排障（含 slug 冲突与 `--update`、内置 Docker/Caddy 安装，不再写自动 `-2/-3`）。
 - [ ] [docs/security-boundary.md](security-boundary.md) 审计项与 `security.py` 实现一致。

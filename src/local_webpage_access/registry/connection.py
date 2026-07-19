@@ -18,7 +18,7 @@ from local_webpage_access.logging import get_logger
 
 log = get_logger("registry")
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 # ---- DDL --------------------------------------------------------------------
 
@@ -137,6 +137,14 @@ _SCHEMAS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_events_instance ON events(instance_id)",
         "CREATE INDEX IF NOT EXISTS idx_builds_instance ON builds(instance_id)",
         "CREATE INDEX IF NOT EXISTS idx_ports_instance ON ports(instance_id)",
+    ],
+    # IMP-033 / 033.02：观测态与最后可信状态（兼容保留 status）
+    2: [
+        "ALTER TABLE instances ADD COLUMN observed_state TEXT",
+        "ALTER TABLE instances ADD COLUMN observation_error TEXT",
+        "ALTER TABLE instances ADD COLUMN last_trusted_state TEXT",
+        "ALTER TABLE instances ADD COLUMN last_observed_at TEXT",
+        "ALTER TABLE instances ADD COLUMN runtime_access TEXT",
     ],
 }
 

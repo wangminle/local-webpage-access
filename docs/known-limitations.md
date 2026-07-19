@@ -10,8 +10,11 @@
 * **Python**：要求 3.13+，不支持更早版本。
 * **Docker**：要求 Docker + Docker Compose 插件（`docker compose` 子命令）。
   Compose v1 独立二进制不支持；低于推荐版本时仅告警，不阻断已满足最低线的环境。
-  `lwa setup --full` / 内置安装脚本覆盖 **macOS / Linux（含 WSL）**；**Windows 原生**无内置脚本，需按 `lwa setup` 指引手动安装。
-  Linux 上 LWA 以安装用户身份访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，否则管理页可能无法观测容器（见 FAQ「Docker 权限不足」）。
+  `lwa setup --full` / 内置安装脚本覆盖 **macOS / Linux（含 WSL）**；**Windows 原生**无内置脚本，需按 `lwa setup` 指引手动安装。`--full` **需要已初始化工作区**（`lwa init --full` 或先 `init` 再 `setup --full`）；default 的 `lwa setup` 可无工作区。
+  Full Profile（`profile: full`）还会验收 manager/daemon/gateway 真实 Docker 权限与 Caddy owner；未闭环不假绿（见 FAQ「Full Profile」）。
+  Linux 上 LWA 以 `serviceUser` 访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，或对 system unit 使用 `SupplementaryGroups=docker`（`lwa autostart` 默认 user unit 仍依赖会话组）。
+  观测失败写 `unknown` / `runtimeAccess`，不把运行中容器误标 stopped；管理页与 API 在能力降级时阻断容器操作。
+* **Caddy 所有权（Full）**：禁止静默复用系统 `caddy.service`；`:2019` 必须属于本工作区 LWA Caddy。Default 档在无 Caddy 时可降级 builtin；Full 不得假绿。
 * **架构**：基线镜像 `node:24-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
   其他架构需用户自备镜像或调整模板。
 
@@ -27,8 +30,8 @@
 
 ## 托管与容器
 
-* **静态网关**：默认 Caddy 优先，无 Caddy 时降级到内置 `http.server`。
-  nginx 模板存在但 V1 未充分验证自动配置。
+* **静态网关**：默认 Caddy 优先；Default 档无 Caddy 时可降级内置 `http.server`。
+  Full Profile 要求可用的 LWA 托管 Caddy（见上）。nginx 模板存在但 V1 未充分验证自动配置。
 * **HTTPS**：V1 仅 HTTP。HTTPS / 证书自动化（Let's Encrypt）不在范围内。
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
@@ -68,9 +71,10 @@
 
 ## 大模型 Skills
 
-* 当前内置的 15 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
+* 当前内置的 16 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
   Skills 是提示工程资产，效果取决于模型与上下文窗口。
 * Skills 不会自动执行带副作用的操作，所有变更需人工确认。
+* Full Profile / 宿主机装配排障优先走 [`lwa-setup-host-environment`](../src/local_webpage_access/skills/lwa-setup-host-environment/SKILL.md) 与 FAQ。
 
 ## 升级路径
 

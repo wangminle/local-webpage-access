@@ -107,6 +107,8 @@ def _list_http_server_pids_on_test_ports() -> set[int]:
     port_pat = re.compile(r"http\.server\s+(\d+)\b")
     try:
         if os.name == "nt":
+            from local_webpage_access.platform_detect import subprocess_hidden_kwargs
+
             ps = (
                 "Get-CimInstance Win32_Process | "
                 "Where-Object { $_.CommandLine -match 'http\\.server' } | "
@@ -117,6 +119,7 @@ def _list_http_server_pids_on_test_ports() -> set[int]:
                 capture_output=True,
                 text=True,
                 timeout=20,
+                **subprocess_hidden_kwargs(),
             )
             out = proc.stdout or ""
         else:
@@ -152,10 +155,13 @@ def _list_http_server_pids_on_test_ports() -> set[int]:
 def _kill_pid(pid: int) -> None:
     try:
         if os.name == "nt":
+            from local_webpage_access.platform_detect import subprocess_hidden_kwargs
+
             subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 timeout=10,
+                **subprocess_hidden_kwargs(),
             )
         else:
             import signal

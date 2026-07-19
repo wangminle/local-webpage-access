@@ -648,6 +648,23 @@ def test_cli_doctor_json_output(env, monkeypatch) -> None:
     assert len(data["checks"]) >= 8
 
 
+def test_cli_doctor_full_json_stdout_is_pure_json(env, monkeypatch) -> None:
+    """BUG-241：--json --profile full 不得混入 Full Profile 人类文本。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+
+    ws, _config, _reg = env
+    monkeypatch.chdir(ws.root)
+    result = CliRunner().invoke(app, ["doctor", "--json", "--profile", "full"])
+    import json
+
+    data = json.loads(result.stdout)
+    assert "checks" in data
+    assert "capabilities" in data
+    assert "[Full Profile]" not in result.stdout
+
+
 def test_cli_doctor_json_valid_when_caddy_hidden(env, monkeypatch) -> None:
     """BUG-075：caddy 缺失时 check_caddy_health 不得 log.warning 污染 --json 输出。"""
     from typer.testing import CliRunner

@@ -363,10 +363,11 @@ def _register_routes(app: FastAPI) -> None:
 
     api = Depends(require_token)
 
-    # ---- /api/health（无鉴权，供存活探测）----
+    # ---- /api/health（无鉴权存活探测；能力细节对本机或已鉴权客户端开放）----
     @app.get("/api/health", tags=["health"])
     def health(request: Request) -> dict[str, Any]:
         ws: Workspace = app.state.workspace
+        cfg: Config = app.state.config
         body: dict[str, Any] = {
             "ok": True,
             "version": _app_version(),
@@ -376,10 +377,29 @@ def _register_routes(app: FastAPI) -> None:
         # managerHost 配 LAN IP / 双栈 :: 时，本机经该地址自连的 client.host 等于
         # 绑定地址（或呈 ::ffff:127.0.0.1），也算可信——仅本机自连能命中，局域网他机源
         # IP 不同，不会泄露。
-        if _is_localhost_client(request) or _is_self_connection(
+        local_ok = _is_localhost_client(request) or _is_self_connection(
             request, app.state.config
-        ):
+        )
+        if local_ok:
             body["workspaceRoot"] = str(ws.root.resolve())
+        # BUG-236：已鉴权局域网客户端也应拿到完整 capabilities（供管理页降级 UI）
+        auth_ok = local_ok or _verify_token(ws, _extract_token(request))
+        try:
+            from local_webpage_access.capability import collect_capability_report
+
+            report = collect_capability_report(
+                workspace_root=ws.root,
+                role="manager",
+                config_profile=getattr(cfg, "profile", None),
+            )
+            frag = report.to_health_fragment()
+            if auth_ok:
+                body.update(frag)
+            else:
+                body["profile"] = frag.get("profile")
+                body["overall"] = frag.get("overall")
+        except Exception:  # noqa: BLE001 — health 不得因能力探测失败而 500
+            body["overall"] = "unknown"
         return body
 
     # ---- 顶部统计（WBS-22.05/06）----
@@ -498,6 +518,43 @@ def _register_routes(app: FastAPI) -> None:
         return {"instanceId": instance_id, "resources": info.to_dict()}
 
     # ---- 操作（WBS-22.08）----
+    def _docker_ops_blocked_reason(ctx: _Ctx, instance_id: str) -> str | None:
+        """BUG-237：容器生命周期在 Docker 能力降级时服务端 fail-closed。
+
+        返回阻断原因字符串；允许操作时返回 None。静态实例不受 Docker 权限影响。
+        """
+        row = ctx.registry.get_instance(instance_id) or {}
+        runtime = str(row.get("runtime") or "")
+        serving = str(row.get("serving_mode") or row.get("servingMode") or "")
+        is_container = (
+            runtime in ("docker-compose", "container")
+            or serving == "container"
+        )
+        if not is_container:
+            # 再看 registry runtime_access：若曾观测到权限失败，仍阻断容器类操作
+            # 但静态站点不走此路径
+            return None
+        try:
+            from local_webpage_access.capability import collect_capability_report
+
+            report = collect_capability_report(
+                workspace_root=ctx.workspace.root,
+                role="manager",
+                config_profile=getattr(ctx.config, "profile", None),
+            )
+            caps = report.to_dict()["capabilities"]
+            if caps.get("sessionRefreshRequired"):
+                return "sessionRefreshRequired：请重新登录后执行 lwa setup --full --resume"
+            for key, label in (
+                ("managerDockerAccess", "manager"),
+                ("dockerAccess", "docker"),
+            ):
+                if caps.get(key) == "permission_denied":
+                    return f"{label} 无 Docker 权限（{key}=permission_denied）"
+        except Exception:  # noqa: BLE001 — 探测失败时 fail-closed
+            return "无法确认 Docker 能力，拒绝容器操作"
+        return None
+
     def _lifecycle_op(
         instance_id: str,
         op: Callable[[Workspace, Config, Registry, str], Any],
@@ -506,6 +563,17 @@ def _register_routes(app: FastAPI) -> None:
     ) -> dict[str, Any]:
         ctx = _Ctx(app)
         _require_instance(ctx, instance_id)
+        blocked = _docker_ops_blocked_reason(ctx, instance_id)
+        if blocked is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "capability_denied",
+                        "message": f"拒绝 {label}：{blocked}",
+                    }
+                },
+            )
         op(ctx.workspace, ctx.config, ctx.registry, instance_id)
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
         snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)

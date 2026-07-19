@@ -185,6 +185,28 @@ select:focus-visible,
 .btn-warn { color: var(--amber); border-color: var(--border-strong); }
 .btn-warn:hover { background: var(--amber-bg); border-color: var(--amber); }
 
+/* ---- IMP-033 能力降级横幅 ---- */
+.capability-banner {
+  margin: 0 var(--pad-x);
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--amber);
+  background: var(--amber-bg);
+  color: var(--text);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  font-size: 13px;
+}
+.capability-banner[data-overall="unready"] {
+  border-color: var(--red);
+  background: var(--red-bg);
+}
+.capability-banner strong { font-weight: 600; }
+.capability-banner .btn { margin-left: auto; }
+
 /* ---- 顶部统计 ---- */
 .stats { padding: 16px var(--pad-x) 4px; }
 .stat-cards {
