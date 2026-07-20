@@ -5,12 +5,17 @@
 
 ## 平台与运行环境
 
-* **操作系统**：主要面向 Linux 小主机（树莓派、NUC、ARM 盒子等）开发与测试。
-  macOS / Windows 可用于开发与静态/前端实例，容器路径在 Windows 上未充分验证。
+* **正式支持操作系统（IMP-036）**：
+  * Linux 裸机：Ubuntu **LTS**（当前：22.04 jammy / 24.04 noble / 26.04 resolute）、Debian **Stable**（12 bookworm / 13 trixie）；kernel ≥5.15、glibc ≥2.35、systemd。版本与代号须配对；非 LTS、sid/testing、未纳入矩阵的未来版本一律拒绝。
+  * WSL2 Linux（同上发行版；WSL 包 ≥2.1.5 且 systemd 为 PID 1）；Windows **仅作 WSL2 宿主**。WSL 下 Full Profile / `lwa autostart` 写路径禁止工作区位于 `/mnt/<drive>`（写入前 fail-closed）；只读诊断与普通 CLI 不因路径形似 `/mnt` 而全局阻断。
+  * macOS：**14 Sonoma+**（滚动下限，对齐 Docker Desktop「当前及前两版」；截至 2026-07）
+  * 架构仅 **x86_64/amd64**、**arm64/aarch64**
+* **明确不支持**：**Windows 原生**进程（CLI/服务入口 hard fail，请改用 WSL2）；WSL1；Ubuntu 非 LTS；Debian sid/testing；Alpine/musl、Fedora/RHEL/Arch 等未纳入矩阵的发行版；32 位 / ARMv7 等。
+* **平台诊断**：`lwa doctor --json` 在**未初始化工作区**时仍输出 `platformSupport`（reasons / action / supported），便于排障。
 * **Python**：要求 3.13+，不支持更早版本。
 * **Docker**：要求 Docker + Docker Compose 插件（`docker compose` 子命令）。
   Compose v1 独立二进制不支持；低于推荐版本时仅告警，不阻断已满足最低线的环境。
-  `lwa setup --full` / 内置安装脚本覆盖 **macOS / Linux（含 WSL）**；**Windows 原生**无内置脚本，需按 `lwa setup` 指引手动安装。`--full` **需要已初始化工作区**（`lwa init --full` 或先 `init` 再 `setup --full`）；default 的 `lwa setup` 可无工作区。
+  `lwa setup --full` / 内置安装脚本覆盖 **macOS / Ubuntu / Debian（含 WSL2）**。`--full` **需要已初始化工作区**（`lwa init --full` 或先 `init` 再 `setup --full`）；default 的 `lwa setup` 可无工作区。
   Full Profile（`profile: full`）还会验收 manager/daemon/gateway 真实 Docker 权限与 Caddy owner；未闭环不假绿（见 FAQ「Full Profile」）。
   Linux 上 LWA 以 `serviceUser` 访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，或对 system unit 使用 `SupplementaryGroups=docker`（`lwa autostart` 默认 user unit 仍依赖会话组）。
   观测失败写 `unknown` / `runtimeAccess`，不把运行中容器误标 stopped；管理页与 API 在能力降级时阻断容器操作。

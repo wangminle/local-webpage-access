@@ -641,11 +641,22 @@ def test_cli_doctor_json_output(env, monkeypatch) -> None:
     result = runner.invoke(app, ["doctor", "--json"])
     import json
 
-    data = json.loads(result.output)
+    # BUG-241 / IMP-036：--json 纯 stdout；stderr 可能有日志，勿用 result.output
+    data = json.loads(result.stdout)
     assert "overall" in data
     assert "checks" in data
     assert isinstance(data["checks"], list)
     assert len(data["checks"]) >= 8
+    assert "platformSupport" in data
+    for key in (
+        "platform",
+        "distroId",
+        "architecture",
+        "supported",
+        "reasons",
+        "action",
+    ):
+        assert key in data["platformSupport"]
 
 
 def test_cli_doctor_full_json_stdout_is_pure_json(env, monkeypatch) -> None:

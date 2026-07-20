@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import LifecycleError, LwaError
+from local_webpage_access.errors import DataNonemptyError, LifecycleError, LwaError
 from local_webpage_access.file_lock import (
     ensure_lockable,
     release_exclusive,
@@ -437,7 +437,7 @@ def remove_instance(
         data_dir = workspace.app_data(instance_id)
         data_nonempty = data_dir.is_dir() and any(data_dir.iterdir())
         if purge and data_nonempty and not force:
-            raise LifecycleError(
+            raise DataNonemptyError(
                 f"实例 {instance_id} 的 data/ 目录非空，删除前请确认"
                 f"（使用 --force 强制删除数据）",
                 instance_id=instance_id,

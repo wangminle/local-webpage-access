@@ -37,15 +37,25 @@ app = typer.Typer(
 
 @app.callback()
 def main_callback(
+    ctx: typer.Context,
     verbose: bool = typer.Option(False, "--verbose", "-v", help="输出 DEBUG 级别日志"),
 ) -> None:
     f"""{PRODUCT_NAME} 命令行工具。"""
     bootstrap("DEBUG" if verbose else "INFO")
+    # IMP-036：除 help / version / 只读 doctor 外，统一平台门禁（写工作区前 fail-fast）
+    sub = ctx.invoked_subcommand
+    if sub in (None, "version", "doctor"):
+        return
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        return
+    from local_webpage_access.platform_support import require_supported_platform
+
+    require_supported_platform()
 
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.6.3-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.6.4-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -119,6 +129,19 @@ def init(
 
     try:
         ws = Path(workspace).resolve()
+        # BUG-260：Full 写路径须在 init_workspace 之前按 WSL+/mnt 门禁 fail-closed
+        if profile == "full":
+            from local_webpage_access.platform_support import (
+                assert_writable_workspace_allowed,
+            )
+
+            try:
+                assert_writable_workspace_allowed(ws)
+            except SystemExit as exc:
+                msg = exc.code if isinstance(exc.code, str) else str(exc)
+                typer.secho(msg or "Full 写路径已阻断", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1) from exc
+
         summary = init_workspace(ws, force=force, static_gateway=gateway)
         typer.secho(f"已初始化工作区：{ws}", fg=typer.colors.GREEN)
         typer.echo(summary)

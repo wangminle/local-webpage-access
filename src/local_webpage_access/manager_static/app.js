@@ -85,12 +85,18 @@
         if (!resp.ok) {
           return resp.json().then(
             function (body) {
-              throw new Error(
+              var err = new Error(
                 (body && body.error && body.error.message) || resp.statusText
               );
+              err.code = (body && body.error && body.error.code) || "";
+              err.status = resp.status;
+              throw err;
             },
             function () {
-              throw new Error(resp.statusText);
+              var err = new Error(resp.statusText);
+              err.code = "";
+              err.status = resp.status;
+              throw err;
             }
           );
         }
@@ -353,6 +359,21 @@
           logs: { open: false, title: "", category: "run", content: "", instanceId: null },
           pathAlias: { open: false, title: "", value: "", error: "", instanceId: null },
           pageview: { open: false, title: "", body: "", instanceId: null },
+          // IMP-035：双阶段删除模态（step 1 选范围 → step 2 输 ID；needForce 再确认）
+          removeDialog: {
+            open: false,
+            step: 1,
+            instanceId: null,
+            instanceName: "",
+            status: "",
+            mode: "keep", // keep=仅移除(purge=false) | purge=彻底删除
+            confirmId: "",
+            acknowledgeIrreversible: false,
+            needForce: false,
+            acknowledgeForce: false,
+            submitting: false,
+            error: "",
+          },
           toastState: { show: false, msg: "", kind: "" },
           capability: null,
           _detailReq: 0, // 详情请求竞态令牌（旧响应到达时丢弃）
@@ -514,7 +535,7 @@
             var id = btn.getAttribute("data-id");
             if (op === "logs") { this.openLogs(id); return; }
             if (op === "path-alias") { this.openPathAlias(id); return; }
-            if (op === "remove") { this.removeSingleInstance(id); return; }
+            if (op === "remove") { this.openRemoveDialog(id); return; }
             if (op === "pageview") { this.openPageview(id); return; }
             this.doOperation(id, op);
             return;
@@ -546,17 +567,156 @@
             .catch(function (e) { self.toast(opLabel(op) + "失败：" + e.message, "error"); });
         },
 
-        removeSingleInstance: function (id) {
-          if (!confirm("确认删除实例 " + id + "？\n（停服并清理登记；保留 apps/ 目录便于排查。同源最早者会保留。）")) return;
+        // ---- IMP-035：双阶段安全删除 ----
+        openRemoveDialog: function (id) {
+          var inst = (this.instances || []).find(function (x) { return x.id === id; });
+          // BUG-264：记住触发点，关闭后恢复焦点
+          this._removeFocusBefore = (doc && doc.activeElement) || null;
+          this.removeDialog = {
+            open: true,
+            step: 1,
+            instanceId: id,
+            instanceName: (inst && (inst.name || inst.id)) || id,
+            status: (inst && inst.status) || "",
+            mode: "keep",
+            confirmId: "",
+            acknowledgeIrreversible: false,
+            needForce: false,
+            acknowledgeForce: false,
+            submitting: false,
+            error: "",
+          };
           var self = this;
+          setTimeoutFn(function () { self._focusRemoveDialog(); }, 0);
+        },
+        closeRemoveDialog: function () {
+          if (this.removeDialog.submitting) return;
+          this.removeDialog.open = false;
+          this.removeDialog.error = "";
+          this._restoreRemoveFocus();
+        },
+        _focusRemoveDialog: function () {
+          if (!doc) return;
+          var box = doc.querySelector(".remove-dialog-box");
+          if (!box) return;
+          var focusable = box.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          );
+          var list = Array.prototype.filter.call(focusable, function (el) {
+            return el.offsetParent !== null || el === doc.activeElement;
+          });
+          if (list.length) list[0].focus();
+        },
+        _restoreRemoveFocus: function () {
+          var prev = this._removeFocusBefore;
+          this._removeFocusBefore = null;
+          if (prev && typeof prev.focus === "function") {
+            try { prev.focus(); } catch (_e) { /* ignore */ }
+          }
+        },
+        _trapRemoveDialogFocus: function (e) {
+          if (!doc || e.key !== "Tab" || !this.removeDialog.open) return;
+          var box = doc.querySelector(".remove-dialog-box");
+          if (!box) return;
+          var focusable = box.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          );
+          var list = Array.prototype.filter.call(focusable, function (el) {
+            return el.offsetParent !== null || el === doc.activeElement;
+          });
+          if (!list.length) return;
+          var first = list[0];
+          var last = list[list.length - 1];
+          if (e.shiftKey && doc.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && doc.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        },
+        advanceRemoveDialog: function () {
+          if (this.removeDialog.step !== 1) return;
+          if (this.removeDialog.mode !== "keep" && this.removeDialog.mode !== "purge") return;
+          this.removeDialog.step = 2;
+          this.removeDialog.confirmId = "";
+          this.removeDialog.acknowledgeIrreversible = false;
+          this.removeDialog.needForce = false;
+          this.removeDialog.acknowledgeForce = false;
+          this.removeDialog.error = "";
+          var self = this;
+          setTimeoutFn(function () { self._focusRemoveDialog(); }, 0);
+        },
+        backRemoveDialog: function () {
+          if (this.removeDialog.submitting) return;
+          if (this.removeDialog.needForce) {
+            this.removeDialog.needForce = false;
+            this.removeDialog.acknowledgeForce = false;
+            this.removeDialog.error = "";
+            var self = this;
+            setTimeoutFn(function () { self._focusRemoveDialog(); }, 0);
+            return;
+          }
+          if (this.removeDialog.step === 2) {
+            this.removeDialog.step = 1;
+            this.removeDialog.confirmId = "";
+            this.removeDialog.acknowledgeIrreversible = false;
+            this.removeDialog.error = "";
+            var selfBack = this;
+            setTimeoutFn(function () { selfBack._focusRemoveDialog(); }, 0);
+          }
+        },
+        canSubmitRemoveDialog: function () {
+          return LWA.canSubmitRemove(this.removeDialog);
+        },
+        submitRemoveDialog: function () {
+          var dlg = this.removeDialog;
+          if (!LWA.canSubmitRemove(dlg) || !dlg.instanceId) return;
+          var self = this;
+          var id = dlg.instanceId;
+          var purge = dlg.mode === "purge";
+          var force = !!(dlg.needForce && dlg.acknowledgeForce);
+          var qs = LWA.buildRemoveQuery(purge, force);
+          dlg.submitting = true;
+          dlg.error = "";
           this.toast("正在删除…");
-          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/remove", { method: "POST" })
+          apiFetch(
+            this,
+            "/api/instances/" + encodeURIComponent(id) + "/remove?" + qs,
+            { method: "POST" }
+          )
             .then(function () {
-              self.toast("已删除 " + id, "success");
+              self.toast(
+                purge ? ("已彻底删除 " + id) : ("已移除 " + id + "（保留项目文件）"),
+                "success"
+              );
+              self.removeDialog.open = false;
+              self.removeDialog.submitting = false;
+              self._restoreRemoveFocus();
               if (self.currentDetailId === id) self.closeDetail();
+              if (self.logs.open && self.logs.instanceId === id) self.closeLogs();
+              if (self.pageview.open && self.pageview.instanceId === id) self.closePageview();
+              if (self.pathAlias.open && self.pathAlias.instanceId === id) self.closePathAlias();
               self.refresh();
             })
-            .catch(function (e) { self.toast("删除失败：" + e.message, "error"); });
+            .catch(function (e) {
+              self.removeDialog.submitting = false;
+              if (
+                purge &&
+                !force &&
+                LWA.shouldElevateRemoveForce(e.code)
+              ) {
+                // 仅 data_nonempty 进入 force 再确认；不自动重试
+                self.removeDialog.needForce = true;
+                self.removeDialog.acknowledgeForce = false;
+                self.removeDialog.error =
+                  e.message || "data/ 目录非空，需再次确认后强制删除";
+                setTimeoutFn(function () { self._focusRemoveDialog(); }, 0);
+                return;
+              }
+              self.removeDialog.error = e.message || "删除失败";
+              self.toast("删除失败：" + (e.message || "未知错误"), "error");
+            });
         },
 
         removeRedundant: function () {
@@ -673,9 +833,15 @@
         // ---- 全局键盘 ----
         // Escape 只关最上层一层（而非一次全关），符合弹窗层叠直觉，
         // 也避免在多弹窗叠加时一按 Esc 把背后的抽屉一起关掉。
+        // BUG-264：删除模态打开时 Tab 焦点约束在对话框内。
         onKeydown: function (e) {
+          if (this.removeDialog.open && e.key === "Tab") {
+            this._trapRemoveDialogFocus(e);
+            return;
+          }
           if (e.key !== "Escape") return;
-          if (this.pageview.open) this.closePageview();
+          if (this.removeDialog.open) this.closeRemoveDialog();
+          else if (this.pageview.open) this.closePageview();
           else if (this.pathAlias.open) this.closePathAlias();
           else if (this.logs.open) this.closeLogs();
           else if (this.drawer.open) this.closeDetail();
@@ -845,6 +1011,50 @@
     '    <h2>{{ pageview.title }}</h2>',
     '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭浏览量" @click="closePageview">✕</button></div>',
     '    <div class="pageview-body" v-html="pageview.body"></div>',
+    "  </div></div>",
+    // IMP-035：双阶段删除确认
+    '<div class="modal" :hidden="!removeDialog.open" role="dialog" aria-modal="true" aria-labelledby="remove-dialog-title">',
+    '  <div class="modal-inner remove-dialog-box"><div class="modal-head">',
+    '    <h2 id="remove-dialog-title">删除实例</h2>',
+    '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭删除确认" @click="closeRemoveDialog" :disabled="removeDialog.submitting">✕</button></div>',
+    '    <div class="remove-dialog-meta">',
+    '      <p><strong>{{ removeDialog.instanceName }}</strong></p>',
+    '      <p class="remove-dialog-id">ID：<code>{{ removeDialog.instanceId }}</code> · 状态：{{ statusLabel(removeDialog.status) }}</p>',
+    "    </div>",
+    // step 1
+    '    <div v-if="removeDialog.step === 1" class="remove-dialog-step">',
+    '      <p class="remove-dialog-hint">请选择删除范围（默认更安全的「仅移除」）：</p>',
+    '      <label class="remove-option"><input type="radio" value="keep" v-model="removeDialog.mode" />',
+    '        <span><strong>仅移除</strong> — 停服并清理登记，保留 <code>apps/&lt;id&gt;/</code> 项目文件</span></label>',
+    '      <label class="remove-option"><input type="radio" value="purge" v-model="removeDialog.mode" />',
+    '        <span><strong>彻底删除</strong> — 停服、清登记，并删除项目文件与数据（不可恢复）</span></label>',
+    '      <div class="remove-dialog-actions">',
+    '        <button class="btn btn-ghost" type="button" @click="closeRemoveDialog">取消</button>',
+    '        <button class="btn btn-primary" type="button" @click="advanceRemoveDialog">继续</button>',
+    "      </div></div>",
+    // step 2 / force
+    '    <div v-else class="remove-dialog-step">',
+    '      <p class="remove-dialog-hint" v-if="!removeDialog.needForce">',
+    '        {{ removeDialog.mode === "purge" ? "即将彻底删除项目文件与数据。" : "即将仅移除登记并停服，保留项目文件。" }}',
+    '        请输入完整项目 ID 以确认：</p>',
+    '      <p class="remove-dialog-warn" v-if="removeDialog.needForce" role="alert">',
+    '        该实例 <code>data/</code> 目录非空。强制删除后数据不可恢复。请再次确认。</p>',
+    '      <label class="remove-dialog-field"><span>项目 ID</span>',
+    '        <input type="text" autocomplete="off" spellcheck="false" v-model="removeDialog.confirmId" :disabled="removeDialog.submitting" @keydown.enter="submitRemoveDialog" /></label>',
+    "      <label class=\"remove-option\" v-if=\"removeDialog.mode === 'purge' && !removeDialog.needForce\">",
+    '        <input type="checkbox" v-model="removeDialog.acknowledgeIrreversible" :disabled="removeDialog.submitting" />',
+    '        <span>我理解数据不可恢复</span></label>',
+    '      <label class="remove-option" v-if="removeDialog.needForce">',
+    '        <input type="checkbox" v-model="removeDialog.acknowledgeForce" :disabled="removeDialog.submitting" />',
+    '        <span>我确认强制删除非空 data/（不可恢复）</span></label>',
+    '      <p class="remove-dialog-error" :hidden="!removeDialog.error">{{ removeDialog.error }}</p>',
+    '      <div class="remove-dialog-actions">',
+    '        <button class="btn btn-ghost" type="button" @click="backRemoveDialog" :disabled="removeDialog.submitting">上一步</button>',
+    '        <button class="btn btn-ghost" type="button" @click="closeRemoveDialog" :disabled="removeDialog.submitting">取消</button>',
+    '        <button class="btn btn-danger" type="button" @click="submitRemoveDialog" :disabled="!canSubmitRemoveDialog() || removeDialog.submitting">',
+    '          {{ removeDialog.submitting ? "删除中…" : (removeDialog.needForce ? "强制彻底删除" : (removeDialog.mode === "purge" ? "确认彻底删除" : "确认仅移除")) }}',
+    "        </button>",
+    "      </div></div>",
     "  </div></div>",
     // toast
     '<div class="toast" role="status" aria-live="polite" aria-atomic="true" :hidden="!toastState.show" :class="toastState.kind ? \'toast toast-\' + toastState.kind : \'toast\'">{{ toastState.msg }}</div>',

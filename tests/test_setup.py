@@ -120,7 +120,9 @@ def test_format_setup_report_mentions_next_steps() -> None:
 def test_render_setup_script_per_platform() -> None:
     assert "#!/usr/bin/env bash" in render_setup_script("macos")
     assert "Docker Engine" in render_setup_script("linux")
-    assert "PowerShell" in render_setup_script("windows")
+    win = render_setup_script("windows")
+    assert "WSL2" in win
+    assert "不支持" in win or "原生" in win
 
 
 def test_cli_setup_command() -> None:
@@ -141,8 +143,12 @@ def test_cli_setup_script_flag() -> None:
     if plat == "macos":
         assert "brew install" in result.output
     elif plat == "windows":
-        # Windows 无内置 docker 脚本时仍可能输出历史参考段
-        assert "winget" in result.output or "内置" in result.output or "平台" in result.output
+        # IMP-036：原生 Windows 应提示改用 WSL2（门禁也可能非零退出）
+        assert (
+            "WSL2" in result.output
+            or "不支持" in result.output
+            or result.exit_code != 0
+        )
 
 
 def test_cli_setup_rejects_default_and_full() -> None:

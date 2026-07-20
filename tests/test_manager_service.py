@@ -428,7 +428,7 @@ def test_run_service_main_passes_log_dir(
     )
     seen: dict = {}
 
-    def fake_setup_logging(level="INFO", log_dir=None, *, force=False):  # noqa: ANN001
+    def fake_setup_logging(level="INFO", log_dir=None, *, log_filename="lwa.log", force=False):  # noqa: ANN001
         seen["log_dir"] = log_dir
         return None
 

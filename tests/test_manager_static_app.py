@@ -439,3 +439,152 @@ close({{ target: {{ closest: function (sel) {{ return sel === ".ip-list" ? {{}} 
 assert.strictEqual(panelA.open, true);
 """
     )
+
+
+def test_helpers_opshtml_remove_for_all_instances() -> None:
+    """IMP-035：所有实例显示删除；building/starting/stopping/removing 禁用。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const opsHtml = context.window.__LWA_TEST_HOOKS__.opsHtml;
+
+function btn(html, op) {{
+  var i = html.indexOf('data-op="' + op + '"');
+  assert.ok(i !== -1, "missing op=" + op + " in " + html);
+  return html.slice(i, html.indexOf(">", i) + 1);
+}}
+
+var normal = opsHtml({{ id: "demo", name: "demo", status: "running", runtime: "shared-static", servingMode: "shared-static", stack: [], redundant: false }});
+assert.ok(btn(normal, "remove").indexOf("disabled") === -1);
+
+var redundant = opsHtml({{ id: "dup", name: "dup", status: "stopped", runtime: "shared-static", servingMode: "shared-static", stack: [], redundant: true }});
+assert.ok(btn(redundant, "remove").indexOf("disabled") === -1);
+
+["building", "starting", "stopping", "removing"].forEach(function (st) {{
+  var html = opsHtml({{ id: "x", name: "x", status: st, runtime: "docker-compose", servingMode: "container", stack: [], redundant: false }});
+  assert.ok(btn(html, "remove").indexOf("disabled") !== -1, "status=" + st + " should disable remove");
+}});
+"""
+    )
+
+
+def test_helpers_remove_dialog_state_machine() -> None:
+    """IMP-035：双阶段确认；未输完整 ID / 未勾选风险不可提交；仅 data_nonempty 升 force。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const h = context.window.__LWA_TEST_HOOKS__;
+assert.strictEqual(typeof h.canSubmitRemove, "function");
+assert.strictEqual(typeof h.shouldElevateRemoveForce, "function");
+assert.strictEqual(typeof h.buildRemoveQuery, "function");
+
+var base = {{
+  step: 2,
+  instanceId: "proj-a",
+  mode: "keep",
+  confirmId: "",
+  acknowledgeIrreversible: false,
+  needForce: false,
+  acknowledgeForce: false,
+  submitting: false,
+}};
+assert.strictEqual(h.canSubmitRemove(base), false);
+assert.strictEqual(h.canSubmitRemove(Object.assign({{}}, base, {{ confirmId: "proj-a" }})), true);
+assert.strictEqual(h.canSubmitRemove(Object.assign({{}}, base, {{ confirmId: "proj-a", submitting: true }})), false);
+
+var purge = Object.assign({{}}, base, {{ mode: "purge", confirmId: "proj-a" }});
+assert.strictEqual(h.canSubmitRemove(purge), false);
+assert.strictEqual(h.canSubmitRemove(Object.assign({{}}, purge, {{ acknowledgeIrreversible: true }})), true);
+
+var forceStep = Object.assign({{}}, purge, {{
+  acknowledgeIrreversible: true,
+  needForce: true,
+  acknowledgeForce: false,
+}});
+assert.strictEqual(h.canSubmitRemove(forceStep), false);
+assert.strictEqual(h.canSubmitRemove(Object.assign({{}}, forceStep, {{ acknowledgeForce: true }})), true);
+
+assert.strictEqual(h.shouldElevateRemoveForce("data_nonempty"), true);
+assert.strictEqual(h.shouldElevateRemoveForce("internal"), false);
+assert.strictEqual(h.shouldElevateRemoveForce("conflict"), false);
+assert.strictEqual(h.shouldElevateRemoveForce(""), false);
+
+assert.strictEqual(h.buildRemoveQuery(false, false), "purge=false&force=false");
+assert.strictEqual(h.buildRemoveQuery(true, false), "purge=true&force=false");
+assert.strictEqual(h.buildRemoveQuery(true, true), "purge=true&force=true");
+"""
+    )
+
+
+def test_app_remove_dialog_methods_and_no_native_confirm() -> None:
+    """IMP-035：app 暴露双阶段删除方法；源码不含连续原生 confirm 糊弄。"""
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "openRemoveDialog" in src
+    assert "submitRemoveDialog" in src
+    assert "advanceRemoveDialog" in src
+    # 单项目删除不得依赖原生 confirm；批量冗余可保留
+    # 定位 removeSingleInstance / openRemoveDialog 区域：不得出现 confirm(
+    assert "removeSingleInstance: function" not in src or "confirm(" not in src.split("removeSingleInstance")[0][-200:]
+    # 更稳：删除流程应打开模态而非 confirm
+    assert "openRemoveDialog" in src
+    assert "removeDialog" in src
+    # BUG-264：打开/关闭须管理焦点（初始焦点或恢复触发点）
+    assert (
+        "_removeFocusBefore" in src
+        or "_focusRemoveDialog" in src
+        or "_restoreRemoveFocus" in src
+        or "focusRemoveDialog" in src
+    ), "删除模态须管理键盘焦点"
+    # 源码中单实例删除路径不应调用 confirm（允许 removeRedundant 仍用 confirm）
+    # 简单启发式：openRemoveDialog 定义存在，且不存在 `if (!confirm("确认删除实例`
+    assert 'confirm("确认删除实例' not in src
+
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: function () {{ throw new Error("no fetch"); }},
+  location: {{ hostname: "127.0.0.1", search: "", pathname: "/" }},
+  sessionStorage: {{ getItem: function () {{ return null; }}, setItem: function () {{}}, removeItem: function () {{}} }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+var capturedRoot = null;
+vm.runInNewContext({_load_app_body()}, context);
+context.window.LWA.createManagerApp(
+  {{ createApp: function (root) {{ capturedRoot = root; return {{ mount: function () {{}} }}; }} }},
+  {{
+    document: null,
+    fetch: function () {{ throw new Error("no fetch"); }},
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+assert.ok(capturedRoot);
+assert.strictEqual(typeof capturedRoot.methods.openRemoveDialog, "function");
+assert.strictEqual(typeof capturedRoot.methods.advanceRemoveDialog, "function");
+assert.strictEqual(typeof capturedRoot.methods.submitRemoveDialog, "function");
+assert.strictEqual(typeof capturedRoot.methods.closeRemoveDialog, "function");
+const state = capturedRoot.data();
+assert.ok(state.removeDialog);
+assert.strictEqual(state.removeDialog.open, false);
+assert.strictEqual(state.removeDialog.mode, "keep");
+assert.ok(capturedRoot.template.indexOf("removeDialog.open") !== -1);
+"""
+    )

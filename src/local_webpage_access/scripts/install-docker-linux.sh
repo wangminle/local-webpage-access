@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LWA：在 Ubuntu（含 WSL Ubuntu）上安装 Docker Engine + Compose 插件。
+# LWA：在 Ubuntu 22.04+ / Debian 12+（含 WSL）上安装 Docker Engine + Compose 插件。
 #
 # 流程对齐官方文档（apt 仓库方式）：
 #   https://docs.docker.com/engine/install/ubuntu/
@@ -49,6 +49,7 @@ Usage: install-docker-linux.sh [--official] [--help]
   --help       显示本帮助
 
 参考：https://docs.docker.com/engine/install/ubuntu/
+      https://docs.docker.com/engine/install/debian/
 EOF
 }
 
@@ -121,22 +122,87 @@ run_sudo() {
   fi
 }
 
-detect_ubuntu() {
-  [[ -f /etc/os-release ]] || die "未找到 /etc/os-release，本脚本仅支持 Ubuntu（含 WSL Ubuntu）"
+# 输出两行：distro_family（ubuntu|debian）与 apt suite/codename。
+# 严禁把 Debian 伪装成 Ubuntu 代号去拉 /linux/ubuntu 源。
+detect_debian_family() {
+  [[ -f /etc/os-release ]] || die "未找到 /etc/os-release，本脚本仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable（含 WSL）"
   # shellcheck disable=SC1091
   . /etc/os-release
-  if [[ "${ID:-}" != "ubuntu" ]]; then
-    die "当前发行版 ID=${ID:-unknown}。本期仅支持 Ubuntu；请参考 https://docs.docker.com/engine/install/"
-  fi
-  local codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
-  [[ -n "$codename" ]] || die "无法解析 Ubuntu 代号（UBUNTU_CODENAME / VERSION_CODENAME）"
-  case "$codename" in
-    jammy|noble|questing|resolute) ;;
+  local id="${ID:-}"
+  local ver="${VERSION_ID:-}"
+  local codename="${VERSION_CODENAME:-}"
+  case "$id" in
+    ubuntu)
+      codename="${UBUNTU_CODENAME:-$codename}"
+      [[ -n "$codename" ]] || die "无法解析 Ubuntu 代号（UBUNTU_CODENAME / VERSION_CODENAME）"
+      # 仅 Ubuntu LTS：偶数年 .04，且 ≥ 22.04（BUG-261）
+      local major="${ver%%.*}"
+      local minor="0"
+      if [[ "$ver" == *.* ]]; then
+        minor="${ver#*.}"
+        minor="${minor%%.*}"
+      fi
+      if [[ -z "$ver" ]] || [[ "$major" -lt 22 ]] || [[ $((major % 2)) -ne 0 ]] || [[ "$minor" -ne 4 ]]; then
+        die "Ubuntu ${ver:-unknown}（${codename}）不是正式支持的 LTS（需 22.04/24.04/26.04）"
+      fi
+      # 未纳入矩阵的未来 LTS（如 28.04）
+      if [[ "$major" -gt 26 ]]; then
+        die "Ubuntu $ver 尚未纳入正式支持矩阵（当前 22.04/24.04/26.04）"
+      fi
+      # 版本/代号配对（须与 SUPPORTED_UBUNTU_LTS 一致）
+      if [[ "$ver" == 22.04* && "$codename" != "jammy" ]]; then
+        die "Ubuntu 版本/代号不匹配：VERSION_ID=$ver 应对 jammy，实际为 ${codename}"
+      fi
+      if [[ "$ver" == 24.04* && "$codename" != "noble" ]]; then
+        die "Ubuntu 版本/代号不匹配：VERSION_ID=$ver 应对 noble，实际为 ${codename}"
+      fi
+      if [[ "$ver" == 26.04* && "$codename" != "resolute" ]]; then
+        die "Ubuntu 版本/代号不匹配：VERSION_ID=$ver 应对 resolute，实际为 ${codename}"
+      fi
+      case "$codename" in
+        # 须与 platform_support.SUPPORTED_UBUNTU_LTS 保持同步
+        jammy|noble|resolute) ;;
+        *)
+          die "Ubuntu 代号 '${codename}' 不在 LTS 允许列表（jammy/noble/resolute；见 SUPPORTED_UBUNTU_LTS）"
+          ;;
+      esac
+      printf 'ubuntu\n%s\n' "$codename"
+      ;;
+    debian)
+      [[ -n "$codename" ]] || die "无法解析 Debian 代号（VERSION_CODENAME）"
+      case "$codename" in
+        sid|unstable|testing|rc-buggy)
+          die "Debian ${codename} 不是 Stable；仅支持 bookworm/trixie（12/13）"
+          ;;
+      esac
+      local major="${ver%%.*}"
+      if [[ -z "$ver" ]] || [[ "$major" -lt 12 ]]; then
+        die "Debian ${ver:-unknown} 低于最低要求 12（Bookworm）"
+      fi
+      case "$codename" in
+        # 须与 platform_support.SUPPORTED_DEBIAN_STABLE 保持同步
+        bookworm|trixie) ;;
+        *)
+          die "Debian 代号 '${codename}' 不在 Stable 允许列表（bookworm/trixie；见 SUPPORTED_DEBIAN_STABLE）"
+          ;;
+      esac
+      # 拒绝未知未来大版本（如 99）假绿；须与 SUPPORTED_DEBIAN_STABLE 键一致
+      if [[ "$major" -gt 13 ]]; then
+        die "Debian $ver 尚未纳入正式支持的 Stable 矩阵（当前 12/13）"
+      fi
+      # 版本与代号配对（12↔bookworm、13↔trixie）
+      if [[ "$major" -eq 12 && "$codename" != "bookworm" ]]; then
+        die "Debian 版本/代号不匹配：VERSION_ID=$ver 应对 bookworm，实际为 ${codename}"
+      fi
+      if [[ "$major" -eq 13 && "$codename" != "trixie" ]]; then
+        die "Debian 版本/代号不匹配：VERSION_ID=$ver 应对 trixie，实际为 ${codename}"
+      fi
+      printf 'debian\n%s\n' "$codename"
+      ;;
     *)
-      warn "代号 '$codename' 不在官方当前列表（jammy/noble/questing/resolute），仍继续尝试安装"
+      die "当前发行版 ID=${id:-unknown}。仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable；见 https://docs.docker.com/engine/install/"
       ;;
   esac
-  printf '%s\n' "$codename"
 }
 
 already_good() {
@@ -178,18 +244,25 @@ uninstall_conflicts() {
 }
 
 setup_apt_repo() {
-  # https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository
-  local codename="$1"
+  # family=ubuntu|debian；严禁 Debian 使用 /linux/ubuntu
+  # https://docs.docker.com/engine/install/ubuntu/
+  # https://docs.docker.com/engine/install/debian/
+  local family="$1"
+  local codename="$2"
   local arch apt_uri gpg_url key_path
   arch="$(dpkg --print-architecture)"
 
+  if [[ "$family" != "ubuntu" && "$family" != "debian" ]]; then
+    die "内部错误：未知 distro family=$family"
+  fi
+
   if [[ "$USE_OFFICIAL" -eq 1 ]]; then
-    apt_uri="${OFFICIAL_APT_ROOT}/linux/ubuntu"
-    gpg_url="${OFFICIAL_APT_ROOT}/linux/ubuntu/gpg"
+    apt_uri="${OFFICIAL_APT_ROOT}/linux/${family}"
+    gpg_url="${OFFICIAL_APT_ROOT}/linux/${family}/gpg"
     log "配置官方 apt 仓库：$apt_uri"
   else
-    apt_uri="${LWA_DOCKER_APT_MIRROR:-$DEFAULT_APT_MIRROR}/linux/ubuntu"
-    gpg_url="${LWA_DOCKER_APT_MIRROR:-$DEFAULT_APT_MIRROR}/linux/ubuntu/gpg"
+    apt_uri="${LWA_DOCKER_APT_MIRROR:-$DEFAULT_APT_MIRROR}/linux/${family}"
+    gpg_url="${LWA_DOCKER_APT_MIRROR:-$DEFAULT_APT_MIRROR}/linux/${family}/gpg"
     log "配置阿里云 Docker CE apt 仓库：$apt_uri"
   fi
 
@@ -334,9 +407,12 @@ main() {
   need_cmd dpkg
   check_apt_pkg
 
-  local codename
-  codename="$(detect_ubuntu)"
-  log "检测到 Ubuntu（代号 $codename）"
+  local family codename
+  {
+    read -r family
+    read -r codename
+  } < <(detect_debian_family)
+  log "检测到 ${family}（代号 $codename）"
 
   if already_good; then
     write_daemon_mirrors "$DEFAULT_REGISTRY_MIRRORS"
@@ -349,7 +425,7 @@ main() {
   fi
 
   uninstall_conflicts
-  setup_apt_repo "$codename"
+  setup_apt_repo "$family" "$codename"
   install_packages
   write_daemon_mirrors "$DEFAULT_REGISTRY_MIRRORS"
   start_docker

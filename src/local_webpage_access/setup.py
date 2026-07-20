@@ -251,12 +251,13 @@ def _docker_install_hint(plat: str) -> str:
     if plat == "linux":
         return (
             f"{builtin}；或官方文档："
-            "https://docs.docker.com/engine/install/ubuntu/"
+            "https://docs.docker.com/engine/install/ubuntu/ "
+            "https://docs.docker.com/engine/install/debian/"
         )
     if plat == "windows":
         return (
-            "安装 Docker Desktop for Windows："
-            "https://docs.docker.com/desktop/setup/install/windows-install/"
+            "Windows 原生不受支持；请在 WSL2 的 Ubuntu/Debian 中安装 Docker Engine "
+            "（或 Docker Desktop WSL integration），勿在 Windows 原生进程中运行 lwa"
         )
     return f"安装 Docker ≥ {MIN_DOCKER_VERSION} 并启动 dockerd"
 
@@ -287,8 +288,7 @@ def _caddy_install_hint(plat: str) -> str:
         )
     if plat == "windows":
         return (
-            f"推荐：`winget install CaddyServer.Caddy` 或 "
-            f"https://caddyserver.com/docs/install#windows "
+            "Windows 原生不受支持；请在 WSL2 内安装 Caddy"
             f"（需 ≥ {MIN_CADDY_VERSION}）"
         )
     return f"安装 Caddy ≥ {MIN_CADDY_VERSION}；或将 local-web.yml 的 staticGateway 设为 builtin"
@@ -300,7 +300,9 @@ def _node_install_hint(plat: str) -> str:
     if plat == "linux":
         return f"推荐：NodeSource / fnm / nvm 安装 Node ≥ {MIN_NODE_VERSION}"
     if plat == "windows":
-        return f"推荐：`winget install OpenJS.NodeJS.LTS` 或 fnm 安装 Node ≥ {MIN_NODE_VERSION}"
+        return (
+            f"Windows 原生不受支持；请在 WSL2 内安装 Node ≥ {MIN_NODE_VERSION}"
+        )
     return f"安装 Node.js ≥ {MIN_NODE_VERSION}（仅前端 SPA 构建需要）"
 
 
@@ -391,7 +393,7 @@ lwa setup
 
 _SCRIPT_LINUX = """\
 #!/usr/bin/env bash
-# lwa 宿主机环境参考安装脚本（Linux）—— 请审阅后逐段执行；需 root/sudo 权限。
+# lwa 宿主机环境参考安装脚本（Ubuntu 22.04+ / Debian 12+）—— 请审阅后逐段执行；需 root/sudo 权限。
 set -euo pipefail
 
 echo "==> Python 3.13+"
@@ -421,34 +423,11 @@ node --version || true
 lwa setup
 """
 
-_SCRIPT_WINDOWS = """\
-# lwa 宿主机环境参考安装脚本（Windows PowerShell）—— 请审阅后逐段执行。
-# 在 PowerShell（管理员）中运行。
-
-Write-Host "==> Python 3.13+"
-# winget install Python.Python.3.13
-# 或从 https://www.python.org/downloads/ 安装并勾选 Add to PATH
-
-Write-Host "==> 安装 lwa（在项目根目录执行）"
-# pip install -e .
-
-Write-Host "==> Docker Desktop（含 Compose，Docker 需 ≥ 29.0.0；Compose 最低 ≥ 2.40.2，推荐 ≥ 5.2.0）"
-# winget install Docker.DockerDesktop
-# 安装后启动 Docker Desktop
-
-Write-Host "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.10.0）"
-# winget install CaddyServer.Caddy
-
-Write-Host "==> Node.js（前端 SPA 构建需要，推荐 ≥ 24）"
-# winget install OpenJS.NodeJS.LTS
-
-Write-Host "==> 验证"
-python --version
-docker version
-docker compose version --short
-caddy version
-node --version
-lwa setup
+_SCRIPT_WINDOWS = """# lwa 不支持 Windows 原生进程。
+# 请在 WSL2 中安装 Ubuntu 22.04+ 或 Debian 12+，启用 systemd 后：
+#   wsl --install -d Ubuntu-24.04
+#   （在 WSL 内）pip install -e . && lwa init --full
+# Windows 仅作为 WSL2 宿主；详见 docs/faq.md / docs/known-limitations.md
 """
 
 _SCRIPT_GENERIC = """\
@@ -493,7 +472,7 @@ def generate_launchd_plists(
     if detect_platform() != "macos":
         raise LifecycleError(
             "launchd 开机自启仅支持 macOS；Linux/WSL 请用 `lwa autostart install`"
-            "（systemd user service），Windows 请用任务计划程序（参考 docs/autostart.md）",
+            "（systemd user service）；Windows 原生不受支持，请在 WSL2 内配置（参考 docs/autostart.md）",
         )
     python = python_exe or sys.executable
     dest = dest_dir or (Path.home() / "Library" / "LaunchAgents")

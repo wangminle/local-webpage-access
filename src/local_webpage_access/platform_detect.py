@@ -101,7 +101,9 @@ def subprocess_hidden_kwargs() -> dict[str, Any]:
     非 Windows 返回空 dict，可直接 ``subprocess.run(..., **kwargs)``。
     """
     if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+        # CREATE_NO_WINDOW 是 Windows 专属常量；非 Windows 测试宿主（伪造 win32）
+        # 用字面量兜底，避免 AttributeError。
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
     return {}
 
 

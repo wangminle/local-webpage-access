@@ -207,11 +207,26 @@ def plan_full_install(
     plat = platform or detect_platform()
     items: list[InstallPlanItem] = []
 
+    # IMP-036：WSL 已接 Docker Desktop 时复用 integration，不装发行版内 Engine
+    skip_distro_docker = False
+    if plat == "wsl":
+        from local_webpage_access.platform_support import detect_wsl_docker_backend
+
+        backend = detect_wsl_docker_backend()
+        if backend == "desktop":
+            skip_distro_docker = True
+        elif backend == "conflict":
+            # 冲突由 run_full_bootstrap 阻断；此处不追加安装计划
+            skip_distro_docker = True
+
     docker = detect_docker_engine(runner=runner)
     compose = detect_docker_compose(runner=runner)
-    if docker.status in ("missing", "outdated") or compose.status in (
-        "missing",
-        "outdated",
+    if (
+        not skip_distro_docker
+        and (
+            docker.status in ("missing", "outdated")
+            or compose.status in ("missing", "outdated")
+        )
     ):
         if docker.status != "daemon_down":
             reason_parts = []
@@ -289,6 +304,57 @@ def run_full_bootstrap(
 
     plat = platform or detect_platform()
     service_user = current_service_user()
+
+    # IMP-036 / BUG-260：仅 WSL + /mnt/<drive> 时 Full 写路径 fail-closed
+    # （原生 Linux 上偶然的 /mnt/c 路径不得误挡）
+    from local_webpage_access.platform_support import (
+        PlatformSupportReport,
+        assert_writable_workspace_allowed,
+        collect_platform_support_report,
+    )
+
+    if workspace_root is not None:
+        try:
+            assert_writable_workspace_allowed(
+                workspace_root,
+                report=PlatformSupportReport(platform=plat),
+            )
+        except SystemExit as exc:
+            msg = exc.code if isinstance(exc.code, str) else str(exc)
+            return FullBootstrapResult(
+                ok=False,
+                planned=[],
+                ran=[],
+                messages=[
+                    msg
+                    or (
+                        "工作区位于 /mnt/<drive>（Windows 文件系统），Full Profile 已阻断；"
+                        "请迁移到 Linux 文件系统（如 ~/lwa）后再执行 lwa setup --full。"
+                    )
+                ],
+                overall="unready",
+                exit_code=1,
+                service_user=service_user,
+            )
+    if plat == "wsl":
+        ps = collect_platform_support_report(
+            platform_name="wsl",
+            workspace_root=workspace_root,
+        )
+        if ps.docker_backend == "conflict":
+            return FullBootstrapResult(
+                ok=False,
+                planned=[],
+                ran=[],
+                messages=[
+                    "同时检测到 Docker Desktop WSL integration 与发行版内 Docker Engine；"
+                    "请只保留一套后再执行 lwa setup --full。"
+                ],
+                overall="unready",
+                exit_code=1,
+                service_user=service_user,
+            )
+
     if workspace_root is None:
         return FullBootstrapResult(
             ok=False,

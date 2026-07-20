@@ -12,8 +12,20 @@
 
 1. `lwa setup` 或 `lwa setup --json` 的输出（当前平台、各组件状态、安装指引）。
 2. （可选）`lwa setup --script` 生成的参考安装脚本。
-3. 用户操作系统：macOS / Linux / Windows。
+3. 用户操作系统：macOS / Linux（Ubuntu LTS 22.04/24.04/26.04、Debian Stable 12/13）/ WSL2（Windows 仅作宿主，原生不支持）。
 4. 预期用途：仅静态托管 / 前端构建 / 容器托管（决定哪些组件为必需）。
+
+## 正式支持平台（IMP-036）
+
+| 平台 | 要求 | 备注 |
+| --- | --- | --- |
+| Ubuntu 裸机 | LTS：22.04/24.04/26.04（版本↔代号配对） | 非 LTS（如 23.10）拒绝 |
+| Debian 裸机 | Stable：12=bookworm / 13=trixie | sid/testing 与错配拒绝 |
+| WSL2 | 同上发行版；包 ≥2.1.5；systemd=PID 1 | Full/autostart 禁止工作区在 `/mnt/<drive>` |
+| macOS | 14+ | 滚动下限 |
+| Windows 原生 | **不支持** | 引导改用 WSL2 |
+
+排障：未 init 也可 `lwa doctor --json` 看 `platformSupport`。
 
 ## 输出
 

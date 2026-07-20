@@ -298,6 +298,14 @@ def test_health_workspace_root_only_for_localhost(manager_env: EnvBundle) -> Non
 
 def test_health_capabilities_for_authenticated_lan(manager_env: EnvBundle) -> None:
     """BUG-236：已鉴权局域网客户端应拿到完整 capabilities，未鉴权仅 overall。"""
+    # BUG-254：health 读启动缓存；预置片段供鉴权客户端读取
+    manager_env.app.state.capability_fragment = {
+        "profile": "default",
+        "overall": "ready",
+        "serviceUser": "tester",
+        "capabilities": {"managerDockerAccess": "ready"},
+        "action": None,
+    }
     with TestClient(manager_env.app, client=("10.0.0.8", 50000)) as lan_client:
         bare = lan_client.get("/api/health").json()
         assert bare["ok"] is True
@@ -310,6 +318,31 @@ def test_health_capabilities_for_authenticated_lan(manager_env: EnvBundle) -> No
         assert authed["ok"] is True
         assert "capabilities" in authed
         assert "workspaceRoot" not in authed  # 路径仍仅本机可见
+
+
+def test_health_does_not_call_collect_capability(manager_env: EnvBundle, monkeypatch) -> None:
+    """BUG-254：/api/health 不得同步跑昂贵 collect_capability_report。"""
+    calls: list[str] = []
+
+    def boom(**kwargs):  # noqa: ANN003
+        calls.append("collect")
+        raise AssertionError("health 不应同步探测")
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report", boom
+    )
+    manager_env.app.state.capability_fragment = {
+        "profile": "full",
+        "overall": "degraded",
+        "capabilities": {"managerDockerAccess": "permission_denied"},
+        "action": "resume",
+    }
+    resp = manager_env.client.get("/api/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["overall"] == "degraded"
+    assert calls == []
 
 
 def test_container_lifecycle_blocked_when_docker_permission_denied(
@@ -1342,6 +1375,7 @@ def test_error_response_http_status_matches_code() -> None:
     assert error_response("bad_request", "x").status_code == 400
     assert error_response("not_found", "x").status_code == 404
     assert error_response("conflict", "x").status_code == 409
+    assert error_response("data_nonempty", "x").status_code == 409
     assert error_response("unauthorized", "x").status_code == 401
     assert error_response("service_unavailable", "x").status_code == 503
     assert error_response("internal", "x").status_code == 500
@@ -1446,7 +1480,12 @@ def test_api_remove_single_instance(manager_env: EnvBundle) -> None:
         f"/api/instances/{iid}/remove", headers=manager_env.auth_headers()
     )
     assert resp.status_code == 200
-    assert resp.json()["action"] == "remove"
+    body = resp.json()
+    assert body["action"] == "remove"
+    # IMP-035：成功响应回显 purge/force
+    assert body["instanceId"] == iid
+    assert body["purge"] is False
+    assert body["force"] is False
     # registry 已清，但 apps/ 目录保留（purge 默认 false）
     resp2 = manager_env.client.get(
         "/api/instances", headers=manager_env.auth_headers()
@@ -1462,6 +1501,90 @@ def test_api_remove_unknown_instance_404(manager_env: EnvBundle) -> None:
         "/api/instances/nonexistent-id/remove", headers=manager_env.auth_headers()
     )
     assert resp.status_code == 404
+
+
+def test_api_remove_purge_empty_data_echoes_flags(manager_env: EnvBundle) -> None:
+    """IMP-035：purge=true 且 data/ 空 → 200，回显 purge/force。"""
+    ws = manager_env.workspace
+    iid = manager_env.instance_id
+    data_dir = ws.app_data(iid)
+    if data_dir.is_dir():
+        # 保证空目录或无目录
+        for child in list(data_dir.iterdir()):
+            if child.is_file():
+                child.unlink()
+            else:
+                import shutil
+
+                shutil.rmtree(child)
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/remove?purge=true&force=false",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "instanceId": iid,
+        "action": "remove",
+        "purge": True,
+        "force": False,
+    }
+    assert not ws.app_dir(iid).exists()
+
+
+def test_api_remove_purge_nonempty_data_returns_409_data_nonempty(
+    manager_env: EnvBundle,
+) -> None:
+    """IMP-035：purge=true、data/ 非空、force=false → HTTP 409 + data_nonempty（非 500）。"""
+    ws = manager_env.workspace
+    iid = manager_env.instance_id
+    data_dir = ws.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "keep.sqlite").write_text("payload", encoding="utf-8")
+
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/remove?purge=true&force=false",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp.status_code == 409
+    err = resp.json()["error"]
+    assert err["code"] == "data_nonempty"
+    # 实例仍在
+    assert manager_env.registry.get_instance(iid) is not None
+    assert (data_dir / "keep.sqlite").is_file()
+
+
+def test_api_remove_purge_force_nonempty_data_succeeds(manager_env: EnvBundle) -> None:
+    """IMP-035：purge=true&force=true 可删除非空 data/，并回显参数。"""
+    ws = manager_env.workspace
+    iid = manager_env.instance_id
+    data_dir = ws.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "keep.sqlite").write_text("payload", encoding="utf-8")
+
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/remove?purge=true&force=true",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["instanceId"] == iid
+    assert body["action"] == "remove"
+    assert body["purge"] is True
+    assert body["force"] is True
+    assert manager_env.registry.get_instance(iid) is None
+    assert not ws.app_dir(iid).exists()
+
+
+def test_lwa_error_code_data_nonempty_is_409_not_generic_lifecycle() -> None:
+    """IMP-035：data_nonempty 映射 409；普通 LifecycleError 仍为 internal。"""
+    from local_webpage_access.errors import DataNonemptyError, LifecycleError
+    from local_webpage_access.manager_api import _ERROR_STATUS, _lwa_error_code
+
+    exc = DataNonemptyError("data nonempty", instance_id="demo")
+    assert _lwa_error_code(exc) == "data_nonempty"
+    assert _ERROR_STATUS["data_nonempty"] == 409
+    assert _lwa_error_code(LifecycleError("other lifecycle")) == "internal"
 
 
 def test_api_redundant_remove_batch(manager_env: EnvBundle) -> None:

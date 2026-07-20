@@ -159,11 +159,83 @@ def test_inspect_caddy_owner_fails_closed_when_process_user_unknown(
     gw.caddy_pid_path().write_text("987654\n", encoding="utf-8")
     monkeypatch.setattr(gw, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gw, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(gw, "_process_user_for_pid", lambda pid: None)
 
     owner = gw.inspect_caddy_owner()
     assert owner["process_user"] is None
     assert owner["owner"] == "unknown"
     assert owner["runtime"] == "owner_mismatch"
+
+
+def test_inspect_caddy_owner_uses_ps_fallback_when_no_proc(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-252：无 /proc 时通过 _process_user_for_pid（ps）识别所有者。"""
+    import getpass
+
+    gw = StaticGateway(workspace, Config(staticGateway="caddy"))
+    gw.caddy_pid_path().parent.mkdir(parents=True, exist_ok=True)
+    gw.caddy_pid_path().write_text("424242\n", encoding="utf-8")
+    monkeypatch.setattr(gw, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gw, "_pid_alive", lambda pid: True)
+    me = getpass.getuser()
+    monkeypatch.setattr(gw, "_process_user_for_pid", lambda pid: me)
+
+    owner = gw.inspect_caddy_owner()
+    assert owner["process_user"] == me
+    assert owner["owner"] == "lwa_service_user"
+    assert owner["runtime"] == "ready"
+
+
+def test_process_user_for_pid_ps_path(monkeypatch) -> None:
+    """BUG-252：非 Linux 路径走 ps -o user=。"""
+    calls: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stdout = "alice\n"
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        calls.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr("local_webpage_access.static_gateway.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run", fake_run
+    )
+    user = StaticGateway._process_user_for_pid(12345)
+    assert user == "alice"
+    assert calls and calls[0][:3] == ["ps", "-o", "user="]
+    assert "-p" in calls[0] and "12345" in calls[0]
+
+
+def test_process_user_for_pid_windows_uses_invoke_cim_method(monkeypatch) -> None:
+    """BUG-255：Windows 必须 Invoke-CimMethod -MethodName GetOwner，禁止 .GetOwner()。"""
+    calls: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stdout = "Alice\n"
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        calls.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr("local_webpage_access.static_gateway.sys.platform", "win32")
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.subprocess_hidden_kwargs",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.run", fake_run
+    )
+    user = StaticGateway._process_user_for_pid(4242)
+    assert user == "Alice"
+    assert calls, "应调用 powershell"
+    command = " ".join(calls[0])
+    assert "Invoke-CimMethod" in command
+    assert "GetOwner" in command
+    assert ".GetOwner()" not in command
 
 
 def test_detect_backend_caddy_config_uses_caddy_when_present(
@@ -351,8 +423,14 @@ class _FakeReloadResult:
 def test_reload_all_first_time_failure_deletes_broken_config(
     gateway: StaticGateway, monkeypatch
 ) -> None:
-    """BUG-007：首次 reload 失败且无旧配置时，坏的 Caddyfile 应被删除而非残留。"""
+    """BUG-007：首次 reload 失败且无旧配置时，坏的 Caddyfile 应被删除而非残留。
+
+    BUG-259：必须隔离宿主机 :2019，否则真实 Caddy 会在目标断言前触发所有权保护。
+    """
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "ensure_caddy_running", lambda: True)
+    monkeypatch.setattr(gateway, "verify_workspace_caddy_access", lambda: None)
     main = gateway.main_config_path()
     assert not main.exists()  # 首次：没有旧配置
 
@@ -368,8 +446,14 @@ def test_reload_all_first_time_failure_deletes_broken_config(
 def test_reload_all_existing_failure_restores_previous(
     gateway: StaticGateway, monkeypatch
 ) -> None:
-    """有旧配置时 reload 失败应恢复上一份内容（既有正确行为，回归保护）。"""
+    """有旧配置时 reload 失败应恢复上一份内容（既有正确行为，回归保护）。
+
+    BUG-259：隔离宿主机真实 Caddy admin，避免误入所有权保护分支。
+    """
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "ensure_caddy_running", lambda: True)
+    monkeypatch.setattr(gateway, "verify_workspace_caddy_access", lambda: None)
     main = gateway.main_config_path()
     main.parent.mkdir(parents=True, exist_ok=True)
     main.write_text("# previous good config\n", encoding="utf-8")
@@ -1063,8 +1147,14 @@ def test_reload_with_self_heal_gives_up_when_start_fails(
 def test_reload_all_invokes_ensure_caddy_running(
     gateway: StaticGateway, workspace: Workspace, monkeypatch
 ) -> None:
-    """IMP-010/0.3：reload_all 在 reload 前必须 ensure_caddy_running。"""
+    """IMP-010/0.3：reload_all 在 reload 前必须 ensure_caddy_running。
+
+    BUG-259：admin 离线路径才调用 ensure；需 mock _admin_alive=False，
+    避免宿主机真实 :2019 走入所有权保护。
+    """
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(gateway, "verify_workspace_caddy_access", lambda: None)
     called = {"ensure": False}
 
     def fake_ensure():

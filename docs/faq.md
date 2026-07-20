@@ -19,17 +19,17 @@ lwa setup --full --resume          # 重登后继续验收（exit 2 时）
 | default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 可询问是否跑内置脚本；`setup` 无需工作区 |
 | full | `lwa setup --full` / `lwa init --full` | 安装 Caddy/Docker/Compose，并验收 Full 能力闭环（见下）；**需已初始化工作区**；非 TTY 必须 `--yes` |
 
-`--default` 与 `--full` 互斥。内置脚本覆盖 macOS / Linux（含 WSL）；Windows 原生请按 `lwa setup` 打印的指引手动安装。详见 [运维手册 · 宿主机装配](operations-playbook.md#零宿主机装配imp-031032033)。
+`--default` 与 `--full` 互斥。内置脚本覆盖 macOS / Ubuntu LTS（22.04/24.04/26.04）/ Debian Stable（12/13）（含 WSL2）。**Windows 原生不受支持**——请在 WSL2 内安装运行。详见 [运维手册 · 宿主机装配](operations-playbook.md#零宿主机装配imp-031032033) 与 [已知限制](known-limitations.md)。
 
 遇到问题时，第一步永远是：
 
 ```bash
 lwa doctor          # 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存
 lwa doctor <id>     # 对单个实例做深度诊断（日志、状态、文件）
-lwa doctor --json   # 机器可读报告，便于脚本化
+lwa doctor --json   # 机器可读报告（含 platformSupport；未 init 亦可输出平台诊断）
 ```
 
-`doctor` 有 fail 时退出码为 1，可在脚本/CI 中用作门禁。
+`doctor` 有 fail 时退出码为 1，可在脚本/CI 中用作门禁。未初始化工作区时，人类可读模式仍需工作区；`--json` 会尽量输出 `platformSupport` 供平台排障。
 
 ### Full Profile（IMP-033）
 
@@ -77,7 +77,7 @@ Full 下系统 `caddy.service` / 外部占用 `:2019` 会 fail-closed；须由 L
 
 * 确认 `docker` 命令在 PATH 中：`docker version`。
 * Linux：确认 dockerd 已启动（`systemctl status docker`），当前用户在 `docker` 组。
-* macOS / Windows：确认 Docker Desktop 已启动。
+* macOS：确认 Docker Desktop 已启动；WSL2：确认 Desktop integration 或发行版内 Engine 仅保留一套。
 * 未安装时可用内置脚本：`lwa setup --script` 查看路径，或 `lwa setup --full --yes` / `lwa setup --install-docker`（macOS/Linux）。
 * 静态/前端实例不需要 Docker，可继续使用。
 
@@ -164,7 +164,7 @@ status: pending
   lwa remove --redundant --purge  # 连磁盘一起清
   ```
 
-  或在管理页勾选「仅冗余」后行内删除 /「批量删除冗余」。详见 [运维手册](operations-playbook.md)。
+  或在管理页勾选「仅冗余」后「批量删除冗余」。任意项目的行内「删除」走 IMP-035 双阶段确认（可仅移除或彻底删除）。详见 [管理页](manager-page.md) 与 [运维手册](operations-playbook.md)。
 
 ## 容器类问题
 
@@ -195,7 +195,7 @@ PortError: 端口池 [18000, 19999] 已耗尽
 
 * `lwa stats` 查看端口池占用。
 * 多数情况是僵尸进程持有端口（异常退出未释放）。Linux：`ss -tlnp | grep 180`；
-  Windows：`netstat -ano | findstr 180`，`taskkill /PID <pid> /F`。
+  （若在 Windows 宿主侧查端口）`netstat -ano | findstr 180`，`taskkill /PID <pid> /F`；正式运行请在 WSL2 内操作。
 * 必要时扩大 `portPool` 范围（修改 `local-web.yml` 后重启管理页/daemon）。
 
 ## 管理页类问题
@@ -232,10 +232,16 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 
 ## 数据与清理
 
-### `lwa remove` 后磁盘文件还在
+### `lwa remove` / 管理页删除后磁盘文件还在
 
-`remove` 默认只删 registry 索引，保留 `apps/<id>/` 全部文件（含 `data/`），
-便于误删恢复。彻底删除用 `--purge`；`data/` 非空时需额外 `--force` 确认。
+**仅移除**（CLI 默认；管理页选「仅移除」/`purge=false`）只删 registry 索引并停服，**保留** `apps/<id>/` 全部文件（含 `data/`），便于误删恢复或重新导入。
+
+**彻底删除**（CLI `--purge`；管理页选「彻底删除」/`purge=true`）会再删掉 `apps/<id>/`。若 `data/` 非空：
+
+* CLI 需额外 `--force`；
+* 管理页首次会收到 HTTP 409 / `data_nonempty`，须在对话框中再次勾选「强制删除非空 data/」后才会带 `force=true`（不会自动重试）。
+
+两种路径都要二次确认项目 ID；取消任一步不会发请求。批量「删除冗余」仍只针对冗余实例，与单项目删除入口独立。
 
 ### 如何备份
 

@@ -31,7 +31,7 @@ def test_resolve_version_uses_metadata_when_git_missing(
 def test_resolve_version_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(version_info, "_version_from_git", lambda root: None)
     monkeypatch.setattr(version_info, "_version_from_metadata", lambda: None)
-    assert version_info.resolve_version() == "0.6.3"
+    assert version_info.resolve_version() == "0.6.4"
 
 
 def test_display_version_prefix(monkeypatch: pytest.MonkeyPatch) -> None:

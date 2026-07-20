@@ -803,7 +803,9 @@ def test_read_pid_cmdline_windows_powershell(monkeypatch) -> None:
     assert "http.server" in cmdline
     assert captured["cmd"][0] == "powershell"
     # BUG-250：Windows 必须传 CREATE_NO_WINDOW，避免无控制台父进程弹黑窗
-    assert captured["kwargs"].get("creationflags") == subprocess.CREATE_NO_WINDOW
+    assert captured["kwargs"].get("creationflags") == getattr(
+        subprocess, "CREATE_NO_WINDOW", 0x08000000
+    )
     # 身份校验在 Windows 上现可命中（不再恒 False）
     assert daemon_mod.pid_cmdline_contains(1234, "http.server", "C:\\apps\\x\\public")
 

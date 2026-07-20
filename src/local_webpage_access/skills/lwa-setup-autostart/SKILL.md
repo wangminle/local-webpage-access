@@ -37,8 +37,7 @@
 
 ## 禁止事项
 
-- **不代替用户改 Windows 任务计划程序 / 注册表**，除非用户明确要求并提供管理员语境；
-  WSL 的 Windows 唤醒只给脚本/清单让用户自行注册。
+- **不支持 Windows 原生自启**；WSL 的 Windows 侧唤醒脚本只给清单让用户自行注册登录任务。
 - **不宣称 macOS 无人值守高可用**（LaunchAgent 是登录触发）。
 - **不建议同时启用发行版 `caddy.service`**（与 LWA gateway 争用 `:2019`）。
 - **不**为绕过 Python ≥3.13 门槛而改用系统旧 Python；指导用 3.13 venv 后 `repair`。
@@ -66,8 +65,8 @@
 | --- | --- | --- |
 | macOS | `lwa autostart install --with-caddy` | LaunchAgent，登录触发；KeepAlive 崩溃即拉起 |
 | Linux | `lwa autostart install` + `enable-linger` | systemd **user** 单元；docker 组靠登录会话（非 SupplementaryGroups）；Python 须 3.13 venv |
-| WSL | 同 Linux + Windows 唤醒任务 | 需 `/etc/wsl.conf` `[boot] systemd=true` |
-| Windows 原生 | 任务计划程序（手动） | 见 [开机自启文档](../../../../docs/autostart.md) |
+| WSL | 同 Linux + Windows 唤醒任务 | 需 `/etc/wsl.conf` `[boot] systemd=true`；包 ≥2.1.5；工作区勿放 `/mnt/<drive>`（Full/autostart fail-closed） |
+| Windows 原生 | **不支持** | 仅作 WSL2 宿主；见 [开机自启文档](../../../../docs/autostart.md) |
 
 > Full Profile 进阶：若改用 **system** unit 并以 `User=` + `SupplementaryGroups=docker` 启动，可减少「重登才继承 docker 组」问题；当前 `lwa autostart` 默认仍生成 user unit。
 

@@ -36,9 +36,9 @@ python -m local_webpage_access.<daemon|manager_service|gateway_service> --worksp
 | 平台 | 后端 | 级别 | 说明 |
 | --- | --- | --- | --- |
 | macOS | launchd LaunchAgent | 用户登录触发 | `RunAtLoad` + `KeepAlive`（前台进程）；非无人值守系统服务 |
-| Linux（Ubuntu 24.04+） | systemd user unit | 用户服务 | `Type=simple` + `Restart=on-failure`；建议 `enable-linger` 登出保活 |
-| WSL 2.7+ | systemd user unit | 用户服务 | 同 Linux；发行版不随 Windows 开机自启，需 Windows 登录任务唤醒 |
-| Windows（原生） | 任务计划程序 | 登录触发 | 见文末手动配置（本期不自动生成任务） |
+| Linux（Ubuntu 22.04/24.04/26.04 LTS · Debian 12/13） | systemd user unit | 用户服务 | `Type=simple` + `Restart=on-failure`；建议 `enable-linger` 登出保活 |
+| WSL 2.1.5+ | systemd user unit | 用户服务 | 同 Linux；发行版不随 Windows 开机自启，需 Windows 登录任务唤醒 |
+| Windows 原生 | — | **不支持** | 仅作 WSL2 宿主；勿在原生进程安装或配置任务计划跑 lwa |
 
 ## macOS（launchd）
 
@@ -156,19 +156,10 @@ LWA 的 manager / daemon 继承**启动时**的用户组。刚执行 `usermod -a
 会识别为旧 detached 启动器并报 fail；`lwa autostart repair` 把它改写为前台监管单元并
 重新启用。
 
-## Windows（原生，手动配置）
+## Windows 宿主（仅 WSL2）
 
-`lwa autostart` 暂不自动生成 Windows 任务（本期非目标）。用任务计划程序创建任务，
-触发器"登录时"，操作"启动程序"，**起始于设工作区根**：
+**不支持**在 Windows 原生进程中安装或自启 lwa。请在 WSL2 发行版内执行 `lwa autostart install`；Windows 侧只需注册「登录时唤醒 WSL」任务（见上文「WSL 的 Windows 侧」）。
 
-| 任务 | 程序 | 参数 |
-| --- | --- | --- |
-| lwa-daemon | `python.exe` | `-m local_webpage_access.daemon --workspace <工作区根>` |
-| lwa-manager | `python.exe` | `-m local_webpage_access.manager_service --workspace <工作区根>` |
-| lwa-gateway（可选） | `python.exe` | `-m local_webpage_access.gateway_service --workspace <工作区根>` |
-
-> Windows 下 daemon 的 `O_EXCL` 单实例锁同样生效，重复触发安全。任务计划程序需在
-> "操作"里设"起始于(WorkingDirectory)"为工作区根。
 
 ## 手工验收清单（不进 CI）
 

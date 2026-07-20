@@ -101,8 +101,8 @@ runtime/                      ← 工作区根（Runtime 根目录）
   （`permission_denied` / timeout / unknown）或 Full Profile `overall≠ready` 时**跳过容器自动纠正**。
   Caddy 后端且网关被显式关闭（`lwa gateway off`）时跳过 caddy 静态实例，避免与手动停止冲突。
 - **开机自启（IMP-030）**：优先 `lwa autostart install [--with-caddy]`（见 [autostart.md](autostart.md)）；
-  `lwa setup --autostart` 为兼容旧入口。macOS launchd / Linux·WSL systemd user unit；
-  Windows 见任务计划程序说明。
+  `lwa setup --autostart` 为兼容旧入口。macOS launchd / Linux·WSL systemd user unit。
+  **Windows 原生不受支持**；仅可在 WSL2 内安装自启，Windows 宿主侧只需注册「登录时唤醒 WSL」任务（见 autostart.md）。
 
 ### `templates/`、`skills/`
 

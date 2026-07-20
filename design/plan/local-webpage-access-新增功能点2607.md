@@ -1,7 +1,7 @@
-# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～034（202607）
+# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～040（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
-> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强（CLI/daemon 落盘、生命周期阶段事件、能力探测结构化日志）。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机可后续补）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 实机清单与 036.09 Windows 分支清理可后续补）**；**IMP-037～039 为 achievement 反查待开发项（038/039=P0，037=P1）；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除；新增 IMP-040 管理页 LAN 地址新鲜度（见 §21）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈。
 
 ---
 
@@ -289,7 +289,7 @@ demo-static 这类 `shared-static` 实例由 Caddy 独立站点块（`:{host_por
 - 不把自启动做成管理页 UI（CLI + Skill 优先）。
 - 不保证 NAT 模式下 WSL IP 永久不变；只检查并提示 `access refresh`。
 - 不降低 Docker ≥29 / Python ≥3.13 门槛；Ubuntu 24.04 官方 python3.12 / 旧 docker.io 在检查项中明确提示改用官方源或固定 venv。
-- 不在本期实现完整 Windows 原生（非 WSL）任务计划一键安装（文档模板可保留；WSL 的 `.ps1`/`.bat` 生成优先）。
+- **Windows 原生明确不支持**（由 IMP-036 §16 取代早期“本期不做”的临时口径）；仅允许为 WSL2 Linux 生成宿主侧唤醒发行版所需的 `.ps1`/`.bat` 指引，LWA 本体仍运行在 WSL2 内。
 
 ### 10.3 关键决策
 
@@ -455,7 +455,7 @@ Skill 输出必须包含：**产品口径一句**（登录触发 vs 系统服务
 | 配置阿里云国内源 | 是 | 包仓库源 + daemon `registry-mirrors`（见 §11.2） |
 | setup / init 检测 Engine | 是 | 无 Engine（或 `docker` 不可用）时进入询问分支 |
 | 交互询问是否执行脚本 | 是 | 默认否（保守）；用户确认后才执行；非 TTY / `--yes`/`--no` 有明确行为 |
-| Windows 原生一键安装脚本 | 否（本期） | 仍指向 Docker Desktop 文档；WSL 走 Linux 脚本 |
+| Windows 原生一键安装脚本 | 否（不支持） | 不再提供原生 Windows / Docker Desktop 安装指引；WSL2 内按 Linux 路径处理，见 IMP-036 §16 |
 | 静默改 Docker Desktop「登录时启动」 | 否 | 与 IMP-030 一致，仅提示 |
 
 #### 11.1.3 非目标
@@ -569,7 +569,7 @@ Skill 输出必须包含：**产品口径一句**（登录触发 vs 系统服务
 | Compose 低于门槛 → 自动安装 | 否（可询问） | **是** | 通常随 Engine/Desktop；Linux 显式装 plugin |
 | 阿里云等国内源 | 询问安装时用 | 安装脚本默认用 | 与 IMP-031 一致 |
 | 自动装 Python / Node | 否 | 否（本期） | 仍只给 hint |
-| Windows 原生 full 一键装 | 否 | 否（本期） | WSL 走 Linux 脚本；Win 原生给 Desktop 指引 |
+| Windows 原生 full 一键装 | 否 | 否（不支持） | 原生 Windows fail-fast；WSL2 内走 Linux 脚本与支持矩阵，见 IMP-036 §16 |
 
 #### 12.1.4 非目标
 
@@ -1006,7 +1006,7 @@ Overall                   READY
 | **A：停止错误扩散** | 033.02～04、033.12 对应用例 | 先修“权限失败→stopped”；管理页不再污染状态 |
 | **B：权限与安装闭环** | 033.01、033.05～06 | Full 可持久识别 serviceUser，安装可 resume，后台真实具备 Docker 权限 |
 | **C：Caddy 与自启动闭环** | 033.07～08、033.11 | Caddy 严格托管，重启后 Docker/Caddy/LWA 全链路恢复 |
-| **D：产品化与验收** | 033.09～10、033.13～14 | doctor/API/UI/文档一致，三平台验收完成 |
+| **D：产品化与验收** | 033.09～10、033.13～14 | doctor/API/UI/文档一致，Ubuntu/Debian/WSL2/macOS 支持矩阵验收完成；不含 Windows 原生 |
 
 推荐执行顺序：**A（P0 止血）→ B（权限根治）→ C（完整协作）→ D（产品化）**。A 完成前不得继续把权限失败按 stopped 处理；B/C 完成前 `setup --full` 应明确标记 legacy/incomplete，不得使用新的 `ready` 口径。
 
@@ -1054,7 +1054,7 @@ Overall                   READY
 >
 > **与既有项关系**：BUG-229（build 流式落盘）为实例构建日志基线；IMP-033 `CapabilityReport` / `observationError` 为本项结构化能力日志的数据源；本项**不替代** IMP-033，只保证「人能读、机器能对账」。
 >
-> **状态**：待开发。
+> **状态（2026-07-19）**：**已落地**。CLI/daemon/manager/gateway 分文件落盘、生命周期阶段事件、能力探测结构化日志与 FAQ 排障地图已完成，见 `DEV-077` / `DEV-079`；后续增强随对应能力项继续维护，不再把本节标记为待开发。
 
 ### 14.1 问题分析
 
@@ -1153,3 +1153,520 @@ Overall                   READY
 | `DEV-077` | IMP-034 主开发项（WBS-034.01～07） |
 | `BUG-229` | 构建流式日志基线（已完成，本项不重复实现） |
 | `BUG-230` / `DEV-076` | 权限观测与 CapabilityReport；034.05 对齐其字段 |
+
+
+## 15. IMP-035 — 管理页任意项目安全删除（二次确认）
+
+> **提出背景（2026-07-20）**：管理页后端已有 `POST /api/instances/{id}/remove`，CLI 也已有 `lwa remove`，但 `17800` 管理页只对 `redundant=true` 的实例显示“删除”按钮。普通已导入项目无法从页面移除；现有网页删除还固定使用默认参数，只会停服并清 registry，不能选择是否删除 `apps/<id>/`。
+>
+> **已确认方案**：采用“C 方案”——第一步选择“仅移除”或“彻底删除”，第二步输入完整项目 ID 完成高风险确认。两种路径都必须经过二次确认；彻底删除对非空 `data/` 再明确提示不可恢复后才允许 `force=true`。
+>
+> **状态**：主路径已落地（2026-07-20，DEV-080 / DOC-052）；035.06 浏览器实机验收可后续补强。
+
+### 15.1 目标与非目标
+
+**目标**：
+
+1. 所有已导入项目均显示删除入口，不再把“是否冗余”作为显示条件。
+2. 用户可明确选择：
+   - **仅移除**：停止服务、删除 registry 及关联记录，保留 `apps/<id>/`，对应 `purge=false`；
+   - **彻底删除**：停止服务、删除 registry，并删除 `apps/<id>/`，对应 `purge=true`。
+3. 两种路径均执行二次确认；第二次确认必须输入完整项目 ID，不能只依赖浏览器原生 `confirm()`。
+4. 彻底删除必须把 `data/` 非空、删除不可恢复、容器/静态服务将停止等影响写清楚；用户显式勾选“理解数据不可恢复”后才允许发送 `force=true`。
+5. 删除期间禁用重复操作；成功后关闭相关详情/日志弹层并刷新列表；失败时保留当前页面状态并显示后端原始错误。
+
+**非目标**：
+
+- 不新增“回收站”或服务端软删除机制；“仅移除 + 保留 apps 目录”承担可恢复路径。
+- 不改变 `lwa remove` 的既有默认语义。
+- 不改变“批量删除冗余”的目标选择规则；批量入口仍只处理冗余实例，单项目删除入口则对全部实例开放。
+- 不允许前端自行拼接或删除文件；所有破坏性动作仍必须经过后端 `remove_instance()` 的路径边界、实例锁、停服和 `data/` 保护。
+
+### 15.2 交互与数据流
+
+1. 用户点击项目行“删除”。按钮对所有实例可见；实例正在 `building/starting/stopping/removing` 时禁用。
+2. **第一次确认（选择范围）**：弹出受控模态框，展示项目名称、项目 ID、当前状态，并提供：
+   - “仅移除（保留项目文件）”；
+   - “彻底删除（删除项目文件与数据）”。
+   默认选中“仅移除”，避免把危险选项作为默认值。
+3. 用户继续后进入**第二次确认（身份复核）**：再次展示最终动作摘要，要求输入完整项目 ID；输入不一致时最终按钮保持禁用。
+4. 若选择“彻底删除”，第二步同时显示不可恢复警告与独立复选框；勾选后调用：
+   - 普通目录：`POST /api/instances/{id}/remove?purge=true`；
+   - 后端返回 HTTP `409` 且稳定错误码为 `data_nonempty` 时，不自动重试。页面转为显式的“包含非空 data/”警告；用户再次确认不可恢复后才调用 `purge=true&force=true`。其他错误不得进入 force 分支。
+5. 若选择“仅移除”，调用 `POST /api/instances/{id}/remove?purge=false`。
+6. 前端为目标 ID 设置 `removing` 本地操作态，阻止重复提交；请求结束后清理该状态。
+
+> 二次确认是两阶段业务状态，不使用两个连续、内容相似的原生 `confirm()` 糊弄验收。第一阶段回答“删到什么程度”，第二阶段回答“确认目标和后果”；彻底删除非空 `data/` 时的 force 提升必须由新的明确用户动作触发，不能捕获错误后自动追加 `force=true`。
+
+### 15.3 安全与错误边界
+
+| 场景 | 要求 |
+| --- | --- |
+| 项目不存在或已被并发删除 | 后端返回稳定错误；前端提示并刷新列表，不继续调用 force |
+| 停服失败 | 沿用 `remove_instance()` 既有“记录告警后清 registry”的语义；响应/事件需能说明是否可能残留容器或进程 |
+| `data/` 非空 | 后端返回 HTTP `409` + `data_nonempty`；首次 purge 不带 force，只有用户在明确看到该风险后再次确认才允许 force |
+| ID 含特殊字符 | URL 使用 `encodeURIComponent`；确认输入按原始完整 ID 严格相等比较 |
+| 重复点击/慢请求 | 前端操作态去重；后端继续依赖实例锁保证串行 |
+| 目录越界或符号链接 | 继续由后端 `remove_instance()` 校验解析路径位于 `apps/` 内；前端不得绕过 |
+| 批量冗余删除 | 保持独立入口和既有规则，不复用单项目二次确认状态导致目标漂移 |
+
+**删除 API 契约补齐**：当前通用 `LifecycleError` 会被管理 API 映射为 `internal` / HTTP 500，前端无法稳定区分“非空 data 需要进一步确认”和真正的内部故障。实现时必须先为该业务分支建立专用、可测试的错误契约（专用异常或等价的结构化错误），仅将非空 `data/` 映射为 HTTP `409`、错误码 `data_nonempty`；其余 `LifecycleError` 保持原有故障语义，不得通过解析中文 message 驱动状态机。删除成功响应由 `{instanceId, action}` 补齐为至少 `{instanceId, action, purge, force}`，便于验收和排障回显。
+
+### 15.4 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **035.01** | P0 | 前置补齐删除 API 稳定错误与成功响应契约 | `manager_api.py`、`lifecycle.py` | 非空 `data/` 唯一映射为 HTTP 409 + `data_nonempty`；其他 `LifecycleError` 不误映射；成功响应回显 `instanceId/action/purge/force` |
+| **035.02** | P0 | 先写后端删除契约失败测试 | `tests/test_manager_api.py`、lifecycle tests | 覆盖 purge false/true、非空 data、force、成功参数回显、目录越界、并发/不存在实例 |
+| **035.03** | P0 | 先写前端显示条件与双阶段状态机失败测试 | `tests/test_manager_static_app.py` | 普通实例有删除入口；未输入 ID、未完成风险确认时不能提交；仅 `data_nonempty` 可进入 force 确认；进行中状态禁用 |
+| **035.04** | P0 | 实现所有实例删除模态框与请求映射 | `manager_static/helpers.js`、`manager_static/app.js`、`manager_static/style.css` | 不再以 `redundant` 控制入口；`purge/force` 与状态机严格对应；`building/starting/stopping/removing` 及请求中禁用；键盘焦点、Esc、窄屏可用 |
+| **035.05** | P1 | 更新管理页和 FAQ 文档 | `docs/manager-page.md`、`docs/faq.md` | 清楚区分“仅移除”和“彻底删除”，写明不可恢复边界 |
+| **035.06** | P0 | 浏览器验收 | Playwright / 手工验收清单 | 普通、冗余、静态、容器实例各走一次取消/仅移除/彻底删除路径 |
+
+### 15.5 验收标准
+
+1. 普通实例和冗余实例均显示单项目“删除”按钮。
+2. 第一步未选择删除范围不能继续；第二步未输入完整项目 ID 不能提交。
+3. “仅移除”后 registry 不再显示实例，但原 `apps/<id>/` 完整保留。
+4. “彻底删除”后 registry 与 `apps/<id>/` 均不存在；非空 `data/` 未经过 force 风险确认时必须被后端阻断。
+5. 取消任意一步不产生 API 请求、不改变实例状态。
+6. 首次遇到非空 `data/` 时响应为 HTTP `409`、错误码 `data_nonempty`；只有该错误码可进入 force 再确认，网络失败、其他后端失败或并发删除均不会自动升级为 force。
+7. 成功响应准确回显实际 `purge/force`；管理页在 `building/starting/stopping/removing` 和删除请求期间禁止重复提交。
+8. 批量冗余删除行为不变；现有 CLI 删除行为不变。
+
+### 15.6 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-016` | IMP-035 交互、安全边界与 WBS 规划 |
+| `DOC-050` / `DOC-051` | 本文 §15/§16 初始写入及 CHK-090 契约、WBS、口径复审修订 |
+| `DEV-080` | IMP-035 主开发项（WBS-035.01～05 已完成；035.06 浏览器实机可后续补） |
+
+
+## 16. IMP-036 — 正式支持平台收敛、最低版本与 Windows 原生阻断
+
+> **产品决策（2026-07-20）**：LWA 只正式支持 **Linux 裸机、WSL2 中运行的 Linux、macOS**。**Windows 原生进程明确不支持**；Windows 只可以作为 WSL2 的宿主系统，LWA 必须安装和运行在 WSL2 Linux 发行版内部。WSL1、未知操作系统和未纳入支持矩阵的发行版/架构均不承诺可用。
+>
+> **现状缺口（落地前）**：`platform_detect.py` 能识别 Windows，但 CLI 无统一门禁；文档/setup 曾暗示 Windows 原生；Linux 安装脚本仅接受 Ubuntu。
+>
+> **状态**：主路径已落地（2026-07-20，DEV-081）。PlatformSupportReport + CLI/服务门禁、Debian apt、WSL2/systemd/`/mnt` fail-closed、文档去 Windows 原生推销已完成。**可后续补强**：036.08 实机验收清单、036.09 无效 Windows 运行分支清理。
+
+### 16.1 依赖分析与最低版本结论
+
+LWA 自身是 Python 应用，但平台下限应由完整功能链中最严格的依赖决定：
+
+| 依赖/能力 | 当前项目门槛 | 上游约束与结论 |
+| --- | --- | --- |
+| Python | `>=3.13` | Python 3.13 的 macOS 官方安装器最低仅需 10.13，但这不是完整产品下限；Docker Desktop / Node 24 更严格。[Python 3.13 发布页](https://www.python.org/downloads/release/python-3130/) |
+| Node.js | `>=24.0.0`（仅前端 SPA 构建） | Node 24 官方 GNU/Linux x64/arm64 Tier 1 要求 kernel ≥4.18、glibc ≥2.28；macOS x64/arm64 要求 ≥13.5。它决定不支持 32 位 Linux 正式路径。[Node 24 BUILDING](https://github.com/nodejs/node/blob/v24.x/BUILDING.md) |
+| Docker Engine / Compose | `>=29.0.0` / `>=2.40.2` | Docker 官方当前支持 Ubuntu 22.04/24.04/26.04 LTS 等和 Debian 11/12/13；LWA 取更窄、可维护的 LTS/Stable 子集。[Ubuntu](https://docs.docker.com/engine/install/ubuntu/) / [Debian](https://docs.docker.com/engine/install/debian/) |
+| Caddy | `>=2.10.0` | 官方提供 Debian/Ubuntu/Raspbian apt 路径及多架构二进制；不单独抬高下述发行版基线。[Caddy 安装文档](https://caddyserver.com/docs/install) |
+| 自启动 | launchd / systemd user | Linux/WSL 必须有可用 systemd user manager；WSL 必须让 systemd 成为 PID 1。微软给出的 systemd 最低 WSL 为 0.67.6，但 Docker Desktop WSL 后端要求 ≥2.1.5，故产品统一采用更高门槛 2.1.5。[微软 systemd](https://learn.microsoft.com/windows/wsl/systemd) / [Docker WSL](https://docs.docker.com/desktop/features/wsl/) |
+| macOS Docker | Docker Desktop | Docker Desktop 支持当前及前两个 macOS 大版本，并同时提供 Apple silicon 与 Intel 安装包；最低 4GB RAM。[Docker Desktop Mac](https://docs.docker.com/desktop/setup/install/mac-install/) |
+| macOS 安装器 | Homebrew | 当前 Tier 1 同时覆盖 Apple Silicon 与 Intel x86_64，但 Homebrew 已说明 Intel 支持窗口将在后续 macOS 周期结束，不能永久承诺 Intel。[Homebrew Support Tiers](https://docs.brew.sh/Support-Tiers) |
+
+**结论**：需要最低版本要求，并采用“固定能力下限 + 滚动上游支持窗口”组合。Linux kernel 只写 Node 的绝对下限 4.18 不够稳健；LWA 的 Docker 29、systemd、自启动和长期维护统一采用 **kernel ≥5.15** 的产品基线。
+
+### 16.2 正式支持矩阵
+
+| 运行环境 | 最低要求 | 正式架构 | 说明 |
+| --- | --- | --- | --- |
+| **Ubuntu 裸机** | Ubuntu **22.04 LTS+**；Linux kernel **5.15+**；glibc **2.35+**；systemd 可用 | `x86_64/amd64`、`arm64/aarch64` | 只承诺官方 Ubuntu LTS，不承诺 Mint 等衍生版；当前与未来 LTS 须仍在厂商标准支持期 |
+| **Debian 裸机** | Debian **12 (Bookworm)+**；Linux kernel **5.15+**；glibc **2.35+**；systemd 可用 | `x86_64/amd64`、`arm64/aarch64` | 当前安装脚本尚拒绝 Debian；WBS-036.05 完成且 WBS-036.08 Debian 实机闭环通过前，不得对外宣称 Debian 已落地支持 |
+| **WSL2 Linux** | WSL **2**；WSL 包版本 **2.1.5+**；默认 Microsoft WSL kernel **5.15+**；发行版为 Ubuntu 22.04 LTS+ 或 Debian 12+；systemd 为 PID 1 | 与发行版一致的 x86_64/arm64 | WSL1 不支持；工作区应放 Linux 文件系统（如 `~/lwa`），不放 `/mnt/c`；若用 Docker Desktop WSL integration，不得再在发行版内并装第二套 Engine |
+| **macOS** | Docker Desktop 所支持的“当前及前两个 macOS 大版本”；**截至 2026-07 为 macOS 14 Sonoma+**；4GB RAM 最低、8GB+ 推荐 | Apple silicon `arm64`、Intel `x86_64` | **不强制 M 系列芯片**。Apple silicon 为推荐和主要验收架构；Intel 仅在 Python/Node/Docker/Homebrew 仍提供官方支持的窗口内承诺，随上游退役同步收缩 |
+
+统一要求：Python 3.13+；FastAPI 0.138.0+；Uvicorn 0.45.0+。容器能力还要求 Docker 29.0.0+、Compose 2.40.2+；Caddy 模式要求 Caddy 2.10.0+；前端 SPA 本机构建要求 Node 24+。缺少可选能力时可进入明确 degraded/pending，但操作系统、架构和 Python 基线不满足时必须 fail-fast。
+
+**不支持清单**：
+
+- Windows 10/11/Server 原生 Python 进程（包括 PowerShell、CMD、Windows Terminal 中直接运行 `lwa`）；
+- WSL1；
+- 32 位 Linux、ARMv7/ARMv6，以及未列入的 ppc64le/s390x/riscv64 等架构；
+- Alpine/musl、CentOS/RHEL/Fedora、Arch、openSUSE、Linux Mint/Kali 等未纳入实机矩阵的发行版；
+- Hackintosh、OpenCore Legacy Patcher、macOS 虚拟机作为正式验收环境；
+- 低于上述版本、厂商已 EOL 或上游依赖已经停止支持的系统。
+
+### 16.3 运行时门禁设计
+
+新增统一的 `PlatformSupportReport`（建议放 `platform_detect.py` 或独立 `platform_support.py`），至少包含：
+
+```text
+platform, distroId, distroVersion, kernelVersion, libcVersion,
+architecture, wslVersion, systemdAvailable, supported, reasons, action
+```
+
+门禁分层：
+
+1. **允许导入**：任何平台都可以 import 包，便于构建文档、读取版本和运行模拟测试；禁止在模块 import 时 `sys.exit()`。
+2. **CLI 统一门禁**：除 `--help` / `version` 外，所有实际命令在读取/创建工作区、写 registry、启动子进程之前调用 `require_supported_platform()`。
+3. **服务直入口门禁**：`manager_service`、`daemon`、`gateway_service` 的 `run_service_main()` 同样调用门禁，防止 `python -m ...` 绕过 CLI。
+4. **Windows 原生 hard fail**：返回非零退出码，中文提示“Windows 原生不受支持；请在 WSL2 的 Ubuntu/Debian 中安装运行”，不得继续创建目录、写配置、探测 Windows Docker named pipe 或生成任务计划。
+5. **WSL2 单独识别**：`detect_platform()==wsl` 视为支持候选，不因宿主为 Windows 而阻断；继续检查 WSL2、发行版、kernel、systemd 和工作区路径。
+6. **未知/过低版本 fail-closed**：无法证明满足硬基线时不执行写操作，输出检测字段和修复建议；`doctor --json` 可只读输出完整报告供排障。
+7. **滚动 macOS 下限**：代码不永久硬编码“14”；运行时常量的权威更新来源是 release checklist，每次发布根据 Docker Desktop 当前+前两版策略刷新常量与测试夹具，并记录当次下限。文档保留“截至日期”的快照。
+
+### 16.4 Linux / WSL 安装器一致性
+
+1. 将当前 `detect_ubuntu()` 抽象为 Debian-family 发行版检测，严格识别 `ID=ubuntu|debian` 和版本下限。
+2. Docker apt 源按发行版选择 `/linux/ubuntu` 或 `/linux/debian`，不能把 Debian 伪装成 Ubuntu codename。
+3. Caddy Cloudsmith 源可复用 Debian/Ubuntu 官方路径，但仍需验证 systemd、架构、Caddy owner 与工作区权限。
+4. WSL 中先识别 Docker 后端：
+   - Docker Desktop WSL integration 已可用：复用它，不安装发行版内 Engine；
+   - 无 Desktop integration 且用户确认：才在发行版内安装 Docker Engine；
+   - 两套同时存在视为冲突，Full Profile 不得假绿。
+5. 检测 `/mnt/<drive>` 工作区并给出明确风险；本期可允许只读诊断，但 Full/autostart 正式路径要求工作区位于 Linux 文件系统。
+
+### 16.5 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **036.01** | P0 | 先写平台矩阵与 fail-fast 失败测试 | `tests/test_platform_detect.py`（新建）、CLI/service tests | Windows 原生、WSL1、旧 kernel/发行版/架构先红；支持矩阵样例通过 |
+| **036.02a** | P0 | 实现 `PlatformSupportReport` 与版本比较 | `platform_detect.py` 或新 `platform_support.py` | Ubuntu/Debian/WSL/macOS/Windows/unknown 输出稳定结构与中文 action；macOS 滚动下限由 release checklist 刷新常量和测试夹具 |
+| **036.02b** | P0 | 将完整平台报告接入只读 doctor JSON | `doctor.py`、CLI、API/serialization tests | `doctor --json` 稳定输出全部检测事实、reasons、action 与 supported，不因 unsupported 先退出或缺字段 |
+| **036.03** | P0 | CLI 统一门禁 | `cli/__init__.py`、`cli/_common.py` | 除 help/version/只读 platform doctor 外，unsupported 在任何工作区写入前退出非零 |
+| **036.04** | P0 | 服务直接入口门禁 | `manager_service.py`、`daemon.py`、`gateway_service.py` | Windows 原生或 unsupported 无法绕过 CLI 启动后台服务 |
+| **036.07** | P0 | 与门禁同迭代清理 Windows 对外承诺和安装提示 | README、`docs/faq.md`、`docs/autostart.md`、`docs/known-limitations.md`、`setup.py`、Skills | 036.03/04 合入时同步删除原生 Windows 安装、任务计划、自启、快捷键和“部分支持”表述；保留且明确 WSL2 宿主说明，不允许出现“代码已拒绝、文档仍推销”的中间发布 |
+| **036.05** | P0 | Linux 安装脚本支持 Ubuntu 22.04+ / Debian 12+ | `install-docker-linux.sh`、`install-caddy-linux.sh`、`host_bootstrap.py` | apt 源按发行版正确选择；不支持发行版明确拒绝；shell 回归覆盖两个家族 |
+| **036.06a** | P0 | WSL 识别、包版本与 systemd 门禁 | `platform_detect.py`、`autostart.py` | WSL1、WSL 包过旧/unknown、kernel 过低、systemd 关闭均给出确定状态与修复建议；WSL2 不被 Windows 门禁误杀 |
+| **036.06b** | P0 | WSL Docker 后端识别与双 Engine 冲突检查 | `platform_detect.py`、`host_bootstrap.py` | 区分 Desktop integration 与发行版内 Engine；已有 Desktop 时不重复安装，两套并存时 Full 不得假绿 |
+| **036.06c** | P0 | WSL 工作区路径与 autostart 策略 | paths/workspace、`autostart.py`、`host_bootstrap.py` | `/mnt/<drive>` 可只读诊断，但 Full/autostart 写路径 fail-closed 并提示迁移到 Linux 文件系统 |
+| **036.08** | P0 | 平台实机验收矩阵 | release/acceptance checklist | Ubuntu 22.04/24.04、Debian 12、WSL2 Ubuntu、macOS arm64 全闭环；macOS Intel 在仍承诺时至少 smoke |
+| **036.09** | P1 | 删除或隔离无效 Windows 运行分支 | `daemon.py`、`manager_service.py`、`static_gateway.py`、tests | 先门禁后清理；测试通过 monkeypatch 注入平台事实，不依赖真实宿主；只保留通用 subprocess 工具真正需要的分支，不再形成支持暗示 |
+
+推荐执行顺序：**036.01 → 036.02a/02b → 036.03/04**，并将 **036.07 与 036.03/04 放在同一迭代、同一发布门槛**；随后执行 **036.05（Debian 宣称阻断）→ 036.06a/06b/06c → 036.08 → 036.09**。IMP-035 与 IMP-036 无硬依赖，可并行推进。
+
+### 16.6 验收标准
+
+1. 原生 Windows 执行任意实际 `lwa` 命令，在创建工作区、registry、日志或子进程前退出非零，并提示改用 WSL2 Ubuntu/Debian。
+2. WSL2 不被误判为 Windows；满足 WSL 2.1.5+、发行版、kernel、systemd 和工作区要求时正常运行。
+3. Ubuntu 22.04/24.04 与 Debian 12 的 setup、init、manager、daemon、gateway、Docker/Caddy Full 闭环通过；Debian apt 源不引用 Ubuntu。
+4. kernel <5.15、glibc <2.35、不支持架构、WSL1、macOS 低于滚动下限均在写操作前 fail-fast。
+5. macOS Apple silicon 完成主验收；Intel x86_64 在当前上游仍支持时可安装 Python 3.13、Node 24、Docker Desktop 并通过 smoke，不要求 M 系列芯片。
+6. `doctor --json` 能输出完整平台检测事实和建议动作；错误信息不只给“unsupported”单词。
+7. 全仓用户文档不再宣称或暗示 Windows 原生可用；所有 Windows 宿主说明都明确指向 WSL2 Linux 内运行。
+8. 发布清单每次复核并刷新 Docker Desktop 当前+前两版 macOS 下限常量与测试夹具、Docker Ubuntu/Debian 支持列表和 Intel 上游状态；Intel 仍对外承诺时必须保留 smoke 项，避免静态最低版本随时间失真。
+
+### 16.7 风险与边界
+
+| 风险 | 处理 |
+| --- | --- |
+| “Linux”范围过宽导致无法验收 | 正式范围只含 Ubuntu LTS 与 Debian Stable 指定下限；其他发行版明确不支持 |
+| WSL 是 Windows 宿主，被 Windows 门禁误杀 | 先执行 WSL 识别；Linux kernel + WSL 标志命中后走 WSL2 矩阵，不走 Windows native 分支 |
+| WSL 包版本在禁用 interop 时难读取 | 报告 `wslVersion=unknown`，结合 kernel/systemd 只读诊断；写操作 fail-closed，并提示在 Windows 侧执行 `wsl --version` |
+| macOS 大版本每年漂移 | 使用“当前+前两版”策略 + 发布清单更新常量；文档快照带“截至 2026-07” |
+| Intel Mac 上游即将退役 | 不要求 M 系列，但承诺以 Python/Node/Docker/Homebrew 同时支持为前提；任何一项退役即在下个版本降级/移除 Intel 支持 |
+| 门禁妨碍跨平台测试 | import 不退出；所有门禁接受注入/monkeypatch 的平台事实；测试不得依赖真实宿主系统 |
+| Windows 文档与代码门禁错位 | 036.07 与 036.03/04 同迭代、同发布门槛；不得发布“代码已拒绝但文档仍提供原生安装/任务计划”的版本 |
+| Debian 名义支持但安装器仍只支持 Ubuntu | 036.05 加 036.08 Debian 实机闭环是正式宣称支持前的发布阻断项，不允许仅改文档即标完成 |
+
+### 16.8 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-017` | IMP-036 支持矩阵、最低版本、门禁与 WBS 规划 |
+| `DOC-050` / `DOC-051` | 本文 §15/§16 初始写入及 CHK-090 契约、WBS、口径复审修订 |
+| `DEV-081` | IMP-036 主开发项（WBS-036.01～07 / 036.05 / 036.06 已完成；036.08/036.09 可后续补） |
+
+
+## 17. `design/achievement/` 功能反查结论（2026-07-20）
+
+### 17.1 审计口径
+
+本轮逐份检查 `design/achievement/` 下 13 份 Markdown 文档（另有一个非文档 `.DS_Store`），并与当前源码、测试、`task-list.md` 交叉核对。收录规则为：
+
+1. 收录文档明确声明的“部分实现”、“能力缺口”、“未本轮”、“后续 P1”或者已定义目标态但代码尚未闭环的功能。
+2. 不重复收录已有代码+测试+task-list 完成记录的历史事故项。
+3. 不收录文档明确列为“非目标 / V1 不交付”的功能，也不把 V1.1/V2 纯路线图畅想自动转成当前承诺。
+4. 历史文档的过时“待修复”状态不作为现状证据；以当前代码、回归测试和最新 task-list 为准。
+
+### 17.2 文档级判定
+
+| achievement 文档 | 当前判定 | 处理 |
+| --- | --- | --- |
+| `2026-07-10-logo-svg-design.md` | 3 个 logo SVG 均已存在 | 不新增 |
+| `2026-07-10-lettermark-svg-design.md` | 3 个 lettermark SVG 均已存在 | 不新增 |
+| `local-webpage-access-analysis-20260707.md` | 别名依赖、SPA 子路径、CLI/importer 拆分、Vue 迁移、跨进程构建门禁已完成；仍留“进行中构建无法中止”；“update 不拉源码 / Vite 开发端口元数据”已明确不纳入本轮 | 取消缺口归 IMP-039；后两项已删出范围 |
+| `local-webpage-access-gateway-switch-access-review-20260709.md` | G1/G2/G3/G5/G6、BUG-102、C1/C2/I1/I2 已完成；I3/I4 仍明确为后续 P1；I5 因 Windows 原生已不支持而失效 | I3 归 IMP-037；I4 归 IMP-038；I5 关闭为过时边界 |
+| `local-webpage-access-runtime-analysis-20260707.md` / `local-webpage-access-imp010-021-plan-20260707.md` | IMP-010～021 已有完成记录和回归 | 不新增 |
+| `local-webpage-access-caddy-startup-diagnostic-report-20260708.md` / `local-webpage-access-caddy-startup-incident-20260708.md` / `local-webpage-access-startup-failure-20260708.md` | BUG-069～071、IMP-010/020、自愈、自启动均已落地 | 不新增 |
+| `local-webpage-access-整改与开发WBS-20260708.md` | 文首已声明当时全部落地；DEV-041～061 可追溯 | 不新增 |
+| `待改进功能-WBS-20260706.md` | IMP-001/005/006/007/008/009 已完成 | 不新增 |
+| `local-webpage-access-v1-design-20260704.md` / `local-webpage-access-v1-wbs-20260704.md` | V1 交付项已完成；构建取消仅作“预留”，并未实现进行中抢占中止；V1.1/V2 与“不交付”按本轮口径排除 | 取消缺口归 IMP-039；V1 预留的源码拉取/Vite 端口元数据不纳入 |
+
+### 17.3 待开发功能总览
+
+| IMP | 建议优先级 | 功能 | 主要来源 | 现状 |
+| --- | --- | --- | --- | --- |
+| **IMP-038** | **P0（下迭代优先）** | `lwa update` 后访问地址刷新、访问复核与 Skill/doctor 闭环 | gateway review I4 | 待开发；`access.refresh/review` 与 CLI 已有，缺 update/doctor/Skill 接线 |
+| **IMP-039** | **P0（下迭代优先）** | 进行中构建的可控取消 | analysis §2.3 / V1 WBS-20.08 | 待开发；仅有排队 `cancel` stub，building 无法杀进程树 |
+| **IMP-040** | **P0（与 038 同批）** | 管理页/状态 DTO 的 LAN 地址新鲜度与漂移自愈 | 用户反馈 2026-07-20：换 LAN IP 后点「端口」仍开旧地址 | 待开发；doctor 仅 WARN；API 只读落盘 `lanUrl` |
+| **IMP-037** | **P1** | 网关后端原子切换与 manifest/registry 一致性 | gateway review I3/G4 | 待开发；`gateway on` 已有单向交接零件，缺双向事务与批量回写 |
+
+> **已从本计划删除（2026-07-20）**：原 IMP-040 `lwa update --pull`、原 IMP-041 Vite `sourceDevPort` 元数据——价值偏低 / 非刚需，不再排期。对应 `task-list` DEV-085/086 关闭。
+
+### 17.4 优先级评审结论（2026-07-20，修订）
+
+按 **用户痛点 × 事故面 × 复用底座 / 实现成本** 排序。
+
+| 排序 | IMP | 结论 | 理由 |
+| --- | --- | --- | --- |
+| 1 | **038** | **做** | 升级后 URL 漂移；底座已齐，主要是 updater/doctor/Skill 接线。 |
+| 2 | **040** | **做（新）** | 管理页「端口」链到落盘旧 `lanUrl`；DHCP/换网后必现。与 038 共享 `refresh_network_entries`，应同批设计。 |
+| 3 | **039** | **做** | 长构建无法取消；进程树实现更重，可紧随 038/040。 |
+| 4 | **037** | **值得做，别插队** | 双向切换频率低；手改 YAML + `gateway on/off` 可撑。 |
+
+**推荐落地顺序**：`038 + 040（同批，先读时正确再落盘自愈）→ 039 → 037`。
+
+## 18. IMP-037 — 网关后端原子切换与状态一致性
+
+> **建议优先级**：**P1**（在 IMP-038/040/039 之后；见 §17.4）
+>
+> **来源**：`local-webpage-access-gateway-switch-access-review-20260709.md` §10.3 I3，以及 G4 的“manifest.static.gateway / 别名入口 / pageviews 日志源与真实后端一致”目标。
+>
+> **现状**：用户仍需手工编辑 `local-web.yml.staticGateway`，再分别执行 `gateway on/off`。`start_gateway()` 能停残留 builtin、启 Caddy、刷新 URL 和写事件，但没有统一 `switch_backend` 事务，也没有批量修正已有 manifest/registry 中的有效 gateway 事实。
+
+### 18.1 目标与非目标
+
+**目标**：
+
+1. 提供单一命令 `lwa gateway switch <caddy|builtin>`，不再要求用户手改 YAML 后猜测操作顺序。
+2. 将预检、停旧后端、写配置、启新后端、重建站点/别名片段、刷新 URL、回写 manifest/registry、access review 和审计事件收敛为一个可测事务。
+3. 切到 builtin 时保留别名元数据，但明确标记别名路由未激活；切回 Caddy 时可按 manifest 重建片段。
+4. 任一阶段失败都不得留下“YAML 说 builtin、进程跑 Caddy、manifest 说 caddy”的混合态。
+
+**非目标**：
+
+- 不自动改应用源码里的 SPA `base`；继续交给 `access review` / IMP-023。
+- 不引入 Nginx/Traefik 第三后端。
+- 不删除别名元数据，除非用户显式清除别名。
+
+### 18.2 原子性与错误契约
+
+| 阶段 | 要求 |
+| --- | --- |
+| 预检 | 验证目标后端、Caddy 能力、端口独占、当前实例运行态；输出变更摘要 |
+| 事务快照 | 备份 `local-web.yml`、受影响 manifest 网关字段、gateway state 和 Caddy 主配置/片段清单 |
+| 切换 | 严格停旧再启新；同一 hostPort 不允许 builtin/Caddy 重叠监听 |
+| 状态收口 | 对每个实例回写“实际生效后端”，registry 与 manifest 同步；地址刷新后再 access review |
+| 失败回滚 | 新后端未就绪时恢复旧 YAML/片段/运行态；回滚也失败则标为 `degraded` 并给出确定修复命令 |
+
+### 18.3 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **037.01** | P0 | 先写双向切换与回滚失败测试 | 新建 `tests/test_gateway_switch.py` | caddy→builtin、builtin→caddy、无 Caddy、端口冲突、回滚失败先红 |
+| **037.02** | P0 | 定义 `GatewaySwitchPlan/Result` 与快照 | 新建 `gateway_switch.py`、`models.py` | dry-run 可列出实例、进程、片段和状态变更，不写盘 |
+| **037.03** | P0 | 实现停旧→改配置→启新→回滚事务 | `gateway_switch.py`、`gateway_service.py`、`static_gateway.py` | 同端口不双开；中途失败恢复旧后端；事件记录每阶段 |
+| **037.04** | P0 | 批量同步 manifest/registry 网关事实 | `models.py`、`registry/dao.py`、`access.py` | 运行/停止静态实例均与实际后端一致；别名激活态可区分 |
+| **037.05** | P1 | 增加 CLI/API 及幂等语义 | `cli/gateway.py`、`manager_api.py` | `switch` 支持 `--dry-run` / JSON；重复切到当前后端不重启、不破坏状态 |
+| **037.06** | P1 | 切换收尾地址刷新与访问复核 | `access.py`、`gateway_switch.py` | URL 已刷新；review 失败不伪装切换成功，报告区分后端与应用风险 |
+| **037.07** | P1 | 文档与实机验收 | `docs/operations-playbook.md`、`docs/acceptance-checklist.md` | macOS/Linux 双向切换，含 running/stopped/别名实例闭环 |
+
+### 18.4 验收标准
+
+1. 用户无需手改 YAML 即可双向切换。
+2. 切换后配置、进程、manifest、registry、站点/别名片段和访问 URL 一致。
+3. 任一注入失败都能回滚，或进入可解释的 degraded 态，不得假绿。
+4. 别名元数据在 builtin 时保留但不宣称可用，切回 Caddy 后可恢复。
+
+### 18.5 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-018` | IMP-037 规划 |
+| `DEV-082` | IMP-037 开发主项 |
+
+
+## 19. IMP-038 — 升级后访问地址与可用性复核闭环
+
+> **建议优先级**：**P0（下迭代优先）**（见 §17.4）
+>
+> **来源**：gateway review §10.3 I4：`lwa update` 不自动 `access refresh`，没有 access-review Skill，doctor 也没有可选深度 access 复核入口。
+>
+> **现状**：`lwa gateway on` 会 refresh+review，但 `lwa update` 在 builtin 或未重启 gateway 时不保证刷新 URL；现有内置 Skills 无专门的访问链路复核流程。
+
+### 19.1 目标与边界
+
+1. `lwa update` 在工作区和 registry 可用时固定执行 `access refresh`，且在 manager/daemon/gateway 重启完成后执行，避免又被旧进程回写。
+2. 新增 `--review-access/--no-review-access`，默认做轻量回环与声明 URL 复核，慢或外网失败不与包安装失败混为一类。
+3. doctor 增加显式 `--access`，复用 `review_access()` 而不重写一套探测。
+4. 新增 `lwa-review-access-urls` Skill，将 refresh→review→定位端口/网关/SPA→可选 rebuild 变成可重复运维流程。
+5. 不把 DHCP 漂移解读为必须 rebuild；仍只有 IMP-023 空 200 可建议重建。
+
+### 19.2 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **038.01** | P0 | 先写 updater 步骤顺序和错误分类失败测试 | `tests/test_updater.py` | 后台重启后才 refresh；refresh/review 结果分步记录 |
+| **038.02** | P0 | 把 access refresh/review 接入 updater | `updater.py`、`cli/system.py` | report/JSON 增 `access_refresh` / `access_review`；dry-run 绝不写 registry/manifest |
+| **038.03** | P1 | doctor `--access` 委托现有探测 | `cli/system.py`、`doctor.py`、`access.py` | human/JSON 字段稳定；不重复计算逻辑 |
+| **038.04** | P1 | 新增 access review 内置 Skill | `skills/lwa-review-access-urls/SKILL.md`、`skills/README.md` | 包含安全读操作、错误分层、`--rebuild-if-needed` 的确认边界 |
+| **038.05** | P1 | 去重 gateway/update/doctor 的后处理编排 | 新建 `access_workflow.py` 或等价抽象 | 三个入口共用相同结果模型、超时与退出码契约 |
+| **038.06** | P1 | 文档、打包和端到端验收 | README、operations/FAQ、packaging tests | 升级后管理页 URL 不漂移；新 Skill 能被 init/update 同步 |
+
+### 19.3 验收标准
+
+1. 模拟 LAN IP 变化后执行 `lwa update`，所有实例的 `lanUrl/routeUrl` 已更新。
+2. `--dry-run` 不发起网络探测、不改 manifest/registry。
+3. `doctor --access --json`、`lwa access review --json`、update report 对同一实例给出一致的诊断。
+4. Skill 说明默认只读，自动 rebuild 必须由显式开关触发。
+
+### 19.4 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-019` | IMP-038 规划 |
+| `DEV-083` | IMP-038 开发主项 |
+
+
+## 20. IMP-039 — 进行中构建的可控取消
+
+> **建议优先级**：**P0（下迭代优先）**（见 §17.4；实现复杂度高于 038）
+>
+> **来源**：`local-webpage-access-analysis-20260707.md` §2.3 和 V1 WBS-20.08。
+>
+> **现状**：`BuildQueue.cancel()` 已能让排队任务在拿到槽位后跳过，但对已进入 `building` 的 `npm/pip/docker compose build` 只改内存状态，无法终止子进程；CLI/API/管理页也没有完整取消入口。
+
+### 20.1 取消契约
+
+1. 状态区分 `queued → cancelled` 和 `building → cancelling → cancelled|cancel_failed`，不得取消请求一来就假报已停。
+2. 构建子进程必须以独立进程组/会话运行；取消先温和终止，超时后强制终止完整进程树。
+3. 持久化 owner PID/process identity、build ID 和取消时间；管理进程重启后不得对 PID 复用的无关进程发信号。
+4. 取消后关闭日志句柄、释放跨进程槽位、收尾 builds 行，实例不留在 building。
+5. 不自动删除构建缓存、旧镜像或用户数据；取消只停止当前工作。
+
+### 20.2 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **039.01** | P0 | 先写 queued/running/竞态/进程重启取消测试 | `tests/test_build_queue.py`、lifecycle tests | 排队取消、进行中取消、PID 复用、取消与正常完成竞态先红 |
+| **039.02** | P0 | 扩展跨进程构建任务持久化 | `build_queue.py`、build-locks DB | 持久化 build ID、owner PID/start time、process group、状态和 cancel request |
+| **039.03** | P0 | 将构建执行改为可中止子进程组 | `docker_runtime.py`、`hosting.py`、command runner | POSIX 可 TERM→KILL 整棵树；超时和返回码可解释 |
+| **039.04** | P0 | 实现幂等 `cancel_build(instance_id)` | `build_queue.py`、`lifecycle.py` | 首次请求发起取消；重复请求返回相同最终态；已完成任务不被篡改 |
+| **039.05** | P1 | 增加 CLI/API/管理页入口 | `cli/lifecycle.py`、`manager_api.py`、manager static | building/queued 显示取消；cancelling 禁止其他生命周期操作 |
+| **039.06** | P0 | 保证状态、日志和槽位收尾 | registry/builds/events/logging | 取消后无槽位泄漏、无孤儿进程、无 building 残留 |
+| **039.07** | P1 | 端到端验收与文档 | tests/e2e、manager/FAQ | 真实长时构建可取消，之后可重新 rebuild |
+
+### 20.3 验收标准
+
+1. queued 任务取消后永不调用 builder。
+2. building 任务在取消超时内退出，其后无子进程、无槽位泄漏。
+3. 取消成功和取消失败在 CLI/API/UI 中有不同结果，不假报。
+4. 管理进程崩溃后可回收任务，且不会终止 PID 复用的无关进程。
+
+### 20.4 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-020` | IMP-039 规划 |
+| `DEV-084` | IMP-039 开发主项 |
+
+## 21. IMP-040 — 管理页 LAN 地址新鲜度与漂移自愈
+
+> **建议优先级**：**P0（与 IMP-038 同批）**（见 §17.4）
+>
+> **来源**：用户反馈（2026-07-20）——主机局域网 IP 变化后，管理页点击「端口」仍打开旧 `lanUrl`；本机「本机」链接可用，但局域网分享/手机访问失效。`doctor.check_lan_url_stale` 仅 WARN 并提示手动 `lwa access refresh`，管理页 15s 轮询只重读落盘字段，不会重算 IP。
+>
+> **现状证据**：
+> - `status._resolve_lan_url` / `_resolve_route`：**只读** `manifest.network.lanUrl|routeUrl`，不调用 `resolve_lan_ip`。
+> - 前端 `helpers.js` → `LWA.urlHtml`：「端口」=`href={i.lanUrl}`；「本机」=`localhostUrl`（现算，故同机仍可用）。
+> - 写盘刷新仅发生在 `lwa access refresh`、`gateway on` finalize、以及 start/enable/alias 时的 `build_network_entry`；**daemon / manager / `lwa update` 均不刷新**。
+
+### 21.1 问题陈述
+
+`lanUrl` / `routeUrl` 是 **生命周期事件写入的持久化快照**，不是读时现算。换 Wi-Fi、有线/无线切换、DHCP 续约后：
+
+1. 管理页列表仍展示并链到旧 IP；
+2. CLI `lwa status` / 导出的地址同样陈旧；
+3. 用户若不跑 doctor 或不知道 `access refresh`，会认为「服务挂了」。
+
+### 21.2 目标与非目标
+
+**目标**：
+
+1. 管理页（及同等 DTO）在 `lanIpStrategy=auto` 时，**展示与可点击链接始终对应当前 LAN IP**（或合法回退），不依赖用户记得手动 refresh。
+2. 发现漂移后 **节流写回** 各实例 `local-web.json`（及别名 `routeUrl`），使 CLI/文件真相与 UI 一致。
+3. 明确 **检查/刷新阶段**（见 §21.4），并与 IMP-038（update 收尾 refresh）共用同一套探测与结果模型。
+4. `lanIpStrategy=manual` 时 **不自动改写**；仅提示当前探测 IP 与 `manualLanIp` 不一致。
+
+**非目标**：
+
+- 不监听 OS 网络变更事件（跨平台复杂，收益有限）。
+- 不修正用户浏览器书签/外部文档里的旧 URL。
+- 不把 DHCP 漂移当成必须 rebuild（仍归 IMP-023 / access review）。
+- 不恢复已删除的 `update --pull` / Vite 开发端口元数据。
+
+### 21.3 方案选型（已选 A）
+
+| 方案 | 做法 | 优点 | 缺点 |
+| --- | --- | --- | --- |
+| **A. 读时现算 + 节流落盘（推荐）** | API/status 用当前 `resolve_lan_ip` + `hostPort`/`alias` **合成** `lanUrl`/`routeUrl`；若与落盘 host 不一致则节流调用 `refresh_network_entries` | 用户点「端口」**立刻**正确；落盘随后自愈；复用现有 refresh | 需小心 detect 成本与写盘节流 |
+| B. 仅后台落盘 | daemon/manager 周期比对后 refresh；DTO 仍读 manifest | 改动面小 | 在下一次 refresh 完成前链接仍坏；轮询窗口内假死 |
+| C. 前端自拼 | API 下发 `currentLanIp` + `hostPort`，前端拼 href | 前端可控 | 易与 routeUrl/别名/https 分叉；CLI/status 仍旧 |
+
+**选定 A**：对「点端口开旧地址」是最小闭环；B 作为 A 的落盘侧实现细节保留；C 仅作可选增强（页眉展示当前 LAN）。
+
+### 21.4 检查与刷新阶段（契约）
+
+| 阶段 | 触发点 | 做什么 | 写盘？ |
+| --- | --- | --- | --- |
+| **R1 读时合成（P0）** | `InstanceStatus` / `GET /api/instances` / detail | `auto`：用 `resolve_lan_ip(config)` + `hostPort` 生成 `lanUrl`；`routeMode=name` 时同步合成 `routeUrl`（host 换新、path 保留）。DTO 增 `currentLanIp`、`lanUrlSource=live|manifest|manual`。`manual`：继续用配置的 manual IP 合成，不静默改。 | 否 |
+| **R2 旁路比对（P0）** | manager 处理 instances 列表（或 `/api/health`）时 | 内存缓存 `lastResolvedLanIp`；若与本次探测不同 → 标记 drift | 否（只记标志） |
+| **R3 节流落盘（P0）** | R2 发现 drift 后 | 调用已有 `refresh_network_entries`；**同一进程内最短间隔**（建议默认 60s，可配）；并发只跑一次（单飞锁） | 是 |
+| **R4 daemon 周期（P1）** | daemon 已有 tick | 同样做 R2→R3，保证无管理页打开时也能自愈（CLI/手机书签文件层） | 条件写 |
+| **R5 显式运维（已有）** | `lwa access refresh`、`gateway on` | 立即全量 refresh | 是 |
+| **R6 升级收尾（IMP-038）** | `lwa update` 重启后台之后 | 固定 refresh（+ 可选 review） | 是 |
+| **R7 诊断（增强）** | `doctor` / `doctor --json` | 保留 `lan_url_stale`；JSON 增加 `currentLanIp`、`driftedInstanceIds`；管理页可在 drift 时出非阻断提示条 +「立即刷新地址」按钮（调 R5 API） | 按钮触发时写 |
+
+**探测成本**：`detect_lan_ip` 单次 UDP 很轻；列表接口内每请求最多探测一次（进程内短 TTL 缓存，建议 5～15s），避免 N 实例 × N 探测。
+
+### 21.5 数据与 API 契约
+
+1. **DTO 字段（向后兼容）**  
+   - 继续返回 `lanUrl` / `routeUrl` / `localhostUrl`（语义变为「当前应打开的地址」）。  
+   - 新增可选：`currentLanIp`、`persistedLanIp`（从旧 lanUrl 解析）、`lanAddressStale: bool`。  
+2. **管理页**  
+   - 「端口」继续绑 `lanUrl`（R1 后自然正确）。  
+   - 当 `lanAddressStale` 为 true 时，页眉/横幅提示「检测到局域网地址已变化，正在同步…」；提供手动「刷新访问地址」→ `POST /api/access/refresh`（薄封装 `refresh_network_entries`）。  
+3. **错误**  
+   - 探测失败：回退 `127.0.0.1` 或保留上次成功 IP，并在 DTO/`doctor` 标明 `lanIpUnknown`；**不得**用错误探测结果批量写坏所有 manifest。  
+4. **与 pageviews / 别名**  
+   - 落盘 refresh 后别名片段无需因纯 IP 变化而 rebuild 站点（host 在 URL 展示层）；若 Caddy 配置写死旧 IP（当前一般不），需在 refresh 报告中列出。
+
+### 21.6 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **040.01** | P0 | 先写「落盘旧 IP / 探测新 IP」下 DTO 链接正确与节流写盘测试 | `tests/test_status.py`、`test_manager_api.py`、access tests | 旧 manifest + mock 新 IP → API `lanUrl` 已是新地址；60s 内二次列表不重复全量写盘 |
+| **040.02** | P0 | status/DTO 读时合成 `lanUrl`/`routeUrl` | `status.py`、`ports.py` | `_resolve_lan_url` 不再盲信落盘；`manual` 路径单测覆盖 |
+| **040.03** | P0 | manager 旁路 drift 检测 + 单飞节流 `refresh_network_entries` | `manager_api.py` / `manager_service.py`、`access.py` | 换 IP 后首次列表触发落盘；并发列表只 refresh 一次 |
+| **040.04** | P1 | daemon 周期复用同一 helper | `daemon.py` | 无管理页时文件层也会自愈 |
+| **040.05** | P1 | `POST /api/access/refresh` + 前端 stale 横幅/按钮 | `manager_api.py`、`manager_static/*` | 手动一键与自动路径结果一致 |
+| **040.06** | P1 | doctor JSON 字段与文档 | `doctor.py`、faq/manager-page/operations | 说明各阶段；与 IMP-038 交叉引用 |
+| **040.07** | P0 | 与 IMP-038 共享 refresh 编排，避免双份逻辑 | `access_workflow.py` 或等价 | update/manager/daemon/CLI 同一结果模型 |
+
+### 21.7 验收标准
+
+1. 将本机 LAN IP 从 A 改到 B（或 mock `resolve_lan_ip`）后，**无需**手动 `access refresh`，管理页「端口」href 已是 `http://B:<port>`（最多一次列表轮询延迟）。
+2. 随后各实例 `local-web.json` 的 `lanUrl`/`routeUrl` 在节流窗口内被写为 B；`doctor` 不再 WARN `lan_url_stale`。
+3. `lanIpStrategy=manual` 时不自动覆盖；UI/doctor 提示探测值与配置值差异。
+4. 探测失败不批量写坏 manifest；`localhostUrl` 始终可用。
+5. 15s 轮询在 IP 未变时不额外打满磁盘写。
+
+### 21.8 风险与边界
+
+| 风险 | 缓解 |
+| --- | --- |
+| 多网卡 / VPN 导致 `detect_lan_ip`「跳变」 | 保持现有 UDP 出口策略；跳变则跟出口走；文档说明可用 `manual` |
+| 列表接口延迟 | IP 探测短 TTL 缓存；refresh 异步/后台线程，响应先返回 live URL |
+| 与 IMP-038 重复 | 040.07 强制抽取共享编排；038 负责 update 时机，040 负责常驻自愈与读时正确 |
+| WSL `/mnt` 与镜像网络 | 不改变平台门禁；仅刷新 URL 字符串 |
+
+### 21.9 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-024` | IMP-040（LAN 新鲜度）规划 |
+| `DEV-087` | IMP-040 开发主项 |
+| `DEV-085` / `DEV-086` | 原 update --pull / Vite 端口 —— **已关闭（移出范围）** |

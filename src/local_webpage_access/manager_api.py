@@ -14,6 +14,8 @@
 * ``GET  /api/port-pool``        —— 端口池占用（WBS-22.10）
 * ``GET  /api/redundant``        —— 冗余实例列表（IMP-019 / WBS-22.13）
 * ``POST /api/redundant/remove`` —— 批量移除冗余实例（IMP-019 / WBS-22.13）
+* ``GET  /api/health``           —— 轻量存活（能力片段来自启动缓存，BUG-254）
+* ``GET  /api/capability``       —— 鉴权能力报告（``?refresh=true`` 同步重探）
 
 所有 ``/api/*`` 路由（除 ``/api/health`` 外）都要求 API token（WBS-22.12）。
 静态资源（管理页前端）由 ``/`` 托管（WBS-22.02），前端实现在 WBS-23。
@@ -46,6 +48,7 @@ from local_webpage_access.config import Config
 from local_webpage_access.errors import (
     BuildError,
     ConfigError,
+    DataNonemptyError,
     DockerError,
     GatewayError,
     HostingError,
@@ -165,6 +168,7 @@ _ERROR_STATUS: dict[str, int] = {
     "not_found": status.HTTP_404_NOT_FOUND,
     "bad_request": status.HTTP_400_BAD_REQUEST,
     "conflict": status.HTTP_409_CONFLICT,
+    "data_nonempty": status.HTTP_409_CONFLICT,  # IMP-035：purge 非空 data/
     "unauthorized": status.HTTP_401_UNAUTHORIZED,
     "service_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
     "internal": status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -301,12 +305,44 @@ def create_app(
     token: str,
 ) -> FastAPI:
     """构建管理页 FastAPI 应用（WBS-22.01）。"""
+    import threading
+
+    from local_webpage_access.capability import (
+        collect_capability_report,
+        log_capability_probe,
+        read_capability_health_fragment,
+        write_capability_cache,
+    )
     from local_webpage_access.logging import setup_logging
 
     setup_logging(level=config.logLevel)  # type: ignore[arg-type]
 
+    def _refresh_capability_cache() -> dict[str, Any]:
+        """后台探测并刷新 capability-manager.json / 内存片段（BUG-254）。"""
+        report = collect_capability_report(
+            workspace_root=workspace.root,
+            role="manager",
+            config_profile=getattr(config, "profile", None),
+            include_backend_cached=False,
+        )
+        level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
+        log_capability_probe("manager", report, level=level)
+        write_capability_cache(workspace.root, "manager", report)
+        return report.to_health_fragment()
+
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
+        # BUG-254：能力探测放到后台，保证 /api/health 立即可用、不阻塞 start 轮询。
+        def _bg_probe() -> None:
+            try:
+                frag = _refresh_capability_cache()
+                app.state.capability_fragment = frag
+            except Exception:  # noqa: BLE001 — 探测失败不阻断管理页
+                log.exception("manager 能力自检失败")
+
+        threading.Thread(
+            target=_bg_probe, name="lwa-capability-probe", daemon=True
+        ).start()
         try:
             yield
         finally:
@@ -324,6 +360,15 @@ def create_app(
     app.state.registry = registry
     app.state.token = token
     app.state.pageview_store = None  # IMP-024：懒加载的 PageviewStore 单例
+    # BUG-254：health 只读缓存；优先已有 capability-manager.json，否则 unknown 占位
+    app.state.capability_fragment = read_capability_health_fragment(workspace.root) or {
+        "profile": getattr(config, "profile", None) or "default",
+        "overall": "unknown",
+        "serviceUser": None,
+        "capabilities": {},
+        "action": None,
+    }
+    app.state.refresh_capability_cache = _refresh_capability_cache
 
     # ---- 异常处理器：LwaError → 统一错误格式 ----
     @app.exception_handler(LwaError)
@@ -367,7 +412,6 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/health", tags=["health"])
     def health(request: Request) -> dict[str, Any]:
         ws: Workspace = app.state.workspace
-        cfg: Config = app.state.config
         body: dict[str, Any] = {
             "ok": True,
             "version": _app_version(),
@@ -384,23 +428,52 @@ def _register_routes(app: FastAPI) -> None:
             body["workspaceRoot"] = str(ws.root.resolve())
         # BUG-236：已鉴权局域网客户端也应拿到完整 capabilities（供管理页降级 UI）
         auth_ok = local_ok or _verify_token(ws, _extract_token(request))
-        try:
-            from local_webpage_access.capability import collect_capability_report
-
-            report = collect_capability_report(
-                workspace_root=ws.root,
-                role="manager",
-                config_profile=getattr(cfg, "profile", None),
-            )
-            frag = report.to_health_fragment()
-            if auth_ok:
-                body.update(frag)
-            else:
-                body["profile"] = frag.get("profile")
-                body["overall"] = frag.get("overall")
-        except Exception:  # noqa: BLE001 — health 不得因能力探测失败而 500
-            body["overall"] = "unknown"
+        # BUG-254：存活检查不得同步跑昂贵 Docker/Caddy 探测；只用启动/后台缓存。
+        frag = getattr(app.state, "capability_fragment", None) or {
+            "overall": "unknown",
+            "profile": "default",
+        }
+        if auth_ok:
+            body.update(frag)
+        else:
+            body["profile"] = frag.get("profile")
+            body["overall"] = frag.get("overall")
         return body
+
+    # ---- /api/capability（鉴权；按需刷新完整能力报告）----
+    @app.get("/api/capability", dependencies=[api], tags=["health"])
+    def capability_report(refresh: bool = Query(False)) -> dict[str, Any]:
+        """返回能力报告；``refresh=true`` 时同步重探并更新缓存。"""
+        ws: Workspace = app.state.workspace
+        cfg: Config = app.state.config
+        if refresh:
+            refresh_fn = getattr(app.state, "refresh_capability_cache", None)
+            if callable(refresh_fn):
+                try:
+                    frag = refresh_fn()
+                    app.state.capability_fragment = frag
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail={
+                            "error": {
+                                "code": "capability_probe_failed",
+                                "message": f"能力探测失败：{exc}",
+                            }
+                        },
+                    ) from exc
+                return {"ok": True, **frag}
+        frag = getattr(app.state, "capability_fragment", None)
+        if frag:
+            return {"ok": True, **frag}
+        from local_webpage_access.capability import collect_capability_report
+
+        report = collect_capability_report(
+            workspace_root=ws.root,
+            role="manager",
+            config_profile=getattr(cfg, "profile", None),
+        )
+        return {"ok": True, **report.to_health_fragment()}
 
     # ---- 顶部统计（WBS-22.05/06）----
     @app.get("/api/stats", dependencies=[api], tags=["stats"])
@@ -652,7 +725,12 @@ def _register_routes(app: FastAPI) -> None:
             purge=purge,
             force=force,
         )
-        return {"instanceId": instance_id, "action": "remove"}
+        return {
+            "instanceId": instance_id,
+            "action": "remove",
+            "purge": purge,
+            "force": force,
+        }
 
     @app.post(
         "/api/instances/{instance_id}/update",
@@ -995,10 +1073,13 @@ _LWA_ERROR_CODE_BY_CLASS: dict[type[LwaError], str] = {
 
 
 def _lwa_error_code(exc: LwaError) -> str:
-    """根据异常类推断错误码（BUG-033）。
+    """根据异常类推断错误码（BUG-033 / IMP-035）。
 
     用显式类映射取代类名字符串匹配；未知子类默认 ``internal``。
+    ``DataNonemptyError`` / ``code=data_nonempty`` 优先于通用 LifecycleError→internal。
     """
+    if isinstance(exc, DataNonemptyError) or getattr(exc, "code", None) == "data_nonempty":
+        return "data_nonempty"
     for cls, code in _LWA_ERROR_CODE_BY_CLASS.items():
         if isinstance(exc, cls):
             return code

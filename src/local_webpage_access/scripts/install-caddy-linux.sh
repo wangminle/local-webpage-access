@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LWA：在 Ubuntu（含 WSL）上安装 Caddy（满足 MIN_CADDY_VERSION，默认 ≥ 2.10.0）。
+# LWA：在 Ubuntu 22.04+ / Debian 12+（含 WSL）上安装 Caddy（≥ MIN_CADDY_VERSION，默认 2.10.0）。
 #
 # 优先：官方 Cloudsmith apt 仓库
 #   https://caddyserver.com/docs/install#debian-ubuntu-raspbian
@@ -74,11 +74,71 @@ already_good() {
   return 0
 }
 
-detect_ubuntu() {
-  [[ -f /etc/os-release ]] || die "仅支持 Ubuntu（含 WSL Ubuntu）"
+detect_debian_family() {
+  [[ -f /etc/os-release ]] || die "仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable（含 WSL）"
   # shellcheck disable=SC1091
   . /etc/os-release
-  [[ "${ID:-}" == "ubuntu" ]] || die "当前 ID=${ID:-?}，本期仅支持 Ubuntu"
+  case "${ID:-}" in
+    ubuntu|debian) ;;
+    *) die "当前 ID=${ID:-?}，仅支持 Ubuntu LTS / Debian Stable" ;;
+  esac
+  local ver="${VERSION_ID:-}"
+  local major="${ver%%.*}"
+  local codename="${VERSION_CODENAME:-}"
+  if [[ "${ID}" == "ubuntu" ]]; then
+    codename="${UBUNTU_CODENAME:-$codename}"
+    local minor="0"
+    if [[ "$ver" == *.* ]]; then
+      minor="${ver#*.}"
+      minor="${minor%%.*}"
+    fi
+    # BUG-261：仅允许 platform_support.SUPPORTED_UBUNTU_LTS
+    if [[ -z "$ver" ]] || [[ "$major" -lt 22 ]] || [[ $((major % 2)) -ne 0 ]] || [[ "$minor" -ne 4 ]]; then
+      die "Ubuntu ${ver:-unknown}（${codename:-?}）不是正式支持的 LTS（需 22.04/24.04/26.04）"
+    fi
+    case "$codename" in
+      jammy|noble|resolute) ;;
+      *) die "Ubuntu 代号 '${codename:-?}' 不在 LTS 允许列表（jammy/noble/resolute；见 SUPPORTED_UBUNTU_LTS）" ;;
+    esac
+    # 版本/代号配对
+    if [[ "$ver" == 22.04* && "$codename" != "jammy" ]]; then
+      die "Ubuntu 版本/代号不匹配：VERSION_ID=$ver 应对 jammy，实际为 ${codename}"
+    fi
+    if [[ "$ver" == 24.04* && "$codename" != "noble" ]]; then
+      die "Ubuntu 版本/代号不匹配：VERSION_ID=$ver 应对 noble，实际为 ${codename}"
+    fi
+    if [[ "$ver" == 26.04* && "$codename" != "resolute" ]]; then
+      die "Ubuntu 版本/代号不匹配：VERSION_ID=$ver 应对 resolute，实际为 ${codename}"
+    fi
+    # 未纳入矩阵的未来 LTS（如 28.04）
+    if [[ "$major" -gt 26 ]]; then
+      die "Ubuntu $ver 尚未纳入正式支持矩阵（当前 22.04/24.04/26.04）"
+    fi
+  fi
+  if [[ "${ID}" == "debian" ]]; then
+    case "$codename" in
+      sid|unstable|testing|rc-buggy)
+        die "Debian ${codename} 不是 Stable；仅支持 bookworm/trixie（12/13）"
+        ;;
+    esac
+    if [[ -z "$ver" ]] || [[ "$major" -lt 12 ]]; then
+      die "Debian ${ver:-unknown} 低于最低要求 12"
+    fi
+    if [[ "$major" -gt 13 ]]; then
+      die "Debian $ver 尚未纳入正式支持的 Stable 矩阵（当前 12/13）"
+    fi
+    case "$codename" in
+      bookworm|trixie) ;;
+      *) die "Debian 代号 '${codename:-?}' 不在 Stable 允许列表（bookworm/trixie；见 SUPPORTED_DEBIAN_STABLE）" ;;
+    esac
+    if [[ "$major" -eq 12 && "$codename" != "bookworm" ]]; then
+      die "Debian 版本/代号不匹配：VERSION_ID=$ver 应对 bookworm，实际为 ${codename}"
+    fi
+    if [[ "$major" -eq 13 && "$codename" != "trixie" ]]; then
+      die "Debian 版本/代号不匹配：VERSION_ID=$ver 应对 trixie，实际为 ${codename}"
+    fi
+  fi
+  log "检测到 ${ID} ${ver:-?}（${codename:-?}）"
 }
 
 detect_arch() {
@@ -278,7 +338,7 @@ main() {
   need_cmd curl
   need_cmd apt-get
   need_cmd tar
-  detect_ubuntu
+  detect_debian_family
   # IMP-033 / BUG-231：版本已达标也必须处理系统 caddy.service，不得跳过 disable
   if already_good; then
     log "Caddy 版本已达标，仍检查并停用系统 caddy.service…"

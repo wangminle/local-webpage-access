@@ -262,6 +262,23 @@
 | BUG-249 | 修复 | `inspect_caddy_owner` 在 pid 存活但读不到 `/proc/.../Uid`（`process_user is None`）时 fail-open 判为 `lwa_service_user`/`ready`，可能误认外来 Caddy | 2026-07-19 19:44 | 2026-07-19 20:20 | 已修复 | process_user 未知时 owner=unknown、runtime=owner_mismatch，保持 fail-closed；回归通过。 |
 | BUG-250 | 修复 | Windows 上无控制台的 lwa daemon 周期性调用 powershell/taskkill 未设 CREATE_NO_WINDOW，约每 60s 弹出短暂黑窗 | 2026-07-19 20:57 | 2026-07-19 20:57 | 已修复 | 新增 platform_detect.subprocess_hidden_kwargs；daemon read_pid_cmdline/_terminate_pid、static_gateway/hosting taskkill、conftest 清理路径全部加 CREATE_NO_WINDOW；回归 test_read_pid_cmdline_windows_powershell 断言 creationflags |
 | BUG-251 | 修复 | lwa init --full 未传 workspace_root，run_full_bootstrap 恒 unready；失败退出码未透传 boot.exit_code | 2026-07-19 22:34 | 2026-07-19 22:34 | 已修复 | BUG-251：cli/__init__.py 传 workspace_root=ws 且 Exit(boot.exit_code)；回归 test_cli_init_full_passes_workspace_root |
+| BUG-252 | 修复 | macOS 无 /proc/<pid>/status，inspect_caddy_owner 的 process_user 恒为 None → owner_mismatch，Full Profile 永远无法 setup --full 验收 | 2026-07-20 00:12 | 2026-07-20 00:30 | 已修复 | 新增 _process_user_for_pid：Linux 读 /proc Uid，macOS/POSIX 用 ps -o user=，Windows 用 CIM GetOwner；仍读不到则 fail-closed。回归 test_inspect_caddy_owner_uses_ps_fallback / test_process_user_for_pid_ps_path |
+| BUG-253 | 修复 | 后台 capability-*.json 无新鲜度/存活校验且停服不删，gateway 旧 ready 可覆盖 CLI 实时 admin_unavailable，doctor/setup --full 误报闭环就绪 | 2026-07-20 00:12 | 2026-07-20 00:30 | 已修复 | 合并前校验 checkedAt≤24h + 对应服务存活；stop_manager/daemon/gateway 清缓存；gateway 缓存仅合并 gatewayAccess，不再覆盖实时 caddy*。回归 test_stale_gateway_cache_* / test_live_caddy_not_overwritten_* / test_clear_capability_cache |
+| BUG-254 | 修复 | /api/health 每次同步跑完整能力探测（Docker 多秒超时），start_manager 0.5s 轮询易超时杀进程，健康轮询堆积阻塞线程 | 2026-07-20 00:12 | 2026-07-20 00:30 | 已修复 | health 只读启动/内存 capability 缓存；探测改 lifespan 后台线程；新增鉴权 GET /api/capability?refresh=true。回归 test_health_does_not_call_collect_capability |
+| BUG-255 | 修复 | Windows 的 Caddy 进程所有者查询直接调用 CimInstance.GetOwner()，PowerShell 不支持该调用方式，Full Profile owner 校验会持续失败 | 2026-07-20 14:33 | 2026-07-20 14:50 | 已修复 | 改为 `Get-CimInstance ... \| Invoke-CimMethod -MethodName GetOwner).User`；回归 test_process_user_for_pid_windows_uses_invoke_cim_method |
+| BUG-256 | 修复 | 能力缓存存活校验只检查 PID 是否存在，PID 被无关进程复用时仍信任 manager/daemon/gateway 陈旧缓存 | 2026-07-20 14:33 | 2026-07-20 14:50 | 已修复 | `_backend_role_alive` 增加 `_role_pid_matches`（cmdline 含角色模块/caddy + 工作区根）；无关 Python PID 复现返回 False。回归 test_backend_role_alive_rejects_unrelated_python_pid |
+| BUG-257 | 修复 | 管理页启动读取 capability-manager.json 时不校验新鲜度，异常退出残留的陈旧 ready 会直接暴露给 /api/health | 2026-07-20 14:33 | 2026-07-20 14:50 | 已修复 | `read_capability_health_fragment` 调用 `_cache_is_fresh`，过期返回 None→health 占位 unknown。回归 test_read_capability_health_fragment_rejects_stale_cache |
+| BUG-258 | 修复 | 能力缓存新鲜度判定未拒绝未来 checkedAt，时钟漂移或异常数据可让缓存长期绕过 24 小时上限 | 2026-07-20 14:33 | 2026-07-20 14:50 | 已修复 | `_cache_is_fresh` 拒绝 age < -60s 的未来时间戳；仍保留 24h 上限。回归 test_cache_is_fresh_rejects_future_checked_at |
+| BUG-259 | 修复 | 两项 static_gateway 单测依赖宿主机 :2019 未运行，现存 Caddy 会令测试在目标断言前触发所有权保护 | 2026-07-20 14:33 | 2026-07-20 14:50 | 已修复 | reload_all 相关 3 例 mock `_admin_alive=False` + ensure/workspace access，隔离真实 :2019 |
+| BUG-260 | 修复 | WSL 的 /mnt/<drive> 风险被并入全局平台 unsupported，误阻断普通 CLI 且门禁按 cwd 而非目标工作区判断 | 2026-07-20 17:42 | 2026-07-20 18:26 | 已修复 | 【闭环】①init --full 在 init_workspace 前 assert_writable；②host_bootstrap/autostart 经 assert_writable 且须 platform=wsl，原生 Linux+/mnt/c 不误挡；③drvfs 不并入全局 supported。回归 test_init_full_blocks_drvfs_before_writing / test_run_full_bootstrap_drvfs_only_blocks_on_wsl / test_assert_writable_allows_drvfs_on_native_linux |
+| BUG-261 | 修复 | Ubuntu/Debian 支持判断只校验最低版本，Ubuntu 非 LTS、Debian sid/未来版本仍会被判定支持或继续安装 | 2026-07-20 17:42 | 2026-07-20 18:26 | 已修复 | 【闭环】SUPPORTED_UBUNTU_LTS / SUPPORTED_DEBIAN_STABLE 版本↔代号配对矩阵；拒 28.04、Debian 12+bullseye 等错配；install-docker/caddy-linux.sh 同步配对与上限。回归 test_ubuntu_future_lts_not_in_matrix_rejected / test_debian_version_codename_mismatch_rejected / test_distro_matrix_shared_with_install_scripts |
+| BUG-262 | 修复 | doctor --json 在输出平台报告前强制打开已初始化工作区，未初始化或 unsupported 主机无法执行只读平台诊断 | 2026-07-20 17:42 | 2026-07-20 18:06 | 已修复 | 【修复】doctor --json 遇 PATH_ERROR 仍输出含 platformSupport 的 JSON（overall=fail）；已初始化路径不变。回归 test_doctor_json_platform_support_without_workspace |
+| BUG-263 | 修复 | IMP-036 用户文档仍暗示 Windows 原生可安装/配置任务计划，且 autostart 支持版本与正式矩阵不一致 | 2026-07-20 17:42 | 2026-07-20 18:06 | 已修复 | 【修复】autostart.md 矩阵改为 Ubuntu 22.04 LTS+/Debian 12+、WSL 2.1.5+；operations-playbook/runtime-workspace 去掉 Windows 原生安装/任务计划推销，改为仅 WSL2 |
+| BUG-264 | 修复 | IMP-035 删除模态框打开及步骤切换未管理键盘焦点，焦点仍留在背景列表且无焦点约束 | 2026-07-20 17:42 | 2026-07-20 18:06 | 已修复 | 【修复】openRemoveDialog 记录触发点并聚焦对话框首个可聚焦控件；步骤切换/force 再聚焦；Tab 焦点陷阱；关闭/成功删除后 _restoreRemoveFocus。回归 test_app_remove_dialog_methods_and_no_native_confirm |
+| BUG-265 | 修复 | 全量测试套件存在 3 例既有失败：capability 日志 caplog 因父 logger propagate=False 收不到记录；daemon Windows PowerShell 用例在非 Windows 宿主访问 subprocess.CREATE_NO_WINDOW 抛 AttributeError；manager_service 用例 fake_setup_logging 形参缺 log_filename | 2026-07-20 17:47 | 2026-07-20 17:47 | 已修复 | capability 测试改为把 caplog.handler 直接挂到子 logger；platform_detect.subprocess_hidden_kwargs 与 test_daemon 断言改 getattr(subprocess,'CREATE_NO_WINDOW',0x08000000)；fake_setup_logging 补 log_filename 形参。全量 1254 passed |
+| BUG-266 | 修复 | test_platform_support 中 WSL unknown 包版本用例的断言含 `or True`，使 wsl_version 断言恒真、无校验意义 | 2026-07-20 17:47 | 2026-07-20 17:47 | 已修复 | 改为 assert report.wsl_version == 'unknown'（wsl_package_version='unknown' 时 display_wsl 取包版本） |
+| BUG-267 | 修复 | setup.py Linux Docker 安装提示把 ubuntu/debian 两个官方文档 URL 拼成一串（engine/install/ubuntu/ / debian/），不可点击 | 2026-07-20 17:47 | 2026-07-20 17:47 | 已修复 | 拆为两个独立 URL：https://docs.docker.com/engine/install/ubuntu/ 与 /debian/ |
+
 ## 调整事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -381,6 +398,16 @@
 | CHK-081 | 检查 | 只读缺陷审查：host_bootstrap/lifecycle/daemon/cli/system/config 相对 HEAD 未提交改动 | 2026-07-19 19:42 | 2026-07-19 19:42 | 已完成 | 范围限定上述文件+对应 tests；确认仍成立 BUG-240/241/242；新发现 BUG-243（reconcile 陈旧观测阻断自愈 P1）、BUG-244（缺 Full overall 门闩 P2）、BUG-245（daemon log force 覆盖级别 P3）。config.py 无缺陷。 |
 | CHK-082 | 检查 | 再次审查当前未提交 IMP-033/034 改动是否仍有 bug（交叉复核 CHK-079/081 + 新路径） | 2026-07-19 19:44 | 2026-07-19 19:44 | 已完成 | 复核仍成立：BUG-238(P0)～245；新发现 BUG-246（manager 自缓存覆盖 live 探测）、BUG-247（API 陈旧 runtime_access 阻断）、BUG-248（无工作区 setup --full 假 ready）、BUG-249（owner process_user=None fail-open）。定向 pytest capability/host_bootstrap/manager_api 相关通过；Windows 上 lifecycle lock / killpg / chmod 失败属既有平台 flaky，非本次引入。 |
 | CHK-083 | 检查 | 全量对照文档与最新代码：Full 流程/降级口径/CLI 与 README·docs·skills 一致性 | 2026-07-19 22:35 | 2026-07-19 22:35 | 已完成 | CHK-083：审计发现 docs 误写 setup --full 可无工作区、init 前跑 full；runtime 误写失败只降级 builtin；顺带修 BUG-251。已改 README/faq/operations-playbook/runtime-workspace/known-limitations/setup-host skill。manager-page/autostart/security/release 主体已对齐。design/plan 规划体保留。 |
+| CHK-084 | 检查 | 审查提交 2871ff3（V0.6.3-Build1349-20260719）的代码变更 | 2026-07-20 00:11 | 2026-07-20 00:11 | 已完成 | 发现 Full Profile 在 macOS 无法识别 Caddy owner、能力缓存无过期导致假绿、health 同步重探测可能拖垮管理页启动；针对性 pytest 受 Windows 沙箱锁文件权限限制，已完成静态审查 |
+| CHK-085 | 检查 | 审阅 Ubuntu 机器从 V0.6.1 升级至 V0.6.3 的实际日志与权限验收结论 | 2026-07-20 00:15 | 2026-07-20 00:15 | 已完成 | 确认 git/pip/CLI 升级成功且既有容器仍运行；未见 manager、daemon、gateway 重启及 Full Profile 验收证据，不能证明后台进程已加载 0.6.3 或具备 Docker 权限；Caddy owner_mismatch 会触发 0.6.3 reload fail-closed，且 :8080 被 freqtrade 占用；测试计数与失败项数量互相矛盾，需以原始 pytest 输出复核。 |
+| CHK-086 | 检查 | 复核 macOS 默认用户与 Ubuntu 新用户权限差异及 LWA 修复步骤说明 | 2026-07-20 08:23 | 2026-07-20 08:23 | 已完成 | 总体方向正确；校正 sudo 不是 LWA 运行必需权限、Ubuntu 新用户权限取决于创建方式、linger 是强烈建议而非权限修复本身；补充必须使用 lwa update 重启 manager/daemon、安装 autostart、解决系统 caddy.service 所有权及 8080/18001 端口冲突，并以 Full overall=ready 验收。 |
+| CHK-087 | 检查 | 仔细复审当前 BUG-252～254 未提交修复及关联缓存、跨平台、API 与测试路径 | 2026-07-20 14:33 | 2026-07-20 14:33 | 已完成 | 确认 4 项产品缺陷 + 1 项测试隔离缺陷，登记 BUG-255～259；新增定向用例通过，完整定向集受真实 Caddy 污染失败 2 项；compileall 与 git diff --check 通过，全量沙箱测试因禁止 socket bind 无法完成 |
+| CHK-088 | 检查 | 确认并修复 CHK-087 登记的 BUG-255～259（Windows GetOwner、PID 身份、缓存新鲜度、Caddy 测试隔离） | 2026-07-20 14:46 | 2026-07-20 14:50 | 已完成 | 五处均复现确认后按 TDD 修复；定向 pytest test_capability+test_manager_api+test_static_gateway 全绿；compileall/git diff --check 通过。未宣称全量沙箱测试通过。 |
+| CHK-089 | 检查 | 调研设计文档中高频参考组件的 Linux/macOS 权限模型及与 LWA 场景的异同 | 2026-07-20 15:04 | 2026-07-20 15:04 | 已完成 | 统计三份 2026-07-03 讨论文档，按提及强度选 Docker、Caddy、Traefik；结合官方资料与当前源码/安装脚本，核对 Docker daemon/socket/组与 Rootless、macOS Desktop VM/特权 helper/文件共享、Caddy 低位端口/站点目录/本地 CA、Traefik Docker socket 风险；结论用于本次用户答复，未修改业务代码。 |
+| CHK-090 | 检查 | 复审计划文档 §15 IMP-035 / §16 IMP-036 功能描述与 WBS（对照现码删除入口与平台门禁） | 2026-07-20 15:04 | 2026-07-20 15:10 | 已完成 | 结论：IMP-035 交互清晰但非空 data 现为 HTTP 500，建议 035.04 先定稳定错误码；IMP-036 矩阵合理但文档/setup 仍暗示 Windows 原生、Debian 宣称须卡 036.05、doctor --json 缺独立 WBS；§14 文首已落地与 §14 状态「待开发」矛盾。详见会话审查。 |
+| CHK-091 | 检查 | 重新审查全部未提交代码并对照 task-list 与 IMP-035/036 计划逐项核验 | 2026-07-20 17:42 | 2026-07-20 17:42 | 已完成 | 确认 BUG-260～264；全量 pytest 通过且 4 项真实 Docker 测试跳过；diff-check、compileall、Node/Shell 语法检查通过；同步纠正统计摘要漂移 |
+| CHK-092 | 检查 | 复查 BUG-260～267 修复结果并重新执行最小复现、定向测试和全量回归 | 2026-07-20 18:21 | 2026-07-20 18:21 | 已完成 | BUG-262～267 复查通过；BUG-260/261 仍有生产路径与支持矩阵边界未闭环，已恢复待修复；定向测试通过，全量 pytest 通过且 4 项真实 Docker 测试跳过，diff-check/compileall/Node/Shell 语法检查通过 |
+| CHK-093 | 检查 | 逐份审计 design/achievement 全部 13 份 Markdown 的功能实现状态 | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 按明确缺口与当前源码/测试/task-list 交叉核对；确认 5 项待开发功能，结论见计划 §17。 |
 
 ## 测试数据
 
@@ -441,6 +468,13 @@
 | DOC-047 | 文档 | 同步 V0.6.3 / IMP-033·034 用户文档：README、faq、operations-playbook、known-limitations、manager-page、runtime-workspace、autostart、security-boundary、release-checklist 与 setup/diagnose/autostart skills | 2026-07-19 09:18 | 2026-07-19 09:30 | 已完成 | 对齐 Full Profile 能力闭环、--resume、capabilities、日志分文件、capability_denied、SupplementaryGroups 说明；历史 DOC-042 不动。 |
 | DOC-048 | 文档 | V0.6.3 文档复核：修正计划文档 §13「止血状态」过时表述；确认用户文档已对齐 IMP-033/034，无需再改版本号 | 2026-07-19 22:28 | 2026-07-19 22:28 | 已完成 | design/plan §13 改为主路径已落地；pack-release-zip 示例改 0.6.3；问题收集历史记录不动。 |
 | DOC-049 | 文档 | 按代码修正 Full 需工作区与 default/Full 降级口径文档 | 2026-07-19 22:34 | 2026-07-19 22:34 | 已完成 | DOC-049：README/faq/operations-playbook/runtime-workspace/known-limitations + lwa-setup-host-environment/skills README |
+| DOC-050 | 文档 | 新增 IMP-035/036 规划并同步计划文档标题、范围、依赖依据、验收标准与 task-list 映射 | 2026-07-20 15:00 | 2026-07-20 15:00 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md；引用 Python、Node、Docker、Microsoft WSL、Homebrew 官方支持矩阵 |
+| DOC-051 | 文档 | 根据 CHK-090 复审结论修订 IMP-035/036 契约、WBS 顺序与平台对外口径 | 2026-07-20 15:48 | 2026-07-20 15:48 | 已完成 | §15 前置 409 data_nonempty 与成功响应契约；§16 将 Windows 文档清理升为同迭代 P0、补 doctor JSON、拆分 WSL WBS、强化 Debian 宣称门槛；同步修正 §13/14 状态口径 |
+| DOC-052 | 文档 | IMP-035：更新 manager-page/faq，区分仅移除与彻底删除及 data_nonempty 契约 | 2026-07-20 16:32 | 2026-07-20 16:32 | 已完成 | docs/manager-page.md、docs/faq.md；配合 DEV-080 |
+| DOC-053 | 文档 | IMP-036：清理 Windows 原生推销并同步支持矩阵文档/Skills | 2026-07-20 16:56 | 2026-07-20 16:59 | 已完成 | README/faq/autostart/known-limitations/setup/Skills；配合 DEV-081；计划文首与§16状态同步 |
+| DOC-054 | 文档 | 同步 V0.6.4 / IMP-035·036 用户文档与 Skills：平台 LTS/Stable 矩阵、doctor --json 未 init、Full/autostart /mnt 仅 WSL、删除模态焦点 | 2026-07-20 18:44 | 2026-07-20 18:44 | 已完成 | README/faq/known-limitations/operations-playbook/autostart/manager-page/release-checklist/acceptance-checklist；skills lwa-setup-host-environment/autostart/update-runtime |
+| DOC-055 | 文档 | 补充 IMP-037～041 功能定义、验收标准与可执行 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 更新 design/plan/local-webpage-access-新增功能点2607.md §17～§22。 |
+| DOC-056 | 文档 | 计划文档删除原 IMP-040/041，新增 LAN 新鲜度 IMP-040（§21），并修订 §17 优先级 | 2026-07-20 19:07 | 2026-07-20 19:07 | 已完成 | 用户确认删除 pull/Vite 元数据；记录管理页点端口仍用旧 lanUrl 问题与方案 A |
 
 ## 功能开发
 
@@ -525,6 +559,14 @@
 | DEV-077 | 开发 | IMP-034：实现日志可观测性补强（WBS-034.01～07） | 2026-07-18 23:43 | 2026-07-19 01:10 | 已完成 | CLI/daemon/manager/gateway 分文件落盘、lifecycle_stage、capability probe、FAQ 排障地图已落地；收口见 DEV-079。 |
 | DEV-078 | 开发 | IMP-033：落地 Full Profile CapabilityReport、观测 unknown 模型、Caddy owner fail-closed、setup --full --resume、doctor/capabilities、管理页 degraded 横幅（DEV-076 主路径） | 2026-07-19 01:12 | 2026-07-19 01:10 | 已完成 | 分支 feat/imp033-034-full-profile-observability；含 capability.py、registry schema v2、lifecycle observe_degraded、install-caddy already_good disable、strict detect_backend。033.13 实机验收与 system unit SupplementaryGroups 完整路径仍可后续补强。 |
 | DEV-079 | 开发 | IMP-034：CLI/daemon/manager/gateway 分文件落盘、lifecycle_stage 事件、capability probe 日志、FAQ 排障地图（DEV-077） | 2026-07-19 01:12 | 2026-07-19 01:10 | 已完成 | setup_logging 支持 log_filename；bootstrap 写 lwa.log；observe_degraded 与 capability probe 对齐 CapabilityReport 字段名。 |
+| DEV-080 | 开发 | IMP-035：实现管理页任意项目仅移除/彻底删除与二次确认 | 2026-07-20 15:00 | 2026-07-20 16:32 | 已完成 | WBS-035.01～05：DataNonemptyError→409 data_nonempty；成功回显 purge/force；全实例删除双阶段模态；docs manager-page/faq；相关 pytest+node --check 通过。035.06 浏览器实机可后续补 |
+| DEV-081 | 开发 | IMP-036：实现正式平台门禁、Debian支持、WSL2检查与 Windows 原生 fail-fast | 2026-07-20 15:00 | 2026-07-20 16:56 | 已完成 | 主路径落地：PlatformSupportReport + require_supported_platform；CLI/doctor/服务门禁；install-*-linux.sh 支持 Ubuntu/Debian；WSL2/systemd/包版本、/mnt fail-closed、双 Engine 冲突；文档/setup/Skills 去掉 Windows 原生推销。036.08 实机验收清单与 036.09 Windows 分支清理可后续补强。 |
+| DEV-082 | 开发 | 实现 IMP-037：网关后端原子切换与状态一致性 | 2026-07-20 18:53 | - | 待开发 | 按 §18 的 037.01～037.07 实施；先补事务失败与回滚测试。 |
+| DEV-083 | 开发 | 实现 IMP-038：升级后访问地址与可用性复核闭环 | 2026-07-20 18:53 | - | 待开发 | 按 §19 的 038.01～038.06 实施；覆盖 CLI、Skill、doctor 与升级钩子。 |
+| DEV-084 | 开发 | 实现 IMP-039：进行中构建的可控取消 | 2026-07-20 18:53 | - | 待开发 | 按 §20 的 039.01～039.07 实施；重点验证进程树终止、锁释放与重启恢复。 |
+| DEV-085 | 开发 | 实现 IMP-040：lwa update --pull 安全拉取源码后升级 | 2026-07-20 18:53 | 2026-07-20 19:07 | 已关闭 | 原 IMP-040 update --pull 已从计划删除；范围取消。|
+| DEV-086 | 开发 | 实现 IMP-041：Vite 源码开发/预览端口元数据检测与展示 | 2026-07-20 18:53 | 2026-07-20 19:07 | 已关闭 | 原 IMP-041 Vite 端口元数据已从计划删除；范围取消。|
+| DEV-087 | 开发 | 实现 IMP-040：管理页/DTO LAN 地址新鲜度与漂移自愈（读时现算 + 节流 refresh） | 2026-07-20 19:07 | - | 待开发 | 按 §21 的 040.01～040.07；与 DEV-083(IMP-038) 同批优先；原 DEV-085/086 已关闭 |
 
 ## 配置运维
 
@@ -583,6 +625,7 @@
 | OPS-051 | 运维 | 应用版本号提升至 V0.6.3：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 同步 | 2026-07-19 09:14 | 2026-07-19 09:16 | 已完成 | 全仓活跃 0.6.1→0.6.3；历史 task-list/OPS-048～049 与 resolve 优先级夹具(0.5.3/0.5.2)保留。lwa version 仍取 git HEAD 主题，提交 V0.6.3-BuildXXXX 后即显示 V0.6.3。 |
 | OPS-052 | 运维 | 复核 V0.6.3 全仓活跃版本引用并补齐遗漏示例 | 2026-07-19 22:28 | 2026-07-19 22:28 | 已完成 | 确认 pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 已为 0.6.3；补 scripts/pack-release-zip.sh 示例 0.6.1→0.6.3；问题收集/与 task-list 历史条目保留不动。 |
 | OPS-053 | 运维 | 将 feat/imp033-034-full-profile-observability 快进合并入 main 并删除本地功能分支 | 2026-07-19 22:56 | 2026-07-19 23:00 | 已完成 | 本地：main 快进 e321d32→5a6f461（V0.6.3-Build1349），本地功能分支已删除。远程：因代理 CONNECT 502 / GitHub 不可达，origin/main 推送与远程分支删除未完成，待网络恢复后执行 git push origin main && git push origin --delete feat/imp033-034-full-profile-observability。 |
+| OPS-054 | 运维 | 应用版本号提升至 V0.6.4：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime/pack-release-zip 同步 | 2026-07-20 18:44 | 2026-07-20 18:44 | 已完成 | 全仓活跃 0.6.3→0.6.4；task-list 历史 OPS-051～053 与 resolve 优先级夹具(0.5.x)保留。lwa version 仍取 git HEAD 主题，提交 V0.6.4-BuildXXXX 后即显示 V0.6.4。 |
 
 ## 规划事项
 
@@ -603,17 +646,26 @@
 | PLN-013 | 规划 | IMP-032：setup/init 增加 --default/--full 环境装配档位（full 检查并安装 Caddy+Docker+Compose） | 2026-07-17 17:11 | 2026-07-17 17:11 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §12；default=现网行为；full=按 MIN_* 检查并内置脚本装齐。依赖 IMP-031/DEV-074；落地对应 DEV-075。 |
 | PLN-014 | 规划 | IMP-033：Full Profile 权限契约与 LWA/Caddy/Docker 能力闭环 WBS | 2026-07-18 23:33 | 2026-07-18 23:33 | 已完成 | 已在 design/plan/local-webpage-access-新增功能点2607.md §13 完成问题分析、强制能力契约、统一 service identity、Docker/Caddy 权限、状态语义、原子 setup 流程、14 项 WBS、验收与风险设计。 |
 | PLN-015 | 规划 | IMP-034：日志可观测性补强 WBS（CLI/daemon 落盘、生命周期阶段事件、能力探测结构化日志） | 2026-07-18 23:43 | 2026-07-18 23:45 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §14；优先 034.01～02，对齐 IMP-033 CapabilityReport。 |
+| PLN-016 | 规划 | IMP-035：管理页任意项目安全删除（二次确认）交互、安全边界与可执行 WBS | 2026-07-20 15:00 | 2026-07-20 15:00 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §15；采用 C 方案：仅移除/彻底删除二选一，第二步输入完整项目 ID，非空 data force 不自动升级 |
+| PLN-017 | 规划 | IMP-036：Linux裸机、WSL2 Linux、macOS 正式支持矩阵、最低版本与 Windows 原生阻断 WBS | 2026-07-20 15:00 | 2026-07-20 15:00 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §16；基线 kernel>=5.15、Ubuntu>=22.04 LTS、Debian>=12、WSL>=2.1.5+systemd、macOS当前及前两版；arm64/x86_64 |
+| PLN-018 | 规划 | IMP-037：网关后端原子切换与 manifest/registry 状态一致性 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §18；落地对应 DEV-082。 |
+| PLN-019 | 规划 | IMP-038：升级后访问地址刷新、可用性复核与 Skill/doctor 闭环 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §19；落地对应 DEV-083。 |
+| PLN-020 | 规划 | IMP-039：进行中构建可控取消的状态机、进程终止与恢复 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 详见 design/plan/local-webpage-access-新增功能点2607.md §20；落地对应 DEV-084。 |
+| PLN-021 | 规划 | IMP-040：lwa update --pull 安全拉取源码后升级 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 原规划已完成；2026-07-20 该 IMP 已从计划删除，DEV-085 已关闭。新 IMP-040（LAN 新鲜度）见 PLN-024/DEV-087。 |
+| PLN-022 | 规划 | IMP-041：Vite 源码开发/预览端口元数据检测与展示 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 原规划已完成；2026-07-20 该 IMP 已从计划删除，DEV-086 已关闭。 |
+| PLN-023 | 规划 | 评审 IMP-037～041 开发优先级：038/039=P0，037=P1，040=P2可延后，041=P3建议搁置 | 2026-07-20 18:58 | 2026-07-20 18:58 | 已完成 | 写入 design/plan §17.3～17.4；推荐落地顺序 038→039→037；040/041 非近两轮刚需 |
+| PLN-024 | 规划 | IMP-040：管理页 LAN 地址新鲜度与漂移自愈（读时现算+节流落盘；替换已删的 update --pull） | 2026-07-20 19:07 | 2026-07-20 19:07 | 已完成 | design/plan §21；检查阶段 R1～R7；与 IMP-038 共享 refresh；落地 DEV-087 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 251 | 251 | 0 | 100% |
+| 代码 Bug | 267 | 267 | 0 | 100% |
 | 调整事项 | 29 | 29 | 0 | 100% |
-| 检查事项 | 81 | 81 | 0 | 100% |
+| 检查事项 | 91 | 91 | 0 | 100% |
 | 测试数据 | 1 | 1 | 0 | 100% |
-| 文档维护 | 49 | 49 | 0 | 100% |
-| 功能开发 | 79 | 79 | 0 | 100% |
-| 配置运维 | 53 | 53 | 0 | 100% |
-| 规划事项 | 15 | 15 | 0 | 100% |
-| **总计** | 558 | 558 | 0 | 100% |
+| 文档维护 | 56 | 56 | 0 | 100% |
+| 功能开发 | 87 | 83 | 4 | 95% |
+| 配置运维 | 54 | 54 | 0 | 100% |
+| 规划事项 | 24 | 24 | 0 | 100% |
+| **总计** | 609 | 605 | 4 | 99% |

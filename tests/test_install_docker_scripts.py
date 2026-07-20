@@ -114,3 +114,33 @@ def test_caddy_linux_guards_against_ubuntu_old_package() -> None:
     assert "避免 apt 静默装上 Ubuntu universe 旧包" in text
     # curl 须带 -S，避免 -s 静默失败导致「无报错就回到 shell」
     assert "curl -1sSfL" in text
+
+
+def test_linux_script_supports_debian_family_without_ubuntu_spoof() -> None:
+    """IMP-036：Debian 走 /linux/debian，不得伪装成 Ubuntu 代号。"""
+    text = _LINUX.read_text(encoding="utf-8")
+    assert "detect_debian_family" in text
+    assert "/linux/debian" in text or 'linux/${family}' in text or "linux/${family}" in text
+    assert "bookworm" in text
+    # 不得在 Debian 分支写死 ubuntu apt 路径伪装
+    assert "不得" in text or "严禁" in text or "debian" in text.lower()
+
+
+def test_linux_script_rejects_debian_sid_and_ubuntu_non_lts() -> None:
+    """BUG-261：安装脚本拒绝 Debian sid 与 Ubuntu 非 LTS。"""
+    text = _LINUX.read_text(encoding="utf-8")
+    assert "sid|unstable|testing" in text
+    assert "die" in text
+    assert "jammy|noble" in text
+    assert "questing" not in text
+    caddy = (_SCRIPTS / "install-caddy-linux.sh").read_text(encoding="utf-8")
+    assert "LTS" in caddy
+    assert "sid|unstable|testing" in caddy
+    assert "jammy|noble" in caddy
+
+
+def test_caddy_linux_script_accepts_debian() -> None:
+    caddy = _SCRIPTS / "install-caddy-linux.sh"
+    text = caddy.read_text(encoding="utf-8")
+    assert "detect_debian_family" in text
+    assert "Debian" in text or "debian" in text

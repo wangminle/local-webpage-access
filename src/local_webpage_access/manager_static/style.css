@@ -773,3 +773,79 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   .ip-list { display: block; }
   .ip-list-panel { position: static; max-width: none; box-shadow: none; border-color: var(--border); }
 }
+
+/* ---- IMP-035：删除确认模态 ---- */
+.remove-dialog-box {
+  max-width: 520px;
+}
+.remove-dialog-meta {
+  margin: 0 0 14px;
+}
+.remove-dialog-meta p {
+  margin: 0 0 4px;
+}
+.remove-dialog-id {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.remove-dialog-hint,
+.remove-dialog-warn {
+  margin: 0 0 12px;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+.remove-dialog-warn {
+  color: var(--red);
+  background: var(--red-bg);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.remove-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.remove-option input {
+  margin-top: 3px;
+}
+.remove-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.remove-dialog-field span {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.remove-dialog-field input {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+}
+.remove-dialog-error {
+  margin: 0 0 10px;
+  color: var(--red);
+  font-size: 0.9rem;
+}
+.remove-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+@media (max-width: 520px) {
+  .remove-dialog-actions {
+    flex-direction: column-reverse;
+  }
+  .remove-dialog-actions .btn {
+    width: 100%;
+  }
+}

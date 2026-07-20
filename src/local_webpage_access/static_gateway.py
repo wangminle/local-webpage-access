@@ -983,25 +983,7 @@ class StaticGateway:
         if pid is not None and self._pid_alive(pid):
             result["pid"] = pid
             result["workspace_match"] = True
-            # 尽量读 euid
-            try:
-                if hasattr(os, "stat"):
-                    # Linux: /proc/<pid>/status Uid
-                    status_path = Path(f"/proc/{pid}/status")
-                    if status_path.is_file():
-                        for line in status_path.read_text(encoding="utf-8").splitlines():
-                            if line.startswith("Uid:"):
-                                euid = int(line.split()[1])
-                                result["process_user"] = str(euid)
-                                try:
-                                    import pwd
-
-                                    result["process_user"] = pwd.getpwuid(euid).pw_name
-                                except Exception:  # noqa: BLE001
-                                    pass
-                                break
-            except Exception:  # noqa: BLE001
-                pass
+            result["process_user"] = self._process_user_for_pid(pid)
             service_user = getattr(self.config, "serviceUser", None) or getpass.getuser()
             proc_user = result["process_user"]
             if proc_user is None:
@@ -1385,6 +1367,77 @@ class StaticGateway:
                 return True
             time.sleep(0.1)
         return _exited()
+
+    @staticmethod
+    def _process_user_for_pid(pid: int) -> str | None:
+        """跨平台读取进程有效用户名（BUG-252：macOS/Windows 无 /proc）。
+
+        Linux 优先 ``/proc/<pid>/status`` Uid；其余 POSIX 用 ``ps -o user=``；
+        Windows 用 ``Invoke-CimMethod -MethodName GetOwner``（BUG-255）。
+        读不到返回 None（调用方 fail-closed）。
+        """
+        if pid <= 0:
+            return None
+        # Linux：/proc/<pid>/status Uid
+        status_path = Path(f"/proc/{pid}/status")
+        if sys.platform.startswith("linux") and status_path.is_file():
+            try:
+                for line in status_path.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("Uid:"):
+                        euid = int(line.split()[1])
+                        try:
+                            import pwd
+
+                            return pwd.getpwuid(euid).pw_name
+                        except Exception:  # noqa: BLE001
+                            return str(euid)
+            except (OSError, ValueError, IndexError):
+                pass
+        if sys.platform == "win32":
+            # BUG-255：CIM 实例方法须 Invoke-CimMethod，不可直接 .GetOwner()。
+            # 官方示例：Get-CimInstance ... | Invoke-CimMethod -MethodName GetOwner
+            from local_webpage_access.platform_detect import subprocess_hidden_kwargs
+
+            try:
+                result = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        (
+                            f"(Get-CimInstance Win32_Process -Filter "
+                            f"'ProcessId={int(pid)}' | "
+                            "Invoke-CimMethod -MethodName GetOwner).User"
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                    **subprocess_hidden_kwargs(),
+                )
+            except (FileNotFoundError, subprocess.SubprocessError, OSError):
+                return None
+            if result.returncode != 0:
+                return None
+            user = (result.stdout or "").strip()
+            return user or None
+        # macOS 及其他 POSIX：ps（无 /proc）
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "user=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        user = (result.stdout or "").strip()
+        return user or None
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:

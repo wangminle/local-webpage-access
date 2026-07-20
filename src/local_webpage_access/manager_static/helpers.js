@@ -237,6 +237,30 @@
     );
   };
 
+  // ---- IMP-035：删除对话框状态机纯函数 ----
+
+  LWA.canSubmitRemove = function (dlg) {
+    if (!dlg || dlg.submitting) return false;
+    if (dlg.step !== 2 && dlg.step !== 3) return false;
+    if (dlg.confirmId !== dlg.instanceId) return false;
+    if (dlg.mode === "purge" && !dlg.acknowledgeIrreversible) return false;
+    if (dlg.needForce && !dlg.acknowledgeForce) return false;
+    return true;
+  };
+
+  LWA.shouldElevateRemoveForce = function (errorCode) {
+    return errorCode === "data_nonempty";
+  };
+
+  LWA.buildRemoveQuery = function (purge, force) {
+    return (
+      "purge=" +
+      (purge ? "true" : "false") +
+      "&force=" +
+      (force ? "true" : "false")
+    );
+  };
+
   LWA.opsHtml = function (i) {
     var id = LWA.esc(i.id);
     var isRunning = i.status === "running";
@@ -244,6 +268,12 @@
       i.status === "building" ||
       i.status === "queued" ||
       i.status === "pending";
+    // IMP-035：删除在启停流转中也禁用（含 starting/stopping/removing）
+    var removeBusy =
+      inProgress ||
+      i.status === "starting" ||
+      i.status === "stopping" ||
+      i.status === "removing";
     var supportsAlias =
       i.runtime === "shared-static" || i.runtime === "docker-compose";
     var html = "";
@@ -270,15 +300,16 @@
     html += LWA.opBtn(id, "stop", "停止", !isRunning || inProgress);
     html += LWA.opBtn(id, "restart", "重启", inProgress);
     html += LWA.opBtn(id, "rebuild", "重建", inProgress);
-    if (i.redundant) {
-      html += LWA.opBtn(
-        id,
-        "remove",
-        "删除",
-        false,
-        "移除此冗余实例（registry 记录 + 停服）；同源最早者保留"
-      );
-    }
+    // IMP-035：所有实例显示删除入口（不再仅 redundant）
+    html += LWA.opBtn(
+      id,
+      "remove",
+      "删除",
+      removeBusy,
+      removeBusy
+        ? "实例正在启停/构建，暂时不能删除"
+        : "移除实例（可选择仅清 registry 或彻底删除项目文件）"
+    );
     return html;
   };
 
@@ -370,6 +401,9 @@
       window.__LWA_TEST_HOOKS__.rowHtml = LWA.rowHtml;
       window.__LWA_TEST_HOOKS__.pageviewHtml = LWA.pageviewHtml;
       window.__LWA_TEST_HOOKS__.sourceLabel = LWA.sourceLabel;
+      window.__LWA_TEST_HOOKS__.canSubmitRemove = LWA.canSubmitRemove;
+      window.__LWA_TEST_HOOKS__.shouldElevateRemoveForce = LWA.shouldElevateRemoveForce;
+      window.__LWA_TEST_HOOKS__.buildRemoveQuery = LWA.buildRemoveQuery;
     }
   }
   if (typeof module !== "undefined" && module.exports) {

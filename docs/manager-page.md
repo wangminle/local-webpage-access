@@ -55,7 +55,7 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上） |
 | POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁 |
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
-| POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019）；默认仅清 registry，`purge=true` 删磁盘，非空 `data/` 需 `force=true` |
+| POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
 | GET | `/api/instances/{id}/pageviews?limit=` | 单实例浏览量详情：按天分布 + 最近命中（IMP-024） |
 | GET | `/api/pageviews` | 全部实例浏览量汇总（惰性摄入日志后返回，IMP-024） |
@@ -72,7 +72,7 @@ lwa manager off         # 停止
 {"error": {"code": "not_found", "message": "实例 xxx 不存在"}}
 ```
 
-常见 code：`unauthorized`、`not_found`、`bad_request`、`lifecycle_error`、`capability_denied`、`recognition_error`、`internal`。
+常见 code：`unauthorized`、`not_found`、`bad_request`、`conflict`、`data_nonempty`（IMP-035：purge 遇非空 data/）、`lifecycle_error`、`capability_denied`、`recognition_error`、`internal`。
 
 ### 能力降级（IMP-033）
 
@@ -169,6 +169,25 @@ Authorization: Bearer <token>
 
 > 容器路径为尽力解析，数字可能近似；直连 hostPort 的访问默认不计入 Caddy 别名入口统计。
 
+### 单个实例删除（IMP-035）
+
+```http
+POST /api/instances/{id}/remove?purge=false&force=false
+Authorization: Bearer <token>
+```
+
+两种语义（与 CLI `lwa remove` 一致）：
+
+| 参数 | 含义 |
+| --- | --- |
+| `purge=false`（默认） | **仅移除**：停服 + 清 registry，**保留** `apps/<id>/` |
+| `purge=true` | **彻底删除**：在仅移除基础上再删 `apps/<id>/` |
+| `force=true` | 仅当 `purge=true` 且 `data/` 非空时需要；跳过非空保护 |
+
+成功响应至少含：`{"instanceId","action":"remove","purge","force"}`。
+
+若 `purge=true&force=false` 且 `data/` 非空，返回 HTTP **409**、错误码 **`data_nonempty`**（不是 500）。管理页据此进入「强制删除」再确认，**不会**自动带 `force=true` 重试。其他错误码不得进入 force 分支。
+
 ### 冗余实例（IMP-019）
 
 ```http
@@ -190,8 +209,9 @@ Authorization: Bearer <token>
 单页前端（`/`，Vue 3）提供：
 
 * **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）。
-* **实例列表**：每行显示名称（冗余实例带「冗余」徽章与行高亮）、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **删除**；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043）。
-* **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」。
+* **实例列表**：每行显示名称（冗余实例带「冗余」徽章与行高亮）、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing` 时禁用）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043）。
+* **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，规则不变）。
+* **删除确认（IMP-035）**：受控双阶段模态——① 选择「仅移除」（默认，`purge=false`）或「彻底删除」（`purge=true`）；② 输入完整项目 ID；彻底删除须勾选「理解数据不可恢复」。非空 `data/` 首次 purge 得 409 `data_nonempty` 后，再勾选强制确认才发 `force=true`（不自动重试）。打开时焦点进入对话框，Tab 限制在模态内，Esc/关闭后恢复触发按钮焦点。
 * **路径别名对话框**：`shared-static` 与 `docker-compose` 实例操作区「路径别名」按钮可用（pending/building/queued 态禁用）；输入 slug 保存或清除；校验错误在对话框内展示。builtin 后端下设置会失败并展示后端错误信息（IMP-022）。
 * **浏览量**：列表列展示累计访问；点击打开按天分布与最近命中弹窗（IMP-024）。
 

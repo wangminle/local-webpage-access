@@ -346,6 +346,12 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
             write_state(workspace, state)
         # BUG-077：backend 非 caddy 但 admin 仍在线 → 仍有残留 master，需关停
         if not gateway._admin_alive():
+            try:
+                from local_webpage_access.capability import clear_capability_cache
+
+                clear_capability_cache(workspace.root, "gateway")
+            except Exception:  # noqa: BLE001
+                pass
             log.info("staticGateway=%s 且无 Caddy master 在线，已清理服务态", backend)
             return True
         log.info(
@@ -353,7 +359,14 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
             backend,
         )
         stopped = gateway.caddy_stop()
-        if not stopped:
+        if stopped:
+            try:
+                from local_webpage_access.capability import clear_capability_cache
+
+                clear_capability_cache(workspace.root, "gateway")
+            except Exception:  # noqa: BLE001
+                pass
+        else:
             log.warning("Caddy master 停止失败（admin :2019 仍可能在线）")
         return stopped
 
@@ -364,6 +377,12 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
             state.enabled = False
             state.pid = None
             write_state(workspace, state)
+        try:
+            from local_webpage_access.capability import clear_capability_cache
+
+            clear_capability_cache(workspace.root, "gateway")
+        except Exception:  # noqa: BLE001
+            pass
         log.info("网关已停止")
     else:
         log.warning("网关停止失败，Caddy master 可能仍在运行（admin :2019）")
@@ -493,6 +512,11 @@ def run_service_main() -> int:
     parser.add_argument("--poll", type=float, default=10.0, help="admin 探活间隔（秒）")
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     args = parser.parse_args()
+
+    # IMP-036：服务直入口平台门禁（防止绕过 CLI）
+    from local_webpage_access.platform_support import require_supported_platform
+
+    require_supported_platform()
 
     workspace = Workspace(Path(args.workspace).resolve())
     setup_logging(

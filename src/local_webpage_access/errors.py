@@ -121,6 +121,15 @@ class LifecycleError(LwaError):
     code = "LIFECYCLE_ERROR"
 
 
+class DataNonemptyError(LifecycleError):
+    """purge 时 data/ 非空且未 force（IMP-035）。
+
+    稳定错误码 ``data_nonempty``，供管理 API 映射 HTTP 409，前端据此进入 force 再确认。
+    """
+
+    code = "data_nonempty"
+
+
 class HostingError(LwaError):
     """静态托管流程中的错误（缺少 index.html、形态不支持等）。"""
 
@@ -140,5 +149,6 @@ __all__ = [
     "BuildError",
     "DockerError",
     "LifecycleError",
+    "DataNonemptyError",
     "HostingError",
 ]

@@ -428,13 +428,113 @@ def collect_capability_report(
     return report
 
 
+# 能力缓存最大新鲜度（秒）。服务通常只在启动时写入；合并时另校验服务存活。
+CAPABILITY_CACHE_MAX_AGE_SECONDS = 24 * 3600
+# BUG-258：允许极小时钟漂移；超出此容差的未来 checkedAt 一律视为不新鲜。
+CAPABILITY_CACHE_CLOCK_SKEW_SECONDS = 60
+
+
+def _parse_checked_at(value: Any) -> float | None:
+    """解析 ISO ``checkedAt`` 为 epoch 秒；失败返回 None。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        from datetime import datetime
+
+        # 兼容 "Z" 后缀
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text).timestamp()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _cache_is_fresh(data: dict[str, Any], *, now_ts: float | None = None) -> bool:
+    """``checkedAt`` 在 ``[now - max_age, now + skew]`` 内才视为新鲜（BUG-258）。"""
+    import time
+
+    checked = _parse_checked_at(data.get("checkedAt"))
+    if checked is None:
+        return False
+    now = time.time() if now_ts is None else now_ts
+    age = now - checked
+    if age < -CAPABILITY_CACHE_CLOCK_SKEW_SECONDS:
+        return False
+    return age <= CAPABILITY_CACHE_MAX_AGE_SECONDS
+
+
+def _role_pid_matches(pid: int, role: str, workspace_root: Path) -> bool:
+    """PID 命令行是否归属指定后台角色与本工作区（BUG-256）。"""
+    from local_webpage_access.daemon import pid_cmdline_contains
+
+    root = str(workspace_root)
+    if role == "manager":
+        return pid_cmdline_contains(
+            pid, "local_webpage_access.manager_service", root
+        )
+    if role == "daemon":
+        return pid_cmdline_contains(pid, "local_webpage_access.daemon", root)
+    if role == "gateway":
+        return pid_cmdline_contains(pid, "caddy", root)
+    return False
+
+
+def _backend_role_alive(root: Path, role: str) -> bool:
+    """对应后台服务是否仍存活（BUG-253/256：停服或 PID 复用后不得信任缓存）。"""
+    from local_webpage_access.daemon import is_pid_alive
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(Path(root))
+
+    def _alive(pid: int | None) -> bool:
+        return bool(
+            pid
+            and is_pid_alive(pid)
+            and _role_pid_matches(pid, role, ws.root)
+        )
+
+    if role == "manager":
+        from local_webpage_access.manager_service import read_state
+
+        state = read_state(ws)
+        return bool(state and state.enabled and _alive(state.pid))
+    if role == "daemon":
+        from local_webpage_access.daemon import read_state
+
+        state = read_state(ws)
+        return bool(state and state.enabled and _alive(state.pid))
+    if role == "gateway":
+        from local_webpage_access.gateway_service import read_state
+
+        state = read_state(ws)
+        if not state or not state.enabled:
+            return False
+        if _alive(state.pid):
+            return True
+        # 服务态 enabled 但 pid 缺失时，回退看工作区 caddy.pid（仍校验身份）
+        caddy_pid_path = ws.run / "caddy.pid"
+        if caddy_pid_path.is_file():
+            try:
+                pid = int(caddy_pid_path.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                return False
+            return _alive(pid)
+        return False
+    return False
+
+
 def _merge_cached_backend_probes(
     report: CapabilityReport,
     root: Path,
     *,
     current_role: Literal["cli", "manager", "daemon", "gateway"] = "cli",
 ) -> None:
-    """合并其他后台角色的能力缓存；当前角色的实时探测永远优先。"""
+    """合并其他后台角色的能力缓存；当前角色的实时探测永远优先。
+
+    BUG-253：拒绝过期或对应服务已停的缓存；实时 Caddy 探测结果不被 gateway
+    缓存覆盖（仅在 live 仍为 unknown 时补齐）。
+    """
     cache_dir = root / "run"
     for role, attr in (
         ("manager", "manager_docker_access"),
@@ -450,7 +550,13 @@ def _merge_cached_backend_probes(
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        caps = data.get("capabilities") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            continue
+        if not _cache_is_fresh(data):
+            continue
+        if not _backend_role_alive(root, role):
+            continue
+        caps = data.get("capabilities")
         if not isinstance(caps, dict):
             continue
         if role == "manager" and caps.get("managerDockerAccess"):
@@ -460,14 +566,8 @@ def _merge_cached_backend_probes(
         elif role == "gateway":
             if caps.get("gatewayAccess"):
                 report.gateway_access = caps["gatewayAccess"]
-            if caps.get("caddyRuntime"):
-                report.caddy_runtime = caps["caddyRuntime"]
-            if caps.get("caddyOwner"):
-                report.caddy_owner = caps["caddyOwner"]
-            if caps.get("caddyProcessUser") is not None:
-                report.caddy_process_user = caps.get("caddyProcessUser")
-            if caps.get("caddyWorkspaceAccess"):
-                report.caddy_workspace_access = caps["caddyWorkspaceAccess"]
+            # BUG-253：实时 Caddy 探测结果优先，gateway 缓存不得覆盖 caddy* 字段。
+            # gatewayAccess 由 gateway 角色专属写入，仍可从存活缓存合并。
 
 
 def write_capability_cache(
@@ -488,6 +588,43 @@ def write_capability_cache(
     except OSError:
         pass
     return path
+
+
+def clear_capability_cache(
+    workspace_root: Path,
+    role: Literal["manager", "daemon", "gateway"],
+) -> None:
+    """停服时删除对应能力缓存，避免 CLI 合并到陈旧 ready（BUG-253）。"""
+    path = Path(workspace_root) / "run" / f"capability-{role}.json"
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def read_capability_health_fragment(workspace_root: Path) -> dict[str, Any] | None:
+    """读取 ``capability-manager.json`` 并转为 ``/api/health`` 片段；不可用返回 None。
+
+    BUG-257：必须校验新鲜度，拒绝异常退出残留的陈旧 ready，避免假绿窗口。
+    """
+    path = Path(workspace_root) / "run" / "capability-manager.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not _cache_is_fresh(data):
+        return None
+    return {
+        "profile": data.get("profile"),
+        "overall": data.get("overall", "unknown"),
+        "serviceUser": data.get("serviceUser"),
+        "capabilities": data.get("capabilities") or {},
+        "action": data.get("action"),
+    }
 
 
 def log_capability_probe(
@@ -608,9 +745,11 @@ def _default_action(report: CapabilityReport) -> str | None:
 
 
 __all__ = [
+    "CAPABILITY_CACHE_MAX_AGE_SECONDS",
     "CapabilityReport",
     "ObservationError",
     "classify_docker_observation_error",
+    "clear_capability_cache",
     "collect_capability_report",
     "current_service_user",
     "load_profile_state",
@@ -618,6 +757,7 @@ __all__ = [
     "probe_caddy_binary_state",
     "probe_caddy_runtime_fields",
     "probe_docker_access_state",
+    "read_capability_health_fragment",
     "resolve_profile_name",
     "save_profile_state",
     "write_capability_cache",

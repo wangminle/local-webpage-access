@@ -259,10 +259,25 @@ def doctor_cmd(
     检查 Python/Docker/Compose/端口/registry/磁盘/内存；提供 instance_id 时
     附加该实例的 manifest、状态、最近事件与日志诊断，并给出修复建议。
     ``--profile full`` 时额外输出 CapabilityReport 并按 Full 契约判定整体。
+
+    BUG-262：``--json`` 在未初始化工作区时仍输出 ``platformSupport``，便于只读平台诊断。
     """
     import json as json_mod
 
     from local_webpage_access.doctor import format_report, run_doctor
+    from local_webpage_access.platform_support import collect_platform_support_report
+
+    def _emit_platform_only_json(*, error: str | None = None) -> None:
+        payload: dict[str, Any] = {
+            "overall": "fail",
+            "instance_id": instance_id,
+            "checks": [],
+            "instance_checks": [],
+            "platformSupport": collect_platform_support_report().to_dict(),
+        }
+        if error:
+            payload["error"] = error
+        typer.echo(json_mod.dumps(payload, ensure_ascii=False, indent=2))
 
     try:
         ws, config, _reg = open_workspace_registry()
@@ -318,6 +333,9 @@ def doctor_cmd(
                 "instance_checks": [
                     c.to_dict() for c in report.instance_checks
                 ],
+                "platformSupport": collect_platform_support_report(
+                    workspace_root=ws.root
+                ).to_dict(),
             }
             if cap_payload is not None:
                 payload["capabilities"] = cap_payload
@@ -330,9 +348,16 @@ def doctor_cmd(
         if cap_payload and (profile == "full" or getattr(config, "profile", None) == "full"):
             if cap_payload.get("overall") in ("unready", "degraded"):
                 fail = True
+        # 平台 unsupported 时 JSON 仍已输出；用非零退出提示调用方
+        ps = collect_platform_support_report(workspace_root=ws.root)
+        if not ps.supported:
+            fail = True
         if fail:
             raise typer.Exit(code=1)
     except LwaError as exc:
+        if json_output:
+            _emit_platform_only_json(error=str(exc))
+            raise typer.Exit(code=1)
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)

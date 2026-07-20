@@ -496,6 +496,12 @@ def stop_manager(workspace: Workspace) -> bool:
         if discovered:
             state.pid = pid
         write_state(workspace, state)
+        try:
+            from local_webpage_access.capability import clear_capability_cache
+
+            clear_capability_cache(workspace.root, "manager")
+        except Exception:  # noqa: BLE001 — 清缓存失败不阻断停服
+            pass
         log.info("管理页已停止（pid=%s）", pid or state.pid)
     else:
         log.warning("管理页停止失败，进程可能仍在运行（pid=%s）", state.pid)
@@ -543,6 +549,11 @@ def run_service_main() -> int:
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     args = parser.parse_args()
 
+    # IMP-036：服务直入口平台门禁（防止绕过 CLI）
+    from local_webpage_access.platform_support import require_supported_platform
+
+    require_supported_platform()
+
     workspace = Workspace(Path(args.workspace).resolve())
     # BUG-116：写入 logs/lwa.log；uvicorn 等 stdout 由父进程重定向到 manager.log。
     setup_logging(
@@ -559,26 +570,8 @@ def run_service_main() -> int:
         log.error("managerEnabled=false，拒绝启动管理页子进程")
         return 2
 
-    # BUG-235：服务进程自身探测并写入 capability-manager.json
-    try:
-        from local_webpage_access.capability import (
-            collect_capability_report,
-            log_capability_probe,
-            write_capability_cache,
-        )
-
-        report = collect_capability_report(
-            workspace_root=workspace.root,
-            role="manager",
-            config_profile=getattr(config, "profile", None),
-            include_backend_cached=False,
-        )
-        level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
-        log_capability_probe("manager", report, level=level)
-        write_capability_cache(workspace.root, "manager", report)
-    except Exception:  # noqa: BLE001 — 探测失败不阻断管理页
-        log.exception("manager 能力自检失败")
-
+    # BUG-235 / BUG-254：能力探测改到 lifespan 后台线程，避免阻塞 uvicorn 监听；
+    # /api/health 只读启动缓存，不再同步跑 Docker/Caddy 探测。
     workspace.ensure_workspace_dirs()
     reg = Registry(workspace.db_path)
     reg.open()
@@ -621,6 +614,12 @@ def run_service_main() -> int:
                             port=st.port,
                         ),
                     )
+                    try:
+                        from local_webpage_access.capability import clear_capability_cache
+
+                        clear_capability_cache(workspace.root, "manager")
+                    except Exception:  # noqa: BLE001
+                        pass
     except LifecycleError:
         log.warning("已有管理页实例在运行，退出")
         return 0

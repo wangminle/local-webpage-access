@@ -765,7 +765,27 @@ def install(
     runner: SubprocessRunner = _default_runner,
 ) -> InstallResult:
     """生成（并可选启用）自启动单元。"""
+    # IMP-036 / BUG-260：仅 WSL + /mnt/<drive> 时 autostart 写路径 fail-closed
+    from local_webpage_access.platform_support import (
+        PlatformSupportReport,
+        assert_writable_workspace_allowed,
+    )
+
     plat = detect_platform()
+    try:
+        assert_writable_workspace_allowed(
+            ws.root,
+            report=PlatformSupportReport(platform=plat),
+        )
+    except SystemExit as exc:
+        msg = exc.code if isinstance(exc.code, str) else str(exc)
+        raise AutostartError(
+            msg
+            or (
+                "工作区位于 /mnt/<drive>（Windows 文件系统），autostart 写路径已阻断；"
+                "请迁移到 Linux 文件系统（如 ~/lwa）后再执行 lwa autostart install"
+            )
+        ) from exc
     backend = select_backend(plat)
     services = select_services(config, with_caddy=with_caddy)
     py = python_exe or sys.executable
@@ -1623,7 +1643,7 @@ def _check_wsl(ws: Workspace) -> CheckItem:
     on_mnt_c = str(ws.root).startswith("/mnt/c") or str(ws.root).startswith("/mnt/")
     notes = [f"发行版：{distro}"]
     if on_mnt_c:
-        notes.append("工作区在 /mnt/×（Windows 文件系统），IO 较慢，建议放 ~/ 下")
+        notes.append("工作区在 /mnt/×（Windows 文件系统）：Full/autostart 写路径 fail-closed，请迁移到 ~/lwa 等 Linux 路径")
     return CheckItem("wsl", "wsl", STATUS_WARN, "；".join(notes),
                      detail="WSL 发行版不随 Windows 开机自启；需 Windows 登录任务唤醒 + 网络可能变化（lwa access refresh）")
 

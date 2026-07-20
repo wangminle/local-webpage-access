@@ -419,14 +419,17 @@ def test_remove_purge_deletes_files(
 def test_remove_purge_protects_nonempty_data(
     workspace, registry, config, fake_runtime
 ) -> None:
-    """purge 但 data/ 非空且未 force → LifecycleError。"""
+    """IMP-035：purge 但 data/ 非空且未 force → DataNonemptyError(code=data_nonempty)。"""
+    from local_webpage_access.errors import DataNonemptyError
+
     _seed_container(workspace, registry, "api", deployed=False)
     data_dir = workspace.app_data("api")
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "app.sqlite").write_text("data")
 
-    with pytest.raises(LifecycleError, match="data/"):
+    with pytest.raises(DataNonemptyError, match="data/") as ei:
         remove_instance(workspace, config, registry, "api", purge=True, force=False)
+    assert ei.value.code == "data_nonempty"
     # 实例仍在（保护生效）
     assert registry.get_instance("api") is not None
 

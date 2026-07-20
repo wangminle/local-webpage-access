@@ -1115,6 +1115,12 @@ def stop_daemon(workspace: Workspace) -> bool:
     if stopped:
         with contextlib.suppress(FileNotFoundError, PermissionError):
             lock_path(workspace).unlink()
+        try:
+            from local_webpage_access.capability import clear_capability_cache
+
+            clear_capability_cache(workspace.root, "daemon")
+        except Exception:  # noqa: BLE001
+            pass
         log.info("daemon 已停止（pid=%s）", state.pid)
     else:
         log.warning("daemon 终止失败（pid=%s 仍存活），保留锁文件供重试", state.pid)
@@ -1137,6 +1143,11 @@ def daemon_status(workspace: Workspace) -> dict[str, Any]:
 # ---- CLI 入口（``python -m local_webpage_access.daemon --workspace ...``）-------
 
 
+def run_service_main() -> int:
+    """与 manager/gateway 对齐的服务入口别名（IMP-036）。"""
+    return _main()
+
+
 def _main() -> int:
     """watcher 子进程入口：解析参数并运行 watcher 主循环。"""
     import argparse
@@ -1148,6 +1159,11 @@ def _main() -> int:
     parser.add_argument("--poll", type=float, default=DEFAULT_POLL_INTERVAL, help="轮询间隔（秒）")
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     args = parser.parse_args()
+
+    # IMP-036：服务直入口平台门禁（防止绕过 CLI）
+    from local_webpage_access.platform_support import require_supported_platform
+
+    require_supported_platform()
 
     workspace = Workspace(Path(args.workspace).resolve())
     if not workspace.config_path.is_file():
@@ -1226,11 +1242,12 @@ def _main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(_main())
+    raise SystemExit(run_service_main())
 
 
 __all__ = [
     "DaemonState",
+    "run_service_main",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_STABLE_SECONDS",
     "DEFAULT_SUPERVISE_INTERVAL",
