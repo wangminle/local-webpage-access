@@ -15,7 +15,6 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -26,7 +25,7 @@ from local_webpage_access.compose import generate_compose, generate_env
 from local_webpage_access.config import Config
 from local_webpage_access.docker_runtime import DockerRuntime
 from local_webpage_access.dockerfile_templates import generate_dockerfile
-from local_webpage_access.errors import BuildError, DockerError, HostingError
+from local_webpage_access.errors import BuildCancelled, BuildError, DockerError, HostingError
 from local_webpage_access.logging import get_logger, write_instance_log
 from local_webpage_access.models import (
     DesiredState,
@@ -266,6 +265,21 @@ def build_and_host_frontend(
         registry.add_event(instance_id, "start", "前端实例已构建并启动")
         log.info("前端实例 %s 构建并启动", instance_id)
         return manifest
+    except BuildCancelled as exc:
+        registry.finish_build(
+            build_id,
+            status="cancelled",
+            error_summary=str(exc)[:500],
+        )
+        registry.update_status(
+            instance_id, Status.CANCELLED.value, last_error=str(exc)[:500]
+        )
+        manifest.status = Status.CANCELLED
+        manifest.lastError = str(exc)[:500]
+        manifest.touch()
+        with contextlib.suppress(Exception):
+            manifest.save(workspace.app_manifest_path(instance_id))
+        raise
     except Exception as exc:
         # WBS-11.11/12/13：构建失败标记 + 写表 + 上下文
         registry.finish_build(
@@ -389,6 +403,29 @@ def host_container(
         _stage("compose_up_start")
         runtime.up(instance_id)
         _stage("compose_up_done")
+    except BuildCancelled as exc:
+        if fresh_port:
+            try:
+                PortAllocator(config, registry).release_instance(instance_id)
+            except Exception:  # noqa: BLE001
+                log.warning("取消回滚释放实例 %s 端口失败", instance_id)
+        try:
+            latest = registry.list_builds(instance_id, limit=1)
+            if latest and latest[0]["id"] == build_id and latest[0]["status"] == "running":
+                registry.finish_build(
+                    build_id, status="cancelled", error_summary=str(exc)[:500]
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("取消 finish build 失败")
+        registry.update_status(
+            instance_id, Status.CANCELLED.value, last_error=str(exc)[:500]
+        )
+        manifest.status = Status.CANCELLED
+        manifest.lastError = str(exc)[:500]
+        manifest.touch()
+        with contextlib.suppress(Exception):
+            manifest.save(workspace.app_manifest_path(instance_id))
+        raise
     except Exception as exc:
         # 端口回滚：仅释放本轮新分配的端口（与 _enable_static / BUG-182 对称）。
         # 复用旧端口是上一轮成功部署的登记，失败时清掉会破坏 lanUrl 稳定性。
@@ -817,50 +854,10 @@ def _promote_to_root(src: Path, public_dir: Path) -> None:
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
-    """终止整个进程树（BUG-183）。
+    """终止整个进程树（BUG-183 / IMP-039）。委托 :mod:`build_process`。"""
+    from local_webpage_access.build_process import kill_process_tree
 
-    旧 ``subprocess.run(shell=True, timeout=...)`` 超时只 kill 直接 shell 子进程，
-    npm/pnpm/node 等孙进程成孤儿继续跑（构建槽位已释放后与后续 rebuild 并发，
-    击穿 buildConcurrency=1 的 OOM 保护；Windows 上孤儿还锁住 build.log 致
-    --purge 删除失败）。新进程组 + 组级 SIGKILL（POSIX）/ taskkill /T（Windows）
-    一并清掉子孙。
-    """
-    if proc.poll() is not None:
-        return
-    pid = proc.pid
-    try:
-        if sys.platform == "win32":
-            from local_webpage_access.platform_detect import subprocess_hidden_kwargs
-
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                timeout=15,
-                check=False,
-                **subprocess_hidden_kwargs(),
-            )
-        else:
-            try:
-                pgid = os.getpgid(pid)
-            except ProcessLookupError:
-                return
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(pgid, sig)
-                except ProcessLookupError:
-                    return
-                except PermissionError:
-                    break
-                try:
-                    proc.wait(timeout=5)
-                    return
-                except subprocess.TimeoutExpired:
-                    continue
-    except Exception:  # noqa: BLE001 — best-effort 清理，兜底 kill 直接进程
-        try:
-            proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
+    kill_process_tree(proc)
 
 
 def run_command(
@@ -873,9 +870,19 @@ def run_command(
 ) -> subprocess.CompletedProcess:
     """运行 shell 命令，stdout/stderr 追加写入 log_path。
 
-    命令来自项目识别器的确定性推断，``shell=True`` 可接受。超时时杀整个进程树
-    （BUG-183），不残留 npm/node 孙进程孤儿。
+    命令来自项目识别器的确定性推断，``shell=True`` 可接受。以独立进程组运行；
+    超时或 IMP-039 取消时杀整棵进程树（BUG-183），不残留 npm/node 孙进程孤儿。
     """
+    from local_webpage_access.build_process import (
+        current_build_instance_id,
+        get_build_process_hub,
+        kill_process_tree,
+        popen_new_session_kwargs,
+        worker_identity_token,
+    )
+    from local_webpage_access.errors import BuildCancelled
+    from local_webpage_access.logs import open_append
+
     log_path.parent.mkdir(parents=True, exist_ok=True)
     popen_kwargs: dict = {
         "cwd": str(cwd),
@@ -884,38 +891,100 @@ def run_command(
         "stderr": subprocess.STDOUT,
         "env": env,
         "text": True,
+        **popen_new_session_kwargs(),
     }
-    if sys.platform == "win32":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_kwargs["start_new_session"] = True
 
-    from local_webpage_access.logs import open_append
+    hub = get_build_process_hub()
+    instance_id = current_build_instance_id()
+
+    def _should_cancel() -> bool:
+        if instance_id is None:
+            return False
+        if hub.is_cancel_requested(instance_id):
+            return True
+        # 跨进程取消：读 build-locks 持久化标志
+        try:
+            from local_webpage_access.build_queue import _gates
+
+            for gate in list(_gates.values()):
+                if gate.is_cancel_requested(instance_id):
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
     with open_append(log_path) as fh:
         fh.write(f"\n$ {cmd}\n")
         fh.flush()
         proc = subprocess.Popen(cmd, **popen_kwargs)
+        identity = worker_identity_token(cmd)
+        if instance_id is not None:
+            hub.register(instance_id, proc, identity=identity)
+            _persist_worker(instance_id, proc, identity)
+        stdout_data = ""
+        timed_out = False
+        cancelled = False
+        completed_normally = False
         try:
-            stdout_data, _ = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_process_tree(proc)
-            try:
-                stdout_data, _ = proc.communicate(timeout=10)
-            except Exception:  # noqa: BLE001
-                stdout_data = ""
+            deadline = time.monotonic() + timeout
+            while True:
+                if _should_cancel():
+                    cancelled = True
+                    kill_process_tree(proc)
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    kill_process_tree(proc)
+                    break
+                try:
+                    chunk, _ = proc.communicate(timeout=min(0.25, remaining))
+                    if chunk:
+                        stdout_data = chunk
+                    completed_normally = True
+                    break
+                except subprocess.TimeoutExpired:
+                    # 部分输出由 Popen 内部缓冲保留，下次 communicate 自动累加，
+                    # 此处无需手动收集（手动收集会与最终全量返回重复）。
+                    continue
+            if not completed_normally:
+                # 仅在取消/超时（进程被杀、首次 communicate 未完成）时 drain
+                # 剩余输出。正常完成时 communicate() 已返回全量，二次调用会
+                # 重复返回同样的全量数据，导致构建日志翻倍（BUG-273）。
+                try:
+                    more, _ = proc.communicate(timeout=5)
+                    if more:
+                        stdout_data = (stdout_data or "") + more
+                except Exception:  # noqa: BLE001
+                    pass
             if stdout_data:
                 fh.write(stdout_data)
             fh.flush()
+        finally:
+            if instance_id is not None:
+                hub.unregister(instance_id, proc)
+                _clear_worker(instance_id)
+
+        if cancelled or (instance_id and _should_cancel()):
+            raise BuildCancelled(
+                f"构建已取消：{cmd}",
+                command=cmd,
+                instance_id=instance_id,
+            )
+        if timed_out:
             raise BuildError(
                 f"命令超时（{timeout}s）：{cmd}",
                 command=cmd,
                 timeout=timeout,
             )
-        if stdout_data:
-            fh.write(stdout_data)
-        fh.flush()
     if proc.returncode != 0:
+        # 取消杀树后 returncode 常非零：若已请求取消，优先报 BuildCancelled
+        if instance_id and _should_cancel():
+            raise BuildCancelled(
+                f"构建已取消：{cmd}",
+                command=cmd,
+                instance_id=instance_id,
+            )
         raise BuildError(
             f"命令失败（exit {proc.returncode}）：{cmd}",
             command=cmd,
@@ -923,6 +992,39 @@ def run_command(
             log_path=str(log_path),
         )
     return subprocess.CompletedProcess(args=cmd, returncode=proc.returncode, stdout="")
+
+
+def _persist_worker(instance_id: str, proc: subprocess.Popen, identity: str) -> None:
+    try:
+        import os
+
+        pgid = None
+        if sys.platform != "win32":
+            try:
+                pgid = os.getpgid(proc.pid)
+            except ProcessLookupError:
+                pgid = None
+        from local_webpage_access.build_queue import _gates
+
+        for gate in list(_gates.values()):
+            gate.update_build_task(
+                instance_id,
+                worker_pid=proc.pid,
+                worker_pgid=pgid,
+                worker_identity=identity,
+            )
+    except Exception:  # noqa: BLE001
+        log.debug("持久化 worker pid 失败", exc_info=True)
+
+
+def _clear_worker(instance_id: str) -> None:
+    try:
+        from local_webpage_access.build_queue import _gates
+
+        for gate in list(_gates.values()):
+            gate.update_build_task(instance_id, clear_worker=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _load_manifest(workspace: Workspace, instance_id: str) -> InstanceManifest:

@@ -99,6 +99,51 @@ def rebuild(instance_id: str = typer.Argument(..., help="要重建的实例 ID")
         raise typer.Exit(code=1)
 
 
+def cancel_build(
+    instance_id: str = typer.Argument(..., help="要取消构建的实例 ID"),
+) -> None:
+    """取消排队中或进行中的构建（IMP-039）。
+
+    排队任务立即 cancelled；进行中任务先 cancelling 再杀进程树，成功为
+    cancelled、失败为 cancel_failed——不会在仅收到请求时假报已停。
+    """
+    from local_webpage_access.lifecycle import cancel_build as do_cancel
+
+    try:
+        ws, config, reg = open_workspace_registry()
+        try:
+            result = do_cancel(ws, config, reg, instance_id)
+        finally:
+            reg.close()
+        outcome = getattr(result, "outcome", "unknown")
+        message = getattr(result, "message", "") or outcome
+        if outcome == "cancelled":
+            typer.secho(
+                f"已取消构建：{instance_id}（{message}）", fg=typer.colors.GREEN
+            )
+        elif outcome == "cancel_failed":
+            typer.secho(
+                f"取消失败：{instance_id}（{message}）",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        elif outcome == "already_done":
+            typer.secho(
+                f"无活动构建可取消：{instance_id}（{message}）",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            typer.secho(
+                f"取消请求结果={outcome}：{instance_id}（{message}）",
+                fg=typer.colors.YELLOW,
+            )
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
 def remove(
     instance_id: str = typer.Argument(None, help="要移除的实例 ID"),
     purge: bool = typer.Option(False, "--purge", help="同时删除 apps/<id>/ 磁盘文件"),
@@ -215,5 +260,6 @@ def register(app: typer.Typer) -> None:
     app.command()(stop)
     app.command()(restart)
     app.command()(rebuild)
+    app.command("cancel-build")(cancel_build)
     app.command()(remove)
     app.command()(logs)

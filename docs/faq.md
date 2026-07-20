@@ -177,6 +177,18 @@ status: pending
 * 用资源 profile 更小的实例（`resourceProfile: tiny`）。
 * 查看 `apps/<id>/logs/build.log` 定位具体失败步骤。
 
+### 取消进行中的构建
+
+排队中或正在 `npm`/`pip`/`docker compose build` 时可用：
+
+* CLI：`lwa cancel-build <id>`
+* 管理页：实例行「取消构建」
+* API：`POST /api/instances/{id}/cancel-build`
+
+取消只停止当前工作，**不会**自动删除构建缓存、旧镜像或用户数据。
+排队任务直接 `cancelled`；进行中会先进入 `cancelling`，再落到
+`cancelled` 或 `cancel_failed`（不会仅因发出请求就假报已停）。
+
 ### 容器启动后立即退出
 
 ```
@@ -218,6 +230,16 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 
 ## 访问类问题
 
+### 管理页「端口」打开旧局域网地址
+
+换 Wi-Fi / DHCP 续约后，本机 LAN IP 变了，但实例 `local-web.json` 里可能仍是旧 `lanUrl`：
+
+* **即时可用**：管理页列表的「端口」链接按**当前** LAN IP 读时合成（IMP-040），一般无需手动操作即可点开。
+* **落盘自愈**：列表轮询会节流调用 `access refresh`；也可 `POST /api/access/refresh` 或 CLI `lwa access refresh`。
+* **升级后**：`lwa update` 在重启 manager/daemon 之后固定 refresh（可选 `--no-review-access` 跳过轻量复核）。
+* **诊断**：`lwa doctor --json` 含 `currentLanIp` / `driftedInstanceIds`；深度探活用 `lwa doctor --access` 或 `lwa access review`（与 update report 同源）。
+* **`lanIpStrategy=manual`**：不会自动改写落盘；请确认 `manualLanIp` 仍正确。
+
 ### 别名入口白屏（页面空白 / 资源空 200 或 404）
 
 经路径别名访问 `http://<LAN-IP>:8080/<alias>/` 白屏，但端口直连 `http://<LAN-IP>:<hostPort>/` 正常：
@@ -228,7 +250,23 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 * **根因 B — 浏览器缓存了旧 HTML**：产物已重建为相对路径，但浏览器仍用重建前的旧 HTML（绝对路径 + 旧 hash）→ 同样白屏。重启 lwa / 网关无效（服务端已正确，问题在客户端缓存）。
   * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
   * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
-* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源空 200 对照，直接指出哪些实例需要 rebuild；`lwa gateway on` 也会在交接后默认跑一次。
+* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源空 200 对照，直接指出哪些实例需要 rebuild；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。
+
+### 如何在 Caddy 与 builtin 之间切换网关后端
+
+不要手改 YAML 再猜顺序，用原子命令（IMP-037）：
+
+```bash
+lwa gateway switch caddy                 # 升回 Caddy（需 PATH 中有合格版本）
+lwa gateway switch builtin               # 降级 builtin（Caddy 坏掉时也可用）
+lwa gateway switch builtin --dry-run     # 只看将影响的实例
+```
+
+- 切到 **builtin**：保留路径别名元数据（`routeHost`），但统一入口不可用；站点仍走各 hostPort。
+- 切回 **caddy**：按 manifest 重建别名片段并 reload。
+- 失败会回滚；若回滚也失败，结果带 `degraded` + `repairHint`，**不会**假报成功。
+- `--json` / `POST /api/gateway/switch` 返回中：`ok=true` 表示切换事务本身成功，但 **`ok` ≠ `fullyOk`**；`accessOk=false` 表示后端已切成功、访问复核仍有风险（不假绿）。`fullyOk` 需切换与访问复核均通过。
+- 管理页等价：`POST /api/gateway/switch`（body `{"backend":"caddy"|"builtin"}`）。
 
 ## 数据与清理
 
@@ -242,6 +280,13 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 * 管理页首次会收到 HTTP 409 / `data_nonempty`，须在对话框中再次勾选「强制删除非空 data/」后才会带 `force=true`（不会自动重试）。
 
 两种路径都要二次确认项目 ID；取消任一步不会发请求。批量「删除冗余」仍只针对冗余实例，与单项目删除入口独立。
+
+**删除后如何对账（IMP-041）**：
+
+* `manager.log` / `lwa.log` 中按时间序 grep `remove stage=`，可见 `begin` → `stop` / `compose_down` / `alias_cleanup` → `registry_delete` → `done`；失败或跳过会标 `result=warn|skip|fail`。
+* registry `events` 在实例行删除后仍保留 orphan 总览（`event_type=remove`）与阶段事件（`event_type=remove_stage`），message 含实例 ID。
+* 管理页破坏性请求另有一行 `audit remove instance=… status=… code=…`（不含 token）。
+* 若删除后路径别名入口仍 502：确认 `static-gateway/aliases/<id>.conf` 已删、主 Caddyfile 无悬空 import；新版本 remove 会自动清理，历史残留可手工删片段后 `lwa gateway on` / reload。
 
 ### 如何备份
 

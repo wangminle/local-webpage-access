@@ -213,17 +213,40 @@ def _execute_streaming(
     log_path: Path,
     timeout: int,
 ) -> ComposeResult:
-    """有日志路径时先写命令头，再边跑边追加输出（BUG-229）。
+    """有日志路径时先写命令头，再边跑边追加输出（BUG-229 / IMP-039）。
 
-    stderr 合并进 stdout 写入日志；``ComposeResult.stderr`` 置空，
-    ``_require_ok`` 仍可通过 ``stderr or stdout`` 取到摘要。
-
-    读侧用后台线程 + ``queue``，避免 ``readline`` 阻塞导致超时无法触发。
+    stderr 合并进 stdout 写入日志；以独立进程组运行，超时/取消时 TERM→KILL 整树。
     """
+    from local_webpage_access.build_process import (
+        current_build_instance_id,
+        get_build_process_hub,
+        kill_process_tree,
+        popen_new_session_kwargs,
+        worker_identity_token,
+    )
+    from local_webpage_access.errors import BuildCancelled
     from local_webpage_access.logs import open_append
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     chunks: list[str] = []
+    hub = get_build_process_hub()
+    instance_id = current_build_instance_id()
+
+    def _should_cancel() -> bool:
+        if instance_id is None:
+            return False
+        if hub.is_cancel_requested(instance_id):
+            return True
+        try:
+            from local_webpage_access.build_queue import _gates
+
+            for gate in list(_gates.values()):
+                if gate.is_cancel_requested(instance_id):
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
     try:
         with open_append(log_path) as fh:
             fh.write(f"\n$ {' '.join(args)}\n")
@@ -238,12 +261,18 @@ def _execute_streaming(
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    **popen_new_session_kwargs(),
                 )
             except FileNotFoundError as exc:
                 raise DockerError(
                     "docker 命令未找到：请确认 Docker 已安装且 docker 在 PATH 中",
                     command=list(args),
                 ) from exc
+
+            identity = worker_identity_token(" ".join(args))
+            if instance_id is not None:
+                hub.register(instance_id, proc, identity=identity)
+                _persist_docker_worker(instance_id, proc, identity)
 
             assert proc.stdout is not None
             line_q: queue.Queue[str | None] = queue.Queue()
@@ -262,8 +291,12 @@ def _execute_streaming(
 
             deadline = time.monotonic() + timeout
             timed_out = False
+            cancelled = False
             try:
                 while True:
+                    if _should_cancel():
+                        cancelled = True
+                        break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         timed_out = True
@@ -278,9 +311,8 @@ def _execute_streaming(
                     fh.write(line)
                     fh.flush()
             finally:
-                if timed_out:
-                    _terminate_execute_process(proc)
-                # 排空队列残留
+                if timed_out or cancelled:
+                    kill_process_tree(proc)
                 while True:
                     try:
                         item = line_q.get_nowait()
@@ -294,11 +326,20 @@ def _execute_streaming(
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    _terminate_execute_process(proc)
+                    kill_process_tree(proc)
                     with contextlib.suppress(Exception):
                         proc.wait(timeout=5)
                 reader.join(timeout=5.0)
+                if instance_id is not None:
+                    hub.unregister(instance_id, proc)
+                    _clear_docker_worker(instance_id)
 
+            if cancelled:
+                raise BuildCancelled(
+                    f"构建已取消：{' '.join(args)}",
+                    command=list(args),
+                    instance_id=instance_id,
+                )
             if timed_out:
                 raise DockerError(
                     f"命令超时（{timeout}s）：{' '.join(args)}",
@@ -306,21 +347,52 @@ def _execute_streaming(
                     timeout=timeout,
                 )
             returncode = proc.returncode if proc.returncode is not None else -1
-    except DockerError:
+    except (DockerError, BuildCancelled):
         raise
 
     out = "".join(chunks)
     return ComposeResult(args=list(args), returncode=returncode, stdout=out, stderr="")
 
 
-def _terminate_execute_process(proc: subprocess.Popen) -> None:
-    """尽力终止 ``_execute_streaming`` 子进程（超时/异常路径）。"""
-    if proc.poll() is not None:
-        return
+def _persist_docker_worker(
+    instance_id: str, proc: subprocess.Popen, identity: str
+) -> None:
     try:
-        proc.kill()
+        import os
+        import sys
+
+        pgid = None
+        if sys.platform != "win32":
+            with contextlib.suppress(ProcessLookupError):
+                pgid = os.getpgid(proc.pid)
+        from local_webpage_access.build_queue import _gates
+
+        for gate in list(_gates.values()):
+            gate.update_build_task(
+                instance_id,
+                worker_pid=proc.pid,
+                worker_pgid=pgid,
+                worker_identity=identity,
+            )
+    except Exception:  # noqa: BLE001
+        log.debug("持久化 docker worker 失败", exc_info=True)
+
+
+def _clear_docker_worker(instance_id: str) -> None:
+    try:
+        from local_webpage_access.build_queue import _gates
+
+        for gate in list(_gates.values()):
+            gate.update_build_task(instance_id, clear_worker=True)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _terminate_execute_process(proc: subprocess.Popen) -> None:
+    """尽力终止 ``_execute_streaming`` 子进程树（超时/异常路径）。"""
+    from local_webpage_access.build_process import kill_process_tree
+
+    kill_process_tree(proc)
 
 
 def _require_ok(result: ComposeResult, *, action: str, instance_id: str) -> ComposeResult:
@@ -428,12 +500,25 @@ class DockerRuntime:
             timeout: 构建超时秒数。
         """
         log_path = log_path or self.workspace.app_logs(instance_id) / _BUILD_LOG
-        result = _execute(
-            self._compose_cmd(instance_id, "build"),
-            cwd=self.workspace.app_dir(instance_id),
-            log_path=log_path,
-            timeout=timeout,
-        )
+        try:
+            result = _execute(
+                self._compose_cmd(instance_id, "build"),
+                cwd=self.workspace.app_dir(instance_id),
+                log_path=log_path,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            from local_webpage_access.errors import BuildCancelled
+
+            if isinstance(exc, BuildCancelled):
+                if build_id is not None and self.registry is not None:
+                    self.registry.finish_build(
+                        build_id,
+                        status="cancelled",
+                        error_summary=str(exc)[:500],
+                    )
+                self._event(instance_id, "build_cancel", "镜像构建已取消")
+            raise
         if build_id is not None and self.registry is not None:
             if result.ok:
                 self.registry.finish_build(build_id, status="success")

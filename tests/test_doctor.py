@@ -1118,3 +1118,45 @@ def test_cli_dash_m_executable() -> None:
     assert result.returncode == 0
     # typer --help 输出包含根 app 用法
     assert "Usage:" in result.stdout or "Usage:" in result.stderr
+
+
+# ---- IMP-038/040：doctor --access 与 JSON 漂移字段 ---------------------------
+
+
+def test_run_doctor_json_fields_current_lan_and_drifted(env, monkeypatch) -> None:
+    """040.06：DoctorReport 暴露 currentLanIp / driftedInstanceIds。"""
+    from local_webpage_access.doctor import run_doctor
+
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws, reg, "demo", host_port=18000, lan_url="http://10.0.0.99:18000"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
+    )
+    report = run_doctor(ws, config)
+    assert report.current_lan_ip == "192.168.1.50"
+    assert "demo" in report.drifted_instance_ids
+
+
+def test_doctor_access_reuses_review_access(env, monkeypatch) -> None:
+    """038.03：doctor --access 委托 review_access，不重写探测。"""
+    from local_webpage_access.access import AccessReviewReport
+    from local_webpage_access.doctor import run_doctor
+
+    ws, config, reg = env
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000)
+    called = {"n": 0}
+
+    def fake_review(ws_, cfg, registry):
+        called["n"] += 1
+        return AccessReviewReport(lan_ip="192.168.1.50")
+
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.review_access", fake_review
+    )
+    report = run_doctor(ws, config, access_review=True)
+    assert called["n"] == 1
+    assert report.access_review is not None
+    assert report.access_review.lan_ip == "192.168.1.50"
+

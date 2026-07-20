@@ -206,6 +206,24 @@ def test_run_command_success(tmp_path: Path) -> None:
     assert log.is_file()
 
 
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="POSIX shell 语义",
+)
+def test_run_command_stdout_not_duplicated(tmp_path: Path) -> None:
+    """BUG-273：成功路径下 communicate 全量输出不应被二次 drain 翻倍。
+
+    轮询取消循环里，首次 communicate 成功已返回全量 stdout；若再调一次
+    communicate(timeout=5) 会重复返回同一份全量，导致构建日志翻倍。
+    """
+    log = tmp_path / "out.log"
+    # 用 seq 5 输出 1..5：命令文本不含 "3"，输出含一个 "3"。
+    # 若 stdout 被二次 drain 翻倍，"3" 会出现两次。
+    run_command("seq 5", cwd=tmp_path, log_path=log)
+    text = log.read_text(encoding="utf-8")
+    assert text.count("3") == 1, f"stdout 被重复收集：\n{text}"
+
+
 def test_run_command_rotates_log_before_append(tmp_path: Path, monkeypatch) -> None:
     """BUG-186：run_command 写日志须经 open_append（先滚动再追加）。"""
     from local_webpage_access import logs as logs_mod

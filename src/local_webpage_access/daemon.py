@@ -688,7 +688,14 @@ def reconcile(
     builtin 静态进程存活监管由本函数在 watcher 周期调用实现：进程死了 → observe 偏离 →
     下一轮 reconcile 重新 spawn。
     """
+    from local_webpage_access.access_workflow import maybe_throttled_lan_refresh
     from local_webpage_access.lifecycle import observe_status, start_instance
+
+    # IMP-040 R4：无管理页时也周期自愈落盘 lanUrl（与列表旁路共用节流 helper）
+    try:
+        maybe_throttled_lan_refresh(workspace, config, registry)
+    except Exception:  # noqa: BLE001
+        log.debug("daemon reconcile LAN refresh 失败", exc_info=True)
 
     restarter = restarter or start_instance
 

@@ -297,7 +297,7 @@ def test_start_gateway_records_switch_event_with_registry(
     fake_gateway["admin_alive"] = False
     refreshed = {"called": False}
     monkeypatch.setattr(
-        "local_webpage_access.access.refresh_network_entries",
+        "local_webpage_access.access_workflow.refresh_network_entries",
         lambda ws, cfg, reg: refreshed.__setitem__("called", True) or RefreshReport(),
     )
     start_gateway(workspace, config, registry=registry)
@@ -315,7 +315,7 @@ def test_start_gateway_without_registry_skips_finalize(
     fake_gateway["admin_alive"] = False
     called = {"n": 0}
     monkeypatch.setattr(
-        "local_webpage_access.access.refresh_network_entries",
+        "local_webpage_access.access_workflow.refresh_network_entries",
         lambda *a, **kw: called.__setitem__("n", called["n"] + 1),
     )
     start_gateway(workspace, config)  # 不传 registry
@@ -498,3 +498,72 @@ def test_gateway_start_lock_recovers_stale(workspace: Workspace) -> None:
         with gateway_start_lock(workspace, timeout=0.1):
             assert lock.is_file()
     assert not lock.exists()
+
+
+def test_run_gateway_foreground_refreshes_capability_after_start(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-270：Caddy 启动成功后才写入 capability 缓存，且 gatewayAccess=ready 记 INFO。"""
+    import threading
+
+    import local_webpage_access.capability as cap_mod
+    from local_webpage_access.capability import CapabilityReport
+    from local_webpage_access.gateway_service import run_gateway_foreground
+
+    workspace.ensure_workspace_dirs()
+    cfg = Config(staticGateway="caddy", staticGatewayPort=8080)
+    probe_order: list[str] = []
+    logged: list[tuple[str, str]] = []
+    real_write = cap_mod.write_capability_cache
+
+    def fake_start(ws, config):  # noqa: ANN001
+        probe_order.append("start")
+        return 4242
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        assert "start" in probe_order, "能力探测不得早于 start_gateway"
+        probe_order.append("collect")
+        return CapabilityReport(
+            profile="default",
+            overall="ready",
+            gateway_access="ready",
+            caddy_runtime="ready",
+        )
+
+    def fake_log_probe(role, report, *, level="INFO"):  # noqa: ANN001
+        logged.append((role, level))
+
+    def fake_write(root, role, report):  # noqa: ANN001
+        probe_order.append(f"write:{role}:{report.gateway_access}")
+        return real_write(root, role, report)
+
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.start_gateway", fake_start
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.is_gateway_running", lambda *a, **k: True
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.stop_gateway", lambda *a, **k: None
+    )
+    monkeypatch.setattr(cap_mod, "collect_capability_report", fake_collect)
+    monkeypatch.setattr(cap_mod, "log_capability_probe", fake_log_probe)
+    monkeypatch.setattr(cap_mod, "write_capability_cache", fake_write)
+
+    # 立刻触发 stop：首次 start + 能力刷新后进入 wait 即退出
+    real_event = threading.Event
+
+    class _ImmediateStop(real_event):
+        def wait(self, timeout=None):  # noqa: ANN001
+            return True
+
+    monkeypatch.setattr("threading.Event", _ImmediateStop)
+
+    rc = run_gateway_foreground(workspace, cfg, poll_interval=0.01)
+    assert rc == 0
+    assert probe_order == ["start", "collect", "write:gateway:ready"]
+    assert logged == [("gateway", "INFO")]
+    cache = workspace.root / "run" / "capability-gateway.json"
+    assert cache.is_file()
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    assert data["capabilities"]["gatewayAccess"] == "ready"

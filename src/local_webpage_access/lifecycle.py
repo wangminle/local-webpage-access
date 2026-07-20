@@ -407,6 +407,24 @@ def rebuild_instance(
         return manifest
 
 
+def cancel_build(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> Any:
+    """取消排队中或进行中的构建（IMP-039）。
+
+    不持实例锁：构建线程可能正持有 ``instance_lock``；取消必须能并发介入。
+    返回 :class:`~local_webpage_access.build_queue.CancelResult`。
+    """
+    from local_webpage_access.build_queue import get_build_queue
+
+    _load(workspace, instance_id)  # 确认实例存在
+    queue = get_build_queue(config, registry)
+    return queue.cancel_build(instance_id)
+
+
 def remove_instance(
     workspace: Workspace,
     config: Config,
@@ -426,6 +444,9 @@ def remove_instance(
 
     ``purge=True``：额外删除 ``apps/<id>/`` 整个目录。当 ``data/`` 非空时必须
     同时传 ``force=True``，避免误删数据库与上传文件（WBS-17.10）。
+
+    IMP-041：各清理阶段写 INFO/WARNING 与 orphan ``remove_stage`` 事件，便于
+    删除后对账；总览 orphan ``remove`` 事件（BUG-047）仍保留。
     """
     from local_webpage_access.docker_runtime import DockerRuntime
     from local_webpage_access.hosting import stop_instance
@@ -437,6 +458,15 @@ def remove_instance(
         data_dir = workspace.app_data(instance_id)
         data_nonempty = data_dir.is_dir() and any(data_dir.iterdir())
         if purge and data_nonempty and not force:
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "data_guard",
+                "fail",
+                purge=purge,
+                force=force,
+                detail="data_nonempty",
+            )
             raise DataNonemptyError(
                 f"实例 {instance_id} 的 data/ 目录非空，删除前请确认"
                 f"（使用 --force 强制删除数据）",
@@ -453,28 +483,140 @@ def remove_instance(
                 "remove",
                 f"移除实例 {instance_id}（purge={purge}, force={force}）",
             )
+        _log_remove_stage(
+            registry, instance_id, "begin", "ok", purge=purge, force=force
+        )
 
         # 2. 停止实例（容忍缺失 manifest 或已停止）
         if manifest is not None:
             try:
                 stop_instance(workspace, config, registry, instance_id)
+                _log_remove_stage(
+                    registry, instance_id, "stop", "ok", purge=purge, force=force
+                )
             except LwaError as exc:
-                # 停止失败（Docker 不可用 / compose 缺失 / 网关异常等）不应阻塞移除，
-                # remove 默认只需清 registry 索引；容器残留由后续 down 兜底。
-                log.warning("移除前停止失败（继续清理）：%s", exc)
+                # 停止失败不应阻塞移除；继续清理 registry / 别名 / 磁盘。
+                _log_remove_stage(
+                    registry,
+                    instance_id,
+                    "stop",
+                    "warn",
+                    purge=purge,
+                    force=force,
+                    detail=str(exc),
+                )
             # 容器：彻底 down 释放容器（不删卷，data/ 是 bind mount 安全）
             if manifest.runtime.value == "docker-compose":
-                with contextlib.suppress(Exception):
+                try:
                     DockerRuntime(workspace, registry).down(instance_id)
+                    _log_remove_stage(
+                        registry,
+                        instance_id,
+                        "compose_down",
+                        "ok",
+                        purge=purge,
+                        force=force,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log_remove_stage(
+                        registry,
+                        instance_id,
+                        "compose_down",
+                        "warn",
+                        purge=purge,
+                        force=force,
+                        detail=str(exc),
+                    )
+            else:
+                _log_remove_stage(
+                    registry,
+                    instance_id,
+                    "compose_down",
+                    "skip",
+                    purge=purge,
+                    force=force,
+                    detail="not docker-compose",
+                )
+        else:
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "stop",
+                "skip",
+                purge=purge,
+                force=force,
+                detail="no manifest",
+            )
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "compose_down",
+                "skip",
+                purge=purge,
+                force=force,
+                detail="no manifest",
+            )
+
+        # 2.5 BUG-268 / IMP-041：全 runtime 清理路径别名（容器 stop 不走 disable）。
+        had_alias = workspace.app_alias_config(instance_id).is_file()
+        try:
+            from local_webpage_access.static_gateway import StaticGateway
+
+            StaticGateway(workspace, config).cleanup_instance_routes(instance_id)
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "alias_cleanup",
+                "ok" if had_alias else "skip",
+                purge=purge,
+                force=force,
+                detail="" if had_alias else "no alias",
+            )
+        except Exception as exc:  # noqa: BLE001 — 别名清理失败不阻断 remove
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "alias_cleanup",
+                "warn",
+                purge=purge,
+                force=force,
+                detail=str(exc),
+            )
 
         # 3. 删除 registry 记录（级联）
         registry.delete_instance(instance_id)
+        _log_remove_stage(
+            registry,
+            instance_id,
+            "registry_delete",
+            "ok",
+            purge=purge,
+            force=force,
+        )
 
-        # 3.5 清理浏览量统计（BUG-090）：避免残留 / 同 ID 复用时旧数据串到新实例。
-        with contextlib.suppress(Exception):
+        # 3.5 清理浏览量统计（BUG-090）
+        try:
             from local_webpage_access.pageviews import clear_instance_pageviews
 
             clear_instance_pageviews(workspace, instance_id)
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "pageviews_clear",
+                "ok",
+                purge=purge,
+                force=force,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "pageviews_clear",
+                "warn",
+                purge=purge,
+                force=force,
+                detail=str(exc),
+            )
 
         # 4. 可选：删除磁盘文件
         if purge:
@@ -485,14 +627,78 @@ def remove_instance(
             if app_dir.is_dir():
                 resolved = app_dir.resolve()
                 if not resolved.is_relative_to(apps_root):
+                    _log_remove_stage(
+                        registry,
+                        instance_id,
+                        "purge_tree",
+                        "fail",
+                        purge=purge,
+                        force=force,
+                        detail="path outside apps/",
+                    )
                     raise LifecycleError(
                         f"实例 {instance_id} 的目录解析到 apps/ 之外，拒绝删除",
                         instance_id=instance_id,
                     )
                 shutil.rmtree(resolved, ignore_errors=True)
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "purge_tree",
+                "ok",
+                purge=purge,
+                force=force,
+            )
+        else:
+            _log_remove_stage(
+                registry,
+                instance_id,
+                "purge_tree",
+                "skip",
+                purge=purge,
+                force=force,
+                detail="purge=false",
+            )
+
+        _log_remove_stage(
+            registry,
+            instance_id,
+            "done",
+            "ok",
+            purge=purge,
+            force=force,
+            detail="with_disk" if purge else "registry_only",
+        )
+        if purge:
             log.info("实例 %s 已移除（含磁盘文件）", instance_id)
         else:
             log.info("实例 %s 已从 registry 移除（保留 apps/ 目录）", instance_id)
+
+
+def _log_remove_stage(
+    registry: Registry,
+    instance_id: str,
+    stage: str,
+    result: str,
+    *,
+    purge: bool,
+    force: bool,
+    detail: str = "",
+) -> None:
+    """IMP-041：删除阶段 INFO/WARNING + orphan ``remove_stage`` 事件。"""
+    msg = (
+        f"remove stage={stage} instance={instance_id} "
+        f"purge={str(purge).lower()} force={str(force).lower()} "
+        f"result={result}"
+    )
+    if detail:
+        msg = f"{msg} detail={detail}"
+    if result in ("warn", "fail"):
+        log.warning("%s", msg)
+    else:
+        log.info("%s", msg)
+    with contextlib.suppress(Exception):
+        registry.add_event(None, "remove_stage", msg)
 
 
 # ---- IMP-012：冗余实例批量清理 --------------------------------------------
@@ -878,6 +1084,7 @@ __all__ = [
     "restart_instance",
     "recover_instance",
     "rebuild_instance",
+    "cancel_build",
     "remove_instance",
     "observe_status",
 ]

@@ -345,6 +345,54 @@ def test_health_does_not_call_collect_capability(manager_env: EnvBundle, monkeyp
     assert calls == []
 
 
+def test_capability_refresh_merges_daemon_and_gateway_caches(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-271：GET /api/capability?refresh=true 应汇总 daemon/gateway 能力缓存。"""
+    from local_webpage_access.capability import CapabilityReport, write_capability_cache
+
+    ws = manager_env.workspace
+    write_capability_cache(
+        ws.root,
+        "daemon",
+        CapabilityReport(daemon_docker_access="ready"),
+    )
+    write_capability_cache(
+        ws.root,
+        "gateway",
+        CapabilityReport(gateway_access="ready"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive",
+        lambda _root, role: role in ("daemon", "gateway"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_docker_access_state",
+        lambda: "ready",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_binary_state",
+        lambda: "ready",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_runtime_fields",
+        lambda _root: ("ready", "lwa_service_user", "fenix", "ready"),
+    )
+
+    resp = manager_env.client.get(
+        "/api/capability",
+        params={"refresh": "true"},
+        headers=manager_env.auth_headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    caps = body["capabilities"]
+    assert caps["daemonDockerAccess"] == "ready"
+    assert caps["gatewayAccess"] == "ready"
+    assert caps["managerDockerAccess"] == "ready"
+
+
 def test_container_lifecycle_blocked_when_docker_permission_denied(
     manager_env: EnvBundle, monkeypatch
 ) -> None:
@@ -759,6 +807,49 @@ def test_rebuild_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
         )
     assert resp.status_code == 200
     assert called == [manager_env.instance_id]
+
+
+def test_cancel_build_operation_returns_outcome(manager_env: EnvBundle) -> None:
+    """IMP-039：cancel-build API 返回结构化 outcome，不假报成功。"""
+    from local_webpage_access.build_queue import CancelResult
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "local_webpage_access.lifecycle.cancel_build",
+            lambda ws, cfg, reg, iid: CancelResult(
+                instance_id=iid,
+                outcome="noop",
+                message="无活动构建",
+            ),
+        )
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/cancel-build",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["action"] == "cancel-build"
+    assert body["outcome"] == "noop"
+
+
+def test_cancel_build_failed_returns_409(manager_env: EnvBundle) -> None:
+    from local_webpage_access.build_queue import CancelResult
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "local_webpage_access.lifecycle.cancel_build",
+            lambda ws, cfg, reg, iid: CancelResult(
+                instance_id=iid,
+                outcome="cancel_failed",
+                message="取消超时",
+            ),
+        )
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/cancel-build",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "cancel_failed"
 
 
 def test_recover_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
@@ -1554,6 +1645,54 @@ def test_api_remove_purge_nonempty_data_returns_409_data_nonempty(
     assert (data_dir / "keep.sqlite").is_file()
 
 
+def test_api_remove_writes_audit_log(
+    manager_env: EnvBundle, caplog: pytest.LogCaptureFixture
+) -> None:
+    """IMP-041：破坏性 remove API 写无 token 的 audit 行（成功与 409）。"""
+    import logging
+
+    from local_webpage_access.logging import get_logger
+
+    iid = manager_env.instance_id
+    data_dir = manager_env.workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "keep.sqlite").write_text("payload", encoding="utf-8")
+
+    logger = get_logger("manager")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            resp409 = manager_env.client.post(
+                f"/api/instances/{iid}/remove?purge=true&force=false",
+                headers=manager_env.auth_headers(),
+            )
+        assert resp409.status_code == 409
+        assert any(
+            "audit remove" in r.message
+            and f"instance={iid}" in r.message
+            and "status=409" in r.message
+            and "code=data_nonempty" in r.message
+            for r in caplog.records
+        )
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            resp_ok = manager_env.client.post(
+                f"/api/instances/{iid}/remove?purge=true&force=true",
+                headers=manager_env.auth_headers(),
+            )
+        assert resp_ok.status_code == 200
+        assert any(
+            "audit remove" in r.message
+            and f"instance={iid}" in r.message
+            and "status=200" in r.message
+            and "code=ok" in r.message
+            for r in caplog.records
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
 def test_api_remove_purge_force_nonempty_data_succeeds(manager_env: EnvBundle) -> None:
     """IMP-035：purge=true&force=true 可删除非空 data/，并回显参数。"""
     ws = manager_env.workspace
@@ -1604,3 +1743,202 @@ def test_api_redundant_remove_batch(manager_env: EnvBundle) -> None:
     ids = [i["id"] for i in resp2.json()["instances"]]
     assert dup_id not in ids
     assert manager_env.instance_id in ids  # 最早者保留
+
+
+# ---- IMP-040：LAN 地址新鲜度 / access refresh API ---------------------------
+
+
+def test_list_instances_lan_url_live_when_manifest_stale(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """旧落盘 lanUrl + mock 新 IP → 列表 API 返回新地址。"""
+    from local_webpage_access.models import InstanceManifest
+
+    iid = manager_env.instance_id
+    path = manager_env.workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(path)
+    assert manifest.network is not None
+    host_port = 21000
+    manifest.network.hostPort = host_port
+    if manifest.static:
+        manifest.static.hostPort = host_port
+    manifest.network.lanUrl = f"http://10.0.0.99:{host_port}"
+    manifest.save(path)
+    manager_env.registry.allocate_port(iid, host_port)
+    manager_env.registry.upsert_static_site(
+        iid,
+        {
+            "root": "public",
+            "gateway": "builtin",
+            "routeMode": "port",
+            "hostPort": host_port,
+            "routeHost": None,
+            "enabled": True,
+        },
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
+    )
+    # 避免列表旁路真写盘干扰断言（读时合成本身应正确）
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.maybe_throttled_lan_refresh",
+        lambda *a, **k: None,
+    )
+
+    resp = manager_env.client.get(
+        "/api/instances", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 200
+    item = next(i for i in resp.json()["instances"] if i["id"] == iid)
+    assert item["lanUrl"] == f"http://192.168.1.50:{host_port}"
+    assert item["currentLanIp"] == "192.168.1.50"
+    assert item["persistedLanIp"] == "10.0.0.99"
+    assert item["lanAddressStale"] is True
+
+
+def test_list_instances_throttles_refresh_write(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """列表旁路节流：窗口内不重复全量 refresh。"""
+    from local_webpage_access import access_workflow as aw
+    from local_webpage_access.models import InstanceManifest
+
+    iid = manager_env.instance_id
+    path = manager_env.workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(path)
+    host_port = 21000
+    assert manifest.network is not None
+    manifest.network.hostPort = host_port
+    if manifest.static:
+        manifest.static.hostPort = host_port
+    manifest.network.lanUrl = f"http://10.0.0.99:{host_port}"
+    manifest.save(path)
+    manager_env.registry.allocate_port(iid, host_port)
+    manager_env.registry.upsert_static_site(
+        iid,
+        {
+            "root": "public",
+            "gateway": "builtin",
+            "routeMode": "port",
+            "hostPort": host_port,
+            "routeHost": None,
+            "enabled": True,
+        },
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50"
+    )
+    aw.reset_lan_refresh_throttle_state()
+    calls = {"n": 0}
+    real = aw.refresh_network_entries
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(aw, "refresh_network_entries", counting)
+
+    h = manager_env.auth_headers()
+    assert manager_env.client.get("/api/instances", headers=h).status_code == 200
+    assert manager_env.client.get("/api/instances", headers=h).status_code == 200
+    assert calls["n"] == 1
+
+
+def test_manual_strategy_list_does_not_auto_refresh(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    from local_webpage_access import access_workflow as aw
+    from local_webpage_access.models import InstanceManifest
+
+    manager_env.config.lanIpStrategy = "manual"
+    manager_env.config.manualLanIp = "192.168.9.9"
+    iid = manager_env.instance_id
+    path = manager_env.workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(path)
+    host_port = 21000
+    assert manifest.network is not None
+    manifest.network.hostPort = host_port
+    if manifest.static:
+        manifest.static.hostPort = host_port
+    manifest.network.lanUrl = f"http://10.0.0.99:{host_port}"
+    manifest.save(path)
+    manager_env.registry.allocate_port(iid, host_port)
+    manager_env.registry.upsert_static_site(
+        iid,
+        {
+            "root": "public",
+            "gateway": "builtin",
+            "routeMode": "port",
+            "hostPort": host_port,
+            "routeHost": None,
+            "enabled": True,
+        },
+    )
+
+    aw.reset_lan_refresh_throttle_state()
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        aw,
+        "refresh_network_entries",
+        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1),
+    )
+    resp = manager_env.client.get(
+        "/api/instances", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 200
+    assert calls["n"] == 0
+    item = next(i for i in resp.json()["instances"] if i["id"] == iid)
+    assert item["lanUrl"] == f"http://192.168.9.9:{host_port}"
+    assert item["lanUrlSource"] == "manual"
+
+
+def test_post_access_refresh(manager_env: EnvBundle, monkeypatch) -> None:
+    from local_webpage_access.access import RefreshReport
+
+    monkeypatch.setattr(
+        "local_webpage_access.access.refresh_network_entries",
+        lambda *a, **k: RefreshReport(lan_ip="192.168.1.50"),
+    )
+    resp = manager_env.client.post(
+        "/api/access/refresh", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["lanIp"] == "192.168.1.50"
+
+
+def test_post_gateway_switch_dry_run(manager_env: EnvBundle, monkeypatch) -> None:
+    from local_webpage_access.gateway_switch import GatewaySwitchResult
+
+    def _fake_switch(ws, cfg, reg, target, *, dry_run=False, review=True):
+        assert target == "caddy"
+        assert dry_run is True
+        return GatewaySwitchResult(
+            ok=True,
+            noop=False,
+            from_backend="builtin",
+            to_backend="caddy",
+            stages=[{"stage": "dry_run", "ok": True}],
+        )
+
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_switch.switch_gateway", _fake_switch
+    )
+    resp = manager_env.client.post(
+        "/api/gateway/switch",
+        headers=manager_env.auth_headers(),
+        json={"backend": "caddy", "dryRun": True},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["toBackend"] == "caddy"
+    assert body["fromBackend"] == "builtin"
+
+

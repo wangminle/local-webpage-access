@@ -73,6 +73,11 @@ class InstanceStatus:
     # IMP-006：路径别名（routeMode=name 时从 manifest.network 读取）
     route_host: str | None = None
     route_url: str | None = None
+    # IMP-040：LAN 地址新鲜度（读时现算；不盲信落盘 lanUrl）
+    current_lan_ip: str | None = None
+    persisted_lan_ip: str | None = None
+    lan_address_stale: bool = False
+    lan_url_source: str | None = None  # live|manual|manifest
     source_size_bytes: int | None = None
     public_size_bytes: int | None = None
     data_size_bytes: int | None = None
@@ -134,6 +139,11 @@ class InstanceStatus:
             ),
             "routeHost": self.route_host,
             "routeUrl": self.route_url,
+            # IMP-040：当前应打开的地址相关元数据（向后兼容可选字段）
+            "currentLanIp": self.current_lan_ip,
+            "persistedLanIp": self.persisted_lan_ip,
+            "lanAddressStale": self.lan_address_stale,
+            "lanUrlSource": self.lan_url_source,
             "sourceSizeBytes": self.source_size_bytes,
             "publicSizeBytes": self.public_size_bytes,
             "dataSizeBytes": self.data_size_bytes,
@@ -171,8 +181,7 @@ def instance_status(
     host_port, internal_port = _resolve_ports(
         workspace, registry, instance_id, row["runtime"]
     )
-    lan_url = _resolve_lan_url(workspace, instance_id, host_port)
-    route_host, route_url = _resolve_route(workspace, instance_id)
+    net = _resolve_network_urls(workspace, config, instance_id, host_port)
     resources = registry.get_resources(instance_id) or {}
 
     return InstanceStatus(
@@ -188,9 +197,13 @@ def instance_status(
         database=row.get("database_type"),
         host_port=host_port,
         internal_port=internal_port,
-        lan_url=lan_url,
-        route_host=route_host,
-        route_url=route_url,
+        lan_url=net["lan_url"],
+        route_host=net["route_host"],
+        route_url=net["route_url"],
+        current_lan_ip=net["current_lan_ip"],
+        persisted_lan_ip=net["persisted_lan_ip"],
+        lan_address_stale=net["lan_address_stale"],
+        lan_url_source=net["lan_url_source"],
         source_size_bytes=_as_int(resources.get("source_size_bytes")),
         public_size_bytes=_as_int(resources.get("public_size_bytes")),
         data_size_bytes=_as_int(resources.get("data_size_bytes")),
@@ -416,7 +429,30 @@ def _resolve_ports(
     # static_sites 表无 internal_port 列；registry 缺失时从 manifest 补齐。
     if internal_port is None:
         internal_port = _resolve_internal_port_from_manifest(workspace, instance_id)
+    # IMP-040：hostPort 亦可能仅在 manifest（未写入 static_sites 时）
+    if host_port is None:
+        host_port = _resolve_host_port_from_manifest(workspace, instance_id)
     return host_port, internal_port
+
+
+def _resolve_host_port_from_manifest(
+    workspace: Workspace, instance_id: str
+) -> int | None:
+    """从 ``local-web.json`` 读取 ``network.hostPort`` / ``static.hostPort``。"""
+    manifest_path = workspace.app_manifest_path(instance_id)
+    if not manifest_path.is_file():
+        return None
+    from local_webpage_access.models import InstanceManifest
+
+    try:
+        manifest = InstanceManifest.load(manifest_path)
+    except Exception:  # noqa: BLE001
+        return None
+    if manifest.network and manifest.network.hostPort is not None:
+        return _as_int(manifest.network.hostPort)
+    if manifest.static and manifest.static.hostPort is not None:
+        return _as_int(manifest.static.hostPort)
+    return None
 
 
 def _resolve_internal_port_from_manifest(
@@ -442,6 +478,8 @@ def _resolve_internal_port_from_manifest(
 def _resolve_lan_url(
     workspace: Workspace, instance_id: str, host_port: int | None
 ) -> str | None:
+    """兼容旧调用：仅读落盘 lanUrl（测试 / 内部兜底）。IMP-040 主路径用
+    :func:`_resolve_network_urls`。"""
     if not host_port:
         return None
     manifest_path = workspace.app_manifest_path(instance_id)
@@ -475,6 +513,94 @@ def _resolve_route(
     if net and net.routeMode == "name":
         return net.routeHost, net.routeUrl
     return None, None
+
+
+def _resolve_network_urls(
+    workspace: Workspace,
+    config: Config,
+    instance_id: str,
+    host_port: int | None,
+) -> dict[str, Any]:
+    """IMP-040 方案 A：读时用当前 ``resolve_lan_ip`` 合成 lanUrl/routeUrl。
+
+    不盲信落盘 ``manifest.network.lanUrl``；``manual`` 用配置 IP 合成。
+    探测失败时回退落盘（若有）或 ``None``，``localhostUrl`` 仍由 hostPort 保证。
+    """
+    from urllib.parse import urlparse
+
+    from local_webpage_access.ports import (
+        build_lan_url,
+        build_route_url,
+        resolve_lan_ip,
+    )
+
+    empty: dict[str, Any] = {
+        "lan_url": None,
+        "route_host": None,
+        "route_url": None,
+        "current_lan_ip": None,
+        "persisted_lan_ip": None,
+        "lan_address_stale": False,
+        "lan_url_source": None,
+    }
+
+    manifest_path = workspace.app_manifest_path(instance_id)
+    persisted_lan: str | None = None
+    route_host: str | None = None
+    persisted_route: str | None = None
+    route_mode_name = False
+    if manifest_path.is_file():
+        from local_webpage_access.models import InstanceManifest
+
+        try:
+            manifest = InstanceManifest.load(manifest_path)
+        except Exception:  # noqa: BLE001
+            manifest = None
+        if manifest and manifest.network:
+            net = manifest.network
+            if net.lanUrl:
+                persisted_lan = urlparse(net.lanUrl).hostname
+            if net.routeMode == "name":
+                route_mode_name = True
+                route_host = net.routeHost
+                persisted_route = net.routeUrl
+
+    if not host_port:
+        # 无端口时仍返回路径别名元数据（停服实例 PATCH path-alias 依赖 routeHost）
+        empty["route_host"] = route_host if route_mode_name else None
+        empty["persisted_lan_ip"] = persisted_lan
+        return empty
+
+    current_ip = resolve_lan_ip(config)
+    source = "manual" if config.lanIpStrategy == "manual" else "live"
+    if current_ip:
+        lan_url = build_lan_url(current_ip, host_port)
+        route_url = (
+            build_route_url(current_ip, config.staticGatewayPort, route_host)
+            if route_mode_name and route_host
+            else None
+        )
+    else:
+        # 探测失败：保留落盘，避免用错误结果污染展示
+        source = "manifest"
+        lan_url = _resolve_lan_url(workspace, instance_id, host_port)
+        route_url = persisted_route if route_mode_name else None
+        current_ip = None
+
+    stale = bool(
+        persisted_lan
+        and current_ip
+        and persisted_lan not in (current_ip, "127.0.0.1")
+    )
+    return {
+        "lan_url": lan_url,
+        "route_host": route_host if route_mode_name else None,
+        "route_url": route_url if route_mode_name else None,
+        "current_lan_ip": current_ip,
+        "persisted_lan_ip": persisted_lan,
+        "lan_address_stale": stale,
+        "lan_url_source": source,
+    }
 
 
 def _registry_status(registry: Registry, instance_id: str) -> str | None:

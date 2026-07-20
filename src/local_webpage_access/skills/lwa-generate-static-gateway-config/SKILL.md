@@ -7,7 +7,7 @@
 
 - 实例 `runtime: shared-static`，但 `static-gateway/sites/<id>.conf` 不存在或与 `public/` 根不一致。
 - 端口池已分配宿主端口，需要网关把请求转到静态产物。
-- 用户问「怎么给静态站写 Caddy 配置」——优先引导用 `lwa start` / `lwa gateway on`，仅在排障时手工核对片段。
+- 用户问「怎么给静态站写 Caddy 配置」——优先引导用 `lwa start` / `lwa gateway switch` / `lwa gateway on`，仅在排障时手工核对片段。
 
 ## 输入
 
@@ -34,7 +34,7 @@
 
 ## 处理流程
 
-1. 确认后端：`staticGateway=caddy` 且 `lwa gateway on`；否则用 builtin（每实例独立 hostPort，无统一入口）。
+1. 确认后端：切换优先用 `lwa gateway switch caddy`（或 `builtin`），**勿手改 YAML 再猜顺序**（IMP-037）。目标为 caddy 时再 `lwa gateway on`（若尚未运行）；builtin 下每实例独立 hostPort，无统一入口。
 2. 确认静态根存在且有 `index.html`（通常 `apps/<id>/public/`）。
 3. **优先**：`lwa start <id>`（或 rebuild）让 `StaticGateway` 生成片段并 reload，不要手写。
 4. 排障时对照模板 `templates/static/caddy_site.conf.tpl`：站点片段为 `:<hostPort> { root * <abs> ; file_server ; encode gzip }`（**无** `try_files`）。

@@ -384,6 +384,16 @@ class StaticGateway:
             path.unlink()
             log.info("已删除路径别名路由：%s", instance_id)
 
+    def cleanup_instance_routes(self, instance_id: str) -> None:
+        """删除实例路径别名并同步主 Caddyfile（BUG-268 / IMP-041）。
+
+        供任意 runtime 的 ``remove``/``purge`` 调用：容器 ``stop_container`` 不走
+        :meth:`disable`，此前会残留 ``aliases/<id>.conf`` 与主配置 import → 502。
+        无别名时为空操作；builtin 后端仅删磁盘片段（:meth:`_sync_main_config` 早退）。
+        """
+        self.remove_alias_config(instance_id)
+        self._sync_main_config()
+
     # ---- enable / disable ---------------------------------------------------
 
     def enable(

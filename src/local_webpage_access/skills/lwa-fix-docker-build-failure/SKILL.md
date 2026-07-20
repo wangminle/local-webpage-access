@@ -6,6 +6,7 @@
 
 - 实例状态为 `failed`，`logs/<id>/build.log` 含构建错误。
 - 管理页"重建"操作后构建仍失败。
+- 构建长时间卡在 `queued` / `building`，需先停掉再改 Dockerfile。
 
 ## 输入
 
@@ -35,6 +36,7 @@
 
 ## 处理流程
 
+0. 若仍在 `queued` / `building`：先 `lwa cancel-build <id>`（或管理页「取消构建」）停掉当前工作，**不删**缓存/镜像/用户数据；`cancelling` 结束后再改文件。
 1. 解析 `build.log`，按常见模式归类：
    - 依赖安装失败（网络/版本冲突/平台不匹配）。
    - `COPY`/`ADD` 路径不存在（`.dockerignore` 误排除、源文件缺失）。

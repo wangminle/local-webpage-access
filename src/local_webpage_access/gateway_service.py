@@ -303,9 +303,16 @@ def _post_switch_finalize(
     if registry is None:
         return
     try:
-        from local_webpage_access.access import refresh_network_entries
+        from local_webpage_access.access_workflow import run_access_pass
 
-        report = refresh_network_entries(workspace, config, registry)
+        pass_result = run_access_pass(
+            workspace, config, registry, review=False, dry_run=False
+        )
+        report = pass_result.refresh
+        if pass_result.refresh_error:
+            log.warning(
+                "切换后刷新访问地址失败（不阻断）：%s", pass_result.refresh_error
+            )
     except Exception as exc:  # noqa: BLE001 — 地址刷新失败不阻断网关启动
         log.warning("切换后刷新访问地址失败（不阻断）：%s", exc)
         report = None
@@ -478,6 +485,10 @@ def run_gateway_foreground(
         log.error("网关首次启动失败：%s", exc)
         return 1
 
+    # BUG-270：必须在 Caddy 启动成功后再采能力；启动前探测恒为 admin_unavailable，
+    # 会把 capability-gateway.json 冻成假红，且 probe 日志恒 WARNING。
+    _refresh_gateway_capability(workspace, config)
+
     log.info(
         "gateway 前台监管就绪（admin=127.0.0.1:%d），每 %ss 探活一次",
         ADMIN_PORT,
@@ -491,11 +502,34 @@ def run_gateway_foreground(
             log.warning("Caddy master 掉线，尝试重启")
             with contextlib.suppress(LifecycleError):
                 start_gateway(workspace, config)
+                _refresh_gateway_capability(workspace, config)
 
     log.info("gateway 前台进程退出，停止 master")
     with contextlib.suppress(Exception):  # noqa: BLE001
         stop_gateway(workspace, config)
     return 0
+
+
+def _refresh_gateway_capability(workspace: Workspace, config: Config) -> None:
+    """Caddy 已在线后采集并写入 capability-gateway.json（BUG-270）。"""
+    try:
+        from local_webpage_access.capability import (
+            collect_capability_report,
+            log_capability_probe,
+            write_capability_cache,
+        )
+
+        report = collect_capability_report(
+            workspace_root=workspace.root,
+            role="gateway",
+            config_profile=getattr(config, "profile", None),
+            include_backend_cached=False,
+        )
+        level = "WARNING" if report.gateway_access != "ready" else "INFO"
+        log_capability_probe("gateway", report, level=level)
+        write_capability_cache(workspace.root, "gateway", report)
+    except Exception:  # noqa: BLE001
+        log.exception("gateway 能力自检失败")
 
 
 def run_service_main() -> int:
@@ -529,26 +563,8 @@ def run_service_main() -> int:
         return 2
     config = load_config(workspace)
 
-    # BUG-233/235：gateway 进程写入 capability-gateway.json（含 Caddy runtime）
-    try:
-        from local_webpage_access.capability import (
-            collect_capability_report,
-            log_capability_probe,
-            write_capability_cache,
-        )
-
-        report = collect_capability_report(
-            workspace_root=workspace.root,
-            role="gateway",
-            config_profile=getattr(config, "profile", None),
-            include_backend_cached=False,
-        )
-        level = "WARNING" if report.gateway_access != "ready" else "INFO"
-        log_capability_probe("gateway", report, level=level)
-        write_capability_cache(workspace.root, "gateway", report)
-    except Exception:  # noqa: BLE001
-        log.exception("gateway 能力自检失败")
-
+    # BUG-270：能力探测移入 run_gateway_foreground（start_gateway 成功之后），
+    # 此处不再提前 collect，避免缓存长期误报 admin_unavailable。
     return run_gateway_foreground(workspace, config, poll_interval=args.poll)
 
 

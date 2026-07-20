@@ -134,6 +134,7 @@
       stop: "停止",
       restart: "重启",
       rebuild: "重建",
+      "cancel-build": "取消构建",
       recover: "恢复",
       remove: "删除",
     };
@@ -376,6 +377,7 @@
           },
           toastState: { show: false, msg: "", kind: "" },
           capability: null,
+          accessRefreshing: false,
           _detailReq: 0, // 详情请求竞态令牌（旧响应到达时丢弃）
           _pageviewReq: 0,
         };
@@ -387,6 +389,16 @@
         needsRecover: function () {
           var c = this.counts;
           return (c.gateway_down || 0) + (c.config_invalid || 0);
+        },
+        lanStaleBanner: function () {
+          var list = this.instances || [];
+          var stale = list.filter(function (i) { return i.lanAddressStale; });
+          if (!stale.length) return null;
+          var ip = (stale[0] && stale[0].currentLanIp) || "";
+          return {
+            count: stale.length,
+            currentLanIp: ip,
+          };
         },
         capabilityBanner: function () {
           var c = this.capability;
@@ -525,6 +537,25 @@
           }).catch(function () {});
         },
 
+        // IMP-040：手动刷新落盘访问地址
+        refreshAccessUrls: function () {
+          var self = this;
+          if (this.accessRefreshing) return;
+          this.accessRefreshing = true;
+          this.toast("正在刷新访问地址…");
+          apiFetch(this, "/api/access/refresh", { method: "POST" })
+            .then(function () {
+              self.toast("访问地址已刷新", "success");
+              self.refresh();
+            })
+            .catch(function (e) {
+              self.toast("刷新访问地址失败：" + e.message, "error");
+            })
+            .then(function () {
+              self.accessRefreshing = false;
+            });
+        },
+
         // ---- 表格事件委托 ----
         // 先判 data-op 再判 data-detail：操作按钮（位于操作列，无 data-detail）
         // 优先；避免点按钮时冒泡到行名单元格的 data-detail 误开详情。
@@ -563,7 +594,23 @@
           }
           this.toast("正在" + opLabel(op) + "…");
           apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/" + op, { method: "POST" })
-            .then(function () { self.toast(opLabel(op) + "完成", "success"); self.refresh(); })
+            .then(function (data) {
+              if (op === "cancel-build") {
+                var outcome = (data && data.outcome) || "";
+                if (outcome === "cancelled") {
+                  self.toast("构建已取消", "success");
+                } else if (outcome === "cancel_failed") {
+                  self.toast("取消失败：" + ((data && data.message) || "超时"), "error");
+                } else if (outcome === "already_done" || outcome === "noop") {
+                  self.toast((data && data.message) || "无活动构建", "info");
+                } else {
+                  self.toast(opLabel(op) + "：" + (outcome || "完成"), "success");
+                }
+              } else {
+                self.toast(opLabel(op) + "完成", "success");
+              }
+              self.refresh();
+            })
             .catch(function (e) { self.toast(opLabel(op) + "失败：" + e.message, "error"); });
         },
 
@@ -911,6 +958,14 @@
     '  <strong>{{ capabilityBanner.profile === "full" ? "Full Profile" : "能力" }}：{{ capabilityBanner.reason }}</strong>',
     '  <span>{{ capabilityBanner.action }}</span>',
     '  <button class="btn btn-sm btn-ghost" type="button" @click="bootstrap">重新检测</button>',
+    "</div>",
+    // IMP-040：LAN 地址漂移提示
+    '<div class="capability-banner" v-if="lanStaleBanner" role="status" data-overall="degraded">',
+    '  <strong>局域网地址已变化</strong>',
+    '  <span>检测到 {{ lanStaleBanner.count }} 个实例落盘地址与当前 IP',
+    '<span v-if="lanStaleBanner.currentLanIp">（{{ lanStaleBanner.currentLanIp }}）</span>',
+    '不一致；列表链接已按新地址显示，可同步落盘。</span>',
+    '  <button class="btn btn-sm btn-ghost" type="button" :disabled="accessRefreshing" @click="refreshAccessUrls">刷新访问地址</button>',
     "</div>",
     // 顶部统计
     '<section class="stats" aria-label="整机与实例统计">',

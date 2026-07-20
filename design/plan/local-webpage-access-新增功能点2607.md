@@ -1,7 +1,7 @@
-# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～040（202607）
+# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～041（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机可后续补）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 实机清单与 036.09 Windows 分支清理可后续补）**；**IMP-037～039 为 achievement 反查待开发项（038/039=P0，037=P1）；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除；新增 IMP-040 管理页 LAN 地址新鲜度（见 §21）**。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
-> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机可后续补）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 实机清单与 036.09 Windows 分支清理可后续补）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈；§22 为删除/purge 阶段日志与容器别名清理（IMP-034 后续 + BUG-268）。
 
 ---
 
@@ -1054,7 +1054,7 @@ Overall                   READY
 >
 > **与既有项关系**：BUG-229（build 流式落盘）为实例构建日志基线；IMP-033 `CapabilityReport` / `observationError` 为本项结构化能力日志的数据源；本项**不替代** IMP-033，只保证「人能读、机器能对账」。
 >
-> **状态（2026-07-19）**：**已落地**。CLI/daemon/manager/gateway 分文件落盘、生命周期阶段事件、能力探测结构化日志与 FAQ 排障地图已完成，见 `DEV-077` / `DEV-079`；后续增强随对应能力项继续维护，不再把本节标记为待开发。
+> **状态（2026-07-19）**：**已落地**。CLI/daemon/manager/gateway 分文件落盘、生命周期阶段事件、能力探测结构化日志与 FAQ 排障地图已完成，见 `DEV-077` / `DEV-079`；后续增强随对应能力项继续维护，不再把本节标记为待开发。**删除/purge 路径的阶段日志与破坏性 API 审计见 §22 IMP-041**（与 BUG-268 同批）。
 
 ### 14.1 问题分析
 
@@ -1398,12 +1398,13 @@ architecture, wslVersion, systemdAvailable, supported, reasons, action
 
 | IMP | 建议优先级 | 功能 | 主要来源 | 现状 |
 | --- | --- | --- | --- | --- |
-| **IMP-038** | **P0（下迭代优先）** | `lwa update` 后访问地址刷新、访问复核与 Skill/doctor 闭环 | gateway review I4 | 待开发；`access.refresh/review` 与 CLI 已有，缺 update/doctor/Skill 接线 |
-| **IMP-039** | **P0（下迭代优先）** | 进行中构建的可控取消 | analysis §2.3 / V1 WBS-20.08 | 待开发；仅有排队 `cancel` stub，building 无法杀进程树 |
-| **IMP-040** | **P0（与 038 同批）** | 管理页/状态 DTO 的 LAN 地址新鲜度与漂移自愈 | 用户反馈 2026-07-20：换 LAN IP 后点「端口」仍开旧地址 | 待开发；doctor 仅 WARN；API 只读落盘 `lanUrl` |
-| **IMP-037** | **P1** | 网关后端原子切换与 manifest/registry 一致性 | gateway review I3/G4 | 待开发；`gateway on` 已有单向交接零件，缺双向事务与批量回写 |
+| **IMP-038** | **P0（下迭代优先）** | `lwa update` 后访问地址刷新、访问复核与 Skill/doctor 闭环 | gateway review I4 | **已落地**（DEV-083，2026-07-20） |
+| **IMP-039** | **P0（下迭代优先）** | 进行中构建的可控取消 | analysis §2.3 / V1 WBS-20.08 | **已落地**（DEV-084，2026-07-20）：queued/building 取消、进程树终止、CLI/API/管理页入口 |
+| **IMP-040** | **P0（与 038 同批）** | 管理页/状态 DTO 的 LAN 地址新鲜度与漂移自愈 | 用户反馈 2026-07-20：换 LAN IP 后点「端口」仍开旧地址 | **已落地**（DEV-087，2026-07-20） |
+| **IMP-041** | **P0（与 BUG-268 同批，可插队）** | 删除/purge 阶段日志 + 容器路径别名清理 | CHK-094 / 用户反馈；BUG-268 | **已落地**（DEV-088，2026-07-20；BUG-268 已关） |
+| **IMP-037** | **P1** | 网关后端原子切换与 manifest/registry 一致性 | gateway review I3/G4 | **已落地**（DEV-082，2026-07-20）：`lwa gateway switch` / `POST /api/gateway/switch`；事务回滚与 degraded；manifest/registry 批量回写 |
 
-> **已从本计划删除（2026-07-20）**：原 IMP-040 `lwa update --pull`、原 IMP-041 Vite `sourceDevPort` 元数据——价值偏低 / 非刚需，不再排期。对应 `task-list` DEV-085/086 关闭。
+> **已从本计划删除（2026-07-20）**：原 IMP-040 `lwa update --pull`、原「Vite `sourceDevPort`」条目——价值偏低 / 非刚需，不再排期（对应 DEV-085/086 关闭）。**IMP-041 编号已复用于**「删除路径阶段日志与别名清理」（§22），勿与已删的 Vite 元数据混淆。
 
 ### 17.4 优先级评审结论（2026-07-20，修订）
 
@@ -1411,15 +1412,18 @@ architecture, wslVersion, systemdAvailable, supported, reasons, action
 
 | 排序 | IMP | 结论 | 理由 |
 | --- | --- | --- | --- |
-| 1 | **038** | **做** | 升级后 URL 漂移；底座已齐，主要是 updater/doctor/Skill 接线。 |
-| 2 | **040** | **做（新）** | 管理页「端口」链到落盘旧 `lanUrl`；DHCP/换网后必现。与 038 共享 `refresh_network_entries`，应同批设计。 |
-| 3 | **039** | **做** | 长构建无法取消；进程树实现更重，可紧随 038/040。 |
-| 4 | **037** | **值得做，别插队** | 双向切换频率低；手改 YAML + `gateway on/off` 可撑。 |
+| 1 | **041** | **做（可插队，与 BUG-268 同批）** | 实机删除后别名 502 + 日志过简；改动面小、风险高路径，宜尽快修。 |
+| 2 | **038** | **做** | 升级后 URL 漂移；底座已齐，主要是 updater/doctor/Skill 接线。 |
+| 3 | **040** | **做** | 管理页「端口」链到落盘旧 `lanUrl`；与 038 共享 refresh。 |
+| 4 | **039** | **做** | 长构建无法取消；进程树实现更重。 |
+| 5 | **037** | **值得做，别插队** | 双向切换频率低；手改 YAML + `gateway on/off` 可撑。 |
 
-**推荐落地顺序**：`038 + 040（同批，先读时正确再落盘自愈）→ 039 → 037`。
+**推荐落地顺序**：`041（+BUG-268）→ 038 + 040 → 039 → 037`。
 
 ## 18. IMP-037 — 网关后端原子切换与状态一致性
 
+> **状态**：**已落地**（2026-07-20，DEV-082）
+>
 > **建议优先级**：**P1**（在 IMP-038/040/039 之后；见 §17.4）
 >
 > **来源**：`local-webpage-access-gateway-switch-access-review-20260709.md` §10.3 I3，以及 G4 的“manifest.static.gateway / 别名入口 / pageviews 日志源与真实后端一致”目标。
@@ -1526,7 +1530,7 @@ architecture, wslVersion, systemdAvailable, supported, reasons, action
 >
 > **来源**：`local-webpage-access-analysis-20260707.md` §2.3 和 V1 WBS-20.08。
 >
-> **现状**：`BuildQueue.cancel()` 已能让排队任务在拿到槽位后跳过，但对已进入 `building` 的 `npm/pip/docker compose build` 只改内存状态，无法终止子进程；CLI/API/管理页也没有完整取消入口。
+> **现状**：`BuildQueue.cancel()` 已能让排队任务在拿到槽位后跳过，并对已进入 `building` 的 `npm/pip/docker compose build` 走 `cancelling → cancelled|cancel_failed` 杀进程树；CLI `lwa cancel-build`、API `/cancel-build`、管理页「取消构建」已接通（IMP-039 / DEV-084）。
 
 ### 20.1 取消契约
 
@@ -1670,3 +1674,106 @@ architecture, wslVersion, systemdAvailable, supported, reasons, action
 | `PLN-024` | IMP-040（LAN 新鲜度）规划 |
 | `DEV-087` | IMP-040 开发主项 |
 | `DEV-085` / `DEV-086` | 原 update --pull / Vite 端口 —— **已关闭（移出范围）** |
+
+## 22. IMP-041 — 删除路径阶段日志与容器别名清理（含 BUG-268）
+
+> **建议优先级**：**P0（可插队；与 BUG-268 同批修复）**（见 §17.4）
+>
+> **来源**：CHK-094 实机复核删除 `prd-workflow`；用户确认需补删除阶段可观测性，并与别名残留一并修。
+>
+> **与既有项关系**：IMP-034 已覆盖分文件落盘与构建/启动心跳，**未覆盖** remove/purge；IMP-035 已落地删除 UI/契约，本项补「删完之后人能对账、网关不留幽灵路由」。关闭 **BUG-268**。
+
+### 22.1 问题陈述
+
+实机彻底删除容器实例后：
+
+1. `manager.log` 往往只有一句 `已移除（含磁盘文件）`；stop / down / 清 pageviews / 清别名无过程 INFO；中间 `suppress(Exception)` 失败可静默。
+2. registry 中 stop 等事件挂在 `instance_id` 上，随 `delete_instance` **CASCADE 消失**，审计只剩一条 orphan `remove`（BUG-047 设计如此，但阶段细节丢失）。
+3. uvicorn `access_log=False`，无法从日志还原 `purge` / `force` / 409 `data_nonempty` 请求路径。
+4. **BUG-268**：`remove` → `stop_container` 不调用 `StaticGateway.remove_alias_config`；`aliases/<id>.conf` 与 `Caddyfile` import 残留，别名 URL 返回 502。
+
+### 22.2 目标与非目标
+
+**目标**：
+
+1. `remove_instance`（及管理页/CLI 入口）对关键阶段输出可 grep 的 **INFO/WARNING**，写入 `manager.log` / `lwa.log`。
+2. 阶段结果同时写入 **orphan registry events**（`instance_id=NULL`，message 含实例 ID 与 stage），避免 CASCADE 后只剩一句。
+3. 修复 BUG-268：任意 runtime 的 remove/purge 均清理路径别名片段并 `_sync_main_config` + best-effort reload。
+4. 管理页对 **破坏性 API**（单实例 remove、批量冗余删除）打一行无 token 的审计日志。
+
+**非目标**：
+
+- 不恢复全站 uvicorn access_log。
+- 不上集中式日志栈；不把 DEBUG 刷满磁盘。
+- 不记录 Authorization / token / `.env` 密钥。
+- 不在本项重做 IMP-035 交互；不改 `data_nonempty` 契约。
+
+### 22.3 阶段契约（日志 + orphan event）
+
+统一 message 形态（便于 grep）：
+
+`remove stage=<name> instance=<id> purge=<bool> force=<bool> result=<ok|skip|warn|fail> detail=...`
+
+| stage | 何时 | result 语义 |
+| --- | --- | --- |
+| `begin` | 通过 data_nonempty 门禁后、开始清理前 | ok |
+| `data_guard` | 触发 `DataNonemptyError`（未 force） | fail（抛错前记 orphan event + WARNING） |
+| `stop` | `stop_instance` 结束 | ok / warn（继续清理） |
+| `compose_down` | docker-compose 的 `down` | ok / skip（非容器）/ warn |
+| `alias_cleanup` | 删除 aliases 片段并同步 Caddyfile | ok / skip（本无别名）/ warn（reload 失败但文件已删） |
+| `pageviews_clear` | `clear_instance_pageviews` | ok / warn |
+| `registry_delete` | `delete_instance` 前后 | ok |
+| `purge_tree` | `rmtree(apps/<id>)` | ok / skip（非 purge）/ fail |
+| `done` | 全部完成 | ok（替代或补充现有「已移除…」一句，须含 purge/force） |
+
+规则：
+
+- 现有收尾 `log.info("实例 … 已移除…")` **保留语义**，可并入 `done` 或紧随 `done`。
+- 原 `contextlib.suppress` 改为：捕获后 `log.warning` + orphan event `result=warn`，再继续（除非安全上必须中止）。
+- orphan `remove` 总览事件（现有 BUG-047）保留；阶段事件用 `event_type=remove_stage`（或 `lifecycle_stage` + message 含 `op=remove`），实现时二选一并写进文档/测试，避免随意字符串。
+
+### 22.4 BUG-268 修复要点
+
+1. 在 `remove_instance` 中（stop/down 之后、删 registry 之前或之后均可，建议 **删盘前**）对**所有** runtime 调用 `StaticGateway(workspace, config).remove_alias_config(instance_id)`（或抽出 `cleanup_instance_gateway_routes`），再 `_sync_main_config()` + best-effort `reload_all()`。
+2. 即使 manifest 缺失 / 已 stop 失败，仍 best-effort 清别名（按 instance_id 文件名），避免幽灵 import。
+3. 单测：容器实例带 `routeHost` → remove/purge → `aliases/<id>.conf` 不存在且主 Caddyfile 无对应 import；静态实例回归仍走 `disable` 路径不双重报错。
+4. 实机验收：清理当前 runtime 残留 `aliases/prd-workflow.conf`（一次性运维或随修复后的 reconcile 命令；至少在测试/文档写明手动删除 + reload）。
+
+### 22.5 破坏性 API 审计（P1）
+
+在 `manager_api` 处理 `POST /api/instances/{id}/remove`（及批量 redundant remove）时：
+
+```
+audit remove instance=<id> purge=<bool> force=<bool> status=<http> code=<error_code|ok>
+```
+
+- 不写 token；可写 `request_id`（若已有）或短随机 correlation id 与阶段日志对齐。
+- 409 `data_nonempty`、403、404 均应有一行，便于对照前端双阶段确认。
+
+### 22.6 可执行 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **041.01** | P0 | 先写：容器带别名 remove 后别名文件与 Caddyfile 无残留；阶段 orphan events 条数/字段 | `tests/test_lifecycle.py`、gateway tests | BUG-268 与阶段事件先红 |
+| **041.02** | P0 | `remove_instance` 阶段 INFO/WARNING + orphan events | `lifecycle.py` | 覆盖 §22.3 各 stage；suppress 改为可观测 warn |
+| **041.03** | P0 | 全 runtime 别名清理 + sync/reload | `lifecycle.py`、`static_gateway.py`、`hosting.py` | 关闭 BUG-268；静态路径无回归 |
+| **041.04** | P1 | 管理页破坏性 API 审计一行 | `manager_api.py` | remove/批量删除可见 status/code |
+| **041.05** | P1 | FAQ/manager-page：删除后看哪些日志；排障地图补一行 | `docs/faq.md`、`docs/manager-page.md` | 症状「别名 502 / 删了但日志只有一句」有索引 |
+| **041.06** | P0 | 实机：清 `prd-workflow` 残留别名并 reload；再跑一次 purge 样例核对日志 | runtime / acceptance | `/prd-workflow/` 不再 502；manager.log 含多 stage |
+
+### 22.7 验收标准
+
+1. 删除（仅移除 / 彻底删除）后，`manager.log`（或 CLI 时 `lwa.log`）能按时间序看到至少 `begin` → `stop`/`alias_cleanup` → `registry_delete` → `done`。
+2. `events` 在实例行删除后仍能查到该次删除的 orphan 总览 + 阶段事件；message 含实例 ID。
+3. 带路径别名的容器实例 purge 后：无 `aliases/<id>.conf`、主配置无悬空 import、别名 URL 非 502（期望 404 或网关默认未匹配行为）。
+4. `data_nonempty` 拒绝时有 WARNING + orphan event，且不删盘。
+5. 安全：日志/events 无 API token。
+
+### 22.8 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `PLN-025` | IMP-041 规划 |
+| `DEV-088` | IMP-041 开发主项（含关闭 BUG-268） |
+| `BUG-268` | 别名残留 —— 由本项 041.03 关闭 |
+| `CHK-094` | 发现问题的实机复核（已完成） |

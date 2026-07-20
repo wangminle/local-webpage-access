@@ -119,7 +119,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
     init_workspace(root)
     ws = Workspace(root)
     skill_docs = list(ws.skills.rglob("SKILL.md"))
-    assert len(skill_docs) == 16  # IMP-030 新增 lwa-setup-autostart
+    assert len(skill_docs) == 17  # IMP-038 新增 lwa-review-access-urls
     # 索引 README 也应存在
     assert (ws.skills / "README.md").is_file()
     # 关键 skill 应在列
@@ -135,6 +135,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
         "lwa-setup-autostart",
         "lwa-update-runtime",
         "lwa-import-zip",
+        "lwa-review-access-urls",
     ):
         assert expected in names, f"缺少 skill：{expected}"
 

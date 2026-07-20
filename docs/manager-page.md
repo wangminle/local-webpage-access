@@ -53,6 +53,7 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/stop` | 停止实例（同上） |
 | POST | `/api/instances/{id}/restart` | 重启实例（同上） |
 | POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上） |
+| POST | `/api/instances/{id}/cancel-build` | 取消排队中或进行中的构建（IMP-039）；返回 `outcome`：`cancelled` / `cancel_failed` / `noop` / `already_done`；`cancel_failed` 为 **409**；不删缓存/镜像/用户数据；`cancelling` 期间其它生命周期操作返回 409 |
 | POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁 |
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
@@ -146,9 +147,36 @@ Content-Type: application/json
 | `portMappingLabel` | 形如 `33001 → 18001` 的映射说明 |
 | `routeHost` | 路径别名 slug（无则为 null） |
 | `routeUrl` | 统一入口 URL（`routeMode=name` 且 Caddy 可用时） |
-| `lanUrl` | 局域网直达 URL（`http://<LAN-IP>:<hostPort>`） |
+| `lanUrl` | 当前应打开的局域网直达 URL（读时按当前 LAN IP 合成，不盲信落盘） |
 | `localhostUrl` | 本机回环兜底 URL（`http://127.0.0.1:<hostPort>/`，LAN 不通时可用） |
+| `currentLanIp` | 当前探测/配置的 LAN IP（IMP-040） |
+| `persistedLanIp` | 落盘 `lanUrl` 中的 host（可能已陈旧） |
+| `lanAddressStale` | 落盘 host 与当前 LAN IP 是否不一致 |
+| `lanUrlSource` | `live` / `manual` / `manifest` |
 | `redundant` | 是否为同 zip 指纹分组中的冗余实例（非最早者，IMP-019） |
+
+### 刷新访问地址（IMP-040）
+
+```http
+POST /api/access/refresh
+Authorization: Bearer <token>
+```
+
+立即用当前 LAN IP 重算并落盘各实例 `lanUrl`/`routeUrl`（与 `lwa access refresh` 同源）。管理页在 `lanAddressStale` 时会提示并可一键调用。
+
+### 网关后端切换（IMP-037）
+
+```http
+POST /api/gateway/switch
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"backend": "caddy"|"builtin", "dryRun": false, "review": true}
+```
+
+与 `lwa gateway switch` 同源原子事务。成功返回 `GatewaySwitchResult`（含 `ok` /
+`fullyOk` / `accessOk` / `stages`）；后端切换失败时 HTTP 409 + detail 为同一结构。
+`ok=true` 但 `accessOk=false` 表示后端已切成功、访问复核有风险（不假绿）。
 
 ### 浏览量统计（IMP-024）
 
@@ -188,6 +216,8 @@ Authorization: Bearer <token>
 
 若 `purge=true&force=false` 且 `data/` 非空，返回 HTTP **409**、错误码 **`data_nonempty`**（不是 500）。管理页据此进入「强制删除」再确认，**不会**自动带 `force=true` 重试。其他错误码不得进入 force 分支。
 
+IMP-041：每次删除请求会在 `manager.log` 写一行无 token 的 `audit remove instance=… status=… code=…`；服务层另有可 grep 的 `remove stage=…` 阶段日志与 orphan `remove_stage` 事件（详见 [FAQ](faq.md)「删除后如何对账」）。
+
 ### 冗余实例（IMP-019）
 
 ```http
@@ -208,8 +238,8 @@ Authorization: Bearer <token>
 
 单页前端（`/`，Vue 3）提供：
 
-* **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）。
-* **实例列表**：每行显示名称（冗余实例带「冗余」徽章与行高亮）、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing` 时禁用）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043）。
+* **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）；任一实例 `lanAddressStale` 时另有 **LAN 地址漂移**横幅，并可一键「刷新访问地址」（`POST /api/access/refresh`，IMP-040）。
+* **实例列表**：每行显示名称（冗余实例带「冗余」徽章与行高亮）、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **取消构建** / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing/cancelling` 时相应禁用）；状态为 `queued` / `building` / `cancelling` 时显示「取消构建」（IMP-039）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043）。
 * **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，规则不变）。
 * **删除确认（IMP-035）**：受控双阶段模态——① 选择「仅移除」（默认，`purge=false`）或「彻底删除」（`purge=true`）；② 输入完整项目 ID；彻底删除须勾选「理解数据不可恢复」。非空 `data/` 首次 purge 得 409 `data_nonempty` 后，再勾选强制确认才发 `force=true`（不自动重试）。打开时焦点进入对话框，Tab 限制在模态内，Esc/关闭后恢复触发按钮焦点。
 * **路径别名对话框**：`shared-static` 与 `docker-compose` 实例操作区「路径别名」按钮可用（pending/building/queued 态禁用）；输入 slug 保存或清除；校验错误在对话框内展示。builtin 后端下设置会失败并展示后端错误信息（IMP-022）。
@@ -222,9 +252,9 @@ Authorization: Bearer <token>
 ## 与 CLI 一致性
 
 管理页的生命周期操作直接调用 `local_webpage_access.lifecycle` 的同名函数，
-**与 CLI `lwa start/stop/restart/rebuild/remove` 走完全相同的代码路径**（验收标准 3）。
+**与 CLI `lwa start/stop/restart/rebuild/cancel-build/remove` 走完全相同的代码路径**（验收标准 3）。
 路径别名与 zip 更新分别调用 `path_alias.set_instance_path_alias` 与 `importer.update_zip`，
-与 CLI `lwa alias set/clear`、`lwa import --update` 一致；冗余清理与 `lwa remove --redundant` 一致。
+与 CLI `lwa alias set/clear`、`lwa import --update`、`lwa access refresh`、`lwa gateway switch` 一致；冗余清理与 `lwa remove --redundant` 一致。
 因此管理页展示的状态与 `lwa status` 始终一致。
 
 ## 绑定安全

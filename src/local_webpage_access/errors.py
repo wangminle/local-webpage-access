@@ -106,6 +106,16 @@ class BuildError(LwaError):
     code = "BUILD_ERROR"
 
 
+class BuildCancelled(BuildError):
+    """构建被用户取消（IMP-039）。
+
+    与普通 ``BuildError`` 区分，便于队列/托管路径收尾为 ``cancelled`` 而非
+    ``failed``，且不假报成功。
+    """
+
+    code = "BUILD_CANCELLED"
+
+
 class DockerError(LwaError):
     """Docker / Docker Compose 不可用或命令执行失败。"""
 
@@ -147,6 +157,7 @@ __all__ = [
     "RecognitionError",
     "GatewayError",
     "BuildError",
+    "BuildCancelled",
     "DockerError",
     "LifecycleError",
     "DataNonemptyError",

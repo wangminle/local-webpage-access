@@ -352,6 +352,8 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 .badge-pending  { background: var(--amber-bg); color: var(--amber); }
 .badge-failed   { background: var(--red-bg);   color: var(--red); }
 .badge-building { background: var(--blue-bg);  color: var(--primary); }
+.badge-cancelling { background: var(--amber-bg); color: var(--amber); }
+.badge-cancelled { background: var(--muted-bg, #eee); color: var(--muted, #666); }
 .badge-queued   { background: var(--amber-bg); color: var(--amber); }
 /* DEV-043：网关不可达（橙，需 action）/ 配置无效（红，错误） */
 .badge-gateway-down    { background: var(--amber-bg); color: var(--amber); }

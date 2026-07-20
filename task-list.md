@@ -278,6 +278,15 @@
 | BUG-265 | 修复 | 全量测试套件存在 3 例既有失败：capability 日志 caplog 因父 logger propagate=False 收不到记录；daemon Windows PowerShell 用例在非 Windows 宿主访问 subprocess.CREATE_NO_WINDOW 抛 AttributeError；manager_service 用例 fake_setup_logging 形参缺 log_filename | 2026-07-20 17:47 | 2026-07-20 17:47 | 已修复 | capability 测试改为把 caplog.handler 直接挂到子 logger；platform_detect.subprocess_hidden_kwargs 与 test_daemon 断言改 getattr(subprocess,'CREATE_NO_WINDOW',0x08000000)；fake_setup_logging 补 log_filename 形参。全量 1254 passed |
 | BUG-266 | 修复 | test_platform_support 中 WSL unknown 包版本用例的断言含 `or True`，使 wsl_version 断言恒真、无校验意义 | 2026-07-20 17:47 | 2026-07-20 17:47 | 已修复 | 改为 assert report.wsl_version == 'unknown'（wsl_package_version='unknown' 时 display_wsl 取包版本） |
 | BUG-267 | 修复 | setup.py Linux Docker 安装提示把 ubuntu/debian 两个官方文档 URL 拼成一串（engine/install/ubuntu/ / debian/），不可点击 | 2026-07-20 17:47 | 2026-07-20 17:47 | 已修复 | 拆为两个独立 URL：https://docs.docker.com/engine/install/ubuntu/ 与 /debian/ |
+| BUG-268 | 修复 | 容器实例 purge/remove 后未清理 Caddy 路径别名：aliases/<id>.conf 与 Caddyfile import 残留，别名入口 502 | 2026-07-20 19:52 | 2026-07-20 20:39 | 已修复 | 【修复】`StaticGateway.cleanup_instance_routes` + `remove_instance` 在 stop/down 后对全 runtime best-effort 清别名并 `_sync_main_config`。回归 `test_remove_container_clears_path_alias_config`。已吸收重复项 BUG-269。阶段日志/API 审计见 DEV-088（IMP-041 已完成）。 |
+| BUG-269 | 修复 | 删除带路径别名的容器实例后未清理 Caddy alias 片段，旧路由持续返回 502 | 2026-07-20 20:12 | 2026-07-20 20:39 | 已修复 | 【并入 BUG-268】并发重复登记，无独立代码改动；主因已由 BUG-268（2026-07-20 20:39）修复。原关闭备注保留：prd-workflow purge 后 alias/Caddyfile import 残留。 |
+| BUG-270 | 修复 | gateway 能力快照在 Caddy 启动前生成且运行成功后不刷新，缓存长期误报 admin_unavailable，且 capability probe 日志恒为 WARNING | 2026-07-20 20:12 | 2026-07-20 20:39 | 已修复 | 【修复】`run_service_main` 不再提前 collect；`run_gateway_foreground` 在 `start_gateway` 成功后及掉线重启后再 `_refresh_gateway_capability`（ready→INFO）。回归 `test_run_gateway_foreground_refreshes_capability_after_start`。已吸收重复项 BUG-272（含 CLI/doctor 合并后 gatewayAccess 与 caddyRuntime 自相矛盾的实证）。 |
+| BUG-271 | 修复 | GET /api/capability?refresh=true 未汇总 daemon/gateway 能力，刷新后仍返回 unknown | 2026-07-20 20:12 | 2026-07-20 20:39 | 已修复 | 【修复】`_refresh_capability_cache` 改 `include_backend_cached=True`，与 CLI/doctor 及无 refresh 回退路径一致；manager 自身字段仍实时探测。回归 `test_capability_refresh_merges_daemon_and_gateway_caches`。 |
+| BUG-272 | 修复 | gateway 能力缓存陈旧：gateway_service 仅在 run_service_main 启动时探测一次能力（早于 run_gateway_foreground 拉起 caddy），得 admin_unavailable 后全程无重探/无后台刷新 | 2026-07-20 20:24 | 2026-07-20 20:39 | 已修复 | 【并入 BUG-270】同根因重复项，**无需再单独修复**；主因已由 BUG-270（2026-07-20 20:39）落地。补充实证：CLI/doctor `include_backend_cached=True` 时 gatewayAccess=admin_unavailable（陈旧缓存）与 caddyRuntime=ready（实时）自相矛盾——启动后重采后该矛盾消除。 |
+| BUG-273 | 修复 | hosting.py run_command / build_process.py wait_with_cancel 的 communicate(timeout=) 重试重复累计 stdout，构建日志翻倍 | 2026-07-20 22:10 | 2026-07-20 22:25 | 已修复 | 【根因】communicate(timeout=) 抛 TimeoutExpired 时 .stdout 是已累计的部分输出，重试返回的是全量累计输出；旧代码两者都 append 致 stdout 翻倍（实证 'AAAAAAAAAAAABBBB' vs 'AAABBBB'）。【修复】hosting.run_command 加 completed_normally 标志，仅未正常完成时 drain；build_process.wait_with_cancel 成功返回全量 out、取消/超时返回 last_partial。回归 test_run_command_stdout_not_duplicated、test_wait_with_cancel_success_no_duplicate、test_wait_with_cancel_returns_partial_on_cancel。V0.6.5-Build1500 落地。 |
+| BUG-274 | 修复 | BuildQueue.run 两条 raise 路径（cancelled-before-acquire / 排队超时）位于 try 块之前，finally 不执行致 _finish_events 字典残留 set Event | 2026-07-20 22:30 | 2026-07-20 22:48 | 已修复 | 【根因】acquire 段在 try 之前，两条 raise 直接抛出，finally（pop _finish_events）永不达，长跑下字典无限增长。【修复】try 上移覆盖 acquire 段；slot 初始化为 None 防 NameError；release(None) 早退；finally 必达 pop。回归 27 项 build_queue 测试全绿。c9d4fd1 落地。 |
+| BUG-275 | 修复 | cli/gateway switch --dry-run 预检失败时吞错：elif dry_run 分支在失败分支之前，plan_switch 失败只打印误导性 [dry-run] from -> to 后 exit 1，不显示 error | 2026-07-20 22:40 | 2026-07-20 22:48 | 已修复 | 【根因】分支顺序 noop->dry_run->ok->else，dry-run 时 plan_switch 失败（如切到 caddy 但本机无 caddy）返回 ok=False/plan=None，落入 dry_run 分支打印成功预览而非错误。【修复】将 not result.ok 分支前移至 dry_run 之前，失败时先打印 error/repair_hint 再 exit 1。补 CLI 回归测试 test_cli_switch_dry_run_precheck_failure_shows_error。c9d4fd1 落地。 |
+| BUG-276 | 修复 | V0.6.5 将 _FALLBACK_VERSION bump 至 0.6.5 但 test_resolve_version_fallback 仍断言 0.6.4，全量 pytest 失败 | 2026-07-20 22:45 | 2026-07-20 22:48 | 已修复 | 【根因】V0.6.5-Build1500 提交时 _FALLBACK_VERSION 0.6.4->0.6.5 但漏改 test_resolve_version_fallback 断言与 version_info 三处 docstring 示例。【修复】断言同步为 0.6.5；docstring 示例同步。test_version_info 5 passed，全量 1313 passed/4 skipped。c9d4fd1 落地。 |
 
 ## 调整事项
 
@@ -312,6 +321,7 @@
 | ADJ-027 | 调整 | 回退网页网络 Logo 整圈白色光束至黄色局部托举光束 | 2026-07-10 19:15 | 2026-07-10 19:15 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：移除10条白色整圈光束，恢复黄色内环上方7条细圆点发散光束；三层网页、同心三环及基础设施配色不变；xmllint、源代码定位与 git diff --check 通过；本机PNG渲染器仍不可用。 |
 | ADJ-028 | 调整 | 在网页网络 Logo 黄色椭圆内沿七条射线补充七个节点 | 2026-07-15 12:05 | 2026-07-15 12:05 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：沿7条黄色射线的延长方向，在黄色内环内部加入7个#FFD43B实心圆点；同步更新无障碍描述。xmllint、射线/节点数量与椭圆内间隙几何校验、Quick Look 1000px PNG渲染、diff-check均通过。 |
 | ADJ-029 | 调整 | 清理 IMP-032 规划写入时误追加的重复 PLN-014/DOC-040/DEV-076 行 | 2026-07-17 17:12 | 2026-07-17 17:12 | 已完成 | 保留 PLN-013/DOC-039/DEV-075 为权威记录；删除内容完全相同的后三个重复行；plan §12 编号映射不变。 |
+| ADJ-030 | 调整 | 合并近期重复 Bug 登记：BUG-269→BUG-268、BUG-272→BUG-270，状态改为已修复并注明并入主因 | 2026-07-20 20:42 | 2026-07-20 20:41 | 已完成 | 不删 ID（标准：ID 不复用）；仅更新备注/完成时间/状态，避免 272 仍像待修。待修复 Bug 仍为 0。 |
 
 ## 检查事项
 
@@ -408,6 +418,10 @@
 | CHK-091 | 检查 | 重新审查全部未提交代码并对照 task-list 与 IMP-035/036 计划逐项核验 | 2026-07-20 17:42 | 2026-07-20 17:42 | 已完成 | 确认 BUG-260～264；全量 pytest 通过且 4 项真实 Docker 测试跳过；diff-check、compileall、Node/Shell 语法检查通过；同步纠正统计摘要漂移 |
 | CHK-092 | 检查 | 复查 BUG-260～267 修复结果并重新执行最小复现、定向测试和全量回归 | 2026-07-20 18:21 | 2026-07-20 18:21 | 已完成 | BUG-262～267 复查通过；BUG-260/261 仍有生产路径与支持矩阵边界未闭环，已恢复待修复；定向测试通过，全量 pytest 通过且 4 项真实 Docker 测试跳过，diff-check/compileall/Node/Shell 语法检查通过 |
 | CHK-093 | 检查 | 逐份审计 design/achievement 全部 13 份 Markdown 的功能实现状态 | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 按明确缺口与当前源码/测试/task-list 交叉核对；确认 5 项待开发功能，结论见计划 §17。 |
+| CHK-094 | 检查 | 复核用户删除 prd-workflow 后的 runtime 日志与落盘状态是否符合 IMP-035 预期 | 2026-07-20 19:52 | 2026-07-20 19:52 | 已完成 | 符合：orphan remove 事件、含磁盘文件日志、apps 已删、registry/pageviews/18002 干净、force=False 说明 data 为空。不符合：别名残留 502（记 BUG-268）；manager 无 stop/down 过程日志、无 API access 行。 |
+| CHK-095 | 检查 | 检查本地部署 V0.6.4 运行态、服务日志、访问日志与能力报告一致性 | 2026-07-20 20:12 | 2026-07-20 20:12 | 已完成 | 版本 V0.6.4；4 个在籍实例、manager/daemon/Caddy、自启动、doctor、access review 全部正常，在籍直连/别名均 200。发现 BUG-268、BUG-270、BUG-271；BUG-269 为 BUG-268 的并发重复记录，已关闭。Caddy pingback WARNING 为 BUG-102 既有兜底，探针日志已排除浏览量。 |
+| CHK-096 | 检查 | 复核本地 V0.6.4 全量日志（lwa/manager/daemon/gateway/launchd.err/实例级）与 CHK-095 结论一致性 | 2026-07-20 20:23 | 2026-07-20 20:23 | 已完成 | 总体符合预期：版本 V0.6.4、profile=default；4 实例 demo-static/voiceprint-v3-demo/3d-demo-family-wakeup/prd-review-v035 均 running；lwa update 完成 3 字段配置迁移与 4 实例地址漂移自愈（10.181.239.115→10.180.105.29）；prd-review-v035 容器轻量 start、prd-workflow purge 移除日志齐备；manager/daemon capability probe 均为 INFO overall=ready。仅 gateway.log 存在 2 处 WARNING：①caddy start --pingback 超时（BUG-102 既有兜底，admin/pidfile 就绪视为成功，非新缺陷）；②capability probe role=gateway 记为 WARNING 但 overall=ready dockerAccess=ready——根因与 BUG-270 同源（probe 在 Caddy 启动前采集，gateway_access=admin_unavailable 触发 WARNING 分支），已并入 BUG-270 备注一并修复，未新开 ID。无 ERROR、无 traceback、无其他异常。 |
+| CHK-097 | 检查 | 复审 V0.6.5（IMP-037~041）全部未提交代码与已提交 diff 的 bug | 2026-07-20 22:10 | 2026-07-20 22:50 | 已完成 | 覆盖 access_workflow/gateway_switch/build_process/build_queue/lifecycle/hosting/status/docker_runtime/manager_api/updater/cli(gateway,lifecycle,system)/doctor/daemon/errors/models/static_gateway/manager_static 全量 diff 与新增测试。发现并修复：BUG-273（communicate stdout 重复，V0.6.5 已落地）、BUG-274（_finish_events 泄漏）、BUG-275（gateway switch --dry-run 预检失败吞错）、BUG-276（version fallback 测试滞后）。确认无误：updater run_access_pass 编排、doctor access_review 集成、status lan_address_stale 读时合成、manager_api cancel-build 端点、helpers opBtn/cancel-build 按钮态、daemon LAN 自愈节流。全量 1313 passed / 4 skipped。 |
 
 ## 测试数据
 
@@ -475,6 +489,9 @@
 | DOC-054 | 文档 | 同步 V0.6.4 / IMP-035·036 用户文档与 Skills：平台 LTS/Stable 矩阵、doctor --json 未 init、Full/autostart /mnt 仅 WSL、删除模态焦点 | 2026-07-20 18:44 | 2026-07-20 18:44 | 已完成 | README/faq/known-limitations/operations-playbook/autostart/manager-page/release-checklist/acceptance-checklist；skills lwa-setup-host-environment/autostart/update-runtime |
 | DOC-055 | 文档 | 补充 IMP-037～041 功能定义、验收标准与可执行 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 更新 design/plan/local-webpage-access-新增功能点2607.md §17～§22。 |
 | DOC-056 | 文档 | 计划文档删除原 IMP-040/041，新增 LAN 新鲜度 IMP-040（§21），并修订 §17 优先级 | 2026-07-20 19:07 | 2026-07-20 19:07 | 已完成 | 用户确认删除 pull/Vite 元数据；记录管理页点端口仍用旧 lanUrl 问题与方案 A |
+| DOC-057 | 文档 | 计划文档新增 §22 IMP-041（删除阶段日志与 BUG-268），并更新 §17 优先级 | 2026-07-20 20:09 | 2026-07-20 20:09 | 已完成 | IMP-041 编号复用于本项（原 Vite 元数据已删）；推荐顺序 041→038+040→039→037 |
+| DOC-058 | 文档 | 计划文档 §17 状态横幅同步：IMP-038/039/040/041 标为已落地，IMP-037 仍为 P1 待开发 | 2026-07-20 21:40 | 2026-07-20 21:35 | 已完成 | 对应 DEV-083/084/087/088 完成；推荐顺序四个 P0 已闭环 |
+| DOC-059 | 文档 | 同步 V0.6.5 / IMP-037～041 用户文档与 Skills：README gateway switch·cancel·stale；release-checklist skills=17；manager-page 前端；faq accessOk；operations cancel-build；runtime-workspace update 收尾；update/fix-build/gateway skills | 2026-07-20 23:34 | 2026-07-20 23:40 | 已完成 | 对照 CHK-097：faq/ops/manager API/lwa-review-access-urls 原先大体已齐；本次补齐 README 命令与特性、release-checklist、前端说明、ops §五附、三处 Skill。 |
 
 ## 功能开发
 
@@ -561,12 +578,13 @@
 | DEV-079 | 开发 | IMP-034：CLI/daemon/manager/gateway 分文件落盘、lifecycle_stage 事件、capability probe 日志、FAQ 排障地图（DEV-077） | 2026-07-19 01:12 | 2026-07-19 01:10 | 已完成 | setup_logging 支持 log_filename；bootstrap 写 lwa.log；observe_degraded 与 capability probe 对齐 CapabilityReport 字段名。 |
 | DEV-080 | 开发 | IMP-035：实现管理页任意项目仅移除/彻底删除与二次确认 | 2026-07-20 15:00 | 2026-07-20 16:32 | 已完成 | WBS-035.01～05：DataNonemptyError→409 data_nonempty；成功回显 purge/force；全实例删除双阶段模态；docs manager-page/faq；相关 pytest+node --check 通过。035.06 浏览器实机可后续补 |
 | DEV-081 | 开发 | IMP-036：实现正式平台门禁、Debian支持、WSL2检查与 Windows 原生 fail-fast | 2026-07-20 15:00 | 2026-07-20 16:56 | 已完成 | 主路径落地：PlatformSupportReport + require_supported_platform；CLI/doctor/服务门禁；install-*-linux.sh 支持 Ubuntu/Debian；WSL2/systemd/包版本、/mnt fail-closed、双 Engine 冲突；文档/setup/Skills 去掉 Windows 原生推销。036.08 实机验收清单与 036.09 Windows 分支清理可后续补强。 |
-| DEV-082 | 开发 | 实现 IMP-037：网关后端原子切换与状态一致性 | 2026-07-20 18:53 | - | 待开发 | 按 §18 的 037.01～037.07 实施；先补事务失败与回滚测试。 |
-| DEV-083 | 开发 | 实现 IMP-038：升级后访问地址与可用性复核闭环 | 2026-07-20 18:53 | - | 待开发 | 按 §19 的 038.01～038.06 实施；覆盖 CLI、Skill、doctor 与升级钩子。 |
-| DEV-084 | 开发 | 实现 IMP-039：进行中构建的可控取消 | 2026-07-20 18:53 | - | 待开发 | 按 §20 的 039.01～039.07 实施；重点验证进程树终止、锁释放与重启恢复。 |
+| DEV-082 | 开发 | 实现 IMP-037：网关后端原子切换与状态一致性 | 2026-07-20 18:53 | 2026-07-20 21:53 | 已完成 | 037.01～037.07：`gateway_switch.py` 事务（预检/快照/停旧启新/回滚/degraded）；批量同步 manifest+registry；CLI `lwa gateway switch` + `POST /api/gateway/switch`；access 收尾与 `ok`/`accessOk`/`fullyOk` 分离；operations/faq/manager-page；`tests/test_gateway_switch.py` 8 项通过。 |
+| DEV-083 | 开发 | 实现 IMP-038：升级后访问地址与可用性复核闭环 | 2026-07-20 18:53 | 2026-07-20 21:07 | 已完成 | updater 后台重启后 refresh+可选 review；doctor --access；access_workflow 共享编排；Skill lwa-review-access-urls；FAQ/operations/README 已同步。 |
+| DEV-084 | 开发 | 实现 IMP-039：进行中构建的可控取消 | 2026-07-20 18:53 | 2026-07-20 21:32 | 已完成 | §20 039.01～039.07：queued/building 取消状态机；build-locks 持久化 build_token/owner/worker；run_command 与 docker 流式执行独立进程组 TERM→KILL；幂等 cancel_build；CLI `lwa cancel-build` + API `/cancel-build` + 管理页按钮；取消不删缓存/镜像/用户数据。定向 pytest build_queue/manager_api/hosting/manager_static 通过。未提交。 |
 | DEV-085 | 开发 | 实现 IMP-040：lwa update --pull 安全拉取源码后升级 | 2026-07-20 18:53 | 2026-07-20 19:07 | 已关闭 | 原 IMP-040 update --pull 已从计划删除；范围取消。|
 | DEV-086 | 开发 | 实现 IMP-041：Vite 源码开发/预览端口元数据检测与展示 | 2026-07-20 18:53 | 2026-07-20 19:07 | 已关闭 | 原 IMP-041 Vite 端口元数据已从计划删除；范围取消。|
-| DEV-087 | 开发 | 实现 IMP-040：管理页/DTO LAN 地址新鲜度与漂移自愈（读时现算 + 节流 refresh） | 2026-07-20 19:07 | - | 待开发 | 按 §21 的 040.01～040.07；与 DEV-083(IMP-038) 同批优先；原 DEV-085/086 已关闭 |
+| DEV-087 | 开发 | 实现 IMP-040：管理页/DTO LAN 地址新鲜度与漂移自愈（读时现算 + 节流 refresh） | 2026-07-20 19:07 | 2026-07-20 21:07 | 已完成 | status 读时合成 lanUrl；manager 节流单飞 refresh；POST /api/access/refresh + 前端 stale 横幅；daemon reconcile 复用；doctor JSON currentLanIp/driftedInstanceIds。 |
+| DEV-088 | 开发 | 实现 IMP-041：remove 阶段日志/orphan events + 修复容器别名残留（BUG-268） | 2026-07-20 20:09 | 2026-07-20 21:35 | 已完成 | 041.01～041.05：`cleanup_instance_routes`（BUG-268）；`_log_remove_stage` + orphan `remove_stage`；manager `audit remove`；FAQ/manager-page 对账说明。041.06 实机清残留为运维项可后续补。回归 test_remove_writes_stage_orphan_events / test_api_remove_writes_audit_log。 |
 
 ## 配置运维
 
@@ -626,6 +644,9 @@
 | OPS-052 | 运维 | 复核 V0.6.3 全仓活跃版本引用并补齐遗漏示例 | 2026-07-19 22:28 | 2026-07-19 22:28 | 已完成 | 确认 pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime 已为 0.6.3；补 scripts/pack-release-zip.sh 示例 0.6.1→0.6.3；问题收集/与 task-list 历史条目保留不动。 |
 | OPS-053 | 运维 | 将 feat/imp033-034-full-profile-observability 快进合并入 main 并删除本地功能分支 | 2026-07-19 22:56 | 2026-07-19 23:00 | 已完成 | 本地：main 快进 e321d32→5a6f461（V0.6.3-Build1349），本地功能分支已删除。远程：因代理 CONNECT 502 / GitHub 不可达，origin/main 推送与远程分支删除未完成，待网络恢复后执行 git push origin main && git push origin --delete feat/imp033-034-full-profile-observability。 |
 | OPS-054 | 运维 | 应用版本号提升至 V0.6.4：pyproject/version_info/cli/test_version_info/release-checklist/lwa-update-runtime/pack-release-zip 同步 | 2026-07-20 18:44 | 2026-07-20 18:44 | 已完成 | 全仓活跃 0.6.3→0.6.4；task-list 历史 OPS-051～053 与 resolve 优先级夹具(0.5.x)保留。lwa version 仍取 git HEAD 主题，提交 V0.6.4-BuildXXXX 后即显示 V0.6.4。 |
+| OPS-055 | 运维 | 本地 runtime 更新部署至 V0.6.4：lwa update 重装包并协调重启 manager/daemon；access refresh 修复 lanUrl 漂移 | 2026-07-20 19:10 | 2026-07-20 19:10 | 已完成 | pip 安装 0.6.4；syncSkills 更新5；migrateConfig 补齐 buildMirrors/profile/serviceUser；/api/health=V0.6.4；doctor 原 WARN lan_url_stale（旧 10.181.239.115→10.180.105.29）已 refresh |
+| OPS-056 | 运维 | 将 feat/imp041-038-040-039-pending-features 合并入 main（V0.6.5） | 2026-07-20 22:26 | 2026-07-20 22:26 | 已完成 | 本地合并：feature 326bf87 + merge a5d609f；main 相对 origin/main ahead 2，未推远程。 |
+| OPS-057 | 运维 | 补齐 V0.6.5 活跃版本引用：cli docstring / lwa-update-runtime / pack-release-zip / release-checklist 示例（pyproject/version_info/test 此前已是 0.6.5） | 2026-07-20 23:29 | 2026-07-20 23:29 | 已完成 | task-list 历史 OPS-054～055 与 CHK-095/096 等 0.6.4 条目保留不动。lwa version 仍取 git HEAD 主题，提交 V0.6.5-BuildXXXX 后即显示 V0.6.5。 |
 
 ## 规划事项
 
@@ -655,17 +676,18 @@
 | PLN-022 | 规划 | IMP-041：Vite 源码开发/预览端口元数据检测与展示 WBS | 2026-07-20 18:53 | 2026-07-20 18:53 | 已完成 | 原规划已完成；2026-07-20 该 IMP 已从计划删除，DEV-086 已关闭。 |
 | PLN-023 | 规划 | 评审 IMP-037～041 开发优先级：038/039=P0，037=P1，040=P2可延后，041=P3建议搁置 | 2026-07-20 18:58 | 2026-07-20 18:58 | 已完成 | 写入 design/plan §17.3～17.4；推荐落地顺序 038→039→037；040/041 非近两轮刚需 |
 | PLN-024 | 规划 | IMP-040：管理页 LAN 地址新鲜度与漂移自愈（读时现算+节流落盘；替换已删的 update --pull） | 2026-07-20 19:07 | 2026-07-20 19:07 | 已完成 | design/plan §21；检查阶段 R1～R7；与 IMP-038 共享 refresh；落地 DEV-087 |
+| PLN-025 | 规划 | IMP-041：删除路径阶段日志 + 容器别名清理（含 BUG-268）WBS | 2026-07-20 20:09 | 2026-07-20 20:09 | 已完成 | design/plan §22；阶段 begin/stop/down/alias/pageviews/registry/purge/done；orphan events；破坏性 API 审计；与 BUG-268 同批；落地 DEV-088 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 267 | 267 | 0 | 100% |
-| 调整事项 | 29 | 29 | 0 | 100% |
-| 检查事项 | 91 | 91 | 0 | 100% |
+| 代码 Bug | 272 | 272 | 0 | 100% |
+| 调整事项 | 30 | 30 | 0 | 100% |
+| 检查事项 | 94 | 94 | 0 | 100% |
 | 测试数据 | 1 | 1 | 0 | 100% |
-| 文档维护 | 56 | 56 | 0 | 100% |
-| 功能开发 | 87 | 83 | 4 | 95% |
-| 配置运维 | 54 | 54 | 0 | 100% |
-| 规划事项 | 24 | 24 | 0 | 100% |
-| **总计** | 609 | 605 | 4 | 99% |
+| 文档维护 | 58 | 58 | 0 | 100% |
+| 功能开发 | 88 | 88 | 0 | 100% |
+| 配置运维 | 56 | 56 | 0 | 100% |
+| 规划事项 | 25 | 25 | 0 | 100% |
+| **总计** | 624 | 624 | 0 | 100% |

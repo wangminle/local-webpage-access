@@ -95,8 +95,7 @@ def test_e2e_init_creates_clean_workspace(tmp_path: Path) -> None:
     assert ws.inbox.is_dir()
     assert ws.apps.is_dir()
     assert ws.skills.is_dir()
-    # 16 个内置 skills（IMP-030 新增 lwa-setup-autostart）
-    assert len(list(ws.skills.rglob("SKILL.md"))) == 16
+    assert len(list(ws.skills.rglob("SKILL.md"))) == 17
 
 
 # ---- WBS-29.02~04 静态 HTML 全链路 ----------------------------------------

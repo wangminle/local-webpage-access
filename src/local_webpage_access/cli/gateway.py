@@ -1,7 +1,8 @@
-"""gateway 子命令（IMP-010 / DEV-041，WBS 0.7）：``lwa gateway on/off/status``。
+"""gateway 子命令（IMP-010 / DEV-041，WBS 0.7）：``lwa gateway on/off/status/switch``。
 
 DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 拆出。暴露 ``app`` 供根
 CLI 通过 ``add_typer`` 挂载为 ``lwa gateway ...`` 子命令组。
+IMP-037 / DEV-082：新增 ``switch`` 原子切换 caddy ↔ builtin。
 """
 
 from __future__ import annotations
@@ -74,7 +75,6 @@ def gateway_on(
     from local_webpage_access.access import (
         format_review_report,
         maybe_rebuild_after_review,
-        review_access,
     )
     from local_webpage_access.gateway_service import start_gateway
     from local_webpage_access.ports import resolve_lan_ip
@@ -96,7 +96,19 @@ def gateway_on(
             typer.echo("  刷新地址：lwa access refresh")
             # G6：交接收尾后默认复核访问；可选自动 rebuild。
             try:
-                report = review_access(ws, config, reg)
+                from local_webpage_access.access_workflow import run_access_pass
+
+                # finalize 已 refresh；此处只跑 review（refresh 幂等再跑一次亦可，
+                # 但共享编排 review=True 会再 refresh——gateway on 路径 finalize
+                # 已写盘，这里仅 review 避免重复写）。
+                pass_result = run_access_pass(
+                    ws, config, reg, review=True, dry_run=False
+                )
+                report = pass_result.review
+                if report is None and pass_result.review_error:
+                    raise RuntimeError(pass_result.review_error)
+                if report is None:
+                    raise RuntimeError("access review 未返回报告")
                 rebuild_report = maybe_rebuild_after_review(
                     ws,
                     config,
@@ -199,4 +211,152 @@ def gateway_status_cmd() -> None:
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("switch")
+def gateway_switch(
+    backend: str = typer.Argument(..., help="目标后端：caddy 或 builtin"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="只预检与打印变更摘要，不写盘、不启停进程"
+    ),
+    json_out: bool = typer.Option(False, "--json", help="以 JSON 输出结果"),
+    review: bool = typer.Option(
+        True,
+        "--review/--no-review",
+        help="切换成功后是否执行 access refresh+review（默认开启）",
+    ),
+) -> None:
+    """原子切换静态网关后端（IMP-037）：预检→停旧→写配置→启新→同步 manifest→访问复核。
+
+    切到 builtin **不**要求本机已有可用 Caddy（便于 Caddy 坏掉时降级）；
+    切到 caddy 时校验 PATH 中的 Caddy 版本。幂等：目标与当前相同则 noop，不重启。
+    """
+    import json as json_mod
+
+    from local_webpage_access.gateway_switch import switch_gateway
+    from local_webpage_access.version_requirements import MIN_CADDY_VERSION
+
+    try:
+        ws, config, reg = open_workspace_registry()
+        try:
+            target = (backend or "").strip().lower()
+            # 仅切到 caddy 时要求版本；切到 builtin 允许在 caddy 不可用时逃生
+            if target == "caddy" and not dry_run:
+                # 临时把配置视为 caddy 以复用版本校验；真实 YAML 由 switch 事务写入
+                if config.staticGateway != "caddy":
+                    # _require_caddy_version 在非 caddy 配置下会直接拒；这里只查二进制版本
+                    import shutil
+                    import subprocess
+
+                    from local_webpage_access.version_requirements import version_ge
+
+                    if not shutil.which("caddy"):
+                        raise LwaError(
+                            "未找到 caddy 可执行文件",
+                            code="GATEWAY_CADDY_MISSING",
+                            suggestion=f"安装 Caddy ≥ {MIN_CADDY_VERSION} 并加入 PATH",
+                        )
+                    try:
+                        ver = subprocess.run(
+                            ["caddy", "version"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        raise LwaError(
+                            f"无法获取 Caddy 版本：{exc}",
+                            code="GATEWAY_VERSION_UNKNOWN",
+                            suggestion=f"确认 caddy 可执行且版本 ≥ {MIN_CADDY_VERSION}",
+                        ) from exc
+                    if ver.returncode != 0 or not version_ge(
+                        (ver.stdout or "").strip() or (ver.stderr or "").strip(),
+                        MIN_CADDY_VERSION,
+                    ):
+                        raise LwaError(
+                            "Caddy 版本不满足要求",
+                            code="GATEWAY_VERSION_TOO_LOW",
+                            suggestion=f"升级 Caddy 至 ≥ {MIN_CADDY_VERSION}",
+                        )
+                else:
+                    _require_caddy_version(config)
+
+            result = switch_gateway(
+                ws, config, reg, target, dry_run=dry_run, review=review
+            )
+            if json_out:
+                typer.echo(json_mod.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                if result.noop:
+                    typer.secho(
+                        f"已是 {result.to_backend}，无需切换（noop）",
+                        fg=typer.colors.GREEN,
+                    )
+                elif not result.ok:
+                    # 失败（含 dry-run 预检失败，如切到 caddy 但本机无 caddy）：
+                    # 必须先报错再退出，否则 dry-run 会打印误导性的成功预览。
+                    typer.secho(
+                        f"网关切换失败：{result.error or 'unknown'}",
+                        fg=typer.colors.RED,
+                        err=True,
+                    )
+                    if result.degraded:
+                        typer.secho(
+                            "  状态：degraded（回滚未完全成功）",
+                            fg=typer.colors.RED,
+                            err=True,
+                        )
+                    if result.repair_hint:
+                        typer.echo(f"  修复建议：{result.repair_hint}")
+                elif dry_run:
+                    typer.secho(
+                        f"[dry-run] {result.from_backend} → {result.to_backend}",
+                        fg=typer.colors.YELLOW,
+                    )
+                    if result.plan:
+                        for note in result.plan.notes:
+                            typer.echo(f"  · {note}")
+                        for inst in result.plan.instances:
+                            typer.echo(
+                                f"  · {inst.get('id')}: {inst.get('action')} "
+                                f"(port={inst.get('hostPort')}, alias={inst.get('routeHost')})"
+                            )
+                else:
+                    typer.secho(
+                        f"网关后端已切换：{result.from_backend} → {result.to_backend}",
+                        fg=typer.colors.GREEN,
+                    )
+                    if result.access_ok is False:
+                        typer.secho(
+                            "  后端切换成功，但访问复核未通过（未假绿）",
+                            fg=typer.colors.YELLOW,
+                            err=True,
+                        )
+                        typer.echo("  请检查：lwa access review")
+
+            if not result.ok or result.degraded:
+                raise typer.Exit(code=1)
+            if result.access_ok is False:
+                raise typer.Exit(code=1)
+        finally:
+            reg.close()
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        if json_out:
+            import json as json_mod
+
+            typer.echo(
+                json_mod.dumps(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": exc.code,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)

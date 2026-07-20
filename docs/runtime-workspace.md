@@ -192,9 +192,14 @@ lwa alias clear <id>
 
 V0.4.0 起优先运行 `lwa update`。当前实现已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon；**若开机自启单元在管，会走 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`），保证单一进程**，勿再手搓 `off && on` 与 KeepAlive 抢锁。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon 等后台子进程仍跑旧代码。
 
+升级收尾（IMP-038）：后台重启后会 **access refresh**，并默认跑一次轻量 **access review**（可用 `--no-review-access` 跳过）。DHCP 换网后的 LAN 漂移另见 [运维手册 §7.2](operations-playbook.md)；AI 协作流程见 Skill **`lwa-review-access-urls`**。
+
 ```bash
 # 推荐：一条命令完成工作区热重载（已与自启协调）
 lwa update
+
+# 跳过升级后的访问复核（仅刷新地址）：
+# lwa update --no-review-access
 
 # ── 仅当 lwa update 失败时的手动兜底 ──
 # 仓库根：刷新 editable 安装
@@ -211,7 +216,7 @@ lwa daemon off && lwa daemon on    # 若启用了 daemon
 # 可选：托管/import 逻辑变更时重启业务实例
 lwa restart <instance-id>
 
-lwa version && lwa doctor
+lwa version && lwa doctor --access
 ```
 
 AI 助手可参照 Skill **`lwa-update-runtime`**（`lwa init` 后会复制到工作区 `skills/`）。V0.4.0 起优先使用 `lwa update` 自动完成上述步骤；升级后请确认管理页 `/api/health` 的 `version` 与 `lwa version` 输出一致，且实例列表可见「路径别名」按钮。手动命令仅作为排障兜底；细节见 [开机自启](autostart.md)「停服与自启的协调」。

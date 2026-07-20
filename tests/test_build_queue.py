@@ -376,12 +376,15 @@ def test_queue_timeout_does_not_leave_status_queued(registry, config) -> None:
 # ---- cancel / 状态查询 -----------------------------------------------------
 
 
-def test_cancel_records_event(registry, config) -> None:
+def test_cancel_noop_when_no_active_task(registry, config) -> None:
+    """无活动构建时不得假报已取消（IMP-039 §20.1）。"""
+    from local_webpage_access.build_queue import CancelResult
+
     _seed_instance(registry, "api")
     q = BuildQueue(config, registry, concurrency=1)
-    q.cancel("api")
-    events = registry.list_events("api")
-    assert any(e["event_type"] == "build_cancel" for e in events)
+    result = q.cancel("api")
+    assert isinstance(result, CancelResult)
+    assert result.outcome == "noop"
 
 
 def test_cancel_skips_queued_builder(registry, config) -> None:
@@ -429,7 +432,8 @@ def test_cancel_skips_queued_builder(registry, config) -> None:
     # 给 api2 一点时间走到 acquire 等待
     time.sleep(0.15)
 
-    assert q.cancel("api2") is True
+    result = q.cancel("api2")
+    assert result.outcome == "cancelled"
     release.set()
     t1.join(timeout=3)
     t2.join(timeout=3)
@@ -439,6 +443,226 @@ def test_cancel_skips_queued_builder(registry, config) -> None:
     assert len(errors) == 1
     assert isinstance(errors[0], LifecycleError)
     assert "已取消" in str(errors[0])
+    # 槽位已释放，无泄漏
+    assert q.global_in_flight() == 0
+
+
+def test_cancel_building_kills_process_tree(registry, config) -> None:
+    """进行中构建：cancel 须终止子进程树，任务落到 cancelled，槽位释放（039.01）。"""
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("进程树取消用例以 POSIX shell 为准")
+
+    from local_webpage_access.errors import BuildCancelled
+    from local_webpage_access.hosting import run_command
+
+    _seed_instance(registry, "api")
+    q = BuildQueue(config, registry, concurrency=1, wait_timeout=5.0)
+    child_pid_file = Path(registry.db_path).parent / "cancel-child.pid"
+    log_path = Path(registry.db_path).parent / "cancel-build.log"
+    errors: list[BaseException] = []
+    started = threading.Event()
+
+    def builder(iid: str):
+        # BuildQueue.run 会 enter_build_context；此处仅发信号并跑可杀命令
+        started.set()
+        cmd = f"sleep 60 & echo $! > {child_pid_file}; wait"
+        run_command(cmd, cwd=Path(registry.db_path).parent, log_path=log_path, timeout=120)
+        return iid
+
+    def run_build() -> None:
+        try:
+            q.run("api", builder)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=run_build)
+    t.start()
+    assert started.wait(5.0)
+    deadline = time.time() + 5
+    while time.time() < deadline and not child_pid_file.exists():
+        time.sleep(0.05)
+    assert child_pid_file.exists()
+    child_pid = int(child_pid_file.read_text().strip())
+
+    result = q.cancel("api", wait_timeout=15.0)
+    assert result.outcome == "cancelled", result
+    t.join(timeout=20)
+    time.sleep(0.3)
+
+    alive = True
+    try:
+        os.kill(child_pid, 0)
+    except (ProcessLookupError, PermissionError):
+        alive = False
+    assert not alive, f"孙进程 {child_pid} 取消后仍存活"
+    assert q.global_in_flight() == 0
+    with q._guard:
+        assert q._tasks["api"].status == "cancelled"
+    assert errors, "builder 线程应因取消而退出"
+    assert any(
+        isinstance(e, (LifecycleError, BuildCancelled)) or "取消" in str(e) for e in errors
+    )
+
+
+def test_cancel_idempotent_and_does_not_mutate_completed(registry, config) -> None:
+    """重复 cancel 返回相同终态；已成功任务不被改成 cancelled。"""
+    _seed_instance(registry, "api")
+    q = BuildQueue(config, registry, concurrency=1)
+    assert q.run("api", lambda iid: iid) == "api"
+    with q._guard:
+        assert q._tasks["api"].status == "success"
+    r1 = q.cancel("api")
+    assert r1.outcome == "already_done"
+    with q._guard:
+        assert q._tasks["api"].status == "success"
+    r2 = q.cancel("api")
+    assert r2.outcome == "already_done"
+
+
+def test_cancel_race_with_normal_completion(registry, config) -> None:
+    """取消与正常完成竞态：已 success 的不得被改成 cancelled。"""
+    _seed_instance(registry, "api")
+    q = BuildQueue(config, registry, concurrency=1)
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def fast_builder(iid):
+        done.set()
+        time.sleep(0.05)
+        return iid
+
+    def run_build() -> None:
+        try:
+            q.run("api", fast_builder)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=run_build)
+    t.start()
+    assert done.wait(2.0)
+    # 尽量在即将完成时取消
+    result = q.cancel("api", wait_timeout=3.0)
+    t.join(timeout=3)
+    with q._guard:
+        final = q._tasks["api"].status
+    assert final in ("success", "cancelled")
+    if final == "success":
+        assert result.outcome in ("already_done", "cancelled", "noop")
+        with q._guard:
+            assert q._tasks["api"].status == "success"
+    else:
+        assert result.outcome == "cancelled"
+        assert errors
+
+
+def test_cancel_pid_reuse_does_not_signal_unrelated(registry, config, tmp_path) -> None:
+    """管理进程重启后，不得对 PID 复用的无关进程发信号（039.01 / §20.3）。"""
+    import os
+    import subprocess
+    import sys
+
+    from local_webpage_access.build_queue import CrossProcessBuildGate
+
+    if sys.platform == "win32":
+        pytest.skip("PID 复用身份校验用例以 POSIX 为准")
+
+    _seed_instance(registry, "api")
+    # 无关长驻进程
+    decoy = subprocess.Popen(
+        ["sleep", "60"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        q = BuildQueue(config, registry, concurrency=1)
+        # 伪造持久化任务：worker_pid=decoy，但身份故意写错
+        gate = q._gate
+        gate.upsert_build_task(
+            instance_id="api",
+            build_token="fake-token",
+            status="building",
+            owner_pid=os.getpid(),
+            owner_identity="not-a-real-owner-identity-xxxxx",
+            worker_pid=decoy.pid,
+            worker_pgid=os.getpgid(decoy.pid),
+            worker_identity="npm-install-fake-identity",
+        )
+        # 内存中无对应 building 任务 → 走跨进程回收路径
+        result = q.cancel("api", wait_timeout=2.0)
+        assert result.outcome in ("cancel_failed", "noop", "already_done")
+        # decoy 必须仍存活
+        try:
+            os.kill(decoy.pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        assert alive, "不得误杀 PID 复用的无关进程"
+    finally:
+        decoy.kill()
+        decoy.wait(timeout=5)
+
+
+def test_cancel_persists_owner_and_cancel_request(registry, config) -> None:
+    """跨进程任务持久化含 build token、owner PID、状态与取消请求（039.02）。"""
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("持久化取消用例依赖 POSIX run_command")
+
+    from local_webpage_access.hosting import run_command
+
+    _seed_instance(registry, "api")
+    q = BuildQueue(config, registry, concurrency=1)
+    started = threading.Event()
+    log_path = Path(registry.db_path).parent / "persist-cancel.log"
+    errors: list[BaseException] = []
+
+    def builder(iid):
+        started.set()
+        run_command(
+            "sleep 60",
+            cwd=Path(registry.db_path).parent,
+            log_path=log_path,
+            timeout=120,
+        )
+        return iid
+
+    def run_build() -> None:
+        try:
+            q.run("api", builder)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=run_build)
+    t.start()
+    assert started.wait(3.0)
+    # 等进入 building 持久化
+    deadline = time.time() + 3
+    row = None
+    while time.time() < deadline:
+        row = q._gate.get_build_task("api")
+        if row and row["status"] == "building":
+            break
+        time.sleep(0.05)
+    assert row is not None
+    assert row["status"] == "building"
+    assert row["owner_pid"] > 0
+    assert row["build_token"]
+    assert row["owner_identity"]
+
+    result = q.cancel("api", wait_timeout=10.0)
+    assert result.outcome == "cancelled"
+    t.join(timeout=15)
+    row2 = q._gate.get_build_task("api")
+    if row2 is not None:
+        assert row2["status"] in ("cancelled", "success", "failed", "cancel_failed")
+        assert row2["status"] != "building"
+        assert row2.get("cancel_requested_at") is not None or row2["status"] == "cancelled"
+    assert errors
 
 
 def test_pending_lists_queued_tasks(registry, config) -> None:

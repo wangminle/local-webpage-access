@@ -94,6 +94,11 @@ class DoctorReport:
     checks: list[CheckResult] = field(default_factory=list)
     instance_checks: list[CheckResult] = field(default_factory=list)
     instance_id: str | None = None
+    # IMP-040：JSON 友好的 LAN 漂移摘要
+    current_lan_ip: str | None = None
+    drifted_instance_ids: list[str] = field(default_factory=list)
+    # IMP-038：可选 access review（doctor --access）
+    access_review: Any = None
 
     @property
     def overall(self) -> str:
@@ -671,7 +676,30 @@ def check_lan_url_stale(
     from local_webpage_access.ports import resolve_lan_ip
 
     lan_ip = resolve_lan_ip(config)
-    drifted: list[str] = []
+    drifted_ids, skipped = _collect_lan_drifted_ids(ws, registry, lan_ip)
+    drifted = [f"{iid}({host})" for iid, host in drifted_ids]
+    if drifted:
+        return CheckResult(
+            "lan_url_stale",
+            STATUS_WARN,
+            f"{len(drifted)} 个实例的 lanUrl 指向非当前 LAN IP（{lan_ip}）",
+            detail="漂移实例：" + ", ".join(drifted[:8]),
+            suggestion="运行 `lwa access refresh` 用当前 LAN IP 刷新所有实例访问地址",
+        )
+    return CheckResult(
+        "lan_url_stale",
+        STATUS_OK,
+        f"实例 lanUrl 与当前 LAN IP（{lan_ip or '127.0.0.1'}）一致" + (
+            "" if not skipped else f"（{skipped} 个 manifest 跳过）"
+        ),
+    )
+
+
+def _collect_lan_drifted_ids(
+    ws: Workspace, registry: Registry, lan_ip: str | None
+) -> tuple[list[tuple[str, str]], int]:
+    """返回 ([(instance_id, host), ...], skipped_count)。"""
+    drifted: list[tuple[str, str]] = []
     skipped = 0
     for row in registry.list_instances():
         iid = row["id"]
@@ -690,22 +718,8 @@ def check_lan_url_stale(
             continue
         host = _url_host(lan_url)
         if lan_ip and host and host not in (lan_ip, "127.0.0.1"):
-            drifted.append(f"{iid}({host})")
-    if drifted:
-        return CheckResult(
-            "lan_url_stale",
-            STATUS_WARN,
-            f"{len(drifted)} 个实例的 lanUrl 指向非当前 LAN IP（{lan_ip}）",
-            detail="漂移实例：" + ", ".join(drifted[:8]),
-            suggestion="运行 `lwa access refresh` 用当前 LAN IP 刷新所有实例访问地址",
-        )
-    return CheckResult(
-        "lan_url_stale",
-        STATUS_OK,
-        f"实例 lanUrl 与当前 LAN IP（{lan_ip or '127.0.0.1'}）一致" + (
-            "" if not skipped else f"（{skipped} 个 manifest 跳过）"
-        ),
-    )
+            drifted.append((iid, host))
+    return drifted, skipped
 
 
 def check_backend_handoff(
@@ -1124,10 +1138,15 @@ def run_doctor(
     config: Config,
     *,
     instance_id: str | None = None,
+    access_review: bool = False,
     runner: SubprocessRunner = _default_runner,
     port_in_use: PortChecker = _default_port_in_use,
 ) -> DoctorReport:
-    """运行全部环境检查；若提供 instance_id 则附加实例诊断。"""
+    """运行全部环境检查；若提供 instance_id 则附加实例诊断。
+
+    ``access_review=True``（``lwa doctor --access``）时复用
+    :func:`local_webpage_access.access.review_access`，不重写探测逻辑。
+    """
     report = DoctorReport()
     allocated_ports = _allocated_ports_for_workspace(ws)
     # IMP-020：打开一个 registry 供 caddy 健康探针探测站点/别名入口可达性；
@@ -1139,6 +1158,15 @@ def run_doctor(
     except Exception:  # noqa: BLE001
         caddy_probe_registry = None
     try:
+        from local_webpage_access.ports import resolve_lan_ip
+
+        report.current_lan_ip = resolve_lan_ip(config)
+        if caddy_probe_registry is not None:
+            drifted_pairs, _skipped = _collect_lan_drifted_ids(
+                ws, caddy_probe_registry, report.current_lan_ip
+            )
+            report.drifted_instance_ids = [iid for iid, _host in drifted_pairs]
+
         report.checks = [
             check_python_version(),
             check_python_packages(),
@@ -1169,6 +1197,22 @@ def run_doctor(
             check_disk_space(ws),
             check_memory(),
         ]
+        if access_review and caddy_probe_registry is not None:
+            from local_webpage_access.access_workflow import review_access
+
+            try:
+                report.access_review = review_access(
+                    ws, config, caddy_probe_registry
+                )
+            except Exception as exc:  # noqa: BLE001
+                report.checks.append(
+                    CheckResult(
+                        "access_review",
+                        STATUS_FAIL,
+                        f"访问复核失败：{exc}",
+                        suggestion="手动运行 `lwa access review`",
+                    )
+                )
     finally:
         if caddy_probe_registry is not None:
             with contextlib.suppress(Exception):

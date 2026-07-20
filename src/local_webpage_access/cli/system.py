@@ -253,17 +253,24 @@ def doctor_cmd(
         "--profile",
         help="档位：default|full（IMP-033；full 附加能力契约检查）",
     ),
+    access: bool = typer.Option(
+        False,
+        "--access",
+        help="附加访问地址可用性复核（复用 lwa access review，不重写探测）",
+    ),
 ) -> None:
     """诊断环境与实例问题（WBS-26）。
 
     检查 Python/Docker/Compose/端口/registry/磁盘/内存；提供 instance_id 时
     附加该实例的 manifest、状态、最近事件与日志诊断，并给出修复建议。
     ``--profile full`` 时额外输出 CapabilityReport 并按 Full 契约判定整体。
+    ``--access``（IMP-038）复用 ``review_access()`` 做声明 URL 真探活。
 
     BUG-262：``--json`` 在未初始化工作区时仍输出 ``platformSupport``，便于只读平台诊断。
     """
     import json as json_mod
 
+    from local_webpage_access.access import format_review_report
     from local_webpage_access.doctor import format_report, run_doctor
     from local_webpage_access.platform_support import collect_platform_support_report
 
@@ -282,7 +289,7 @@ def doctor_cmd(
     try:
         ws, config, _reg = open_workspace_registry()
         _reg.close()  # doctor 自行打开 registry
-        report = run_doctor(ws, config, instance_id=instance_id)
+        report = run_doctor(ws, config, instance_id=instance_id, access_review=access)
         cap_payload: dict[str, Any] | None = None
         if profile in ("full", "default") or getattr(config, "profile", None) == "full":
             from typing import Literal, cast
@@ -333,10 +340,14 @@ def doctor_cmd(
                 "instance_checks": [
                     c.to_dict() for c in report.instance_checks
                 ],
+                "currentLanIp": report.current_lan_ip,
+                "driftedInstanceIds": report.drifted_instance_ids,
                 "platformSupport": collect_platform_support_report(
                     workspace_root=ws.root
                 ).to_dict(),
             }
+            if report.access_review is not None:
+                payload["accessReview"] = report.access_review.to_dict()
             if cap_payload is not None:
                 payload["capabilities"] = cap_payload
             typer.echo(
@@ -344,7 +355,12 @@ def doctor_cmd(
             )
         else:
             typer.echo(format_report(report))
+            if report.access_review is not None:
+                typer.echo("")
+                typer.echo(format_review_report(report.access_review))
         fail = report.has_failures
+        if report.access_review is not None and report.access_review.has_failures:
+            fail = True
         if cap_payload and (profile == "full" or getattr(config, "profile", None) == "full"):
             if cap_payload.get("overall") in ("unready", "degraded"):
                 fail = True
@@ -445,6 +461,11 @@ def update_cmd(
     no_restart_daemon: bool = typer.Option(
         False, "--no-restart-daemon", help="跳过重启 daemon"
     ),
+    review_access: bool = typer.Option(
+        True,
+        "--review-access/--no-review-access",
+        help="升级收尾后做轻量访问复核（默认开启；失败不与 pip 混为一类）",
+    ),
     json_output: bool = typer.Option(
         False, "--json", help="输出机器可读的 JSON 摘要"
     ),
@@ -484,6 +505,7 @@ def update_cmd(
                 restart_daemon=not no_restart_daemon,
                 restart_instances=restart_instances,
                 run_doctor=not no_doctor,
+                review_access=review_access,
                 repo=repo,
             )
             report = run_update(ws, config, reg, options=options)

@@ -61,6 +61,7 @@ class UpdateOptions:
     restart_daemon: bool = True
     restart_instances: bool = False
     run_doctor: bool = True
+    review_access: bool = True  # IMP-038：升级后默认轻量 access review
     repo: str | None = None  # 显式 --repo，覆盖自动识别
 
 
@@ -474,6 +475,13 @@ def run_update(
             report.steps.append(
                 StepResult("restartInstances", "skipped", "[dry-run] 计划重启可重启实例")
             )
+        report.steps.append(
+            StepResult("accessRefresh", "skipped", "[dry-run] 计划刷新访问地址")
+        )
+        if options.review_access:
+            report.steps.append(
+                StepResult("accessReview", "skipped", "[dry-run] 计划轻量访问复核")
+            )
         if options.run_doctor:
             report.steps.append(
                 StepResult("doctor", "skipped", "[dry-run] 计划运行 lwa doctor")
@@ -584,6 +592,59 @@ def run_update(
             )
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("restartInstances", "failed", str(exc)))
+
+    # ---- 8.5 IMP-038：后台重启后再 refresh（+ 可选 review），避免旧进程回写 ----
+    from local_webpage_access.access_workflow import run_access_pass
+
+    access = run_access_pass(
+        workspace,
+        config,
+        registry,
+        review=options.review_access,
+        dry_run=False,
+    )
+    if access.refresh_error:
+        report.steps.append(
+            StepResult("accessRefresh", "failed", access.refresh_error)
+        )
+    elif access.refresh is not None:
+        report.steps.append(
+            StepResult(
+                "accessRefresh",
+                "ok",
+                f"LAN IP={access.refresh.lan_ip or '(无)'}，"
+                f"刷新 {len(access.refresh.refreshed)}，"
+                f"漂移 {access.refresh.drifted_count}",
+                extra={"accessRefresh": access.refresh.to_dict()},
+            )
+        )
+    else:
+        report.steps.append(
+            StepResult("accessRefresh", "skipped", "未执行访问地址刷新")
+        )
+
+    if options.review_access:
+        if access.review_error:
+            report.steps.append(
+                StepResult("accessReview", "failed", access.review_error)
+            )
+        elif access.review is not None:
+            report.steps.append(
+                StepResult(
+                    "accessReview",
+                    "ok",
+                    f"总体：{access.review.overall.upper()}",
+                    extra={"accessReview": access.review.to_dict()},
+                )
+            )
+        else:
+            report.steps.append(
+                StepResult("accessReview", "skipped", "未执行访问复核")
+            )
+    else:
+        report.steps.append(
+            StepResult("accessReview", "skipped", "已通过 --no-review-access 跳过")
+        )
 
     # ---- 9. doctor ----
     if options.run_doctor:

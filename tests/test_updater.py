@@ -76,6 +76,7 @@ def _opts(**kw) -> UpdateOptions:
         restart_daemon=False,
         restart_instances=False,
         run_doctor=False,
+        review_access=True,
         repo=None,
     )
     base.update(kw)
@@ -637,3 +638,183 @@ def test_format_report_renders(
     text = format_report(report)
     assert "lwa update" in text
     assert "doctor" in text
+
+
+# ---- IMP-038：升级后 access refresh / review --------------------------------
+
+
+def test_access_refresh_runs_after_background_restarts(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """038.01：accessRefresh 必须在 restartManager/Daemon 之后执行。"""
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.stop_manager", lambda ws: True
+    )
+
+    def fake_start_mgr(ws, cfg):
+        order.append("restartManager")
+        return 4242
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.start_manager", fake_start_mgr
+    )
+
+    import local_webpage_access.daemon as dmod
+
+    monkeypatch.setattr(dmod, "is_running", lambda ws: True)
+    monkeypatch.setattr(dmod, "stop_daemon", lambda ws: True)
+
+    def fake_start_daemon(ws, cfg, **kw):
+        order.append("restartDaemon")
+        return 5252
+
+    monkeypatch.setattr(dmod, "start_daemon", fake_start_daemon)
+
+    def fake_refresh(ws, cfg, reg):
+        order.append("accessRefresh")
+        from local_webpage_access.access import RefreshReport
+
+        return RefreshReport(lan_ip="192.168.1.50")
+
+    def fake_review(ws, cfg, reg):
+        order.append("accessReview")
+        from local_webpage_access.access import AccessReviewReport
+
+        return AccessReviewReport(lan_ip="192.168.1.50")
+
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.refresh_network_entries",
+        fake_refresh,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.review_access",
+        fake_review,
+    )
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=_opts(
+            restart_manager=True,
+            restart_daemon=True,
+            review_access=True,
+        ),
+    )
+    names = [s.name for s in report.steps]
+    assert "accessRefresh" in names
+    assert "accessReview" in names
+    assert order.index("restartManager") < order.index("accessRefresh")
+    assert order.index("restartDaemon") < order.index("accessRefresh")
+    assert order.index("accessRefresh") < order.index("accessReview")
+    assert report.step("accessRefresh").status == "ok"
+    assert report.step("accessReview").status == "ok"
+
+
+def test_dry_run_never_writes_or_probes_access(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """038.01/验收：dry-run 不调用 refresh/review，也不写盘。"""
+    called = {"refresh": 0, "review": 0}
+
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.refresh_network_entries",
+        lambda *a, **k: called.__setitem__("refresh", called["refresh"] + 1),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.review_access",
+        lambda *a, **k: called.__setitem__("review", called["review"] + 1),
+    )
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=_opts(
+            dry_run=True,
+            skip_pip=False,
+            sync_skills=True,
+            restart_manager=True,
+            restart_daemon=True,
+            run_doctor=True,
+            review_access=True,
+        ),
+    )
+    assert called == {"refresh": 0, "review": 0}
+    assert all(s.status == "skipped" for s in report.steps)
+    refresh = report.step("accessRefresh")
+    review = report.step("accessReview")
+    assert refresh is not None and refresh.status == "skipped"
+    assert review is not None and review.status == "skipped"
+    assert "[dry-run]" in (refresh.message or "")
+
+
+def test_access_refresh_failure_separate_from_pip(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """038.01：refresh 失败记在 accessRefresh，不污染 pip 步骤。"""
+    fake_repo = workspace.root / "repo"
+    fake_repo.mkdir()
+    (fake_repo / "pyproject.toml").write_text("[project]\nname='x'\n")
+    monkeypatch.setattr(
+        "local_webpage_access.updater.locate_repo", lambda e: fake_repo
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.updater.run_pip_install",
+        lambda repo: "Successfully installed local-webpage-access",
+    )
+
+    def boom(*a, **k):
+        raise RuntimeError("refresh boom")
+
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.refresh_network_entries", boom
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.review_access",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("should not run")),
+    )
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=_opts(skip_pip=False, review_access=True),
+    )
+    assert report.step("pip").status == "ok"
+    assert report.step("accessRefresh").status == "failed"
+    assert "refresh boom" in report.step("accessRefresh").message
+    # refresh 失败时仍可尝试 review（独立分类）；此处 mock 抛错也应独立记录
+    assert report.step("accessReview") is not None
+
+
+def test_no_review_access_skips_review_step(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """--no-review-access 时只 refresh，不 review。"""
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.refresh_network_entries",
+        lambda *a, **k: __import__(
+            "local_webpage_access.access", fromlist=["RefreshReport"]
+        ).RefreshReport(lan_ip="10.0.0.1"),
+    )
+    reviewed = {"n": 0}
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.review_access",
+        lambda *a, **k: reviewed.__setitem__("n", reviewed["n"] + 1),
+    )
+    report = run_update(
+        workspace, config, registry, options=_opts(review_access=False)
+    )
+    assert report.step("accessRefresh").status == "ok"
+    assert report.step("accessReview").status == "skipped"
+    assert reviewed["n"] == 0

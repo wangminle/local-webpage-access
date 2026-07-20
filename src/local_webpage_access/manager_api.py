@@ -318,12 +318,16 @@ def create_app(
     setup_logging(level=config.logLevel)  # type: ignore[arg-type]
 
     def _refresh_capability_cache() -> dict[str, Any]:
-        """后台探测并刷新 capability-manager.json / 内存片段（BUG-254）。"""
+        """后台探测并刷新 capability-manager.json / 内存片段（BUG-254）。
+
+        BUG-271：``include_backend_cached=True``，与 CLI/doctor 及「完整能力报告/
+        刷新」契约一致，合并 daemon/gateway 缓存字段；manager 自身仍以实时探测为准。
+        """
         report = collect_capability_report(
             workspace_root=workspace.root,
             role="manager",
             config_profile=getattr(config, "profile", None),
-            include_backend_cached=False,
+            include_backend_cached=True,
         )
         level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
         log_capability_probe("manager", report, level=level)
@@ -515,11 +519,17 @@ def _register_routes(app: FastAPI) -> None:
     # ---- 实例列表（WBS-22.03）----
     @app.get("/api/instances", dependencies=[api], tags=["instances"])
     def list_instances() -> dict[str, Any]:
+        from local_webpage_access.access_workflow import maybe_throttled_lan_refresh
         from local_webpage_access.lifecycle import list_redundant_instances
 
         ctx = _Ctx(app)
         # 先观测回写，再取快照（状态尽量新鲜）
         sync_status(ctx.workspace, ctx.config, ctx.registry)
+        # IMP-040 R2/R3：旁路漂移检测 + 节流落盘（读时合成由 status 负责）
+        try:
+            maybe_throttled_lan_refresh(ctx.workspace, ctx.config, ctx.registry)
+        except Exception:  # noqa: BLE001 — 旁路失败不阻断列表
+            log.debug("列表旁路 LAN refresh 失败", exc_info=True)
         statuses = all_statuses(ctx.workspace, ctx.config, ctx.registry)
         # IMP-019（WBS-22.13）：标注冗余实例（同 zip 指纹分组中非最早者），
         # 前端据此显示冗余徽章 / 黄色边框 / 行内删除。
@@ -533,6 +543,45 @@ def _register_routes(app: FastAPI) -> None:
             data["redundant"] = snap.id in redundant_ids
             items.append(data)
         return {"instances": items}
+
+    # ---- IMP-040：显式刷新访问地址（薄封装 refresh_network_entries）----
+    @app.post("/api/access/refresh", dependencies=[api], tags=["access"])
+    def refresh_access_urls() -> dict[str, Any]:
+        from local_webpage_access.access import refresh_network_entries
+
+        ctx = _Ctx(app)
+        report = refresh_network_entries(ctx.workspace, ctx.config, ctx.registry)
+        return {"ok": True, **report.to_dict()}
+
+    # ---- IMP-037：网关后端原子切换（薄封装 switch_gateway）----
+    @app.post("/api/gateway/switch", dependencies=[api], tags=["gateway"])
+    def switch_gateway_backend(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from local_webpage_access.gateway_switch import switch_gateway
+
+        ctx = _Ctx(app)
+        backend = str(payload.get("backend") or payload.get("target") or "").strip()
+        if not backend:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "GATEWAY_BACKEND_INVALID", "message": "缺少 backend（caddy|builtin）"},
+            )
+        dry_run = bool(payload.get("dryRun", False))
+        review = bool(payload.get("review", True))
+        result = switch_gateway(
+            ctx.workspace,
+            ctx.config,
+            ctx.registry,
+            backend,
+            dry_run=dry_run,
+            review=review,
+        )
+        body = result.to_dict()
+        if not result.ok:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=body,
+            )
+        return body
 
     # ---- 实例详情（WBS-22.04）----
     @app.get("/api/instances/{instance_id}", dependencies=[api], tags=["instances"])
@@ -636,6 +685,18 @@ def _register_routes(app: FastAPI) -> None:
     ) -> dict[str, Any]:
         ctx = _Ctx(app)
         _require_instance(ctx, instance_id)
+        # IMP-039：cancelling 期间禁止其它生命周期操作（取消本身走独立路由）
+        row = ctx.registry.get_instance(instance_id)
+        if row and str(row.get("status") or "") == Status.CANCELLING.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "cancelling",
+                        "message": f"实例正在取消构建，暂时不能 {label}",
+                    }
+                },
+            )
         blocked = _docker_ops_blocked_reason(ctx, instance_id)
         if blocked is not None:
             raise HTTPException(
@@ -685,6 +746,46 @@ def _register_routes(app: FastAPI) -> None:
         return _lifecycle_op(instance_id, rebuild_instance, label="rebuild")
 
     @app.post(
+        "/api/instances/{instance_id}/cancel-build",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def cancel_build_op(instance_id: str) -> dict[str, Any]:
+        """IMP-039：取消排队中或进行中的构建。
+
+        返回结构化 ``outcome``（cancelled / cancel_failed / noop / already_done），
+        不在仅收到请求时假报成功。
+        """
+        from local_webpage_access.lifecycle import cancel_build
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+        result = cancel_build(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        outcome = getattr(result, "outcome", "unknown")
+        payload = {
+            "instanceId": instance_id,
+            "action": "cancel-build",
+            "outcome": outcome,
+            "message": getattr(result, "message", "") or "",
+            "previousStatus": getattr(result, "previous_status", None),
+            "instance": snap.to_dict(),
+        }
+        if outcome == "cancel_failed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "cancel_failed",
+                        "message": payload["message"] or "构建取消失败",
+                        "outcome": outcome,
+                    }
+                },
+            )
+        return payload
+
+    @app.post(
         "/api/instances/{instance_id}/recover",
         dependencies=[api],
         tags=["instances"],
@@ -717,13 +818,35 @@ def _register_routes(app: FastAPI) -> None:
 
         ctx = _Ctx(app)
         _require_instance(ctx, instance_id)
-        remove_instance(
-            ctx.workspace,
-            ctx.config,
-            ctx.registry,
+        try:
+            remove_instance(
+                ctx.workspace,
+                ctx.config,
+                ctx.registry,
+                instance_id,
+                purge=purge,
+                force=force,
+            )
+        except LwaError as exc:
+            code = _lwa_error_code(exc)
+            http_status = _ERROR_STATUS.get(
+                code, status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            # IMP-041：破坏性 API 审计（无 token）
+            log.info(
+                "audit remove instance=%s purge=%s force=%s status=%s code=%s",
+                instance_id,
+                str(purge).lower(),
+                str(force).lower(),
+                http_status,
+                code,
+            )
+            raise
+        log.info(
+            "audit remove instance=%s purge=%s force=%s status=200 code=ok",
             instance_id,
-            purge=purge,
-            force=force,
+            str(purge).lower(),
+            str(force).lower(),
         )
         return {
             "instanceId": instance_id,
@@ -961,12 +1084,32 @@ def _register_routes(app: FastAPI) -> None:
         from local_webpage_access.lifecycle import remove_redundant
 
         ctx = _Ctx(app)
-        removed = remove_redundant(
-            ctx.workspace,
-            ctx.config,
-            ctx.registry,
-            purge=purge,
-            force=force,
+        try:
+            removed = remove_redundant(
+                ctx.workspace,
+                ctx.config,
+                ctx.registry,
+                purge=purge,
+                force=force,
+            )
+        except LwaError as exc:
+            code = _lwa_error_code(exc)
+            http_status = _ERROR_STATUS.get(
+                code, status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            log.info(
+                "audit remove-redundant purge=%s force=%s status=%s code=%s count=0",
+                str(purge).lower(),
+                str(force).lower(),
+                http_status,
+                code,
+            )
+            raise
+        log.info(
+            "audit remove-redundant purge=%s force=%s status=200 code=ok count=%s",
+            str(purge).lower(),
+            str(force).lower(),
+            len(removed),
         )
         return {
             "action": "remove-redundant",

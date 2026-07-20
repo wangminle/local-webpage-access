@@ -16,7 +16,7 @@
 | `lwa init` | **首次**创建工作区（目录、registry、配置） |
 | **`lwa update`（V0.4.0 起）** | 已有工作区 + **lwa 包升级** + skills/config 同步 + 重启 manager/daemon |
 
-当前已实现 `lwa update` CLI（V0.6.4 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
+当前已实现 `lwa update` CLI（V0.6.5 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
 执行失败、需要定位具体步骤，或用户明确要求手动处理时，才使用下方手动兜底步骤。
 
 ## 输入
@@ -44,6 +44,9 @@ lwa update --skip-pip
 
 # 需要机器可读摘要时：
 lwa update --json
+
+# 跳过升级后的访问复核（仍会 refresh 地址）：
+lwa update --no-review-access
 ```
 
 预期结果：
@@ -53,7 +56,8 @@ lwa update --json
 - 新增配置字段已非破坏性补齐，并在需要时生成 `.bak`；
 - manager / daemon 仅在原本启用或运行时重启；
 - **自启单元在管时**由 `coordinated_restart` 交监督器重启（`kickstart -k` / `systemctl restart`），不 stop+detached spawn，避免与 KeepAlive 抢锁；
-- 默认不重启业务实例，除非显式传 `--restart-instances`。
+- 默认不重启业务实例，除非显式传 `--restart-instances`；
+- **升级收尾（IMP-038）**：后台重启后自动 **access refresh**，并默认跑一次轻量 **access review**（`--no-review-access` 可跳过 review）；访问复核细节见 Skill [`lwa-review-access-urls`](../lwa-review-access-urls/SKILL.md)。
 
 ## 手动兜底流程
 
@@ -108,4 +112,5 @@ curl -s http://127.0.0.1:17800/api/health   # version 字段应已更新
 - [待改进 IMP-008](../../../../docs/plan/待改进功能点记录-20260706.md)
 - [Runtime 工作区说明](../../../../docs/runtime-workspace.md)
 - [开机自启（停服/update 协调）](../../../../docs/autostart.md)
+- [访问地址复核](../lwa-review-access-urls/SKILL.md)
 - [lwa-setup-host-environment](../lwa-setup-host-environment/SKILL.md)

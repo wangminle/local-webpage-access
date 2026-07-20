@@ -89,6 +89,8 @@
     stopped: "已停止",
     pending: "待识别",
     building: "构建中",
+    cancelling: "取消中",
+    cancelled: "已取消",
     failed: "失败",
     queued: "排队中",
     gateway_down: "网关不可达",
@@ -266,6 +268,7 @@
     var isRunning = i.status === "running";
     var inProgress =
       i.status === "building" ||
+      i.status === "cancelling" ||
       i.status === "queued" ||
       i.status === "pending";
     // IMP-035：删除在启停流转中也禁用（含 starting/stopping/removing）
@@ -276,6 +279,8 @@
       i.status === "removing";
     var supportsAlias =
       i.runtime === "shared-static" || i.runtime === "docker-compose";
+    var canCancelBuild =
+      i.status === "building" || i.status === "queued";
     var html = "";
     html += LWA.opBtn(id, "logs", "日志", false);
     html += LWA.opBtn(
@@ -300,6 +305,17 @@
     html += LWA.opBtn(id, "stop", "停止", !isRunning || inProgress);
     html += LWA.opBtn(id, "restart", "重启", inProgress);
     html += LWA.opBtn(id, "rebuild", "重建", inProgress);
+    if (canCancelBuild || i.status === "cancelling") {
+      html += LWA.opBtn(
+        id,
+        "cancel-build",
+        i.status === "cancelling" ? "取消中…" : "取消构建",
+        i.status === "cancelling",
+        i.status === "cancelling"
+          ? "正在终止构建进程树"
+          : "取消排队或进行中的构建（不删缓存/镜像/用户数据）"
+      );
+    }
     // IMP-035：所有实例显示删除入口（不再仅 redundant）
     html += LWA.opBtn(
       id,

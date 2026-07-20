@@ -456,6 +456,47 @@ def test_remove_container_calls_compose_down(
     assert "down" in fake_runtime.calls
 
 
+def test_remove_container_clears_path_alias_config(
+    workspace, registry, fake_runtime, monkeypatch
+) -> None:
+    """BUG-268：容器 remove/purge 后应清理 aliases/<id>.conf 并同步主 Caddyfile。"""
+    from local_webpage_access.config import Config, PortPool
+    from local_webpage_access.static_gateway import StaticGateway
+
+    caddy_config = Config(
+        staticGateway="caddy",
+        staticGatewayPort=8080,
+        portPool=PortPool(start=21000, end=21050),
+    )
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
+    monkeypatch.setattr(
+        StaticGateway, "_reload_with_self_heal", lambda self: (True, "")
+    )
+
+    iid = "prd-workflow"
+    _seed_container(workspace, registry, iid, deployed=True)
+    alias_path = workspace.app_alias_config(iid)
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    alias_path.write_text(
+        f"# alias\nhandle_path /{iid}/* {{\n\treverse_proxy 127.0.0.1:21000\n}}\n",
+        encoding="utf-8",
+    )
+    gw = StaticGateway(workspace, caddy_config)
+    main = gw.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(
+        f":8080 {{\n\timport {alias_path.as_posix()}\n}}\n",
+        encoding="utf-8",
+    )
+
+    remove_instance(workspace, caddy_config, registry, iid, purge=True, force=True)
+
+    assert not alias_path.exists()
+    main_text = main.read_text(encoding="utf-8") if main.is_file() else ""
+    assert iid not in main_text
+    assert "import" not in main_text or not main_text.strip()
+
+
 # ---- 回归测试：BUG-025 ----------------------------------------------------
 #
 # BUG-025：``lwa remove .. --purge --force`` 会 ``shutil.rmtree(app_dir(".."))``，
@@ -922,6 +963,82 @@ def test_remove_keeps_audit_event_as_orphan(
     assert remove_events[-1]["instance_id"] is None
     # message 中保留了实例 ID 文本，便于追溯
     assert "api" in remove_events[-1]["message"]
+
+
+def test_remove_writes_stage_orphan_events(
+    workspace, registry, config, fake_runtime, caplog
+) -> None:
+    """IMP-041：remove 各阶段写 orphan remove_stage 事件与可 grep 日志。
+
+    不依赖全局 logging 配置：setup_logging 会把 ``local_webpage_access`` 父
+    logger 的 propagate 置 False 并跨测试残留，caplog 的 handler 挂在 root，
+    故必须把 handler 直接加到 lifecycle 子 logger 上，记录才不会被截断。
+    """
+    import logging
+
+    from local_webpage_access import lifecycle as lifecycle_mod
+
+    logger = lifecycle_mod.log
+    logger.addHandler(caplog.handler)
+    orig_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        _seed_container(workspace, registry, "api", deployed=True)
+        remove_instance(workspace, config, registry, "api", purge=False, force=False)
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(orig_level)
+
+    stages = [
+        e for e in registry.list_events(None) if e["event_type"] == "remove_stage"
+    ]
+    names = []
+    for ev in stages:
+        assert ev["instance_id"] is None
+        assert "instance=api" in ev["message"]
+        assert "purge=false" in ev["message"]
+        m = ev["message"]
+        # message: remove stage=<name> ...
+        part = m.split("stage=", 1)[1].split(" ", 1)[0]
+        names.append(part)
+    for required in (
+        "begin",
+        "stop",
+        "compose_down",
+        "alias_cleanup",
+        "registry_delete",
+        "pageviews_clear",
+        "purge_tree",
+        "done",
+    ):
+        assert required in names, f"missing stage {required} in {names}"
+    assert any("stage=purge_tree" in e["message"] and "result=skip" in e["message"] for e in stages)
+    assert any("remove stage=begin" in r.message for r in caplog.records)
+    assert any("remove stage=done" in r.message for r in caplog.records)
+
+
+def test_remove_data_guard_logs_fail_stage(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """IMP-041：data_nonempty 拒绝前写 data_guard fail orphan event。"""
+    from local_webpage_access.errors import DataNonemptyError
+
+    _seed_container(workspace, registry, "api", deployed=False)
+    data_dir = workspace.app_data("api")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.sqlite").write_text("data")
+
+    with pytest.raises(DataNonemptyError):
+        remove_instance(workspace, config, registry, "api", purge=True, force=False)
+
+    stages = [
+        e for e in registry.list_events(None) if e["event_type"] == "remove_stage"
+    ]
+    assert any(
+        "stage=data_guard" in e["message"] and "result=fail" in e["message"]
+        for e in stages
+    )
+    assert registry.get_instance("api") is not None
 
 
 # ---- IMP-012：冗余实例批量清理 --------------------------------------------
