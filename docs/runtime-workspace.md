@@ -66,7 +66,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
 ### `static-gateway/`
 
 - **用途**：共享静态网关配置。
-- **Caddy 模式**：`sites/<id>.conf` 按实例生成；`aliases/<id>.conf` 为路径别名路由片段（IMP-006 / IMP-014），由主 Caddyfile 在 `staticGatewayPort` 统一入口 import；统一入口块开启 JSON access log（`logs/static-access.log`，IMP-024）。
+- **Caddy 模式**：`sites/<id>.conf` 按实例生成；`aliases/<id>.conf` 为路径别名路由片段（IMP-006 / IMP-014），由主 Caddyfile 在 `staticGatewayPort` 统一入口 import；站点块开启 JSON access log（`logs/static-access.log`：别名按路径前缀归属，无别名静态按 host 端口归属，IMP-024/028）。
 - **builtin 模式**：每个静态实例仍占独立 hostPort，由内置 `http.server` 子进程服务；**不支持**路径别名统一入口。设置别名会被 **IMP-022 拦截报错**（仅清除别名允许）；访问请用 hostPort。
 
 ### `logs/`
@@ -74,7 +74,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
 - **用途**：工作区级日志（IMP-034）：
   - `lwa.log` — CLI / 通用操作
   - `manager.log` / `daemon.log` / `gateway.log` — 各后台进程
-  - `static-access.log` — Caddy 别名入口 JSON access log（浏览量）
+  - `static-access.log` — Caddy JSON access log（别名入口 + 无别名静态直连端口；浏览量 IMP-024/028）
 - 排障对照见 [FAQ · 症状→日志](faq.md#症状--日志文件--命令imp-034)。
 
 ### `run/`
@@ -86,7 +86,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
   - `daemon.json` / `daemon.lock` — daemon 开关与 watcher 锁
   - `gateway.json` — Caddy 网关后台服务态（IMP-010）
   - `caddy.pid` — Caddy master pid（`caddy start --pidfile` 写入）
-  - `pageviews.db` — 浏览量聚合与摄入游标（IMP-024）
+  - `pageviews.db` — 浏览量聚合、page 过滤、独立 IP 与摄入游标（IMP-024～026）
   - `capability-manager.json` / `capability-daemon.json` / `capability-gateway.json` — 各进程真实身份写入的能力缓存（IMP-033；CLI 不得冒充）
   - `full-setup-state.json` — Full Profile 安装进度与 `sessionRefreshRequired` 等状态
 

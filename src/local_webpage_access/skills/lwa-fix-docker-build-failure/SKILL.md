@@ -1,3 +1,9 @@
+---
+name: lwa-fix-docker-build-failure
+description: >-
+  Diagnose an lwa Docker build failure and repair the Dockerfile or dependency declarations before retrying with lwa rebuild. Use when build.log contains package, image, COPY, network, architecture, or native-extension errors, or an instance remains failed after a rebuild.
+---
+
 # lwa-fix-docker-build-failure
 
 > 诊断 `docker build` 失败原因，修正 `Dockerfile` / 依赖声明，交 `lwa rebuild` 重试。

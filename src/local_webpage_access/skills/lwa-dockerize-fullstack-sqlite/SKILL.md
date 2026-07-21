@@ -1,3 +1,9 @@
+---
+name: lwa-dockerize-fullstack-sqlite
+description: >-
+  Generate Dockerfile and docker-compose.yml for an lwa full-stack application that uses SQLite, with a durable data mount and safe database path. Use when servingMode is fullstack-sqlite, SQLite data must survive rebuilds, or an existing container writes its database outside the mounted data directory.
+---
+
 # lwa-dockerize-fullstack-sqlite
 
 > 为"后端 + SQLite"全栈项目生成 `Dockerfile` 与 `docker-compose.yml`，并正确挂载数据目录。

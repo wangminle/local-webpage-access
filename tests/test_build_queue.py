@@ -844,3 +844,73 @@ def test_cross_process_gate_reclaims_dead_holder_slot(tmp_path) -> None:
     assert slot == 0
     gate.release(slot)
     gate.close()
+
+
+def test_cross_process_cancel_queued_skips_builder(registry, config) -> None:
+    """BUG-278：另一进程取消 queued 后，owner 获槽不得再跑 builder / 写 success。"""
+    _seed_instance(registry, "blocker")
+    _seed_instance(registry, "target")
+
+    q_owner = BuildQueue(config, registry, concurrency=1)
+    q_cancel = BuildQueue(config, registry, concurrency=1)
+    assert q_owner._gate is q_cancel._gate
+
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+    target_waiting = threading.Event()
+    builder_calls: list[str] = []
+    owner_errors: list[BaseException] = []
+
+    def blocker_builder(iid: str) -> str:
+        blocker_started.set()
+        assert release_blocker.wait(timeout=20.0)
+        return iid
+
+    def target_builder(iid: str) -> str:
+        builder_calls.append(iid)
+        return iid
+
+    def run_blocker() -> None:
+        q_owner.run("blocker", blocker_builder)
+
+    def run_target() -> None:
+        # 等 blocker 占住槽位后再排队，保证 target 进入 wait
+        assert blocker_started.wait(timeout=5.0)
+        target_waiting.set()
+        try:
+            q_owner.run("target", target_builder, wait_timeout=15.0)
+        except BaseException as exc:  # noqa: BLE001
+            owner_errors.append(exc)
+
+    t_block = threading.Thread(target=run_blocker, name="blocker")
+    t_target = threading.Thread(target=run_target, name="target")
+    t_block.start()
+    t_target.start()
+
+    assert target_waiting.wait(timeout=5.0)
+    # 确认 target 已持久化为 queued
+    deadline = time.time() + 3.0
+    row = None
+    while time.time() < deadline:
+        row = q_owner._gate.get_build_task("target")
+        if row and row["status"] == "queued":
+            break
+        time.sleep(0.05)
+    assert row is not None and row["status"] == "queued"
+
+    result = q_cancel.cancel("target", wait_timeout=2.0)
+    assert result.outcome == "cancelled"
+    assert result.previous_status == "queued"
+    row_cancelled = q_owner._gate.get_build_task("target")
+    assert row_cancelled is not None
+    assert row_cancelled["status"] == "cancelled"
+
+    release_blocker.set()
+    t_block.join(timeout=10.0)
+    t_target.join(timeout=15.0)
+
+    assert builder_calls == [], f"跨进程取消后仍执行了 builder: {builder_calls}"
+    assert owner_errors, "owner 应因取消抛出 LifecycleError"
+    assert all(isinstance(e, LifecycleError) for e in owner_errors)
+    final = q_owner._gate.get_build_task("target")
+    assert final is None or final["status"] == "cancelled"

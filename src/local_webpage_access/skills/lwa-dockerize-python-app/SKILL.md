@@ -1,3 +1,9 @@
+---
+name: lwa-dockerize-python-app
+description: >-
+  Generate a minimal Dockerfile for a small FastAPI, Flask, Django, or other Python backend managed by lwa. Use when a Python instance is classified for docker-compose but has no Dockerfile, or when dependency files, interpreter version, application entrypoint, and container port need to be aligned.
+---
+
 # lwa-dockerize-python-app
 
 > 为小型 Python 后端（FastAPI/Flask/Django）生成最小化 `Dockerfile`。

@@ -34,7 +34,7 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 
 | WBS | 项 | 自动化 | 手工步骤 | 通过标准 |
 | --- | --- | --- | --- | --- |
-| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（16 个 SKILL.md） |
+| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（**17** 个 SKILL.md） |
 | 29.02 | 导入静态 HTML | ✓ `test_e2e_static_html_import_and_structure` | `lwa import inbox/static_html.zip` | `apps/static-html/` 出现，`local-web.json` 的 `kind=static` |
 | 29.03 | 静态目录结构 | ✓ 同上 | 检查 `apps/static-html/{source,current,logs,data}/` | 四个子目录齐全，`current/index.html` 存在 |
 | 29.04 | 静态 HTTP 可访问 | ✓ `test_e2e_static_html_accessible_via_http` | `lwa start static-html`，浏览器访问分配端口 | 返回 HTML 内容，`lwa status` 显示 `running` |
@@ -52,7 +52,7 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 | 29.16 | doctor 排障 | ✓ `test_e2e_doctor_diagnoses_instance` | `lwa doctor`、`lwa doctor <id>` | 环境检查全 ok/warn；实例诊断无 fail |
 | 29.17 | failed/pending 展示 | ✓ `test_e2e_failed_and_pending_display` | 导入 `build_failure.zip`、`pending_unknown.zip`，查管理页 | failed 显示错误原因；pending 显示在待处理区 |
 | 29.18 | 记录结果与问题 | — | 填写下表 | 完成本清单 |
-| 29.19 | 浏览量 API/UI（IMP-024） | ✓ `test_pageviews.py` / `test_manager_api.py` | 管理页列表见浏览量列；`GET /api/pageviews` 有汇总 | 有 hits/source；详情弹窗可打开 |
+| 29.19 | 浏览量 API/UI（IMP-024～028） | ✓ `test_pageviews.py` / `test_manager_api.py` | 管理页列表见浏览量列；`GET /api/pageviews` 有汇总；详情含 `uniqueIpList` | page 级 hits/source；Caddy 无别名静态直连端口可计入；有别名容器走 Caddy 源 |
 | 29.20 | 冗余清理（IMP-019） | ✓ `test_lifecycle.py` / `test_manager_api.py` | 重复导入同 zip 后 `lwa remove --redundant` 或管理页批量删除 | 每组仅保留最早者 |
 
 ## 验收标准（来自 WBS-29）
@@ -85,9 +85,9 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 
 ```bash
 # 仅 E2E 验收
-python -m pytest tests/test_e2e_acceptance.py -v
+python3 -m pytest tests/test_e2e_acceptance.py -v
 
 # 含真实 Docker 的端到端（需 Docker 守护进程）
 export LWA_RUN_DOCKER_TESTS=1
-python -m pytest tests/test_docker_integration.py -v
+python3 -m pytest tests/test_docker_integration.py -v
 ```

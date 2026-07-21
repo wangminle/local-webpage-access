@@ -1,3 +1,9 @@
+---
+name: lwa-update-runtime
+description: >-
+  Refresh an installed lwa package and runtime workspace after source changes, then synchronize built-in skills and safely reload manager and daemon. Use after git pull, branch switches, or local code edits, when CLI and manager versions differ, or when new behavior is not visible in the runtime.
+---
+
 # lwa-update-runtime
 
 > 在 **lwa 源代码已更新**（git pull、切换分支、本地改代码）后，刷新安装并重载 Runtime 工作区，使管理页/daemon/CLI 立即生效。
@@ -16,7 +22,7 @@
 | `lwa init` | **首次**创建工作区（目录、registry、配置） |
 | **`lwa update`（V0.4.0 起）** | 已有工作区 + **lwa 包升级** + skills/config 同步 + 重启 manager/daemon |
 
-当前已实现 `lwa update` CLI（V0.6.5 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
+当前已实现 `lwa update` CLI（V0.6.6 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
 执行失败、需要定位具体步骤，或用户明确要求手动处理时，才使用下方手动兜底步骤。
 
 ## 输入
@@ -85,7 +91,11 @@ lwa daemon off && lwa daemon on
 # 仅当静态网关、import、构建逻辑变更时：
 lwa restart <instance-id>
 
-# ── E. 校验 ──
+# ── E. 访问地址收尾（手搓 off/on 不会自动跑 IMP-038）──
+lwa access refresh
+lwa access review            # 或 lwa doctor --access
+
+# ── F. 校验 ──
 lwa version          # 应与 Git 最新 commit 主题 V0.x.x 一致
 lwa doctor
 curl -s http://127.0.0.1:17800/api/health   # version 字段应已更新
@@ -106,6 +116,11 @@ curl -s http://127.0.0.1:17800/api/health   # version 字段应已更新
 | `lwa version` 已新但页面旧 | 浏览器强刷；确认访问的是本机 127.0.0.1 而非旧 tab 缓存 |
 | 代码变更后实例行为异常 | `lwa restart <id>` 或 `lwa update --restart-instances` |
 | update 后出现双 daemon/manager | 多为自启未协调的旧路径残留；改用 `lwa update`，或 `autostart disable` 后清理进程再 enable |
+
+## 示例对话
+
+> 用户：我刚 `git pull`，CLI 是新版本，但管理页还是旧的。
+> Agent：在 Runtime 工作区根目录执行 `lwa update`；它会同步内置 skills，并仅重启原本运行的 manager/daemon。完成后对比 `lwa version` 与 `/api/health` 的 `version`。
 
 ## 相关文档
 

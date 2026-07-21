@@ -1492,3 +1492,35 @@ def test_concurrent_path_alias_rejects_duplicate(
     hosts = registry.list_route_hosts()
     assert hosts.get("same-alias") == successes[0]
     assert list(hosts.values()).count(successes[0]) == 1
+
+
+def test_remove_purge_rmtree_failure_is_visible(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-279：purge 磁盘删除失败不得记 purge_tree/done=ok 并静默成功。"""
+    from local_webpage_access.errors import LifecycleError
+
+    _seed_container(workspace, registry, "api", deployed=False)
+    app_dir = workspace.app_dir("api")
+    assert app_dir.is_dir()
+
+    def fake_rmtree(path, *args, **kwargs):  # noqa: ANN001, ARG001
+        # 模拟删除失败：目录仍在
+        return None
+
+    monkeypatch.setattr("local_webpage_access.lifecycle.shutil.rmtree", fake_rmtree)
+
+    with pytest.raises(LifecycleError, match="磁盘删除失败|未能删除"):
+        remove_instance(workspace, config, registry, "api", purge=True, force=True)
+
+    assert app_dir.exists(), "失败时应保留 apps/<id> 供重试"
+    stages = [
+        e for e in registry.list_events(None) if e["event_type"] == "remove_stage"
+    ]
+    assert any(
+        "stage=purge_tree" in e["message"] and "result=fail" in e["message"]
+        for e in stages
+    ), stages
+    assert not any(
+        "stage=done" in e["message"] and "result=ok" in e["message"] for e in stages
+    ), "失败路径不得记 done=ok"

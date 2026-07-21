@@ -9,14 +9,14 @@
 pip install -e ".[dev]"
 
 # 运行全部非 Docker 测试
-python -m pytest
+python3 -m pytest
 
 # 查看详细输出
-python -m pytest -ra -v
+python3 -m pytest -ra -v
 
 # 运行单个模块
-python -m pytest tests/test_security.py
-python -m pytest tests/test_doctor.py
+python3 -m pytest tests/test_security.py
+python3 -m pytest tests/test_doctor.py
 ```
 
 ## 测试分层
@@ -40,12 +40,9 @@ python -m pytest tests/test_doctor.py
 启用方式：
 
 ```bash
-# Linux / macOS
+# 正式支持平台：Linux / macOS / WSL2（不要在 Windows 原生跑）
 export LWA_RUN_DOCKER_TESTS=1
-python -m pytest tests/test_docker_integration.py
-
-# Windows (Git Bash)
-LWA_RUN_DOCKER_TESTS=1 python -m pytest tests/test_docker_integration.py
+python3 -m pytest tests/test_docker_integration.py
 ```
 
 绝大多数 `docker_runtime` / `lifecycle` 测试通过 monkeypatch 模拟
@@ -71,7 +68,13 @@ LWA_RUN_DOCKER_TESTS=1 python -m pytest tests/test_docker_integration.py
 | 28.13 资源统计 | `test_stats.py` | 磁盘、内存解析 |
 | 28.14 管理页 API | `test_manager_api.py` | token、全部端点（含 pageviews / redundant / remove / path-alias） |
 | 28.15 Docker 跳过 | `conftest.py`、`test_docker_integration.py` | `requires_docker` / `LWA_RUN_DOCKER_TESTS` |
-| — 浏览量（IMP-024） | `test_pageviews.py` | CLF/Caddy JSON/容器日志解析、store 聚合、摄入游标 |
+| — 浏览量（IMP-024～028） | `test_pageviews.py` | page 判定、IP 聚合、`uniqueIpList`、别名容器 Caddy 源、无别名静态直连端口归属、CLF/JSON 解析与摄入游标 |
+| — 能力 / Full（IMP-033） | `test_capability.py`、`test_host_bootstrap.py` | CapabilityReport、setup --full/--resume |
+| — 网关切换（IMP-037） | `test_gateway_switch.py` | 原子切换事务、access 收尾 |
+| — 访问复核（IMP-038/040） | `test_access.py`、`test_access_workflow.py`、`test_status_lan_freshness.py` | refresh/review、LAN 新鲜度 |
+| — 取消构建（IMP-039） | `test_build_process.py`、`test_build_queue.py` | cancel / cancelling |
+| — 自启（IMP-030） | `test_autostart.py` | install/check/linger |
+| — 平台矩阵（IMP-036） | `test_platform_support.py` | Windows 原生 hard fail、LTS/WSL 门禁 |
 | — 构建闸门（DEV-047） | `test_build_queue.py` | `CrossProcessBuildGate` 跨进程互斥与死进程回收 |
 | — zip 处理抽取 | `test_zip_processor.py` | validate / hash / safe_extract |
 | — 管理页前端 | `test_manager_static_app.py` | helpers / Vue 根组件冒烟、冗余徽章、浏览量渲染 |
@@ -85,16 +88,15 @@ LWA_RUN_DOCKER_TESTS=1 python -m pytest tests/test_docker_integration.py
 原因：测试用的静态托管服务器在异常退出时未释放端口，残留进程占用
 21000-21050。
 
-解决（Windows）：
+解决（macOS / Linux / WSL2）：
 
 ```bash
 # 查看占用端口的进程
-netstat -ano | grep -E "210[0-4][0-9]|21050"
+lsof -nP -iTCP:21000-21050 -sTCP:LISTEN
+# 或：ss -lptn 'sport >= :21000 and sport <= :21050'
 
-# 批量清理
-for pid in $(netstat -ano | grep -E "210[0-4][0-9]|21050" | grep LISTENING | awk '{print $5}' | sort -u); do
-  taskkill //PID $pid //F
-done
+# 结束残留（把 PID 换成上一步结果）
+kill <PID>
 ```
 
 ### 验收标准

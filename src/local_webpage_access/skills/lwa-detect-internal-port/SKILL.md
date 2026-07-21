@@ -1,3 +1,9 @@
+---
+name: lwa-detect-internal-port
+description: >-
+  Determine the port an lwa containerized application listens on and update local-web.json internalPort. Use when internalPort is missing or zero, health checks report connection refused, or Dockerfile, Compose, source, and environment port settings disagree.
+---
+
 # lwa-detect-internal-port
 
 > 找到应用在容器内监听的端口，回写 `local-web.json` 的 `internalPort`。

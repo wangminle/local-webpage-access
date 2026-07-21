@@ -1,3 +1,9 @@
+---
+name: lwa-generate-static-gateway-config
+description: >-
+  Review or generate the per-site shared-gateway fragment for an lwa static instance while leaving the main Caddyfile and gateway lifecycle to lwa. Use when a shared-static site fragment is missing or stale, its root or host port is wrong, or a user asks how to expose a static site through Caddy or the builtin gateway.
+---
+
 # lwa-generate-static-gateway-config
 
 > 为静态实例（纯静态或构建后 SPA）生成共享网关**站点片段**（Caddy 优先）。

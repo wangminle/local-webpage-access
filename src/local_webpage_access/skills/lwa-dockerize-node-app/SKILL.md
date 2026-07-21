@@ -1,3 +1,9 @@
+---
+name: lwa-dockerize-node-app
+description: >-
+  Generate a minimal Dockerfile for a small Node.js backend that lwa will build and run with Docker Compose. Use when a Node instance is classified for docker-compose but has no Dockerfile, or when start scripts, package manager locks, Node versions, and container ports need to be aligned.
+---
+
 # lwa-dockerize-node-app
 
 > 为小型 Node 后端生成最小化 `Dockerfile`，交由 `lwa` 构建运行。

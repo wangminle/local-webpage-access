@@ -44,7 +44,10 @@ lwa manager off         # 停止
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查（无需 token；能力细节见上文鉴权说明） |
+| GET | `/api/capability` | 鉴权能力报告（`?refresh=true` 同步重探，IMP-033） |
 | GET | `/api/stats` | 顶部统计：实例计数、类型分布、数据库实例数、端口池、主机资源 |
+| POST | `/api/access/refresh` | 用当前 LAN IP 重算并落盘各实例 `lanUrl`/`routeUrl`（IMP-038/040） |
+| POST | `/api/gateway/switch` | 网关后端原子切换（body `{"backend":"caddy"|"builtin"}`，IMP-037） |
 | GET | `/api/instances` | 实例列表（先观测回写状态再取快照；含 `redundant` 布尔字段，IMP-019） |
 | GET | `/api/instances/{id}` | 实例详情：状态快照 + manifest + 构建/事件/资源记录 |
 | GET | `/api/instances/{id}/logs?category=&tail=` | 日志内容（build/run/gateway/import/scan） |
@@ -58,8 +61,8 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
-| GET | `/api/instances/{id}/pageviews?limit=` | 单实例浏览量详情：按天分布 + 最近命中（IMP-024） |
-| GET | `/api/pageviews` | 全部实例浏览量汇总（惰性摄入日志后返回，IMP-024） |
+| GET | `/api/instances/{id}/pageviews?limit=` | 单实例浏览量详情：按天分布 + 最近命中 + `uniqueIpList`（IMP-024/026；page 级过滤见 IMP-025） |
+| GET | `/api/pageviews` | 全部实例浏览量汇总（惰性摄入日志后返回，IMP-024；Caddy 无别名直连端口见 IMP-028） |
 | GET | `/api/redundant` | 冗余实例列表（同 `sourceZipHash` 分组中非最早者，IMP-019） |
 | POST | `/api/redundant/remove?purge=&force=` | 批量移除冗余实例，保留每组最早者（IMP-019） |
 | GET | `/api/pending` | pending 与 failed 实例队列 |
@@ -178,7 +181,7 @@ Content-Type: application/json
 `fullyOk` / `accessOk` / `stages`）；后端切换失败时 HTTP 409 + detail 为同一结构。
 `ok=true` 但 `accessOk=false` 表示后端已切成功、访问复核有风险（不假绿）。
 
-### 浏览量统计（IMP-024）
+### 浏览量统计（IMP-024 / 025 / 026 / 027 / 028）
 
 ```http
 GET /api/pageviews
@@ -186,16 +189,22 @@ Authorization: Bearer <token>
 ```
 
 响应形如 `{"instances": {"<id>": {"hits": N, "uniqueIps": N, "lastSeen": "...", "source": "caddy|builtin|container"}}}`。
-请求时惰性摄入最新访问日志（Caddy 统一入口 JSON log、builtin `gateway.log`、容器 stdout 尽力解析），再返回聚合。
+请求时惰性摄入最新访问日志再返回聚合：
+
+| 来源 | 何时 | 说明 |
+| --- | --- | --- |
+| `caddy` | `staticGateway=caddy` 且（静态，或容器有路径别名） | 读 `run/logs/static-access.log`；有别名按 `/<alias>/`，无别名静态按 host 端口（IMP-028）；容器别名见 IMP-027 |
+| `builtin` | builtin / Caddy 不可用降级 | 每实例 `gateway.log`（CLF） |
+| `container` | 容器且无 Caddy 别名 | docker logs 尽力解析（近似） |
+
+仅 **page** 级命中计入 `hits`（静态资源 / `__lwa_probe` 探测排除，IMP-025）。`uniqueIps` 为实例级去重（IMP-026，与详情 `uniqueIpList` 长度一致）。
 
 ```http
 GET /api/instances/{id}/pageviews?limit=50
 Authorization: Bearer <token>
 ```
 
-返回按天分布（`byDay`）与最近命中明细（`recent`）。数据落在工作区 `run/pageviews.db`；Caddy 别名入口 access log 为 `logs/static-access.log`。
-
-> 容器路径为尽力解析，数字可能近似；直连 hostPort 的访问默认不计入 Caddy 别名入口统计。
+返回 `byDay`、`recent`、以及全量 `uniqueIpList`（含 `ip` / `count` / `lastSeen` / `local`）。数据在工作区 `run/pageviews.db`。
 
 ### 单个实例删除（IMP-035）
 
@@ -243,7 +252,7 @@ Authorization: Bearer <token>
 * **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，规则不变）。
 * **删除确认（IMP-035）**：受控双阶段模态——① 选择「仅移除」（默认，`purge=false`）或「彻底删除」（`purge=true`）；② 输入完整项目 ID；彻底删除须勾选「理解数据不可恢复」。非空 `data/` 首次 purge 得 409 `data_nonempty` 后，再勾选强制确认才发 `force=true`（不自动重试）。打开时焦点进入对话框，Tab 限制在模态内，Esc/关闭后恢复触发按钮焦点。
 * **路径别名对话框**：`shared-static` 与 `docker-compose` 实例操作区「路径别名」按钮可用（pending/building/queued 态禁用）；输入 slug 保存或清除；校验错误在对话框内展示。builtin 后端下设置会失败并展示后端错误信息（IMP-022）。
-* **浏览量**：列表列展示累计访问；点击打开按天分布与最近命中弹窗（IMP-024）。
+* **浏览量**：列表列展示累计访问；点击打开按天分布、最近命中与独立 IP 列表（IMP-024/026；page 级过滤 IMP-025）。
 
 > **状态说明（DEV-043 / BUG-071 / IMP-033）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。Docker 观测失败时显示 unknown / 权限提示，不误写 stopped。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例（容器路径仍受能力门禁）。
 * **实例详情**：manifest、构建记录、事件流、资源占用、分类日志查看器；含路径别名说明与 CLI 等价命令提示。

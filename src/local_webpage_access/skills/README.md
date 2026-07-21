@@ -86,7 +86,7 @@ skill 的输出**只**落到以下位置（设计 §18）：
 3. skill 产出配置后，执行 lwa rebuild / lwa start 验证
    ├── 成功 → 实例进入 running
    └── 失败 → 进入修复 skill：
-       - 构建失败        → lwa-fix-docker-build-failure
+       - 构建失败        → 先可 `lwa cancel-build <id>`（若仍 queued/building），再 lwa-fix-docker-build-failure
        - 启动失败        → lwa-fix-container-startup-failure
        - 端口冲突        → lwa-fix-port-binding
        - 健康检查不过    → lwa-diagnose-health-check

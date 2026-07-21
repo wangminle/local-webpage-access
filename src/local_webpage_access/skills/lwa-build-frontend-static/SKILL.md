@@ -1,3 +1,9 @@
+---
+name: lwa-build-frontend-static
+description: >-
+  Build React, Vue, Vite, Next.js static exports, and other frontend SPAs into assets that lwa can serve through the shared static gateway. Use when a frontend-static project has no public or dist output, the build output is stale, or a path alias shows a blank page because the SPA base path is wrong.
+---
+
 # lwa-build-frontend-static
 
 > 把前端 SPA（React/Vue/Vite/Next 静态导出）构建为静态产物，交由共享静态网关托管。

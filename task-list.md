@@ -287,6 +287,10 @@
 | BUG-274 | 修复 | BuildQueue.run 两条 raise 路径（cancelled-before-acquire / 排队超时）位于 try 块之前，finally 不执行致 _finish_events 字典残留 set Event | 2026-07-20 22:30 | 2026-07-20 22:48 | 已修复 | 【根因】acquire 段在 try 之前，两条 raise 直接抛出，finally（pop _finish_events）永不达，长跑下字典无限增长。【修复】try 上移覆盖 acquire 段；slot 初始化为 None 防 NameError；release(None) 早退；finally 必达 pop。回归 27 项 build_queue 测试全绿。c9d4fd1 落地。 |
 | BUG-275 | 修复 | cli/gateway switch --dry-run 预检失败时吞错：elif dry_run 分支在失败分支之前，plan_switch 失败只打印误导性 [dry-run] from -> to 后 exit 1，不显示 error | 2026-07-20 22:40 | 2026-07-20 22:48 | 已修复 | 【根因】分支顺序 noop->dry_run->ok->else，dry-run 时 plan_switch 失败（如切到 caddy 但本机无 caddy）返回 ok=False/plan=None，落入 dry_run 分支打印成功预览而非错误。【修复】将 not result.ok 分支前移至 dry_run 之前，失败时先打印 error/repair_hint 再 exit 1。补 CLI 回归测试 test_cli_switch_dry_run_precheck_failure_shows_error。c9d4fd1 落地。 |
 | BUG-276 | 修复 | V0.6.5 将 _FALLBACK_VERSION bump 至 0.6.5 但 test_resolve_version_fallback 仍断言 0.6.4，全量 pytest 失败 | 2026-07-20 22:45 | 2026-07-20 22:48 | 已修复 | 【根因】V0.6.5-Build1500 提交时 _FALLBACK_VERSION 0.6.4->0.6.5 但漏改 test_resolve_version_fallback 断言与 version_info 三处 docstring 示例。【修复】断言同步为 0.6.5；docstring 示例同步。test_version_info 5 passed，全量 1313 passed/4 skipped。c9d4fd1 落地。 |
+| BUG-277 | 修复 | manager 启动后台能力探测早于 gateway/Caddy 就绪后，/api/health 长期缓存 gatewayAccess=admin_unavailable（与 lwa capabilities 实时 ready 不一致） | 2026-07-21 12:12 | 2026-07-21 12:58 | 已修复 | 【修复】health 经 overlay_gateway_access_from_cache 廉价合并新鲜 capability-gateway.json；manager lifespan 延后 15s 再探一次。回归 test_health_overlays_fresh_gateway_access_from_cache。 |
+| BUG-278 | 修复 | IMP-039 跨进程取消 queued 构建仅改持久化状态，owner 仍执行 builder 并覆盖为 success | 2026-07-21 12:13 | 2026-07-21 12:58 | 已修复 | 【修复】获槽前后经 _cancel_pending 合并内存与持久化 cancel；is_cancel_requested 认 cancelled。回归 test_cross_process_cancel_queued_skips_builder。 |
+| BUG-279 | 修复 | IMP-035/041 purge 使用 rmtree(ignore_errors=True)，磁盘删除失败仍返回成功并记录 purge_tree/done=ok | 2026-07-21 12:13 | 2026-07-21 12:58 | 已修复 | 【修复】purge 去掉 ignore_errors；rmtree 异常或目录仍在则 purge_tree=fail 并抛 LifecycleError，不写 done=ok。回归 test_remove_purge_rmtree_failure_is_visible。 |
+| BUG-280 | 修复 | README 开发测试命令使用 python -m pytest，在受支持的当前 macOS 环境无 python 命令 | 2026-07-21 12:13 | 2026-07-21 12:58 | 已修复 | 【修复】README 开发测试命令改为 python3 -m pytest。 |
 
 ## 调整事项
 
@@ -322,6 +326,8 @@
 | ADJ-028 | 调整 | 在网页网络 Logo 黄色椭圆内沿七条射线补充七个节点 | 2026-07-15 12:05 | 2026-07-15 12:05 | 已完成 | 更新 design/logo/lwa-logo-b-web-network.svg：沿7条黄色射线的延长方向，在黄色内环内部加入7个#FFD43B实心圆点；同步更新无障碍描述。xmllint、射线/节点数量与椭圆内间隙几何校验、Quick Look 1000px PNG渲染、diff-check均通过。 |
 | ADJ-029 | 调整 | 清理 IMP-032 规划写入时误追加的重复 PLN-014/DOC-040/DEV-076 行 | 2026-07-17 17:12 | 2026-07-17 17:12 | 已完成 | 保留 PLN-013/DOC-039/DEV-075 为权威记录；删除内容完全相同的后三个重复行；plan §12 编号映射不变。 |
 | ADJ-030 | 调整 | 合并近期重复 Bug 登记：BUG-269→BUG-268、BUG-272→BUG-270，状态改为已修复并注明并入主因 | 2026-07-20 20:42 | 2026-07-20 20:41 | 已完成 | 不删 ID（标准：ID 不复用）；仅更新备注/完成时间/状态，避免 272 仍像待修。待修复 Bug 仍为 0。 |
+| ADJ-031 | 调整 | 将 ruff 加入 pyproject.toml 的 [project.optional-dependencies].dev | 2026-07-21 12:58 | 2026-07-21 12:58 | 已完成 | 与既有 [tool.ruff] 配置对齐；安装方式 pip install -e ".[dev]"；不进入正式运行依赖。 |
+| ADJ-032 | 调整 | 修复 17 个内置 Skill 的 Agent Skills 可发现性与章节一致性 | 2026-07-21 14:31 | 2026-07-21 14:31 | 已完成 | 为 src/local_webpage_access/skills 与 runtime/skills 双份 17 个 SKILL.md 补齐仅含 name/description 的 YAML frontmatter；补 review-access-urls 的输入/禁止事项，并为 import/update/review 增加短示例；新增元数据契约测试。17 项 quick_validate、tests/test_init.py 13 项、双份一致性及 git diff --check 通过。 |
 
 ## 检查事项
 
@@ -422,6 +428,9 @@
 | CHK-095 | 检查 | 检查本地部署 V0.6.4 运行态、服务日志、访问日志与能力报告一致性 | 2026-07-20 20:12 | 2026-07-20 20:12 | 已完成 | 版本 V0.6.4；4 个在籍实例、manager/daemon/Caddy、自启动、doctor、access review 全部正常，在籍直连/别名均 200。发现 BUG-268、BUG-270、BUG-271；BUG-269 为 BUG-268 的并发重复记录，已关闭。Caddy pingback WARNING 为 BUG-102 既有兜底，探针日志已排除浏览量。 |
 | CHK-096 | 检查 | 复核本地 V0.6.4 全量日志（lwa/manager/daemon/gateway/launchd.err/实例级）与 CHK-095 结论一致性 | 2026-07-20 20:23 | 2026-07-20 20:23 | 已完成 | 总体符合预期：版本 V0.6.4、profile=default；4 实例 demo-static/voiceprint-v3-demo/3d-demo-family-wakeup/prd-review-v035 均 running；lwa update 完成 3 字段配置迁移与 4 实例地址漂移自愈（10.181.239.115→10.180.105.29）；prd-review-v035 容器轻量 start、prd-workflow purge 移除日志齐备；manager/daemon capability probe 均为 INFO overall=ready。仅 gateway.log 存在 2 处 WARNING：①caddy start --pingback 超时（BUG-102 既有兜底，admin/pidfile 就绪视为成功，非新缺陷）；②capability probe role=gateway 记为 WARNING 但 overall=ready dockerAccess=ready——根因与 BUG-270 同源（probe 在 Caddy 启动前采集，gateway_access=admin_unavailable 触发 WARNING 分支），已并入 BUG-270 备注一并修复，未新开 ID。无 ERROR、无 traceback、无其他异常。 |
 | CHK-097 | 检查 | 复审 V0.6.5（IMP-037~041）全部未提交代码与已提交 diff 的 bug | 2026-07-20 22:10 | 2026-07-20 22:50 | 已完成 | 覆盖 access_workflow/gateway_switch/build_process/build_queue/lifecycle/hosting/status/docker_runtime/manager_api/updater/cli(gateway,lifecycle,system)/doctor/daemon/errors/models/static_gateway/manager_static 全量 diff 与新增测试。发现并修复：BUG-273（communicate stdout 重复，V0.6.5 已落地）、BUG-274（_finish_events 泄漏）、BUG-275（gateway switch --dry-run 预检失败吞错）、BUG-276（version fallback 测试滞后）。确认无误：updater run_access_pass 编排、doctor access_review 集成、status lan_address_stale 读时合成、manager_api cancel-build 端点、helpers opBtn/cancel-build 按钮态、daemon LAN 自愈节流。全量 1313 passed / 4 skipped。 |
+| CHK-098 | 检查 | 检查 V0.6.5 runtime 运行态、日志多阶段效果、计划 IMP-025～041 完成度与残留 bug | 2026-07-21 12:12 | 2026-07-21 12:12 | 已完成 | 运行态正常：manager/daemon/gateway/Caddy 在跑，doctor overall=OK，4 实例直连与在籍别名均 200，LAN 地址新鲜。日志：capability probe 多角色分文件已具备；lifecycle_stage/remove stage 代码已落地，但本机近期无全量 rebuild/IMP-041 后删除，故运行日志无对应 stage 样本。计划主路径全部已落地；可后续补：033.13/035.06/036.08/036.09/041.06。发现残留：aliases/prd-workflow.conf 502（OPS-059 已清）；/api/health 缓存 gatewayAccess=admin_unavailable（记 BUG-277）；pytest 孤儿 manager pid 64365。 |
+| CHK-099 | 检查 | 复核新增功能点2607计划完成度并执行全量回归与缺陷最小复现 | 2026-07-21 12:13 | 2026-07-21 12:13 | 已完成 | 逐项核对 IMP-025～041；主功能大多落地，但 033.13/system unit SupplementaryGroups、035.06、036.08/09、041.06 验收/清理未全部收口；新发现 BUG-278～280。全量 pytest 通过且 4 项真实 Docker 集成跳过；compileall、Node 语法、git diff --check 通过；ruff 未安装。 |
+| CHK-100 | 检查 | 按 skill-creator 规范审计 17 个内置 Skill：结构/篇幅/章节一致；确认全部缺失 YAML frontmatter（name/description）导致 Agent Skills 无法靠元数据触发 | 2026-07-21 14:22 | 2026-07-21 14:22 | 已完成 | 对照 skill-creator + Anthropic best practices；产品内「何时触发/输入/输出/禁止」自有约定大体齐全；review-access 缺输入/禁止，3 个缺示例。未改文件，待用户确认是否补 frontmatter。 |
 
 ## 测试数据
 
@@ -492,6 +501,9 @@
 | DOC-057 | 文档 | 计划文档新增 §22 IMP-041（删除阶段日志与 BUG-268），并更新 §17 优先级 | 2026-07-20 20:09 | 2026-07-20 20:09 | 已完成 | IMP-041 编号复用于本项（原 Vite 元数据已删）；推荐顺序 041→038+040→039→037 |
 | DOC-058 | 文档 | 计划文档 §17 状态横幅同步：IMP-038/039/040/041 标为已落地，IMP-037 仍为 P1 待开发 | 2026-07-20 21:40 | 2026-07-20 21:35 | 已完成 | 对应 DEV-083/084/087/088 完成；推荐顺序四个 P0 已闭环 |
 | DOC-059 | 文档 | 同步 V0.6.5 / IMP-037～041 用户文档与 Skills：README gateway switch·cancel·stale；release-checklist skills=17；manager-page 前端；faq accessOk；operations cancel-build；runtime-workspace update 收尾；update/fix-build/gateway skills | 2026-07-20 23:34 | 2026-07-20 23:40 | 已完成 | 对照 CHK-097：faq/ops/manager API/lwa-review-access-urls 原先大体已齐；本次补齐 README 命令与特性、release-checklist、前端说明、ops §五附、三处 Skill。 |
+| DOC-060 | 文档 | 按 skills 审计修正 5 个硬不匹配 Skill：healthCheck 虚构、gateway switch、import rebuild 口径、review handoff、update 手动收尾；并补 soft 缺口（cancel-build/linger/cli 注释） | 2026-07-21 14:19 | 2026-07-21 14:19 | 已完成 | 对照 subagent 14b5a8e2；已同步 runtime/skills；涉及 diagnose-health-check/setup-host/import-zip/review-access/update-runtime/setup-autostart/skills README |
+| DOC-061 | 文档 | 对齐 V0.6.5 文档：pageviews IMP-025～028 口径、README python3/nginx 说明、testing/release/acceptance 统一 python3 -m pytest | 2026-07-21 14:19 | 2026-07-21 14:19 | 已完成 | known-limitations/manager-page 浏览量；pageviews.py 模块头注释；README staticGateway |
+| DOC-062 | 文档 | 按 docs 审计补齐剩余缺口：skills 16→17、API 表补 capability/access/gateway、testing 去 Windows 原生、runtime/ops/security/faq/acceptance 对齐 IMP-025～028 | 2026-07-21 14:21 | 2026-07-21 14:21 | 已完成 | 对照 subagent a42e31d4；pageviews blocker 前序 DOC-061 已改；本项补 medium 项与 faq 浏览量 FAQ |
 
 ## 功能开发
 
@@ -647,6 +659,9 @@
 | OPS-055 | 运维 | 本地 runtime 更新部署至 V0.6.4：lwa update 重装包并协调重启 manager/daemon；access refresh 修复 lanUrl 漂移 | 2026-07-20 19:10 | 2026-07-20 19:10 | 已完成 | pip 安装 0.6.4；syncSkills 更新5；migrateConfig 补齐 buildMirrors/profile/serviceUser；/api/health=V0.6.4；doctor 原 WARN lan_url_stale（旧 10.181.239.115→10.180.105.29）已 refresh |
 | OPS-056 | 运维 | 将 feat/imp041-038-040-039-pending-features 合并入 main（V0.6.5） | 2026-07-20 22:26 | 2026-07-20 22:26 | 已完成 | 本地合并：feature 326bf87 + merge a5d609f；main 相对 origin/main ahead 2，未推远程。 |
 | OPS-057 | 运维 | 补齐 V0.6.5 活跃版本引用：cli docstring / lwa-update-runtime / pack-release-zip / release-checklist 示例（pyproject/version_info/test 此前已是 0.6.5） | 2026-07-20 23:29 | 2026-07-20 23:29 | 已完成 | task-list 历史 OPS-054～055 与 CHK-095/096 等 0.6.4 条目保留不动。lwa version 仍取 git HEAD 主题，提交 V0.6.5-BuildXXXX 后即显示 V0.6.5。 |
+| OPS-058 | 运维 | 本地 runtime 更新部署至 V0.6.5：lwa update + 协调重启 gateway | 2026-07-21 07:49 | 2026-07-21 07:50 | 已完成 | pip 安装 local-webpage-access-0.6.5；syncSkills 新增1更新4；自启协调重启 manager(pid 96977)/daemon(pid 96982)；kickstart 重启 gateway caddy(pid 4442→97160) 后 lwa gateway on 对齐状态；/api/health=V0.6.5；access review 4实例 OK；Caddy v2.11.4 |
+| OPS-059 | 运维 | 清理 runtime 残留 aliases/prd-workflow.conf 并 reload Caddy（IMP-041.06） | 2026-07-21 12:12 | 2026-07-21 12:12 | 已完成 | 调用 StaticGateway.cleanup_instance_routes(prd-workflow)+reload_all；Caddyfile 去掉对应 import；/prd-workflow/ 由 502 变为空 200；在籍 /prd-review/ 仍 200。 |
+| OPS-060 | 运维 | 应用版本号提升至 V0.6.6：pyproject/version_info(_FALLBACK_VERSION+docstring×3)/cli docstring/test_version_info/skills·lwa-update-runtime/release-checklist 示例/pack-release-zip 注释同步 | 2026-07-21 14:49 | 2026-07-21 14:49 | 已完成 | task-list 历史 0.6.5 条目保留不动。lwa version 仍取 git HEAD 主题；提交 V0.6.6-BuildXXXX 后即显示 V0.6.6。runtime/skills 已同步 update-runtime。 |
 
 ## 规划事项
 
@@ -682,12 +697,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 272 | 272 | 0 | 100% |
-| 调整事项 | 30 | 30 | 0 | 100% |
-| 检查事项 | 94 | 94 | 0 | 100% |
+| 代码 Bug | 280 | 280 | 0 | 100% |
+| 调整事项 | 32 | 32 | 0 | 100% |
+| 检查事项 | 98 | 98 | 0 | 100% |
 | 测试数据 | 1 | 1 | 0 | 100% |
-| 文档维护 | 58 | 58 | 0 | 100% |
+| 文档维护 | 62 | 62 | 0 | 100% |
 | 功能开发 | 88 | 88 | 0 | 100% |
-| 配置运维 | 56 | 56 | 0 | 100% |
+| 配置运维 | 59 | 59 | 0 | 100% |
 | 规划事项 | 25 | 25 | 0 | 100% |
-| **总计** | 624 | 624 | 0 | 100% |
+| **总计** | 645 | 645 | 0 | 100% |

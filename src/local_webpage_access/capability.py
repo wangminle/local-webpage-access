@@ -627,6 +627,39 @@ def read_capability_health_fragment(workspace_root: Path) -> dict[str, Any] | No
     }
 
 
+def overlay_gateway_access_from_cache(
+    fragment: dict[str, Any] | None,
+    workspace_root: Path,
+) -> dict[str, Any]:
+    """BUG-277：从新鲜的 ``capability-gateway.json`` 覆盖 ``gatewayAccess``。
+
+    只读缓存文件，不触发 Docker/Caddy 探测，供 ``/api/health`` 在 manager
+    启动探测早于 gateway 就绪时廉价纠偏。
+    """
+    out: dict[str, Any] = dict(fragment or {})
+    caps = dict(out.get("capabilities") or {})
+    path = Path(workspace_root) / "run" / "capability-gateway.json"
+    if not path.is_file():
+        out["capabilities"] = caps
+        return out
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        out["capabilities"] = caps
+        return out
+    if not isinstance(data, dict) or not _cache_is_fresh(data):
+        out["capabilities"] = caps
+        return out
+    if not _backend_role_alive(Path(workspace_root), "gateway"):
+        out["capabilities"] = caps
+        return out
+    gw_caps = data.get("capabilities")
+    if isinstance(gw_caps, dict) and gw_caps.get("gatewayAccess"):
+        caps["gatewayAccess"] = gw_caps["gatewayAccess"]
+    out["capabilities"] = caps
+    return out
+
+
 def log_capability_probe(
     role: str,
     report: CapabilityReport | dict[str, Any],
@@ -754,6 +787,7 @@ __all__ = [
     "current_service_user",
     "load_profile_state",
     "log_capability_probe",
+    "overlay_gateway_access_from_cache",
     "probe_caddy_binary_state",
     "probe_caddy_runtime_fields",
     "probe_docker_access_state",

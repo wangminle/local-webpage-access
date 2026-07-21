@@ -1,3 +1,9 @@
+---
+name: lwa-setup-host-environment
+description: >-
+  Prepare a supported macOS, Linux, or WSL2 host for lwa and initialize the runtime workspace. Use on a new machine, when lwa setup or lwa doctor reports missing or outdated Python, Docker, Compose, Node, or Caddy, or when the user asks which dependencies and setup profile are required.
+---
+
 # lwa-setup-host-environment
 
 > 在新机器或全新环境中，引导用户安装 `lwa` 所需的宿主机工具，并完成工作区初始化。
@@ -57,7 +63,7 @@
 | fastapi / uvicorn | ≥ 0.138.0 / ≥ 0.45.0 | 始终（`pip install -e .`） |
 | Docker | ≥ 29.0.0 | 容器实例 |
 | Docker Compose | ≥ 2.40.2，推荐 ≥ 5.2.0（[docker/compose](https://github.com/docker/compose)） | 容器实例 |
-| Caddy | ≥ 2.10.0 | **路径别名 / 统一入口 / 别名入口浏览量（IMP-024）** 的硬依赖：需 `staticGateway=caddy`、Caddy 在 PATH、并 `lwa gateway on`。仅临时预览、不用别名时，**default** 档缺失会降级 `builtin`（每实例独立 hostPort；`lwa alias set` 会被 IMP-022 拦截）。**Full** 档要求 Caddy 严格可用，不静默降级 |
+| Caddy | ≥ 2.10.0 | **路径别名 / 统一入口 / 浏览量（page 级，Caddy access log）** 的硬依赖：需 `staticGateway=caddy`、Caddy 在 PATH。切换后端用 **`lwa gateway switch caddy`**（勿只手改 YAML）；master 未起时再 `lwa gateway on`。仅临时预览、不用别名时，**default** 档缺失会降级 `builtin`（每实例独立 hostPort；`lwa alias set` 会被 IMP-022 拦截）。**Full** 档要求 Caddy 严格可用，不静默降级 |
 | Node.js | ≥ 24（推荐） | 前端 SPA 构建 |
 
 ## 处理流程
@@ -100,7 +106,7 @@ Full 闭环要点（对用户输出时必提）：
 若用户**只做静态 HTML**、不用容器：
 
 - Docker / Compose 可暂不装；
-- 将 `local-web.yml` 的 `staticGateway` 设为 `builtin` 可跳过 Caddy——但**不能使用路径别名**，也无 Caddy 别名入口浏览量；需要 `/<slug>/` 统一入口时请安装 Caddy 并 `lwa gateway on`；
+- 切换到 builtin：用 **`lwa gateway switch builtin`**（IMP-037 原子事务），**不要**手改 YAML 再猜 `on/off` 顺序——但 builtin **不能使用路径别名**，浏览量仅能尽力解析各实例 gateway.log；需要 `/<slug>/` 统一入口时请安装 Caddy 后执行 **`lwa gateway switch caddy`**（必要时再 `lwa gateway on`）；
 - Node 仅在前端 SPA 时需要。
 
 选型细节见 [运维手册](../../../../docs/operations-playbook.md)。

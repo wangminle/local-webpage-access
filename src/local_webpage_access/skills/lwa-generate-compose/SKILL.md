@@ -1,3 +1,9 @@
+---
+name: lwa-generate-compose
+description: >-
+  Generate or repair docker-compose.yml for an lwa instance that needs multiple coordinated services such as an application, cache, and database. Use when one container is insufficient, service dependencies or networks are missing, or existing Compose ports, volumes, and resource limits conflict with local-web.json.
+---
+
 # lwa-generate-compose
 
 > 为多服务实例（后端 + 缓存 + 数据库等）生成 `docker-compose.yml`。

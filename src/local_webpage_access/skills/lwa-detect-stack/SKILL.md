@@ -1,3 +1,9 @@
+---
+name: lwa-detect-stack
+description: >-
+  Identify an imported project's technology stack, serving mode, runtime kind, and resource profile, then update local-web.json. Use after lwa import or lwa scan leaves an instance pending, stack is empty, or lwa reports that it cannot recognize the project type.
+---
+
 # lwa-detect-stack
 
 > 识别项目的技术栈、运行形态与资源档位，回写 `local-web.json`。

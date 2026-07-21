@@ -408,7 +408,10 @@ class CrossProcessBuildGate:
         row = self.get_build_task(instance_id)
         if row is None:
             return False
-        return row["status"] == "cancelling" or row.get("cancel_requested_at") is not None
+        # BUG-278：跨进程取消写 status=cancelled + cancel_requested_at，owner 必须认
+        return row["status"] in ("cancelling", "cancelled") or (
+            row.get("cancel_requested_at") is not None
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -465,7 +468,7 @@ class BuildQueue:
             slot = self._gate.acquire(instance_id, 0.0)
             if slot is None:
                 with self._guard:
-                    if task.status == "cancelled":
+                    if self._cancel_pending(task, instance_id):
                         self._finish_task_local(task, "cancelled")
                         finish_ev.set()
                         raise LifecycleError(
@@ -483,17 +486,12 @@ class BuildQueue:
                     )
 
             with self._guard:
-                if task.status == "cancelled":
+                # BUG-278：跨进程 cancel 只改持久化行，须合并 DB 与内存状态
+                if self._cancel_pending(task, instance_id):
                     self.registry.add_event(
                         instance_id, "build_cancel", "排队任务已取消，跳过构建"
                     )
                     log.info("实例 %s 构建已取消，跳过 builder", instance_id)
-                    self._finish_task_local(task, "cancelled")
-                    raise LifecycleError(
-                        f"实例 {instance_id} 构建已取消",
-                        instance_id=instance_id,
-                    )
-                if task.status == "cancelling":
                     self._finish_task_local(task, "cancelled")
                     raise LifecycleError(
                         f"实例 {instance_id} 构建已取消",
@@ -511,7 +509,10 @@ class BuildQueue:
             finally:
                 exit_build_context(instance_id)
             with self._guard:
-                if task.status in ("cancelling", "cancelled"):
+                if self._cancel_pending(task, instance_id) or task.status in (
+                    "cancelling",
+                    "cancelled",
+                ):
                     # 竞态：取消已发起但 builder 仍跑完 → 保留 cancelled，不改 success
                     self._finish_task_local(task, "cancelled")
                     raise LifecycleError(
@@ -784,6 +785,27 @@ class BuildQueue:
             return [iid for iid, t in self._tasks.items() if t.status == "queued"]
 
     # ---- 内部 ---------------------------------------------------------------
+
+    def _cancel_pending(self, task: BuildTask, instance_id: str) -> bool:
+        """内存或跨进程持久化是否已请求/完成取消（BUG-278）。
+
+        调用方须已持有 ``self._guard``（或可接受短暂读竞态）；会把 DB 取消态
+        回写到内存 ``task``，避免后续仍按 queued/building 收尾。
+        """
+        if task.status in ("cancelled", "cancelling"):
+            return True
+        if not self._gate.is_cancel_requested(instance_id):
+            return False
+        row = self._gate.get_build_task(instance_id)
+        status = (row or {}).get("status")
+        if status == "cancelling":
+            task.status = "cancelling"
+            task.cancel_requested_at = (row or {}).get("cancel_requested_at") or time.time()
+        else:
+            task.status = "cancelled"
+            task.cancel_requested_at = (row or {}).get("cancel_requested_at") or time.time()
+            task.finished_at = task.finished_at or time.time()
+        return True
 
     def _register_task(self, instance_id: str) -> BuildTask:
         task = BuildTask(instance_id=instance_id, queued_at=time.time())

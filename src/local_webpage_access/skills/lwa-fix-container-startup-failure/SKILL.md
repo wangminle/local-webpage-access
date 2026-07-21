@@ -1,3 +1,9 @@
+---
+name: lwa-fix-container-startup-failure
+description: >-
+  Diagnose an lwa container that builds successfully but exits, crashes, restarts, or is killed for resource use, then correct its startup configuration. Use when run.log has a nonzero exit, docker compose ps shows Restarting, or the declared command, environment, permissions, and resource limits disagree.
+---
+
 # lwa-fix-container-startup-failure
 
 > 诊断容器启动后立即退出/OOM/崩溃的原因，修正启动配置。

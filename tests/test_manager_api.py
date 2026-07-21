@@ -345,6 +345,51 @@ def test_health_does_not_call_collect_capability(manager_env: EnvBundle, monkeyp
     assert calls == []
 
 
+def test_health_overlays_fresh_gateway_access_from_cache(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-277：health 启动缓存 gatewayAccess 陈旧时，应廉价合并新鲜 gateway 缓存。"""
+    from local_webpage_access.capability import CapabilityReport, write_capability_cache
+
+    calls: list[str] = []
+
+    def boom(**kwargs):  # noqa: ANN003
+        calls.append("collect")
+        raise AssertionError("health 不应同步探测")
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report", boom
+    )
+    # 跳过「gateway 进程存活」检查，专注缓存合并语义
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive", lambda *_a, **_k: True
+    )
+
+    manager_env.app.state.capability_fragment = {
+        "profile": "default",
+        "overall": "ready",
+        "serviceUser": "tester",
+        "capabilities": {
+            "managerDockerAccess": "ready",
+            "gatewayAccess": "admin_unavailable",
+        },
+        "action": None,
+    }
+    write_capability_cache(
+        manager_env.workspace.root,
+        "gateway",
+        CapabilityReport(gateway_access="ready", overall="ready"),
+    )
+
+    # TestClient 默认 host=testclient（非回环）；需鉴权才返回 capabilities
+    body = manager_env.client.get(
+        "/api/health", headers=manager_env.auth_headers()
+    ).json()
+    assert body["ok"] is True
+    assert body["capabilities"]["gatewayAccess"] == "ready"
+    assert calls == []
+
+
 def test_capability_refresh_merges_daemon_and_gateway_caches(
     manager_env: EnvBundle, monkeypatch
 ) -> None:

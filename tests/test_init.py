@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from local_webpage_access.config import load_config
 from local_webpage_access.init_workspace import init_workspace
 from local_webpage_access.paths import Workspace
@@ -138,6 +140,24 @@ def test_init_copies_skills(tmp_path: Path) -> None:
         "lwa-review-access-urls",
     ):
         assert expected in names, f"缺少 skill：{expected}"
+
+
+def test_bundled_skills_have_discoverable_frontmatter() -> None:
+    """内置 Skill 必须提供 Agent Skills 可发现的最小 YAML 元数据。"""
+    skills_root = Path(__file__).parents[1] / "src/local_webpage_access/skills"
+    skill_docs = sorted(skills_root.glob("lwa-*/SKILL.md"))
+    assert len(skill_docs) == 17
+
+    for skill_doc in skill_docs:
+        text = skill_doc.read_text(encoding="utf-8")
+        assert text.startswith("---\n"), f"{skill_doc.parent.name} 缺少 YAML frontmatter"
+        _, frontmatter, body = text.split("---", 2)
+        metadata = yaml.safe_load(frontmatter)
+        assert set(metadata) == {"name", "description"}
+        assert metadata["name"] == skill_doc.parent.name
+        assert isinstance(metadata["description"], str)
+        assert metadata["description"].strip()
+        assert body.lstrip().startswith(f"# {skill_doc.parent.name}\n")
 
 
 def test_cli_init_e2e(tmp_path: Path) -> None:

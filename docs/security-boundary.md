@@ -86,7 +86,7 @@
 
 ## 默认资源限制
 
-V1 生成的容器统一带资源限额（`local-web.yml` 的 `defaultResourceLimits`）：
+容器限额由实例 **`resourceProfile`**（IMP-018）映射为 Compose `mem_limit` / `cpus`（常见：`small`=256m/0.5、`medium`=1g/1.5 等，见 [runtime-workspace](runtime-workspace.md#资源档位imp-018)）。`local-web.yml` 的 `defaultResourceLimits` 仍为配置默认值参考：
 
 ```yaml
 defaultResourceLimits:
@@ -94,7 +94,7 @@ defaultResourceLimits:
   cpus: "0.75"
 ```
 
-* 防止单实例吃满小主机内存/CPU。
+* 防止单实例吃满小主机内存/CPU（实际生效以实例档位为准，多数并非 512m）。
 * 每实例 `restart: unless-stopped`，崩溃自动重启。
 * 构建并发限流（`buildConcurrency: 1`），避免并发构建 OOM。
 

@@ -4,13 +4,13 @@
 其余命令按功能域拆到子模块，由 :func:`_register_all` 统一挂载：
 
 * :mod:`local_webpage_access.cli.importing` —— import / scan
-* :mod:`local_webpage_access.cli.lifecycle`   —— start / stop / restart / rebuild / remove / logs
+* :mod:`local_webpage_access.cli.lifecycle`   —— start / stop / restart / rebuild / cancel-build / remove / logs
 * :mod:`local_webpage_access.cli.status`      —— status / stats / list
 * :mod:`local_webpage_access.cli.system`      —— setup / doctor / update
 * :mod:`local_webpage_access.cli.alias`       —— ``lwa alias set/clear`` 子命令组
 * :mod:`local_webpage_access.cli.daemon`      —— ``lwa daemon on/off/status`` 子命令组
 * :mod:`local_webpage_access.cli.manager`     —— ``lwa manager on/off/status/start/logs`` 子命令组
-* :mod:`local_webpage_access.cli.gateway`     —— ``lwa gateway on/off/status`` 子命令组
+* :mod:`local_webpage_access.cli.gateway`     —— ``lwa gateway on/off/status/switch`` 子命令组
 * :mod:`local_webpage_access.cli.access`      —— ``lwa access refresh/review`` 子命令组
 * :mod:`local_webpage_access.cli.autostart`   —— ``lwa autostart install/enable/.../check`` 子命令组（IMP-030）
 
@@ -55,7 +55,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.6.5-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.6.6-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())

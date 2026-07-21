@@ -1,3 +1,9 @@
+---
+name: lwa-fix-port-binding
+description: >-
+  Resolve host-port conflicts and incorrect container port mappings for lwa instances. Use when run.log reports address already in use or port is already allocated, lwa doctor finds abnormal port-pool occupancy, or the allocated hostPort does not route to the application's internalPort.
+---
+
 # lwa-fix-port-binding
 
 > 解决宿主端口被占用或端口映射错误导致实例无法启动的问题。

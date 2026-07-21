@@ -228,6 +228,18 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 管理页每次 `GET /api/instances` 都会先观测回写状态，理论上始终一致。
 若仍不一致，运行 `lwa status` 强制刷新，或 `lwa doctor <id>` 诊断该实例。
 
+### 浏览量数字对不上 / 「直连端口不算」？
+
+管理页浏览量已不是「仅别名入口」：
+
+* **只计 page**：静态资源、API、带 `__lwa_probe` 的探活不计（IMP-025）。
+* **独立 IP**：详情含 `uniqueIpList`（含本机标记，IMP-026）。
+* **有路径别名的容器**：走 Caddy `static-access.log`（IMP-027），不是 docker logs。
+* **无别名静态 + Caddy**：经 Caddy 伺服的 **hostPort 直连**也会写入同一 access log，按端口归属（IMP-028）——**会计入**。
+* **builtin** 或无别名容器：仍分别靠 `gateway.log` / docker logs（后者为近似）。
+
+详见 [manager-page 浏览量](manager-page.md) 与 [known-limitations](known-limitations.md)。
+
 ## 访问类问题
 
 ### 管理页「端口」打开旧局域网地址

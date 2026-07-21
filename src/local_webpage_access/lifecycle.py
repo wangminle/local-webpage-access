@@ -640,7 +640,37 @@ def remove_instance(
                         f"实例 {instance_id} 的目录解析到 apps/ 之外，拒绝删除",
                         instance_id=instance_id,
                     )
-                shutil.rmtree(resolved, ignore_errors=True)
+                try:
+                    # BUG-279：禁止 ignore_errors 假绿；失败须可观测并可重试
+                    shutil.rmtree(resolved)
+                except OSError as exc:
+                    _log_remove_stage(
+                        registry,
+                        instance_id,
+                        "purge_tree",
+                        "fail",
+                        purge=purge,
+                        force=force,
+                        detail=str(exc),
+                    )
+                    raise LifecycleError(
+                        f"实例 {instance_id} 磁盘删除失败：{exc}",
+                        instance_id=instance_id,
+                    ) from exc
+                if resolved.exists():
+                    _log_remove_stage(
+                        registry,
+                        instance_id,
+                        "purge_tree",
+                        "fail",
+                        purge=purge,
+                        force=force,
+                        detail="directory still exists after rmtree",
+                    )
+                    raise LifecycleError(
+                        f"实例 {instance_id} 磁盘删除失败：未能删除 apps/{instance_id}",
+                        instance_id=instance_id,
+                    )
             _log_remove_stage(
                 registry,
                 instance_id,

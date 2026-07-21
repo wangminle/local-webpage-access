@@ -36,6 +36,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -343,6 +344,13 @@ def create_app(
                 app.state.capability_fragment = frag
             except Exception:  # noqa: BLE001 — 探测失败不阻断管理页
                 log.exception("manager 能力自检失败")
+            # BUG-277：gateway 常比 manager 晚就绪；延后重合并一次缓存
+            time.sleep(15)
+            try:
+                frag = _refresh_capability_cache()
+                app.state.capability_fragment = frag
+            except Exception:  # noqa: BLE001
+                log.exception("manager 延后能力自检失败")
 
         threading.Thread(
             target=_bg_probe, name="lwa-capability-probe", daemon=True
@@ -433,10 +441,13 @@ def _register_routes(app: FastAPI) -> None:
         # BUG-236：已鉴权局域网客户端也应拿到完整 capabilities（供管理页降级 UI）
         auth_ok = local_ok or _verify_token(ws, _extract_token(request))
         # BUG-254：存活检查不得同步跑昂贵 Docker/Caddy 探测；只用启动/后台缓存。
-        frag = getattr(app.state, "capability_fragment", None) or {
-            "overall": "unknown",
-            "profile": "default",
-        }
+        # BUG-277：廉价合并新鲜 gateway 缓存，纠偏 manager 早于 gateway 就绪的陈旧片段。
+        from local_webpage_access.capability import overlay_gateway_access_from_cache
+
+        frag = overlay_gateway_access_from_cache(
+            getattr(app.state, "capability_fragment", None),
+            ws.root,
+        )
         if auth_ok:
             body.update(frag)
         else:

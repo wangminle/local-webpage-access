@@ -1,3 +1,9 @@
+---
+name: lwa-import-zip
+description: >-
+  Import a local zip archive into lwa as a new instance or safely update an existing instance in place. Use when a user asks to deploy or preview a zip, supplies a new version of the same project, encounters a slug conflict, or needs to preserve ports and data while replacing application source.
+---
+
 # lwa-import-zip
 
 > 把用户提供的本地 zip 包导入为实例；同一项目的新版本应**原地更新**而非重复新建。
@@ -50,7 +56,8 @@ lwa alias clear <id>
 >
 > - **需要 Caddy 网关**：别名统一入口依赖 Caddy 的 `:<gatewayPort>` 站点块。
 >   `lwa alias set` 在 `staticGateway=builtin`（或 caddy 未安装）时会**明确报错**，
->   不再无声写元数据造成"设置成功但访问失败"。先 `lwa gateway on` 启用 Caddy。
+>   不再静默写元数据造成"设置成功但访问失败"。若当前是 `builtin`，先
+>   **`lwa gateway switch caddy`**；master 未起再 `lwa gateway on`。
 > - **SPA 子路径资源（IMP-023）**：别名 `reverse_proxy` 会去掉 `/<alias>/` 前缀，
 >   **相对路径资源**（`./assets/...`）正常；但 **绝对路径资源**（`/assets/...`，
 >   Vue/React 默认 `base: '/'`）会绕过别名打到入口根 → 404 白屏。受影响项目应在
@@ -117,10 +124,15 @@ lwa import inbox/foo-v2.zip --update foo --force-kind-change
 ## 输出
 
 - 新建：一个 `pending` 实例（交给后续 skill 识别）。
-- 更新：同一 instance_id，`current/` 已替换；若原 running 则自动 restart（端口不变）。
+- 更新：同一 instance_id，`current/` 已替换；若原 running 且未传 `--no-restart`，容器走自动 **rebuild**（端口不变），静态/前端走 restart。
 
 ## 禁止事项
 
 - 不在未确认时 silent 覆盖 running 实例（daemon inbox 默认也不自动覆盖）。
 - 不手动删 `apps/<id>/current/` 再解压——绕过了 `update_zip` 的原子换入与回滚保护。
 - 不用 `--force-kind-change` 除非用户明确确认跨形态迁移。
+
+## 示例对话
+
+> 用户：这是 foo 项目的 v2 zip，帮我更新，保留数据和端口。
+> Agent：先用 `lwa list` 确认 foo 的 instance id，再执行 `lwa import inbox/foo-v2.zip --update foo --dry-run`。预演确认无跨形态变更后，去掉 `--dry-run` 原地更新；默认保留 `data/` 和 hostPort。

@@ -7,12 +7,11 @@
 * **静态 + builtin**：解析 ``apps/<id>/logs/gateway.log``（``python -m http.server``
   写入的 CLF）。每实例独立日志，无需路由归属。
 * **静态 + caddy**：解析统一入口块写入的 JSON access log
-  （``run/logs/static-access.log``），按请求路径前缀 ``/<alias>/`` 归属到实例。
-  仅覆盖**别名入口**流量；Caddy 模式下直连 hostPort 的访问不计入（hostPort
-  多用于本机预览，别名才是「公开浏览」入口）。
-* **容器**：尽力解析 ``docker compose logs``（CLF / uvicorn / flask / gunicorn
-  常见 access 行）。容器日志格式不可控，统计为**近似值**——能识别的 HTTP 行
-  计为命中，识别不到则该实例显示「—」而非误导性 0。
+  （``run/logs/static-access.log``）。有路径别名时按 ``/<alias>/`` 前缀归属
+  （IMP-024）；无别名时按 ``request.host`` 端口归属到实例 hostPort（IMP-028）。
+  探测请求（``__lwa_probe``）与非页面资源不计入 page hits。
+* **容器**：有 Caddy 别名时走同一 JSON access log（IMP-027，真实访客 IP）；
+  否则尽力解析 ``docker compose logs``（近似值）。
 
 设计要点：
 

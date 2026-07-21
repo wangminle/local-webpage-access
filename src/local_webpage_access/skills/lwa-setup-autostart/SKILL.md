@@ -1,3 +1,9 @@
+---
+name: lwa-setup-autostart
+description: >-
+  Set up, inspect, and repair lwa login or boot autostart for daemon, manager, and optional gateway through launchd or systemd user services. Use when users ask for automatic startup, services disappear after login or reboot, lwa autostart check fails, or an older detached configuration must be migrated.
+---
+
 # lwa-setup-autostart
 
 > 引导用户用 `lwa autostart` 完成开机/登录自启动：跨平台（macOS launchd / Linux·WSL
@@ -49,7 +55,7 @@
 1. 让用户在工作区目录运行：lwa autostart check --json
 2. 按 platform 与 fail 项给最小命令：
    - macos：lwa autostart install [--with-caddy]  →  lwa autostart check
-   - linux：lwa autostart install → sudo loginctl enable-linger $USER → check
+   - linux：lwa autostart install [--linger] → （若未 --linger）sudo loginctl enable-linger $USER → check
    - wsl  ：Linux 侧同上 + Windows 侧注册登录任务（lwa autostart install 会打印脚本）
 3. 旧 detached 单元（check 报 unit 身份 fail）：lwa autostart repair
 4. 停服说明：lwa autostart disable 再 lwa X off
@@ -64,7 +70,7 @@
 | 平台 | 一键命令 | 关键点 |
 | --- | --- | --- |
 | macOS | `lwa autostart install --with-caddy` | LaunchAgent，登录触发；KeepAlive 崩溃即拉起 |
-| Linux | `lwa autostart install` + `enable-linger` | systemd **user** 单元；docker 组靠登录会话（非 SupplementaryGroups）；Python 须 3.13 venv |
+| Linux | `lwa autostart install [--linger]` | systemd **user** 单元；`--linger` 尝试 `enable-linger`（也可手写 `sudo loginctl enable-linger $USER`）；docker 组靠登录会话；Python 须 3.13 venv |
 | WSL | 同 Linux + Windows 唤醒任务 | 需 `/etc/wsl.conf` `[boot] systemd=true`；包 ≥2.1.5；工作区勿放 `/mnt/<drive>`（Full/autostart fail-closed） |
 | Windows 原生 | **不支持** | 仅作 WSL2 宿主；见 [开机自启文档](../../../../docs/autostart.md) |
 
