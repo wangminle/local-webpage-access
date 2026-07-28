@@ -656,12 +656,49 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   font-size: 14px;
   background: var(--bg);
   color: var(--text);
-  margin: 12px 0;
+  margin: 0;
 }
 .token-box input:focus {
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 3px oklch(0.54 0.19 264 / 0.2);
+}
+.token-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 12px 0;
+}
+.token-input-wrap input {
+  padding-right: 42px;
+}
+.token-visibility-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.token-visibility-btn:hover,
+.token-visibility-btn:focus-visible {
+  color: var(--text);
+  background: oklch(0.54 0.19 264 / 0.1);
+  outline: none;
+}
+.token-visibility-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
 }
 .token-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
 .token-hint {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import zipfile
 from pathlib import Path
 
@@ -600,6 +599,32 @@ def test_import_conflict_error_mode(importer: Importer, tmp_path: Path) -> None:
         importer.import_zip(zip_path, on_conflict="error")
 
 
+def test_import_conflict_error_mode_is_atomic(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-313：检查后目录被并发认领时 error 模式不能静默创建 -2。"""
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    original_mkdir = Path.mkdir
+    raced = False
+    # 故意让预检永远通过，强制冲突只由原子 mkdir claim 裁决。
+    monkeypatch.setattr(importer, "_id_taken", lambda _slug: False)
+
+    def racing_mkdir(path, *args, **kwargs):  # noqa: ANN001
+        nonlocal raced
+        if path == workspace.app_dir("demo") and kwargs.get("exist_ok") is False:
+            if not raced:
+                raced = True
+                original_mkdir(path, parents=True, exist_ok=False)
+                raise FileExistsError(path)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    with pytest.raises(ZipImportError, match="--update"):
+        importer.import_zip(zip_path, on_conflict="error")
+    assert not workspace.app_dir("demo-2").exists()
+
+
 def test_import_conflict_rename_still_default(importer: Importer, tmp_path: Path) -> None:
     """默认 on_conflict='rename' 仍走 -2（daemon 依赖，不能回归）。"""
     zip_path = _make_static_zip(tmp_path / "demo.zip")
@@ -848,6 +873,33 @@ def test_update_no_keep_data_clears_data(
     assert resources["data_size_bytes"] == 0
 
 
+def test_update_keep_data_false_preserves_data_when_registry_sync_fails(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-348：keep_data=False 时 data 清空须在 registry 同步成功之后；同步失败应保留 data。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    data_dir = workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.db").write_bytes(b"keep-me")
+
+    original = registry.upsert_from_manifest
+
+    def boom(manifest, **kwargs):
+        raise RuntimeError("registry sync boom")
+
+    monkeypatch.setattr(registry, "upsert_from_manifest", boom)
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(ZipImportError, match="registry sync boom"):
+        importer.update_zip(v2, iid, restart=False, keep_data=False)
+
+    assert (data_dir / "app.db").read_bytes() == b"keep-me"
+    # 恢复以便后续清理；此处仅断言回滚路径未提前清空 data
+    monkeypatch.setattr(registry, "upsert_from_manifest", original)
+
+
 def test_update_preserves_path_alias(
     importer: Importer, workspace: Workspace, tmp_path: Path
 ) -> None:
@@ -880,6 +932,72 @@ def test_update_preserves_hostport_registration(
     importer.update_zip(v2, iid, restart=False)
 
     assert registry.get_static_site(iid)["host_port"] == 18001
+
+
+def test_update_preserves_static_enabled_and_timestamps(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """BUG-321：--update 必须保留 static.enabled / lastStartedAt / lastHealthCheckAt。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+
+    manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert manifest.static is not None
+    manifest.static.enabled = False
+    manifest.lastStartedAt = "2026-01-02T03:04:05Z"
+    manifest.lastHealthCheckAt = "2026-01-02T03:05:06Z"
+    manifest.desiredState = DesiredState.STOPPED
+    manifest.status = Status.STOPPED
+    manifest.save(workspace.app_manifest_path(iid))
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    result = importer.update_zip(v2, iid, restart=False)
+
+    assert result.manifest.static is not None
+    assert result.manifest.static.enabled is False
+    assert result.manifest.lastStartedAt == "2026-01-02T03:04:05Z"
+    assert result.manifest.lastHealthCheckAt == "2026-01-02T03:05:06Z"
+    reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert reloaded.static is not None
+    assert reloaded.static.enabled is False
+    assert reloaded.lastStartedAt == "2026-01-02T03:04:05Z"
+    assert reloaded.lastHealthCheckAt == "2026-01-02T03:05:06Z"
+
+
+def test_update_rollback_restores_port_registry_rows(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-323：换入后失败回滚须恢复 static_sites/containers 的 host_port。"""
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    registry.upsert_static_site(iid, {"hostPort": 18077})
+    assert registry.get_static_site(iid)["host_port"] == 18077
+
+    from local_webpage_access import importer as importer_mod
+
+    original_hash = getattr(
+        InstanceManifest.load(workspace.app_manifest_path(iid)), "sourceZipHash", None
+    )
+    original_save = importer_mod.InstanceManifest.save
+
+    def fail_after_swap(self, path):
+        if getattr(self, "sourceZipHash", None) != original_hash:
+            # 模拟换入后 registry 已被新 manifest 清掉 hostPort 的中间态
+            importer.registry.upsert_static_site(iid, {"hostPort": None})
+            raise OSError("manifest write boom")
+        return original_save(self, path)
+
+    monkeypatch.setattr(importer_mod.InstanceManifest, "save", fail_after_swap)
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(ZipImportError, match="manifest write boom"):
+        importer.update_zip(v2, iid, restart=False)
+
+    row = registry.get_static_site(iid)
+    assert row is not None
+    assert row["host_port"] == 18077
 
 
 def test_update_force_kind_change_preserves_hostport_across_static_to_container(

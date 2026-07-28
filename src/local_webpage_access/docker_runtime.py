@@ -219,6 +219,7 @@ def _execute_streaming(
     """
     from local_webpage_access.build_process import (
         current_build_instance_id,
+        current_build_token,
         get_build_process_hub,
         kill_process_tree,
         popen_new_session_kwargs,
@@ -231,6 +232,7 @@ def _execute_streaming(
     chunks: list[str] = []
     hub = get_build_process_hub()
     instance_id = current_build_instance_id()
+    build_token = current_build_token()
 
     def _should_cancel() -> bool:
         if instance_id is None:
@@ -241,7 +243,9 @@ def _execute_streaming(
             from local_webpage_access.build_queue import _gates
 
             for gate in list(_gates.values()):
-                if gate.is_cancel_requested(instance_id):
+                if build_token is not None and gate.is_cancel_requested(
+                    instance_id, build_token=build_token
+                ):
                     return True
         except Exception:  # noqa: BLE001
             pass
@@ -275,14 +279,19 @@ def _execute_streaming(
                 _persist_docker_worker(instance_id, proc, identity)
 
             assert proc.stdout is not None
+            stdout = proc.stdout
             line_q: queue.Queue[str | None] = queue.Queue()
 
             def _reader() -> None:
                 try:
-                    for line in iter(proc.stdout.readline, ""):
+                    for line in iter(stdout.readline, ""):
                         line_q.put(line)
                 finally:
                     line_q.put(None)
+                    # 审查 L4：kill 失败时 readline 可能卡住；显式关闭可让
+                    # reader 尽快退出，避免多次取消后 fd 累积。
+                    with contextlib.suppress(Exception):
+                        stdout.close()
 
             reader = threading.Thread(
                 target=_reader, name="lwa-docker-exec-reader", daemon=True
@@ -330,6 +339,9 @@ def _execute_streaming(
                     with contextlib.suppress(Exception):
                         proc.wait(timeout=5)
                 reader.join(timeout=5.0)
+                with contextlib.suppress(Exception):
+                    if proc.stdout is not None and not proc.stdout.closed:
+                        proc.stdout.close()
                 if instance_id is not None:
                     hub.unregister(instance_id, proc)
                     _clear_docker_worker(instance_id)
@@ -365,11 +377,16 @@ def _persist_docker_worker(
         if sys.platform != "win32":
             with contextlib.suppress(ProcessLookupError):
                 pgid = os.getpgid(proc.pid)
+        from local_webpage_access.build_process import current_build_token
         from local_webpage_access.build_queue import _gates
 
+        build_token = current_build_token()
+        if build_token is None:
+            return
         for gate in list(_gates.values()):
             gate.update_build_task(
                 instance_id,
+                build_token=build_token,
                 worker_pid=proc.pid,
                 worker_pgid=pgid,
                 worker_identity=identity,
@@ -380,10 +397,16 @@ def _persist_docker_worker(
 
 def _clear_docker_worker(instance_id: str) -> None:
     try:
+        from local_webpage_access.build_process import current_build_token
         from local_webpage_access.build_queue import _gates
 
+        build_token = current_build_token()
+        if build_token is None:
+            return
         for gate in list(_gates.values()):
-            gate.update_build_task(instance_id, clear_worker=True)
+            gate.update_build_task(
+                instance_id, build_token=build_token, clear_worker=True
+            )
     except Exception:  # noqa: BLE001
         pass
 
@@ -530,7 +553,8 @@ class DockerRuntime:
                 )
         if not result.ok:
             self._event(instance_id, "error", f"镜像构建失败（exit {result.returncode}）")
-            raise _require_ok(result, action="build", instance_id=instance_id)
+            # `_require_ok` 在非 ok 时必抛 DockerError；勿用 raise 包返回值（mypy）。
+            _require_ok(result, action="build", instance_id=instance_id)
         return result
 
     def up(
@@ -635,6 +659,15 @@ class DockerRuntime:
         self._event(instance_id, "down", "容器已 down（容器与网络已清理）")
         return result
 
+    def remove_image(self, image: str) -> ComposeResult:
+        """best-effort 删除实例镜像（purge 磁盘回收，BUG-345）。"""
+        result = _execute(
+            ["docker", "image", "rm", image],
+            cwd=self.workspace.root,
+            timeout=_QUERY_TIMEOUT,
+        )
+        return result
+
     # ---- 数据迁移（BUG-205）------------------------------------------------
 
     def rescue_container_data(
@@ -662,7 +695,8 @@ class DockerRuntime:
                 return 0
         except OSError:
             return 0
-        cid = self.container_id(instance_id)
+        # BUG-318：stopped 容器对默认 ps -q 不可见，救援必须 --all。
+        cid = self.container_id(instance_id, all_containers=True)
         if not cid:
             return 0
         host_data.mkdir(parents=True, exist_ok=True)
@@ -718,13 +752,17 @@ class DockerRuntime:
 
     # ---- 观测（WBS-14.09~11）---------------------------------------------
 
-    def container_id(self, instance_id: str) -> str | None:
+    def container_id(
+        self, instance_id: str, *, all_containers: bool = False
+    ) -> str | None:
         """查询 service 容器 id（WBS-14.09）。
 
-        使用 ``docker compose ps -q``，返回短 id；无运行容器时返回 None。
+        默认 ``docker compose ps -q``（仅运行中）。``all_containers=True`` 时加
+        ``--all``，以便数据救援识别已停止但尚未删除的容器（BUG-318）。
         """
+        ps_args = ("ps", "--all", "-q") if all_containers else ("ps", "-q")
         result = _execute(
-            self._compose_cmd(instance_id, "ps", "-q"),
+            self._compose_cmd(instance_id, *ps_args),
             cwd=self.workspace.app_dir(instance_id),
             timeout=_QUERY_TIMEOUT,
         )

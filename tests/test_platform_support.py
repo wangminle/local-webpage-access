@@ -655,3 +655,174 @@ def test_import_package_does_not_exit() -> None:
 
     importlib.reload(ps)
     assert hasattr(ps, "collect_platform_support_report")
+
+
+def test_detect_wsl_package_version_parses_utf16le_bytes(monkeypatch) -> None:
+    """BUG-282：wsl.exe 默认 UTF-16LE 输出须能解析出包版本。"""
+    from types import SimpleNamespace
+
+    import local_webpage_access.platform_support as ps
+    from local_webpage_access.platform_support import detect_wsl_package_version
+
+    sample = (
+        "WSL version: 2.4.13.0\n"
+        "Kernel version: 5.15.167.4-1\n"
+        "WSLg version: 1.0.65\n"
+    )
+    raw = sample.encode("utf-16-le")
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN003
+        assert kwargs.get("text") is not True  # 须以 bytes 捕获
+        env = kwargs.get("env") or {}
+        assert env.get("WSL_UTF8") == "1"
+        assert "WSL_UTF8" in str(env.get("WSLENV", ""))
+        return SimpleNamespace(returncode=0, stdout=raw, stderr=b"")
+
+    monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
+    assert detect_wsl_package_version(runner=runner) == "2.4.13.0"
+
+
+def test_detect_wsl_package_version_parses_utf8_and_zh(monkeypatch) -> None:
+    """BUG-282：UTF-8 / 中文「WSL 版本」行亦可解析。"""
+    from types import SimpleNamespace
+
+    import local_webpage_access.platform_support as ps
+    from local_webpage_access.platform_support import detect_wsl_package_version
+
+    sample = "WSL 版本: 2.1.5.0\n内核版本: 5.15.0\n".encode("utf-8")
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN003
+        return SimpleNamespace(returncode=0, stdout=sample, stderr=b"")
+
+    monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
+    assert detect_wsl_package_version(runner=runner) == "2.1.5.0"
+
+
+def test_detect_wsl_package_version_never_reports_kernel_as_package(
+    monkeypatch,
+) -> None:
+    """BUG-288：只有 Kernel/WSLg 行时不得把内核版本当包版本（会绕过 ≥2.1.5 门禁）。"""
+    from types import SimpleNamespace
+
+    import local_webpage_access.platform_support as ps
+    from local_webpage_access.platform_support import detect_wsl_package_version
+
+    sample = b"Kernel version: 5.15.167.4-1\nWSLg version: 1.0.65\n"
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN003
+        return SimpleNamespace(returncode=0, stdout=sample, stderr=b"")
+
+    monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
+    assert detect_wsl_package_version(runner=runner) == "unknown"
+
+
+def test_detect_wsl_package_version_retries_runner_without_env(monkeypatch) -> None:
+    """BUG-288：注入的 runner 不接受 env= 时应降级重试，而非静默判 unknown。"""
+    from types import SimpleNamespace
+
+    import local_webpage_access.platform_support as ps
+    from local_webpage_access.platform_support import detect_wsl_package_version
+
+    def runner(args, capture_output=True, text=False, timeout=5, check=False):  # noqa: ANN001
+        return SimpleNamespace(
+            returncode=0, stdout=b"WSL version: 2.4.13.0\n", stderr=b""
+        )
+
+    monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
+    assert detect_wsl_package_version(runner=runner) == "2.4.13.0"
+
+
+def test_wsl_exe_candidates_scans_drvfs_when_not_on_path(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """BUG-291：PATH 无 wsl.exe 时扫描 /mnt/<drive>/Windows/System32/wsl.exe。"""
+    import local_webpage_access.platform_support as ps
+
+    exe = tmp_path / "c" / "Windows" / "System32" / "wsl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
+
+    monkeypatch.setattr(ps.shutil, "which", lambda _name: None)
+    real_path = ps.Path
+
+    def fake_path(*args, **kwargs):  # noqa: ANN002, ANN003
+        if args and str(args[0]) in ("/mnt", "/mnt/"):
+            return real_path(tmp_path)
+        return real_path(*args, **kwargs)
+
+    monkeypatch.setattr(ps, "Path", fake_path)
+    found = ps._wsl_exe_candidates()
+    assert found == [str(exe)]
+
+
+def test_detect_wsl_package_version_falls_back_to_system32_path(
+    monkeypatch,
+) -> None:
+    """BUG-291：PATH 名失败后继续尝试绝对路径候选，仍可解析包版本。"""
+    from types import SimpleNamespace
+
+    import local_webpage_access.platform_support as ps
+    from local_webpage_access.platform_support import detect_wsl_package_version
+
+    abs_exe = "/mnt/c/Windows/System32/wsl.exe"
+    sample = b"WSL version: 2.9.4.0\nKernel version: 6.18.35.2-1\n"
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN003
+        if args[0] == "wsl.exe":
+            raise FileNotFoundError("wsl.exe")
+        assert args[0] == abs_exe
+        return SimpleNamespace(returncode=0, stdout=sample, stderr=b"")
+
+    monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
+    monkeypatch.setattr(ps, "_wsl_exe_candidates", lambda: ["wsl.exe", abs_exe])
+    assert detect_wsl_package_version(runner=runner) == "2.9.4.0"
+
+
+def test_detect_wsl_package_version_unknown_when_runner_fails(monkeypatch) -> None:
+    """BUG-282：interop 失败返回 unknown，不得抛异常。"""
+    import local_webpage_access.platform_support as ps
+    from local_webpage_access.platform_support import detect_wsl_package_version
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN003
+        raise FileNotFoundError("wsl.exe")
+
+    monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
+    assert detect_wsl_package_version(runner=runner) == "unknown"
+
+
+def test_doctor_human_prints_platform_support_when_unsupported(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """BUG-283：人类可读 doctor 须打印平台 reasons，不能只静默 exit 1。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+    from local_webpage_access.init_workspace import init_workspace
+    import local_webpage_access.platform_support as ps
+
+    root = tmp_path / "ws"
+    init_workspace(root)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        ps,
+        "collect_platform_support_report",
+        lambda **_k: collect_platform_support_report(
+            platform_name="wsl",
+            distro_id="ubuntu",
+            distro_version="22.04",
+            kernel_version="5.15.0-microsoft-standard-WSL2",
+            libc_version="2.35",
+            architecture="x86_64",
+            wsl_version="2",
+            wsl_package_version="unknown",
+            systemd_available=True,
+            systemd_pid1=True,
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["doctor"])
+    out = (result.stdout or "") + (result.output or "")
+    assert result.exit_code != 0
+    assert "平台支持" in out or "platform" in out.lower()
+    assert "unknown" in out.lower() or "无法确定" in out
+    assert "wsl" in out.lower() or "WSL" in out

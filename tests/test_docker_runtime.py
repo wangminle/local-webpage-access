@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import threading
 import time
@@ -544,7 +543,6 @@ def test_is_running_reflects_state(workspace, monkeypatch) -> None:
     _seed_compose_files(workspace, "api")
     payload_running = {"Service": "app", "State": "running"}
     payload_exited = {"Service": "app", "State": "exited"}
-    fake = _FakeExecute()
 
     def ps_handler(args, *, cwd, log_path=None, timeout=60, **kw):
         if "--all" in args:
@@ -662,6 +660,47 @@ def test_execute_streaming_timeout_writes_cmd_header(tmp_path: Path) -> None:
     assert "time.sleep" in content
 
 
+def test_execute_streaming_closes_stdout_pipe(tmp_path: Path, monkeypatch) -> None:
+    """审查 L4：reader 结束须关闭 stdout，避免 kill 失败时 fd/线程泄漏。"""
+    import subprocess
+
+    from local_webpage_access import docker_runtime as dr
+
+    closed: list[bool] = []
+    real_popen = subprocess.Popen
+
+    class _TrackingStdout:
+        def __init__(self, real: object) -> None:
+            self._real = real
+
+        def readline(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return self._real.readline(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def close(self) -> None:
+            closed.append(True)
+            return self._real.close()  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str):
+            return getattr(self._real, name)
+
+    def fake_popen(*args, **kwargs):  # noqa: ANN002, ANN003
+        proc = real_popen(*args, **kwargs)
+        if proc.stdout is not None:
+            proc.stdout = _TrackingStdout(proc.stdout)  # type: ignore[assignment]
+        return proc
+
+    monkeypatch.setattr(dr.subprocess, "Popen", fake_popen)
+    log = tmp_path / "build.log"
+    r = _execute(
+        [sys.executable, "-c", "print('close-me', flush=True)"],
+        cwd=tmp_path,
+        log_path=log,
+        timeout=10,
+    )
+    assert r.ok
+    assert closed, "流式 reader 结束必须 close(stdout)"
+
+
 def test_execute_missing_binary_raises_docker_error(tmp_path: Path) -> None:
     with pytest.raises(DockerError, match="未找到"):
         _execute(["this-binary-does-not-exist-xyz"], cwd=tmp_path)
@@ -716,10 +755,12 @@ class _RescueCopyFake(_FakeExecute):
         self._cid = cid
         self._ps_stdout = ps_stdout if ps_stdout is not None else f"{cid}\n"
         self.cp_targets: list[str] = []
+        self.ps_args: list[str] = []
 
     def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
         # container_id 查询（docker compose ps -q）返回容器 id
         if "ps" in args:
+            self.ps_args = list(args)
             return ComposeResult(
                 args=list(args), returncode=0, stdout=self._ps_stdout, stderr=""
             )
@@ -792,3 +833,37 @@ def test_rescue_container_data_no_container_returns_zero(
     rt = DockerRuntime(workspace, registry)
     assert rt.rescue_container_data("api", host_data, ["/app/data", "/app/runtime/data"]) == 0
     assert fake.cp_targets == []
+
+
+def test_rescue_container_data_finds_stopped_container(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-318：数据救援查询必须包含已停止但尚未删除的容器。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+    fake = _RescueCopyFake()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    assert DockerRuntime(workspace, registry).rescue_container_data(
+        "api", host_data, ["/app/data"]
+    ) == 1
+    assert "--all" in fake.ps_args
+
+
+def test_container_id_all_containers_param(workspace, monkeypatch) -> None:
+    """BUG-318：container_id(all_containers=True) 使用 ps --all -q。"""
+    _seed_compose_files(workspace, "api")
+    seen: list[list[str]] = []
+
+    def fake(args, *, cwd, log_path=None, timeout=60, **kw):
+        seen.append(list(args))
+        return ComposeResult(args=list(args), returncode=0, stdout="cid1\n")
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    rt = DockerRuntime(workspace)
+    assert rt.container_id("api", all_containers=True) == "cid1"
+    assert "--all" in seen[-1]
+    assert rt.container_id("api") == "cid1"
+    assert "--all" not in seen[-1]

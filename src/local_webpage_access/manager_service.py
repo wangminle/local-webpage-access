@@ -349,12 +349,6 @@ def manager_instance_lock(workspace: Workspace) -> Iterator[None]:
             content = path.read_text(encoding="utf-8").strip().splitlines()
             holder_pid = int(content[0]) if content else 0
             stale = holder_pid <= 0 or not is_pid_alive(holder_pid)
-            if not stale:
-                # 存活但锁文件极旧（卡死进程）→ 视为陈旧回收
-                stale = (
-                    time.time() - path.stat().st_mtime
-                    > MANAGER_START_LOCK_STALE_SECONDS
-                )
         except (OSError, ValueError):
             stale = True
         if stale:
@@ -557,7 +551,7 @@ def run_service_main() -> int:
     workspace = Workspace(Path(args.workspace).resolve())
     # BUG-116：写入 logs/lwa.log；uvicorn 等 stdout 由父进程重定向到 manager.log。
     setup_logging(
-        level=args.log_level.upper(),  # type: ignore[arg-type]
+        level=args.log_level.upper(),
         log_dir=workspace.logs,
         log_filename="manager.log",
     )

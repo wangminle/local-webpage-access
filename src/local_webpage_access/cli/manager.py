@@ -105,7 +105,11 @@ def manager_start(
         help="监听地址（默认用配置 managerHost，通常是 0.0.0.0 即局域网可达）",
     ),
     port: int = typer.Option(
-        None, "--port", help="监听端口（默认用配置 managerPort，通常是 17800）"
+        None,
+        "--port",
+        min=1,
+        max=65535,
+        help="监听端口（默认用配置 managerPort，通常是 17800）",
     ),
 ) -> None:
     """启动管理页 HTTP 服务（前台运行，Ctrl+C 退出）。"""

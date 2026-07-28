@@ -30,8 +30,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from local_webpage_access.config import Config
-from local_webpage_access.daemon import is_pid_alive
 from local_webpage_access.errors import LifecycleError
+from local_webpage_access.file_lock import (
+    ensure_lockable,
+    release_exclusive,
+    try_acquire_exclusive,
+    write_lock_payload,
+)
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
@@ -136,7 +141,13 @@ def is_gateway_running(workspace: Workspace, config: Config) -> bool:
     gateway = StaticGateway(workspace, config)
     if gateway.detect_backend() != "caddy":
         return False
-    return gateway._admin_alive()
+    if not gateway._admin_alive():
+        return False
+    owner = gateway.inspect_caddy_owner()
+    return bool(
+        owner.get("owner") == "lwa_service_user"
+        and owner.get("workspace_match")
+    )
 
 
 @contextlib.contextmanager
@@ -148,30 +159,14 @@ def gateway_start_lock(
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
     deadline = time.monotonic() + timeout
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    ensure_lockable(fd)
     while True:
         try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            os.write(fd, f"{os.getpid()}\n".encode())
+            try_acquire_exclusive(fd)
+            write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
             break
-        except FileExistsError:
-            # BUG-175：回收陈旧锁——holder pid 已死，或锁文件年龄超阈值
-            # （持锁进程被 SIGKILL 后残留）。否则 SIGKILL 后锁永久残留，网关再无法启动。
-            stale = False
-            try:
-                content = path.read_text(encoding="utf-8").strip().splitlines()
-                holder_pid = int(content[0]) if content else 0
-                stale = not is_pid_alive(holder_pid)
-                if not stale:
-                    stale = (
-                        time.time() - path.stat().st_mtime
-                        > GATEWAY_START_LOCK_STALE_SECONDS
-                    )
-            except (OSError, ValueError):
-                stale = True
-            if stale:
-                with contextlib.suppress(FileNotFoundError, PermissionError):
-                    path.unlink()
-                continue
+        except BlockingIOError:
             if time.monotonic() >= deadline:
                 raise LifecycleError("网关启动锁被占用，稍后重试")
             time.sleep(0.05)
@@ -179,10 +174,9 @@ def gateway_start_lock(
         yield
     finally:
         if fd is not None:
+            release_exclusive(fd)
             with contextlib.suppress(OSError):
                 os.close(fd)
-        with contextlib.suppress(FileNotFoundError, PermissionError):
-            path.unlink()
 
 
 def start_gateway(
@@ -206,6 +200,12 @@ def start_gateway(
     _require_caddy_backend(gateway)
 
     with gateway_start_lock(workspace):
+        if gateway._admin_alive() and not is_gateway_running(workspace, config):
+            owner = gateway.inspect_caddy_owner()
+            raise LifecycleError(
+                "Caddy admin :2019 已被非本工作区进程占用，拒绝停止 builtin "
+                f"或认领外部网关（owner={owner.get('owner')}, pid={owner.get('pid')}）",
+            )
         if is_gateway_running(workspace, config):
             state = read_state(workspace)
             # pid 优先取 live master 的 caddy.pid，缺失时回退服务态记录的最后 pid
@@ -554,7 +554,7 @@ def run_service_main() -> int:
 
     workspace = Workspace(Path(args.workspace).resolve())
     setup_logging(
-        level=args.log_level.upper(),  # type: ignore[arg-type]
+        level=args.log_level.upper(),
         log_dir=workspace.logs if workspace.config_path.is_file() else None,
         log_filename="gateway.log",
     )

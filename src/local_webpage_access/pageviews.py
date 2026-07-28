@@ -70,8 +70,8 @@ _NON_PAGE_PATHS: frozenset[str] = frozenset(
     {"/api", "/graphql", "/health", "/healthz", "/metrics"}
 )
 # pageviews.db schema 版本。旧库 user_version=0；升级时单事务重建派生表（IMP-025.e）。
-# v2（IMP-027）：容器经 Caddy 别名日志统计 + 别名前缀剥离后重摄入，数据形态变化需重建。
-_PAGEVIEW_SCHEMA_VERSION = 2
+# v3（BUG-303）：时间戳统一存 UTC、按系统本地日期分桶；旧混合时区派生数据需重摄入。
+_PAGEVIEW_SCHEMA_VERSION = 3
 
 # 业务表 DDL（逐条执行，便于在显式事务内原子迁移；executescript 会自动 COMMIT）。
 _DDL_STATEMENTS: tuple[str, ...] = (
@@ -183,16 +183,16 @@ def parse_clf_line(line: str) -> AccessHit | None:
 
 
 def _parse_clf_ts(date_str: str) -> str:
-    """把 CLF 时间串转 ISO8601；解析失败回退当前 UTC 时间。"""
+    """把 CLF 时间串转 UTC ISO8601；无时区的 http.server 日志按本地时间解释。"""
     for fmt in _CLF_DATE_FORMATS:
         try:
             dt = datetime.strptime(date_str.strip(), fmt)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.isoformat()
+                dt = dt.astimezone()
+            return dt.astimezone(timezone.utc).isoformat()
         except ValueError:
             continue
-    return now_iso()
+    return _normalize_ts(now_iso())
 
 
 # Caddy JSON access log：取 request.* / status / ts 字段。ts 为 unix 秒（float）。
@@ -266,11 +266,27 @@ def _unix_to_iso(ts: float) -> str:
 
 
 def _day_of(iso_ts: str) -> str:
-    """从 ISO8601 取 ``YYYY-MM-DD``；失败回退当天。"""
+    """把任意偏移的 ISO8601 时间换算为系统本地日历日。"""
     try:
-        return iso_ts[:10]
-    except Exception:  # noqa: BLE001
-        return now_iso()[:10]
+        return _parse_iso_ts(iso_ts).astimezone().date().isoformat()
+    except (TypeError, ValueError):
+        return datetime.now().astimezone().date().isoformat()
+
+
+def _parse_iso_ts(iso_ts: str) -> datetime:
+    """解析 ISO8601；无偏移输入按系统本地时间解释。"""
+    dt = datetime.fromisoformat(str(iso_ts).strip().replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt
+
+
+def _normalize_ts(iso_ts: str) -> str:
+    """规范为 UTC ISO8601，使字典序与真实时间先后一致（BUG-303）。"""
+    try:
+        return _parse_iso_ts(iso_ts).astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc).isoformat()
 
 
 def _is_page_view(method: str, path: str, status: int) -> bool:
@@ -317,6 +333,20 @@ def _has_probe_marker(query: str) -> bool:
 
 # ---- 存储 ------------------------------------------------------------------
 
+_shared_stores: dict[str, "PageviewStore"] = {}
+_shared_stores_guard = threading.Lock()
+
+
+def _reset_shared_stores() -> None:
+    """关闭并清空进程内共享 PageviewStore（测试隔离用）。"""
+    with _shared_stores_guard:
+        for store in list(_shared_stores.values()):
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _shared_stores.clear()
+
 
 class PageviewStore:
     """``run/pageviews.db`` 的访问层（IMP-024）。
@@ -334,6 +364,21 @@ class PageviewStore:
     @classmethod
     def for_workspace(cls, workspace: Workspace) -> "PageviewStore":
         return cls(workspace.run / PAGEVIEW_DB_FILENAME)
+
+    @classmethod
+    def shared_for_workspace(cls, workspace: Workspace) -> "PageviewStore":
+        """返回进程内按 db 路径共享的 store（BUG-363）。
+
+        管理页与 ``clear_instance_pageviews`` 须复用同一连接，避免临时 store
+        与长事务并发写同一 pageviews.db 触发 database is locked。
+        """
+        key = str((workspace.run / PAGEVIEW_DB_FILENAME).resolve())
+        with _shared_stores_guard:
+            store = _shared_stores.get(key)
+            if store is None or store._closed:  # noqa: SLF001
+                store = cls(workspace.run / PAGEVIEW_DB_FILENAME)
+                _shared_stores[key] = store
+            return store
 
     def _conn_or_open(self) -> sqlite3.Connection:
         with self._lock:
@@ -451,20 +496,21 @@ class PageviewStore:
         )
         detail_rows: list[tuple] = []
         for h in page_hits:
-            day = _day_of(h.ts)
+            normalized_ts = _normalize_ts(h.ts)
+            day = _day_of(normalized_ts)
             bucket = per_day[day]
             bucket["hits"] += 1
             if h.remote:
                 bucket["ips"].add(h.remote)
-            if h.ts > bucket["last"]:
-                bucket["last"] = h.ts
+            if normalized_ts > bucket["last"]:
+                bucket["last"] = normalized_ts
             if h.remote:
                 rb = per_remote[h.remote]
                 rb["hits"] += 1
-                if h.ts > rb["last"]:
-                    rb["last"] = h.ts
+                if normalized_ts > rb["last"]:
+                    rb["last"] = normalized_ts
             detail_rows.append(
-                (instance_id, h.ts, h.method, h.path, h.status, h.remote)
+                (instance_id, normalized_ts, h.method, h.path, h.status, h.remote)
             )
         with self._lock:
             owns_transaction = not conn.in_transaction
@@ -473,12 +519,15 @@ class PageviewStore:
             try:
                 for day, b in per_day.items():
                     # 累加命中数；unique_ips 稍后由 pageview_ips 集合重算
+                    # BUG-303：last_seen 取既有与本批规范化 UTC 串的较大值，
+                    # 避免后到更早批次覆盖更晚时间。
                     conn.execute(
                         "INSERT INTO pageviews(instance_id, day, hits, unique_ips, "
                         "last_seen, source) VALUES(?,?,?,?,?,?) "
                         "ON CONFLICT(instance_id, day) DO UPDATE SET "
                         "hits=pageviews.hits+excluded.hits, "
-                        "last_seen=excluded.last_seen, source=excluded.source",
+                        "last_seen=MAX(pageviews.last_seen, excluded.last_seen), "
+                        "source=excluded.source",
                         (instance_id, day, b["hits"], 0, b["last"], source),
                     )
                     # 写入当天 IP 真相集（跨批次去重），再据此重算当天 unique_ips
@@ -606,7 +655,12 @@ class PageviewStore:
                         "ON CONFLICT(source_key) DO UPDATE SET "
                         "offset_bytes=excluded.offset_bytes, last_ts=excluded.last_ts, "
                         "updated_at=excluded.updated_at",
-                        (cursor_key, 0, max(h.ts for h in new_hits), now_iso()),
+                        (
+                            cursor_key,
+                            0,
+                            max(_normalize_ts(h.ts) for h in new_hits),
+                            now_iso(),
+                        ),
                     )
                 conn.execute("COMMIT")
             except Exception:
@@ -813,22 +867,51 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
         return _TailBatch([], 0)
     offset, _ = store.get_cursor(cursor_key)
     size = path.stat().st_size
-    if size < offset:
-        # 日志轮转 / 被截断 → 从头开始
+    archived_lines: list[str] = []
+    archive = path.with_name(path.name + ".1")
+    rotated = size < offset
+    if (
+        not rotated
+        and offset > 0
+        and archive.is_file()
+        and archive.stat().st_size >= offset
+    ):
+        # 新文件体积碰巧 ≥ 旧游标时 size<offset 无法发现滚动；对比文件头判断
+        # 是否已换成新 inode 内容（BUG-328）。
+        try:
+            with archive.open("rb") as old_fh, path.open("rb") as new_fh:
+                n = min(64, offset, size, archive.stat().st_size)
+                rotated = old_fh.read(n) != new_fh.read(n)
+        except OSError:
+            rotated = False
+    if rotated:
+        # BUG-328：常规滚动会把旧文件改名为 .log.1。先从旧游标补读归档尾部，
+        # 再从新文件开头读取，避免两次摄入之间的尾部请求永久丢失。
+        if archive.is_file() and archive.stat().st_size >= offset:
+            with archive.open("rb") as old_fh:
+                old_fh.seek(offset)
+                archived = old_fh.read()
+            if archived.endswith(b"\n"):
+                archived_lines = archived.decode("utf-8", "replace").splitlines()
+            elif archived:
+                # 归档尾半行：仍按已有字节尽量解码完整行
+                text = archived.decode("utf-8", "replace")
+                if "\n" in text:
+                    archived_lines = text.rsplit("\n", 1)[0].splitlines()
         offset = 0
     with path.open("rb") as fh:
         fh.seek(offset)
         new_bytes = fh.read()
     if not new_bytes:
-        return _TailBatch([], offset)
+        return _TailBatch(archived_lines, offset)
     if not new_bytes.endswith(b"\n"):
         last_nl = new_bytes.rfind(b"\n")
         if last_nl == -1:
             # 尚无任何完整行：不推进游标，等写入方补完换行
-            return _TailBatch([], offset)
+            return _TailBatch(archived_lines, offset)
         new_bytes = new_bytes[: last_nl + 1]
     return _TailBatch(
-        new_bytes.decode("utf-8", "replace").splitlines(),
+        archived_lines + new_bytes.decode("utf-8", "replace").splitlines(),
         offset + len(new_bytes),
     )
 
@@ -1086,17 +1169,15 @@ def _ingest_container(
 
 
 def clear_instance_pageviews(workspace: Workspace, instance_id: str) -> None:
-    """删除实例时清空其浏览量数据（BUG-090）。
+    """删除实例时清空其浏览量数据（BUG-090 / BUG-363）。
 
-    开一个临时 :class:`PageviewStore`、清完即关；任何异常只记 DEBUG，绝不阻断
-    实例删除主流程。CLI 与管理页两条删除路径都应调用此函数。
+    复用进程内共享 :class:`PageviewStore`，避免临时连接与管理页单例并发写
+    同一 ``pageviews.db`` 触发 ``database is locked``。任何异常只记 DEBUG，
+    绝不阻断实例删除主流程。CLI 与管理页两条删除路径都应调用此函数。
     """
     try:
-        store = PageviewStore.for_workspace(workspace)
-        try:
-            store.clear_instance(instance_id)
-        finally:
-            store.close()
+        store = PageviewStore.shared_for_workspace(workspace)
+        store.clear_instance(instance_id)
     except Exception as exc:  # noqa: BLE001
         log.debug("清理实例 %s 浏览量失败（忽略）：%s", instance_id, exc)
 

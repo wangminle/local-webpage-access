@@ -132,6 +132,32 @@ def test_rotate_missing_log_no_op(workspace) -> None:
     assert rotate_log(workspace, "api", "build") is False
 
 
+def test_rotate_path_serializes_with_file_lock(workspace, monkeypatch) -> None:
+    """BUG-355：rotate_path 在 check+shift+rename 期间持有 file_lock。"""
+    import local_webpage_access.file_lock as fl
+    import local_webpage_access.logs as logs_mod
+    from local_webpage_access.logs import rotate_path
+
+    path = log_path(workspace, "api", "build")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x" * 100, encoding="utf-8")
+
+    acquired: list[int] = []
+    real_acquire = fl.try_acquire_exclusive
+
+    def tracking_acquire(fd: int) -> None:
+        acquired.append(fd)
+        return real_acquire(fd)
+
+    monkeypatch.setattr(fl, "try_acquire_exclusive", tracking_acquire)
+    if hasattr(logs_mod, "try_acquire_exclusive"):
+        monkeypatch.setattr(logs_mod, "try_acquire_exclusive", tracking_acquire)
+
+    assert rotate_path(path, max_bytes=50, keep=3) is True
+    assert acquired, "rotate_path 应通过 file_lock 串行化 check+shift+rename"
+    assert path.with_name("build.log.1").is_file()
+
+
 def test_rotate_all_processes_all_categories(workspace) -> None:
     _write(workspace, "api", "build", "b" * 100)
     _write(workspace, "api", "run", "r" * 100)
@@ -180,6 +206,43 @@ def test_open_append_rotates_then_writes(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8").endswith("fresh\n")
     assert ("x" * 200) in path.with_name("build.log.1").read_text(encoding="utf-8")
     assert ("x" * 200) not in path.read_text(encoding="utf-8")
+
+
+def test_setup_logging_uses_rotating_file_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-297/BUG-329：长跑 daemon/manager/gateway 日志必须由 handler 在线滚动。"""
+    import logging.handlers
+
+    import local_webpage_access.logging as logging_mod
+    from local_webpage_access.logging import setup_logging
+
+    monkeypatch.setattr(logging_mod, "_FILE_LOG_MAX_BYTES", 2048)
+    monkeypatch.setattr(logging_mod, "_FILE_LOG_BACKUP_COUNT", 2)
+
+    logger = setup_logging(
+        log_dir=tmp_path,
+        log_filename="daemon.log",
+        force=True,
+    )
+    try:
+        rotating = [
+            handler
+            for handler in logger.handlers
+            if isinstance(handler, logging.handlers.RotatingFileHandler)
+        ]
+        assert rotating
+        handler = rotating[0]
+        assert handler.maxBytes == 2048
+        assert handler.backupCount == 2
+        # 长持 fd：写入超过阈值后应在线滚动，无需 reopen
+        for _ in range(40):
+            logger.info("x" * 120)
+        handler.flush()
+        assert (tmp_path / "daemon.log.1").is_file()
+    finally:
+        for handler in list(logger.handlers):
+            handler.close()
 
 def test_read_log_tail_avoids_full_read_text(workspace, monkeypatch) -> None:
     """BUG-186：tail>0 时不得 Path.read_text 全量读入。"""

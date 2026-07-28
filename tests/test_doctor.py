@@ -109,7 +109,6 @@ def test_pid_alive_local_windows_does_not_os_kill(monkeypatch) -> None:
     （check_caddy_health 探 caddy.pid）若走它将误杀 Caddy master。
     """
     import ctypes
-    import os
 
     import local_webpage_access.doctor as doc
 
@@ -900,7 +899,6 @@ def test_check_caddy_health_entry_probe_uses_alias_path(env, monkeypatch) -> Non
     ws, config, reg = env
     config.staticGateway = "caddy"
     _seed_static_for_doctor(ws, reg, "demo", host_port=21100, alias="myapp")
-    entry_port = config.staticGatewayPort
     seen: list[str] = []
 
     def _health(port, path="/"):
@@ -964,6 +962,20 @@ def test_check_lan_url_stale_ok_when_current(env, monkeypatch) -> None:
                         lambda cfg: "192.168.1.50")
     r = check_lan_url_stale(ws, config, reg)
     assert r.status == STATUS_OK
+
+
+def test_check_lan_url_stale_warns_when_lan_ip_unresolvable(env, monkeypatch) -> None:
+    """BUG-358：无法解析 LAN IP 且实例带 lanUrl 时不得静默 OK。"""
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws, reg, "demo", host_port=18000, lan_url="http://10.0.0.99:18000"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: None
+    )
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status in (STATUS_WARN, STATUS_SKIP)
+    assert r.status != STATUS_OK
 
 
 def test_check_port_contention_skips_for_builtin(env) -> None:
@@ -1159,4 +1171,50 @@ def test_doctor_access_reuses_review_access(env, monkeypatch) -> None:
     assert called["n"] == 1
     assert report.access_review is not None
     assert report.access_review.lan_ip == "192.168.1.50"
+
+
+def test_check_registry_does_not_create_or_migrate(tmp_path: Path) -> None:
+    """BUG-331：doctor 只读打开 registry，不得创建缺失库或静默迁移。"""
+    import sqlite3
+
+    from local_webpage_access.registry.connection import CURRENT_SCHEMA_VERSION
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    ws = Workspace(root)
+    ws.ensure_workspace_dirs()
+
+    # 缺失：报告失败且不得创建文件
+    missing = check_registry(ws)
+    assert missing.status == STATUS_FAIL
+    assert "不存在" in missing.message
+    assert not ws.db_path.exists()
+
+    # 旧 schema：只读诊断，版本保持不变
+    conn = sqlite3.connect(str(ws.db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO schema_version(version, applied_at) VALUES (1, 'seed')"
+        )
+        conn.execute("CREATE TABLE instances (id TEXT PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = check_registry(ws)
+    assert result.status == STATUS_WARN
+    assert "schema" in result.message.lower() or "版本" in result.message
+
+    conn = sqlite3.connect(str(ws.db_path))
+    try:
+        version = conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert version == 1
+    assert version != CURRENT_SCHEMA_VERSION
 

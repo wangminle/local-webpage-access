@@ -11,7 +11,8 @@
   * macOS：**14 Sonoma+**（滚动下限，对齐 Docker Desktop「当前及前两版」；截至 2026-07）
   * 架构仅 **x86_64/amd64**、**arm64/aarch64**
 * **明确不支持**：**Windows 原生**进程（CLI/服务入口 hard fail，请改用 WSL2）；WSL1；Ubuntu 非 LTS；Debian sid/testing；Alpine/musl、Fedora/RHEL/Arch 等未纳入矩阵的发行版；32 位 / ARMv7 等。
-* **平台诊断**：`lwa doctor --json` 在**未初始化工作区**时仍输出 `platformSupport`（reasons / action / supported），便于排障。
+* **平台诊断**：`lwa doctor --json` 在**未初始化工作区**时仍输出 `platformSupport`（reasons / action / supported），便于排障；已初始化时人类可读模式也会在末尾打印「平台支持」段（`doctor` 是唯一豁免平台门禁的命令）。
+* **WSL 包版本探测**：优先 PATH 中的 `wsl.exe`，并回退 `/mnt/<drive>/Windows/System32/wsl.exe`（覆盖 `appendWindowsPath=false`）；已处理 UTF-16LE 输出与中文本地化。若 `[interop] enabled=false` 导致 Windows 二进制完全不可执行，则仍会 `wslVersion=unknown` 并 fail-closed——此时应在 Windows 侧确认版本。
 * **Python**：要求 3.13+，不支持更早版本。
 * **Docker**：要求 Docker + Docker Compose 插件（`docker compose` 子命令）。
   Compose v1 独立二进制不支持；低于推荐版本时仅告警，不阻断已满足最低线的环境。
@@ -36,7 +37,7 @@
 ## 托管与容器
 
 * **静态网关**：默认 Caddy 优先；Default 档无 Caddy 时可降级内置 `http.server`。
-  Full Profile 要求可用的 LWA 托管 Caddy（见上）。nginx 模板存在但 V1 未充分验证自动配置。
+  Full Profile 要求可用的 LWA 托管 Caddy（见上）。`staticGateway=nginx` 枚举保留但未实现（无 nginx 模板），会降级 builtin（Full/严格模式则拒绝降级）。
 * **HTTPS**：V1 仅 HTTP。HTTPS / 证书自动化（Let's Encrypt）不在范围内。
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
@@ -48,7 +49,8 @@
 
 ## 管理页与 API
 
-* **鉴权**：单一静态 token，无过期、无轮换、无角色分级。多用户场景不适用。
+* **鉴权**：单一静态 token，无过期、无自动轮换、无角色分级（如需轮换：删掉工作区 `run/manager-token.json` 后重启 manager 会重新生成，目前没有专门的 CLI 轮换命令）。多用户场景不适用。
+* **`?token=` 查询参数**：有意保留以便新标签带入鉴权；会进入浏览器历史 / Referer / 反代 access log。日常 API 请优先用 Header。详见 [管理页](manager-page.md#鉴权)。
 * **并发写入**：registry 用 SQLite WAL + 连接级锁，适合单机管理页并发；
   不适合多进程/多机水平扩展。
 * **实时推送**：无 WebSocket / SSE，前端通过轮询刷新状态。

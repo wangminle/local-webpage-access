@@ -564,7 +564,6 @@ def test_cancel_pid_reuse_does_not_signal_unrelated(registry, config, tmp_path) 
     import subprocess
     import sys
 
-    from local_webpage_access.build_queue import CrossProcessBuildGate
 
     if sys.platform == "win32":
         pytest.skip("PID 复用身份校验用例以 POSIX 为准")
@@ -914,3 +913,238 @@ def test_cross_process_cancel_queued_skips_builder(registry, config) -> None:
     assert all(isinstance(e, LifecycleError) for e in owner_errors)
     final = q_owner._gate.get_build_task("target")
     assert final is None or final["status"] == "cancelled"
+
+
+# ---- BUG-292：取消状态不得跨构建代际泄漏 ----------------------------------
+
+
+def test_new_build_clears_previous_generation_cancel_state(registry, config) -> None:
+    """同一实例的新构建必须清掉上一代持久化的取消时间戳。"""
+    _seed_instance(registry, "api")
+    q = BuildQueue(config, registry, concurrency=1)
+    q._gate.upsert_build_task(
+        instance_id="api",
+        build_token="old-generation",
+        status="cancelled",
+        owner_pid=1,
+        owner_identity="old-owner",
+        cancel_requested_at=time.time(),
+    )
+    builder_calls: list[str] = []
+
+    result = q.run(
+        "api",
+        lambda iid: builder_calls.append(iid) or iid,
+        wait_timeout=1.0,
+    )
+
+    assert result == "api"
+    assert builder_calls == ["api"]
+    row = q._gate.get_build_task("api")
+    assert row is not None
+    assert row["build_token"] != "old-generation"
+    assert row["cancel_requested_at"] is None
+
+
+def test_cancel_query_ignores_different_build_generation(registry, config) -> None:
+    """旧 build_token 的取消记录不能取消当前构建代际。"""
+    q = BuildQueue(config, registry, concurrency=1)
+    q._gate.upsert_build_task(
+        instance_id="api",
+        build_token="old-generation",
+        status="cancelled",
+        owner_pid=1,
+        owner_identity="old-owner",
+        cancel_requested_at=time.time(),
+    )
+
+    assert (
+        q._gate.is_cancel_requested("api", build_token="current-generation") is False
+    )
+    assert q._gate.is_cancel_requested("api", build_token="old-generation") is True
+
+
+def test_cross_process_cancel_interrupts_gate_wait_immediately(
+    registry, config
+) -> None:
+    """BUG-293：取消 queued 任务后，owner 不得继续等占槽任务结束。"""
+    _seed_instance(registry, "blocker")
+    _seed_instance(registry, "target")
+    q_owner = BuildQueue(config, registry, concurrency=1)
+    q_cancel = BuildQueue(config, registry, concurrency=1)
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+    target_finished = threading.Event()
+    target_errors: list[BaseException] = []
+
+    def blocker(iid: str) -> str:
+        blocker_started.set()
+        release_blocker.wait(timeout=10.0)
+        return iid
+
+    def run_target() -> None:
+        try:
+            q_owner.run("target", lambda iid: iid, wait_timeout=8.0)
+        except BaseException as exc:  # noqa: BLE001
+            target_errors.append(exc)
+        finally:
+            target_finished.set()
+
+    blocker_thread = threading.Thread(
+        target=lambda: q_owner.run("blocker", blocker),
+        name="bug293-blocker",
+    )
+    target_thread = threading.Thread(target=run_target, name="bug293-target")
+    blocker_thread.start()
+    assert blocker_started.wait(timeout=2.0)
+    target_thread.start()
+    try:
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            row = q_owner._gate.get_build_task("target")
+            if row and row["status"] == "queued":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("target 未进入 queued")
+
+        result = q_cancel.cancel("target", wait_timeout=0.5)
+        assert result.outcome == "cancelled"
+        assert target_finished.wait(timeout=0.5), "取消后仍阻塞在 gate.acquire"
+        assert target_errors
+        assert isinstance(target_errors[0], LifecycleError)
+    finally:
+        release_blocker.set()
+        blocker_thread.join(timeout=5.0)
+        target_thread.join(timeout=5.0)
+
+
+def test_build_task_update_rejects_stale_token(registry, config) -> None:
+    """BUG-307：旧构建代际不得覆盖当前代际状态。"""
+    q = BuildQueue(config, registry, concurrency=1)
+    q._gate.upsert_build_task(
+        instance_id="api",
+        build_token="current",
+        status="building",
+        owner_pid=1,
+        owner_identity="owner",
+    )
+
+    changed = q._gate.update_build_task(
+        "api",
+        build_token="stale",
+        status="cancelled",
+        cancel_requested_at=time.time(),
+    )
+
+    assert changed is False
+    row = q._gate.get_build_task("api")
+    assert row is not None
+    assert row["build_token"] == "current"
+    assert row["status"] == "building"
+
+
+def test_build_task_cancelled_terminal_rejects_success_overwrite(
+    registry, config
+) -> None:
+    """BUG-307：同代际 cancelled 终态不得被迟到的 success 覆盖。"""
+    q = BuildQueue(config, registry, concurrency=1)
+    q._gate.upsert_build_task(
+        instance_id="api",
+        build_token="token",
+        status="building",
+        owner_pid=1,
+        owner_identity="owner",
+    )
+    assert q._gate.update_build_task(
+        "api",
+        build_token="token",
+        status="cancelled",
+        cancel_requested_at=time.time(),
+    )
+
+    changed = q._gate.upsert_build_task(
+        instance_id="api",
+        build_token="token",
+        status="success",
+        owner_pid=1,
+        owner_identity="owner",
+    )
+
+    assert changed is False
+    row = q._gate.get_build_task("api")
+    assert row is not None
+    assert row["status"] == "cancelled"
+
+
+def test_reclaim_dead_owner_terminates_orphan_worker(
+    registry, config, monkeypatch
+) -> None:
+    """BUG-308：owner 死亡时须先终止身份匹配的孤儿 worker 再回收任务。"""
+    q = BuildQueue(config, registry, concurrency=1)
+    q._gate.upsert_build_task(
+        instance_id="orphan",
+        build_token="token",
+        status="building",
+        owner_pid=1234,
+        owner_identity="dead-owner",
+        worker_pid=5678,
+        worker_pgid=5678,
+        worker_identity="worker-identity",
+    )
+    killed: list[tuple[int, int | None, str]] = []
+    monkeypatch.setattr(
+        "local_webpage_access.build_queue._pid_alive",
+        lambda pid: pid != 1234,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.build_queue.kill_pid_tree_if_matches",
+        lambda pid, *, expected_pgid, expected_identity: killed.append(
+            (pid, expected_pgid, expected_identity)
+        )
+        or True,
+    )
+
+    slot = q._gate.acquire("next", 0.0)
+
+    assert slot == 0
+    assert killed == [(5678, 5678, "worker-identity")]
+    row = q._gate.get_build_task("orphan")
+    assert row is not None
+    assert row["status"] == "cancelled"
+
+
+# ---- BUG-361 / BUG-362：CrossProcessBuildGate 缓存与 close 后重开 ------------
+
+
+def test_shared_gate_evicts_stale_concurrency(registry, config) -> None:
+    """BUG-361：同 db_path 切换 concurrency 时须 close 并淘汰旧 gate。"""
+    from local_webpage_access import build_queue as bq
+
+    q1 = BuildQueue(config, registry, concurrency=1)
+    gate1 = q1._gate
+    assert gate1.concurrency == 1
+
+    # 丢弃进程内 BuildQueue 单例，但保留 _gates 缓存模拟 concurrency 切换
+    with bq._global_queue_guard:  # noqa: SLF001
+        bq._global_queue = None  # noqa: SLF001
+
+    q2 = BuildQueue(config, registry, concurrency=2)
+    gate2 = q2._gate
+    assert gate2 is not gate1
+    assert gate2.concurrency == 2
+    assert gate1._closed is True  # noqa: SLF001
+    # 旧 key 不得残留
+    db_key = str(bq._gate_db_path(registry).resolve())
+    assert (db_key, 1) not in bq._gates  # noqa: SLF001
+    assert (db_key, 2) in bq._gates  # noqa: SLF001
+
+
+def test_gate_conn_or_open_rejects_after_close(tmp_path: Path) -> None:
+    """BUG-362：close 后不得静默重开连接。"""
+    from local_webpage_access.build_queue import CrossProcessBuildGate
+
+    gate = CrossProcessBuildGate(tmp_path / "build-locks.db", 1)
+    gate.close()
+    with pytest.raises(RuntimeError, match="closed|已关闭"):
+        gate._conn_or_open()  # noqa: SLF001

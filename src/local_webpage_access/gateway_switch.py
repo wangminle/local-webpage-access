@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from local_webpage_access.access_workflow import AccessPassResult, run_access_pass
 from local_webpage_access.config import Config, load_config
-from local_webpage_access.errors import LwaError
+from local_webpage_access.errors import LifecycleError, LwaError
 from local_webpage_access.gateway_service import start_gateway, stop_gateway
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest, RouteMode, Runtime
@@ -303,7 +304,7 @@ def _enable_running_builtin(
             iid,
             int(st.hostPort),
             public,
-            wait_health=False,
+            wait_health=True,
             alias=alias,
         )
         enabled.append(iid)
@@ -330,11 +331,13 @@ def _rebuild_caddy_aliases(
             gateway.reload_all()
         except Exception as exc:  # noqa: BLE001
             log.warning("重建别名后 reload 失败：%s", exc)
-            # 主配置缺失时尝试 sync
+            # 主配置缺失时尝试 sync；sync 本身会吞掉 reload 失败（软失败），
+            # 必须再调用 reload_all 把失败上抛，避免 switch 报 ok 但别名未生效（BUG-353）。
             try:
                 gateway._sync_main_config()
+                gateway.reload_all()
             except Exception as exc2:  # noqa: BLE001
-                log.warning("sync_main_config 失败：%s", exc2)
+                log.warning("sync/reload 别名主配置失败：%s", exc2)
                 raise
     return rebuilt
 
@@ -386,6 +389,11 @@ def _rollback(
             gw = StaticGateway(workspace, restored)
             _enable_running_builtin(workspace, restored, registry, gw)
             stages.append({"stage": "rollback_enable_builtin", "ok": True})
+        review_result = run_access_pass(
+            workspace, restored, registry, review=True, dry_run=False
+        )
+        if _access_ok(review_result) is False:
+            raise LifecycleError("回滚后的访问复核失败")
         return True, None
     except Exception as exc:  # noqa: BLE001
         stages.append({"stage": "rollback_process", "ok": False, "error": str(exc)})

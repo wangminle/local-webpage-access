@@ -358,8 +358,9 @@ def _render_python(
             # IMP-017：无独立生产清单时，构建期就地剔除 pytest*（pytest/pytest-cov/
             # pytest-xdist 等含版本号或 extras 的行），让镜像不含测试包。
             # python:3.13-slim（Debian）自带 GNU sed，-E 用扩展正则。
+            # BUG-360：须匹配 pytest[extras]、前导空白；旧正则漏掉 extras 写法。
             strip_step = (
-                f"RUN sed -i -E '/^pytest([-_]|[<>=!~]|$)/d' {req_file}\n"
+                f"RUN sed -i -E '/^\\s*pytest([-_]|[<>=!~\\[]|$)/d' {req_file}\n"
             )
         else:
             # requirements-prod.txt 已是生产子集，无需剥离。
@@ -516,7 +517,11 @@ def _to_exec_form(shell_cmd: str) -> str:
     形式不会像 shell 那样设置环境变量；这类变量应通过 ``ENV`` / compose
     ``environment`` 注入（见 ``_render_python`` / ``compose.generate_compose``）。
     """
-    parts = shlex.split(shell_cmd)
+    # BUG-359：未闭合引号等无法解析时回退 shell 形式（与空 parts 路径一致）。
+    try:
+        parts = shlex.split(shell_cmd)
+    except ValueError:
+        return json.dumps(shell_cmd)
     while parts and "=" in parts[0] and not parts[0].startswith("-"):
         # 仅剥离 ``NAME=value`` 形态；保留含 ``=`` 的普通参数极少见，且
         # 启动命令首段几乎总是解释器名。

@@ -10,16 +10,13 @@ import pytest
 from local_webpage_access.errors import SchemaError
 from local_webpage_access.models import (
     SCHEMA_VERSION,
-    ContainerConfig,
     DesiredState,
     InstanceManifest,
     Kind,
-    NetworkConfig,
     ResourceProfile,
     Runtime,
     ServingMode,
     Status,
-    StaticConfig,
 )
 
 

@@ -15,11 +15,18 @@
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
 from local_webpage_access.errors import PathError
+from local_webpage_access.file_lock import (
+    ensure_lockable,
+    release_exclusive,
+    try_acquire_exclusive,
+)
 from local_webpage_access.paths import Workspace
 
 # 已知日志分类（用于校验与文档）；list_logs 不局限于此，会列出实际存在的 .log
@@ -31,6 +38,8 @@ DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_KEEP = 3
 # 从文件末尾向前读时的块大小（BUG-186 高效尾读）
 _TAIL_CHUNK = 8192
+# 多进程滚动互斥等待上限（BUG-355）
+_ROTATE_LOCK_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -147,9 +156,39 @@ def rotate_path(
 
     超过 ``max_bytes`` 时把当前文件改名为 ``<stem>.log.1``，旧的 ``.1`` 顺延为
     ``.2``，依此类推；保留最多 ``keep`` 份，最旧的删除。返回是否触发滚动。
+
+    BUG-355：check-then-act 全程持 ``file_lock``，避免多进程竞态交错 rename。
     """
     if keep < 1:
         keep = 1
+    path = Path(path)
+    lock_path = path.with_name(f".{path.name}.rotate.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        ensure_lockable(fd)
+        deadline = time.monotonic() + _ROTATE_LOCK_TIMEOUT
+        while True:
+            try:
+                try_acquire_exclusive(fd)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.05)
+        return _rotate_path_locked(path, max_bytes=max_bytes, keep=keep)
+    finally:
+        release_exclusive(fd)
+        os.close(fd)
+
+
+def _rotate_path_locked(
+    path: Path,
+    *,
+    max_bytes: int,
+    keep: int,
+) -> bool:
+    """已持滚动锁时执行体积判定与 rename 链。"""
     if not path.is_file():
         return False
     try:

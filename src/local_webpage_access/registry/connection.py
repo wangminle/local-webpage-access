@@ -164,6 +164,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # BUG-363：显式 busy_timeout，避免与 pageviews 等并发写时立即抛 database is locked。
+    # （sqlite3.connect 默认 timeout=5.0 等价 5000ms，此处写明意图并与调用方对齐。）
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -236,15 +239,17 @@ def migrate(conn: sqlite3.Connection) -> int:
     """执行所有待应用的迁移，返回应用后的版本号。"""
     from local_webpage_access.logging import now_iso
 
-    current = get_schema_version(conn)
     target = max(_SCHEMAS)
-    if current >= target:
-        log.debug("schema 已是最新版本 %d", current)
-        return current
-
-    for version in range(current + 1, target + 1):
-        statements = _SCHEMAS[version]
+    while True:
         with transaction(conn) as tx:
+            # BUG-294：版本读取必须在 BEGIN IMMEDIATE 之后；否则两个进程都读到
+            # 旧版本，后获得写锁者会重复执行 ALTER TABLE。
+            current = get_schema_version(tx)
+            if current >= target:
+                log.debug("schema 已是最新版本 %d", current)
+                return current
+            version = current + 1
+            statements = _SCHEMAS[version]
             for stmt in statements:
                 tx.execute(stmt)
             # schema_version 表在 v1 第一批 DDL 中创建
@@ -253,17 +258,23 @@ def migrate(conn: sqlite3.Connection) -> int:
                 (version, now_iso()),
             )
         log.info("已应用 schema 迁移到版本 %d", version)
-    return target
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
     """连接数据库并迁移到最新版本。"""
-    conn = connect(db_path)
+    conn: sqlite3.Connection | None = None
     try:
+        conn = connect(db_path)
         migrate(conn)
-    except sqlite3.DatabaseError as exc:
-        conn.close()
-        raise RegistryError(f"数据库初始化失败：{exc}", path=str(db_path)) from exc
+    except (OSError, sqlite3.Error) as exc:
+        if conn is not None:
+            conn.close()
+        # BUG-316：包装原生 sqlite3/OSError，附路径与排查建议，避免 traceback 直抛用户。
+        raise RegistryError(
+            f"数据库初始化失败：{exc}；请检查路径权限、磁盘空间与是否被其他进程占用",
+            path=str(db_path),
+        ) from exc
+    assert conn is not None
     return conn
 
 

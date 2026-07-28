@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import posixpath
+import re
 import stat
 from dataclasses import dataclass
 from typing import Any
@@ -274,6 +276,7 @@ def _audit_volume(
             return
 
     is_windows_abs = _is_windows_abs_path(src_norm)
+    relative_norm = posixpath.normpath(src_norm) if src.startswith(".") else None
 
     # BUG-184：~ / ${VAR} 形式的 source 经 docker compose 渲染为 bind 挂载，
     # 不得按"命名卷"放行。无法静态展开：命中已知敏感名片段 → critical；其余 → warn。
@@ -328,6 +331,34 @@ def _audit_volume(
 
     # 相对路径：只允许实例自己的 data/
     if src.startswith("."):
+        # BUG-304：先 normpath，再按绝对敏感目录规则匹配（含子路径）。
+        # 不把裸 "/" 当作前缀匹配——否则 ../data 也会被误伤。
+        if relative_norm is not None and relative_norm.startswith("../"):
+            escaped_tail = relative_norm
+            while escaped_tail.startswith("../"):
+                escaped_tail = escaped_tail[3:]
+            if escaped_tail in ("", ".", ".."):
+                out.append(
+                    SecurityFinding(
+                        LEVEL_CRITICAL,
+                        "host_sensitive_mount",
+                        f"服务 {svc} 通过相对路径穿越挂载宿主根目录：{src}",
+                    )
+                )
+                return
+            candidate = "/" + escaped_tail
+            for sens in _HOST_SENSITIVE_DIRS:
+                if sens == "/":
+                    continue
+                if candidate == sens or candidate.startswith(sens.rstrip("/") + "/"):
+                    out.append(
+                        SecurityFinding(
+                            LEVEL_CRITICAL,
+                            "host_sensitive_mount",
+                            f"服务 {svc} 通过相对路径穿越挂载宿主敏感目录：{src}",
+                        )
+                    )
+                    return
         if src not in allowed_host_mounts:
             out.append(
                 SecurityFinding(
@@ -377,7 +408,9 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
     * ``RUN ... | sh`` / ``| bash`` 管道执行 → warn（供应链风险）
     """
     findings: list[SecurityFinding] = []
-    lines = text.splitlines()
+    # BUG-330：先合并 Dockerfile 反斜杠续行，避免把 curl 与 |sh 拆到物理行绕过。
+    logical_text = re.sub(r"\\\s*\r?\n\s*", " ", text)
+    lines = logical_text.splitlines()
     has_user = False
     for raw in lines:
         line = raw.strip()
@@ -406,9 +439,10 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
             )
         elif upper.startswith("RUN "):
             lowered = line.lower()
-            if ("| sh" in lowered or "| bash" in lowered) and (
-                "curl" in lowered or "wget" in lowered
-            ):
+            pipe_shell = re.search(
+                r"\|\s*(?:/usr/bin/|/bin/)?(?:ba)?sh\b", lowered
+            )
+            if pipe_shell and ("curl" in lowered or "wget" in lowered):
                 findings.append(
                     SecurityFinding(
                         LEVEL_WARN,

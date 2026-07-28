@@ -51,9 +51,24 @@ _GATE_POLL_INTERVAL = 0.1
 # 取消进行中构建的默认等待超时（秒）。
 _DEFAULT_CANCEL_WAIT = 60.0
 
+_BUILD_TASK_TRANSITIONS: dict[str, frozenset[str]] = {
+    "queued": frozenset({"queued", "building", "cancelled", "failed"}),
+    "building": frozenset(
+        {"building", "cancelling", "cancelled", "success", "failed"}
+    ),
+    "cancelling": frozenset({"cancelling", "cancelled", "cancel_failed"}),
+    "success": frozenset({"success"}),
+    "failed": frozenset({"failed"}),
+    "cancelled": frozenset({"cancelled"}),
+    "cancel_failed": frozenset({"cancel_failed"}),
+}
+
 # 进程内单例（BUG-022）
 _global_queue: "BuildQueue | None" = None
 _global_queue_guard = threading.Lock()
+# BUG-361：闸门按 (db_path, concurrency) 缓存；切换 concurrency 时须淘汰旧项。
+_gates: dict[tuple[str, int], "CrossProcessBuildGate"] = {}
+_gates_guard = threading.Lock()
 
 
 def get_build_queue(config: Config, registry: Registry) -> "BuildQueue":
@@ -83,6 +98,14 @@ def _reset_global_queue() -> None:
     """丢弃进程内单例（测试隔离用）。"""
     with _global_queue_guard:
         _close_global_queue()
+    # 同步清空闸门缓存，避免测试间泄漏 closed gate / SQLite 句柄。
+    with _gates_guard:
+        for gate in list(_gates.values()):
+            try:
+                gate.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _gates.clear()
 
 
 def _gate_db_path(registry: Registry) -> Path:
@@ -166,6 +189,9 @@ class CrossProcessBuildGate:
         self._init_schema()
 
     def _conn_or_open(self) -> sqlite3.Connection:
+        # BUG-362：close 后禁止重开，避免 _closed=True 时残留连接永不关闭。
+        if self._closed:
+            raise RuntimeError("CrossProcessBuildGate 已关闭，不能再打开连接")
         if self._conn is None:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(
@@ -241,19 +267,43 @@ class CrossProcessBuildGate:
                 conn.execute("DELETE FROM build_slots WHERE slot=?", (int(slot),))
         # 同步收尾 owner 已死且仍卡在 building/cancelling/queued 的任务行
         task_rows = conn.execute(
-            "SELECT instance_id, owner_pid, status FROM build_tasks "
+            "SELECT instance_id, owner_pid, status, worker_pid, worker_pgid, "
+            "worker_identity FROM build_tasks "
             "WHERE status IN ('queued','building','cancelling')"
         ).fetchall()
         now = time.time()
-        for iid, owner_pid, status in task_rows:
+        for (
+            iid,
+            owner_pid,
+            status,
+            worker_pid,
+            worker_pgid,
+            worker_identity,
+        ) in task_rows:
             if not _pid_alive(int(owner_pid)):
+                if worker_pid is not None:
+                    kill_pid_tree_if_matches(
+                        int(worker_pid),
+                        expected_pgid=int(worker_pgid)
+                        if worker_pgid is not None
+                        else None,
+                        expected_identity=str(worker_identity or ""),
+                    )
                 conn.execute(
-                    "UPDATE build_tasks SET status=?, cancel_requested_at=COALESCE(cancel_requested_at, ?), "
+                    "UPDATE build_tasks SET status=?, "
+                    "cancel_requested_at=COALESCE(cancel_requested_at, ?), "
+                    "worker_pid=NULL, worker_pgid=NULL, worker_identity=NULL, "
                     "updated_at=? WHERE instance_id=?",
                     ("cancelled", now, now, iid),
                 )
 
-    def acquire(self, instance_id: str, timeout: float | None) -> int | None:
+    def acquire(
+        self,
+        instance_id: str,
+        timeout: float | None,
+        *,
+        build_token: str | None = None,
+    ) -> int | None:
         """阻塞获取槽位，超时返回 ``None``；``timeout=None`` 无限等待。"""
         slot = self._try_acquire(instance_id)
         if slot is not None:
@@ -262,6 +312,10 @@ class CrossProcessBuildGate:
             return None
         deadline = time.monotonic() + timeout if timeout is not None else None
         while True:
+            if build_token is not None and self.is_cancel_requested(
+                instance_id, build_token=build_token
+            ):
+                return None
             slot = self._try_acquire(instance_id)
             if slot is not None:
                 return slot
@@ -308,59 +362,123 @@ class CrossProcessBuildGate:
         worker_pgid: int | None = None,
         worker_identity: str | None = None,
         cancel_requested_at: float | None = None,
-    ) -> None:
+        replace_generation: bool = False,
+    ) -> bool:
         with self._lock:
             conn = self._conn_or_open()
             now = time.time()
-            conn.execute(
-                "INSERT INTO build_tasks("
-                "instance_id, build_token, status, owner_pid, owner_identity, "
-                "worker_pid, worker_pgid, worker_identity, cancel_requested_at, updated_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(instance_id) DO UPDATE SET "
-                "build_token=excluded.build_token, "
-                "status=excluded.status, "
-                "owner_pid=excluded.owner_pid, "
-                "owner_identity=excluded.owner_identity, "
-                "worker_pid=COALESCE(excluded.worker_pid, build_tasks.worker_pid), "
-                "worker_pgid=COALESCE(excluded.worker_pgid, build_tasks.worker_pgid), "
-                "worker_identity=COALESCE(excluded.worker_identity, build_tasks.worker_identity), "
-                "cancel_requested_at=COALESCE(excluded.cancel_requested_at, build_tasks.cancel_requested_at), "
-                "updated_at=excluded.updated_at",
-                (
-                    instance_id,
-                    build_token,
-                    status,
-                    owner_pid,
-                    owner_identity,
-                    worker_pid,
-                    worker_pgid,
-                    worker_identity,
-                    cancel_requested_at,
-                    now,
-                ),
-            )
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT * FROM build_tasks WHERE instance_id=?",
+                    (instance_id,),
+                ).fetchone()
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO build_tasks("
+                        "instance_id, build_token, status, owner_pid, owner_identity, "
+                        "worker_pid, worker_pgid, worker_identity, "
+                        "cancel_requested_at, updated_at"
+                        ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            instance_id,
+                            build_token,
+                            status,
+                            owner_pid,
+                            owner_identity,
+                            worker_pid,
+                            worker_pgid,
+                            worker_identity,
+                            cancel_requested_at,
+                            now,
+                        ),
+                    )
+                elif row["build_token"] != build_token:
+                    if not replace_generation:
+                        conn.execute("ROLLBACK")
+                        return False
+                    conn.execute(
+                        "UPDATE build_tasks SET build_token=?, status=?, owner_pid=?, "
+                        "owner_identity=?, worker_pid=?, worker_pgid=?, "
+                        "worker_identity=?, cancel_requested_at=?, updated_at=? "
+                        "WHERE instance_id=?",
+                        (
+                            build_token,
+                            status,
+                            owner_pid,
+                            owner_identity,
+                            worker_pid,
+                            worker_pgid,
+                            worker_identity,
+                            cancel_requested_at,
+                            now,
+                            instance_id,
+                        ),
+                    )
+                else:
+                    allowed = _BUILD_TASK_TRANSITIONS.get(
+                        str(row["status"]), frozenset({str(row["status"])})
+                    )
+                    if status not in allowed:
+                        conn.execute("ROLLBACK")
+                        return False
+                    conn.execute(
+                        "UPDATE build_tasks SET status=?, owner_pid=?, "
+                        "owner_identity=?, worker_pid=COALESCE(?, worker_pid), "
+                        "worker_pgid=COALESCE(?, worker_pgid), "
+                        "worker_identity=COALESCE(?, worker_identity), "
+                        "cancel_requested_at=COALESCE(?, cancel_requested_at), "
+                        "updated_at=? WHERE instance_id=? AND build_token=?",
+                        (
+                            status,
+                            owner_pid,
+                            owner_identity,
+                            worker_pid,
+                            worker_pgid,
+                            worker_identity,
+                            cancel_requested_at,
+                            now,
+                            instance_id,
+                            build_token,
+                        ),
+                    )
+                conn.execute("COMMIT")
+                return True
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
 
     def update_build_task(
         self,
         instance_id: str,
         *,
+        build_token: str,
         status: str | None = None,
         worker_pid: int | None = None,
         worker_pgid: int | None = None,
         worker_identity: str | None = None,
         cancel_requested_at: float | None = None,
         clear_worker: bool = False,
-    ) -> None:
+    ) -> bool:
         with self._lock:
             conn = self._conn_or_open()
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT * FROM build_tasks WHERE instance_id=?", (instance_id,)
+                "SELECT * FROM build_tasks WHERE instance_id=? AND build_token=?",
+                (instance_id, build_token),
             ).fetchone()
             if row is None:
-                return
+                conn.execute("ROLLBACK")
+                return False
             data = dict(row)
             if status is not None:
+                allowed = _BUILD_TASK_TRANSITIONS.get(
+                    str(data["status"]), frozenset({str(data["status"])})
+                )
+                if status not in allowed:
+                    conn.execute("ROLLBACK")
+                    return False
                 data["status"] = status
             if clear_worker:
                 data["worker_pid"] = None
@@ -379,7 +497,7 @@ class CrossProcessBuildGate:
             conn.execute(
                 "UPDATE build_tasks SET status=?, worker_pid=?, worker_pgid=?, "
                 "worker_identity=?, cancel_requested_at=?, updated_at=? "
-                "WHERE instance_id=?",
+                "WHERE instance_id=? AND build_token=?",
                 (
                     data["status"],
                     data["worker_pid"],
@@ -388,8 +506,11 @@ class CrossProcessBuildGate:
                     data["cancel_requested_at"],
                     data["updated_at"],
                     instance_id,
+                    build_token,
                 ),
             )
+            conn.execute("COMMIT")
+            return True
 
     def get_build_task(self, instance_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -404,9 +525,9 @@ class CrossProcessBuildGate:
             conn = self._conn_or_open()
             conn.execute("DELETE FROM build_tasks WHERE instance_id=?", (instance_id,))
 
-    def is_cancel_requested(self, instance_id: str) -> bool:
+    def is_cancel_requested(self, instance_id: str, *, build_token: str) -> bool:
         row = self.get_build_task(instance_id)
-        if row is None:
+        if row is None or row["build_token"] != build_token:
             return False
         # BUG-278：跨进程取消写 status=cancelled + cancel_requested_at，owner 必须认
         return row["status"] in ("cancelling", "cancelled") or (
@@ -415,11 +536,14 @@ class CrossProcessBuildGate:
 
     def close(self) -> None:
         with self._lock:
-            if self._conn is not None and not self._closed:
+            if self._closed:
+                return
+            self._closed = True
+            if self._conn is not None:
                 try:
                     self._conn.close()
                 finally:
-                    self._closed = True
+                    self._conn = None
 
 
 class BuildQueue:
@@ -461,7 +585,7 @@ class BuildQueue:
         with self._guard:
             self._finish_events[instance_id] = finish_ev
 
-        self._persist_task(task, status="queued")
+        self._persist_task(task, status="queued", replace_generation=True)
 
         slot: int | None = None
         try:
@@ -476,8 +600,18 @@ class BuildQueue:
                             instance_id=instance_id,
                         )
                 self._mark_queued(instance_id, task)
-                slot = self._gate.acquire(instance_id, timeout)
+                slot = self._gate.acquire(
+                    instance_id, timeout, build_token=task.build_token
+                )
                 if slot is None:
+                    with self._guard:
+                        if self._cancel_pending(task, instance_id):
+                            self._finish_task_local(task, "cancelled")
+                            finish_ev.set()
+                            raise LifecycleError(
+                                f"实例 {instance_id} 构建已取消",
+                                instance_id=instance_id,
+                            )
                     self._mark_timeout(instance_id, task, timeout)
                     finish_ev.set()
                     raise LifecycleError(
@@ -499,11 +633,18 @@ class BuildQueue:
                     )
                 task.status = "building"
             task.started_at = time.time()
-            self._persist_task(task, status="building")
+            if self._persist_task(task, status="building") is False:
+                with self._guard:
+                    self._cancel_pending(task, instance_id)
+                    self._finish_task_local(task, "cancelled")
+                raise LifecycleError(
+                    f"实例 {instance_id} 构建已取消",
+                    instance_id=instance_id,
+                )
             self.registry.add_event(
                 instance_id, "build_start", "获得构建槽位，开始构建"
             )
-            enter_build_context(instance_id)
+            enter_build_context(instance_id, build_token=task.build_token)
             try:
                 result = builder(instance_id)
             finally:
@@ -521,7 +662,14 @@ class BuildQueue:
                     )
                 task.status = "success"
                 task.finished_at = time.time()
-            self._persist_task(task, status="success")
+            if self._persist_task(task, status="success") is False:
+                with self._guard:
+                    self._cancel_pending(task, instance_id)
+                    self._finish_task_local(task, "cancelled")
+                raise LifecycleError(
+                    f"实例 {instance_id} 构建已取消",
+                    instance_id=instance_id,
+                )
             return result
         except BuildCancelled as exc:
             with self._guard:
@@ -675,6 +823,7 @@ class BuildQueue:
             if prev == "queued":
                 self._gate.update_build_task(
                     instance_id,
+                    build_token=str(row["build_token"]),
                     status="cancelled",
                     cancel_requested_at=time.time(),
                 )
@@ -690,12 +839,17 @@ class BuildQueue:
             # building / cancelling：标记并尝试按身份杀 worker
             self._gate.update_build_task(
                 instance_id,
+                build_token=str(row["build_token"]),
                 status="cancelling",
                 cancel_requested_at=time.time(),
             )
             signaled = self._signal_persisted_worker(row)
             if not signaled and not _pid_alive(int(row["owner_pid"])):
-                self._gate.update_build_task(instance_id, status="cancelled")
+                self._gate.update_build_task(
+                    instance_id,
+                    build_token=str(row["build_token"]),
+                    status="cancelled",
+                )
                 self._update_instance_cancelled(instance_id, "owner 已退出，任务已回收")
                 return CancelResult(
                     instance_id=instance_id,
@@ -741,7 +895,12 @@ class BuildQueue:
                 final.status = "cancel_failed"
                 final.finished_at = time.time()
                 final.error = "取消超时，进程可能仍在运行"
-        self._gate.update_build_task(instance_id, status="cancel_failed")
+        if final is not None:
+            self._gate.update_build_task(
+                instance_id,
+                build_token=final.build_token,
+                status="cancel_failed",
+            )
         self.registry.add_event(
             instance_id, "build_cancel", "取消失败：等待构建退出超时"
         )
@@ -794,7 +953,9 @@ class BuildQueue:
         """
         if task.status in ("cancelled", "cancelling"):
             return True
-        if not self._gate.is_cancel_requested(instance_id):
+        if not self._gate.is_cancel_requested(
+            instance_id, build_token=task.build_token
+        ):
             return False
         row = self._gate.get_build_task(instance_id)
         status = (row or {}).get("status")
@@ -819,9 +980,10 @@ class BuildQueue:
         *,
         status: str,
         cancel_requested_at: float | None = None,
-    ) -> None:
+        replace_generation: bool = False,
+    ) -> bool | None:
         try:
-            self._gate.upsert_build_task(
+            return self._gate.upsert_build_task(
                 instance_id=task.instance_id,
                 build_token=task.build_token,
                 status=status,
@@ -830,9 +992,11 @@ class BuildQueue:
                 cancel_requested_at=cancel_requested_at
                 if cancel_requested_at is not None
                 else task.cancel_requested_at,
+                replace_generation=replace_generation,
             )
         except Exception:  # noqa: BLE001
             log.exception("持久化 build_task 失败")
+            return None
 
     def _finish_task_local(self, task: BuildTask, status: str) -> None:
         task.status = status
@@ -909,7 +1073,13 @@ class BuildQueue:
                     message="取消失败",
                 )
             time.sleep(0.1)
-        self._gate.update_build_task(instance_id, status="cancel_failed")
+        row = self._gate.get_build_task(instance_id)
+        if row is not None:
+            self._gate.update_build_task(
+                instance_id,
+                build_token=str(row["build_token"]),
+                status="cancel_failed",
+            )
         return CancelResult(
             instance_id=instance_id,
             outcome="cancel_failed",
@@ -948,13 +1118,20 @@ class BuildQueue:
 
 # ---- 闸门单例 ---------------------------------------------------------------
 
-_gates: dict[tuple[str, int], CrossProcessBuildGate] = {}
-_gates_guard = threading.Lock()
-
 
 def _shared_gate(registry: Registry, concurrency: int) -> CrossProcessBuildGate:
-    key = (str(_gate_db_path(registry).resolve()), concurrency)
+    db_path = str(_gate_db_path(registry).resolve())
+    key = (db_path, concurrency)
     with _gates_guard:
+        # BUG-361：同 db_path 不同 concurrency 的旧 gate 永不淘汰 → SQLite 连接泄漏。
+        stale_keys = [k for k in _gates if k[0] == db_path and k != key]
+        for sk in stale_keys:
+            old = _gates.pop(sk, None)
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:  # noqa: BLE001
+                    pass
         gate = _gates.get(key)
         if gate is None or gate._closed:  # noqa: SLF001
             gate = CrossProcessBuildGate(_gate_db_path(registry), concurrency)

@@ -7,6 +7,8 @@ Caddy 共享日志按别名前缀归属。直接测试摄入函数，避免依�
 from __future__ import annotations
 
 import sqlite3
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -171,6 +173,96 @@ def test_store_aggregates_by_day_and_unique_ips(store: PageviewStore) -> None:
     assert by_day["2026-07-09"]["uniqueIps"] == 2  # 当天 1.1.1.1 + 2.2.2.2
     assert by_day["2026-07-08"]["hits"] == 1
     assert len(detail["recent"]) == 4
+
+
+def test_pageview_timezone_uses_local_day_and_utc_ordering(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-303：分桶按本地日历日，存储/最近时间统一按 UTC 比较。
+
+    策略：入库时间戳一律规范为 UTC ISO8601；日历日按系统本地时区分桶
+    （与管理页“今天”直觉一致）；last_seen 只用规范化后的 UTC 串比较。
+    """
+    old_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    time.tzset()
+    try:
+        local_clf = parse_clf_line(
+            '1.1.1.1 - - [28/Jul/2026 00:30:00] "GET / HTTP/1.1" 200 1'
+        )
+        assert local_clf is not None
+        assert local_clf.ts == "2026-07-27T16:30:00+00:00"
+
+        s = PageviewStore(tmp_path / "tz-pageviews.db")
+        try:
+            s.record_hits(
+                "demo",
+                "mixed",
+                [
+                    local_clf,
+                    AccessHit(
+                        "2026-07-27T20:00:00+00:00",
+                        "GET",
+                        "/later",
+                        200,
+                        "2.2.2.2",
+                    ),
+                ],
+            )
+            detail = s.detail("demo")
+            assert detail["byDay"] == [
+                {"day": "2026-07-28", "hits": 2, "uniqueIps": 2}
+            ]
+            assert s.summary()["demo"]["lastSeen"] == "2026-07-27T20:00:00+00:00"
+        finally:
+            s.close()
+    finally:
+        if old_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", old_tz)
+        time.tzset()
+
+
+def test_pageview_last_seen_ignores_offset_lexicographic_trap(
+    store: PageviewStore,
+) -> None:
+    """BUG-303：跨偏移 ISO 串不能靠字典序比先后（+08 的 22:00 早于 +00 的 15:00）。"""
+    store.record_hits(
+        "demo",
+        "mixed",
+        [
+            AccessHit("2026-07-27T22:00:00+08:00", "GET", "/", 200, "1.1.1.1"),
+            AccessHit("2026-07-27T15:00:00+00:00", "GET", "/later", 200, "2.2.2.2"),
+        ],
+    )
+    assert store.summary()["demo"]["lastSeen"] == "2026-07-27T15:00:00+00:00"
+    ips = {
+        row["ip"]: row["lastSeen"] for row in store.detail("demo")["uniqueIpList"]
+    }
+    assert ips["1.1.1.1"] == "2026-07-27T14:00:00+00:00"
+    assert ips["2.2.2.2"] == "2026-07-27T15:00:00+00:00"
+
+
+def test_pageview_last_seen_keeps_later_across_batches(
+    store: PageviewStore,
+) -> None:
+    """BUG-303：后到批次若时间更早，不得用 excluded.last_seen 覆盖已有更晚值。"""
+    store.record_hits(
+        "demo",
+        "builtin",
+        [AccessHit("2026-07-27T20:00:00+00:00", "GET", "/", 200, "1.1.1.1")],
+    )
+    store.record_hits(
+        "demo",
+        "builtin",
+        [AccessHit("2026-07-27T18:00:00+00:00", "GET", "/a", 200, "1.1.1.1")],
+    )
+    assert store.summary()["demo"]["lastSeen"] == "2026-07-27T20:00:00+00:00"
+    ips = {
+        row["ip"]: row["lastSeen"] for row in store.detail("demo")["uniqueIpList"]
+    }
+    assert ips["1.1.1.1"] == "2026-07-27T20:00:00+00:00"
 
 
 def test_unique_ips_dedup_across_batches_same_day(store: PageviewStore) -> None:
@@ -865,3 +957,113 @@ def test_ingest_caddy_shared_strips_alias_prefix(
     assert {r["path"] for r in detail["recent"]} == {"/"}
     # /api/data 未误计（剥前缀后命中 /api/ 规则）；style.css 资源未计
     assert all(r["path"] != "/api/data" for r in detail["recent"])
+
+
+# ---- BUG-363：busy_timeout + clear 复用共享 store ----------------------------
+
+
+def test_connect_sets_busy_timeout(tmp_path: Path) -> None:
+    """BUG-363：registry/pageviews 共用 connect() 须设 busy_timeout。"""
+    from local_webpage_access.registry.connection import connect
+
+    conn = connect(tmp_path / "x.db")
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+        assert row is not None
+        assert int(row[0]) >= 5000
+    finally:
+        conn.close()
+
+
+def test_clear_instance_pageviews_reuses_shared_store(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-363：clear 须复用进程内共享 store，不得新建后 close 掉单例连接。"""
+    from local_webpage_access import pageviews as pv
+
+    pv._reset_shared_stores()
+    shared = pv.PageviewStore.shared_for_workspace(workspace)
+    shared.record_hits(
+        "demo",
+        "builtin",
+        [AccessHit("2026-07-09T10:00:00+08:00", "GET", "/", 200, "1.1.1.1")],
+    )
+    assert shared.summary()["demo"]["hits"] == 1
+
+    closed: list[object] = []
+    real_close = shared.close
+
+    def tracking_close() -> None:
+        closed.append(True)
+        real_close()
+
+    monkeypatch.setattr(shared, "close", tracking_close)
+    pv.clear_instance_pageviews(workspace, "demo")
+    assert closed == []  # 不得 close 共享 store
+    assert "demo" not in shared.summary()
+    # 连接仍可用
+    shared.record_hits(
+        "demo",
+        "builtin",
+        [AccessHit("2026-07-09T11:00:00+08:00", "GET", "/", 200, "2.2.2.2")],
+    )
+    assert shared.summary()["demo"]["hits"] == 1
+    pv._reset_shared_stores()
+
+
+def test_read_new_lines_ingests_rotated_archive_before_reset(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """BUG-328：日志滚动后须先补读 .log.1 归档尾部，再读新文件。"""
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    old_content = (
+        '127.0.0.1 - - [09/Jul/2026 10:00:00] "GET /old HTTP/1.1" 200 -\n'
+        '127.0.0.1 - - [09/Jul/2026 10:01:00] "GET /tail HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(old_content, encoding="utf-8")
+    cursor_key = f"builtin:demo:{log_path.as_posix()}"
+    # 游标停在第一行之后，模拟尚未摄入第二行
+    first_line = old_content.splitlines(keepends=True)[0]
+    store.set_cursor(cursor_key, len(first_line.encode("utf-8")), None)
+
+    # 滚动：旧文件 → .log.1，新文件只有新请求（体积可 ≥ 旧游标）
+    archive = log_path.with_name(log_path.name + ".1")
+    log_path.rename(archive)
+    new_line = '192.168.1.5 - - [09/Jul/2026 10:02:00] "GET /new HTTP/1.1" 200 -\n'
+    log_path.write_text(new_line, encoding="utf-8")
+    assert log_path.stat().st_size >= store.get_cursor(cursor_key)[0]
+
+    batch = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(batch.lines)
+    assert "/tail" in joined
+    assert "/new" in joined
+    assert "/old" not in joined
+
+
+def test_read_new_lines_ingests_archive_when_new_file_smaller(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """BUG-328：新文件体积 < 游标（经典截断判定）时也要补读归档。"""
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    old_content = (
+        '127.0.0.1 - - [09/Jul/2026 10:00:00] "GET /old HTTP/1.1" 200 -\n'
+        '127.0.0.1 - - [09/Jul/2026 10:01:00] "GET /tail HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(old_content, encoding="utf-8")
+    cursor_key = f"builtin:demo:{log_path.as_posix()}"
+    store.set_cursor(cursor_key, len(old_content.encode("utf-8")) - 10, None)
+
+    archive = log_path.with_name(log_path.name + ".1")
+    log_path.rename(archive)
+    log_path.write_text('1.1.1.1 - - [09/Jul/2026 10:03:00] "GET /tiny HTTP/1.1" 200 -\n')
+    assert log_path.stat().st_size < store.get_cursor(cursor_key)[0]
+
+    batch = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(batch.lines)
+    assert "/tiny" in joined

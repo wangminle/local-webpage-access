@@ -257,13 +257,37 @@ def plan_full_install(
 def _default_subprocess_run(
     cmd: Sequence[str], **kwargs
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    # 捕获输出以便失败时回流到 messages；同时回放到终端，保留用户可见进度。
+    result = subprocess.run(
         list(cmd),
         check=False,
         text=True,
-        capture_output=False,
+        capture_output=True,
         **kwargs,
     )
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+        if not result.stdout.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+        if not result.stderr.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+    return result
+
+
+def _script_failure_detail(
+    result: subprocess.CompletedProcess[str], *, limit: int = 400
+) -> str:
+    """从脚本结果提取可展示的失败摘要（优先 stderr）。"""
+    blob = (result.stderr or result.stdout or "").strip()
+    if not blob:
+        return ""
+    text = blob if len(blob) <= limit else blob[-limit:]
+    one_line = " ".join(text.split())
+    return f"：{one_line}"
 
 
 def _stdin_is_interactive() -> bool:
@@ -433,7 +457,10 @@ def run_full_bootstrap(
             messages.append(f"执行：bash {item.script}")
             result = run(["bash", str(item.script)])
             if result.returncode != 0:
-                messages.append(f"脚本失败（exit {result.returncode}）：{item.script}")
+                messages.append(
+                    f"脚本失败（exit {result.returncode}）：{item.script}"
+                    + _script_failure_detail(result)
+                )
                 if workspace_root:
                     save_profile_state(
                         workspace_root,
@@ -671,7 +698,11 @@ def _persist_full_config(
 
         ws = Workspace(workspace_root)
         cfg = load_config(ws)
-        cfg.profile = "full"
+        # BUG-305：只有完整能力验收通过后才把运行配置提升为 full。
+        # 安装失败/待刷新仍由 full-setup-state.json 记录恢复信息，不能让日常
+        # builtin 路径提前进入严格模式而失去自愈入口。
+        if ready:
+            cfg.profile = "full"
         cfg.serviceUser = service_user
         if ready and cfg.staticGateway == "builtin":
             # Full ready 仍尊重用户显式 builtin；能力验收已在上层处理
@@ -746,7 +777,10 @@ def maybe_offer_docker_install(
     messages.append(f"执行：bash {script}")
     result = run(["bash", str(script)])
     if result.returncode != 0:
-        messages.append(f"Docker 安装脚本失败（exit {result.returncode}）")
+        messages.append(
+            f"Docker 安装脚本失败（exit {result.returncode})"
+            + _script_failure_detail(result)
+        )
         return DockerOfferResult(
             messages=messages, attempted=True, script_ok=False, recheck_ok=False
         )

@@ -282,7 +282,8 @@ def probe_caddy_runtime_fields(
 def current_service_user() -> str:
     """当前有效运行身份（非临时 sudo 的 root 时优先 SUDO_USER）。"""
     sudo_user = (os.environ.get("SUDO_USER") or "").strip()
-    if sudo_user and os.geteuid() == 0 if hasattr(os, "geteuid") else False:
+    geteuid = getattr(os, "geteuid", None)
+    if sudo_user and geteuid is not None and geteuid() == 0:
         return sudo_user
     try:
         return getpass.getuser()
@@ -500,17 +501,17 @@ def _backend_role_alive(root: Path, role: str) -> bool:
         state = read_state(ws)
         return bool(state and state.enabled and _alive(state.pid))
     if role == "daemon":
-        from local_webpage_access.daemon import read_state
+        from local_webpage_access.daemon import read_state as read_daemon_state
 
-        state = read_state(ws)
-        return bool(state and state.enabled and _alive(state.pid))
+        daemon_state = read_daemon_state(ws)
+        return bool(daemon_state and daemon_state.enabled and _alive(daemon_state.pid))
     if role == "gateway":
-        from local_webpage_access.gateway_service import read_state
+        from local_webpage_access.gateway_service import read_state as read_gw_state
 
-        state = read_state(ws)
-        if not state or not state.enabled:
+        gw_state = read_gw_state(ws)
+        if not gw_state or not gw_state.enabled:
             return False
-        if _alive(state.pid):
+        if _alive(gw_state.pid):
             return True
         # 服务态 enabled 但 pid 缺失时，回退看工作区 caddy.pid（仍校验身份）
         caddy_pid_path = ws.run / "caddy.pid"
@@ -635,9 +636,15 @@ def overlay_gateway_access_from_cache(
 
     只读缓存文件，不触发 Docker/Caddy 探测，供 ``/api/health`` 在 manager
     启动探测早于 gateway 就绪时廉价纠偏。
+
+    BUG-284：纠偏 ``gatewayAccess`` 后按片段能力字段重算 ``overall`` / ``action``，
+    避免出现 gatewayAccess=ready 而 overall 仍为启动时 unready 的矛盾。
     """
     out: dict[str, Any] = dict(fragment or {})
     caps = dict(out.get("capabilities") or {})
+    # manager 是否已有真实探测结果：启动占位片段的 capabilities 为空，
+    # 此时任何重算都只是凭 gateway 缓存臆断（default profile 会直接得出 ready）。
+    manager_probed = bool(caps) and bool(out.get("overall"))
     path = Path(workspace_root) / "run" / "capability-gateway.json"
     if not path.is_file():
         out["capabilities"] = caps
@@ -654,10 +661,58 @@ def overlay_gateway_access_from_cache(
         out["capabilities"] = caps
         return out
     gw_caps = data.get("capabilities")
+    changed = False
     if isinstance(gw_caps, dict) and gw_caps.get("gatewayAccess"):
-        caps["gatewayAccess"] = gw_caps["gatewayAccess"]
+        new_gw = gw_caps["gatewayAccess"]
+        if caps.get("gatewayAccess") != new_gw:
+            changed = True
+        caps["gatewayAccess"] = new_gw
     out["capabilities"] = caps
+    # 仅在「manager 已有真实探测片段」且 gatewayAccess 确有纠偏时重算；
+    # 否则保持原样，避免在启动窗口内凭 gateway 缓存伪造 ready（BUG-257 假绿）。
+    if changed and manager_probed:
+        _refresh_overall_in_health_fragment(out)
     return out
+
+
+def _refresh_overall_in_health_fragment(fragment: dict[str, Any]) -> None:
+    """按 health 片段中的 capabilities 重算 overall / action（manager 视角）。"""
+    caps = fragment.get("capabilities") or {}
+    if not isinstance(caps, dict):
+        return
+    profile = fragment.get("profile") or "default"
+    if profile not in ("default", "full"):
+        profile = "default"
+    report = CapabilityReport(
+        profile=profile,  # type: ignore[arg-type]
+        service_user=str(fragment.get("serviceUser") or ""),
+        docker_engine=str(caps.get("dockerEngine") or "unknown"),  # type: ignore[arg-type]
+        docker_compose=str(caps.get("dockerCompose") or "unknown"),  # type: ignore[arg-type]
+        docker_access=str(caps.get("dockerAccess") or "unknown"),  # type: ignore[arg-type]
+        caddy_binary=str(caps.get("caddyBinary") or "unknown"),  # type: ignore[arg-type]
+        caddy_runtime=str(caps.get("caddyRuntime") or "unknown"),  # type: ignore[arg-type]
+        caddy_owner=str(caps.get("caddyOwner") or "unknown"),  # type: ignore[arg-type]
+        caddy_process_user=caps.get("caddyProcessUser"),
+        caddy_workspace_access=str(
+            caps.get("caddyWorkspaceAccess") or "unknown"
+        ),  # type: ignore[arg-type]
+        cli_docker_access=str(caps.get("cliDockerAccess") or "unknown"),  # type: ignore[arg-type]
+        manager_docker_access=str(
+            caps.get("managerDockerAccess") or "unknown"
+        ),  # type: ignore[arg-type]
+        daemon_docker_access=str(
+            caps.get("daemonDockerAccess") or "unknown"
+        ),  # type: ignore[arg-type]
+        gateway_access=str(caps.get("gatewayAccess") or "unknown"),  # type: ignore[arg-type]
+        session_refresh_required=bool(caps.get("sessionRefreshRequired")),
+        details={"role": "manager"},
+    )
+    report.overall = _compute_overall(report)
+    fragment["overall"] = report.overall
+    if report.overall == "ready":
+        fragment["action"] = None
+    else:
+        fragment["action"] = report.action or _default_action(report)
 
 
 def log_capability_probe(

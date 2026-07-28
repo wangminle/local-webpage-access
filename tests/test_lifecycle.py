@@ -7,6 +7,7 @@ remove / observe_status 的派发、desiredState 一致性、并发锁与数据�
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from pathlib import Path
 
@@ -97,6 +98,9 @@ class _FakeRuntime:
 
     def image_id(self, iid):
         return "sha256:img"
+
+    def remove_image(self, image):
+        type(self).calls.append(f"rmi:{image}")
 
     def status(self, iid):
         return None
@@ -268,6 +272,21 @@ def test_pid_alive_current_process() -> None:
     assert _pid_alive(999999) is False
 
 
+def test_pid_alive_permission_error_means_alive(monkeypatch) -> None:
+    """BUG-346：PermissionError 表示进程存在但不可访问，不得判死。"""
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("PermissionError 语义针对 POSIX os.kill(pid, 0)")
+
+    def boom(pid, sig):
+        raise PermissionError("EPERM")
+
+    monkeypatch.setattr(os, "kill", boom)
+    assert _pid_alive(4242) is True
+
+
 # ---- start -----------------------------------------------------------------
 
 
@@ -294,6 +313,53 @@ def test_start_deployed_container_uses_light_start(
     assert "start" in fake_runtime.calls
     assert "build" not in fake_runtime.calls
     assert "up" not in fake_runtime.calls
+
+
+def test_start_recovers_via_full_rebuild_after_rebuild_failure(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-300：重建失败后旧 containerId 必须作废，下次 start 走完整 build+up。
+
+    否则轻量 ``compose start`` 会对着已 down 的陈旧容器身份失败，实例永不可恢复。
+    """
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.hosting import host_container
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._running = True
+
+    def fail_build(self, iid, *, build_id=None, **kw):
+        if build_id is not None and self.registry is not None:
+            self.registry.finish_build(
+                build_id, status="failed", error_summary="rebuild boom"
+            )
+        raise DockerError("rebuild boom", instance_id=iid)
+
+    monkeypatch.setattr(fake_runtime, "build", fail_build)
+    with pytest.raises(DockerError, match="rebuild boom"):
+        host_container(workspace, config, registry, "api")
+
+    failed = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert failed.container is not None
+    assert failed.container.containerId is None
+    assert failed.container.imageId is None
+
+    # 恢复 build，模拟用户再次 start
+    fake_runtime.calls.clear()
+
+    def ok_build(self, iid, *, build_id=None, **kw):
+        self.calls.append("build")
+        if build_id is not None and self.registry is not None:
+            self.registry.finish_build(build_id, status="success")
+
+    monkeypatch.setattr(fake_runtime, "build", ok_build)
+    fake_runtime._running = False
+
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert "build" in fake_runtime.calls
+    assert "up" in fake_runtime.calls
+    assert "start" not in fake_runtime.calls
 
 
 def test_start_static_dispatches_to_host_static(
@@ -416,6 +482,37 @@ def test_remove_purge_deletes_files(
     assert not workspace.app_dir("api").exists()
 
 
+def test_remove_purge_best_effort_removes_image(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-345：purge 时按 imageId/image 尽力 docker rmi，避免小主机磁盘泄漏。"""
+    m = _seed_container(workspace, registry, "api", deployed=True)
+    assert m.container is not None
+    m.container.imageId = "sha256:deadbeef"
+    m.container.image = "lwa-api:latest"
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+
+    remove_instance(workspace, config, registry, "api", purge=True, force=True)
+
+    assert any(c.startswith("rmi:") for c in fake_runtime.calls)
+    assert "rmi:sha256:deadbeef" in fake_runtime.calls
+    assert registry.get_instance("api") is None
+
+
+def test_remove_tolerates_corrupt_manifest(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-347：local-web.json 损坏时 remove 仍按 registry 降级清理，不得整段崩溃。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    workspace.app_manifest_path("api").write_text("{not-json", encoding="utf-8")
+
+    remove_instance(workspace, config, registry, "api")
+
+    assert "down" in fake_runtime.calls
+    assert registry.get_instance("api") is None
+
+
 def test_remove_purge_protects_nonempty_data(
     workspace, registry, config, fake_runtime
 ) -> None:
@@ -454,6 +551,47 @@ def test_remove_container_calls_compose_down(
     remove_instance(workspace, config, registry, "api")
     assert "stop" in fake_runtime.calls
     assert "down" in fake_runtime.calls
+
+
+def test_remove_container_without_manifest_still_calls_compose_down(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-319：manifest 丢失时按 registry runtime 降级清理容器资源。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    workspace.app_manifest_path("api").unlink()
+
+    remove_instance(workspace, config, registry, "api")
+
+    assert "down" in fake_runtime.calls
+    assert registry.get_instance("api") is None
+
+
+def test_remove_static_without_manifest_still_disables_gateway(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-319：静态实例 manifest 缺失时仍按 registry 调用 gateway.disable。"""
+    _seed_static(workspace, registry, "demo")
+    workspace.app_manifest_path("demo").unlink()
+    calls: list[str] = []
+
+    class _FakeGW:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def disable(self, iid):
+            calls.append(f"disable:{iid}")
+
+        def cleanup_instance_routes(self, iid):
+            calls.append(f"cleanup:{iid}")
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway", _FakeGW
+    )
+
+    remove_instance(workspace, config, registry, "demo")
+
+    assert "disable:demo" in calls
+    assert registry.get_instance("demo") is None
 
 
 def test_remove_container_clears_path_alias_config(
@@ -686,6 +824,37 @@ def test_observe_status_no_change_no_event(
     observe_status(workspace, config, registry, "api")
     events_after = registry.list_events("api")
     assert len(events_after) == len(events_before)
+
+
+def test_observe_status_holds_instance_lock_while_saving(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-320：观测回写 manifest 必须受同一实例生命周期锁保护。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._running = True
+    lock_held = False
+    saved_under_lock = False
+    original_save = InstanceManifest.save
+
+    def checked_save(self, path):
+        # save 外包 suppress(Exception)，不能在此 assert；用标志事后校验。
+        nonlocal saved_under_lock
+        saved_under_lock = lock_held
+        return original_save(self, path)
+
+    @contextlib.contextmanager
+    def tracked_lock(*args, **kwargs):
+        nonlocal lock_held
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    monkeypatch.setattr("local_webpage_access.lifecycle.instance_lock", tracked_lock)
+    monkeypatch.setattr(InstanceManifest, "save", checked_save)
+    assert observe_status(workspace, config, registry, "api") == Status.RUNNING
+    assert saved_under_lock, "observe_status 保存时未持实例锁"
 
 
 def test_observe_static_status_uses_health_when_pid_missing(
@@ -1524,3 +1693,32 @@ def test_remove_purge_rmtree_failure_is_visible(
     assert not any(
         "stage=done" in e["message"] and "result=ok" in e["message"] for e in stages
     ), "失败路径不得记 done=ok"
+
+
+def test_path_alias_lock_does_not_steal_live_holder_by_age(
+    workspace, monkeypatch
+) -> None:
+    """BUG-327：持锁进程仍存活时，不得仅因锁文件年龄而抢走 path-alias.lock。"""
+    import os
+    import time
+
+    from local_webpage_access.errors import LifecycleError
+    from local_webpage_access.file_lock import ensure_lockable, try_acquire_exclusive
+    from local_webpage_access.path_alias import _alias_lock_path, path_alias_lock
+
+    workspace.ensure_workspace_dirs()
+    lock = _alias_lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    # 伪装成「很久没心跳」的活锁
+    os.write(fd, f"{os.getpid()}\n{time.time() - 3600:.3f}\n".encode())
+    os.fsync(fd)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    try:
+        with pytest.raises(LifecycleError, match="路径别名锁"):
+            with path_alias_lock(workspace, timeout=0.0):
+                pass
+    finally:
+        os.close(fd)

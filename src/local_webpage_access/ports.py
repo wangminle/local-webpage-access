@@ -158,7 +158,7 @@ def detect_local_ips() -> set[str]:
     for info in infos:
         sockaddr = info[4]
         if sockaddr and sockaddr[0]:
-            n = _normalize_ip(sockaddr[0])
+            n = _normalize_ip(str(sockaddr[0]))
             if n:
                 found.add(n)
     found |= _tailscale_ips()
@@ -258,9 +258,12 @@ class PortAllocator:
         for port in self.candidate_ports():
             if port in allocated or port in exclude:
                 continue
-            if probe_host and is_port_in_use(port):
-                log.debug("端口 %d 已被宿主机占用，跳过", port)
-                continue
+            if probe_host:
+                # BUG-364：独占 bind（is_port_in_use）会把 TIME_WAIT 误判为占用；
+                # 分配决策以「是否有活跃监听者」为准（与 BUG-045 静态复用语义对齐）。
+                if is_port_listening(port):
+                    log.debug("端口 %d 有活跃监听，跳过", port)
+                    continue
             # 并发安全登记：若端口在登记前被其他实例抢走（BUG-017），
             # allocate_port 返回 False，跳到下一个候选端口重试。
             if not self.registry.allocate_port(instance_id, port):

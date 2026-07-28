@@ -1,6 +1,6 @@
 # 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～041（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机可后续补）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 实机清单与 036.09 Windows 分支清理可后续补）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../archive/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机可后续补）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 实机清单与 036.09 Windows 分支清理可后续补）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../achievement/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
 > **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈；§22 为删除/purge 阶段日志与容器别名清理（IMP-034 后续 + BUG-268）。
 
 ---
@@ -1353,7 +1353,7 @@ architecture, wslVersion, systemdAvailable, supported, reasons, action
 | --- | --- |
 | “Linux”范围过宽导致无法验收 | 正式范围只含 Ubuntu LTS 与 Debian Stable 指定下限；其他发行版明确不支持 |
 | WSL 是 Windows 宿主，被 Windows 门禁误杀 | 先执行 WSL 识别；Linux kernel + WSL 标志命中后走 WSL2 矩阵，不走 Windows native 分支 |
-| WSL 包版本在禁用 interop 时难读取 | 报告 `wslVersion=unknown`，结合 kernel/systemd 只读诊断；写操作 fail-closed，并提示在 Windows 侧执行 `wsl --version` |
+| WSL 包版本在禁用 interop 时难读取 | interop 可用时经 `wsl.exe --version` 读取（UTF-16LE/`WSL_UTF8`/中文，BUG-282；PATH 缺失时回退 `/mnt/<drive>/Windows/System32/wsl.exe`，BUG-291）；`[interop] enabled=false` 时 Windows 二进制完全不可跑才报 `wslVersion=unknown` 并 fail-closed。同版面 Kernel/WSLg 版本号不得当包版本（BUG-288） |
 | macOS 大版本每年漂移 | 使用“当前+前两版”策略 + 发布清单更新常量；文档快照带“截至 2026-07” |
 | Intel Mac 上游即将退役 | 不要求 M 系列，但承诺以 Python/Node/Docker/Homebrew 同时支持为前提；任何一项退役即在下个版本降级/移除 Intel 支持 |
 | 门禁妨碍跨平台测试 | import 不退出；所有门禁接受注入/monkeypatch 的平台事实；测试不得依赖真实宿主系统 |

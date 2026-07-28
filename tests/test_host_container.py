@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from local_webpage_access.compose import generate_compose, generate_env
-from local_webpage_access.dockerfile_templates import generate_dockerfile
 from local_webpage_access.errors import DockerError, HostingError
 from local_webpage_access.hosting import (
     _ensure_container_port,
@@ -20,6 +18,7 @@ from local_webpage_access.hosting import (
     _wait_for_http,
     host_container,
     host_instance,
+    start_container,
     stop_container,
     stop_instance,
 )
@@ -179,6 +178,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: True)
     # 端口探测恒返回"未占用"，使分配确定性地取池首端口（避免宿主机真实占用干扰）
     monkeypatch.setattr("local_webpage_access.ports.is_port_in_use", lambda *a, **kw: False)
+    monkeypatch.setattr("local_webpage_access.ports.is_port_listening", lambda *a, **kw: False)
     monkeypatch.setattr("local_webpage_access.hosting.is_port_listening", lambda *a, **kw: False)
     return _FakeRuntime
 
@@ -341,7 +341,11 @@ def test_host_container_node_project_uses_node_template(
 def test_host_container_build_failure_marks_failed(
     workspace, registry, config, fake_runtime, monkeypatch
 ) -> None:
-    _seed_container_instance(workspace, registry, "api")
+    old = _seed_container_instance(workspace, registry, "api")
+    old.container.containerId = "stale-container"
+    old.container.imageId = "sha256:stale"
+    old.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(old)
 
     def fail_build(self, iid, *, build_id=None, **kw):
         if build_id is not None and self.registry is not None:
@@ -355,6 +359,10 @@ def test_host_container_build_failure_marks_failed(
     row = registry.get_instance("api")
     assert row["status"] == "failed"
     assert row["last_error"]
+    failed_manifest = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert failed_manifest.container.containerId is None
+    assert failed_manifest.container.imageId is None
+    assert registry.get_container("api")["container_id"] is None
     builds = registry.list_builds("api")
     assert builds[0]["status"] == "failed"
     assert builds[0]["error_summary"]
@@ -380,6 +388,68 @@ def test_host_container_up_failure_marks_failed(
     builds = registry.list_builds("api")
     # build 本身成功（up 失败不回滚 build 状态）
     assert builds[0]["status"] == "success"
+
+
+def test_host_container_observation_failure_stays_failed_without_stale_id(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-344 / BUG-300：观测不到新 containerId 时不得假报 running 或保留陈旧身份。"""
+    old = _seed_container_instance(workspace, registry, "api")
+    old.container.containerId = "stale-container"
+    old.container.imageId = "sha256:stale"
+    old.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(old)
+
+    monkeypatch.setattr(
+        fake_runtime,
+        "container_id",
+        lambda self, iid: None,
+    )
+    monkeypatch.setattr(
+        fake_runtime,
+        "image_id",
+        lambda self, iid: None,
+    )
+
+    with pytest.raises(HostingError, match="未能观测到新 containerId"):
+        host_container(workspace, config, registry, "api")
+
+    row = registry.get_instance("api")
+    assert row["status"] == "failed"
+    failed = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert failed.container.containerId is None
+    assert failed.container.imageId is None
+    assert "down" in fake_runtime.calls
+
+
+def test_start_container_keeps_ids_when_observe_returns_none(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-344：轻量 start 观测为 None 时保留已落库 containerId/imageId。"""
+    m = _seed_container_instance(workspace, registry, "api")
+    m.container.containerId = "cid-keep"
+    m.container.imageId = "sha256:keep"
+    m.container.hostPort = 21000
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+    registry.upsert_container(
+        "api",
+        {
+            "projectName": "lwa-api",
+            "internalPort": 8000,
+            "composePath": "x",
+            "dockerfilePath": "y",
+            "hostPort": 21000,
+        },
+    )
+
+    monkeypatch.setattr(fake_runtime, "container_id", lambda self, iid: None)
+    monkeypatch.setattr(fake_runtime, "image_id", lambda self, iid: None)
+
+    started = start_container(workspace, config, registry, "api")
+    assert started.container.containerId == "cid-keep"
+    assert started.container.imageId == "sha256:keep"
+    assert started.status == Status.RUNNING
 
 
 def test_host_container_rejects_non_container_manifest(

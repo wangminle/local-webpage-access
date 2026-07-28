@@ -586,3 +586,35 @@ def test_apt_mirror_rejects_shell_injection() -> None:
         _apt_mirror_prefix(BuildMirrors(enabled=True, aptMirror="a; rm -rf /"))
     ok = _apt_mirror_prefix(BuildMirrors(enabled=True, aptMirror="mirrors.aliyun.com"))
     assert "mirrors.aliyun.com" in ok
+
+
+# ---- BUG-359 / BUG-360：_to_exec_form 回退 + pytest extras 剥离 --------------
+
+
+def test_to_exec_form_unclosed_quote_falls_back_to_shell() -> None:
+    """BUG-359：未闭合引号不得抛 ValueError，应回退 shell 形式。"""
+    import json
+
+    from local_webpage_access.dockerfile_templates import _to_exec_form
+
+    raw = 'uvicorn main:app --host "0.0.0.0'
+    assert _to_exec_form(raw) == json.dumps(raw)
+
+
+def test_to_exec_form_normal_command_stays_exec() -> None:
+    """正常可解析命令仍输出 exec 数组形式。"""
+    from local_webpage_access.dockerfile_templates import _to_exec_form
+
+    out = _to_exec_form("uvicorn main:app --host 0.0.0.0")
+    assert out.startswith("[")
+    assert '"uvicorn"' in out
+    assert '"main:app"' in out
+
+
+def test_dockerfile_strips_pytest_extras_and_leading_space(workspace: Workspace) -> None:
+    """BUG-360：pytest[extras] / 前导空格行也须被 sed 剥离。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    # 扩展正则须覆盖 extras 的 ``[`` 与前导空白
+    assert r"/^\s*pytest([-_]|[<>=!~\[]|$)/d" in content

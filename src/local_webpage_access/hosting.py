@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import shutil
 import subprocess
 import sys
@@ -377,6 +376,14 @@ def host_container(
         # BUG-205：重建 down 前先把容器内数据救出到宿主 data/，避免旧库随容器删除丢失
         _rescue_container_data_before_rebuild(workspace, manifest, instance_id, runtime)
 
+        # BUG-300：从这一刻起旧容器即将被 down，旧身份不能继续表示“可轻量启动”。
+        # 先落盘清空；若后续 build/up 失败，start_instance 会走完整重建而不是
+        # 对已经删除的旧 containerId 执行 compose start。
+        manifest.container.containerId = None
+        manifest.container.imageId = None
+        manifest.touch()
+        manifest.save(workspace.app_manifest_path(instance_id))
+
         # 2. 重建场景：先停掉旧容器，释放端口绑定
         try:
             if runtime.is_running(instance_id):
@@ -451,6 +458,21 @@ def host_container(
     # 7. 观测 containerId / imageId（失败不阻塞，仅记录 None）
     container_id = _safe(lambda: runtime.container_id(instance_id))
     image_id = _safe(lambda: runtime.image_id(instance_id))
+    if container_id is None:
+        # BUG-344 与 BUG-300 联合约束：旧 ID 已因 down 失效，不能恢复；新 ID
+        # 又未观测到时也不能假报 running。清理本轮容器并留在 failed，使下次
+        # start 走完整重建，而不是对陈旧身份 compose start。
+        observation_error = HostingError(
+            f"实例 {instance_id} 启动后未能观测到新 containerId",
+            instance_id=instance_id,
+        )
+        with contextlib.suppress(Exception):
+            runtime.down(instance_id)
+        if fresh_port:
+            with contextlib.suppress(Exception):
+                PortAllocator(config, registry).release_instance(instance_id)
+        _mark_failed(workspace, registry, instance_id, manifest, observation_error)
+        raise observation_error
     manifest.container.containerId = container_id
     manifest.container.imageId = image_id
     manifest.container.hostPort = host_port
@@ -875,6 +897,7 @@ def run_command(
     """
     from local_webpage_access.build_process import (
         current_build_instance_id,
+        current_build_token,
         get_build_process_hub,
         kill_process_tree,
         popen_new_session_kwargs,
@@ -896,6 +919,7 @@ def run_command(
 
     hub = get_build_process_hub()
     instance_id = current_build_instance_id()
+    build_token = current_build_token()
 
     def _should_cancel() -> bool:
         if instance_id is None:
@@ -907,7 +931,9 @@ def run_command(
             from local_webpage_access.build_queue import _gates
 
             for gate in list(_gates.values()):
-                if gate.is_cancel_requested(instance_id):
+                if build_token is not None and gate.is_cancel_requested(
+                    instance_id, build_token=build_token
+                ):
                     return True
         except Exception:  # noqa: BLE001
             pass
@@ -1004,11 +1030,16 @@ def _persist_worker(instance_id: str, proc: subprocess.Popen, identity: str) -> 
                 pgid = os.getpgid(proc.pid)
             except ProcessLookupError:
                 pgid = None
+        from local_webpage_access.build_process import current_build_token
         from local_webpage_access.build_queue import _gates
 
+        build_token = current_build_token()
+        if build_token is None:
+            return
         for gate in list(_gates.values()):
             gate.update_build_task(
                 instance_id,
+                build_token=build_token,
                 worker_pid=proc.pid,
                 worker_pgid=pgid,
                 worker_identity=identity,
@@ -1019,10 +1050,16 @@ def _persist_worker(instance_id: str, proc: subprocess.Popen, identity: str) -> 
 
 def _clear_worker(instance_id: str) -> None:
     try:
+        from local_webpage_access.build_process import current_build_token
         from local_webpage_access.build_queue import _gates
 
+        build_token = current_build_token()
+        if build_token is None:
+            return
         for gate in list(_gates.values()):
-            gate.update_build_task(instance_id, clear_worker=True)
+            gate.update_build_task(
+                instance_id, build_token=build_token, clear_worker=True
+            )
     except Exception:  # noqa: BLE001
         pass
 

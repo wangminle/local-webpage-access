@@ -136,6 +136,12 @@ def test_is_file_stable_false_when_size_changes(workspace: Workspace) -> None:
     assert stable is False
 
 
+def test_effective_stable_window_spans_two_poll_intervals() -> None:
+    """BUG-311：稳定窗口不能短于两次轮询，避免一次写入停顿被判完成。"""
+    assert daemon_mod._effective_stable_seconds(2.0, 5.0) == 10.0
+    assert daemon_mod.DEFAULT_STABLE_SECONDS >= daemon_mod.DEFAULT_POLL_INTERVAL
+
+
 # ---- 单实例锁（WBS-21.11）--------------------------------------------------
 
 
@@ -420,15 +426,40 @@ def test_process_zip_autostart_failure_archives_and_defers(
 
 
 def test_processed_set_roundtrip(workspace: Workspace) -> None:
-    assert daemon_mod.load_processed_set(workspace) == set()
-    daemon_mod.save_processed_set(workspace, {"/a/b.zip", "/c/d.zip"})
+    assert daemon_mod.load_processed_set(workspace) == []
+    daemon_mod.save_processed_set(workspace, ["/a/b.zip", "/c/d.zip"])
     got = daemon_mod.load_processed_set(workspace)
-    assert got == {"/a/b.zip", "/c/d.zip"}
+    assert got == ["/a/b.zip", "/c/d.zip"]
 
 
 def test_processed_set_tolerates_corrupt(workspace: Workspace) -> None:
     daemon_mod._archive_processed_marker(workspace).write_text("garbage", encoding="utf-8")
-    assert daemon_mod.load_processed_set(workspace) == set()
+    assert daemon_mod.load_processed_set(workspace) == []
+
+
+def test_save_processed_set_prunes_to_size_cap(workspace: Workspace) -> None:
+    """BUG-337：processed 集合落盘须有上界，避免无界增长。"""
+    items = [f"key-{i:05d}" for i in range(3000)]
+    daemon_mod.save_processed_set(workspace, items)
+    loaded = daemon_mod.load_processed_set(workspace)
+    assert len(loaded) <= daemon_mod.PROCESSED_SET_MAX
+    assert len(loaded) == daemon_mod.PROCESSED_SET_MAX
+
+
+def test_save_processed_set_prunes_by_recency_not_lexicographic(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """CHK-115 / BUG-337：达上限时按最近处理时间（LRU）裁剪，而非字典序。"""
+    monkeypatch.setattr(daemon_mod, "PROCESSED_SET_MAX", 3)
+    # 先写入较旧的 3 个；再追加字典序更小的新指纹 aaa（应保留，丢掉最旧的）
+    daemon_mod.save_processed_set(workspace, ["old-a", "old-b", "old-c"])
+    ordered = daemon_mod.load_processed_set(workspace)
+    ordered.append("aaa-newest")
+    daemon_mod.save_processed_set(workspace, ordered)
+    loaded = daemon_mod.load_processed_set(workspace)
+    assert loaded == ["old-b", "old-c", "aaa-newest"]
+    assert "old-a" not in loaded
+    assert "aaa-newest" in loaded
 
 
 def test_processed_key_changes_when_same_path_is_overwritten(
@@ -852,6 +883,50 @@ def test_archive_processed_zip_handles_missing_source(workspace: Workspace) -> N
     assert daemon_mod._archive_processed_zip(workspace, workspace.inbox / "nope.zip") is None
 
 
+def test_run_watcher_archives_duplicate_processed_zip(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """BUG-337：命中 processed 指纹的 zip 应归档移出 inbox，不得永久滞留。"""
+    zip_path = workspace.inbox / "dup.zip"
+    _make_zip(zip_path, {"index.html": "dup"})
+    key = daemon_mod.processed_key(zip_path)
+    daemon_mod.save_processed_set(workspace, {key})
+    daemon_mod.write_state(
+        workspace, daemon_mod.DaemonState(enabled=True, pid=0, poll_interval=0.01)
+    )
+
+    stop = threading.Event()
+    calls: list[Path] = []
+
+    def fake_process(ws, cfg, reg, p):
+        calls.append(p)
+        return {"action": "started"}
+
+    def runner() -> None:
+        daemon_mod.run_watcher(
+            workspace,
+            config,
+            registry,
+            stop_event=stop,
+            poll_interval=0.01,
+            stable_seconds=0.0,
+            process_fn=fake_process,
+        )
+
+    t = threading.Thread(target=runner)
+    t.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and zip_path.exists():
+        time.sleep(0.02)
+    stop.set()
+    t.join(timeout=2.0)
+
+    assert calls == []
+    assert not zip_path.exists()
+    archived = list(workspace.inbox_processed.glob("*.zip"))
+    assert archived, "重复投递 zip 应移入 inbox/processed/"
+
+
 def test_scan_inbox_ignores_processed_subdir(workspace: Workspace) -> None:
     """IMP-011：inbox/processed/ 下的 zip 不被 scan_inbox 扫到。"""
     workspace.inbox.mkdir(parents=True, exist_ok=True)
@@ -891,7 +966,7 @@ def test_run_watcher_archives_terminal_zip(
 def test_run_watcher_keeps_failed_zip_in_inbox(
     workspace: Workspace, config: Config, registry: Registry
 ) -> None:
-    """IMP-011：failed 的 zip 保留在 inbox 等下轮重试，不归档。"""
+    """IMP-011：failed 的 zip 首次失败仍保留在 inbox 等下轮重试，不归档。"""
     zip_path = workspace.inbox / "broken.zip"
     _make_zip(zip_path, {"index.html": "x"})
     stop = threading.Event()
@@ -911,6 +986,40 @@ def test_run_watcher_keeps_failed_zip_in_inbox(
     )
     assert zip_path.exists()  # 仍在 inbox
     assert list(workspace.inbox_processed.glob("*.zip")) == []  # 未归档
+    assert list(workspace.inbox_failed.glob("*.zip")) == []  # 未达死信阈值
+
+
+def test_run_watcher_moves_persistently_failed_zip_to_failed(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-297：连续失败超阈值后移入 inbox/failed/，停止无限重试。"""
+    monkeypatch.setattr(daemon_mod, "DEFAULT_FAILED_ZIP_MAX_ATTEMPTS", 3)
+    zip_path = workspace.inbox / "broken.zip"
+    _make_zip(zip_path, {"index.html": "x"})
+    attempts = {"n": 0}
+    stop = threading.Event()
+
+    def fake_process(ws, cfg, reg, zp):
+        attempts["n"] += 1
+        if attempts["n"] >= 3:
+            stop.set()
+        return {"action": "failed", "instance_id": None, "note": "boom", "zip": str(zp)}
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=fake_process,
+    )
+    assert attempts["n"] == 3
+    assert not zip_path.exists()
+    assert list(workspace.inbox_processed.glob("*.zip")) == []
+    failed = list(workspace.inbox_failed.glob("*.zip"))
+    assert len(failed) == 1
+    assert "broken" in failed[0].name
 
 
 # ---- DEV-042：reconcile 自愈 -------------------------------------------------
@@ -1144,6 +1253,45 @@ def test_reconcile_continues_on_individual_failure(
     assert restarted == ["ok"]
 
 
+def test_reconcile_applies_backoff_after_repeated_failure(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """BUG-312：恢复失败后退避，下一轮不能立即再次拉起。"""
+    _seed_instance(registry, workspace, "boom", status="stopped")
+    now = [100.0]
+    attempts: list[str] = []
+
+    def fail(ws, cfg, reg, iid):
+        attempts.append(iid)
+        raise RuntimeError("still broken")
+
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=fail,
+        monotonic=lambda: now[0],
+    )
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=fail,
+        monotonic=lambda: now[0],
+    )
+    assert attempts == ["boom"]
+
+    now[0] += daemon_mod.RECONCILE_BACKOFF_BASE_SECONDS
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=fail,
+        monotonic=lambda: now[0],
+    )
+    assert attempts == ["boom", "boom"]
+
+
 def test_reconcile_skips_caddy_static_when_gateway_disabled(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:
@@ -1186,7 +1334,6 @@ def test_run_watcher_invokes_supervise_periodically(
     import time as _time
 
     calls: list[float] = []
-    clock = [_time.monotonic()]
     # 让 clock 随调用推进，确保越过 supervise_interval 触发一次后停止
     base = [_time.monotonic()]
 
@@ -1296,3 +1443,174 @@ def test_attach_daemon_log_handler_preserves_requested_level(
     )
     daemon_mod.attach_daemon_log_handler(workspace, level="DEBUG")
     assert captured["level"] == "DEBUG"
+
+
+def test_main_runtime_oserror_returns_failure(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-296：拿锁后的运行期 OSError 必须非零退出。"""
+    monkeypatch.setattr(
+        daemon_mod.sys,
+        "argv",
+        ["lwa-daemon", "--workspace", str(workspace.root), "--poll", "0.1"],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.platform_support.require_supported_platform",
+        lambda: None,
+    )
+    monkeypatch.setattr(daemon_mod, "_probe_daemon_capability", lambda *a, **k: None)
+    monkeypatch.setattr(daemon_mod, "reconcile", lambda *a, **k: [])
+    monkeypatch.setattr(
+        daemon_mod,
+        "run_watcher",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk failed")),
+    )
+
+    assert daemon_mod._main() == 1
+
+
+def test_main_lock_busy_still_exits_zero(workspace: Workspace, monkeypatch) -> None:
+    """BUG-296：仅锁争用仍视为正常退出（exit 0），避免监督器误重启。"""
+    import contextlib
+
+    @contextlib.contextmanager
+    def busy_lock(_workspace):
+        raise daemon_mod._DaemonLockBusy("daemon 锁被占用")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        daemon_mod.sys,
+        "argv",
+        ["lwa-daemon", "--workspace", str(workspace.root), "--poll", "0.1"],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.platform_support.require_supported_platform",
+        lambda: None,
+    )
+    monkeypatch.setattr(daemon_mod, "daemon_lock", busy_lock)
+
+    assert daemon_mod._main() == 0
+
+
+def test_main_probes_capability_only_after_daemon_lock(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-298：子进程应先抢运行锁，再做可能耗时的 capability 探测。"""
+    import contextlib
+
+    inside_lock = {"value": False}
+
+    @contextlib.contextmanager
+    def fake_lock(_workspace):
+        inside_lock["value"] = True
+        try:
+            yield 123
+        finally:
+            inside_lock["value"] = False
+
+    def probe(*args, **kwargs):
+        assert inside_lock["value"] is True
+
+    monkeypatch.setattr(
+        daemon_mod.sys,
+        "argv",
+        ["lwa-daemon", "--workspace", str(workspace.root), "--poll", "0.1"],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.platform_support.require_supported_platform",
+        lambda: None,
+    )
+    monkeypatch.setattr(daemon_mod, "daemon_lock", fake_lock)
+    monkeypatch.setattr(daemon_mod, "_probe_daemon_capability", probe)
+    monkeypatch.setattr(daemon_mod, "reconcile", lambda *a, **k: [])
+    monkeypatch.setattr(daemon_mod, "run_watcher", lambda *a, **k: None)
+
+    assert daemon_mod._main() == 0
+
+
+def test_daemon_start_timeout_covers_slow_probe() -> None:
+    """BUG-298：启动等待须覆盖 Docker capability 探测（可达 10s+）。"""
+    assert daemon_mod.DAEMON_START_TIMEOUT >= 30.0
+
+
+def test_sigterm_handler_requests_graceful_stop(monkeypatch) -> None:
+    """BUG-299：SIGTERM 只设置 stop_event，让当前导入有机会收尾。"""
+    import signal
+
+    installed: dict[int, object] = {}
+    monkeypatch.setattr(
+        signal,
+        "signal",
+        lambda sig, handler: installed.setdefault(sig, handler),
+    )
+    stop = threading.Event()
+
+    with daemon_mod._graceful_stop_signals(stop):
+        handler = installed[signal.SIGTERM]
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        assert stop.is_set()
+
+
+def test_sigint_handler_requests_graceful_stop(monkeypatch) -> None:
+    """BUG-299：SIGINT 同样只设置 stop_event（对齐 gateway_service）。"""
+    import signal
+
+    installed: dict[int, object] = {}
+    monkeypatch.setattr(
+        signal,
+        "signal",
+        lambda sig, handler: installed.setdefault(sig, handler),
+    )
+    stop = threading.Event()
+
+    with daemon_mod._graceful_stop_signals(stop):
+        assert signal.SIGINT in installed
+        handler = installed[signal.SIGINT]
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+        assert stop.is_set()
+
+
+def test_import_zip_keyboardinterrupt_cleans_claimed_dir(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-299：导入中途 KeyboardInterrupt 须清理已 claim 的实例目录。"""
+    import zipfile
+
+    from local_webpage_access.config import Config
+    from local_webpage_access.importer import Importer
+    from local_webpage_access.registry import Registry
+
+    reg = Registry(workspace.db_path)
+    reg.open()
+    try:
+        zip_path = workspace.inbox / "interrupt-me.zip"
+        workspace.inbox.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("index.html", "<html>hi</html>")
+
+        importer = Importer(workspace, Config(), reg)
+        claimed: dict[str, object] = {}
+
+        real_claim = importer._claim_unique_id
+
+        def claim_and_mark(slug, *, on_conflict="rename"):
+            iid = real_claim(slug, on_conflict=on_conflict)
+            claimed["id"] = iid
+            claimed["dir"] = workspace.app_dir(iid)
+            return iid
+
+        monkeypatch.setattr(importer, "_claim_unique_id", claim_and_mark)
+        monkeypatch.setattr(
+            "shutil.copy2",
+            lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            importer.import_zip(str(zip_path))
+
+        assert claimed["id"]
+        assert not Path(claimed["dir"]).exists()
+    finally:
+        reg.close()

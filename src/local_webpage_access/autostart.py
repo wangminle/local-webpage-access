@@ -22,6 +22,7 @@ Linux/WSL（systemd user unit）上**直接监管前台进程**（修复 BUG-138
 
 from __future__ import annotations
 
+import getpass
 import os
 import shlex
 import shutil
@@ -214,7 +215,14 @@ def build_systemd_unit(
 ) -> str:
     """构造单个 systemd user unit 内容（Type=simple 前台 + Restart + PATH）。"""
     args = _foreground_program_arguments(name, python_exe, workspace_root)
-    exec_start = " ".join(shlex.quote(a) for a in args)
+    exec_start = " ".join(shlex.quote(a) for a in args).replace("%", "%%")
+    workdir = str(workspace_root).replace("%", "%%")
+    path_env = (
+        _build_path_env(caddy_dir)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("%", "%%")
+    )
     after = "network-online.target"
     if name == "manager":
         after += " lwa-daemon.service"
@@ -225,11 +233,11 @@ def build_systemd_unit(
         "",
         "[Service]",
         "Type=simple",
-        f"WorkingDirectory={workspace_root}",
+        f"WorkingDirectory={workdir}",
         # BUG-174：PATH 值整体加引号——systemd 的 Environment= 按空格分割多个赋值，
         # 未加引号时含空格目录（WSL 默认 PATH 必含 /mnt/c/Program Files 之类）会被截断，
         # 监管进程拿到损坏 PATH。_unit_path_env 已兼容带引号读取。
-        f'Environment="PATH={_build_path_env(caddy_dir)}"',
+        f'Environment="PATH={path_env}"',
         # BUG-230：systemd --user 无法可靠设置 SupplementaryGroups=docker；
         # 用户须在 usermod -aG docker 后重新登录，再 systemctl --user restart 本单元，
         # 否则 manager/daemon 无 docker.sock 权限，会把运行中容器误标 stopped。
@@ -738,7 +746,7 @@ def _migrate_detached_for_supervision(
         if name == "daemon":
             from local_webpage_access import daemon as daemon_mod
 
-            if not daemon_mod.is_running(ws):  # type: ignore[attr-defined]
+            if not daemon_mod.is_running(ws):
                 return True
             return bool(daemon_mod.stop_daemon(ws))
         from local_webpage_access.manager_service import (
@@ -1083,11 +1091,26 @@ def coordinated_restart(
 # ---- linger ----------------------------------------------------------------
 
 
+def _linger_username() -> str:
+    """解析 linger 操作目标用户；永不回退 root（BUG-339）。"""
+    user = os.environ.get("USER") or ""
+    if not user:
+        try:
+            user = getpass.getuser()
+        except Exception as exc:  # noqa: BLE001
+            raise AutostartError(
+                f"无法确定当前用户，拒绝操作 linger：{exc}"
+            ) from exc
+    if not user:
+        raise AutostartError("无法确定当前用户，拒绝以 root 操作 linger")
+    return user
+
+
 def enable_linger(*, runner: SubprocessRunner = _default_runner) -> bool:
     """``loginctl enable-linger $USER``（Linux/WSL）。失败返回 False。"""
     if detect_platform() not in (PLATFORM_LINUX, PLATFORM_WSL):
         return False
-    user = os.environ.get("USER") or "root"
+    user = _linger_username()
     try:
         res = runner(["loginctl", "enable-linger", user], capture_output=True)
         return res.returncode == 0
@@ -1099,7 +1122,7 @@ def linger_enabled(*, runner: SubprocessRunner = _default_runner) -> bool:
     """当前用户是否已 enable-linger。"""
     if detect_platform() not in (PLATFORM_LINUX, PLATFORM_WSL):
         return True  # 非 Linux 无此概念，视为满足
-    user = os.environ.get("USER") or "root"
+    user = _linger_username()
     try:
         res = runner(
             ["loginctl", "show-user", user, "--value", "-p", "Linger"],
@@ -1114,7 +1137,7 @@ def disable_linger(*, runner: SubprocessRunner = _default_runner) -> bool:
     """``loginctl disable-linger $USER``（Linux/WSL）。失败返回 False。"""
     if detect_platform() not in (PLATFORM_LINUX, PLATFORM_WSL):
         return True  # 非 Linux 无此概念
-    user = os.environ.get("USER") or "root"
+    user = _linger_username()
     try:
         res = runner(["loginctl", "disable-linger", user], capture_output=True)
         return res.returncode == 0
@@ -1346,7 +1369,7 @@ def _service_process_running(ws: Workspace, config: Config, name: str) -> bool:
     if name == "daemon":
         from local_webpage_access import daemon as daemon_mod
 
-        return bool(daemon_mod.is_running(ws))  # type: ignore[attr-defined]
+        return bool(daemon_mod.is_running(ws))
     if name == "manager":
         from local_webpage_access.manager_service import manager_status
 

@@ -98,8 +98,9 @@ def get_build_process_hub() -> BuildProcessHub:
     return _hub
 
 
-def enter_build_context(instance_id: str) -> None:
+def enter_build_context(instance_id: str, *, build_token: str | None = None) -> None:
     _tls.instance_id = instance_id
+    _tls.build_token = build_token
     _hub.clear_cancel(instance_id)
 
 
@@ -107,12 +108,18 @@ def exit_build_context(instance_id: str | None = None) -> None:
     current = getattr(_tls, "instance_id", None)
     if instance_id is None or current == instance_id:
         _tls.instance_id = None
+        _tls.build_token = None
     if instance_id:
         _hub.clear(instance_id)
 
 
 def current_build_instance_id() -> str | None:
     return getattr(_tls, "instance_id", None)
+
+
+def current_build_token() -> str | None:
+    """返回当前线程构建代次令牌，供跨进程 CAS 更新使用。"""
+    return getattr(_tls, "build_token", None)
 
 
 def popen_new_session_kwargs() -> dict:
@@ -366,6 +373,7 @@ __all__ = [
     "ActiveBuildProc",
     "BuildProcessHub",
     "current_build_instance_id",
+    "current_build_token",
     "enter_build_context",
     "exit_build_context",
     "get_build_process_hub",

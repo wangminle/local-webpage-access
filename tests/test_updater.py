@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 from local_webpage_access.updater import (
     UpdateOptions,
-    UpdateReport,
     locate_repo,
     migrate_config_defaults,
     run_update,
@@ -89,13 +87,51 @@ def _opts(**kw) -> UpdateOptions:
 def test_locate_repo_explicit_valid(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "pyproject.toml").write_text("[project]\nname='x'\n")
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname='local-webpage-access'\n"
+    )
     assert locate_repo(str(repo)) == repo.resolve()
 
 
 def test_locate_repo_explicit_missing_pyproject(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="pyproject.toml"):
         locate_repo(str(tmp_path))
+
+
+def test_locate_repo_rejects_unrelated_python_project(tmp_path: Path) -> None:
+    """BUG-306：存在 pyproject.toml 不代表是 LWA 源码根。"""
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='unrelated-project'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileNotFoundError, match="local-webpage-access"):
+        locate_repo(str(tmp_path))
+
+
+def test_locate_repo_git_fallback_rejects_unrelated_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-306：git 根兜底也必须校验 project.name。"""
+    from local_webpage_access import updater
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='unrelated-project'\n",
+        encoding="utf-8",
+    )
+    # editable 候选为 tmp_path/src（无 pyproject），强制落到 git 兜底
+    fake_here = tmp_path / "src" / "local_webpage_access" / "updater.py"
+    fake_here.parent.mkdir(parents=True, exist_ok=True)
+    fake_here.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.setattr(updater, "__file__", str(fake_here))
+
+    class _Result:
+        returncode = 0
+        stdout = str(tmp_path) + "\n"
+
+    monkeypatch.setattr(updater.subprocess, "run", lambda *a, **k: _Result())
+
+    assert locate_repo(None) is None
 
 
 def test_locate_repo_falls_back_to_editable_install() -> None:
@@ -128,6 +164,30 @@ def test_migrate_config_adds_missing_keys(workspace: Workspace) -> None:
     assert "staticGatewayPort" in new_raw
     parsed = yaml.safe_load(new_raw)
     assert parsed["managerPort"] == 17800
+
+
+def test_migrate_config_preserves_comments(workspace: Workspace) -> None:
+    """BUG-356：补齐缺失键时保留原文件注释与用户格式。"""
+    commented = (
+        "# keep-me: workspace comment\n"
+        "managerPort: 17800\n"
+        "# port pool note\n"
+        "portPool:\n"
+        "  start: 21000\n"
+        "  end: 21050\n"
+    )
+    workspace.config_path.write_text(commented, encoding="utf-8")
+    cfg = load_config(workspace)
+    missing, written = migrate_config_defaults(workspace, cfg)
+    assert written is True
+    assert missing
+    new_raw = workspace.config_path.read_text(encoding="utf-8")
+    assert "# keep-me: workspace comment" in new_raw
+    assert "# port pool note" in new_raw
+    assert "managerPort: 17800" in new_raw
+    parsed = yaml.safe_load(new_raw)
+    assert parsed["managerPort"] == 17800
+    assert "staticGatewayPort" in parsed
 
 
 def test_migrate_config_noop_when_complete(workspace: Workspace) -> None:
@@ -169,6 +229,80 @@ def test_migrate_config_deep_merges_nested_dict(workspace: Workspace) -> None:
     # 用户的 start 保留，end 从默认补齐（深层合并，非整体覆盖）
     assert parsed["portPool"]["start"] == 19000
     assert parsed["portPool"]["end"] == Config().portPool.end
+
+
+def test_migrate_config_deep_merges_flow_style_nested_dict(workspace: Workspace) -> None:
+    """CHK-115：flow-style 嵌套（portPool: {start: …}）缺子键时也须补齐 end。"""
+    workspace.config_path.write_text(
+        "managerPort: 17800\n"
+        "portPool: {start: 19000}\n"
+        "# keep-comment\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(workspace)
+    missing, written = migrate_config_defaults(workspace, cfg)
+
+    assert written is True
+    assert "staticGatewayPort" in missing
+    raw = workspace.config_path.read_text(encoding="utf-8")
+    assert "# keep-comment" in raw
+    parsed = yaml.safe_load(raw)
+    assert parsed["portPool"]["start"] == 19000
+    assert parsed["portPool"]["end"] == Config().portPool.end
+
+
+def test_run_update_migrates_config_via_subprocess(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-357：pip 之后配置迁移须在新进程执行，避免旧 Config 类漏补新字段。"""
+    import local_webpage_access.updater as upd
+
+    fake_repo = workspace.root / "repo"
+    fake_repo.mkdir()
+    (fake_repo / "pyproject.toml").write_text(
+        '[project]\nname = "local-webpage-access"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(upd, "locate_repo", lambda e: fake_repo)
+    monkeypatch.setattr(
+        upd, "run_pip_install", lambda repo: "Successfully installed local-webpage-access"
+    )
+    monkeypatch.setattr(upd, "sync_skills", lambda ws, force=False: ([], [], []))
+
+    in_process_calls: list[object] = []
+    subproc_calls: list[object] = []
+
+    def tracking_in_process(ws, cfg):
+        in_process_calls.append((ws, cfg))
+        return ["staticGatewayPort"], True
+
+    def tracking_subproc(ws):
+        subproc_calls.append(ws)
+        return ["staticGatewayPort"], True
+
+    monkeypatch.setattr(upd, "migrate_config_defaults", tracking_in_process)
+    monkeypatch.setattr(
+        upd, "run_migrate_config_defaults", tracking_subproc, raising=False
+    )
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=UpdateOptions(
+            skip_pip=False,
+            sync_skills=False,
+            restart_manager=False,
+            restart_daemon=False,
+            restart_instances=False,
+            run_doctor=False,
+            review_access=False,
+        ),
+    )
+    assert not in_process_calls, "run_update 不应在同进程直接 migrate_config_defaults"
+    assert subproc_calls, "run_update 应走 run_migrate_config_defaults（子进程）"
+    step = report.step("migrateConfig")
+    assert step is not None
+    assert step.status == "ok"
 
 
 # ---- sync_skills -----------------------------------------------------------

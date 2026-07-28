@@ -27,6 +27,7 @@ from local_webpage_access.access import (
     refresh_network_entries,
     review_access,
 )
+from local_webpage_access.models import DesiredState, InstanceManifest, Status
 
 
 # ---- 工具：构造静态实例 manifest --------------------------------------------
@@ -146,6 +147,37 @@ def test_refresh_preserves_path_alias_and_routeurl(workspace, registry, config, 
     assert saved.network.routeUrl == "http://192.168.1.50:8080/voiceprint/"
 
 
+def test_refresh_preserves_network_extra_fields(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-365：refresh 只更新地址字段，不得抹掉 NetworkConfig extra=allow 的扩展键。"""
+    _seed_static(
+        workspace,
+        registry,
+        "demo",
+        host_port=21000,
+        lan_url="http://10.0.0.99:21000",
+    )
+    from local_webpage_access.models import InstanceManifest, NetworkConfig
+
+    manifest_path = workspace.app_manifest_path("demo")
+    manifest = InstanceManifest.load(manifest_path)
+    manifest.network = NetworkConfig(
+        lanUrl=manifest.network.lanUrl if manifest.network else "",
+        customMeta={"source": "skill"},
+    )
+    manifest.save(manifest_path)
+
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50"
+    )
+    refresh_network_entries(workspace, config, registry)
+
+    saved = InstanceManifest.load(manifest_path)
+    assert saved.network.lanUrl == "http://192.168.1.50:21000"
+    assert saved.network.customMeta == {"source": "skill"}
+
+
 def test_refresh_ignores_stale_routehost_when_port_mode(
     workspace, registry, config, monkeypatch
 ) -> None:
@@ -258,6 +290,36 @@ def test_refresh_skips_instance_without_hostport(workspace, registry, config, mo
     assert "noport" in report.skipped
 
 
+def test_refresh_skips_write_when_lan_ip_unavailable(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-325：LAN IP 探测失败时不得把现有 lanUrl/routeUrl 写成 None。"""
+    _seed_static(
+        workspace,
+        registry,
+        "demo",
+        host_port=21000,
+        lan_url="http://10.0.0.99:21000",
+        route_host="demo-alias",
+        route_url="http://10.0.0.99:8080/demo-alias/",
+    )
+    from local_webpage_access.models import InstanceManifest
+
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: None
+    )
+
+    report = refresh_network_entries(workspace, config, registry)
+
+    assert report.lan_ip is None
+    assert report.refreshed == []
+    assert "demo" in report.skipped
+    saved = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    assert saved.network is not None
+    assert saved.network.lanUrl == "http://10.0.0.99:21000"
+    assert saved.network.routeUrl == "http://10.0.0.99:8080/demo-alias/"
+
+
 # ---- review_access：lanUrl 漂移（G1/G5）------------------------------------
 
 
@@ -278,6 +340,33 @@ def test_review_detects_lan_url_stale(workspace, registry, config, monkeypatch):
     assert rep.lan_url_stale is True
     assert rep.status == "warn"
     assert any("漂移" in f for f in rep.findings)
+
+
+def test_review_skips_desired_stopped_instance(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-301：用户已停用的实例不应因端口不可达被判访问失败。"""
+    _seed_static(
+        workspace,
+        registry,
+        "demo",
+        host_port=21000,
+        lan_url="http://127.0.0.1:21000",
+    )
+    manifest = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    manifest.desiredState = DesiredState.STOPPED
+    manifest.status = Status.STOPPED
+    manifest.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(manifest)
+    monkeypatch.setattr(
+        "local_webpage_access.access._http_get",
+        lambda *a, **kw: pytest.fail("停用实例不应发起 HTTP 探测"),
+    )
+
+    report = review_access(workspace, config, registry)
+
+    assert report.instances[0].status == "skip"
+    assert any("已停用" in item for item in report.instances[0].findings)
 
 
 def _probe_ok(url, status=200, length=1024):
@@ -706,4 +795,3 @@ def test_fetch_text_marks_probe_param(monkeypatch) -> None:
     assert text == "<html>alias entry</html>"
     assert "__lwa_probe=" in captured["url"]
     assert "/my-app/" in captured["url"]
-

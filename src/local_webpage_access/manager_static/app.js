@@ -39,7 +39,10 @@
     function isLocalhostAccess() {
       if (!loc) return true;
       var h = loc.hostname;
-      return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+      // 后端 _is_loopback_host 认整个 127.0.0.0/8 与 ::1；前端须对齐，
+      // 否则会对本机访问多要一次 token（BUG-289）。
+      if (h === "localhost" || h === "[::1]" || h === "::1") return true;
+      return /^127\.\d+\.\d+\.\d+$/.test(h);
     }
 
     function getToken() {
@@ -102,6 +105,14 @@
         }
         return resp.json();
       });
+    }
+
+    // BUG-289：把 apiFetch 抛出的错误转成一句用户能看懂的中文。
+    function loadErrorText(e) {
+      var status = e && e.status;
+      var detail = (e && e.message) || "未知错误";
+      if (status) return "加载失败（HTTP " + status + "）：" + detail;
+      return "加载失败：" + detail + "（请检查管理服务是否在运行）";
     }
 
     // ---- 详情/弹窗渲染辅助（HTML 字符串，经 v-html 注入）----
@@ -352,9 +363,13 @@
           instances: [],
           pageviewMap: {},
           filters: { search: "", status: "", form: "", pending: false, redundant: false },
+          // BUG-289：非 401 的加载失败（5xx / 断网 / 非 JSON）也要可见，
+          // 否则页面看起来「已登录但什么都没有」，与真的没有实例无法区分。
+          loadError: "",
           // 弹窗/抽屉状态
           needToken: false,
           tokenInput: "",
+          tokenVisible: false,
           drawer: { open: false, title: "", body: "" },
           currentDetailId: null,
           logs: { open: false, title: "", category: "run", content: "", instanceId: null },
@@ -461,8 +476,15 @@
         tbodyHtml: function () {
           var self = this;
           if (!this.instances.length) {
+            // BUG-289：加载失败与「真的没有实例」必须区分，否则空壳页面会被
+            // 误读成「部署的站点不见了」。
+            if (this.loadError) {
+              return '<tr class="empty-row"><td colspan="13">' +
+                LWA.esc(this.loadError) +
+                "</td></tr>";
+            }
             return '<tr class="empty-row"><td colspan="13">' +
-              (this.instances.length ? "没有匹配的实例" : "暂无实例，把 zip 放进 inbox/ 或用 lwa import 导入") +
+              "暂无实例，把 zip 放进 inbox/ 或用 lwa import 导入" +
               "</td></tr>";
           }
           var rows = this.filteredInstances;
@@ -498,8 +520,21 @@
           var val = this.tokenInput.trim();
           if (!val) return;
           if (storage) storage.setItem(TOKEN_KEY, val);
-          this.needToken = false;
-          this.bootstrap();
+          // BUG-289：先证明 token 能用再关弹窗；否则失败时只剩一个空壳页面。
+          var self = this;
+          apiFetch(this, "/api/instances")
+            .then(function () {
+              self.needToken = false;
+              self.bootstrap();
+            })
+            .catch(function (e) {
+              if (e && e.message === "unauthorized") return; // 已由 apiFetch 提示
+              if (storage) storage.removeItem(TOKEN_KEY);
+              self.toast(loadErrorText(e), "error");
+            });
+        },
+        toggleTokenVisibility: function () {
+          this.tokenVisible = !this.tokenVisible;
         },
 
         // ---- 启动 ----
@@ -517,7 +552,7 @@
               action: data.action,
               serviceUser: data.serviceUser,
             };
-          }).catch(function () {});
+          }).catch(function (e) { self.noteLoadError(e); });
           this.refresh();
           this._timer = setIntervalFn(function () { self.refresh(); }, POLL_MS);
         },
@@ -527,14 +562,24 @@
           var self = this;
           apiFetch(this, "/api/stats").then(function (data) {
             self.stats = data;
-          }).catch(function () {});
+          }).catch(function (e) { self.noteLoadError(e); });
           apiFetch(this, "/api/pageviews").then(function (data) {
             self.pageviewMap = (data && data.instances) || {};
-          }).catch(function () {});
+          }).catch(function (e) { self.noteLoadError(e); });
           apiFetch(this, "/api/instances").then(function (data) {
             self.instances = data.instances || [];
+            self.loadError = "";
             if (self.currentDetailId) self.openDetail(self.currentDetailId);
-          }).catch(function () {});
+          }).catch(function (e) { self.noteLoadError(e); });
+        },
+
+        // BUG-289：401 由 apiFetch 处理；其余失败必须让用户看见，且只在状态
+        // 由「正常」翻转为「失败」时弹一次 toast，避免轮询刷屏。
+        noteLoadError: function (e) {
+          if (e && e.message === "unauthorized") return;
+          var text = loadErrorText(e);
+          if (this.loadError !== text) this.toast(text, "error");
+          this.loadError = text;
         },
 
         // IMP-040：手动刷新落盘访问地址
@@ -730,7 +775,11 @@
           apiFetch(
             this,
             "/api/instances/" + encodeURIComponent(id) + "/remove?" + qs,
-            { method: "POST" }
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ confirmId: dlg.confirmId })
+            }
           )
             .then(function () {
               self.toast(
@@ -1041,9 +1090,21 @@
     '<div class="modal" :hidden="!needToken">',
     '  <div class="token-box"><h2>需要 API token</h2>',
     '    <p>请输入管理页 token（由 <code>lwa manager on</code> / <code>lwa manager start</code> 输出；本机 127.0.0.1 访问免 token）：</p>',
-    '    <input type="password" placeholder="API token" autocomplete="off" aria-label="API token" v-model="tokenInput" @keydown.enter="submitToken" />',
+    '    <div class="token-input-wrap">',
+    '      <input id="token-input" :type="tokenVisible ? \'text\' : \'password\'" placeholder="API token" autocomplete="off" aria-label="API token" v-model="tokenInput" @keydown.enter="submitToken" />',
+    '      <button type="button" class="token-visibility-btn" @click="toggleTokenVisibility"',
+    '        :aria-label="tokenVisible ? \'隐藏 token\' : \'显示 token\'"',
+    '        :title="tokenVisible ? \'隐藏\' : \'显示\'">',
+    '        <svg v-if="!tokenVisible" class="token-visibility-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
+    '          <path fill="currentColor" d="M12 5c-5 0-9.27 3.11-11 7 1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/>',
+    "        </svg>",
+    '        <svg v-else class="token-visibility-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
+    '          <path fill="currentColor" d="M2.1 3.51 3.51 2.1l18.39 18.39-1.41 1.41-3.28-3.28A11.7 11.7 0 0 1 12 19c-5 0-9.27-3.11-11-7a12.7 12.7 0 0 1 4.68-5.41L2.1 3.51zM12 7a5 5 0 0 1 4.9 6.09l-1.57-1.57A3 3 0 0 0 12 9a3 3 0 0 0-.52.05L9.9 7.47A4.9 4.9 0 0 1 12 7zm0 10c1.2 0 2.33-.24 3.36-.67l-1.6-1.6A3 3 0 0 1 9.27 10.9L7.7 9.33A4.98 4.98 0 0 0 12 17zM12 5c5 0 9.27 3.11 11 7a12.8 12.8 0 0 1-3.16 4.33l-1.45-1.45A10.7 10.7 0 0 0 21.05 12 10.7 10.7 0 0 0 12 7c-.5 0-1 .04-1.48.11L8.96 5.55C9.92 5.2 10.94 5 12 5z"/>',
+    "        </svg>",
+    "      </button>",
+    "    </div>",
     '    <div class="token-actions"><button class="btn btn-primary" @click="submitToken">进入</button></div>',
-    '    <p class="token-hint">token 保存在浏览器 sessionStorage，关闭标签页即清除。</p>',
+    '    <p class="token-hint">token 保存在浏览器 sessionStorage，关闭标签页即清除。从局域网打开新标签时可用 <code>?token=</code> 传递（会进入浏览器历史与可能的访问日志，用后请从地址栏清除）。</p>',
     "  </div></div>",
     // 路径别名
     '<div class="modal" :hidden="!pathAlias.open">',

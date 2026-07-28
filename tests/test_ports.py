@@ -207,6 +207,22 @@ def test_allocate_skips_host_listening_port(registry: Registry) -> None:
         s.close()
 
 
+def test_allocate_ignores_bind_only_not_listening(registry: Registry, monkeypatch) -> None:
+    """BUG-364：仅 bind 占用（如 TIME_WAIT）且无监听者时仍应可分配。"""
+    from local_webpage_access.config import PortPool
+
+    cfg = Config(portPool=PortPool(start=20000, end=20010))
+    registry.upsert_from_manifest(make_static_manifest("a"))
+    alloc = PortAllocator(cfg, registry)
+
+    def fake_listening(port: int) -> bool:
+        return port == 20001  # 仅 20001 视为真占用
+
+    monkeypatch.setattr("local_webpage_access.ports.is_port_listening", fake_listening)
+    port = alloc.allocate("a", probe_host=True)
+    assert port == 20000
+
+
 # ---- 回归测试：BUG-017 ----------------------------------------------------
 #
 # BUG-017：并发分配时两个实例可能选中同一空闲端口，旧 INSERT OR REPLACE 让后

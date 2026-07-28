@@ -12,6 +12,12 @@ from typing import Any
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import GatewayError, LifecycleError, RecognitionError
+from local_webpage_access.file_lock import (
+    ensure_lockable,
+    release_exclusive,
+    try_acquire_exclusive,
+    write_lock_payload,
+)
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import (
     InstanceManifest,
@@ -241,38 +247,32 @@ def path_alias_lock(
     if not _alias_thread_lock.acquire(timeout=timeout):
         raise LifecycleError(f"路径别名锁等待超时（{timeout}s）")
     file_acquired = False
+    fd: int | None = None
     lock_path = _alias_lock_path(workspace)
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        ensure_lockable(fd)
         while True:
-            fd: int | None = None
             try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            except FileExistsError:
-                if _alias_lock_is_stale(lock_path):
-                    with contextlib.suppress(FileNotFoundError):
-                        lock_path.unlink()
-                    continue
+                try_acquire_exclusive(fd)
+                write_lock_payload(
+                    fd, f"{os.getpid()}\n{time.time():.3f}\n".encode()
+                )
+                file_acquired = True
+                break
+            except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise LifecycleError(f"路径别名锁被占用，等待超时（{timeout}s）")
                 time.sleep(0.05)
-                continue
-            try:
-                os.write(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
-                os.close(fd)
-                fd = None
-                file_acquired = True
-                break
-            finally:
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
         yield
     finally:
-        if file_acquired:
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                lock_path.unlink()
+        if file_acquired and fd is not None:
+            release_exclusive(fd)
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
         _alias_thread_lock.release()
 
 

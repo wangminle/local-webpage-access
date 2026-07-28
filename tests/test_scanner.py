@@ -174,6 +174,52 @@ def test_detect_node_backend_port_from_scripts_flag(tmp_path: Path) -> None:
     assert result.internalPort == 4000
 
 
+def test_detect_node_port_prefers_start_over_vite_dev(tmp_path: Path) -> None:
+    """BUG-322：express+vite 时不应被 dev/build 的 Vite 端口覆盖。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0", "vite": "^5.0.0"},
+                "scripts": {
+                    "start": "node server.js",
+                    "dev": "vite --port 5173",
+                    "build": "vite build --port 5173",
+                },
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.internalPort == 3000
+
+
+def test_detect_node_port_from_dev_when_no_start(tmp_path: Path) -> None:
+    """BUG-322：无 start 时可读 dev 脚本端口。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"dev": "PORT=4000 node server.js"},
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.internalPort == 4000
+
+
+def test_detect_node_invalid_port_left_none(tmp_path: Path) -> None:
+    """BUG-322：非法端口（如 99999）不得写入 internalPort。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "PORT=99999 node server.js"},
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.internalPort is None
+
+
 def test_detect_node_unknown_pending(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(
         json.dumps({"dependencies": {"lodash": "^4.0.0"}, "scripts": {}})
@@ -555,3 +601,77 @@ def test_detect_requirements_prod_not_treated_as_static(tmp_path: Path) -> None:
     result = Scanner().detect(tmp_path)
     assert result.kind == Kind.PYTHON
     assert result.pending is False
+
+
+# ---- BUG-349 / BUG-350 / BUG-352 -------------------------------------------
+
+
+def test_runtime_paths_not_false_positive_when_workspace_path_contains_app(
+    tmp_path: Path,
+) -> None:
+    """BUG-349：工作区绝对路径含 app 段时，不得把任意 runtime_paths.py 判为 RUNTIME_ROOT。"""
+    root = tmp_path / "app" / "workspace" / "proj"
+    root.mkdir(parents=True)
+    (root / "lib").mkdir()
+    (root / "lib" / "runtime_paths.py").write_text("ROOT = '.'\n", encoding="utf-8")
+    (root / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+
+    summary = summarize(root)
+    assert summary.has_runtime_paths is False
+
+
+def test_runtime_paths_detects_explicit_layouts(tmp_path: Path) -> None:
+    """BUG-349 / BUG-198：仅 src/app 或 app 下的 runtime_paths.py 才算命中。"""
+    for rel in (("src", "app", "runtime_paths.py"), ("app", "runtime_paths.py")):
+        root = tmp_path / "-".join(rel[:-1])
+        target = root.joinpath(*rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x=1\n", encoding="utf-8")
+        (root / "requirements.txt").write_text("fastapi\nsqlalchemy\n", encoding="utf-8")
+        assert summarize(root).has_runtime_paths is True
+
+
+def test_heavy_db_in_devdependencies_does_not_mark_pending(tmp_path: Path) -> None:
+    """BUG-350：重型库只看 dependencies；devDependencies 里的 redis 不应让纯前端 pending。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "devDependencies": {
+                    "vite": "^5.0.0",
+                    "react": "^18.0.0",
+                    "redis": "^4.6.0",
+                },
+                "scripts": {"build": "vite build"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.form == "frontend-static"
+    assert not any("重型数据库" in n or "redis" in n for n in result.notes)
+
+
+def test_heavy_db_in_dependencies_still_marks_pending(tmp_path: Path) -> None:
+    """BUG-350 对照：dependencies 命中 redis 仍应 pending。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.0.0", "redis": "^4.6.0"},
+                "scripts": {"start": "node server.js"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+    assert any("redis" in n for n in result.notes)
+
+
+def test_detect_tornado_infers_port_8888(tmp_path: Path) -> None:
+    """BUG-352：tornado 惯例内部端口为 8888，不得误推 8000。"""
+    (tmp_path / "requirements.txt").write_text("tornado\n", encoding="utf-8")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.internalPort == 8888
+    assert "tornado" in result.stack

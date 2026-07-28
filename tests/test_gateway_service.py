@@ -12,7 +12,6 @@ import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -101,6 +100,8 @@ def fake_gateway(monkeypatch, workspace):
         "call_order": [],
         "stopped_builtin": [],
         "pid": 12345,
+        "owner": "lwa_service_user",
+        "workspace_match": True,
     }
 
     class _Fake:
@@ -113,6 +114,13 @@ def fake_gateway(monkeypatch, workspace):
 
         def _admin_alive(self, **kw) -> bool:
             return state["admin_alive"]
+
+        def inspect_caddy_owner(self) -> dict:
+            return {
+                "owner": state["owner"],
+                "workspace_match": state["workspace_match"],
+                "pid": state["pid"],
+            }
 
         def caddy_start(self) -> bool:
             state["start_calls"] += 1
@@ -260,6 +268,21 @@ def test_start_gateway_noop_when_already_running_and_state_present(
     assert read_state(workspace).started_at == "t"
 
 
+def test_start_gateway_rejects_foreign_admin_before_stopping_builtin(
+    workspace: Workspace, config: Config, fake_gateway
+) -> None:
+    """BUG-302：外部进程占用 admin :2019 时不得停 builtin 或伪报启动成功。"""
+    fake_gateway["admin_alive"] = True
+    fake_gateway["owner"] = "foreign_process"
+    fake_gateway["workspace_match"] = False
+
+    with pytest.raises(LifecycleError, match="非本工作区"):
+        start_gateway(workspace, config)
+
+    assert fake_gateway["stop_builtin_calls"] == 0
+    assert fake_gateway["start_calls"] == 0
+
+
 def test_start_gateway_raises_on_caddy_start_failure(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
@@ -284,8 +307,10 @@ def test_start_gateway_creates_and_releases_lock(
 ) -> None:
     fake_gateway["admin_alive"] = False
     start_gateway(workspace, config)
-    # 启动结束后锁文件应被清理（即便成功路径）
-    assert not start_lock_path(workspace).exists()
+    # inode 保留，锁已释放后可再次获取（避免 unlink 导致跨进程双锁）。
+    assert start_lock_path(workspace).exists()
+    with gateway_start_lock(workspace, timeout=0.1):
+        pass
 
 
 def test_start_gateway_records_switch_event_with_registry(
@@ -468,36 +493,66 @@ def test_maybe_start_gateway_noop_when_already_running(
 
 
 def test_gateway_start_lock_serializes(workspace: Workspace, monkeypatch) -> None:
-    """锁文件被活进程占用时应抛 LifecycleError（活锁不回收）。"""
+    """底层文件锁被占用时应抛 LifecycleError。"""
+    from local_webpage_access.file_lock import ensure_lockable, try_acquire_exclusive
+
     lock = start_lock_path(workspace)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")  # 模拟活进程持锁
-    # 缩短超时避免拖慢测试
-    monkeypatch.setattr("time.sleep", lambda *_: None)
-    with pytest.raises(LifecycleError):
-        with gateway_start_lock(workspace, timeout=0.0):
-            pass
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    try:
+        monkeypatch.setattr("time.sleep", lambda *_: None)
+        with pytest.raises(LifecycleError):
+            with gateway_start_lock(workspace, timeout=0.0):
+                pass
+    finally:
+        os.close(fd)
 
 
 def test_gateway_start_lock_cleans_up_on_success(workspace: Workspace) -> None:
     with gateway_start_lock(workspace):
         assert start_lock_path(workspace).exists()
-    assert not start_lock_path(workspace).exists()
+    assert start_lock_path(workspace).exists()
+    with gateway_start_lock(workspace, timeout=0.1):
+        pass
 
 
-def test_gateway_start_lock_recovers_stale(workspace: Workspace) -> None:
-    """BUG-175：死 PID 或超龄的网关启动锁可立即回收（对齐 manager_start_lock）。"""
+def test_gateway_start_lock_ignores_stale_payload(workspace: Workspace) -> None:
+    """BUG-327：陈旧内容不影响 OS 锁获取，也不再按年龄偷锁。"""
     workspace.ensure_workspace_dirs()
     lock = start_lock_path(workspace)
     lock.write_text("999999\n", encoding="utf-8")
     old = time.time() - 120
     os.utime(lock, (old, old))
-    with patch(
-        "local_webpage_access.gateway_service.is_pid_alive", return_value=False
-    ):
-        with gateway_start_lock(workspace, timeout=0.1):
-            assert lock.is_file()
-    assert not lock.exists()
+    with gateway_start_lock(workspace, timeout=0.1):
+        assert lock.is_file()
+    assert lock.exists()
+
+
+def test_gateway_start_lock_does_not_steal_live_holder_by_age(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-327：活持锁者即使锁文件很旧也不可被年龄偷锁。"""
+    from local_webpage_access.file_lock import (
+        ensure_lockable,
+        try_acquire_exclusive,
+        write_lock_payload,
+    )
+
+    workspace.ensure_workspace_dirs()
+    lock = start_lock_path(workspace)
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    write_lock_payload(fd, f"{os.getpid()}\n{time.time() - 3600:.3f}\n".encode())
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    try:
+        with pytest.raises(LifecycleError, match="网关启动锁"):
+            with gateway_start_lock(workspace, timeout=0.0):
+                pass
+    finally:
+        os.close(fd)
 
 
 def test_run_gateway_foreground_refreshes_capability_after_start(

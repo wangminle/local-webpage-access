@@ -8,7 +8,7 @@
 
 **命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 17 个），避免与其他项目的 skill 撞名。
 
-日常运维（网关选型、冗余清理、容器别名、浏览量）见仓库 [`docs/operations-playbook.md`](../../../../docs/operations-playbook.md)。
+日常运维（网关选型、冗余清理、容器别名、浏览量）见仓库 [`docs/operations-playbook.md`](../../../docs/operations-playbook.md)。
 
 ## 总览
 

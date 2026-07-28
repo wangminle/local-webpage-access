@@ -327,8 +327,10 @@ if path.exists():
     except Exception as exc:
         bak = path.with_suffix(".json.bak-lwa")
         shutil.copy2(path, bak)
-        print(f"警告：无法解析 {path} ({exc})，已备份为 {bak}", flush=True)
-        data = {}
+        raise SystemExit(
+            f"错误：无法解析 {path} ({exc})，已备份为 {bak}；"
+            "为避免丢失现有 Docker 配置，本次拒绝覆盖，请修复 JSON 后重试"
+        )
 
 existing = data.get("registry-mirrors") or []
 if not isinstance(existing, list):

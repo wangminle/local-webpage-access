@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Callable
 from unittest.mock import MagicMock
 
 import pytest
@@ -369,6 +368,27 @@ def test_run_full_bootstrap_rejects_without_backend_capability_loop(
     assert result.exit_code == 1
     assert result.overall == "unready"
     assert any("强制闭环" in m or "能力验收未通过" in m for m in result.messages)
+    from local_webpage_access.config import load_config
+
+    assert load_config(ws).profile == "default"
+
+
+def test_persist_full_config_only_writes_profile_when_ready(tmp_path: Path) -> None:
+    """BUG-305：验收失败时不得把 profile 持久化为 full。"""
+    from local_webpage_access.config import example_config_text, load_config
+    from local_webpage_access.host_bootstrap import _persist_full_config
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path)
+    ws.ensure_workspace_dirs()
+    ws.config_path.write_text(example_config_text(), encoding="utf-8")
+    assert load_config(ws).profile == "default"
+
+    _persist_full_config(tmp_path, "lwa", ready=False)
+    assert load_config(ws).profile == "default"
+
+    _persist_full_config(tmp_path, "lwa", ready=True)
+    assert load_config(ws).profile == "full"
 
 
 def test_maybe_offer_propagates_script_failure(monkeypatch, tmp_path: Path) -> None:
@@ -396,6 +416,66 @@ def test_maybe_offer_propagates_script_failure(monkeypatch, tmp_path: Path) -> N
     assert result.attempted is True
     assert result.script_ok is False
     assert result.recheck_ok is False
+
+
+def test_maybe_offer_script_failure_includes_stderr(monkeypatch, tmp_path: Path) -> None:
+    """审查 L5：Docker 安装脚本失败须带回 stderr，便于排障。"""
+    script = tmp_path / "install-docker-linux.sh"
+    script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.detect_docker_engine",
+        lambda **_: DockerEngineState(status="missing"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.resolve_install_script",
+        lambda *a, **k: script,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap._stdin_is_interactive",
+        lambda: False,
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _proc(1, stderr="apt-get: package not found")
+
+    result = maybe_offer_docker_install(install_docker=True, runner=fake_run)
+    joined = "\n".join(result.messages)
+    assert "exit 1" in joined
+    assert "apt-get: package not found" in joined
+
+
+def test_run_full_bootstrap_script_failure_includes_stderr(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """审查 L5：full bootstrap 脚本失败消息须含 stderr 摘要。"""
+    script = tmp_path / "install-caddy-linux.sh"
+    script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap.plan_full_install",
+        lambda **_: [
+            type("P", (), {"kind": "caddy", "script": script, "reason": "missing"})()
+        ],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.host_bootstrap._stdin_is_interactive",
+        lambda: False,
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _proc(7, stderr="caddy: unsupported distro")
+
+    result = run_full_bootstrap(
+        platform="linux",
+        yes=True,
+        confirm=None,
+        runner=fake_run,
+        workspace_root=tmp_path,
+    )
+    assert result.ok is False
+    joined = "\n".join(result.messages)
+    assert "脚本失败" in joined
+    assert "exit 7" in joined
+    assert "caddy: unsupported distro" in joined
 
 
 def test_maybe_offer_rechecks_after_success(monkeypatch, tmp_path: Path) -> None:

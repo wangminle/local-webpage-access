@@ -588,3 +588,151 @@ assert.strictEqual(state.removeDialog.mode, "keep");
 assert.ok(capturedRoot.template.indexOf("removeDialog.open") !== -1);
 """
     )
+
+
+def test_token_input_has_visibility_toggle() -> None:
+    """审查 M6 产品策略：保留 ?token=；登录框须支持显隐切换图标按钮。"""
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "toggleTokenVisibility" in src
+    assert "tokenVisible" in src
+    assert "token-visibility" in src or "token-visibility-btn" in src
+
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: function () {{ throw new Error("no fetch"); }},
+  location: {{ hostname: "127.0.0.1", search: "", pathname: "/" }},
+  sessionStorage: {{ getItem: function () {{ return null; }}, setItem: function () {{}}, removeItem: function () {{}} }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+var capturedRoot = null;
+vm.runInNewContext({_load_app_body()}, context);
+context.window.LWA.createManagerApp(
+  {{ createApp: function (root) {{ capturedRoot = root; return {{ mount: function () {{}} }}; }} }},
+  {{
+    document: null,
+    fetch: function () {{ throw new Error("no fetch"); }},
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+assert.ok(capturedRoot);
+const state = capturedRoot.data();
+assert.strictEqual(state.tokenVisible, false);
+assert.strictEqual(typeof capturedRoot.methods.toggleTokenVisibility, "function");
+const ctx = {{ tokenVisible: false }};
+capturedRoot.methods.toggleTokenVisibility.call(ctx);
+assert.strictEqual(ctx.tokenVisible, true);
+capturedRoot.methods.toggleTokenVisibility.call(ctx);
+assert.strictEqual(ctx.tokenVisible, false);
+const t = capturedRoot.template;
+assert.ok(t.indexOf('id="token-input"') !== -1, t);
+assert.ok(
+  t.indexOf(':type="tokenVisible ? \\'text\\' : \\'password\\'"') !== -1
+    || t.indexOf(':type="tokenVisible') !== -1,
+  "token 输入框须按 tokenVisible 切换 type，实际：" + t
+);
+assert.ok(
+  t.indexOf("toggleTokenVisibility") !== -1,
+  "须有显隐切换按钮绑定 toggleTokenVisibility"
+);
+assert.ok(
+  t.indexOf("aria-label") !== -1 && t.indexOf("token") !== -1,
+  "显隐按钮须有无障碍标签"
+);
+"""
+    )
+
+
+def test_bootstrap_surfaces_non_401_errors() -> None:
+    """BUG-289：后端 5xx 时不得静默失败，须提示并标记加载失败。
+
+    BUG-281 的用户可见症状即此：token 含非 ASCII 时后端返回 500，前端只处理
+    401，于是关掉 token 弹窗、显示空壳页面（无版本号、无实例列表），用户误以为
+    已经登录成功。
+    """
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: function () {{ throw new Error("no fetch"); }},
+  location: {{ hostname: "10.0.0.5", search: "", pathname: "/" }},
+  sessionStorage: {{ getItem: function () {{ return "tok"; }}, setItem: function () {{}}, removeItem: function () {{}} }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+
+let capturedRoot = null;
+context.window.LWA.createManagerApp(
+  {{ createApp: function (root) {{ capturedRoot = root; return {{ mount: function () {{}} }}; }} }},
+  {{
+    document: null,
+    fetch: function () {{
+      return Promise.resolve({{
+        status: 500,
+        ok: false,
+        statusText: "Internal Server Error",
+        json: function () {{ return Promise.reject(new Error("not json")); }},
+      }});
+    }},
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+
+const state = capturedRoot.data();
+assert.strictEqual(state.loadError, "", "初始不应有加载错误");
+
+const toasts = [];
+const ctx = Object.assign({{}}, state, {{
+  toast: function (msg, kind) {{ toasts.push([msg, kind]); }},
+  requireToken: function () {{}},
+  refresh: capturedRoot.methods.refresh,
+  noteLoadError: capturedRoot.methods.noteLoadError,
+  openDetail: function () {{}},
+}});
+
+capturedRoot.methods.bootstrap.call(ctx);
+
+setTimeout(function () {{
+  assert.ok(
+    toasts.some(function (t) {{ return t[1] === "error"; }}),
+    "500 时应给出错误 toast，实际：" + JSON.stringify(toasts)
+  );
+  assert.ok(ctx.loadError, "500 时应设置 loadError，实际：" + JSON.stringify(ctx.loadError));
+  // 表格应区分「加载失败」与「暂无实例」
+  const html = capturedRoot.computed.tbodyHtml.call(ctx);
+  assert.ok(
+    html.indexOf("加载失败") !== -1,
+    "加载失败时表格不应显示「暂无实例」，实际：" + html
+  );
+}}, 60);
+"""
+    )

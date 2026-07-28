@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -22,6 +23,8 @@ _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 _CONFIGURED = False
+_FILE_LOG_MAX_BYTES = 10 * 1024 * 1024
+_FILE_LOG_BACKUP_COUNT = 3
 
 
 def setup_logging(
@@ -63,7 +66,12 @@ def setup_logging(
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / (log_filename or "lwa.log")
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=_FILE_LOG_MAX_BYTES,
+            backupCount=_FILE_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
         file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
         file_handler.setLevel(level)
         root.addHandler(file_handler)

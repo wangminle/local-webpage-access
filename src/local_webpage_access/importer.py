@@ -54,6 +54,19 @@ log = get_logger("importer")
 _MAX_SLUG_LEN = 40
 
 
+def _coerce_host_port(value: object) -> int:
+    """把 registry 行里的 host_port（object）收窄为 int，满足 mypy（CHK-115）。"""
+    if isinstance(value, bool):
+        raise TypeError(f"host_port 不能是 bool：{value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        return int(value.strip())
+    raise TypeError(f"无法将 host_port 转为 int：{type(value).__name__}")
+
+
 @dataclass
 class ImportResult:
     """导入结果。"""
@@ -183,23 +196,15 @@ class Importer:
         slug = slugify(base)
         display_name = name if name else titleize(slug)
 
-        # IMP-009：CLI 路径下 slug 冲突不再 silent 建 -2，提示用 --update。
-        # daemon 路径（默认 rename）保持原自动改名行为，避免 watcher 误报错。
-        if on_conflict == "error" and self._id_taken(slug):
-            raise ZipImportError(
-                f"实例 {slug} 已存在。如需更新该实例，请使用："
-                f"lwa import <zip> --update {slug}；"
-                f"如需另建新实例，请用 --name 指定不同的名称。",
-                instance_id=slug,
-            )
         # IMP-006：路径别名在写盘前校验，避免半成品写入后才发现冲突。
         if path_alias is not None:
             existing = set(self.registry.list_route_hosts().keys())
             validate_path_alias(path_alias, existing_aliases=existing)
             log.info("路径别名 %s 已校验通过", path_alias)
 
-        # BUG-127：目录本身作为原子 claim。仅先查再 mkdir 会让并发导入拿到同一 slug。
-        instance_id = self._claim_unique_id(slug)
+        # BUG-127 / BUG-313：冲突检查与认领合并为 mkdir 原子 claim。
+        # on_conflict=error 时不得在 TOCTOU 窗口里 silent 改名到 -2。
+        instance_id = self._claim_unique_id(slug, on_conflict=on_conflict)
         if path_alias is not None:
             log.info("路径别名 %s 将写入实例 %s", path_alias, instance_id)
 
@@ -304,6 +309,12 @@ class Importer:
             # "失败（下轮重试）"。携带 instance_id 会让瞬时失败被误判为冲突、永久归档
             # 并给已清理的实例记孤儿事件。这里只保留错误信息，由 daemon 走重试分支。
             raise ZipImportError(f"导入失败：{exc}") from exc
+        except BaseException:
+            # BUG-299：KeyboardInterrupt/SystemExit 等不走 Exception 分支；
+            # 仍须清理已 claim 的实例目录，避免 slug 永久占用。
+            log.error("导入 %s 被中断，清理半成品", instance_id)
+            self._cleanup_failed(instance_id)
+            raise
 
     # ---- 原地更新（IMP-009）-------------------------------------------------
 
@@ -511,6 +522,11 @@ class Importer:
                 manifest.sourceZipHash = new_hash  # type: ignore[attr-defined]
                 manifest.desiredState = old_manifest.desiredState
                 manifest.status = old_manifest.status
+                manifest.lastStartedAt = old_manifest.lastStartedAt
+                manifest.lastHealthCheckAt = old_manifest.lastHealthCheckAt
+                if old_manifest.static is not None and manifest.static is not None:
+                    # BUG-321：更新源码不等于重新启用用户已停止的静态实例。
+                    manifest.static.enabled = old_manifest.static.enabled
                 # IMP-006：路径别名是用户/CLI 选择，不从 zip 推导，必须保留
                 if (
                     old_manifest.static is not None
@@ -545,21 +561,18 @@ class Importer:
                 # 覆盖 original.zip（备份已在上面完成）
                 shutil.copy2(src, orig_zip)
 
-                # keep_data=False：清空持久 data/（apps/<id>/data/，在 current/ 之外，
-                # 默认不动；仅在用户显式 --no-keep-data 时清空，作为「重置数据」语义）。
-                # 必须早于资源统计写入，否则管理页会继续显示清空前的 data/ 大小。
-                if not keep_data:
-                    persistent_data = self.ws.app_data(instance_id)
-                    if persistent_data.exists():
-                        shutil.rmtree(persistent_data, ignore_errors=True)
-                    persistent_data.mkdir(parents=True, exist_ok=True)
-
                 # registry 同步
                 self.registry.upsert_from_manifest(
                     manifest,
                     app_path=str(current_dir),
                     source_zip_path=str(orig_zip),
                 )
+                # BUG-348：registry 主同步成功后才执行不可逆数据清空；此前异常可完整回滚。
+                if not keep_data:
+                    persistent_data = self.ws.app_data(instance_id)
+                    if persistent_data.exists():
+                        shutil.rmtree(persistent_data, ignore_errors=True)
+                    persistent_data.mkdir(parents=True, exist_ok=True)
                 self.registry.upsert_resources(
                     instance_id,
                     source_size_bytes=_dir_size(current_dir),
@@ -596,6 +609,8 @@ class Importer:
                         manifest_path=manifest_path,
                         manifest_snapshot=manifest_snapshot,
                         old_manifest=old_manifest,
+                        old_host_port=old_host_port,
+                        old_port_rows=old_port_rows,
                         orig_zip=orig_zip,
                         orig_zip_bak=orig_zip.with_suffix(".zip.bak"),
                         old_resources=old_resources,
@@ -613,8 +628,8 @@ class Importer:
 
         # 容器必须 rebuild 镜像；静态/前端只需 restart 同步 public。
         is_container = (
-            manifest is not None  # type: ignore[possibly-undefined]
-            and manifest.runtime.value == "docker-compose"  # type: ignore[possibly-undefined]
+            manifest is not None
+            and manifest.runtime.value == "docker-compose"
         )
         needs_rebuild = bool(restart and was_running and is_container)
         needs_restart = bool(restart and was_running and not is_container)
@@ -628,8 +643,8 @@ class Importer:
         )
         return UpdateResult(
             instance_id=instance_id,
-            manifest=manifest,  # type: ignore[possibly-undefined]
-            detection=detection,  # type: ignore[possibly-undefined]
+            manifest=manifest,
+            detection=detection,
             app_dir=app_dir,
             zip_hash=new_hash,
             prev_hash=old_hash,
@@ -638,8 +653,8 @@ class Importer:
             was_running=was_running,
             needs_restart=needs_restart,
             needs_rebuild=needs_rebuild,
-            kind_changed=kind_changed,  # type: ignore[possibly-undefined]
-            sanitized=sanitized,  # type: ignore[possibly-undefined]
+            kind_changed=kind_changed,
+            sanitized=sanitized,
         )
 
     @staticmethod
@@ -660,6 +675,8 @@ class Importer:
             # 容器实例被 pending zip 改写为 static 草稿 = 跨形态（BUG-180）
             return old_rt == "docker-compose"
         old_kind = old.kind.value if hasattr(old.kind, "value") else old.kind
+        if detection.runtime is None:
+            return detection.kind != old_kind
         new_rt = (
             detection.runtime.value
             if hasattr(detection.runtime, "value")
@@ -707,11 +724,13 @@ class Importer:
         manifest_path: Path,
         manifest_snapshot: bytes,
         old_manifest: InstanceManifest,
+        old_host_port: int | None,
+        old_port_rows: tuple[dict[str, object] | None, dict[str, object] | None],
         orig_zip: Path,
         orig_zip_bak: Path,
         old_resources: dict[str, object] | None,
     ) -> None:
-        """在 current/ 已换入后恢复旧源码与关键元数据（BUG-056）。"""
+        """在 current/ 已换入后恢复旧源码与关键元数据（BUG-056 / BUG-323）。"""
         try:
             shutil.rmtree(current_dir, ignore_errors=True)
             if old_current.exists():
@@ -731,11 +750,53 @@ class Importer:
             log.error("回滚实例 %s 的 original.zip 失败：%s", instance_id, rollback_exc)
 
         try:
+            if old_host_port is not None:
+                if old_manifest.static is not None:
+                    old_manifest.static.hostPort = old_host_port
+                elif old_manifest.container is not None:
+                    old_manifest.container.hostPort = old_host_port
             self.registry.upsert_from_manifest(
                 old_manifest,
                 app_path=str(current_dir),
                 source_zip_path=str(orig_zip),
             )
+            # BUG-323：upsert 后显式回写停止前的端口子表快照，避免 host_port 被清空。
+            old_static, old_container = old_port_rows
+            if old_static and old_static.get("host_port") is not None:
+                self.registry.upsert_static_site(
+                    instance_id,
+                    {
+                        "root": old_static.get("root_path", "public"),
+                        "gateway": old_static.get("gateway", "caddy"),
+                        "routeMode": old_static.get("route_mode", "port"),
+                        "hostPort": _coerce_host_port(old_static["host_port"]),
+                        "routeHost": old_static.get("route_host"),
+                        "gatewayConfigPath": old_static.get("gateway_config_path"),
+                        "enabled": bool(old_static.get("enabled", 1)),
+                    },
+                )
+            if old_container and old_container.get("host_port") is not None:
+                self.registry.upsert_container(
+                    instance_id,
+                    {
+                        "projectName": old_container.get("compose_project")
+                        or f"lwa-{instance_id}",
+                        "serviceName": old_container.get("service_name", "app"),
+                        "image": old_container.get("image"),
+                        "imageId": old_container.get("image_id"),
+                        "containerId": old_container.get("container_id"),
+                        "internalPort": old_container.get("internal_port"),
+                        "hostPort": _coerce_host_port(old_container["host_port"]),
+                        "routeMode": old_container.get("route_mode", "port"),
+                        "routeHost": old_container.get("route_host"),
+                        "composePath": old_container.get("compose_path"),
+                        "dockerfilePath": old_container.get("dockerfile_path"),
+                        "resourceLimits": {
+                            "memory": old_container.get("memory_limit"),
+                            "cpus": old_container.get("cpu_limit"),
+                        },
+                    },
+                )
             if old_resources is not None:
                 self.registry.upsert_resources(
                     instance_id,
@@ -751,18 +812,38 @@ class Importer:
 
     # ---- id 冲突处理 --------------------------------------------------------
 
-    def _claim_unique_id(self, base_slug: str) -> str:
-        """原子占用实例目录，避免并发导入同一 slug（BUG-127）。"""
+    def _claim_unique_id(
+        self, base_slug: str, *, on_conflict: str = "rename"
+    ) -> str:
+        """原子占用实例目录，避免并发导入同一 slug（BUG-127 / BUG-313）。"""
         candidate = base_slug
         n = 2
+
+        def _conflict_error(*, concurrent: bool = False) -> ZipImportError:
+            prefix = (
+                f"实例 {base_slug} 已被并发创建"
+                if concurrent
+                else f"实例 {base_slug} 已存在"
+            )
+            return ZipImportError(
+                f"{prefix}。如需更新该实例，请使用："
+                f"lwa import <zip> --update {base_slug}；"
+                f"如需另建新实例，请用 --name 指定不同的名称。",
+                instance_id=base_slug,
+            )
+
         while True:
             if self.registry.instance_exists(candidate):
+                if on_conflict == "error":
+                    raise _conflict_error()
                 candidate = f"{base_slug}-{n}"
                 n += 1
                 continue
             try:
                 self.ws.app_dir(candidate).mkdir(parents=True, exist_ok=False)
             except FileExistsError:
+                if on_conflict == "error":
+                    raise _conflict_error(concurrent=True) from None
                 candidate = f"{base_slug}-{n}"
                 n += 1
                 continue

@@ -45,11 +45,12 @@ def fmt_bytes(n: int | None) -> str:
     """字节数格式化为人类可读。"""
     if n is None:
         return "-"
+    value = float(n)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024:
-            return f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}PiB"
+        if abs(value) < 1024:
+            return f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}PiB"
 
 
 def coordinated_autostart_disable(ws, service_name: str) -> tuple[str | None, bool]:

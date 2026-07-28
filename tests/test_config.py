@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
@@ -149,3 +148,59 @@ def test_static_gateway_port_conflicts_with_pool() -> None:
 def test_static_gateway_port_outside_pool_ok() -> None:
     cfg = Config(staticGatewayPort=8081)
     assert cfg.staticGatewayPort == 8081
+
+
+# ---- BUG-351：ResourceLimits / manualLanIp 校验 -----------------------------
+
+
+def test_resource_limits_reject_invalid_memory() -> None:
+    from local_webpage_access.config import ResourceLimits
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ResourceLimits(memory="lots")
+    with pytest.raises(ValidationError):
+        ResourceLimits(memory="0m")
+    with pytest.raises(ValidationError):
+        ResourceLimits(memory="-512m")
+
+
+def test_resource_limits_reject_invalid_cpus() -> None:
+    from local_webpage_access.config import ResourceLimits
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="fast")
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="0")
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="-1")
+    # CHK-115：float("nan"/"inf") 成功但非有限正数，必须拒绝
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="nan")
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="inf")
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="-inf")
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="NaN")
+    with pytest.raises(ValidationError):
+        ResourceLimits(cpus="Infinity")
+
+
+def test_resource_limits_accept_valid_formats() -> None:
+    from local_webpage_access.config import ResourceLimits
+
+    assert ResourceLimits(memory="512m", cpus="0.75").memory == "512m"
+    assert ResourceLimits(memory="1g", cpus="2").cpus == "2"
+
+
+def test_manual_lan_ip_must_be_valid_address() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Config(manualLanIp="not-an-ip")
+    with pytest.raises(ValidationError):
+        Config(manualLanIp="192.168.1.256")
+    cfg = Config(manualLanIp="10.0.0.8")
+    assert cfg.manualLanIp == "10.0.0.8"

@@ -23,7 +23,7 @@ cd ./acceptance-ws
 样例 zip 由 `tests/fixtures` 生成：
 
 ```bash
-python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-ws/inbox'); print(list(SAMPLES))"
+python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-ws/inbox'); print(list(SAMPLES))"
 ```
 
 执行后 `inbox/` 内会生成 6 个 zip：
@@ -39,7 +39,7 @@ python -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance-
 | 29.03 | 静态目录结构 | ✓ 同上 | 检查 `apps/static-html/{source,current,logs,data}/` | 四个子目录齐全，`current/index.html` 存在 |
 | 29.04 | 静态 HTTP 可访问 | ✓ `test_e2e_static_html_accessible_via_http` | `lwa start static-html`，浏览器访问分配端口 | 返回 HTML 内容，`lwa status` 显示 `running` |
 | 29.05 | 导入 Vite/React | ✓ `test_e2e_vite_react_detected_as_frontend` | `lwa import inbox/vite_react.zip` | 识别为 `node` + `frontend-static` |
-| 29.06 | 前端构建产物 | — | `lwa start vite-react` | 容器内执行 `npm run build`，`dist/` 生成，静态托管可访问 |
+| 29.06 | 前端构建产物 | — | `lwa start vite-react` | 宿主机执行 `npm run build`（`hosting.py`），`dist/` 生成并同步至 `public/`，静态托管可访问 |
 | 29.07 | 前端形态正确 | ✓ 同 29.05 | 检查 `local-web.json` | `servingMode=shared-static`，有 build 命令 |
 | 29.08 | 导入 Node/Express | ✓ `test_e2e_node_express_detected_and_compose_generated` | `lwa import inbox/node_express.zip` | 识别为 `node` + `backend-container`，`docker/compose.yaml` 生成 |
 | 29.09 | Node 容器构建启动 | ✓ 手工验收（2026-07-07） | `lwa start node-express` | `docker compose up` 成功，`lwa status` 显示 `running`，HTTP 可访问 |

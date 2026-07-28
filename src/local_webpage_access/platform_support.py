@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -177,7 +178,7 @@ def _detect_kernel_version() -> str | None:
 
 def _detect_libc_version() -> str | None:
     try:
-        conf = os.confstr("CS_GNU_LIBC_VERSION")  # type: ignore[arg-type]
+        conf = os.confstr("CS_GNU_LIBC_VERSION")
     except (AttributeError, ValueError, OSError):
         conf = None
     if conf:
@@ -251,38 +252,171 @@ def detect_wsl_kernel_kind() -> str | None:
     return "2"
 
 
+def _wsl_exe_candidates() -> list[str]:
+    """guest 内调用 Windows 侧 ``wsl.exe`` 的候选路径。
+
+    BUG-291：``appendWindowsPath=false`` 时 PATH 常无 ``wsl.exe``，但 DrvFS
+    绝对路径 ``/mnt/c/Windows/System32/wsl.exe`` 在 interop 仍开启时往往可执行。
+    仅依赖 PATH 名会把本可探测的环境误判为 ``unknown``。
+    """
+    found: list[str] = []
+    which = shutil.which("wsl.exe")
+    if which:
+        found.append(which)
+    # 扫描已挂载的 Windows 盘符（通常是 c；偶发 d 等）
+    mnt = Path("/mnt")
+    if mnt.is_dir():
+        try:
+            drives = sorted(p.name for p in mnt.iterdir() if p.is_dir())
+        except OSError:
+            drives = []
+        for drive in drives:
+            if len(drive) != 1 or not drive.isalpha():
+                continue
+            # 必须基于 mnt 拼接：单测可把 Path("/mnt") stub 到临时目录，
+            # 硬编码 "/mnt/..." 字符串会绕过 stub 去查真实宿主。
+            abs_exe = mnt / drive / "Windows" / "System32" / "wsl.exe"
+            key = str(abs_exe)
+            if key not in found and abs_exe.is_file():
+                found.append(key)
+    # 无任何候选时仍保留 PATH 名，便于注入 runner / 后续 PATH 变化
+    if not found:
+        found.append("wsl.exe")
+    return found
+
+
 def detect_wsl_package_version(
     runner: Callable[..., Any] = subprocess.run,
 ) -> str | None:
-    """尝试读取 Windows 侧 WSL 包版本；失败返回 ``unknown``。"""
+    """尝试读取 Windows 侧 WSL 包版本；失败返回 ``unknown``。
+
+    BUG-282：在 guest 内调用 ``wsl.exe`` 时默认常为 UTF-16LE；以 bytes 捕获并
+    双解码，同时注入 ``WSL_UTF8=1`` / ``WSLENV`` 请求 UTF-8 输出。
+
+    BUG-291：除 PATH 外回退 ``/mnt/<drive>/Windows/System32/wsl.exe``。
+    """
     if detect_platform() != PLATFORM_WSL:
         return None
-    candidates: list[Sequence[str]] = [
-        ("wsl.exe", "--version"),
-        ("wsl.exe", "-v"),
-    ]
+    candidates: list[Sequence[str]] = []
+    for exe in _wsl_exe_candidates():
+        candidates.append((exe, "--version"))
+        candidates.append((exe, "-v"))
+    env = os.environ.copy()
+    env["WSL_UTF8"] = "1"
+    wslenv = env.get("WSLENV", "") or ""
+    if "WSL_UTF8" not in wslenv.split(":"):
+        env["WSLENV"] = f"{wslenv}:WSL_UTF8" if wslenv else "WSL_UTF8"
+
     for args in candidates:
         try:
             proc = runner(
                 list(args),
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=5,
                 check=False,
+                env=env,
             )
-        except (OSError, subprocess.SubprocessError):
+        except TypeError:
+            # BUG-288：注入的 runner 可能不接受 env=；降级重试而非当成 interop 失败
+            try:
+                proc = runner(
+                    list(args),
+                    capture_output=True,
+                    text=False,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+                continue
+        except (OSError, subprocess.SubprocessError, ValueError):
             continue
-        text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).replace("\x00", "")
-        for line in text.splitlines():
-            lower = line.lower()
-            if "wsl" in lower and ("version" in lower or "版本" in line):
-                match = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", line)
-                if match:
-                    return match.group(1)
-        match = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", text)
-        if match and proc.returncode == 0:
-            return match.group(1)
+        try:
+            text = _decode_wsl_cli_output(getattr(proc, "stdout", None))
+            err = _decode_wsl_cli_output(getattr(proc, "stderr", None))
+        except Exception:  # noqa: BLE001 — 解码失败继续下一候选
+            continue
+        blob = f"{text}\n{err}"
+        parsed = _parse_wsl_package_version_text(blob)
+        if parsed:
+            return parsed
+        # 回退兼容无 "WSL version" 标题的输出；但必须排除内核/WSLg 等同版面的
+        # 其它组件版本号，否则会把 Kernel 5.15.x 当成包版本而绕过 ≥2.1.5 门禁
+        # （BUG-288）。
+        if getattr(proc, "returncode", 1) == 0:
+            fallback = _first_version_outside_known_components(blob)
+            if fallback:
+                return fallback
     return "unknown"
+
+
+def _decode_wsl_cli_output(raw: bytes | str | None) -> str:
+    """解码 ``wsl.exe`` stdout/stderr（UTF-8 / UTF-16LE / 含 NUL 的误解码）。"""
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+    data = bytes(raw)
+    if not data:
+        return ""
+    if data.startswith(b"\xff\xfe"):
+        text = data.decode("utf-16-le", errors="replace")
+    elif data.startswith(b"\xfe\xff"):
+        text = data.decode("utf-16-be", errors="replace")
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-16-le", errors="replace")
+        else:
+            # UTF-16LE ASCII 无 BOM 时常被 utf-8「成功」解出夹 NUL
+            if "\x00" in text:
+                text = data.decode("utf-16-le", errors="replace")
+    return text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+# ``wsl --version`` 同版面还会列出内核 / WSLg / MSRDC / Direct3D / Windows 版本；
+# 这些行的版本号绝不可当作 WSL 包版本（BUG-288）。
+_WSL_OTHER_COMPONENT_MARKERS = (
+    "wslg",
+    "kernel",
+    "内核",
+    "msrdc",
+    "direct3d",
+    "directx",
+    "windows",
+)
+
+
+def _is_other_wsl_component_line(lower: str, line: str) -> bool:
+    """该行是否属于 wsl --version 里的非「WSL 包」组件。"""
+    if "内核" in line:
+        return True
+    return any(marker in lower for marker in _WSL_OTHER_COMPONENT_MARKERS)
+
+
+def _parse_wsl_package_version_text(text: str) -> str | None:
+    """从 ``wsl --version`` 文本提取 WSL 包版本（仅认含 WSL/版本 的包版本行）。"""
+    for line in (text or "").splitlines():
+        lower = line.lower()
+        if "wsl" in lower and ("version" in lower or "版本" in line):
+            if _is_other_wsl_component_line(lower, line):
+                continue
+            match = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", line)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _first_version_outside_known_components(text: str) -> str | None:
+    """在排除内核 / WSLg 等组件行后取第一个版本号；全被排除则返回 None。"""
+    for line in (text or "").splitlines():
+        if _is_other_wsl_component_line(line.lower(), line):
+            continue
+        match = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def is_wsl_drvfs_path(path: Path | str) -> bool:
@@ -455,6 +589,7 @@ def collect_platform_support_report(
     )
 
     reasons: list[str] = []
+    wsl_pkg_unknown = False
 
     if plat == PLATFORM_WINDOWS:
         reasons.append("检测到 Windows 原生进程，正式支持范围不包含 Windows 原生")
@@ -557,6 +692,7 @@ def collect_platform_support_report(
             reasons.append("WSL1 不受支持；请升级到 WSL2")
         pkg = wsl_package_version
         if pkg is None or pkg == "unknown" or pkg == "":
+            wsl_pkg_unknown = True
             reasons.append(
                 "无法确定 WSL 包版本（wslVersion=unknown）；"
                 f"写操作 fail-closed，请在 Windows 侧执行 wsl --version"
@@ -585,11 +721,23 @@ def collect_platform_support_report(
     if report.supported:
         report.action = None
     elif plat == PLATFORM_WSL:
-        report.action = (
-            "请使用 WSL2（包 ≥ "
-            f"{MIN_WSL_PACKAGE_VERSION}）+ Ubuntu 22.04 LTS+/Debian 12+ Stable，"
-            "启用 systemd；Full/autostart 工作区请放在 Linux 文件系统"
-        )
+        if wsl_pkg_unknown:
+            # BUG-288：包版本 unknown 通常是 guest 内读不到 Windows 侧（interop
+            # 被禁用），而非「版本过低」；别把用户引向无谓的升级。
+            report.action = (
+                "无法在 WSL 内读取 Windows 侧 WSL 包版本："
+                "请在 Windows PowerShell 执行 wsl --version 确认 ≥ "
+                f"{MIN_WSL_PACKAGE_VERSION}；并检查 /etc/wsl.conf 的 "
+                "[interop] enabled=true（彻底关闭 interop 时连 "
+                "/mnt/c/Windows/System32/wsl.exe 也无法执行）。"
+                "若仅关掉 appendWindowsPath，本工具会回退绝对路径探测"
+            )
+        else:
+            report.action = (
+                "请使用 WSL2（包 ≥ "
+                f"{MIN_WSL_PACKAGE_VERSION}）+ Ubuntu 22.04 LTS+/Debian 12+ Stable，"
+                "启用 systemd；Full/autostart 工作区请放在 Linux 文件系统"
+            )
     else:
         report.action = (
             "请使用 Ubuntu LTS（"

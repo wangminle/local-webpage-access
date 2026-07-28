@@ -1,23 +1,33 @@
-"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.6.6-Build...`` 前缀。"""
+"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.6.7-Build...`` 前缀。"""
 
 from __future__ import annotations
 
 import re
 import subprocess
+import tomllib
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
 _VERSION_PREFIX = re.compile(r"^V(\d+\.\d+\.\d+)", re.IGNORECASE)
 _PACKAGE_NAME = "local-webpage-access"
-_FALLBACK_VERSION = "0.6.6"
+_FALLBACK_VERSION = "0.6.7"
+
+
+def _is_lwa_repo(path: Path) -> bool:
+    try:
+        with (path / "pyproject.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    return str(data.get("project", {}).get("name", "")).strip() == _PACKAGE_NAME
 
 
 def _repo_root() -> Path | None:
     """editable 安装时定位仓库根（``src/local_webpage_access`` 的上两级）。"""
     here = Path(__file__).resolve().parent
     candidate = here.parent.parent
-    if (candidate / "pyproject.toml").is_file():
+    if _is_lwa_repo(candidate):
         return candidate
     try:
         result = subprocess.run(
@@ -29,7 +39,7 @@ def _repo_root() -> Path | None:
         )
         if result.returncode == 0:
             root = Path(result.stdout.strip())
-            if root.is_dir():
+            if root.is_dir() and _is_lwa_repo(root):
                 return root
     except (OSError, subprocess.SubprocessError):
         pass
@@ -68,7 +78,7 @@ def _version_from_metadata() -> str | None:
 
 @lru_cache(maxsize=1)
 def resolve_version() -> str:
-    """返回 semver 字符串（如 ``0.6.6``），不含 ``V`` 前缀。"""
+    """返回 semver 字符串（如 ``0.6.7``），不含 ``V`` 前缀。"""
     git_ver = _version_from_git(_repo_root())
     if git_ver:
         return git_ver
@@ -79,7 +89,7 @@ def resolve_version() -> str:
 
 
 def display_version() -> str:
-    """UI/CLI 展示用（如 ``V0.6.6``）。"""
+    """UI/CLI 展示用（如 ``V0.6.7``）。"""
     return f"V{resolve_version()}"
 
 

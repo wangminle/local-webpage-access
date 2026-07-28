@@ -144,3 +144,30 @@ def test_caddy_linux_script_accepts_debian() -> None:
     text = caddy.read_text(encoding="utf-8")
     assert "detect_debian_family" in text
     assert "Debian" in text or "debian" in text
+
+
+def test_linux_daemon_json_invalid_aborts_instead_of_empty_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-332：既有 daemon.json 非法 JSON 时必须中止，不得清空重建。"""
+    daemon = tmp_path / "daemon.json"
+    daemon.write_text("{not-json: true, keep: me}\n", encoding="utf-8")
+    original = daemon.read_text(encoding="utf-8")
+
+    # 抽取脚本内嵌 Python，替换目标路径后执行
+    text = _LINUX.read_text(encoding="utf-8")
+    start = text.index("import json, os, pathlib, shutil, tempfile")
+    end = text.index("tmp_path.replace(path)", start) + len("tmp_path.replace(path)")
+    snippet = text[start:end]
+    snippet = snippet.replace(
+        'path = pathlib.Path("/etc/docker/daemon.json")',
+        f"path = pathlib.Path({str(daemon)!r})",
+    )
+
+    monkeypatch.setenv("MIRRORS_CSV", "https://example.invalid/mirror")
+    with pytest.raises(SystemExit) as ei:
+        exec(snippet, {"__name__": "__main__"})  # noqa: S102 — 回归脚本内嵌逻辑
+    assert ei.value.code  # 非空消息 / 非零
+    assert "无法解析" in str(ei.value)
+    assert daemon.read_text(encoding="utf-8") == original
+    assert daemon.with_suffix(".json.bak-lwa").is_file()

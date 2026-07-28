@@ -255,7 +255,6 @@ def test_run_command_failure(tmp_path: Path) -> None:
 def test_run_command_timeout_kills_child_tree(tmp_path: Path) -> None:
     """BUG-183：超时时杀整个进程树，不残留孙进程孤儿。"""
     import os
-    import sys
     import time
 
     log = tmp_path / "out.log"
@@ -428,7 +427,6 @@ def test_build_and_host_frontend_success(
             dist = Path(cwd) / "dist"
             dist.mkdir(exist_ok=True)
             (dist / "index.html").write_text("<html>built</html>")
-        from local_webpage_access.hosting import subprocess as _sp
 
         return _subprocess_completed(0)
     monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
@@ -657,7 +655,6 @@ def test_enable_static_releases_port_on_gateway_failure(
 ) -> None:
     """BUG-016：gateway.enable 抛错时，_enable_static 应释放刚分配的端口。"""
     from local_webpage_access.hosting import _enable_static
-    from local_webpage_access.models import EntryConfig
     from local_webpage_access.static_gateway import StaticGateway
 
     _seed_static_instance(workspace, registry, "demo")

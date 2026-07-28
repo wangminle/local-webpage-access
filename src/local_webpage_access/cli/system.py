@@ -272,7 +272,14 @@ def doctor_cmd(
 
     from local_webpage_access.access import format_review_report
     from local_webpage_access.doctor import format_report, run_doctor
-    from local_webpage_access.platform_support import collect_platform_support_report
+    from local_webpage_access.platform_support import (
+        PlatformSupportReport,
+        collect_platform_support_report,
+    )
+
+    if profile not in (None, "default", "full"):
+        typer.secho("--profile 仅支持 default 或 full", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
 
     def _emit_platform_only_json(*, error: str | None = None) -> None:
         payload: dict[str, Any] = {
@@ -291,6 +298,18 @@ def doctor_cmd(
         _reg.close()  # doctor 自行打开 registry
         report = run_doctor(ws, config, instance_id=instance_id, access_review=access)
         cap_payload: dict[str, Any] | None = None
+
+        # 单次 doctor 只探一次平台：WSL 上每次探测都可能起 wsl.exe（含超时），
+        # 且多次独立探测结果可能互相矛盾。
+        _ps_cache: list[PlatformSupportReport] = []
+
+        def _platform_report() -> PlatformSupportReport:
+            if not _ps_cache:
+                _ps_cache.append(
+                    collect_platform_support_report(workspace_root=ws.root)
+                )
+            return _ps_cache[0]
+
         if profile in ("full", "default") or getattr(config, "profile", None) == "full":
             from typing import Literal, cast
 
@@ -328,10 +347,19 @@ def doctor_cmd(
                     ("Caddy binary", cap.caddy_binary),
                     ("Caddy runtime", cap.caddy_runtime),
                     ("Caddy owner", cap.caddy_owner),
+                    ("Caddy workspace", cap.caddy_workspace_access),
+                    ("Gateway access", cap.gateway_access),
                 ):
                     typer.echo(f"  {label:18s} {val}")
                 if cap.action:
-                    typer.echo(f"  建议：{cap.action}")
+                    # BUG-283：平台 unsupported 时先修平台，别引导用户跑 setup --full
+                    if not _platform_report().supported:
+                        typer.echo(
+                            "  建议：先解决下方「平台支持」问题；"
+                            "在平台 unsupported 时勿直接执行 lwa setup --full"
+                        )
+                    else:
+                        typer.echo(f"  建议：{cap.action}")
         if json_output:
             payload: dict[str, Any] = {
                 "overall": report.overall,
@@ -342,9 +370,7 @@ def doctor_cmd(
                 ],
                 "currentLanIp": report.current_lan_ip,
                 "driftedInstanceIds": report.drifted_instance_ids,
-                "platformSupport": collect_platform_support_report(
-                    workspace_root=ws.root
-                ).to_dict(),
+                "platformSupport": _platform_report().to_dict(),
             }
             if report.access_review is not None:
                 payload["accessReview"] = report.access_review.to_dict()
@@ -358,6 +384,22 @@ def doctor_cmd(
             if report.access_review is not None:
                 typer.echo("")
                 typer.echo(format_review_report(report.access_review))
+            # BUG-283：人类模式始终打印平台支持段（含 supported / reasons）
+            ps = _platform_report()
+            typer.echo("")
+            typer.echo("── 平台支持 ──")
+            typer.echo(
+                f"  platform={ps.platform} supported={ps.supported} "
+                f"wslVersion={ps.wsl_version!s} "
+                f"distro={ps.distro_id or '-'} {ps.distro_version or ''}".rstrip()
+            )
+            if ps.reasons:
+                for reason in ps.reasons:
+                    typer.echo(f"  - {reason}")
+            elif ps.supported:
+                typer.echo("  （正式支持矩阵已满足）")
+            if ps.action:
+                typer.echo(f"  建议：{ps.action}")
         fail = report.has_failures
         if report.access_review is not None and report.access_review.has_failures:
             fail = True
@@ -365,8 +407,7 @@ def doctor_cmd(
             if cap_payload.get("overall") in ("unready", "degraded"):
                 fail = True
         # 平台 unsupported 时 JSON 仍已输出；用非零退出提示调用方
-        ps = collect_platform_support_report(workspace_root=ws.root)
-        if not ps.supported:
+        if not _platform_report().supported:
             fail = True
         if fail:
             raise typer.Exit(code=1)

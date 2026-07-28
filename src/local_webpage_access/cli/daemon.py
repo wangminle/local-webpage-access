@@ -20,6 +20,7 @@ def daemon_on(
         None,
         "--poll",
         "-p",
+        min=0.1,
         help="inbox 扫描间隔（秒），默认 5",
     ),
 ) -> None:

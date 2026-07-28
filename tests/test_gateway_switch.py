@@ -108,6 +108,7 @@ def switch_fakes(monkeypatch, workspace: Workspace):
         "access_calls": 0,
         "access_review_fail": False,
         "fail_after_stop": False,
+        "reload_ok": True,
         "call_order": [],
         "pid": 4242,
     }
@@ -130,6 +131,7 @@ def switch_fakes(monkeypatch, workspace: Workspace):
                     "host_port": host_port,
                     "alias": alias,
                     "backend": self.cfg.staticGateway,
+                    "wait_health": wait_health,
                 }
             )
             state["call_order"].append(f"enable:{instance_id}")
@@ -150,6 +152,8 @@ def switch_fakes(monkeypatch, workspace: Workspace):
         def reload_all(self) -> None:
             state["reload_calls"] += 1
             state["call_order"].append("reload_all")
+            if not state["reload_ok"]:
+                raise LwaError("Caddy reload 失败", code="GATEWAY_RELOAD_FAIL")
 
         def stop_all_builtin(self) -> list[str]:
             state["stop_builtin_calls"] += 1
@@ -157,6 +161,7 @@ def switch_fakes(monkeypatch, workspace: Workspace):
             return []
 
         def _sync_main_config(self) -> None:
+            # 模拟真实 StaticGateway._sync_main_config：写盘成功但 reload 软失败不抛
             state["sync_calls"] += 1
             state["call_order"].append("sync_main")
 
@@ -307,6 +312,27 @@ def test_switch_builtin_to_caddy_rebuilds_alias(
     assert row is not None and row["gateway"] == "caddy"
 
 
+def test_switch_to_caddy_fails_when_alias_reload_fails(
+    workspace: Workspace, registry, switch_fakes
+) -> None:
+    """BUG-353：别名重建后 reload 失败不得报 switch ok（sync 吞失败路径）。"""
+    from local_webpage_access.gateway_switch import switch_gateway
+
+    cfg = _builtin_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="builtin")
+    switch_fakes["backend"] = "builtin"
+    switch_fakes["admin_alive"] = False
+    switch_fakes["reload_ok"] = False
+
+    result = switch_gateway(workspace, cfg, registry, "caddy", review=False)
+
+    assert result.ok is False
+    assert result.error
+    assert switch_fakes["generate_alias_calls"]
+    assert switch_fakes["reload_calls"] >= 1
+
+
 def test_switch_noop_when_already_on_target(
     workspace: Workspace, registry, switch_fakes
 ) -> None:
@@ -412,6 +438,46 @@ def test_review_failure_keeps_backend_ok_but_access_not_fully_ok(
     assert result.access is not None
     assert result.access_ok is False
     assert result.fully_ok is False
+
+
+def test_switch_to_builtin_enable_waits_health(
+    workspace: Workspace, registry, switch_fakes
+) -> None:
+    """BUG-326：切换到 builtin 时 enable 必须 wait_health，绑定失败不可静默。"""
+    from local_webpage_access.gateway_switch import switch_gateway
+
+    cfg = _caddy_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="caddy")
+    switch_fakes["backend"] = "caddy"
+
+    result = switch_gateway(workspace, cfg, registry, "builtin", review=True)
+
+    assert result.ok is True
+    assert switch_fakes["enable_calls"]
+    assert all(call["wait_health"] is True for call in switch_fakes["enable_calls"])
+
+
+def test_rollback_review_failure_marks_degraded(
+    workspace: Workspace, registry, switch_fakes
+) -> None:
+    """BUG-326：回滚后访问复核失败不得报 degraded=False（站点可能已全灭）。"""
+    from local_webpage_access.gateway_switch import switch_gateway
+
+    cfg = _caddy_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="caddy")
+    switch_fakes["backend"] = "caddy"
+    switch_fakes["enable_ok"] = False
+    switch_fakes["access_review_fail"] = True
+
+    result = switch_gateway(workspace, cfg, registry, "builtin", review=False)
+
+    assert result.ok is False
+    assert result.degraded is True
+    assert result.repair_hint
+    # enable 失败触发回滚；回滚路径仍会跑 access review
+    assert switch_fakes["access_calls"] >= 1
 
 
 def test_plan_switch_rejects_invalid_target(

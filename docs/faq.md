@@ -31,19 +31,42 @@ lwa doctor --json   # 机器可读报告（含 platformSupport；未 init 亦可
 
 `doctor` 有 fail 时退出码为 1，可在脚本/CI 中用作门禁。未初始化工作区时，人类可读模式仍需工作区；`--json` 会尽量输出 `platformSupport` 供平台排障。
 
+`doctor` 是唯一豁免平台门禁的命令（其余命令在平台 unsupported 时会直接 exit 2），所以它的人类可读输出**总会**在末尾追加「平台支持」段——平台不达标时，这里是你唯一能看到原因的地方：
+
+```text
+── 平台支持 ──
+  platform=wsl supported=False wslVersion=unknown distro=ubuntu 24.04
+  - 无法确定 WSL 包版本（wslVersion=unknown）；写操作 fail-closed，请在 Windows 侧执行 wsl --version（需 ≥ 2.1.5）
+  建议：无法在 WSL 内读取 Windows 侧 WSL 包版本（多为 interop 被禁用）：…
+```
+
+平台 `supported=False` 时 `doctor` 退出码为 1。
+
 ### Full Profile（IMP-033）
 
 ```bash
-lwa doctor --profile full     # 输出 overall / 各上下文 Docker / Caddy owner / 建议动作
+lwa doctor --profile full     # 输出 overall / 各上下文 Docker / Caddy / Gateway / 建议动作
 lwa capabilities --json       # 与 doctor full 同源 CapabilityReport
 lwa setup --full --resume     # 组权限刷新后继续；exit 2=session_refresh_required，exit 1=unready
 ```
 
+`--profile full` 的人类可读摘要含 8 行能力：CLI Docker、Manager Docker、Daemon Docker、Caddy binary、Caddy runtime、Caddy owner、Caddy workspace、Gateway access。若平台同时 `supported=False`，「建议」会改为提示先解决平台问题，**不会**引导你直接跑 `lwa setup --full`（那会被平台门禁挡在 exit 2）。
+
+`CapabilityReport.overall` 只有三个取值：
+
 | overall | 含义 | 常见动作 |
 | --- | --- | --- |
 | `ready` | Full 强制能力均已证明 | 可无人值守跑容器与 Caddy |
-| `session_refresh_required` / exit 2 | 已加 docker 组但当前会话未继承 | 重登或 `newgrp docker` 后 `--resume`，并重启 manager/daemon |
-| `unready` / `degraded` | 缺组件、权限不足、Caddy owner 不匹配、后台缓存未闭环等 | 按 `action` 字段提示修复；**不得**当作安装成功 |
+| `degraded` | 能力可用但未完全闭环 | 按 `action` 修复后复验 |
+| `unready` | 缺组件、权限不足、Caddy owner 不匹配、后台缓存未闭环，或 `sessionRefreshRequired=true` | 按 `action` 字段提示修复；**不得**当作安装成功 |
+
+`sessionRefreshRequired` 是 CapabilityReport 里的**布尔字段**（不是 overall 取值）；Full 下为 `true` 时 overall 一定是 `unready`。它对应 `lwa setup --full` 的退出码 2：
+
+| `lwa setup --full` 退出码 | 含义 | 动作 |
+| --- | --- | --- |
+| 0 | 装配完成且能力闭环 | — |
+| 2 | `sessionRefreshRequired`：已加 docker 组但当前会话未继承 | 重登或 `newgrp docker` 后 `--resume`，并重启 manager/daemon |
+| 1 | 其余 unready | 按输出提示修复后 `--resume` |
 
 Full 下系统 `caddy.service` / 外部占用 `:2019` 会 fail-closed；须由 LWA gateway 以 `serviceUser` 托管。
 
@@ -52,7 +75,7 @@ Full 下系统 `caddy.service` / 外部占用 `:2019` 会 fail-closed；须由 L
 | 症状 | 先看哪个文件 | 命令 |
 | --- | --- | --- |
 | CLI 操作后无痕迹 / 关终端丢日志 | 工作区 `logs/lwa.log` | 任意 `lwa status` / `lwa start` 后再 `tail logs/lwa.log` |
-| daemon 不导入 inbox | `logs/daemon.log` | `lwa daemon status`；`lwa doctor` |
+| daemon 不导入 inbox | `logs/daemon.log`；`inbox/failed/`（连续失败死信） | `lwa daemon status`；修好 zip 后移回 `inbox/`；`lwa doctor` |
 | 管理页异常 / 能力降级横幅 | `logs/manager.log`、`/api/health`（须本机或带 token） | `lwa manager status`；`lwa capabilities --json` |
 | 构建无输出、`build.log` 长时间为空 | `apps/<id>/logs/build.log` + `logs/lwa.log`（阶段事件）+ registry events | `lwa logs <id> --category build`；`lwa doctor <id>` |
 | 管理页显示 stopped 但容器仍在跑 | `observationError` / `runtimeAccess=permission_denied`；`capability probe` | `lwa doctor --profile full`；`newgrp docker` 后重启 manager/daemon |
@@ -64,7 +87,7 @@ Full 下系统 `caddy.service` / 外部占用 `:2019` 会 fail-closed；须由 L
 ### Python 版本不满足
 
 ```
-[fail] python_version: 需要 Python ≥ 3.13
+[fail] python_version: Python 3.x.y 不满足最低要求 ≥ 3.13
 ```
 
 `lwa` 依赖 Python 3.13+（pydantic v2 / typing 特性）。升级 Python 或用 `pyenv`/`uv` 管理。
@@ -134,7 +157,7 @@ V1 要求 Docker Compose 插件（`docker compose` 子命令）。安装 `docker
 ZipImportError: 检测到路径穿越（zip slip）：../../etc/passwd
 ```
 
-导入器对所有 zip 成员做 `_safe_extract` 检查，任何成员解析后落在解压目录之外都会被拒绝。
+导入器对所有 zip 成员做 `safe_extract` 检查，任何成员解析后落在解压目录之外都会被拒绝。
 这是 [安全边界](security-boundary.md) 的强制保护。请用正规工具重新打包。
 
 ### 实例识别为 pending
@@ -156,6 +179,7 @@ status: pending
 
 * **手动 `lwa import`**：同名 slug 已存在时会**报错**，提示使用 `lwa import <zip> --update <id>` 原地升级；不会静默覆盖，也不会自动建 `my-site-2`。
 * **daemon 自动导入（IMP-011）**：slug 冲突时记 `import_conflict` 事件并提示 `--update`，**不再**自动追加 `-2/-3`；导入成功后 zip 会移入 `inbox/processed/`。
+* **连续失败死信（BUG-297）**：同一 zip 指纹连续失败默认 5 次后移入 `inbox/failed/`；修好后移回 `inbox/` 根目录即可再试。
 * **`--update` 后容器仍是旧版？**：容器实例必须 **rebuild 镜像** 才会跑新源码。V0.5.2 起，running 容器的 `--update` 默认走 `lwa rebuild`（不再轻量 `restart`）。若用了 `--no-restart`，请手动 `lwa rebuild <id>`。
 * **同包重复导入**：同一 zip 指纹（`sourceZipHash`）会产生冗余实例。清理：
 
@@ -219,7 +243,7 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 
 ### 管理页打不开 / 401
 
-* 确认端口未被占用：`lwa doctor` 的 port_pool 检查会覆盖 managerPort。
+* 确认端口未被占用：`lwa doctor` 的 port_pool 检查**排除** lwa 自用端口（`managerPort`、`staticGatewayPort`、registry 已分配 hostPort），只报外部冲突；管理页端口请单独用 `ss`/`lsof` 或 `lwa manager status` 核对。
 * 确认 token 正确（复制时勿带前后空格）。
 * 若绑定到 `0.0.0.0` 但无 token，启动会被 `validate_manager_binding` 拒绝。
 
@@ -278,6 +302,7 @@ lwa gateway switch builtin --dry-run     # 只看将影响的实例
 - 切回 **caddy**：按 manifest 重建别名片段并 reload。
 - 失败会回滚；若回滚也失败，结果带 `degraded` + `repairHint`，**不会**假报成功。
 - `--json` / `POST /api/gateway/switch` 返回中：`ok=true` 表示切换事务本身成功，但 **`ok` ≠ `fullyOk`**；`accessOk=false` 表示后端已切成功、访问复核仍有风险（不假绿）。`fullyOk` 需切换与访问复核均通过。
+- **主动停止的实例**（`desiredState=stopped`）在 access review 中标 `[SKIP]`，不会因回环 REFUSED 拖垮 switch/review 的 overall（BUG-301）。
 - 管理页等价：`POST /api/gateway/switch`（body `{"backend":"caddy"|"builtin"}`）。
 
 ## 数据与清理

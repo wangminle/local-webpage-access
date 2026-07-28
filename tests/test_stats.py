@@ -156,6 +156,22 @@ def test_host_resources_disk_always_available(workspace) -> None:
         assert info.load_avg_1m is None
 
 
+def test_disk_usage_returns_none_on_oserror(monkeypatch, workspace) -> None:
+    """BUG-354：shutil.disk_usage 抛 OSError 时降级为 (None, None)。"""
+    import local_webpage_access.stats as stats_mod
+
+    def boom(_path: str):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(stats_mod.shutil, "disk_usage", boom)
+    total, used = stats_mod._disk_usage(workspace.root)
+    assert total is None
+    assert used is None
+    info = host_resources(root=workspace.root)
+    assert info.disk_total_bytes is None
+    assert info.disk_used_bytes is None
+
+
 def test_host_resources_to_dict(workspace) -> None:
     info = host_resources(root=workspace.root)
     d = info.to_dict()

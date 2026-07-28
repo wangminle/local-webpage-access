@@ -26,7 +26,7 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 - **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权，覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计。
 - **自动导入守护进程（WBS-21）**：`lwa daemon on` 后监听 `inbox/`，自动导入并启动可确定的轻量实例。
 - **安全审计（WBS-25）**：对生成的 Compose / Dockerfile / zip 成员做 critical/warn/info 分级审计，critical 问题拒绝写出；管理页绑定校验（LAN 绑定 + token）。
-- **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；`--json` 含平台矩阵报告（未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。
+- **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；人类可读与 `--json` 均含平台矩阵报告（`--json` 未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。
 - **宿主机装配（IMP-031/032/033）**：`lwa setup` / `lwa init` 内置 macOS/Linux 的 Docker Engine+Compose、Caddy 安装脚本（默认国内源 + registry-mirrors）；`--default` 检测+指引，`--full` 装齐并做 **Full Profile 能力闭环**（CLI + manager/daemon/gateway 真实上下文、Caddy owner/工作区访问）；未闭环不假绿；`--resume` 在重登/权限刷新后续跑验收（非 TTY 需 `--yes`）。
 - **正式平台门禁（IMP-036）**：仅 Ubuntu LTS / Debian Stable / WSL2 / macOS；Windows 原生 hard fail。
 - **大模型 Skills（WBS-24）**：17 个 SKILL.md 覆盖环境初始化、导入、托管、容器、生命周期、自启动、访问复核、排障等场景，供 AI 编程助手协作。
@@ -54,7 +54,7 @@ pip install -e ".[dev]"
 - **macOS**：14 Sonoma+（滚动下限，截至 2026-07）
 - **不支持**：Windows 原生（请改用 WSL2）、WSL1、Ubuntu 非 LTS、Debian sid/testing、未列入的发行版/架构
 
-未初始化工作区时仍可用 `lwa doctor --json` 查看 `platformSupport` 报告。
+`lwa doctor` 会在人类可读输出末尾打印「平台支持」段（platform / supported / wslVersion / distro / 原因 / 建议）；未初始化工作区时仍可用 `lwa doctor --json` 查看 `platformSupport` 报告。
 
 ## 快速开始
 
@@ -122,7 +122,7 @@ lwa access review             # 复核访问地址可用性（别名白屏 / 空
 
 | 命令 | 说明 |
 | --- | --- |
-| `lwa init [-w DIR] [--force] [--default\|--full] [--yes]` | 初始化工作区（目录 / 配置 / registry / skills），幂等；`--full` 装齐依赖并写入 `profile: full` |
+| `lwa init [-w DIR] [--force] [--default\|--full] [--yes]` | 初始化工作区（目录 / 配置 / registry / skills），幂等；`--full` 装齐依赖并在能力闭环 **ready 后**写入 `profile: full` |
 | `lwa update` | 升级 lwa 包并热重载工作区：同步 skills、补齐配置、重启 manager/daemon、刷新访问地址（可选 review）、可选 doctor / restart 实例 |
 | `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名；`--update` 原地升级（容器自动 rebuild，静态/前端 restart；`--no-restart` 仅换源码） |
 | `lwa alias set <ID> <slug>` / `lwa alias clear <ID>` | 为静态或容器实例设置/清除路径别名（需 Caddy；与管理页/API 共用逻辑） |
@@ -170,7 +170,7 @@ portPool:                   # 实例端口池
   end: 19999
 staticGateway: caddy        # caddy | builtin（nginx 枚举保留但未实现，会降级 builtin）
 staticGatewayPort: 8080    # 路径别名统一入口端口（Caddy 模式，需与 managerPort 错开）
-profile: default            # default | full（IMP-033；full 由 setup/init --full 写入）
+profile: default            # default | full（IMP-033；full 由 setup/init --full 在能力闭环 ready 后写入）
 serviceUser: null           # Full 固化的运行身份（安装时的真实登录用户）
 buildConcurrency: 1         # 构建并发数（小主机建议保持 1）
 defaultResourceLimits:
@@ -189,7 +189,7 @@ logLevel: INFO
 ```
 <workspace>/
 ├─ local-web.yml            # 全局配置
-├─ inbox/                   # 待导入的 zip（daemon 自动监听；成功后可归档到 processed/）
+├─ inbox/                   # 待导入的 zip（daemon 自动监听；成功→processed/，连续失败→failed/）
 ├─ apps/                    # 已导入实例
 ├─ registry/
 │  ├─ local-web.db          # SQLite registry
@@ -214,7 +214,7 @@ logLevel: INFO
 ## 管理页
 
 `lwa manager on` 可后台启动管理页，`lwa manager start` 可前台启动管理页（FastAPI + 单页前端），默认监听 `0.0.0.0:17800`。
-首次启动会生成访问 token 并打印到终端，浏览器打开后输入 token 即可使用；本机 `127.0.0.1` / `localhost` / `::1` 访问 API 可免 token。
+首次启动会生成访问 token 并打印到终端，浏览器打开后输入 token 即可使用；本机 `127.0.0.1` / `localhost` / `::1` 的**读** API 可免 token，**写**操作需同源（浏览器管理页）或带 token。
 管理页覆盖实例列表、详情、日志查看、资源占用、start/stop/restart/rebuild/**取消构建**/删除、
 路径别名（静态与容器，需 Caddy）、**浏览量**列与详情、**冗余**徽章/筛选/批量清理、
 pending/failed/可恢复异常队列、端口池与统计。`queued`/`building`/`cancelling` 时显示「取消构建」；

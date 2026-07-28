@@ -66,7 +66,6 @@ def test_build_zip_into_dir_uses_default_name(tmp_path: Path) -> None:
 @pytest.fixture
 def env(tmp_path: Path):
     from local_webpage_access.config import example_config_text, load_config
-    from local_webpage_access.importer import Importer
     from local_webpage_access.paths import Workspace
     from local_webpage_access.registry import Registry
 

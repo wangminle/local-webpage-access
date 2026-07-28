@@ -1345,3 +1345,58 @@ def test_systemd_static_is_not_enabled(tmp_path, monkeypatch) -> None:
         return CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     assert backend.is_enabled("daemon", runner) is False
+
+
+# ---- BUG-338 / BUG-339 ----------------------------------------------------
+
+
+def test_build_systemd_unit_escapes_percent_and_quotes(tmp_path, monkeypatch) -> None:
+    """BUG-338：路径中的 % 须写成 %%；PATH 内引号须转义以免打破 Environment 引号。"""
+    root = tmp_path / "ws%prod"
+    root.mkdir()
+    monkeypatch.setattr(
+        asm,
+        "_build_path_env",
+        lambda *a, **k: '/usr/bin:/opt/with"quote/bin:/tmp/%cache',
+    )
+    unit = asm.build_systemd_unit(
+        "daemon", python_exe="/usr/bin/python3", workspace_root=root
+    )
+    assert f"WorkingDirectory={root}".replace("%", "%%") in unit
+    assert "WorkingDirectory=" in unit and "ws%%prod" in unit
+    env_line = next(ln for ln in unit.splitlines() if ln.startswith("Environment="))
+    assert 'Environment="PATH=' in env_line
+    assert '\\"' in env_line or 'with\\"quote' in env_line
+    assert "%%cache" in env_line
+    # ExecStart 中工作区路径的 % 也必须转义
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    assert "ws%%prod" in exec_line
+
+
+def test_enable_linger_uses_getpass_not_root(monkeypatch) -> None:
+    """BUG-339：USER 未设置时用 getpass.getuser()，不得回退 root。"""
+    monkeypatch.setattr(asm, "detect_platform", lambda: asm.PLATFORM_LINUX)
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.setattr(asm.getpass, "getuser", lambda: "alice")
+    seen: list[list[str]] = []
+
+    def runner(cmd, **kwargs):
+        seen.append(list(cmd))
+        return CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    assert asm.enable_linger(runner=runner) is True
+    assert seen and seen[0] == ["loginctl", "enable-linger", "alice"]
+    assert "root" not in seen[0]
+
+
+def test_enable_linger_raises_when_user_unavailable(monkeypatch) -> None:
+    """BUG-339：无法解析当前用户时必须报错，不得操作 root。"""
+    monkeypatch.setattr(asm, "detect_platform", lambda: asm.PLATFORM_LINUX)
+    monkeypatch.delenv("USER", raising=False)
+
+    def boom() -> str:
+        raise KeyError("uid has no passwd entry")
+
+    monkeypatch.setattr(asm.getpass, "getuser", boom)
+    with pytest.raises((KeyError, asm.AutostartError)):
+        asm.enable_linger(runner=lambda *a, **k: CompletedProcess(args=[], returncode=0))

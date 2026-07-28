@@ -13,7 +13,7 @@ lwa 在局域网小主机上的日常运维、选型与排障速查。面向已 
 | 档位 | 命令 | 行为 |
 | --- | --- | --- |
 | default（缺省） | `lwa setup` / `lwa init` | 检测 Python / Docker / Compose / Caddy / Node 并打印指引；缺 Docker Engine 时 TTY 询问是否执行内置安装脚本。**`lwa setup`（default）无需先有工作区** |
-| full | `lwa setup --full` / `lwa init --full` | 按 `MIN_*` 检查并安装 Caddy + Docker Engine + Compose；写入 `profile=full` / `serviceUser`；验收 **CapabilityReport.overall=ready**（CLI + manager/daemon/gateway 真实上下文、Caddy owner/工作区访问）；未闭环 **不得** exit 0。**`--full` 需要已初始化工作区**（推荐 `lwa init --full --yes`，或先 `lwa init` 再 `lwa setup --full`） |
+| full | `lwa setup --full` / `lwa init --full` | 按 `MIN_*` 检查并安装 Caddy + Docker Engine + Compose；固化 `serviceUser`；验收 **CapabilityReport.overall=ready**（CLI + manager/daemon/gateway 真实上下文、Caddy owner/工作区访问）后才把 `local-web.yml` 的 `profile` 写成 `full`（未闭环可写 `full-setup-state.json`，**不**提前抬成 full）；未闭环 **不得** exit 0。**`--full` 需要已初始化工作区**（推荐 `lwa init --full --yes`，或先 `lwa init` 再 `lwa setup --full`） |
 
 常用开关：
 
@@ -106,6 +106,10 @@ builtin 时**保留** `routeHost` 元数据但别名入口未激活；切回 cad
 ### 导入成功后的归档
 
 daemon 导入成功（started/pending/conflict 终态）后会把 zip **移入 `inbox/processed/`**（同名加时间戳），从扫描视野移除。手动 `lwa import` 不自动归档——导入后可自行移走或删除 zip。
+
+### 连续失败死信（BUG-297）
+
+同一 zip 指纹被 daemon 连续导入失败达到阈值（默认 5 次）后，会移入 **`inbox/failed/`**，停止无限重试。处理：查 `logs/daemon.log` → 修好 zip/环境 → 移回 `inbox/` 根目录再试。
 
 ### 批量清理冗余实例
 
@@ -247,6 +251,8 @@ lwa access review --json   # 机器可读
 ```
 
 逐实例探测：回环 `127.0.0.1:<hostPort>`（权威，区分「服务没起」vs「LAN URL 陈旧」）、lanUrl、routeUrl；对别名入口解析 HTML 的绝对路径 `src`/`href`，对照「无前缀」与「带别名前缀」两种请求——前者 200 但 0 字节、后者有实体 → **IMP-023 风险**（SPA 需构建时设相对 base，如 Vite `base: './'`）。这才是别名下「可用」的真实口径，而非仅看入口 HTML 200。
+
+**主动停止的实例**（`desiredState=stopped`）标 `[SKIP]`，不探活、不计入 FAIL（BUG-301），避免拖垮 `gateway on` / `gateway switch` 的 overall。
 
 `lwa gateway on` 交接收尾后会**默认**跑一次 access review（见 7.6）。
 

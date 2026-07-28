@@ -55,6 +55,13 @@ def import_cmd(
     from local_webpage_access.importer import Importer
 
     try:
+        if update is not None and path_alias is not None:
+            typer.secho(
+                "--path-alias 不能与 --update 同时使用",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
         ws, config, reg = open_workspace_registry()
         try:
             importer = Importer(ws, config, reg)
@@ -272,17 +279,27 @@ def scan(
                 return
 
             for iid in ids:
-                current_dir = ws.app_current(iid)
-                detection = scanner.detect(current_dir)
-                manifest_path = ws.app_manifest_path(iid)
-                if not manifest_path.is_file():
-                    typer.secho(f"  {iid}：缺少 local-web.json，跳过", fg=typer.colors.YELLOW)
-                    continue
-                manifest = InstanceManifest.load(manifest_path)
-                manifest = apply_detection_to_manifest(manifest, detection, ws)
-                manifest.save(manifest_path)
-                reg.upsert_from_manifest(manifest)
-                reg.add_event(iid, "scan", f"重新扫描：{detection.form}（{detection.confidence}）")
+                from local_webpage_access.lifecycle import instance_lock
+
+                with instance_lock(ws, iid):
+                    current_dir = ws.app_current(iid)
+                    detection = scanner.detect(current_dir)
+                    manifest_path = ws.app_manifest_path(iid)
+                    if not manifest_path.is_file():
+                        typer.secho(
+                            f"  {iid}：缺少 local-web.json，跳过",
+                            fg=typer.colors.YELLOW,
+                        )
+                        continue
+                    manifest = InstanceManifest.load(manifest_path)
+                    manifest = apply_detection_to_manifest(manifest, detection, ws)
+                    manifest.save(manifest_path)
+                    reg.upsert_from_manifest(manifest)
+                    reg.add_event(
+                        iid,
+                        "scan",
+                        f"重新扫描：{detection.form}（{detection.confidence}）",
+                    )
                 status_label = detection.form if not detection.pending else "pending"
                 typer.echo(f"  {iid}：{status_label}（{detection.confidence}）")
         finally:

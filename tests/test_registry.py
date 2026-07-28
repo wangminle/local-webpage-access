@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,82 @@ def test_migrate_runs_on_fresh_db(workspace_root: Path) -> None:
     reg.open()
     assert get_schema_version(reg.conn) == 2
     reg.close()
+
+
+def test_concurrent_migrate_serializes_schema_version_check(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-294：两连接同时从 v1 升级时不得重复 ALTER 崩溃。"""
+    import local_webpage_access.registry.connection as connection_mod
+
+    db_path = tmp_path / "concurrent-migrate.db"
+    seed = connection_mod.connect(db_path)
+    for statement in connection_mod._SCHEMAS[1]:
+        seed.execute(statement)
+    seed.execute(
+        "INSERT INTO schema_version(version, applied_at) VALUES (1, 'seed')"
+    )
+    seed.close()
+
+    original_get = connection_mod.get_schema_version
+    reads_before_tx = threading.Barrier(2)
+
+    def synchronized_get(conn):
+        version = original_get(conn)
+        if not conn.in_transaction:
+            reads_before_tx.wait(timeout=3.0)
+        return version
+
+    monkeypatch.setattr(connection_mod, "get_schema_version", synchronized_get)
+    errors: list[BaseException] = []
+
+    def migrate_one() -> None:
+        conn = connection_mod.connect(db_path)
+        try:
+            connection_mod.migrate(conn)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=migrate_one) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    verify = connection_mod.connect(db_path)
+    try:
+        assert original_get(verify) == 2
+    finally:
+        verify.close()
+
+
+def test_init_db_wraps_connect_error_with_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-316：Registry 打开失败应转为 RegistryError，不泄漏 sqlite traceback。"""
+    import sqlite3
+
+    import local_webpage_access.registry.connection as connection_mod
+    from local_webpage_access.errors import RegistryError
+
+    db_path = tmp_path / "denied" / "registry.db"
+    monkeypatch.setattr(
+        connection_mod,
+        "connect",
+        lambda _path: (_ for _ in ()).throw(
+            sqlite3.OperationalError("unable to open database file")
+        ),
+    )
+
+    with pytest.raises(RegistryError, match="数据库初始化失败") as exc_info:
+        connection_mod.init_db(db_path)
+    assert exc_info.value.context["path"] == str(db_path)
+    # BUG-316：给用户可读建议，避免只剩 sqlite 原生 traceback。
+    assert "权限" in str(exc_info.value) or "检查" in str(exc_info.value)
 
 
 # ---- 实例同步 ---------------------------------------------------------------
@@ -445,3 +522,26 @@ def test_registry_concurrent_reads_thread_safe(registry: Registry) -> None:
         counts = list(ex.map(_read_many, range(40)))
 
     assert all(c == 30 for c in counts)
+
+
+# ---- 回归测试：BUG-333 ----------------------------------------------------
+
+
+def test_upsert_from_manifest_rolls_back_when_child_write_fails(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-333：子表写入失败时，主表不得单独提交留下不一致状态。"""
+    original = Registry._upsert_mapping
+
+    def flaky(
+        tx: object, table: str, row: dict, key: str
+    ) -> None:
+        if table == "static_sites":
+            raise RuntimeError("simulated child write failure")
+        return original(tx, table, row, key)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Registry, "_upsert_mapping", staticmethod(flaky))
+    with pytest.raises(RuntimeError, match="simulated child write failure"):
+        registry.upsert_from_manifest(_static_manifest("demo"))
+    assert registry.get_instance("demo") is None
+    assert registry.get_static_site("demo") is None

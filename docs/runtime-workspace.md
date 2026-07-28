@@ -18,7 +18,7 @@ lwa start my-app
 lwa list
 ```
 
-管理页：本机 http://127.0.0.1:17800/（本机免 token）；局域网 http://\<LAN-IP\>:17800/（需 token；`/api/health` 带 token 才返回完整 capabilities）。
+管理页：本机 http://127.0.0.1:17800/（本机读免 token，写需同源或 token）；局域网 http://\<LAN-IP\>:17800/（需 token；`/api/health` 带 token 才返回完整 capabilities）。
 
 ---
 
@@ -27,13 +27,13 @@ lwa list
 ```
 runtime/                      ← 工作区根（Runtime 根目录）
 ├── local-web.yml             ← 全局配置（端口池、管理页、静态网关、profile/serviceUser 等）
-├── inbox/                    ← 待导入 zip 投放区（daemon 也会监听；成功后可归档到 processed/）
+├── inbox/                    ← 待导入 zip 投放区（daemon 监听；成功→processed/，连续失败→failed/）
 ├── apps/                     ← 已导入实例（每个子目录一个实例）
 ├── registry/                 ← SQLite 全局索引（local-web.db）与构建闸门（build-locks.db）
 ├── static-gateway/           ← 静态网关配置（Caddy 站点/别名片段等）
 ├── logs/                     ← 工作区级日志：lwa.log / manager.log / daemon.log / gateway.log / static-access.log
 ├── run/                      ← token、daemon/manager/gateway 状态、pageviews.db、capability-*.json、full-setup-state.json
-├── templates/                ← 用户可编辑的 Dockerfile/Compose 模板副本
+├── templates/                ← 网关/配置模板副本（如 static/caddy_site.conf.tpl、local-web.yml.example）
 └── skills/                   ← 从包内复制的大模型 Skill 文档
 ```
 
@@ -42,6 +42,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
 - **用途**：放置待导入的 `.zip`；`lwa import inbox/foo.zip` 或 daemon 自动导入。
 - **注意**：zip 内若含 `node_modules` 等大目录，导入时会 **自动剥离**可重建依赖；仍保留 zip slip / 符号链接安全审计。
 - **归档（IMP-011）**：daemon 导入成功（started/pending/conflict 终态）后会把 zip 物理移入 `inbox/processed/`（同名加时间戳），从扫描视野移除，避免重复导入与 `-2/-3` 冗余实例；slug 冲突时不再自动改名，而是记事件并提示用 `lwa import <zip> --update <slug>`。
+- **死信（BUG-297）**：同一 zip 指纹连续导入失败达到阈值（默认 5 次）后，daemon 将其移入 `inbox/failed/` 停止无限重试；修好后移回 `inbox/` 根目录即可再试。详情见 `logs/daemon.log`。
 
 ### `apps/<instance-id>/`
 
@@ -106,7 +107,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
 
 ### `templates/`、`skills/`
 
-- **templates/**：`lwa init` 复制的 Dockerfile/Compose 模板，可手工定制。
+- **templates/**：`lwa init` 复制的包内模板，当前主要为 `static/caddy_site.conf.tpl`（静态网关站点片段）与 `local-web.yml.example`。Dockerfile / Compose 由代码内模板（`dockerfile_templates.py` / compose 生成逻辑）按实例写出到 `apps/<id>/docker/`，不在工作区 `templates/` 下维护可编辑副本。
 - **skills/**：AI 助手协作用 SKILL.md，描述 import/start/排障等流程。
 
 ---

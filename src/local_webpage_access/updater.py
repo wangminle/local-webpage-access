@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ _RESTARTABLE_STATUSES = frozenset({"running", "stopped", "failed"})
 
 # pip install 超时（大依赖网络慢，留足窗口）
 _PIP_TIMEOUT = 300
+_PROJECT_NAME = "local-webpage-access"
 
 
 # ---- 数据结构 --------------------------------------------------------------
@@ -115,6 +117,16 @@ class UpdateReport:
 # ---- 上下文识别 ------------------------------------------------------------
 
 
+def _is_lwa_repo(path: Path) -> bool:
+    pyproject = path / "pyproject.toml"
+    try:
+        with pyproject.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    return str(data.get("project", {}).get("name", "")).strip() == _PROJECT_NAME
+
+
 def locate_repo(explicit: str | None = None) -> Path | None:
     """识别 lwa 源码根（IMP-008.01）。
 
@@ -123,17 +135,18 @@ def locate_repo(explicit: str | None = None) -> Path | None:
     """
     if explicit:
         p = Path(explicit).resolve()
-        if p.is_dir() and (p / "pyproject.toml").is_file():
+        if p.is_dir() and _is_lwa_repo(p):
             return p
         # 给出明确错误而非静默降级，避免在错误目录跑 pip
         raise FileNotFoundError(
-            f"--repo 指定的目录不是 lwa 源码根（缺少 pyproject.toml）：{p}"
+            f"--repo 指定的目录不是 {_PROJECT_NAME} 源码根"
+            f"（缺少有效 pyproject.toml 或 project.name 不匹配）：{p}"
         )
 
     # editable 安装路径
     here = Path(__file__).resolve().parent
     candidate = here.parent.parent
-    if (candidate / "pyproject.toml").is_file():
+    if _is_lwa_repo(candidate):
         return candidate
 
     # git 根兜底
@@ -147,7 +160,7 @@ def locate_repo(explicit: str | None = None) -> Path | None:
         )
         if result.returncode == 0:
             root = Path(result.stdout.strip())
-            if root.is_dir() and (root / "pyproject.toml").is_file():
+            if root.is_dir() and _is_lwa_repo(root):
                 return root
     except (OSError, subprocess.SubprocessError):
         pass
@@ -292,13 +305,128 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
         log.warning("配置迁移备份失败，中止写回：%s", exc)
         return missing, False
 
-    merged = _deep_merge_defaults(defaults, existing)  # existing 优先；嵌套字段深层补齐
-    config_path.write_text(
-        yaml.safe_dump(merged, allow_unicode=True, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
+    # BUG-356：只把缺失键追加/嵌入原文，保留注释、键顺序与用户格式。
+    # CHK-115：flow-style（portPool: {start: …}）也须补齐嵌套缺省子键。
+    updated_raw = raw
+    for key, default_value in defaults.items():
+        current_value = existing.get(key)
+        if not isinstance(default_value, dict) or not isinstance(current_value, dict):
+            continue
+        nested_missing = {
+            child: value
+            for child, value in default_value.items()
+            if child not in current_value
+        }
+        if not nested_missing:
+            continue
+        lines = updated_raw.splitlines(keepends=True)
+        start = None
+        flow_style = False
+        key_prefix = f"{key}:"
+        for i, line in enumerate(lines):
+            stripped = line.rstrip("\r\n")
+            if stripped == key_prefix:
+                start = i
+                flow_style = False
+                break
+            # flow-style：`portPool: {start: 19000}`（允许 key 后空白）
+            if stripped.startswith(key_prefix):
+                remainder = stripped[len(key_prefix) :].lstrip()
+                if remainder.startswith("{"):
+                    start = i
+                    flow_style = True
+                    break
+        if start is None:
+            continue
+        if flow_style:
+            merged = _deep_merge_defaults(default_value, current_value)
+            fragment = yaml.safe_dump(
+                {key: merged},
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False,
+            )
+            replacement = list(fragment.splitlines(keepends=True))
+            if not replacement[-1].endswith("\n"):
+                replacement[-1] = replacement[-1] + "\n"
+            # 尽量沿用原行结尾风格
+            if lines[start].endswith("\r\n"):
+                replacement = [
+                    (ln if ln.endswith("\r\n") else ln.rstrip("\n") + "\r\n")
+                    for ln in replacement
+                ]
+            lines[start : start + 1] = replacement
+        else:
+            end = start + 1
+            while end < len(lines) and (
+                lines[end].startswith((" ", "\t")) or not lines[end].strip()
+            ):
+                end += 1
+            fragment = yaml.safe_dump(
+                nested_missing, allow_unicode=True, sort_keys=False
+            )
+            lines[end:end] = [
+                "  " + line for line in fragment.splitlines(keepends=True)
+            ]
+        updated_raw = "".join(lines)
+    addition = yaml.safe_dump(
+        {key: defaults[key] for key in missing},
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
     )
+    prefix = updated_raw if updated_raw.endswith("\n") else updated_raw + "\n"
+    config_path.write_text(prefix + addition, encoding="utf-8")
     log.info("配置迁移：补齐 %d 个缺失字段（备份 → %s）", len(missing), backup.name)
     return missing, True
+
+
+def run_migrate_config_defaults(ws: Workspace) -> tuple[list[str], bool]:
+    """在**新解释器进程**中执行 :func:`migrate_config_defaults`（BUG-357）。
+
+    ``lwa update`` 的 pip 之后，当前进程仍持有升级前的 ``Config`` 类；同进程
+    迁移会漏掉新版本新增的缺省字段。子进程重新 import 即可拿到新 schema。
+    """
+    import json
+    import sys
+
+    script = (
+        "import json, sys\n"
+        "from local_webpage_access.paths import Workspace\n"
+        "from local_webpage_access.config import load_config\n"
+        "from local_webpage_access.updater import migrate_config_defaults\n"
+        "ws = Workspace(sys.argv[1])\n"
+        "cfg = load_config(ws)\n"
+        "missing, written = migrate_config_defaults(ws, cfg)\n"
+        "print(json.dumps({'missing': missing, 'written': written}))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script, str(ws.root)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("配置迁移子进程启动失败：%s", exc)
+        raise
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() or f"exit={proc.returncode}"
+        raise RuntimeError(f"配置迁移子进程失败：{detail}")
+    line = (proc.stdout or "").strip().splitlines()
+    if not line:
+        return [], False
+    try:
+        payload = json.loads(line[-1])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"配置迁移子进程输出无法解析：{(proc.stdout or '')[:200]}"
+        ) from exc
+    missing = payload.get("missing") or []
+    if not isinstance(missing, list):
+        missing = []
+    return [str(x) for x in missing], bool(payload.get("written"))
 
 
 def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
@@ -533,7 +661,8 @@ def run_update(
 
     # ---- 5. 配置缺省字段补齐 ----
     try:
-        missing, written = migrate_config_defaults(workspace, config)
+        # BUG-357：pip 后须在新进程迁移，否则旧 Config 类漏补新字段
+        missing, written = run_migrate_config_defaults(workspace)
         if missing:
             report.steps.append(
                 StepResult(
@@ -696,6 +825,7 @@ __all__ = [
     "sync_skills",
     "sync_templates",
     "migrate_config_defaults",
+    "run_migrate_config_defaults",
     "restart_manager",
     "restart_daemon",
     "restart_instances",

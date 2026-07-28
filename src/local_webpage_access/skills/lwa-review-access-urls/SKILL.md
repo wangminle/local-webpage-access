@@ -60,8 +60,9 @@ lwa rebuild <id>
 1. **安装/升级失败**（pip、配置迁移）→ 查 `lwa update --json` 的 `pip` / `migrateConfig` 步骤。
 2. **地址漂移**（`lan_url_stale` / `lanUrlStale`）→ `access refresh`；不必 rebuild。
 3. **服务未起**（回环探活失败）→ `lwa start` / 查 run 日志；与 LAN 无关。
-4. **IMP-023 空 200** → 修前端 `base` 后显式 `--rebuild-if-needed` 或 `lwa rebuild`。
-5. **端口双开 / 后端不一致 / 网关残留** → 优先 `lwa gateway switch <caddy|builtin>`（IMP-037）；仅启停 master 用 `lwa gateway on/off`；并用 `doctor` 的 `backend_handoff` 核对。
+4. **`[SKIP] desiredState=stopped`**（BUG-301）→ 用户主动停止的实例，属预期，不计入 FAIL；需复核时先 `lwa start`。
+5. **IMP-023 空 200** → 修前端 `base` 后显式 `--rebuild-if-needed` 或 `lwa rebuild`。
+6. **端口双开 / 后端不一致 / 网关残留** → 优先 `lwa gateway switch <caddy|builtin>`（IMP-037）；仅启停 master 用 `lwa gateway on/off`；并用 `doctor` 的 `backend_handoff` 核对。
 
 ## 输出
 

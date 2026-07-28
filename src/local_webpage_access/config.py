@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +52,26 @@ class ResourceLimits(BaseModel):
 
     memory: str = "512m"
     cpus: str = "0.75"
+
+    @field_validator("memory")
+    @classmethod
+    def _validate_memory(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if not re.fullmatch(r"[1-9]\d*(?:[kmgt]i?b?|b)?", normalized):
+            raise ValueError("memory 必须是正整数加可选单位，如 512m、1g")
+        return normalized
+
+    @field_validator("cpus")
+    @classmethod
+    def _validate_cpus(cls, value: str) -> str:
+        normalized = str(value).strip()
+        try:
+            numeric = float(normalized)
+        except ValueError as exc:
+            raise ValueError("cpus 必须是正数") from exc
+        if not math.isfinite(numeric) or numeric <= 0:
+            raise ValueError("cpus 必须是有限正数")
+        return normalized
 
 
 class StaticRateLimit(BaseModel):
@@ -174,6 +197,16 @@ class Config(BaseModel):
         if v not in allowed:
             raise ValueError(f"lanIpStrategy 必须是 {allowed} 之一，得到 {v!r}")
         return v
+
+    @field_validator("manualLanIp")
+    @classmethod
+    def _validate_manual_lan_ip(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return str(ipaddress.ip_address(value.strip()))
+        except ValueError as exc:
+            raise ValueError(f"manualLanIp 不是合法 IP 地址：{value!r}") from exc
 
     @model_validator(mode="after")
     def _check_manager_port_not_in_pool(self) -> Config:

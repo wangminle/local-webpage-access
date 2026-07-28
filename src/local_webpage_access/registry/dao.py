@@ -11,6 +11,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import quote
 
 from local_webpage_access.errors import RegistryError
 from local_webpage_access.logging import get_logger, now_iso
@@ -47,6 +48,29 @@ class Registry:
     def open(self) -> Registry:
         if self._conn is None:
             self._conn = init_db(self.db_path)
+        return self
+
+    def open_readonly(self) -> Registry:
+        """只读打开既有 registry，不创建文件、不迁移 schema（BUG-331）。"""
+        if self._conn is None:
+            if not self.db_path.is_file():
+                raise RegistryError(f"Registry 数据库不存在：{self.db_path}")
+            uri = f"file:{quote(str(self.db_path))}?mode=ro"
+            try:
+                conn = sqlite3.connect(
+                    uri,
+                    uri=True,
+                    check_same_thread=False,
+                    isolation_level=None,
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only=ON")
+                conn.execute("PRAGMA busy_timeout=5000")
+                self._conn = conn
+            except (OSError, sqlite3.Error) as exc:
+                raise RegistryError(
+                    f"只读打开 Registry 失败（{self.db_path}）：{exc}"
+                ) from exc
         return self
 
     def close(self) -> None:
@@ -141,15 +165,34 @@ class Registry:
             "last_health_check_at": data.get("lastHealthCheckAt"),
             "last_error": data.get("lastError"),
         }
-        self.upsert_instance(row)
+        # BUG-333：主表、当前 runtime 子表及另一侧清理必须同一事务提交。
+        with self.txn() as tx:
+            self._upsert_mapping(tx, "instances", row, "id")
+            if data.get("container"):
+                container = self._container_row(data["id"], data["container"])
+                self._upsert_mapping(tx, "containers", container, "instance_id")
+                tx.execute(
+                    "DELETE FROM static_sites WHERE instance_id = ?", (data["id"],)
+                )
+            elif data.get("static"):
+                static = self._static_row(data["id"], data["static"])
+                self._upsert_mapping(tx, "static_sites", static, "instance_id")
+                tx.execute(
+                    "DELETE FROM containers WHERE instance_id = ?", (data["id"],)
+                )
 
-        # 同步容器/静态配置；runtime 切换时清理另一侧残留子表（BUG-005）
-        if data.get("container"):
-            self.upsert_container(data["id"], data["container"])
-            self.delete_static_site(data["id"])
-        elif data.get("static"):
-            self.upsert_static_site(data["id"], data["static"])
-            self.delete_container(data["id"])
+    @staticmethod
+    def _upsert_mapping(
+        tx: sqlite3.Connection, table: str, row: dict[str, Any], key: str
+    ) -> None:
+        cols = ", ".join(row.keys())
+        placeholders = ", ".join(["?"] * len(row))
+        updates = ", ".join(f"{c}=excluded.{c}" for c in row if c != key)
+        tx.execute(
+            f"INSERT INTO {table} ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT({key}) DO UPDATE SET {updates}",
+            tuple(row.values()),
+        )
 
     def get_instance(self, instance_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
@@ -248,8 +291,16 @@ class Registry:
     # ---- 容器 ---------------------------------------------------------------
 
     def upsert_container(self, instance_id: str, container: dict[str, Any]) -> None:
+        row = self._container_row(instance_id, container)
+        with self.txn() as tx:
+            self._upsert_mapping(tx, "containers", row, "instance_id")
+
+    @staticmethod
+    def _container_row(
+        instance_id: str, container: dict[str, Any]
+    ) -> dict[str, Any]:
         rl = container.get("resourceLimits") or {}
-        row = {
+        return {
             "instance_id": instance_id,
             "compose_project": container["projectName"],
             "service_name": container.get("serviceName", "app"),
@@ -265,15 +316,6 @@ class Registry:
             "memory_limit": rl.get("memory"),
             "cpu_limit": rl.get("cpus"),
         }
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(["?"] * len(row))
-        updates = ", ".join(f"{c}=excluded.{c}" for c in row if c != "instance_id")
-        sql = (
-            f"INSERT INTO containers ({cols}) VALUES ({placeholders})"
-            f" ON CONFLICT(instance_id) DO UPDATE SET {updates}"
-        )
-        with self.txn() as tx:
-            tx.execute(sql, tuple(row.values()))
 
     def get_container(self, instance_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
@@ -289,7 +331,13 @@ class Registry:
     # ---- 静态站点 -----------------------------------------------------------
 
     def upsert_static_site(self, instance_id: str, static: dict[str, Any]) -> None:
-        row = {
+        row = self._static_row(instance_id, static)
+        with self.txn() as tx:
+            self._upsert_mapping(tx, "static_sites", row, "instance_id")
+
+    @staticmethod
+    def _static_row(instance_id: str, static: dict[str, Any]) -> dict[str, Any]:
+        return {
             "instance_id": instance_id,
             "root_path": static.get("root", "public"),
             "gateway": static.get("gateway", "caddy"),
@@ -299,15 +347,6 @@ class Registry:
             "gateway_config_path": static.get("gatewayConfigPath"),
             "enabled": 1 if static.get("enabled", True) else 0,
         }
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(["?"] * len(row))
-        updates = ", ".join(f"{c}=excluded.{c}" for c in row if c != "instance_id")
-        sql = (
-            f"INSERT INTO static_sites ({cols}) VALUES ({placeholders})"
-            f" ON CONFLICT(instance_id) DO UPDATE SET {updates}"
-        )
-        with self.txn() as tx:
-            tx.execute(sql, tuple(row.values()))
 
     def get_static_site(self, instance_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
@@ -405,7 +444,10 @@ class Registry:
                 "VALUES (?, ?, ?, ?)",
                 (instance_id, event_type, message, now_iso()),
             )
-            return int(cur.lastrowid)
+            row_id = cur.lastrowid
+            if row_id is None:
+                raise RuntimeError("INSERT events 未返回 lastrowid")
+            return int(row_id)
 
     def list_events(
         self, instance_id: str | None = None, *, limit: int = 100
@@ -437,7 +479,10 @@ class Registry:
                 "VALUES (?, ?, ?, ?)",
                 (instance_id, status, started_at or now_iso(), log_path),
             )
-            new_id = int(cur.lastrowid)
+            row_id = cur.lastrowid
+            if row_id is None:
+                raise RuntimeError("INSERT builds 未返回 lastrowid")
+            new_id = int(row_id)
             # BUG-119：新构建启动时立刻关闭同实例其它 running 行，避免被后续
             # 成功记录遮蔽后永久残留。
             if status == "running":
@@ -545,6 +590,8 @@ class Registry:
 
     def total_count(self) -> int:
         row = self._fetchone("SELECT COUNT(*) AS n FROM instances")
+        if row is None:
+            return 0
         return int(row["n"])
 
 

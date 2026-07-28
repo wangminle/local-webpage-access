@@ -428,3 +428,152 @@ def test_log_capability_probe_does_not_raise(caplog) -> None:
     finally:
         logger.removeHandler(caplog.handler)
         logger.setLevel(orig_level)
+
+
+def test_overlay_recomputes_overall_when_gateway_becomes_ready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-284：overlay 纠偏 gatewayAccess 后须重算 overall，不得留下陈旧 unready。"""
+    from local_webpage_access.capability import (
+        CapabilityReport,
+        overlay_gateway_access_from_cache,
+        write_capability_cache,
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive",
+        lambda *_a, **_k: True,
+    )
+    write_capability_cache(
+        tmp_path,
+        "gateway",
+        CapabilityReport(gateway_access="ready", overall="ready"),
+    )
+    frag = {
+        "profile": "full",
+        "overall": "unready",
+        "serviceUser": "fenix",
+        "capabilities": {
+            "dockerEngine": "ready",
+            "dockerCompose": "ready",
+            "dockerAccess": "ready",
+            "managerDockerAccess": "ready",
+            "daemonDockerAccess": "ready",
+            "caddyBinary": "ready",
+            "caddyRuntime": "ready",
+            "caddyOwner": "lwa_service_user",
+            "caddyProcessUser": "fenix",
+            "caddyWorkspaceAccess": "ready",
+            "gatewayAccess": "unknown",
+            "cliDockerAccess": "unknown",
+            "sessionRefreshRequired": False,
+        },
+        "action": "执行：lwa doctor --profile full 与 lwa setup --full --resume",
+    }
+    out = overlay_gateway_access_from_cache(frag, tmp_path)
+    assert out["capabilities"]["gatewayAccess"] == "ready"
+    assert out["overall"] == "ready"
+    assert not out.get("action")
+
+
+def test_overlay_never_invents_overall_without_manager_fragment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-284：manager 尚未探测（fragment=None）时不得凭 gateway 缓存伪造 ready。"""
+    from local_webpage_access.capability import (
+        CapabilityReport,
+        overlay_gateway_access_from_cache,
+        write_capability_cache,
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive",
+        lambda *_a, **_k: True,
+    )
+    write_capability_cache(
+        tmp_path,
+        "gateway",
+        CapabilityReport(gateway_access="ready", overall="ready"),
+    )
+    out = overlay_gateway_access_from_cache(None, tmp_path)
+    assert out["capabilities"]["gatewayAccess"] == "ready"
+    assert out.get("overall") != "ready"
+
+
+def test_overlay_never_invents_ready_from_startup_placeholder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-284：manager 启动占位片段（capabilities 为空）不得被纠偏成 ready。
+
+    default profile 下 ``_compute_overall`` 对全 unknown 返回 ready，若不设防会在
+    后台探测完成前出现假绿窗口（BUG-257）。
+    """
+    from local_webpage_access.capability import (
+        CapabilityReport,
+        overlay_gateway_access_from_cache,
+        write_capability_cache,
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive",
+        lambda *_a, **_k: True,
+    )
+    write_capability_cache(
+        tmp_path,
+        "gateway",
+        CapabilityReport(gateway_access="ready", overall="ready"),
+    )
+    placeholder = {
+        "profile": "default",
+        "overall": "unknown",
+        "serviceUser": None,
+        "capabilities": {},
+        "action": None,
+    }
+    out = overlay_gateway_access_from_cache(placeholder, tmp_path)
+    assert out["capabilities"]["gatewayAccess"] == "ready"
+    assert out["overall"] == "unknown"
+
+
+def test_overlay_keeps_unready_when_other_capability_still_bad(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-284：仅 gatewayAccess 转 ready 不足以翻盘，其余强制项仍失败时保持 unready。"""
+    from local_webpage_access.capability import (
+        CapabilityReport,
+        overlay_gateway_access_from_cache,
+        write_capability_cache,
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive",
+        lambda *_a, **_k: True,
+    )
+    write_capability_cache(
+        tmp_path,
+        "gateway",
+        CapabilityReport(gateway_access="ready", overall="ready"),
+    )
+    frag = {
+        "profile": "full",
+        "overall": "unready",
+        "serviceUser": "fenix",
+        "capabilities": {
+            "dockerEngine": "ready",
+            "dockerCompose": "ready",
+            "dockerAccess": "permission_denied",
+            "managerDockerAccess": "permission_denied",
+            "daemonDockerAccess": "ready",
+            "caddyBinary": "ready",
+            "caddyRuntime": "ready",
+            "caddyOwner": "lwa_service_user",
+            "caddyWorkspaceAccess": "ready",
+            "gatewayAccess": "unknown",
+            "sessionRefreshRequired": False,
+        },
+        "action": None,
+    }
+    out = overlay_gateway_access_from_cache(frag, tmp_path)
+    assert out["capabilities"]["gatewayAccess"] == "ready"
+    assert out["overall"] == "unready"
+    assert out["action"]

@@ -13,19 +13,31 @@ V1 静态托管的两条路径：
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.request
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
+from typing import Any, TypeVar
 
 from local_webpage_access.config import Config
 from local_webpage_access.daemon import pid_cmdline_contains
 from local_webpage_access.errors import GatewayError
+from local_webpage_access.file_lock import (
+    ensure_lockable,
+    release_exclusive,
+    try_acquire_exclusive,
+)
 from local_webpage_access.logging import get_logger, write_instance_log
 from local_webpage_access.paths import Workspace
 from local_webpage_access.probe import mark_probe_url
@@ -35,10 +47,81 @@ log = get_logger("gateway")
 _HEALTH_TIMEOUT = 5
 _START_WAIT = 3.0
 _KILL_TIMEOUT = 10
+_GATEWAY_MUTATION_TIMEOUT = 30.0
+_gateway_mutation_thread_lock = threading.RLock()
+_gateway_mutation_state = threading.local()
+_T = TypeVar("_T")
 
 # 从站点片段解析 :port / root（BUG-216 失败恢复用）
 _SITE_PORT_RE = re.compile(r"^:(\d+)\s*\{", re.MULTILINE)
 _SITE_ROOT_RE = re.compile(r"^\s*root\s+\*\s+(.+)$", re.MULTILINE)
+
+
+@contextmanager
+def _gateway_mutation_lock(workspace: Workspace) -> Iterator[None]:
+    """串行化主 Caddyfile 的组装、写入、reload 与回滚（BUG-324）。"""
+    with _gateway_mutation_thread_lock:
+        depth = int(getattr(_gateway_mutation_state, "depth", 0))
+        if depth:
+            _gateway_mutation_state.depth = depth + 1
+            try:
+                yield
+            finally:
+                _gateway_mutation_state.depth = depth
+            return
+        path = workspace.run / "gateway-config.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+        ensure_lockable(fd)
+        deadline = time.monotonic() + _GATEWAY_MUTATION_TIMEOUT
+        try:
+            while True:
+                try:
+                    try_acquire_exclusive(fd)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise GatewayError("Caddy 配置锁等待超时")
+                    time.sleep(0.05)
+            _gateway_mutation_state.depth = 1
+            yield
+        finally:
+            _gateway_mutation_state.depth = 0
+            release_exclusive(fd)
+            os.close(fd)
+
+
+def _serialized_gateway_mutation(
+    method: Callable[..., _T],
+) -> Callable[..., _T]:
+    @wraps(method)
+    def wrapped(self: "StaticGateway", *args: Any, **kwargs: Any) -> _T:
+        with _gateway_mutation_lock(self.ws):
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """同目录临时文件 + ``os.replace``，避免主 Caddyfile 半写可见（BUG-324）。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
 
 # ---- Caddy master 生命周期（IMP-010 / BUG-069 / BUG-070）-------------------
 # admin API 固定走 IPv4 loopback（macOS 上 localhost 常解析为 ::1，而 Caddy admin
@@ -172,7 +255,7 @@ class StaticGateway:
         profile = getattr(self.config, "profile", None) or "default"
         if profile != "full":
             state = load_profile_state(self.ws.root)
-            if state.get("profile") == "full":
+            if state.get("profile") == "full" and state.get("overall") == "ready":
                 profile = "full"
         strict = profile == "full"
 
@@ -396,6 +479,7 @@ class StaticGateway:
 
     # ---- enable / disable ---------------------------------------------------
 
+    @_serialized_gateway_mutation
     def enable(
         self,
         instance_id: str,
@@ -540,6 +624,7 @@ class StaticGateway:
         except Exception:  # noqa: BLE001 — 恢复失败不掩盖原始 enable 异常
             log.exception("实例 %s enable 失败后的配置恢复又出错", instance_id)
 
+    @_serialized_gateway_mutation
     def disable(self, instance_id: str) -> None:
         """禁用静态站点（WBS-09.07）。
 
@@ -612,6 +697,7 @@ class StaticGateway:
 
     # ---- Caddy reload + 回滚 ------------------------------------------------
 
+    @_serialized_gateway_mutation
     def reload_all(self) -> None:
         """组装主 Caddyfile 并 reload（WBS-09.05/06；BUG-069 / IMP-010 修复）。
 
@@ -661,15 +747,15 @@ class StaticGateway:
 
         if previous is not None:
             backup = main.with_suffix(".bak")
-            backup.write_text(previous, encoding="utf-8")
-        main.write_text(new_content, encoding="utf-8")
+            _atomic_write_text(backup, previous)
+        _atomic_write_text(main, new_content)
 
         ok, stderr = self._reload_with_self_heal()
         if ok:
             return
         # reload 失败：回滚主 Caddyfile
         if previous is not None:
-            main.write_text(previous, encoding="utf-8")
+            _atomic_write_text(main, previous)
             self._reload_once()  # 尽力把旧配置 reload 回去（忽略结果）
         else:
             # 首次生成即失败：删除坏配置，避免残留非法 Caddyfile 影响后续 reload（BUG-007）
@@ -727,6 +813,7 @@ class StaticGateway:
             return False, stderr2
         return False, stderr
 
+    @_serialized_gateway_mutation
     def _sync_main_config(self) -> None:
         """按磁盘实际存在的 site/alias 片段重组主 Caddyfile 并尽力 reload（BUG-069）。
 
@@ -739,7 +826,7 @@ class StaticGateway:
             return
         main = self.main_config_path()
         main.parent.mkdir(parents=True, exist_ok=True)
-        main.write_text(self._assemble_main_config(), encoding="utf-8")
+        _atomic_write_text(main, self._assemble_main_config())
         ok, stderr = self._reload_with_self_heal()
         if not ok:
             log.warning(

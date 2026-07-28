@@ -134,6 +134,36 @@ def test_rotate_token_replaces_existing(workspace: Workspace) -> None:
     assert token_path(workspace).stat().st_mode & 0o777 == 0o600
 
 
+def test_write_token_creates_file_with_mode_600_via_os_open(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-334：token 应用 os.open(..., 0o600) 一步创建，避免 write_text→chmod 窗口。"""
+    import os
+
+    from local_webpage_access.manager_api import rotate_token
+
+    ensure_token(workspace)
+    opens: list[dict[str, object]] = []
+    real_open = os.open
+
+    def tracking_open(path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777, *args: object, **kwargs: object) -> int:
+        opens.append({"path": str(path), "flags": flags, "mode": mode})
+        return real_open(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    rotate_token(workspace)
+    token_opens = [
+        c for c in opens if Path(str(c["path"])).name == token_path(workspace).name
+    ]
+    assert token_opens, "token 写入应走 os.open"
+    assert token_opens[0]["mode"] == 0o600
+    flags = int(token_opens[0]["flags"])  # type: ignore[arg-type]
+    assert flags & os.O_CREAT
+    assert flags & os.O_WRONLY or flags & os.O_RDWR
+    assert flags & os.O_TRUNC
+    assert token_path(workspace).stat().st_mode & 0o777 == 0o600
+
+
 def test_run_manager_does_not_log_full_token(
     workspace: Workspace, config, monkeypatch
 ) -> None:
@@ -178,8 +208,67 @@ def test_api_rejects_missing_token(manager_env: EnvBundle) -> None:
     assert body["error"]["code"] == "unauthorized"
 
 
+def test_loopback_rejects_cross_site_unsafe_request(manager_env: EnvBundle) -> None:
+    """BUG-295：回环免 token 不能放行浏览器跨站 POST。"""
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000)
+    ) as local_client:
+        resp = local_client.post(
+            f"/api/instances/{manager_env.instance_id}/remove",
+            headers={
+                "Origin": "https://evil.example",
+                "Sec-Fetch-Site": "cross-site",
+            },
+        )
+        assert manager_env.registry.get_instance(manager_env.instance_id) is not None
+
+    assert resp.status_code == 403
+
+
+def test_loopback_rejects_form_post_without_csrf_headers(
+    manager_env: EnvBundle,
+) -> None:
+    """BUG-295：简单跨站 form POST（无自定义头）在回环亦须拒绝。"""
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000)
+    ) as local_client:
+        resp = local_client.post(
+            f"/api/instances/{manager_env.instance_id}/remove",
+        )
+        assert manager_env.registry.get_instance(manager_env.instance_id) is not None
+
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "csrf_forbidden"
+
+
+def test_loopback_allows_mutating_with_x_lwa_token(manager_env: EnvBundle) -> None:
+    """BUG-295：管理页经 X-LWA-Token 发起的写请求仍可通过。"""
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000)
+    ) as local_client:
+        resp = local_client.post(
+            f"/api/instances/{manager_env.instance_id}/stop",
+            headers={"X-LWA-Token": manager_env.token},
+        )
+
+    assert resp.status_code != 403
+
+
+def test_loopback_allows_same_origin_mutating(manager_env: EnvBundle) -> None:
+    """BUG-295：Sec-Fetch-Site=same-origin 的回环写请求可放行。"""
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000)
+    ) as local_client:
+        resp = local_client.post(
+            f"/api/instances/{manager_env.instance_id}/stop",
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+
+    assert resp.status_code != 403
+
+
 def test_api_localhost_bypass_without_token(manager_env: EnvBundle) -> None:
-    """IMP-003：本机 loopback 访问免 token。"""
+    """IMP-003：本机 loopback 的安全方法（GET）免 token。"""
     from unittest.mock import Mock
 
     from fastapi import HTTPException
@@ -189,11 +278,13 @@ def test_api_localhost_bypass_without_token(manager_env: EnvBundle) -> None:
     for host in ("127.0.0.1", "::1", "localhost"):
         request = Mock()
         request.client = Mock(host=host)
+        request.method = "GET"
         assert _is_localhost_client(request) is True
         require_token(request)  # 不应抛错
 
     request = Mock()
     request.client = Mock(host="10.0.0.8")
+    request.method = "GET"
     request.app = manager_env.app
     request.headers = Mock(get=lambda _k, default="": default)
     request.query_params = Mock(get=lambda _k: None)
@@ -207,6 +298,57 @@ def test_api_rejects_wrong_token(manager_env: EnvBundle) -> None:
         "/api/instances", headers={"Authorization": "Bearer wrong-token"}
     )
     assert resp.status_code == 401
+
+
+def test_api_non_ascii_token_returns_401_not_500(manager_env: EnvBundle) -> None:
+    """BUG-281：Authorization 含西里尔字母时须 401，不得因 hmac TypeError 变 500。
+
+    httpx TestClient 拒绝非 ASCII header；用 ASGI scope 模拟 curl 把 UTF-8
+    字节放进 Authorization、Starlette 按 latin-1 解码后的真实路径。
+    """
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from local_webpage_access.manager_api import _verify_token, require_token
+
+    # 西里尔 І（U+0406），与拉丁 I 外形相似
+    bad = "0XU8tCRDIJKQKfxGLv7Іjc9qk0P7Ym3k"
+    assert _verify_token(manager_env.workspace, bad) is False
+
+    auth_bytes = f"Bearer {bad}".encode("utf-8")
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/stats",
+        "raw_path": b"/api/stats",
+        "query_string": b"",
+        "headers": [(b"authorization", auth_bytes)],
+        "client": ("10.181.224.39", 54321),
+        "server": ("testserver", 80),
+        "app": manager_env.app,
+    }
+    request = Request(scope)
+
+    with pytest.raises(HTTPException) as exc:
+        require_token(request)
+    assert exc.value.status_code == 401
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("error", {}).get("code") == "unauthorized"
+
+
+def test_verify_token_accepts_matching_unicode_via_bytes(
+    manager_env: EnvBundle,
+) -> None:
+    """BUG-281：合法 token 经 UTF-8 bytes 比较仍应通过（含仅 ASCII 的正常路径）。"""
+    from local_webpage_access.manager_api import _verify_token
+
+    assert _verify_token(manager_env.workspace, manager_env.token) is True
+    assert _verify_token(manager_env.workspace, None) is False
+    assert _verify_token(manager_env.workspace, "") is False
 
 
 def test_api_accepts_bearer_token(manager_env: EnvBundle) -> None:
@@ -1656,6 +1798,7 @@ def test_api_remove_purge_empty_data_echoes_flags(manager_env: EnvBundle) -> Non
     resp = manager_env.client.post(
         f"/api/instances/{iid}/remove?purge=true&force=false",
         headers=manager_env.auth_headers(),
+        json={"confirmId": iid},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -1666,6 +1809,39 @@ def test_api_remove_purge_empty_data_echoes_flags(manager_env: EnvBundle) -> Non
         "force": False,
     }
     assert not ws.app_dir(iid).exists()
+
+
+def test_api_remove_purge_requires_matching_confirm_id(
+    manager_env: EnvBundle,
+) -> None:
+    """BUG-310：purge/force 必须由服务端校验 confirmId。"""
+    iid = manager_env.instance_id
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/remove?purge=true&force=true",
+        headers=manager_env.auth_headers(),
+        json={"confirmId": "different-instance"},
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "confirmation_required"
+    assert manager_env.registry.get_instance(iid) is not None
+
+
+def test_api_remove_purge_requires_confirm_id_in_body(
+    manager_env: EnvBundle,
+) -> None:
+    """BUG-310：缺少 confirmId 的单次 POST 不得执行不可逆删除。"""
+    iid = manager_env.instance_id
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/remove?purge=true&force=true",
+        headers=manager_env.auth_headers(),
+        json={},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "confirmation_required"
+    assert manager_env.registry.get_instance(iid) is not None
 
 
 def test_api_remove_purge_nonempty_data_returns_409_data_nonempty(
@@ -1681,6 +1857,7 @@ def test_api_remove_purge_nonempty_data_returns_409_data_nonempty(
     resp = manager_env.client.post(
         f"/api/instances/{iid}/remove?purge=true&force=false",
         headers=manager_env.auth_headers(),
+        json={"confirmId": iid},
     )
     assert resp.status_code == 409
     err = resp.json()["error"]
@@ -1710,6 +1887,7 @@ def test_api_remove_writes_audit_log(
             resp409 = manager_env.client.post(
                 f"/api/instances/{iid}/remove?purge=true&force=false",
                 headers=manager_env.auth_headers(),
+                json={"confirmId": iid},
             )
         assert resp409.status_code == 409
         assert any(
@@ -1725,6 +1903,7 @@ def test_api_remove_writes_audit_log(
             resp_ok = manager_env.client.post(
                 f"/api/instances/{iid}/remove?purge=true&force=true",
                 headers=manager_env.auth_headers(),
+                json={"confirmId": iid},
             )
         assert resp_ok.status_code == 200
         assert any(
@@ -1749,6 +1928,7 @@ def test_api_remove_purge_force_nonempty_data_succeeds(manager_env: EnvBundle) -
     resp = manager_env.client.post(
         f"/api/instances/{iid}/remove?purge=true&force=true",
         headers=manager_env.auth_headers(),
+        json={"confirmId": iid},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -1987,3 +2167,61 @@ def test_post_gateway_switch_dry_run(manager_env: EnvBundle, monkeypatch) -> Non
     assert body["fromBackend"] == "builtin"
 
 
+def test_post_gateway_switch_error_uses_unified_error_shape(
+    manager_env: EnvBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-335：/api/gateway/switch 失败响应须包在 error 键内，与其它端点一致。"""
+    from local_webpage_access.gateway_switch import GatewaySwitchResult
+
+    def _fake_switch(ws, cfg, reg, target, *, dry_run=False, review=True):
+        return GatewaySwitchResult(
+            ok=False,
+            noop=False,
+            from_backend="builtin",
+            to_backend="caddy",
+            error="切换失败：模拟",
+            stages=[{"stage": "apply", "ok": False}],
+        )
+
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_switch.switch_gateway", _fake_switch
+    )
+    resp = manager_env.client.post(
+        "/api/gateway/switch",
+        headers=manager_env.auth_headers(),
+        json={"backend": "caddy"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert "error" in body
+    assert body["error"]["code"] == "gateway_switch_failed"
+    assert "切换失败" in body["error"]["message"]
+    assert isinstance(body["error"].get("result"), dict)
+
+
+def test_remove_blocked_while_cancelling(manager_env: EnvBundle) -> None:
+    """BUG-336：cancelling 期间 remove 应与 _lifecycle_op 一样返回 409。"""
+    from local_webpage_access.models import Status
+
+    iid = manager_env.instance_id
+    manager_env.registry.update_status(iid, Status.CANCELLING.value)
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/remove", headers=manager_env.auth_headers()
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "cancelling"
+
+
+def test_update_blocked_while_cancelling(manager_env: EnvBundle) -> None:
+    """BUG-336：cancelling 期间 update 应在校验 zipPath 前被拦截。"""
+    from local_webpage_access.models import Status
+
+    iid = manager_env.instance_id
+    manager_env.registry.update_status(iid, Status.CANCELLING.value)
+    resp = manager_env.client.post(
+        f"/api/instances/{iid}/update",
+        headers=manager_env.auth_headers(),
+        json={},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "cancelling"

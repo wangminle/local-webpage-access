@@ -112,22 +112,29 @@ def rotate_token(workspace: Workspace) -> str:
 
 
 def _write_token(workspace: Workspace, token: str) -> str:
+    import contextlib
     import json
+    import os
 
     path = token_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    payload = (
         json.dumps(
             {"token": token, "createdAt": _now_iso()}, ensure_ascii=False, indent=2
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
     )
+    # BUG-334：一步以 0o600 创建/截断，避免 write_text 后 chmod 的权限窗口。
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        # 收紧权限：仅所有者可读
-        path.chmod(0o600)
-    except OSError:
-        pass  # Windows 上 chmod 无意义，忽略
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1
+            fh.write(payload)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     return token
 
 
@@ -147,13 +154,25 @@ def read_token(workspace: Workspace) -> str | None:
 
 
 def _verify_token(workspace: Workspace, candidate: str | None) -> bool:
-    """常数时间比较 token。"""
+    """常数时间比较 token。
+
+    BUG-281：``hmac.compare_digest`` 对含非 ASCII 的 ``str`` 会抛 ``TypeError``；
+    统一转为 UTF-8 bytes 再比较，非法/不可比候选一律视为未通过（调用方→401）。
+    """
     expected = read_token(workspace)
     if not expected:
         return False
-    if not candidate:
+    if not candidate or not isinstance(candidate, str):
         return False
-    return hmac.compare_digest(expected, candidate)
+    try:
+        left = expected.encode("utf-8")
+        right = candidate.encode("utf-8")
+    except (AttributeError, TypeError, UnicodeEncodeError):
+        return False
+    try:
+        return hmac.compare_digest(left, right)
+    except (TypeError, ValueError):
+        return False
 
 
 def _now_iso() -> str:
@@ -198,9 +217,9 @@ class _Ctx:
     """请求级别的共享上下文（从 ``app.state`` 取）。"""
 
     def __init__(self, app: FastAPI) -> None:
-        self.workspace: Workspace = app.state.workspace  # type: ignore[attr-defined]
-        self.config: Config = app.state.config  # type: ignore[attr-defined]
-        self.registry: Registry = app.state.registry  # type: ignore[attr-defined]
+        self.workspace: Workspace = app.state.workspace
+        self.config: Config = app.state.config
+        self.registry: Registry = app.state.registry
 
     @classmethod
     def from_request(cls, request: Request) -> _Ctx:
@@ -268,18 +287,43 @@ def require_token(request: Request) -> None:
     支持三种传递方式：``Authorization: Bearer <token>``、
     ``X-LWA-Token`` 头、``?token=`` 查询参数。
 
+    ``?token=`` 为便利通道（管理页新标签等），会进入浏览器历史与可能的
+    访问日志；日常请求优先使用 Header。详见 docs/manager-page.md。
+
     从 ``127.0.0.1`` / ``localhost`` / ``::1`` 访问时跳过鉴权（IMP-003），
     便于本机调试；局域网 IP 访问仍必须携带有效 token。
     """
-    if _is_localhost_client(request):
+    is_local = _is_localhost_client(request)
+    request_method = getattr(request, "method", "GET")
+    if not isinstance(request_method, str):
+        request_method = "GET"
+    if is_local and request_method.upper() in {"GET", "HEAD", "OPTIONS"}:
         return
     workspace: Workspace = request.app.state.workspace
     candidate = _extract_token(request)
-    if not _verify_token(workspace, candidate):
+    if _verify_token(workspace, candidate):
+        return
+    if is_local:
+        fetch_site = request.headers.get("sec-fetch-site", "").lower()
+        if fetch_site == "same-origin":
+            return
+        origin = request.headers.get("origin", "").rstrip("/")
+        expected_origin = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+        if origin and origin == expected_origin:
+            return
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "unauthorized", "message": "API token 无效或缺失"}},
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": {
+                    "code": "csrf_forbidden",
+                    "message": "回环地址的非同源写请求需要 API token",
+                }
+            },
         )
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"error": {"code": "unauthorized", "message": "API token 无效或缺失"}},
+    )
 
 
 def _extract_token(request: Request) -> str | None:
@@ -574,7 +618,7 @@ def _register_routes(app: FastAPI) -> None:
         if not backend:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "GATEWAY_BACKEND_INVALID", "message": "缺少 backend（caddy|builtin）"},
+                detail={"error": {"code": "GATEWAY_BACKEND_INVALID", "message": "缺少 backend（caddy|builtin）"}},
             )
         dry_run = bool(payload.get("dryRun", False))
         review = bool(payload.get("review", True))
@@ -590,7 +634,13 @@ def _register_routes(app: FastAPI) -> None:
         if not result.ok:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=body,
+                detail={
+                    "error": {
+                        "code": "gateway_switch_failed",
+                        "message": result.error or "网关切换失败",
+                        "result": body,
+                    }
+                },
             )
         return body
 
@@ -819,6 +869,7 @@ def _register_routes(app: FastAPI) -> None:
         instance_id: str,
         purge: bool = Query(False, description="同时删除实例磁盘数据"),
         force: bool = Query(False, description="强制移除（跳过 data/ 非空检查）"),
+        payload: dict[str, Any] = Body(default={}),
     ) -> dict[str, Any]:
         """IMP-019：移除单个实例（管理页行内删除 / 冗余清理）。
 
@@ -829,6 +880,27 @@ def _register_routes(app: FastAPI) -> None:
 
         ctx = _Ctx(app)
         _require_instance(ctx, instance_id)
+        row = ctx.registry.get_instance(instance_id) or {}
+        if row.get("status") == Status.CANCELLING.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "cancelling",
+                        "message": "实例正在取消构建，暂时不能 remove",
+                    }
+                },
+            )
+        if (purge or force) and str(payload.get("confirmId") or "") != instance_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "confirmation_required",
+                        "message": "彻底删除必须提交与实例 ID 完全相同的 confirmId",
+                    }
+                },
+            )
         try:
             remove_instance(
                 ctx.workspace,
@@ -881,6 +953,17 @@ def _register_routes(app: FastAPI) -> None:
 
         ctx = _Ctx(app)
         _require_instance(ctx, instance_id)
+        row = ctx.registry.get_instance(instance_id) or {}
+        if row.get("status") == Status.CANCELLING.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "cancelling",
+                        "message": "实例正在取消构建，暂时不能 update",
+                    }
+                },
+            )
 
         raw_zip = str(payload.get("zipPath") or "").strip()
         if not raw_zip:
@@ -1139,7 +1222,8 @@ def _pageview_store(app: FastAPI) -> Any:
         from local_webpage_access.pageviews import PageviewStore
 
         ws: Workspace = app.state.workspace
-        store = PageviewStore.for_workspace(ws)
+        # BUG-363：与 clear_instance_pageviews 共用进程级单例，避免双连接锁冲突。
+        store = PageviewStore.shared_for_workspace(ws)
         app.state.pageview_store = store
     return store
 

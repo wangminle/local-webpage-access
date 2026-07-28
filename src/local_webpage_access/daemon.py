@@ -56,15 +56,22 @@ log = get_logger("daemon")
 # ---- 常量 -------------------------------------------------------------------
 
 DEFAULT_POLL_INTERVAL = 5.0  # 秒：inbox 扫描周期
-DEFAULT_STABLE_SECONDS = 2.0  # 秒：文件 mtime/size 稳定窗口（防半写文件）
+# BUG-311：稳定窗口默认不得短于 poll，否则一次轮询间的拷贝停顿会被误判写完。
+DEFAULT_STABLE_SECONDS = 5.0
+# BUG-297：同一 zip 指纹连续失败超此次数后移入 inbox/failed/，停止无限重试。
+DEFAULT_FAILED_ZIP_MAX_ATTEMPTS = 5
 # DEV-042：周期自愈间隔——watcher 每隔该秒数跑一次 reconcile，恢复掉线的
 # desired=running 实例（builtin 静态进程存活监管 + 容器轻量拉起）。
 DEFAULT_SUPERVISE_INTERVAL = 60.0
+RECONCILE_BACKOFF_BASE_SECONDS = 60.0
+RECONCILE_BACKOFF_MAX_SECONDS = 1800.0
 STATE_FILENAME = "daemon.json"
 LOCK_FILENAME = "daemon.lock"
 START_LOCK_FILENAME = "daemon-start.lock"
 LOG_FILENAME = "daemon.log"
-DAEMON_START_TIMEOUT = 5.0
+# BUG-298：须覆盖子进程抢锁后的 Docker capability 探测（可达 10s+），
+# 避免父进程把仍在探测的健康子进程误杀。
+DAEMON_START_TIMEOUT = 30.0
 # 心跳超时回收（BUG-030）：watcher 每轮更新锁文件心跳时间戳，
 # 超过此秒数未更新即视为 watcher 卡死，即使 PID 仍在也回收锁。
 LOCK_HEARTBEAT_TIMEOUT = 60.0
@@ -73,6 +80,7 @@ _LOCK_HEARTBEAT_POLL_MULTIPLE = 4  # 心跳超时至少为 poll_interval 的 N �
 # daemon 自动启动的资源档位白名单（其余 medium/heavy 不自动启动，设计 §16.5）
 _AUTO_START_PROFILES = {"tiny", "small"}
 _START_LOCK_MUTEX = threading.Lock()
+_reconcile_failures: dict[tuple[str, str], tuple[int, float]] = {}
 
 
 # ---- 状态持久化（WBS-21.04）-------------------------------------------------
@@ -315,6 +323,10 @@ _daemon_lock_held = False
 _daemon_lock_guard = threading.Lock()
 
 
+class _DaemonLockBusy(OSError):
+    """运行锁已由另一个 watcher 持有。"""
+
+
 @contextlib.contextmanager
 def daemon_lock(workspace: Workspace) -> Iterator[int]:
     """watcher 单实例文件锁（跨平台 :mod:`file_lock`）。
@@ -330,7 +342,7 @@ def daemon_lock(workspace: Workspace) -> Iterator[int]:
     acquired = False
     with _daemon_lock_guard:
         if _daemon_lock_held:
-            raise OSError(f"daemon 锁已被本进程持有：{path}")
+            raise _DaemonLockBusy(f"daemon 锁已被本进程持有：{path}")
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
             ensure_lockable(fd)
@@ -339,7 +351,7 @@ def daemon_lock(workspace: Workspace) -> Iterator[int]:
             except BlockingIOError as exc:
                 os.close(fd)
                 fd = None
-                raise OSError(f"daemon 锁被占用：{path}") from exc
+                raise _DaemonLockBusy(f"daemon 锁被占用：{path}") from exc
             write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
             _daemon_lock_held = True
             acquired = True
@@ -456,6 +468,11 @@ class _FileFingerprint:
     size: int
 
 
+def _effective_stable_seconds(stable_seconds: float, poll_interval: float) -> float:
+    """稳定窗口至少覆盖两次轮询，避免一次短暂停写被误判完成。"""
+    return max(stable_seconds, poll_interval * 2)
+
+
 def is_file_stable(
     path: Path,
     previous: _FileFingerprint | None,
@@ -488,28 +505,66 @@ def is_file_stable(
 # ---- 导入与自动启动决策（WBS-21.07/08/09）---------------------------------
 
 
+# BUG-337：processed 指纹集合落盘上界（按处理顺序保留最近项，LRU/size cap）。
+PROCESSED_SET_MAX = 2048
+
+
 def _archive_processed_marker(workspace: Workspace) -> Path:
     """已处理 zip 的标记文件路径。"""
     return workspace.run / "daemon-processed.json"
 
 
-def load_processed_set(workspace: Workspace) -> set[str]:
-    """加载已处理 zip 指纹集合（避免重复导入）。"""
+def load_processed_set(workspace: Workspace) -> list[str]:
+    """加载已处理 zip 指纹列表（按处理时间升序：旧 → 新）。
+
+    返回 list 以保留顺序，供 :func:`save_processed_set` 做 LRU 裁剪；
+    membership 仍可用 ``key in loaded``。
+    """
     path = _archive_processed_marker(workspace)
     if not path.is_file():
-        return set()
+        return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return set()
-    return {str(item) for item in data} if isinstance(data, list) else set()
+        return []
+    if not isinstance(data, list):
+        return []
+    # 去重保序：后者覆盖前者（同指纹再次处理后视为更新）
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in data:
+        key = str(item)
+        if key in seen:
+            ordered.remove(key)
+        else:
+            seen.add(key)
+        ordered.append(key)
+    return ordered
 
 
-def save_processed_set(workspace: Workspace, items: set[str]) -> None:
+def save_processed_set(workspace: Workspace, items: list[str] | set[str]) -> None:
+    """落盘 processed 指纹；超上限时丢弃最旧项（CHK-115 / BUG-337 LRU）。
+
+    ``list`` 按出现顺序视为处理时间（末尾最新）。传入 ``set`` 时无稳定顺序，
+    仅用于兼容旧测试/调用；生产路径应传有序 list。
+    """
     path = _archive_processed_marker(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(items, set):
+        ordered = sorted(str(x) for x in items)
+    else:
+        ordered = []
+        seen: set[str] = set()
+        for item in items:
+            key = str(item)
+            if key in seen:
+                ordered.remove(key)
+            else:
+                seen.add(key)
+            ordered.append(key)
+    pruned = ordered[-PROCESSED_SET_MAX:]
     path.write_text(
-        json.dumps(sorted(items), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(pruned, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -533,9 +588,18 @@ def _archive_processed_zip(workspace: Workspace, zip_path: Path) -> Path | None:
     物理移出 inbox 扫描视野，替代旧"留 inbox + 指纹表去重"机制，杜绝归档后
     按旧指纹重复导入。返回归档目标路径；源文件已不存在或移动失败时返回 None。
     """
+    return _move_inbox_zip(workspace.inbox_processed, zip_path)
+
+
+def _archive_failed_zip(workspace: Workspace, zip_path: Path) -> Path | None:
+    """BUG-297：把连续失败的 zip 移入 ``inbox/failed/`` 死信目录。"""
+    return _move_inbox_zip(workspace.inbox_failed, zip_path)
+
+
+def _move_inbox_zip(dest_dir: Path, zip_path: Path) -> Path | None:
+    """把 inbox zip 移入目标目录（同名加时间戳）；失败返回 None。"""
     if not zip_path.is_file():
         return None
-    dest_dir = workspace.inbox_processed
     dest_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = dest_dir / f"{zip_path.stem}-{stamp}{zip_path.suffix}"
@@ -543,7 +607,7 @@ def _archive_processed_zip(workspace: Workspace, zip_path: Path) -> Path | None:
     if dest.exists():
         dest = dest_dir / f"{zip_path.stem}-{stamp}-{os.getpid()}{zip_path.suffix}"
     try:
-        return shutil.move(str(zip_path), str(dest))
+        return Path(shutil.move(str(zip_path), str(dest)))
     except OSError:
         return None
 
@@ -667,6 +731,7 @@ def reconcile(
     registry: Registry,
     *,
     restarter: Callable[[Workspace, Config, Registry, str], None] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> list[str]:
     """DEV-042 / BUG-079：开机/守护自愈——恢复 ``desired=running`` 但实际未在跑的实例。
 
@@ -697,8 +762,10 @@ def reconcile(
     except Exception:  # noqa: BLE001
         log.debug("daemon reconcile LAN refresh 失败", exc_info=True)
 
-    restarter = restarter or start_instance
-
+    # start_instance 返回 Manifest；类型上宽于 Optional restarter 形参，故用局部绑定。
+    do_restart: Callable[[Workspace, Config, Registry, str], object] = (
+        restarter or start_instance
+    )
     # Full Profile：后台能力闭环未 ready 时，容器自动纠正整轮 fail-closed；
     # 静态实例仍可按自身网关状态恢复。
     full_containers_blocked = False
@@ -750,6 +817,10 @@ def reconcile(
         if row.get("desired_state") != "running":
             continue
         iid = row["id"]
+        failure_key = (str(workspace.root), iid)
+        failure_state = _reconcile_failures.get(failure_key)
+        if failure_state is not None and monotonic() < failure_state[1]:
+            continue
         runtime = row.get("runtime")
         registry_status = row.get("status")
         if runtime == "docker-compose" and full_containers_blocked:
@@ -798,12 +869,14 @@ def reconcile(
                 )
             continue
         if actual_status == "running":
+            _reconcile_failures.pop(failure_key, None)
             continue
         if caddy_gateway_off and runtime == "shared-static":
             log.debug("daemon reconcile: 网关被显式关闭，跳过 caddy 静态实例 %s", iid)
             continue
         try:
-            restarter(workspace, config, registry, iid)
+            do_restart(workspace, config, registry, iid)
+            _reconcile_failures.pop(failure_key, None)
             restarted.append(iid)
             log.info(
                 "daemon reconcile: 恢复实例 %s（%s → running）", iid, actual_status or "?"
@@ -815,6 +888,13 @@ def reconcile(
                     f"daemon 自愈：desired=running 但状态偏离（{actual_status}），已自动恢复",
                 )
         except Exception as exc:  # noqa: BLE001 — 单实例恢复失败不中断
+            previous_failures = _reconcile_failures.get(failure_key, (0, 0.0))[0]
+            failures = previous_failures + 1
+            delay = min(
+                RECONCILE_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
+                RECONCILE_BACKOFF_MAX_SECONDS,
+            )
+            _reconcile_failures[failure_key] = (failures, monotonic() + delay)
             log.warning("daemon reconcile: 恢复 %s 失败：%s", iid, exc)
     return restarted
 
@@ -861,9 +941,12 @@ def run_watcher(
         poll_interval if poll_interval is not None else DEFAULT_POLL_INTERVAL
     )
     process_fn = process_fn or process_zip
+    stable_seconds = _effective_stable_seconds(stable_seconds, poll_interval)
     if heartbeat_interval is None:
         heartbeat_interval = LOCK_HEARTBEAT_TIMEOUT / 4
     fingerprints: dict[str, _FileFingerprint] = {}
+    # BUG-297：按 processed_key 累计连续失败次数，超阈值进死信。
+    fail_counts: dict[str, int] = {}
 
     log.info("daemon watcher 启动（poll=%.1fs）", poll_interval)
     last_supervise = clock()
@@ -906,6 +989,13 @@ def run_watcher(
             for zip_path in scan_inbox(workspace):
                 key = processed_key(zip_path)
                 if key in processed:
+                    # BUG-337：命中已处理指纹时仍归档移出 inbox，避免永久滞留。
+                    archived = _archive_processed_zip(workspace, zip_path)
+                    if archived is not None:
+                        log.info(
+                            "daemon: 重复投递 %s 已归档，不再滞留 inbox",
+                            zip_path.name,
+                        )
                     continue
                 previous = fingerprints.get(str(zip_path))
                 stable, fp = is_file_stable(
@@ -918,14 +1008,40 @@ def run_watcher(
                 log.info("daemon: 处理 %s", zip_path.name)
                 summary = process_fn(workspace, config, registry, zip_path)
                 if isinstance(summary, dict) and summary.get("action") == "failed":
-                    log.warning("daemon: %s 处理失败，保留待下轮重试", zip_path.name)
+                    # BUG-297：连续失败计数；超阈值移入 inbox/failed/ 停止无限重试。
+                    count = fail_counts.get(key, 0) + 1
+                    fail_counts[key] = count
+                    max_attempts = DEFAULT_FAILED_ZIP_MAX_ATTEMPTS
+                    if count >= max_attempts:
+                        archived = _archive_failed_zip(workspace, zip_path)
+                        if archived is not None:
+                            fail_counts.pop(key, None)
+                            log.warning(
+                                "daemon: %s 连续失败 %d 次，已移入 inbox/failed/",
+                                zip_path.name,
+                                count,
+                            )
+                        else:
+                            log.warning(
+                                "daemon: %s 连续失败 %d 次且死信归档失败，下轮再试",
+                                zip_path.name,
+                                count,
+                            )
+                    else:
+                        log.warning(
+                            "daemon: %s 处理失败（%d/%d），保留待下轮重试",
+                            zip_path.name,
+                            count,
+                            max_attempts,
+                        )
                 else:
+                    fail_counts.pop(key, None)
                     # 先归档成功再标记 processed，避免归档失败后 zip 留在 inbox
                     # 却被永久跳过。
                     archived = _archive_processed_zip(workspace, zip_path)
                     if archived is not None:
-                        processed.add(key)
-                        processed.add(str(zip_path))
+                        processed.append(key)
+                        processed.append(str(zip_path))
                         save_processed_set(workspace, processed)
                         log.info("daemon: %s 已归档至 inbox/processed/", zip_path.name)
                     else:
@@ -1150,6 +1266,53 @@ def daemon_status(workspace: Workspace) -> dict[str, Any]:
 # ---- CLI 入口（``python -m local_webpage_access.daemon --workspace ...``）-------
 
 
+def _probe_daemon_capability(workspace: Workspace, config: Config) -> None:
+    """以 watcher 真实身份探测并写入 daemon capability 缓存。"""
+    try:
+        from local_webpage_access.capability import (
+            collect_capability_report,
+            log_capability_probe,
+            write_capability_cache,
+        )
+
+        report = collect_capability_report(
+            workspace_root=workspace.root,
+            role="daemon",
+            config_profile=getattr(config, "profile", None),
+            include_backend_cached=False,
+        )
+        level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
+        log_capability_probe("daemon", report, level=level)
+        write_capability_cache(workspace.root, "daemon", report)
+    except Exception:  # noqa: BLE001
+        log.exception("daemon 能力自检失败")
+
+
+@contextlib.contextmanager
+def _graceful_stop_signals(stop_event: threading.Event) -> Iterator[None]:
+    """SIGTERM/SIGINT 只请求退出，等待当前轮导入/自愈自然收尾。"""
+    import signal
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous: dict[int, Any] = {}
+
+    def _request_stop(signum: int, _frame: Any) -> None:
+        log.info("daemon 收到信号 %s，等待当前任务收尾后退出", signum)
+        stop_event.set()
+
+    signals = [signal.SIGTERM, signal.SIGINT]
+    try:
+        for sig in signals:
+            previous[sig] = signal.signal(sig, _request_stop)
+        yield
+    finally:
+        for restore_sig, handler in previous.items():
+            signal.signal(restore_sig, handler)
+
+
 def run_service_main() -> int:
     """与 manager/gateway 对齐的服务入口别名（IMP-036）。"""
     return _main()
@@ -1175,7 +1338,7 @@ def _main() -> int:
     workspace = Workspace(Path(args.workspace).resolve())
     if not workspace.config_path.is_file():
         # 尚无工作区时只能控制台报错
-        setup_logging(level=args.log_level.upper())  # type: ignore[arg-type]
+        setup_logging(level=args.log_level.upper())
         log.error("工作区未初始化：%s", workspace.root)
         return 2
 
@@ -1184,26 +1347,6 @@ def _main() -> int:
     from local_webpage_access.config import load_config
 
     config = load_config(workspace)
-    # BUG-235：watcher 进程自身探测并写入 capability-daemon.json
-    try:
-        from local_webpage_access.capability import (
-            collect_capability_report,
-            log_capability_probe,
-            write_capability_cache,
-        )
-
-        report = collect_capability_report(
-            workspace_root=workspace.root,
-            role="daemon",
-            config_profile=getattr(config, "profile", None),
-            include_backend_cached=False,
-        )
-        level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
-        log_capability_probe("daemon", report, level=level)
-        write_capability_cache(workspace.root, "daemon", report)
-    except Exception:  # noqa: BLE001
-        log.exception("daemon 能力自检失败")
-
     # 抢占单实例锁；已有 daemon 在跑则直接退出
     try:
         with daemon_lock(workspace):
@@ -1219,6 +1362,9 @@ def _main() -> int:
                     poll_interval=args.poll,
                 ),
             )
+            # BUG-298：先拿运行锁再做可能阻塞 10s+ 的 Docker capability 探测，
+            # 让父进程的启动握手能立即确认健康子进程。
+            _probe_daemon_capability(workspace, config)
             reg = Registry(workspace.db_path)
             reg.open()
             try:
@@ -1232,19 +1378,25 @@ def _main() -> int:
                     log.exception("daemon 启动 reconcile 失败")
                 # BUG-190：watcher 在 run_watcher 内部启动后台心跳线程，
                 # 持续刷新锁心跳（详见 run_watcher）。
-                run_watcher(
-                    workspace,
-                    config,
-                    reg,
-                    poll_interval=args.poll,
-                    heartbeat=lambda: touch_lock_heartbeat(workspace),
-                    supervise=reconcile,
-                )
+                stop_event = threading.Event()
+                with _graceful_stop_signals(stop_event):
+                    run_watcher(
+                        workspace,
+                        config,
+                        reg,
+                        stop_event=stop_event,
+                        poll_interval=args.poll,
+                        heartbeat=lambda: touch_lock_heartbeat(workspace),
+                        supervise=reconcile,
+                    )
             finally:
                 reg.close()
-    except OSError:
+    except _DaemonLockBusy:
         log.warning("已有 daemon 实例在运行，退出")
         return 0
+    except OSError:
+        log.exception("daemon 运行期 IO 错误，异常退出")
+        return 1
     return 0
 
 

@@ -132,7 +132,7 @@ PortChecker = Callable[[int], bool]
 def _default_runner(args: Sequence[str]) -> "subprocess.CompletedProcess[str]":
     """默认 subprocess 运行器：捕获输出，不在终端回显。"""
     try:
-        return subprocess.run(  # type: ignore[call-overload]
+        return subprocess.run(
             list(args),
             capture_output=True,
             text=True,
@@ -418,7 +418,7 @@ def check_registry(ws: Workspace) -> CheckResult:
         )
 
         reg = Registry(ws.db_path)
-        reg.open()
+        reg.open_readonly()
         try:
             version = get_schema_version(reg.conn)
             count = reg.total_count()
@@ -676,6 +676,34 @@ def check_lan_url_stale(
     from local_webpage_access.ports import resolve_lan_ip
 
     lan_ip = resolve_lan_ip(config)
+    if lan_ip is None:
+        # BUG-358：无法解析本机 LAN IP 时不得静默 OK（有 lanUrl 则无法确认是否仍有效）
+        has_lan_url = False
+        for row in registry.list_instances():
+            manifest_path = ws.app_manifest_path(row["id"])
+            if not manifest_path.is_file():
+                continue
+            try:
+                from local_webpage_access.models import InstanceManifest
+
+                manifest = InstanceManifest.load(manifest_path)
+            except Exception:  # noqa: BLE001
+                continue
+            if manifest.network and manifest.network.lanUrl:
+                has_lan_url = True
+                break
+        if has_lan_url:
+            return CheckResult(
+                "lan_url_stale",
+                STATUS_WARN,
+                "无法解析当前 LAN IP，不能确认实例 lanUrl 是否仍有效",
+                suggestion="检查网络后重试；恢复后运行 `lwa access refresh`",
+            )
+        return CheckResult(
+            "lan_url_stale",
+            STATUS_SKIP,
+            "无法解析当前 LAN IP，且无实例 lanUrl 需核对",
+        )
     drifted_ids, skipped = _collect_lan_drifted_ids(ws, registry, lan_ip)
     drifted = [f"{iid}({host})" for iid, host in drifted_ids]
     if drifted:
@@ -914,7 +942,7 @@ def check_disk_space(ws: Workspace, *, min_gb: float = 1.0) -> CheckResult:
 def check_memory() -> CheckResult:
     """WBS-26.09：内存与 swap（跨平台尽力检测）。"""
     try:
-        import psutil  # type: ignore
+        import psutil
 
         mem = psutil.virtual_memory()
         swap = psutil.swap_memory()
@@ -1154,7 +1182,7 @@ def run_doctor(
     caddy_probe_registry: Registry | None = None
     try:
         caddy_probe_registry = Registry(ws.db_path)
-        caddy_probe_registry.open()
+        caddy_probe_registry.open_readonly()
     except Exception:  # noqa: BLE001
         caddy_probe_registry = None
     try:

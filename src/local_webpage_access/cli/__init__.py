@@ -19,8 +19,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 
+import click
 import typer
 
 from local_webpage_access import PRODUCT_NAME
@@ -55,7 +57,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.6.6-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.6.7-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -96,6 +98,7 @@ def init(
     static_gateway: str | None = typer.Option(
         None,
         "--static-gateway",
+        click_type=click.Choice(["caddy", "nginx", "builtin"]),
         help="写入 local-web.yml 的 staticGateway（full 默认 caddy）",
     ),
 ) -> None:
@@ -223,6 +226,11 @@ def run() -> None:
         # 兜底：子命令内部未捕获的业务异常
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         sys.exit(1)
+    except BrokenPipeError:
+        # BUG-340：管道截断（如 `| head`）时避免 traceback + exit 120
+        with contextlib.suppress(OSError, ValueError):
+            sys.stdout.close()
+        sys.exit(0)
 
 
 if __name__ == "__main__":

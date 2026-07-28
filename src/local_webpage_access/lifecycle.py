@@ -208,6 +208,8 @@ def _pid_alive(pid: int) -> bool:
             return True
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        return True
     except (OSError, ProcessLookupError):
         return False
 
@@ -227,7 +229,11 @@ def _load_optional(
     path = workspace.app_manifest_path(instance_id)
     if not path.is_file():
         return None
-    return InstanceManifest.load(path)
+    try:
+        return InstanceManifest.load(path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("实例 %s manifest 损坏，remove 将按 registry 降级清理：%s", instance_id, exc)
+        return None
 
 
 def _is_deployed_container(manifest: InstanceManifest) -> bool:
@@ -453,6 +459,7 @@ def remove_instance(
 
     with instance_lock(workspace, instance_id):
         manifest = _load_optional(workspace, instance_id)
+        registry_row = registry.get_instance(instance_id) or {}
 
         # data/ 保护：purge 时若数据目录非空，必须显式 force
         data_dir = workspace.app_data(instance_id)
@@ -527,6 +534,11 @@ def remove_instance(
                         force=force,
                         detail=str(exc),
                     )
+                if purge and manifest.container is not None:
+                    image_ref = manifest.container.imageId or manifest.container.image
+                    if image_ref:
+                        with contextlib.suppress(Exception):
+                            DockerRuntime(workspace, registry).remove_image(image_ref)
             else:
                 _log_remove_stage(
                     registry,
@@ -538,24 +550,50 @@ def remove_instance(
                     detail="not docker-compose",
                 )
         else:
-            _log_remove_stage(
-                registry,
-                instance_id,
-                "stop",
-                "skip",
-                purge=purge,
-                force=force,
-                detail="no manifest",
-            )
-            _log_remove_stage(
-                registry,
-                instance_id,
-                "compose_down",
-                "skip",
-                purge=purge,
-                force=force,
-                detail="no manifest",
-            )
+            # BUG-319：manifest 可能被误删，但 registry 仍保有 runtime。
+            # 按 registry 降级清理，避免容器或 builtin 服务泄漏。
+            runtime_value = registry_row.get("runtime")
+            if runtime_value == "docker-compose":
+                try:
+                    DockerRuntime(workspace, registry).down(instance_id)
+                    _log_remove_stage(
+                        registry, instance_id, "compose_down", "ok",
+                        purge=purge, force=force, detail="registry fallback",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log_remove_stage(
+                        registry, instance_id, "compose_down", "warn",
+                        purge=purge, force=force, detail=f"registry fallback: {exc}",
+                    )
+                _log_remove_stage(
+                    registry, instance_id, "stop", "skip",
+                    purge=purge, force=force, detail="no manifest; compose down used",
+                )
+            elif runtime_value == "shared-static":
+                try:
+                    from local_webpage_access.static_gateway import StaticGateway
+
+                    StaticGateway(workspace, config).disable(instance_id)
+                    result, detail = "ok", "registry fallback"
+                except Exception as exc:  # noqa: BLE001
+                    result, detail = "warn", f"registry fallback: {exc}"
+                _log_remove_stage(
+                    registry, instance_id, "stop", result,
+                    purge=purge, force=force, detail=detail,
+                )
+                _log_remove_stage(
+                    registry, instance_id, "compose_down", "skip",
+                    purge=purge, force=force, detail="shared-static",
+                )
+            else:
+                _log_remove_stage(
+                    registry, instance_id, "stop", "skip",
+                    purge=purge, force=force, detail="no manifest or runtime",
+                )
+                _log_remove_stage(
+                    registry, instance_id, "compose_down", "skip",
+                    purge=purge, force=force, detail="no manifest or runtime",
+                )
 
         # 2.5 BUG-268 / IMP-041：全 runtime 清理路径别名（容器 stop 不走 disable）。
         had_alias = workspace.app_alias_config(instance_id).is_file()
@@ -879,6 +917,17 @@ def observe_status(
 
     返回观测到的 :class:`Status`。仅做观测与回写，不改变 ``desiredState``。
     """
+    with instance_lock(workspace, instance_id):
+        return _observe_status_locked(workspace, config, registry, instance_id)
+
+
+def _observe_status_locked(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> Status:
+    """在实例生命周期锁内执行真实状态观测及 manifest 回写（BUG-320）。"""
     manifest = _load(workspace, instance_id)
     runtime_value = manifest.runtime.value
 
@@ -895,10 +944,18 @@ def observe_status(
     )
     if observed.value != current:
         registry.update_status(instance_id, observed.value)
-        manifest.status = observed
-        manifest.touch()
-        with contextlib.suppress(Exception):
-            manifest.save(workspace.app_manifest_path(instance_id))
+        # BUG-320：只更新 status 相关字段，避免全量 save 覆盖并发生命周期写入。
+        path = workspace.app_manifest_path(instance_id)
+        try:
+            fresh = InstanceManifest.load(path)
+            fresh.status = observed
+            fresh.touch()
+            fresh.save(path)
+        except Exception:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                manifest.status = observed
+                manifest.touch()
+                manifest.save(path)
         registry.add_event(
             instance_id,
             "status_change",

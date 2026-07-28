@@ -22,12 +22,12 @@
 | 检查项 | 级别 | code |
 | --- | --- | --- |
 | `privileged: true` | critical | `privileged` |
-| 挂载 Docker socket（`/var/run/docker.sock` 等） | critical | `docker_socket` |
+| 挂载 Docker socket（`/var/run/docker.sock` 等） | critical | `docker_socket_mount` |
 | bind mount 宿主敏感目录（`/`、`/etc`、`/var`、`/root`、`/proc`、`/var/lib/docker` 等） | critical | `host_sensitive_mount` |
 | 非 `data/` 的 host bind mount | warn | `unexpected_host_mount` |
 | `network_mode: host` | warn | `host_network` |
-| 危险 `cap_add`（`SYS_ADMIN` / `NET_ADMIN` / `SYS_PTRACE` 等） | warn | `dangerous_cap` |
-| 以 root 用户运行（`user: root` 或 `user: 0`） | warn | `run_as_root` |
+| 危险 `cap_add`（`SYS_ADMIN` / `NET_ADMIN` / `SYS_PTRACE` 等） | warn | `dangerous_capability` |
+| 以 root 用户运行（`user: root` 或 `user: 0`） | warn | `root_user` |
 | Compose YAML 非法 / 结构错误 | critical | `invalid_yaml` |
 
 **允许的 host bind mount**：仅 `./data`、`../data`（实例自己的持久化目录）。
@@ -37,26 +37,27 @@
 
 | 检查项 | 级别 | code |
 | --- | --- | --- |
-| 显式 `USER root` 或 `USER 0` | warn | `dockerfile_user_root` |
-| `ADD <url>`（远程下载，不可复现且有供应链风险） | warn | `dockerfile_add_url` |
-| `RUN` 中含 `curl ... \| sh` / `wget ... \| sh` 模式 | warn | `dockerfile_curl_pipe_sh` |
+| 显式 `USER root` 或 `USER 0` | warn | `root_user` |
+| 未声明 `USER`（默认 root） | info | `no_user` |
+| `ADD <url>`（远程下载，不可复现且有供应链风险） | warn | `add_remote_url` |
+| `RUN` 中含 `curl ... \| sh` / `wget ... \| sh` 模式 | warn | `pipe_to_shell` |
 
 > V1 生成的 Dockerfile 默认非 root（`node:24-alpine` 用 `node` 用户，
 > `python:3.13-slim` 创建 `app` 用户并切换）。审计主要针对用户/skill 覆盖的模板。
 
 ## zip 成员审计（`audit_zip_members`）
 
-作为 `_safe_extract` 的**纵深防御**第二层，`audit_zip_members` 在成员名层面
-独立检查路径穿越：
+作为 `safe_extract` 的**纵深防御**第二层，`audit_zip_members` 在成员名层面
+独立检查路径穿越与符号链接：
 
 | 检查项 | 级别 | code |
 | --- | --- | --- |
 | 绝对路径（`/etc/...`） | critical | `zip_absolute_path` |
-| Windows 盘符（`C:\...`） | critical | `zip_drive_path` |
-| `..` 穿越序列 | critical | `zip_traversal` |
-| 反斜杠路径 | warn | `zip_backslash` |
+| Windows 盘符（`C:\...`） | critical | `zip_drive_letter` |
+| `..` 穿越序列 | critical | `zip_slip` |
+| 符号链接成员（`S_IFLNK`） | critical | `zip_symlink` |
 
-导入器在 `_safe_extract` 中对每个成员做 `resolve().relative_to(target)` 校验，
+导入器在 `safe_extract` 中对每个成员做 `resolve().relative_to(target)` 校验，
 **即便审计层漏过，解压层也会拒绝**。
 
 ## 未识别 zip 风险提示
@@ -83,6 +84,9 @@
 * 应用日志（`logs/lwa.log`、`logs/manager.log`）同样收紧为 `0600`，且**不落盘完整 token**
   （仅 CLI 终端打印）。查看管理页运行日志用 `lwa manager logs`。
 * 轮换：删除 `run/manager-token.json` 后 `lwa manager off && lwa manager on`（旧 token 立即失效）。
+* API 传 token 支持 `Authorization: Bearer`、`X-LWA-Token`，以及 `?token=` 查询参数
+  （管理页新标签等）；**查询参数会进入浏览器历史 / Referer / 反代 access log**，属有意保留的便利通道，日常优先用 Header。详见 [管理页鉴权](manager-page.md#鉴权)。
+* **回环写请求 CSRF（BUG-295）**：本机 `GET`/`HEAD`/`OPTIONS` 仍可免 token；无有效 token 的写请求须 `Sec-Fetch-Site: same-origin` 或匹配的 `Origin`，否则 403 `csrf_forbidden`。
 
 ## 默认资源限制
 
@@ -114,7 +118,7 @@ defaultResourceLimits:
   **禁止**把运行中容器误标 stopped；管理页与 API 对容器生命周期 **fail-closed**（`capability_denied`）。
 * Caddy：Full 下必须由本工作区 LWA 托管；系统 `caddy.service` / 外部 `:2019` fail-closed，
   不以 ACL 共享工作区给系统 Caddy 作为默认解法。
-* `/api/health` 的完整 `capabilities` 仅对本机或已鉴权客户端可见；未鉴权局域网只见 `overall`。
+* `/api/health` 的完整 `capabilities` 仅对本机或已鉴权客户端可见；未鉴权局域网只见 `profile` 与 `overall`。
 * `run/capability-*.json`、`full-setup-state.json`、token 等敏感运行态文件默认 `0600`。
 
 ## V1 不做的安全承诺

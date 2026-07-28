@@ -124,6 +124,14 @@ class Workspace:
         return self.inbox / "processed"
 
     @property
+    def inbox_failed(self) -> Path:
+        """BUG-297：daemon 连续失败超阈值的 zip 死信目录（``inbox/failed/``）。
+
+        物理移出扫描视野，避免损坏 zip 每 poll 无限重试撑爆日志。
+        """
+        return self.inbox / "failed"
+
+    @property
     def apps(self) -> Path:
         return self.root / "apps"
 
@@ -227,6 +235,7 @@ class Workspace:
         for directory in (
             self.inbox,
             self.inbox_processed,
+            self.inbox_failed,
             self.apps,
             self.registry_dir,
             self.logs,

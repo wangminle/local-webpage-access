@@ -129,6 +129,23 @@ def test_detect_backend_full_profile_fails_when_caddy_missing(
         gw.detect_backend()
 
 
+def test_detect_backend_ignores_unready_full_setup_state(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-305：Full 安装未验收成功时不得提前启用严格 Caddy 模式。"""
+    from local_webpage_access.capability import save_profile_state
+
+    save_profile_state(
+        workspace.root,
+        {"profile": "full", "overall": "unready", "completedSteps": []},
+    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: None)
+
+    assert StaticGateway(
+        workspace, Config(profile="default", staticGateway="caddy")
+    ).detect_backend() == "builtin"
+
+
 def test_ensure_caddy_running_rejects_foreign_admin(
     workspace: Workspace, monkeypatch
 ) -> None:
@@ -306,7 +323,7 @@ def test_is_enabled_caddy_true_when_site_config_exists(
     gw = _caddy_gateway(workspace, monkeypatch)
     site = gw.site_config_path("demo")
     site.parent.mkdir(parents=True, exist_ok=True)
-    site.write_text(f":21100 {{ root */public }}\n", encoding="utf-8")
+    site.write_text(":21100 { root */public }\n", encoding="utf-8")
     assert gw.is_enabled("demo") is True
 
 
@@ -669,7 +686,6 @@ def _caddy_present(workspace, monkeypatch, *, modules: str = "") -> StaticGatewa
         "local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy"
     )
 
-    import subprocess as sp
 
     class _FakeResult:
         returncode = 0
@@ -827,7 +843,6 @@ def test_supports_rate_limit_caches_result(
     """supports_rate_limit 在实例生命周期内缓存，不重复探测。"""
     call_count = {"n": 0}
 
-    import subprocess as sp
 
     class _FakeResult:
         returncode = 0
@@ -1383,3 +1398,88 @@ def test_clear_stale_caddy_pid_removes_dead_pid(gateway: StaticGateway) -> None:
     gateway._clear_stale_caddy_pid()
     assert not path.exists()
 
+
+# ---- BUG-324：主 Caddyfile 跨进程锁 + 原子写 --------------------------------
+
+
+def test_atomic_write_text_uses_replace(tmp_path: Path, monkeypatch) -> None:
+    """BUG-324：主配置经临时文件 + os.replace，避免半写可见。"""
+    from local_webpage_access.static_gateway import _atomic_write_text
+
+    target = tmp_path / "Caddyfile"
+    target.write_text("old\n", encoding="utf-8")
+    replaced: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def tracking_replace(src, dst):  # noqa: ANN001
+        replaced.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", tracking_replace)
+    _atomic_write_text(target, "new-content\n")
+    assert target.read_text(encoding="utf-8") == "new-content\n"
+    assert replaced
+    assert replaced[0][1] == str(target)
+
+
+def test_reload_all_waits_on_gateway_config_lock(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-324：持有 gateway-config.lock 时 reload_all 应超时失败，而非并发 RMW。"""
+    from local_webpage_access.file_lock import ensure_lockable, try_acquire_exclusive
+    from local_webpage_access.static_gateway import (
+        StaticGateway,
+        _GATEWAY_MUTATION_TIMEOUT,
+    )
+
+    cfg = Config(staticGateway="caddy", staticGatewayPort=8080)
+    gw = StaticGateway(workspace, cfg)
+    monkeypatch.setattr(gw, "detect_backend", lambda: "caddy")
+    monkeypatch.setattr(gw, "verify_workspace_caddy_access", lambda: None)
+    monkeypatch.setattr(gw, "_admin_alive", lambda: False)
+    monkeypatch.setattr(gw, "ensure_caddy_running", lambda: True)
+    monkeypatch.setattr(gw, "_assemble_main_config", lambda: "# assembled\n")
+    monkeypatch.setattr(gw, "_reload_with_self_heal", lambda: (True, ""))
+
+    lock_path = workspace.run / "gateway-config.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway._GATEWAY_MUTATION_TIMEOUT", 0.05
+    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.time.sleep", lambda *_: None)
+    try:
+        with pytest.raises(GatewayError, match="配置锁"):
+            gw.reload_all()
+    finally:
+        os.close(fd)
+    assert _GATEWAY_MUTATION_TIMEOUT > 0
+
+
+def test_enable_holds_gateway_config_lock(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-324：enable 全程持锁，嵌套 reload/_sync 可重入。"""
+    from local_webpage_access.static_gateway import StaticGateway, _gateway_mutation_state
+
+    cfg = Config(staticGateway="builtin")
+    gw = StaticGateway(workspace, cfg)
+    public = workspace.app_public("demo")
+    public.mkdir(parents=True, exist_ok=True)
+    (public / "index.html").write_text("ok\n", encoding="utf-8")
+    depths: list[int] = []
+
+    def capture_start(iid, port, root):  # noqa: ANN001
+        depths.append(int(getattr(_gateway_mutation_state, "depth", 0)))
+
+    monkeypatch.setattr(gw, "_start_builtin", capture_start)
+    monkeypatch.setattr(gw, "_wait_until_healthy", lambda *_a, **_k: True)
+    monkeypatch.setattr(gw, "_clear_stale_static_pid", lambda *_a, **_k: None)
+    monkeypatch.setattr(gw, "_stop_live_builtin_if_any", lambda *_a, **_k: False)
+
+    port = _free_port()
+    gw.enable("demo", port, public, wait_health=True)
+    assert depths == [1]
+    assert (workspace.run / "gateway-config.lock").is_file()

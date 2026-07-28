@@ -245,6 +245,24 @@ def test_manager_instance_lock_exclusive_when_live_holder(
     assert lock.exists()
 
 
+def test_manager_instance_lock_does_not_steal_old_live_holder(
+    workspace: Workspace,
+) -> None:
+    """BUG-309：锁文件超龄不能覆盖仍存活的 manager 持有者。"""
+    workspace.ensure_workspace_dirs()
+    lock = instance_lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
+
+    with pytest.raises(LifecycleError):
+        with manager_instance_lock(workspace):
+            pass
+
+    assert lock.read_text(encoding="utf-8").strip() == str(os.getpid())
+
+
 def test_manager_instance_lock_reclaims_stale(workspace: Workspace) -> None:
     """BUG-193：持有进程已死 → 回收陈旧锁后正常获取。"""
     workspace.ensure_workspace_dirs()

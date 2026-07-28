@@ -3,7 +3,7 @@
 #
 # 用法（在仓库根目录）：
 #   bash scripts/pack-release-zip.sh
-#   bash scripts/pack-release-zip.sh /path/to/lwa-0.6.6-src.zip
+#   bash scripts/pack-release-zip.sh /path/to/lwa-0.6.7-src.zip
 #
 set -euo pipefail
 
@@ -28,7 +28,8 @@ fi
 # 校验关键文件
 test -f "$STAGING/pyproject.toml"
 test -d "$STAGING/src/local_webpage_access"
-rg -q '\[project\.scripts\]' "$STAGING/pyproject.toml" || {
+# BUG-286：只用 POSIX grep，别让打包脚本隐式依赖 ripgrep（干净环境里没有）。
+grep -qF '[project.scripts]' "$STAGING/pyproject.toml" || {
   echo "pyproject.toml 缺少 [project.scripts]" >&2
   exit 1
 }
@@ -50,4 +51,4 @@ _listing="$STAGING/.release-listing.txt"
 unzip -l "$OUT" > "$_listing"
 head -30 "$_listing"
 echo "..."
-rg -n 'pyproject\.toml|src/local_webpage_access/__init__' "$_listing" || true
+grep -nE 'pyproject\.toml|src/local_webpage_access/__init__' "$_listing" || true

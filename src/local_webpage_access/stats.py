@@ -120,8 +120,11 @@ def _read_loadavg() -> tuple[float | None, float | None]:
 def _disk_usage(root: Path | None) -> tuple[int | None, int | None]:
     """获取 root 所在分区的总容量与已用（WBS-19.05）。"""
     target = str(root) if root else "."
-    usage = shutil.disk_usage(target)
-    return usage.total, usage.used
+    try:
+        usage = shutil.disk_usage(target)
+        return usage.total, usage.used
+    except OSError:
+        return None, None
 
 
 # ---- 实例资源 ---------------------------------------------------------------

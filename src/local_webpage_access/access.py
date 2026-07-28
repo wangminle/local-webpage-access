@@ -416,6 +416,11 @@ def refresh_network_entries(
     lan_ip = resolve_lan_ip(config)
     report = RefreshReport(lan_ip=lan_ip)
     rows = registry.list_instances()
+    if lan_ip is None:
+        # BUG-325：临时探测失败时保留最后一次可信 URL，不能把所有地址写成 None。
+        report.skipped.extend(str(row["id"]) for row in rows)
+        log.warning("刷新访问地址：未解析到 LAN IP，保留现有地址并跳过写盘")
+        return report
     for row in rows:
         iid = row["id"]
         manifest_path = workspace.app_manifest_path(iid)
@@ -443,7 +448,11 @@ def refresh_network_entries(
             path_alias=path_alias,
             lan_ip=lan_ip,
         )
-        manifest.network = NetworkConfig(**entry)
+        # BUG-365：NetworkConfig(extra=allow) 的附加字段须保留，不可 **entry 重建抹掉。
+        if manifest.network is not None:
+            manifest.network = manifest.network.model_copy(update=entry)
+        else:
+            manifest.network = NetworkConfig(**entry)
         manifest.touch()
         try:
             manifest.save(manifest_path)
@@ -646,6 +655,15 @@ def _review_instance(
     except Exception as exc:  # noqa: BLE001
         rep.status = "skip"
         rep.findings.append(f"manifest 读取失败：{exc}")
+        return rep
+    desired_state = (
+        manifest.desiredState.value
+        if hasattr(manifest.desiredState, "value")
+        else manifest.desiredState
+    )
+    if desired_state == "stopped":
+        rep.status = "skip"
+        rep.findings.append("实例 desiredState=stopped（已停用），跳过访问探测")
         return rep
     host_port, path_alias, _internal = _extract_host_port_alias(
         manifest, for_review=True

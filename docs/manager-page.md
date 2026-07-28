@@ -17,7 +17,7 @@ lwa manager off         # 停止
 ```
 
 * 默认监听 `0.0.0.0:17800`（由 `local-web.yml` 的 `managerPort` / `managerHost` 控制）。
-* **本机访问免 token**：浏览器打开 http://127.0.0.1:17800/ 即可进入（IMP-003）。
+* **本机读免 token、写需同源或 token**：浏览器打开 http://127.0.0.1:17800/ 即可进入（IMP-003）；本机 `GET`/`HEAD`/`OPTIONS` 免 token，**写操作**（POST/PATCH/…）须同源 Fetch Metadata（`Sec-Fetch-Site: same-origin`）或匹配的 `Origin`，否则 403 `csrf_forbidden`；也可直接带 token。
 * 从局域网 IP 访问时仍须 token。token 写入工作区 `run/manager-token.json`（权限 `0600`）；
   `lwa manager on` / `lwa manager start` 首次启动会生成并**仅在终端打印**（不会写入
   `logs/lwa.log` / `logs/manager.log`），例如：
@@ -34,10 +34,20 @@ lwa manager off         # 停止
 ## 鉴权
 
 * 所有 `/api/*` 路由（`/api/health` 除外）默认要求请求头 `Authorization: Bearer <token>`（WBS-22.12）。
-* **本机调试例外（IMP-003）**：从 `127.0.0.1` / `localhost` / `::1` 访问时免 token；从局域网 IP 访问时仍须 token。
+* 另支持 `X-LWA-Token` 头，以及查询参数 `?token=`（管理页打开新标签等场景；见下方泄漏面说明）。
+* **本机调试例外（IMP-003 / BUG-295）**：从 `127.0.0.1` / `localhost` / `::1` 访问时，**读请求**（GET/HEAD/OPTIONS）免 token；**写请求**无有效 token 时须 `Sec-Fetch-Site: same-origin` 或 `Origin` 与请求 host 一致，否则 **403 `csrf_forbidden`**。浏览器打开同源管理页仍可正常操作；裸 `curl`/跨站脚本对本机写 API 须带 token。局域网 IP 访问仍须 token。
 * `/api/health` **无需 token 即可探活**；但完整 CapabilityReport（`capabilities` / `action` 等）仅对本机客户端或**携带有效 token** 的局域网请求返回（BUG-236）。未鉴权 LAN 仅见 `profile` / `overall`；`workspaceRoot` 仍仅本机可见（BUG-169）。
 * 缺失或错误 token 返回 `401`，统一错误格式 `{"error": {"code": "unauthorized", "message": "..."}}`。
 * token 为一次性生成的随机串，仅在本工作区有效；重置方式：删除 `run/` 下的 token 文件后重启管理页。
+* 管理页登录框默认隐藏输入；可用眼睛图标切换可见/隐藏，便于核对粘贴结果。
+
+### `?token=` 查询参数泄漏面（有意保留）
+
+产品策略：**保留** `?token=`，方便从已登录页用带 token 的链接打开新标签；同时须知：
+
+* token 会进入浏览器历史、可能的 Referer，以及反向代理 / 访问日志。
+* 服务端已对回环**写请求**强制同源 Fetch Metadata / `Origin`（无 token 时 403 `csrf_forbidden`）；`?token=` 仍是额外泄漏面，日常优先用 Header。
+* 推荐日常请求只用 `Authorization: Bearer` / `X-LWA-Token`；用完 `?token=` 后尽快从地址栏去掉（管理页会在读入后尝试 `history.replaceState` 清除）。
 
 ## API 端点
 
@@ -76,7 +86,7 @@ lwa manager off         # 停止
 {"error": {"code": "not_found", "message": "实例 xxx 不存在"}}
 ```
 
-常见 code：`unauthorized`、`not_found`、`bad_request`、`conflict`、`data_nonempty`（IMP-035：purge 遇非空 data/）、`lifecycle_error`、`capability_denied`、`recognition_error`、`internal`。
+常见 code：`unauthorized`、`csrf_forbidden`（回环非同源写请求）、`not_found`、`bad_request`、`conflict`、`data_nonempty`（IMP-035：purge 遇非空 data/）、`lifecycle_error`、`capability_denied`、`recognition_error`、`internal`。
 
 ### 能力降级（IMP-033）
 
@@ -91,11 +101,18 @@ lwa manager off         # 停止
     "managerDockerAccess": "permission_denied",
     "daemonDockerAccess": "unknown",
     "caddyRuntime": "owner_mismatch",
+    "caddyWorkspaceAccess": "ready",
+    "gatewayAccess": "ready",
     "sessionRefreshRequired": false
   },
   "action": "执行：lwa doctor --profile full 与 lwa setup --full --resume"
 }
 ```
+
+`/api/health` **只读缓存**，不会同步跑 Docker/Caddy 探测（否则存活检查会被拖慢）。两点排障须知：
+
+- **`overall: "unknown"` 是启动占位**，表示 manager 的后台能力自检还没跑完，既不是 ready 也不是故障；它不属于 `CapabilityReport.overall` 的正式取值。
+- gateway 通常比 manager 晚就绪，因此 health 会用新鲜的 gateway 缓存纠偏 `gatewayAccess`。纠偏后 `overall` / `action` 会**一并重算**，与 `capabilities` 保持一致；但仅在 manager 已有真实探测结果时才重算——占位期间不会凭 gateway 缓存推出 ready。
 
 前端据此显示降级横幅并禁用容器按钮；**后端**对容器 start/stop/restart/rebuild/recover 同样拒绝，避免绕过 UI。静态实例不受 Docker 能力门禁影响。实例快照可含 `observedState` / `observationError` / `runtimeAccess`（观测失败 ≠ stopped）。
 ### 实例更新（IMP-009）
@@ -193,7 +210,7 @@ Authorization: Bearer <token>
 
 | 来源 | 何时 | 说明 |
 | --- | --- | --- |
-| `caddy` | `staticGateway=caddy` 且（静态，或容器有路径别名） | 读 `run/logs/static-access.log`；有别名按 `/<alias>/`，无别名静态按 host 端口（IMP-028）；容器别名见 IMP-027 |
+| `caddy` | `staticGateway=caddy` 且（静态，或容器有路径别名） | 读 `logs/static-access.log`；有别名按 `/<alias>/`，无别名静态按 host 端口（IMP-028）；容器别名见 IMP-027 |
 | `builtin` | builtin / Caddy 不可用降级 | 每实例 `gateway.log`（CLF） |
 | `container` | 容器且无 Caddy 别名 | docker logs 尽力解析（近似） |
 
