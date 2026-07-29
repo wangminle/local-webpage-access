@@ -7,7 +7,7 @@
 
 * **正式支持操作系统（IMP-036）**：
   * Linux 裸机：Ubuntu **LTS**（当前：22.04 jammy / 24.04 noble / 26.04 resolute）、Debian **Stable**（12 bookworm / 13 trixie）；kernel ≥5.15、glibc ≥2.35、systemd。版本与代号须配对；非 LTS、sid/testing、未纳入矩阵的未来版本一律拒绝。
-  * WSL2 Linux（同上发行版；WSL 包 ≥2.1.5 且 systemd 为 PID 1）；Windows **仅作 WSL2 宿主**。WSL 下 Full Profile / `lwa autostart` 写路径禁止工作区位于 `/mnt/<drive>`（写入前 fail-closed）；只读诊断与普通 CLI 不因路径形似 `/mnt` 而全局阻断。
+  * WSL2 Linux（同上发行版；WSL 包 ≥2.1.5 且 systemd 为 PID 1）；Windows **仅作 WSL2 宿主**。WSL 下 Full Profile / `lwa autostart` 写路径禁止工作区位于 `/mnt/<drive>`（写入前 fail-closed）；只读诊断与普通 CLI 不因路径形似 `/mnt` 而全局阻断。运行前宿主准备见下文「WSL2 宿主准备」。
   * macOS：**14 Sonoma+**（滚动下限，对齐 Docker Desktop「当前及前两版」；截至 2026-07）
   * 架构仅 **x86_64/amd64**、**arm64/aarch64**
 * **明确不支持**：**Windows 原生**进程（CLI/服务入口 hard fail，请改用 WSL2）；WSL1；Ubuntu 非 LTS；Debian sid/testing；Alpine/musl、Fedora/RHEL/Arch 等未纳入矩阵的发行版；32 位 / ARMv7 等。
@@ -24,6 +24,76 @@
 * **架构**：基线镜像 `node:24-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
   其他架构需用户自备镜像或调整模板。
 
+## WSL2 宿主准备（运行前）
+
+下列项**不在** `lwa setup` 自动改写范围内，但会直接影响 Full Profile 稳定性、Docker 构建与 LAN 访问。建议在首次 `lwa init --full` / `lwa autostart install` **之前**完成。
+
+### 工作区放在 Linux 文件系统（正确性 + 性能）
+
+* Full / `autostart` **禁止**工作区位于 `/mnt/<drive>/…`（写入前 fail-closed）。
+* 即使不做 Full，也不要把仓库、venv、`node_modules`、Docker 构建上下文、SQLite、`logs/` 放在 `/mnt/c` 等 Windows 盘：经 **9p** 跨文件系统访问时 I/O 明显变慢，构建与热路径容易卡顿。
+* 推荐路径形如 `/home/<user>/…` 或其它 Linux ext4 卷。微软亦建议：由 Linux 工具操作的项目放在 WSL 的 Linux 文件系统中。
+
+### 宿主资源配额（`.wslconfig`）
+
+应用容器另有 `resourceProfile` / `defaultResourceLimits`（见 [runtime-workspace](runtime-workspace.md#资源档位imp-018)）；那是**容器级**限额。WSL2 虚拟机本身的内存/CPU/Swap 由 Windows 侧 `%UserProfile%\.wslconfig` 控制。小主机上若 Linux 只看到约 2～3GB，Docker + Python manager/daemon + Caddy 会同时吃紧。
+
+示例（按宿主机实际内存调整；改完执行 `wsl --shutdown` 再生效）：
+
+```ini
+# %UserProfile%\.wslconfig
+[wsl2]
+memory=8GB
+processors=4
+swap=4GB
+```
+
+经验值：
+
+| Windows 物理内存 | 建议给 WSL `memory` | `swap` | `processors` |
+| --- | --- | --- | --- |
+| 16GB | 6～8GB | 2～4GB | 宿主逻辑核的一半左右 |
+| 32GB | 8～12GB | 2～4GB | 同上 |
+
+不要把 `swap=0` 当作默认（内存尖峰时易 OOM）。官方项说明见 [WSL 设置配置](https://learn.microsoft.com/windows/wsl/wsl-config)。
+
+> 容器内的 `mem_limit` / `cpus` **不能**替代上述 VM 配额；两者需同时合理。
+
+### LAN 访问与防火墙
+
+* LWA 面向**局域网 HTTP**：统一入口默认 `:8080`（`staticGatewayPort`），管理页默认 `:17800`（`managerPort`），实例另占端口池（常见 `18000–19999`）。
+* **端口最小化**：防火墙只放行**实际在用**的业务口（例如当前实例 `18000`），不要把 `portPool` 整段 `18000–19999` 默认全开；管理页 `17800` 仅在确需 LAN 管理时开放，并依赖 manager token。
+* **不要**把 Caddy **admin `:2019`** 暴露到 LAN 或公网——仅供本机 `127.0.0.1` 管理 reload。
+* **Windows / WSL2 Mirrored（Windows 11 22H2+、WSL ≥2.0.9）**：入站由 **Hyper-V firewall** 管理，不是普通「Windows 防火墙」规则 alone。应在 **PowerShell（管理员）** 按 WSL `VMCreatorId` 逐端口放行，例如：
+
+  ```powershell
+  # 常用 WSL VMCreatorId；若环境不同以 Get-NetFirewallHyperVVMCreator 为准
+  $wslId = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
+
+  New-NetFirewallHyperVRule `
+    -Name "WSL-In-TCP-8080" `
+    -DisplayName "WSL-In-TCP-8080" `
+    -Direction Inbound `
+    -VMCreatorId $wslId `
+    -Protocol TCP `
+    -LocalPorts 8080 `
+    -Action Allow
+  ```
+
+  优先**逐端口 Allow**；不要默认把整台 WSL 的 `DefaultInboundAction` 改为 Allow。可用 `Get-NetFirewallHyperVRule` 核对是否已有 `WSL-In-TCP-*`。发行版内若启用了 `ufw`/`firewalld`，以及企业 GPO/EDR，仍可能叠加拦截——但不要把普通 Defender 入站规则写成 Mirrored 的唯一控制层。
+* **验收分层**（须逐层记录，不可跳级宣称「LAN 已通」）：
+  1. WSL 内 `127.0.0.1:<port>` —— 证明服务自身；
+  2. Windows `localhost:<port>` —— 证明宿主/WSL localhost 互通；
+  3. Windows **自身 NIC IP** —— 只记录现场结果，**不作为最终 LAN 结论**（本机自测假阴性暂缺充分官方证据，只能写作观察）；
+  4. **另一台物理机/手机**访问 `http://<共享 LAN IP>:<port>` —— 最终 LAN 验收。
+* 换网 / DHCP 后 LAN IP 可能变：执行 `lwa access refresh` 与 `lwa access review`（见 [运维手册](operations-playbook.md#72-访问地址刷新g1--imp-038--imp-040)）。可选 mirrored 网络模式见 [开机自启 · WSL 网络](autostart.md#wsl-网络可选-mirrored)。
+* **代理**：WSL `autoProxy=true` 便于发行版访问互联网依赖源；LWA **内部**健康/access/Caddy admin 探针走直连，不依赖用户 `unset http_proxy`。人工 `curl` 仍可能受代理影响。
+
+### PATH / interop（可选精简）
+
+* `lwa autostart` 生成的 systemd/launchd 单元已**固化 PATH**（含 caddy 常见路径，修 BUG-139），交互终端不必长期手动塞 `/mnt/c/Windows/System32`。
+* 若几乎不依赖 Windows CLI，可在 `/etc/wsl.conf` 设 `[interop] appendWindowsPath=false` 减少 PATH 污染；版本探测仍会回退绝对路径找 `wsl.exe`（见上文「WSL 包版本探测」）。`[interop] enabled=false` 会导致包版本探测失败，Full 写路径 fail-closed——一般不要关。
+
 ## 项目识别
 
 * **支持识别**：纯静态 HTML、纯前端 SPA（Vite/React/Vue/Svelte 等基于 `package.json` 的项目）、
@@ -36,6 +106,10 @@
 
 ## 托管与容器
 
+* **运行时只有两条路径（V1 架构边界）**：
+  * **纯静态 / 前端构建产物** → `shared-static`（Caddy 或 builtin `http.server`）；
+  * **含 Python / Node 等后端的全栈** → **仅** `docker-compose`（`host_container`）。**没有**「本机 venv / systemd 直接跑 uvicorn/gunicorn」的本地 Python 运行时；坚持不装 Docker 则无法用 lwa 托管此类后端（见 FAQ「Python 后端是否支持本地直跑」）。
+* **不纳管外部既有站点**：已在机上的 nginx+systemd、独立进程、非本工作区 Caddy 等，**不能** `adopt` / 登记进 lwa 生命周期。`lwa autostart` 只监管 **本工作区** 的 manager/daemon/gateway；要把旧站纳入 lwa，须改为 zip 导入并由 lwa 重新部署（静态走网关，全栈走 Compose）。与 Full Profile「禁止静默复用系统 caddy.service / 外部 `:2019`」一致。
 * **静态网关**：默认 Caddy 优先；Default 档无 Caddy 时可降级内置 `http.server`。
   Full Profile 要求可用的 LWA 托管 Caddy（见上）。`staticGateway=nginx` 枚举保留但未实现（无 nginx 模板），会降级 builtin（Full/严格模式则拒绝降级）。
 * **HTTPS**：V1 仅 HTTP。HTTPS / 证书自动化（Let's Encrypt）不在范围内。
@@ -44,7 +118,7 @@
 * **数据持久化**：仅自动 bind mount `data/` 目录。其他路径（如日志、上传目录）需用户在项目内处理。
 * **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。
 * **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。
-* **别名下 SPA 绝对资源路径（IMP-023）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 → 空 200，页面白屏。受影响项目应构建时设相对 base（Vite `base: './'`）或 `--base=/<alias>/`，或继续用 hostPort 直达。`lwa access review` 会检测该空 200 并告警（入口 HTML 200 ≠ 别名下可渲染）。
+* **别名下 SPA 绝对资源路径（IMP-023）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 → **空 200、404 或错误 MIME（如 JS 请求得到 text/html）**，页面白屏。受影响项目应构建时设相对 base（Vite `base: './'`）或 `--base=/<alias>/`，或继续用 hostPort 直达。`lwa access review` 会对照「无前缀 vs 带前缀」子资源并告警（入口 HTML 200 ≠ 别名下可渲染）。
 * **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。
 
 ## 管理页与 API

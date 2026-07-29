@@ -504,7 +504,7 @@ def test_ingest_builtin_does_not_advance_cursor_when_recording_fails(
         '127.0.0.1 - - [09/Jul/2026 10:00:00] "GET / HTTP/1.1" 200 -\n',
         encoding="utf-8",
     )
-    cursor_key = f"builtin:demo:{log_path.as_posix()}"
+    cursor_key = "builtin:demo:gateway"
     conn = store._conn_or_open()
     conn.execute(
         "CREATE TRIGGER fail_pageview_detail BEFORE INSERT ON pageview_detail "
@@ -519,6 +519,111 @@ def test_ingest_builtin_does_not_advance_cursor_when_recording_fails(
     _ingest_builtin(workspace, _InstanceSource("demo", "builtin"), store)
     assert store.summary()["demo"]["hits"] == 1
     assert store.get_cursor(cursor_key)[0] == log_path.stat().st_size
+
+
+def test_ingest_cursor_keys_are_path_independent(
+    workspace: Workspace, store: PageviewStore, tmp_path: Path
+) -> None:
+    """BUG-383：游标 key 不依赖绝对路径，工作区改名后不从头重摄入。"""
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    line = '127.0.0.1 - - [09/Jul/2026 10:00:00] "GET / HTTP/1.1" 200 -\n'
+    log_path.write_text(line, encoding="utf-8")
+
+    _ingest_builtin(workspace, _InstanceSource("demo", "builtin"), store)
+    assert store.summary()["demo"]["hits"] == 1
+    assert store.get_cursor("builtin:demo:gateway")[0] == log_path.stat().st_size
+    # 不得再写入带绝对路径的旧 key
+    assert store.get_cursor(f"builtin:demo:{log_path.as_posix()}")[0] == 0
+
+    # 模拟工作区改名：同一相对路径下的日志文件，换一个 Workspace 根
+    renamed_root = tmp_path / "renamed-workspace"
+    renamed_root.mkdir()
+    from local_webpage_access.paths import Workspace as WS
+
+    renamed_ws = WS(renamed_root)
+    renamed_ws.ensure_workspace_dirs()
+    renamed_log = renamed_ws.app_logs("demo") / "gateway.log"
+    renamed_log.parent.mkdir(parents=True, exist_ok=True)
+    renamed_log.write_text(line, encoding="utf-8")
+
+    _ingest_builtin(renamed_ws, _InstanceSource("demo", "builtin"), store)
+    # 稳定 key 已在旧 offset，同内容不会重复累计
+    assert store.summary()["demo"]["hits"] == 1
+
+
+def test_ingest_caddy_shared_uses_stable_cursor_key(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """BUG-383：caddy 共享日志游标为路径无关的 caddy-shared:static-access。"""
+    access_log = workspace.root / ACCESS_LOG_REL
+    access_log.parent.mkdir(parents=True, exist_ok=True)
+    access_log.write_text(
+        '{"ts":1752043200.0,"request":{"method":"GET","uri":"/demo/","remote_ip":"1.2.3.4"},"status":200}\n',
+        encoding="utf-8",
+    )
+    _ingest_caddy_shared(
+        workspace,
+        access_log,
+        {"/demo": "demo"},
+        {},
+        store,
+        [_InstanceSource("demo", "caddy", alias="demo")],
+    )
+    assert store.get_cursor("caddy-shared:static-access")[0] == access_log.stat().st_size
+    assert store.get_cursor(f"caddy-shared:{access_log.as_posix()}")[0] == 0
+
+
+def test_schema_v3_to_v4_migrates_path_cursors_without_dropping_stats(
+    tmp_path: Path,
+) -> None:
+    """BUG-383：v3→v4 迁移保留浏览量，并把绝对路径游标改写为稳定 key。"""
+    db = tmp_path / "pageviews.db"
+    old_builtin = "builtin:demo:/old/root/apps/demo/logs/gateway.log"
+    old_caddy = "caddy-shared:/old/root/logs/static-access.log"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE pageviews (
+            instance_id TEXT NOT NULL, day TEXT NOT NULL, hits INTEGER NOT NULL,
+            unique_ips INTEGER NOT NULL, last_seen TEXT, source TEXT NOT NULL,
+            PRIMARY KEY (instance_id, day));
+        CREATE TABLE pageview_detail (
+            instance_id TEXT, ts TEXT, method TEXT, path TEXT, status INTEGER, remote TEXT);
+        CREATE TABLE pageview_ips (
+            instance_id TEXT, day TEXT, remote TEXT,
+            PRIMARY KEY (instance_id, day, remote));
+        CREATE TABLE container_seen (
+            instance_id TEXT, line_hash TEXT, PRIMARY KEY (instance_id, line_hash));
+        CREATE TABLE ingest_cursor (
+            source_key TEXT PRIMARY KEY, offset_bytes INTEGER, last_ts TEXT, updated_at TEXT);
+        CREATE TABLE pageview_ip_stats (
+            instance_id TEXT, remote TEXT, hits INTEGER, last_seen TEXT,
+            PRIMARY KEY (instance_id, remote));
+        INSERT INTO pageviews VALUES ('demo','2026-07-01',42,1,'2026-07-01T00:00:00+00:00','caddy');
+        INSERT INTO pageview_ip_stats VALUES ('demo','1.1.1.1',42,'2026-07-01T00:00:00+00:00');
+        """
+    )
+    conn.execute(
+        "INSERT INTO ingest_cursor VALUES (?, 1234, null, null)", (old_builtin,)
+    )
+    conn.execute(
+        "INSERT INTO ingest_cursor VALUES (?, 5678, null, null)", (old_caddy,)
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+    s = PageviewStore(db)
+    try:
+        assert _user_version(s) == _PAGEVIEW_SCHEMA_VERSION
+        assert s.summary()["demo"]["hits"] == 42
+        assert s.get_cursor("builtin:demo:gateway")[0] == 1234
+        assert s.get_cursor("caddy-shared:static-access")[0] == 5678
+        assert s.get_cursor(old_builtin)[0] == 0
+        assert s.get_cursor(old_caddy)[0] == 0
+    finally:
+        s.close()
 
 
 def test_ingest_builtin_handles_missing_log(

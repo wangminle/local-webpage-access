@@ -1,6 +1,6 @@
 """``lwa update`` 工作区热重载测试（IMP-008 / WBS-008.05）。
 
-全部 mock subprocess / manager / daemon / doctor，避免依赖真实 pip、
+全部 mock subprocess / manager / daemon / gateway / doctor，避免依赖真实 pip、
 不启动真实管理页进程、不要求 Docker。
 """
 
@@ -72,6 +72,7 @@ def _opts(**kw) -> UpdateOptions:
         sync_templates=False,
         restart_manager=False,
         restart_daemon=False,
+        restart_gateway=False,
         restart_instances=False,
         run_doctor=False,
         review_access=True,
@@ -462,7 +463,7 @@ def test_pip_failure_does_not_block_other_steps(
     assert report.has_failures is True
 
 
-# ---- run_update: manager/daemon restart -----------------------------------
+# ---- run_update: manager/daemon/gateway restart ---------------------------
 
 
 def test_manager_restart_skipped_when_not_running(
@@ -632,6 +633,108 @@ def test_daemon_restart_stop_failure_marks_failed(
     assert step.status == "failed"
     assert started["n"] == 0  # 终止失败不得 start
     assert "停止失败" in step.message
+
+
+def test_gateway_restart_via_autostart_when_managed(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-378：Caddy 已运行且由自启动接管时，update 必须重启 gateway 监督器。"""
+    caddy_config = config.model_copy(update={"staticGateway": "caddy"})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.is_gateway_running",
+        lambda ws, cfg: True,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (calls.append(name) or "gateway 已由自启动重启", True, True),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.stop_gateway",
+        lambda ws, cfg: pytest.fail("自启动接管时不应手工 stop gateway"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.start_gateway",
+        lambda ws, cfg: pytest.fail("自启动接管时不应额外 start gateway"),
+    )
+
+    report = run_update(
+        workspace,
+        caddy_config,
+        registry,
+        options=UpdateOptions(
+            skip_pip=True,
+            sync_skills=False,
+            restart_manager=False,
+            restart_daemon=False,
+            restart_gateway=True,
+            run_doctor=False,
+            review_access=False,
+        ),
+    )
+
+    assert report.step("restartGateway").status == "ok"
+    assert calls == ["gateway"]
+
+
+def test_gateway_not_started_when_stopped(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-378：用户主动关闭的 Caddy 不得因 update 被意外拉起。"""
+    caddy_config = config.model_copy(update={"staticGateway": "caddy"})
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.is_gateway_running",
+        lambda ws, cfg: False,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.start_gateway",
+        lambda ws, cfg: pytest.fail("原本 stopped 的 gateway 不应启动"),
+    )
+
+    report = run_update(
+        workspace,
+        caddy_config,
+        registry,
+        options=UpdateOptions(
+            skip_pip=True,
+            sync_skills=False,
+            restart_manager=False,
+            restart_daemon=False,
+            restart_gateway=True,
+            run_doctor=False,
+            review_access=False,
+        ),
+    )
+
+    assert report.step("restartGateway").status == "skipped"
+
+
+def test_run_doctor_check_full_rejects_unready_capability_cache(
+    workspace: Workspace, config: Config, monkeypatch
+) -> None:
+    """BUG-378：Full 更新验收不得只看基础 doctor，Gateway 缓存缺失必须失败。"""
+    from types import SimpleNamespace
+
+    from local_webpage_access.capability import CapabilityReport
+    from local_webpage_access.updater import run_doctor_check
+
+    full_config = config.model_copy(update={"profile": "full"})
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.run_doctor",
+        lambda ws, cfg: SimpleNamespace(overall="ok"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report",
+        lambda **kw: CapabilityReport(
+            profile="full",
+            overall="unready",
+            gateway_access="unknown",
+            action="缺少 gateway 能力缓存",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="gatewayAccess=unknown"):
+        run_doctor_check(workspace, full_config)
 
 
 # ---- run_update: restart-instances ----------------------------------------

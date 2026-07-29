@@ -71,7 +71,10 @@ _NON_PAGE_PATHS: frozenset[str] = frozenset(
 )
 # pageviews.db schema 版本。旧库 user_version=0；升级时单事务重建派生表（IMP-025.e）。
 # v3（BUG-303）：时间戳统一存 UTC、按系统本地日期分桶；旧混合时区派生数据需重摄入。
-_PAGEVIEW_SCHEMA_VERSION = 3
+# v4（BUG-383）：文件游标改为路径无关稳定 key；仅改写 ingest_cursor，保留统计数据。
+_PAGEVIEW_SCHEMA_VERSION = 4
+_CURSOR_KEY_CADDY_SHARED = "caddy-shared:static-access"
+_DROP_ON_UPGRADE_BEFORE = 3  # <3 仍 drop 重建；3→4 只迁移游标
 
 # 业务表 DDL（逐条执行，便于在显式事务内原子迁移；executescript 会自动 COMMIT）。
 _DDL_STATEMENTS: tuple[str, ...] = (
@@ -348,6 +351,69 @@ def _reset_shared_stores() -> None:
         _shared_stores.clear()
 
 
+def builtin_cursor_key(instance_id: str) -> str:
+    """builtin gateway 日志的路径无关游标 key（BUG-383）。"""
+    return f"builtin:{instance_id}:gateway"
+
+
+def caddy_shared_cursor_key() -> str:
+    """Caddy 共享 access log 的路径无关游标 key（BUG-383）。"""
+    return _CURSOR_KEY_CADDY_SHARED
+
+
+def _stable_cursor_key_from_legacy(source_key: str) -> str | None:
+    """把 v3 及更早的绝对路径游标改写为稳定 key；已是稳定格式则返回 None。"""
+    if source_key == _CURSOR_KEY_CADDY_SHARED:
+        return None
+    if source_key.startswith("caddy-shared:"):
+        return _CURSOR_KEY_CADDY_SHARED
+    if source_key.startswith("builtin:"):
+        parts = source_key.split(":", 2)
+        if len(parts) < 3:
+            return None
+        instance_id, rest = parts[1], parts[2]
+        if rest == "gateway":
+            return None
+        return builtin_cursor_key(instance_id)
+    return None
+
+
+def _migrate_ingest_cursor_keys_to_stable(conn: sqlite3.Connection) -> None:
+    """v3→v4：改写 ingest_cursor.source_key，保留 offset（BUG-383）。"""
+    rows = conn.execute(
+        "SELECT source_key, offset_bytes, last_ts, updated_at FROM ingest_cursor"
+    ).fetchall()
+    for source_key, offset_bytes, last_ts, updated_at in rows:
+        new_key = _stable_cursor_key_from_legacy(source_key)
+        if new_key is None:
+            continue
+        existing = conn.execute(
+            "SELECT offset_bytes, last_ts, updated_at FROM ingest_cursor "
+            "WHERE source_key=?",
+            (new_key,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "UPDATE ingest_cursor SET source_key=? WHERE source_key=?",
+                (new_key, source_key),
+            )
+            continue
+        # 同稳定 key 已有行时保留较大 offset，再删旧路径 key。
+        keep_offset = int(offset_bytes)
+        keep_ts = last_ts
+        keep_updated = updated_at
+        if int(existing[0]) > keep_offset:
+            keep_offset = int(existing[0])
+            keep_ts = existing[1]
+            keep_updated = existing[2]
+        conn.execute(
+            "UPDATE ingest_cursor SET offset_bytes=?, last_ts=?, updated_at=? "
+            "WHERE source_key=?",
+            (keep_offset, keep_ts, keep_updated, new_key),
+        )
+        conn.execute("DELETE FROM ingest_cursor WHERE source_key=?", (source_key,))
+
+
 class PageviewStore:
     """``run/pageviews.db`` 的访问层（IMP-024）。
 
@@ -401,8 +467,9 @@ class PageviewStore:
         ``BEGIN IMMEDIATE … COMMIT`` 把“读版本 → 必要时重建派生表 → 建表 →
         写版本”做成单事务，避免留下“游标已清但聚合表未建好”的半迁移状态。
 
-        - ``user_version < 本代码版本``：旧派生表为资源级口径，DROP 全部派生表 +
+        - ``user_version < 3``：旧派生表为资源级口径，DROP 全部派生表 +
           游标/去重集后重建，触发按 page 口径全量重摄入（**不能漏 ``container_seen``**）。
+        - ``user_version == 3``：保留统计，仅把绝对路径游标改写为稳定 key（BUG-383）。
         - ``user_version == 本代码版本``：``CREATE … IF NOT EXISTS`` 幂等。
         - ``user_version > 本代码版本``：未来版本库，**禁止 drop**，抛错降级。
         """
@@ -414,7 +481,8 @@ class PageviewStore:
                     f"pageviews.db schema version {version} 高于本代码支持的 "
                     f"{_PAGEVIEW_SCHEMA_VERSION}，拒绝迁移以免破坏未来版本数据",
                 )
-            if version < _PAGEVIEW_SCHEMA_VERSION:
+            if version < _DROP_ON_UPGRADE_BEFORE:
+                # v0/v1/v2：口径变更，必须 drop 派生表后按 page 口径重摄入。
                 for table in (
                     "pageviews",
                     "pageview_detail",
@@ -426,6 +494,9 @@ class PageviewStore:
                     conn.execute(f"DROP TABLE IF EXISTS {table}")
             for stmt in _DDL_STATEMENTS:
                 conn.execute(stmt)
+            if version == 3:
+                # BUG-383：保留统计，仅把绝对路径游标改写为稳定 key。
+                _migrate_ingest_cursor_keys_to_stable(conn)
             conn.execute(f"PRAGMA user_version = {_PAGEVIEW_SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except Exception:
@@ -800,8 +871,13 @@ class PageviewStore:
         )
         conn.execute("DELETE FROM container_seen WHERE instance_id=?", (instance_id,))
         conn.execute(
-            "DELETE FROM ingest_cursor WHERE source_key=? OR source_key LIKE ?",
-            (f"container:{instance_id}", f"builtin:{instance_id}:%"),
+            "DELETE FROM ingest_cursor WHERE source_key=? OR source_key=? "
+            "OR source_key LIKE ?",
+            (
+                f"container:{instance_id}",
+                builtin_cursor_key(instance_id),
+                f"builtin:{instance_id}:%",
+            ),
         )
 
     def filter_new_container_lines(
@@ -1068,7 +1144,7 @@ def _ingest_builtin(
     workspace: Workspace, src: _InstanceSource, store: PageviewStore
 ) -> None:
     log_path = workspace.app_logs(src.instance_id) / "gateway.log"
-    cursor_key = f"builtin:{src.instance_id}:{log_path.as_posix()}"
+    cursor_key = builtin_cursor_key(src.instance_id)
     batch = _read_new_lines(log_path, cursor_key, store)
     hits = [h for h in (parse_clf_line(ln) for ln in batch.lines) if h]
     store.record_file_batch(
@@ -1099,7 +1175,7 @@ def _ingest_caddy_shared(
     有路径别名的实例（统一入口块 :8080）按请求路径前缀路由并剥前缀；
     无别名的静态站点（直连端口伺服）按 ``request.host`` 端口归属（IMP-028）。
     """
-    cursor_key = f"caddy-shared:{log_path.as_posix()}"
+    cursor_key = caddy_shared_cursor_key()
     batch = _read_new_lines(log_path, cursor_key, store)
     if not batch.lines:
         store.record_file_batch({}, "caddy", cursor_key, batch.next_offset)

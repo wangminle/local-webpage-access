@@ -458,7 +458,293 @@ def test_review_detects_spa_empty_200(workspace, registry, config, spa_server, m
     assert empty[0].path == "/assets/app.js"
     assert empty[0].absolute.content_length == 0
     assert empty[0].prefixed.content_length == 1200
+    assert empty[0].alias_resource_mismatch is True
     assert any("IMP-023" in f for f in rep.findings)
+
+
+class _Spa404Handler(http.server.BaseHTTPRequestHandler):
+    """BUG-381：绝对路径 404、带前缀 200 —— 常见别名白屏（非空 200）。"""
+
+    HTML = (
+        b'<!doctype html><html><head>'
+        b'<script type="module" src="/assets/app.js"></script>'
+        b'</head><body>spa</body></html>'
+    )
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/" or path == "/alias/":
+            self._send(200, self.HTML if path == "/alias/" else b"root", "text/html")
+        elif path == "/alias/assets/app.js":
+            self._send(200, b"x" * 1200, "application/javascript")
+        elif path == "/assets/app.js":
+            self._send(404, b"nf", "text/plain")
+        else:
+            self._send(404, b"nf", "text/plain")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class _SpaMimeHandler(http.server.BaseHTTPRequestHandler):
+    """BUG-381：绝对路径返回非空 HTML（错误 MIME），带前缀返回真实 JS。"""
+
+    HTML = (
+        b'<!doctype html><html><head>'
+        b'<script type="module" src="/assets/app.js"></script>'
+        b'</head><body>spa</body></html>'
+    )
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/" or path == "/alias/":
+            self._send(200, self.HTML if path == "/alias/" else b"root", "text/html")
+        elif path == "/alias/assets/app.js":
+            self._send(200, b"x" * 1200, "application/javascript")
+        elif path == "/assets/app.js":
+            self._send(200, b"<html>not found</html>", "text/html")
+        else:
+            self._send(404, b"nf", "text/plain")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture()
+def spa_404_server():
+    port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", port), _Spa404Handler)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.fixture()
+def spa_mime_server():
+    port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", port), _SpaMimeHandler)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_review_detects_spa_absolute_404_mismatch(
+    workspace, registry, config, spa_404_server, monkeypatch
+):
+    """BUG-381：绝对路径 404 + 带前缀 200 → alias_resource_mismatch / needsRebuild。"""
+    port = spa_404_server
+    config.staticGatewayPort = port
+    _seed_static(
+        workspace, registry, "vp404", host_port=port,
+        lan_url=f"http://127.0.0.1:{port}",
+        route_host="alias",
+        route_url=f"http://127.0.0.1:{port}/alias/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+
+    report = review_access(workspace, config, registry)
+    rep = report.instances[0]
+    assert rep.status == "warn"
+    mismatched = [s for s in rep.subresources if s.alias_resource_mismatch]
+    assert mismatched, "应识别出别名资源不匹配"
+    assert mismatched[0].path == "/assets/app.js"
+    assert mismatched[0].empty_200 is False
+    assert mismatched[0].absolute.status_code == 404
+    assert mismatched[0].prefixed.ok is True
+    assert rep.needs_rebuild is True
+    assert "vp404" in instances_needing_rebuild(report)
+    assert any("IMP-023" in f for f in rep.findings)
+
+
+def test_review_detects_spa_wrong_mime_mismatch(
+    workspace, registry, config, spa_mime_server, monkeypatch
+):
+    """BUG-381：绝对路径错误 MIME（text/html）+ 带前缀 JS → mismatch。"""
+    port = spa_mime_server
+    config.staticGatewayPort = port
+    _seed_static(
+        workspace, registry, "vpmime", host_port=port,
+        lan_url=f"http://127.0.0.1:{port}",
+        route_host="alias",
+        route_url=f"http://127.0.0.1:{port}/alias/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+
+    report = review_access(workspace, config, registry)
+    rep = report.instances[0]
+    mismatched = [s for s in rep.subresources if s.alias_resource_mismatch]
+    assert mismatched, "应识别出错误 MIME 不匹配"
+    assert mismatched[0].empty_200 is False
+    assert mismatched[0].absolute.ok is True
+    assert (mismatched[0].absolute.content_length or 0) > 0
+    assert rep.needs_rebuild is True
+    assert any("IMP-023" in f for f in rep.findings)
+
+
+def test_review_no_mismatch_when_both_absolute_and_prefixed_fail(
+    workspace, registry, config, monkeypatch
+):
+    """BUG-381 矩阵：两边都失败 → 不误判成 alias mismatch。"""
+    from local_webpage_access.access import UrlProbe
+
+    config.staticGatewayPort = 18080
+    _seed_static(
+        workspace, registry, "bothfail", host_port=18080,
+        lan_url="http://127.0.0.1:18080",
+        route_host="alias",
+        route_url="http://127.0.0.1:18080/alias/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access._fetch_text",
+        lambda url, **kw: (
+            '<script src="/assets/app.js"></script>' if "/alias/" in url else None
+        ),
+    )
+
+    def fake_get(url, **kw):
+        # 入口/回环通；绝对与带前缀资源均 404
+        if url.rstrip("/").endswith("/alias") or url.endswith(":18080/"):
+            return UrlProbe(url=url, status_code=200, content_length=10, ok=True)
+        return UrlProbe(
+            url=url, status_code=404, content_length=0, ok=False, note="HTTP 404"
+        )
+
+    monkeypatch.setattr("local_webpage_access.access._http_get", fake_get)
+    report = review_access(workspace, config, registry)
+    rep = next(r for r in report.instances if r.instance_id == "bothfail")
+    mismatched = [s for s in rep.subresources if s.alias_resource_mismatch]
+    assert mismatched == []
+    assert rep.needs_rebuild is False
+
+
+def test_review_no_mismatch_when_absolute_mime_correct(
+    workspace, registry, config, spa_ok_server, monkeypatch
+):
+    """BUG-381 矩阵：绝对与带前缀均正确 MIME/非空 → 不告警。"""
+    port = spa_ok_server
+    config.staticGatewayPort = port
+    _seed_static(
+        workspace, registry, "okmime", host_port=port,
+        lan_url=f"http://127.0.0.1:{port}",
+        route_host="alias",
+        route_url=f"http://127.0.0.1:{port}/alias/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+    report = review_access(workspace, config, registry)
+    rep = report.instances[0]
+    assert rep.subresources
+    assert all(not s.alias_resource_mismatch for s in rep.subresources)
+    assert rep.needs_rebuild is False
+
+
+class _SpaOkHandler(http.server.BaseHTTPRequestHandler):
+    HTML = (
+        b'<!doctype html><html><head>'
+        b'<script type="module" src="/assets/app.js"></script>'
+        b'</head><body>spa</body></html>'
+    )
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path in {"/", "/alias/"}:
+            body = self.HTML if path == "/alias/" else b"root"
+            self._send(200, body, "text/html")
+        elif path in {"/assets/app.js", "/alias/assets/app.js"}:
+            self._send(200, b"x" * 800, "application/javascript")
+        else:
+            self._send(404, b"nf", "text/plain")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture()
+def spa_ok_server():
+    port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", port), _SpaOkHandler)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_http_get_ignores_env_http_proxy(monkeypatch) -> None:
+    """BUG-380：access._http_get 在无效代理下仍直连本机。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+
+    from local_webpage_access.access import _http_get
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    port = _free_port()
+    server = HTTPServer(("127.0.0.1", port), _H)
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("https_proxy", "http://127.0.0.1:1")
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        probe = _http_get(f"http://127.0.0.1:{port}/")
+        assert probe.ok is True
+        assert probe.status_code == 200
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_review_synthesizes_route_when_route_url_missing(
@@ -790,7 +1076,7 @@ def test_fetch_text_marks_probe_param(monkeypatch) -> None:
         captured["url"] = req.full_url
         return _Resp()
 
-    monkeypatch.setattr(access_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(access_mod, "urlopen_direct", fake_urlopen)
     text = _fetch_text("http://10.0.0.1:8080/my-app/")
     assert text == "<html>alias entry</html>"
     assert "__lwa_probe=" in captured["url"]

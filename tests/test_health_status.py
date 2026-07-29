@@ -160,6 +160,17 @@ def test_http_ok_false_on_closed_port() -> None:
     assert code is None
 
 
+def test_http_ok_ignores_env_http_proxy(http_server, monkeypatch) -> None:
+    """BUG-380：无效 http_proxy 不得把本机健康服务误判为不可达。"""
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    ok, code = http_ok(http_server, timeout=2.0)
+    assert ok is True
+    assert code == 200
+
+
 # ---- check_health ----------------------------------------------------------
 
 

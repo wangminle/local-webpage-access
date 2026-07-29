@@ -487,6 +487,256 @@ def test_health_does_not_call_collect_capability(manager_env: EnvBundle, monkeyp
     assert calls == []
 
 
+def test_manager_capability_probe_refreshes_periodically(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-379：manager lifespan 须周期刷新完整能力，并用停止事件收尾。"""
+    import threading
+    import time
+
+    import local_webpage_access.manager_api as api_mod
+
+    calls: list[float] = []
+    ready = threading.Event()
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        from local_webpage_access.capability import CapabilityReport
+
+        calls.append(time.monotonic())
+        if len(calls) >= 3:
+            ready.set()
+        return CapabilityReport(
+            profile="full",
+            overall="ready",
+            caddy_runtime="ready" if len(calls) >= 2 else "admin_unavailable",
+            caddy_owner="ready" if len(calls) >= 2 else "unknown",
+            caddy_workspace_access="ready" if len(calls) >= 2 else "unknown",
+            manager_docker_access="ready",
+            gateway_access="ready",
+        )
+
+    monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 0.05)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 0.05)
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report", fake_collect
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.log_capability_probe", lambda *a, **k: None
+    )
+
+    # 重新创建 app，使 lifespan 使用缩短后的周期
+    app = create_app(
+        manager_env.workspace,
+        manager_env.config,
+        manager_env.registry,
+        token=manager_env.token,
+    )
+    with TestClient(app):
+        assert ready.wait(timeout=2.0), f"应至少刷新 3 次，实际 {len(calls)}"
+        frag = app.state.capability_fragment
+        assert frag["capabilities"]["caddyRuntime"] == "ready"
+        # lifespan 退出后停止事件应终止后台线程，不再无限增长
+        before = len(calls)
+    time.sleep(0.25)
+    assert len(calls) <= before + 1
+
+
+def test_capability_refresh_interval_defaults_to_300() -> None:
+    """§23.4.1：默认周期应为 300 秒，避免过密探测。"""
+    import local_webpage_access.manager_api as api_mod
+
+    assert api_mod._CAPABILITY_REFRESH_INTERVAL == 300.0
+    assert api_mod._CAPABILITY_INITIAL_DELAY == 15.0
+
+
+def test_manager_capability_tracks_caddy_ready_then_unready(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-379：周期刷新须反映 Caddy 后续恢复与掉线。"""
+    import threading
+
+    import local_webpage_access.manager_api as api_mod
+
+    seq = {"n": 0}
+    saw_ready = threading.Event()
+    saw_unready = threading.Event()
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        from local_webpage_access.capability import CapabilityReport
+
+        seq["n"] += 1
+        # 1: unready → 2: ready → 3+: unready
+        ready = seq["n"] == 2
+        if ready:
+            saw_ready.set()
+        elif seq["n"] >= 3:
+            saw_unready.set()
+        return CapabilityReport(
+            profile="full",
+            overall="ready" if ready else "unready",
+            caddy_runtime="ready" if ready else "admin_unavailable",
+            caddy_owner="ready" if ready else "unknown",
+            caddy_workspace_access="ready" if ready else "unknown",
+            manager_docker_access="ready",
+            gateway_access="ready" if ready else "admin_unavailable",
+        )
+
+    monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 0.04)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 0.04)
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report", fake_collect
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.log_capability_probe", lambda *a, **k: None
+    )
+
+    app = create_app(
+        manager_env.workspace,
+        manager_env.config,
+        manager_env.registry,
+        token=manager_env.token,
+    )
+    with TestClient(app):
+        assert saw_ready.wait(timeout=2.0)
+        assert app.state.capability_fragment["capabilities"]["caddyRuntime"] == "ready"
+        assert saw_unready.wait(timeout=2.0)
+        assert (
+            app.state.capability_fragment["capabilities"]["caddyRuntime"]
+            == "admin_unavailable"
+        )
+
+
+def test_capability_refresh_single_flight(manager_env: EnvBundle, monkeypatch) -> None:
+    """BUG-379：并发 refresh 只跑一次探测，共享结果。"""
+    import threading
+    import time
+
+    from local_webpage_access.capability import CapabilityReport
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def slow_collect(**kwargs):  # noqa: ANN003
+        calls["n"] += 1
+        started.set()
+        assert release.wait(timeout=2.0)
+        time.sleep(0.02)
+        return CapabilityReport(
+            profile="full",
+            overall="ready",
+            manager_docker_access="ready",
+            caddy_runtime="ready",
+            gateway_access="ready",
+        )
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report", slow_collect
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.log_capability_probe", lambda *a, **k: None
+    )
+    # 禁止 lifespan 后台抢先探测，专注单飞语义
+    import local_webpage_access.manager_api as api_mod
+
+    monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 60.0)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 60.0)
+
+    app = create_app(
+        manager_env.workspace,
+        manager_env.config,
+        manager_env.registry,
+        token=manager_env.token,
+    )
+    refresh = app.state.refresh_capability_cache
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            results.append(refresh())
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    with TestClient(app):
+        # 等 lifespan 首次探测进入 slow_collect 或直接发起并发
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        assert started.wait(timeout=2.0)
+        t2.start()
+        time.sleep(0.05)
+        release.set()
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+
+    assert errors == []
+    assert len(results) == 2
+    assert calls["n"] == 1
+    assert results[0]["capabilities"]["caddyRuntime"] == "ready"
+    assert results[1]["capabilities"]["caddyRuntime"] == "ready"
+
+
+def test_capability_probe_failure_keeps_disk_cache(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-379：探测失败不覆盖磁盘快照，内存 overall 须降为 unknown。"""
+    import time
+
+    from local_webpage_access.capability import CapabilityReport, write_capability_cache
+    import local_webpage_access.manager_api as api_mod
+
+    write_capability_cache(
+        manager_env.workspace.root,
+        "manager",
+        CapabilityReport(
+            profile="full",
+            overall="ready",
+            manager_docker_access="ready",
+            caddy_runtime="ready",
+            gateway_access="ready",
+        ),
+    )
+    cache_path = manager_env.workspace.root / "run" / "capability-manager.json"
+    before = cache_path.read_text(encoding="utf-8")
+
+    def boom(**kwargs):  # noqa: ANN003
+        raise RuntimeError("probe down")
+
+    monkeypatch.setattr(
+        "local_webpage_access.capability.collect_capability_report", boom
+    )
+    monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 60.0)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 60.0)
+
+    app = create_app(
+        manager_env.workspace,
+        manager_env.config,
+        manager_env.registry,
+        token=manager_env.token,
+    )
+    with TestClient(app):
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            if app.state.capability_fragment.get("overall") == "unknown":
+                break
+            time.sleep(0.02)
+        assert app.state.capability_fragment.get("overall") == "unknown"
+        assert "capability_probe_failed" in str(
+            app.state.capability_fragment.get("action") or ""
+        )
+        assert cache_path.read_text(encoding="utf-8") == before
+
+
 def test_health_overlays_fresh_gateway_access_from_cache(
     manager_env: EnvBundle, monkeypatch
 ) -> None:

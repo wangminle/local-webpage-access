@@ -202,6 +202,74 @@ def test_start_gateway_writes_state_and_pid(
     assert st is not None and st.enabled and st.pid == 12345
 
 
+def test_start_gateway_refreshes_capability_cache_after_success(
+    workspace: Workspace, config: Config, fake_gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """截图假红根因：lwa gateway on / start_gateway 成功后须写 capability-gateway.json。"""
+    import local_webpage_access.capability as cap_mod
+    from local_webpage_access.capability import CapabilityReport
+
+    fake_gateway["admin_alive"] = False
+    writes: list[str] = []
+    real_write = cap_mod.write_capability_cache
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        return CapabilityReport(
+            profile="full",
+            overall="ready",
+            gateway_access="ready",
+            caddy_runtime="ready",
+        )
+
+    def fake_write(root, role, report):  # noqa: ANN001
+        writes.append(f"{role}:{report.gateway_access}")
+        return real_write(root, role, report)
+
+    monkeypatch.setattr(cap_mod, "collect_capability_report", fake_collect)
+    monkeypatch.setattr(cap_mod, "log_capability_probe", lambda *a, **k: None)
+    monkeypatch.setattr(cap_mod, "write_capability_cache", fake_write)
+
+    pid = start_gateway(workspace, config)
+    assert pid == 12345
+    assert writes == ["gateway:ready"]
+    cache = workspace.root / "run" / "capability-gateway.json"
+    assert cache.is_file()
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    assert data["capabilities"]["gatewayAccess"] == "ready"
+
+
+def test_start_gateway_refreshes_capability_when_already_running(
+    workspace: Workspace, config: Config, fake_gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已在线路径同样刷新能力缓存，避免仅补写 gateway.json 仍假红。"""
+    import local_webpage_access.capability as cap_mod
+    from local_webpage_access.capability import CapabilityReport
+
+    fake_gateway["admin_alive"] = True
+    write_state(
+        workspace,
+        GatewayState(enabled=True, pid=4321, started_at="t", port=8080),
+    )
+    refreshed: list[str] = []
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        return CapabilityReport(gateway_access="ready", caddy_runtime="ready")
+
+    def fake_write(root, role, report):  # noqa: ANN001
+        refreshed.append(role)
+        path = Path(root) / "run" / f"capability-{role}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(cap_mod, "collect_capability_report", fake_collect)
+    monkeypatch.setattr(cap_mod, "log_capability_probe", lambda *a, **k: None)
+    monkeypatch.setattr(cap_mod, "write_capability_cache", fake_write)
+
+    start_gateway(workspace, config)
+    assert refreshed == ["gateway"]
+
+
 def test_start_gateway_stops_builtin_before_caddy_start(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:

@@ -222,7 +222,11 @@ def autostart_check(
 
 @app.command("repair")
 def autostart_repair(
-    with_caddy: bool = typer.Option(False, "--with-caddy", help="一并修复/启用 gateway 单元"),
+    with_caddy: bool = typer.Option(
+        False,
+        "--with-caddy",
+        help="原先未安装时新增 gateway；已安装的 gateway 默认保留，无需此开关",
+    ),
 ) -> None:
     """修复：重写失效路径、迁移旧启动器单元、重新启用。"""
     from local_webpage_access import autostart as asm

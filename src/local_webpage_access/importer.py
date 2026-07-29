@@ -536,6 +536,18 @@ class Importer:
                 ):
                     manifest.static.routeMode = "name"
                     manifest.static.routeHost = old_manifest.static.routeHost
+                # BUG-385 / IMP-014：容器实例路径别名同理必须保留（与上方 static 对称）。
+                # 否则容器实例 ``import --update`` 重建 manifest 时
+                # ``container.routeHost`` 被清空，管理页别名消失；而网关 Caddy
+                # 别名片段仍残留，造成 manifest/registry 与网关层不一致。
+                if (
+                    old_manifest.container is not None
+                    and old_manifest.container.routeMode == "name"
+                    and old_manifest.container.routeHost
+                    and manifest.container is not None
+                ):
+                    manifest.container.routeMode = "name"
+                    manifest.container.routeHost = old_manifest.container.routeHost
                 # 保留端口登记：从旧 registry 行读 hostPort 写回 manifest，
                 # 避免 upsert_from_manifest 用 manifest 的空 hostPort 清零登记
                 # （hosting 重启时靠 static_sites/containers 表复用端口）

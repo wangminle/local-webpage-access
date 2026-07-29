@@ -17,7 +17,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 from local_webpage_access.compose import generate_compose, generate_env
@@ -35,7 +34,7 @@ from local_webpage_access.models import (
     Status,
 )
 from local_webpage_access.paths import Workspace
-from local_webpage_access.probe import mark_probe_url
+from local_webpage_access.probe import mark_probe_url, urlopen_direct
 from local_webpage_access.ports import PortAllocator, build_network_entry, is_port_listening
 from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
@@ -519,11 +518,13 @@ def start_container(
     registry: Registry,
     instance_id: str,
 ) -> InstanceManifest:
-    """轻量启动已部署的容器实例：``docker compose start``（不重建镜像）。
+    """启动已部署过的容器实例（优先轻量恢复）。
 
     与 :func:`host_container`（全量部署/重建）的区别：
-    - 不重新生成 Dockerfile/Compose/.env、不 ``build``；
-    - 仅 ``compose start`` 已存在的容器，复用已登记端口与 lanUrl。
+    - 容器仍在（含 stopped）→ ``compose start``，不 build；
+    - 容器已被外部 ``compose down`` 移除，但 compose/env/镜像仍在
+      → 清空陈旧身份后 ``compose up -d`` 重建容器（BUG-382）；
+    - 生成文件或镜像缺失 → 回退 :func:`host_container` 完整重建。
 
     前提：实例此前已被 :func:`host_container` 部署过（``containerId`` 已落库）。
     若从未部署，应走 :func:`host_instance` 全量流程。
@@ -542,8 +543,32 @@ def start_container(
     # 已在跑：直接同步状态，避免重复 start
     if runtime.is_running(instance_id):
         log.info("容器实例 %s 已在运行，跳过 start", instance_id)
+        action = "start"
     else:
-        runtime.start(instance_id)
+        existing = _safe(
+            lambda: runtime.container_id(instance_id, all_containers=True)
+        )
+        if existing:
+            runtime.start(instance_id)
+            action = "start"
+        elif _can_recreate_container_without_rebuild(workspace, runtime, instance_id):
+            # BUG-382：外部 down 后 manifest 仍有陈旧 containerId。
+            log.info(
+                "容器实例 %s 已无容器但 compose/镜像仍在，使用 compose up -d 重建",
+                instance_id,
+            )
+            manifest.container.containerId = None
+            manifest.container.imageId = None
+            manifest.touch()
+            manifest.save(workspace.app_manifest_path(instance_id))
+            runtime.up(instance_id)
+            action = "up"
+        else:
+            log.info(
+                "容器实例 %s 无法轻量恢复（compose/镜像缺失），回退完整重建",
+                instance_id,
+            )
+            return host_container(workspace, config, registry, instance_id)
 
     # 端口：复用此前部署登记的 hostPort
     host_port = manifest.container.hostPort
@@ -551,11 +576,25 @@ def start_container(
         host_port, _fresh = _ensure_container_port(config, registry, instance_id)
         manifest.container.hostPort = host_port
 
-    # 观测 containerId / imageId
-    container_id = _safe(lambda: runtime.container_id(instance_id)) or manifest.container.containerId
-    image_id = _safe(lambda: runtime.image_id(instance_id)) or manifest.container.imageId
-    manifest.container.containerId = container_id
-    manifest.container.imageId = image_id
+    # 观测 containerId / imageId；up 重建后必须写回新身份（BUG-382）。
+    # 轻量 start 观测失败时保留已落库身份（BUG-344）。
+    observed_cid = _safe(lambda: runtime.container_id(instance_id))
+    observed_iid = _safe(lambda: runtime.image_id(instance_id))
+    if action == "up":
+        if not observed_cid:
+            observation_error = HostingError(
+                f"实例 {instance_id} 重建容器后未能观测到新 containerId",
+                instance_id=instance_id,
+            )
+            with contextlib.suppress(Exception):
+                runtime.down(instance_id)
+            _mark_failed(workspace, registry, instance_id, manifest, observation_error)
+            raise observation_error
+        manifest.container.containerId = observed_cid
+        manifest.container.imageId = observed_iid
+    else:
+        manifest.container.containerId = observed_cid or manifest.container.containerId
+        manifest.container.imageId = observed_iid or manifest.container.imageId
 
     # 更新 manifest + registry
     # BUG-084：写回 network 时保留容器路径别名（与 host_container 一致）。
@@ -582,9 +621,27 @@ def start_container(
     # 健康检查（best-effort，放在 registry 写回之后避免被覆盖）
     if _wait_for_http(host_port):
         registry.record_health_check(instance_id)
-    registry.add_event(instance_id, "start", f"容器实例已启动（start，host_port={host_port}）")
-    log.info("容器实例 %s 已 start，端口 %d", instance_id, host_port)
+    registry.add_event(
+        instance_id,
+        "start",
+        f"容器实例已启动（{action}，host_port={host_port}）",
+    )
+    log.info("容器实例 %s 已 %s，端口 %d", instance_id, action, host_port)
     return manifest
+
+
+def _can_recreate_container_without_rebuild(
+    workspace: Workspace,
+    runtime: DockerRuntime,
+    instance_id: str,
+) -> bool:
+    """compose/env 与镜像仍在时，可用 ``up -d`` 重建容器而无需 build（BUG-382）。"""
+    if not workspace.app_compose_path(instance_id).is_file():
+        return False
+    if not workspace.app_env_path(instance_id).is_file():
+        return False
+    image_id = _safe(lambda: runtime.image_id(instance_id))
+    return bool(image_id)
 
 
 def stop_container(
@@ -726,7 +783,7 @@ def _http_ok(host_port: int, *, timeout: float = 2.0) -> bool:
     """单次 HTTP GET 健康探测（2xx/3xx 视为成功）。"""
     url = mark_probe_url(f"http://127.0.0.1:{host_port}/")
     try:
-        resp = urllib.request.urlopen(url, timeout=timeout)
+        resp = urlopen_direct(url, timeout=timeout)
         return 200 <= resp.status < 400
     except Exception:  # noqa: BLE001
         return False

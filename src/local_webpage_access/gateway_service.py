@@ -191,6 +191,9 @@ def start_gateway(
     已轮询 admin :2019 确认在线），成功后把 pid 写入 ``run/gateway.json``。
     已在运行则不重复启动。返回 master pid；admin 在线但读不到 pidfile 时返回 0。
 
+    成功路径（含已在线）会写入 ``run/capability-gateway.json``，避免仅起 Caddy、
+    无 gateway supervisor 时 Full Profile 因 ``gatewayAccess=unknown`` 假红。
+
     建议项 A/B/F（gateway-switch-access-review）：传入 ``registry`` 时额外执行切换
     事务收尾——停掉残留 builtin 静态进程、刷新各实例 LAN 访问地址、记录
     ``gateway_backend_switch`` 审计事件。``lwa init`` / ``maybe_start_gateway``
@@ -241,6 +244,9 @@ def start_gateway(
                 workspace, config, registry, pid, started=False,
                 stopped_builtin=stopped_builtin,
             )
+            # 已在线路径也要刷新能力缓存：仅补写 gateway.json 不够，
+            # 否则 Full Profile 会因缺 capability-gateway.json 假红（截图根因）。
+            _refresh_gateway_capability(workspace, config)
             return int(pid) if pid else 0
 
         # I1 / §4.1：先停残留 builtin（释放 hostPort），再拉 Caddy——避免双开竞态。
@@ -284,6 +290,9 @@ def start_gateway(
         _post_switch_finalize(
             workspace, config, registry, pid, started=True, stopped_builtin=stopped_builtin
         )
+        # lwa gateway on / maybe_start_gateway 只起 Caddy 时也必须写能力缓存，
+        # 不能依赖 gateway_service 前台监管进程才存在（截图假红）。
+        _refresh_gateway_capability(workspace, config)
         return int(pid) if pid else 0
 
 
@@ -487,6 +496,7 @@ def run_gateway_foreground(
 
     # BUG-270：必须在 Caddy 启动成功后再采能力；启动前探测恒为 admin_unavailable，
     # 会把 capability-gateway.json 冻成假红，且 probe 日志恒 WARNING。
+    # start_gateway 成功路径已刷新一次；此处再刷保证前台入口语义稳定（幂等）。
     _refresh_gateway_capability(workspace, config)
 
     log.info(
@@ -494,6 +504,9 @@ def run_gateway_foreground(
         ADMIN_PORT,
         poll_interval,
     )
+    # 进程常驻期间周期刷新能力快照（默认约 5 分钟），覆盖权限/网络等静默变化。
+    polls_since_capability_refresh = 0
+    capability_refresh_every_polls = max(1, int(300 / max(poll_interval, 0.1)))
     while not stop_event.is_set():
         # wait 既作轮询节拍又能在收到信号时立即唤醒。
         if stop_event.wait(timeout=poll_interval):
@@ -502,7 +515,13 @@ def run_gateway_foreground(
             log.warning("Caddy master 掉线，尝试重启")
             with contextlib.suppress(LifecycleError):
                 start_gateway(workspace, config)
-                _refresh_gateway_capability(workspace, config)
+                # start_gateway 已刷新；重置周期计数
+                polls_since_capability_refresh = 0
+            continue
+        polls_since_capability_refresh += 1
+        if polls_since_capability_refresh >= capability_refresh_every_polls:
+            _refresh_gateway_capability(workspace, config)
+            polls_since_capability_refresh = 0
 
     log.info("gateway 前台进程退出，停止 master")
     with contextlib.suppress(Exception):  # noqa: BLE001

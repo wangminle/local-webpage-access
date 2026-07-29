@@ -770,9 +770,15 @@ def install(
     enable: bool = True,
     linger: bool = False,
     python_exe: str | None = None,
+    preserve_installed: bool = False,
     runner: SubprocessRunner = _default_runner,
 ) -> InstallResult:
-    """生成（并可选启用）自启动单元。"""
+    """生成（并可选启用）自启动单元。
+
+    ``preserve_installed=True`` 时并入磁盘上已安装的服务（含 gateway），
+    避免 repair 把既有单元当 orphan 卸载（BUG-384）。``with_caddy`` 只控制
+    是否**新增** gateway，不表示“是否保留”。
+    """
     # IMP-036 / BUG-260：仅 WSL + /mnt/<drive> 时 autostart 写路径 fail-closed
     from local_webpage_access.platform_support import (
         PlatformSupportReport,
@@ -796,6 +802,9 @@ def install(
         ) from exc
     backend = select_backend(plat)
     services = select_services(config, with_caddy=with_caddy)
+    if preserve_installed:
+        prev = installed_services(ws, backend)
+        services = [s for s in ALL_SERVICES if s in set(services) | set(prev)]
     py = python_exe or sys.executable
     caddy_dir = _resolve_caddy_dir() if config.staticGateway == "caddy" else None
     ws_root = ws.root
@@ -803,6 +812,7 @@ def install(
     written: list[UnitGen] = []
     legacy_detected: list[str] = []
     # 缩减服务集合时差量卸载被移除的单元，避免 manifest 外孤儿（BUG-163）。
+    # preserve_installed 时 services 已含 prev，orphans 为空。
     prev_installed = installed_services(ws, backend)
     orphans = [s for s in prev_installed if s not in services]
     orphan_outcomes: list[CmdOutcome] = []
@@ -1732,15 +1742,25 @@ def repair(
     python_exe: str | None = None,
     runner: SubprocessRunner = _default_runner,
 ) -> tuple[InstallResult, list[str]]:
-    """修复：重写失效路径、迁移旧启动器单元、重新 enable。返回 (结果, 修复说明)。"""
+    """修复：重写失效路径、迁移旧启动器单元、重新 enable。返回 (结果, 修复说明)。
+
+    默认保留磁盘上已安装的全部服务（含 gateway）；``with_caddy`` 仅在原先
+    未安装 gateway 时新增它，不会卸载已有单元（BUG-384）。
+    """
     actions: list[str] = []
     backend = select_backend()
-    # 检测旧单元 → 记录迁移
-    for name in select_services(config, with_caddy=with_caddy):
+    # 检测旧单元 → 记录迁移（含已安装但 select_services 未纳入的 gateway）
+    target = select_services(config, with_caddy=with_caddy)
+    installed = installed_services(ws, backend)
+    check_names = [s for s in ALL_SERVICES if s in set(target) | set(installed)]
+    for name in check_names:
         if backend.is_legacy(name):
             actions.append(f"迁移旧 detached 启动器单元：{name}")
+    if "gateway" in installed and "gateway" not in target:
+        actions.append("保留已安装的 gateway 单元（repair 默认不卸载）")
     result = install(
         ws, config, with_caddy=with_caddy, enable=True,
+        preserve_installed=True,
         python_exe=python_exe, runner=runner,
     )
     if not actions:

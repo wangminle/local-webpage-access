@@ -113,6 +113,8 @@ lwa manager off         # 停止
 
 - **`overall: "unknown"` 是启动占位**，表示 manager 的后台能力自检还没跑完，既不是 ready 也不是故障；它不属于 `CapabilityReport.overall` 的正式取值。
 - gateway 通常比 manager 晚就绪，因此 health 会用新鲜的 gateway 缓存纠偏 `gatewayAccess`。纠偏后 `overall` / `action` 会**一并重算**，与 `capabilities` 保持一致；但仅在 manager 已有真实探测结果时才重算——占位期间不会凭 gateway 缓存推出 ready。
+- manager 另有后台周期刷新完整能力（默认约 5 分钟），使 Caddy 后续恢复/掉线后 `/api/health` 的 `caddyRuntime` 等字段也能收敛；探测失败不覆盖磁盘上最后一份可解析快照。
+- 鉴权后也可 `GET /api/capability?refresh=true` 同步重探。
 
 前端据此显示降级横幅并禁用容器按钮；**后端**对容器 start/stop/restart/rebuild/recover 同样拒绝，避免绕过 UI。静态实例不受 Docker 能力门禁影响。实例快照可含 `observedState` / `observationError` / `runtimeAccess`（观测失败 ≠ stopped）。
 ### 实例更新（IMP-009）
@@ -156,7 +158,7 @@ Content-Type: application/json
 * 保留字（如 `api`、`health`）与全局唯一性校验；改别名时**排除当前实例自身**。
 * 写入 manifest `static.routeMode` / `routeHost`（或容器侧 network 字段）与 `network.routeMode` / `routeHost` / `routeUrl`；同步 registry。
 * 实例 **running** 且后端为 **Caddy** 时，regenerate `static-gateway/aliases/<id>.conf` 并 `reload_all`。
-* **SPA 限制（IMP-023）**：构建产物若使用绝对路径资源（如 `/assets/app.js`），在 `/<alias>/` 下可能 404；相对路径或 Vite `base: './'` 等配置可正常使用。
+* **SPA 限制（IMP-023）**：构建产物若使用绝对路径资源（如 `/assets/app.js`），在 `/<alias>/` 下可能空 200 / 404 / 错误 MIME 白屏；相对路径或 Vite `base: './'` 等配置可正常使用。`lwa access review` 会检出 `aliasResourceMismatch`。
 
 列表与详情 API 额外返回（IMP-007 / IMP-006 / IMP-019）：
 

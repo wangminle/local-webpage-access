@@ -386,7 +386,23 @@
 | BUG-373 | 修复 | migrate_config_defaults 对 flow-style 嵌套（portPool: {start: …}）找不到 `key:` 行而跳过，嵌套缺省子键未写回 | 2026-07-28 09:26 | 2026-07-28 09:26 | 已修复 | CHK-115 P2；updater 识别 flow-style 行并以 _deep_merge_defaults 展开为 block 写回；保留注释。回归 test_migrate_config_deep_merges_flow_style_nested_dict。 |
 | BUG-374 | 修复 | ResourceLimits.cpus 接受 nan/inf（float 成功且 <=0 为假），无效值写入 Compose 后部署才失败 | 2026-07-28 09:26 | 2026-07-28 09:26 | 已修复 | CHK-115 P2；config._validate_cpus 要求 math.isfinite 且 >0。回归 test_resource_limits_reject_invalid_cpus。 |
 | BUG-375 | 修复 | daemon save_processed_set 按字典序裁剪非 LRU：新加入但字典序小的指纹达上限后立即被丢弃，重复投递绕过去重（BUG-337 未兑现） | 2026-07-28 09:26 | 2026-07-28 09:26 | 已修复 | CHK-115 P2 / 补完 BUG-337；load/save 改为有序 list，超限丢最旧。回归 test_save_processed_set_prunes_by_recency_not_lexicographic。 |
+| BUG-376 | 修复 | lwa gateway on / start_gateway 成功后不写 capability-gateway.json，无 supervisor 时 Full Profile 因 gatewayAccess=unknown 假红 | 2026-07-28 23:43 | 2026-07-28 23:47 | 已修复 | 核对截图结论正确；BUG-270 仅覆盖 gateway_service 前台路径。修复：start_gateway 成功/已在线路径调用 _refresh_gateway_capability；前台循环约每 5 分钟周期刷新。回归 test_start_gateway_refreshes_capability_*。 |
+| BUG-377 | 优化 | write_capability_cache 直接 path.write_text，manager/CLI 并发读可能撞上半截 JSON | 2026-07-28 23:43 | 2026-07-28 23:47 | 已修复 | 改为同目录临时文件 + flush/fsync + chmod 0600 + os.replace 原子替换。回归 test_write_capability_cache_uses_atomic_replace。 |
+| BUG-378 | 修复 | lwa update 不重启 gateway 且收尾 doctor 不核验 Full 能力缓存，升级后可能继续运行旧 supervisor 或漏报 capability-gateway 缺失 | 2026-07-28 23:59 | 2026-07-29 00:10 | 已修复 | UpdateOptions/CLI 新增默认开启的 restart_gateway 与 --no-restart-gateway；仅重启原本运行的 Caddy，优先交 systemd/launchd 监督器，未托管才 stop→start，原本关闭不拉起。Full 收尾验收现合并 manager/daemon/gateway 新鲜且存活的能力缓存，overall 非 ready 时 doctor 步骤失败并输出各角色状态。新增 3 条 BUG-378 回归；tests/test_updater.py 35 通过，全量 pytest 退出码 0（4 项真实 Docker 集成按开关跳过），ruff check 与 git diff --check 通过。 |
+| BUG-379 | 修复 | manager 能力缓存仅在启动与延后 15 秒刷新，Caddy 后续恢复/掉线时 /api/health 的 caddyRuntime、caddyOwner、caddyWorkspaceAccess 可陈旧至 24 小时 | 2026-07-29 17:27 | 2026-07-29 17:51 | 已修复 | 对齐 §23.4.1：立即探测 + 15s 收敛 + 默认 300s 周期；单飞锁；失败不覆盖磁盘、内存 overall→unknown；lifespan join 收尾。回归含双向 ready/unready、单飞、失败语义。 |
+| BUG-380 | 修复 | LWA 内部本机/LAN HTTP 探测继承 http_proxy/https_proxy，代理异常时把健康服务误判为不可达 | 2026-07-29 17:27 | 2026-07-29 17:51 | 已修复 | probe.urlopen_direct；health/access/hosting/static_gateway/manager_service 全覆盖。回归含 health/access/manager/static_gateway 代理假阴性。 |
+| BUG-381 | 修复 | IMP-023 子资源检查只识别绝对路径空 200，遗漏绝对资源 404/失败而带前缀资源 200 的常见别名白屏 | 2026-07-29 17:27 | 2026-07-29 17:51 | 已修复 | alias_resource_mismatch（空 200/404/错误 MIME）；empty200 兼容；两边失败与正确 MIME 不误报。 |
+| BUG-382 | 修复 | 容器被外部 docker compose down 移除后，manifest 仍有 containerId，lwa start 误走 compose start 并报 no container to start | 2026-07-29 18:18 | 2026-07-29 18:32 | 已修复 | 【已修复 2026-07-29 18:32】start_container 先观测 compose ps --all：容器仍在→start；不在但 compose/env/镜像仍在→清陈旧身份后 up -d；否则回退 host_container。回归 test_start_recreates_via_up_when_container_removed_externally / test_start_falls_back_to_full_rebuild_when_compose_missing。 |
+| BUG-383 | 修复 | pageviews 文件摄入游标使用日志绝对路径作为 source_key，工作区改名后会从头重摄入并重复累计浏览量 | 2026-07-29 18:18 | 2026-07-29 18:32 | 已修复 | 【已修复 2026-07-29 18:32】游标改为 builtin:\<id\>:gateway / caddy-shared:static-access；schema v4 迁移保留统计并改写旧绝对路径游标 offset。回归含 path-independent ingest 与 v3→v4 迁移。 |
+| BUG-384 | 修复 | lwa autostart repair 默认不含 gateway，可能把既有 gateway 单元当 orphan 卸载，且 gateway 工作区不一致时 check 仍只提示无参数 repair | 2026-07-29 18:18 | 2026-07-29 18:32 | 已修复 | 【已修复 2026-07-29 18:32】install 新增 preserve_installed；repair 默认保留已装服务；--with-caddy 只新增未装 gateway。回归 test_repair_preserves_installed_gateway_without_with_caddy。 |
+| BUG-385 | 修复 | 容器实例 lwa import --update 后路径别名（container.routeHost）丢失，管理页别名消失但网关仍通 | 2026-07-29 20:00 | 2026-07-29 20:02 | 已修复 | 【已修复 2026-07-29 20:02】importer.py update 流程在 static.routeHost 保留块后补对称的 container.routeMode/routeHost 保留；回归 tests/test_importer.py::test_update_preserves_container_path_alias（断言 update 后 manifest+registry 仍为 name/prd-review）。已安装 runtime 中已丢别名的实例需另用 `lwa alias set <id> <alias>` 恢复显示。【原诊断保留】【触发】prd-review-v035(docker-compose 容器实例,别名 /prd-review/) 执行 lwa import --update 升级到 v0.3.6 后,管理页/访问地址列不再显示路径别名。【症状】①管理页 API /api/instances 返回 routeUrl=null、routeHost=null;②manifest apps/prd-review-v035/local-web.json 的 container.routeHost=None;③但 Caddy 网关层别名片段 static-gateway/aliases/prd-review-v035.conf 仍在、Caddyfile 仍 import,curl http://10.181.237.97:8080/prd-review/ 仍 HTTP 200。即 manifest/registry 与网关层不一致:别名实际可用但管理页不显示。【根因】importer.py 更新流程仅在约 530-538 行保留 static.routeHost(静态实例路径别名),无对称的 container.routeHost 保留;manifest 由 apply_detection_to_manifest(old,detection) 重建后 container.routeHost=None,而 registry 层保留(760-798 行 BUG-323/BUG-124 从 old_container 快照写 route_host)随后被 rebuild 的 upsert_from_manifest 用 manifest 空值覆盖回 None。518 行注释声称保留路径别名但仅对 static 生效。【影响】所有 docker-compose 容器实例 lwa import --update 后丢失别名元数据;静态实例不受影响。【复现】任意带别名的容器实例 lwa import zip --update id 后 manifest.container.routeHost 变 None、管理页别名消失。【建议修复-未应用】importer.py static 保留块(538行)后补对称块:if old_manifest.container is not None and old_manifest.container.routeMode=='name' and old_manifest.container.routeHost and manifest.container is not None: manifest.container.routeMode='name'; manifest.container.routeHost=old_manifest.container.routeHost。【数据层临时恢复-prd-review-v035】lwa alias set prd-review-v035 prd-review(set_instance_path_alias 见 path_alias.py:96-106 支持容器,写 container.routeMode/routeHost 并联动 registry+Caddy)。 |
 
+| BUG-386 | 修复 | 【major】lwa workspace relocate --rollback 只 rename 目录、不反向改写路径：越过 REBIND 后回滚，manifest/registry/Caddyfile/自启单元仍指向已不存在的 NEW，工作区悬空不可用 | 2026-07-29 20:08 | - | 待修复 | workspace_migrate.py:1106-1143 仅 quiesce+move_workspace_root，无 rebind 逆操作/autostart 重写/实例恢复；docs/workspace-rename.md §10 第 3 步明确要求回滚改回 OLD 未实现；test_run_migrate_rollback 只断言目录搬回未断言文件内容 |
+| BUG-387 | 修复 | 【major】relocate resume/重跑时 BACKUP 阶段无条件重采快照：quiesce 中途被杀后 --resume，基于已停一半的 registry 重采，已停实例从恢复清单永久丢失（迁移后不再重启），污染快照写回 journal | 2026-07-29 20:08 | - | 待修复 | workspace_migrate.py:997-1004；KeyboardInterrupt 非 Exception（1077 行捕获不到）journal 停留 backup；snapshot.desired_states 全代码无消费者 |
+| BUG-388 | 修复 | 【major】relocate 的 regenerate_after_move 无条件 autostart repair：从未安装自启的工作区也会被新装并启用 daemon/manager 单元（持久系统级副作用），与 restore_instances 的 autostart_installed 门控自相矛盾 | 2026-07-29 20:08 | - | 待修复 | workspace_migrate.py:694-701 vs 726-728；asm.repair→install(enable=True) 会 bootstrap/enable --now 立即启动 |
+| BUG-389 | 修复 | 【major】autostart repair 取 target∪installed 并集且 enable=True：config 已关闭的服务（staticGateway 改 builtin 后残留的 gateway 单元、managerEnabled=false 的 manager 单元）被保留并重新启用，前台入口立即退出，KeepAlive/Restart 形成无限崩溃循环 | 2026-07-29 20:08 | - | 待修复 | autostart.py:1753-1765；BUG-384 修复的反面；run_gateway_foreground 在 staticGateway!=caddy 时 return 2（gateway_service.py:473-478），launchd 每 10s/systemd 每 5s 重拉 |
+| BUG-390 | 修复 | 【major】lwa workspace relocate --resume 与显式 NEW 同用时 journal 完全不被读取：old 被错误推导（find_workspace_root 解析到 NEW 或直接取 NEW），rebind 成 no-op、verify 把正确含 NEW 路径的配置误报为残留 | 2026-07-29 20:08 | - | 待修复 | cli/workspace.py:82-94：new_path 非空时跳过 88-94 行 journal 读取；help 文本明确允许 --resume 传 NEW；无 CLI 层测试覆盖此路径 |
+| BUG-391 | 修复 | 新增 lwa-relocate-workspace skill（共 18 个）后计数与清单未同步：3 处测试硬编码 17 致全量 pytest 失败；README 两处写 17 个、命令参考表缺 lwa workspace relocate、release-checklist 写 17 | 2026-07-29 20:08 | - | 待修复 | tests/test_init.py:124,149、tests/test_e2e_acceptance.py:98 断言 ==17 实测 18；README.md:33,204、docs/release-checklist.md:9；skills/README.md 已改 18 证明是漏改 |
 ## 调整事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -544,7 +560,20 @@
 | CHK-114 | 检查 | 清掉 DOC-066~073 文档与实现不符（8 处勘误） | 2026-07-28 09:09 | 2026-07-28 09:15 | 已完成 | 对照 security.py / doctor.py / pageviews / hosting / static_gateway / 包内 templates 修订 security-boundary、faq、manager-page、runtime-workspace、acceptance-checklist、known-limitations；task-list DOC-066~073 标已完成。 |
 | CHK-115 | 检查 | 审查当前工作区 staged、unstaged 与 untracked 代码变更 | 2026-07-28 09:19 | 2026-07-28 09:19 | 已完成 | 发现 mypy 门禁失败、daemon processed 裁剪非 LRU、配置迁移对 flow-style 嵌套键漏补等问题；ruff 通过；pytest 受沙箱网络监听限制且目标集出现环境相关失败 |
 | CHK-116 | 检查 | 落实 CHK-115：修复 mypy/flow-style 迁移/cpus 有限性/processed LRU 四处问题并回归 | 2026-07-28 09:26 | 2026-07-28 09:26 | 已完成 | P1 importer _coerce_host_port；P2 updater flow-style 嵌套补齐、config math.isfinite、daemon 有序 LRU。mypy 全包通过；config/updater/daemon/importer 相关 pytest 全绿。 |
+| CHK-117 | 检查 | 分析截图中的 WSL2 Ubuntu Full Profile 假红及环境优化空间 | 2026-07-28 23:07 | 2026-07-28 23:07 | 已完成 | 核对截图、当前 gateway_service/capability/autostart 实现与 Microsoft WSL 官方文档；确认截图根因是 capability-gateway.json 缺失，当前 BUG-270/277/284/290 已修复；整理 systemd 常驻、Linux 文件系统、资源配额、mirrored 网络、防火墙、PATH、缓存原子写与日志轮转等分级建议。 |
+| CHK-118 | 检查 | 核对截图假红分析观点并落地仍成立的代码修复 | 2026-07-28 23:43 | 2026-07-28 23:47 | 已完成 | 确认截图根因正确；BUG-270/277/284 监管路径已修；残留缺口为 gateway on 不写缓存与能力缓存非原子写（记 BUG-376/377）。WSL systemd/内存/mirrored/PATH 属运维建议，未改代码。 |
+| CHK-119 | 检查 | 评估 WSL 路径别名入口隐藏 8080 端口的实现方案 | 2026-07-28 23:52 | 2026-07-28 23:52 | 已完成 | 确认现有 build_route_url 已在 staticGatewayPort=80 时省略端口；比较 Caddy 直接监听 80、Windows portproxy 80→8080、Windows 反向代理三种方案，推荐 Caddy 低端口能力 + staticGatewayPort=80，并保留 NAT/防火墙校验。 |
+| CHK-120 | 检查 | 逐条验证截图中 gatewayAccess 假红建议措施的实现状态 | 2026-07-28 23:59 | 2026-07-28 23:59 | 已完成 | 已核对 gateway on/foreground/autostart/cache overlay/WSL PATH/文档；关键修复 BUG-376/377 已落地，相关四个测试文件全绿，ruff 与 git diff --check 通过；发现升级收尾缺口并登记待修 BUG。 |
+| CHK-121 | 检查 | 对照 10.181.224.39 WSL2 Mirrored 排障记录（2026-07-29）评估对当前仓库的代码/文档启发 | 2026-07-29 17:20 | 2026-07-29 17:23 | 已完成 | 只读对照源码与未提交 diff：缺口 A/B 已被 BUG-376/377/378 覆盖（gateway on 写 capability-gateway、原子缓存写、update 重启 gateway）；BUG-102/IMP-023/rebuild 不删 data/ 均已有证据。新启发：①文档补 Mirrored 下 Hyper-V 防火墙（New-NetFirewallHyperVRule）与 NIC 自测假阴性；②可选：access/doctor 探测强制直连抗 http_proxy。SPA 相对路径与 data/data 嵌套库属应用侧，不改 lwa。未改业务代码。 |
+| CHK-122 | 检查 | 深入复核并纠正 CHK-121 对 10.181.224.39 排障记录的初步结论 | 2026-07-29 17:27 | 2026-07-29 17:27 | 已完成 | 确认 V0.6.7 的 gateway on 缓存缺口已由未提交 BUG-376～378部分修复；另发现 manager 完整能力仍不周期刷新、内部探测受代理、IMP-023 漏 404 三项待修；数据嵌套成因证据不足，不应直接定性应用侧。相关 135 项测试通过，代理假阴性已最小复现。 |
+| CHK-123 | 检查 | 结合 10.181.224.39 的 local-web.yml 复核前述排障结论 | 2026-07-29 17:30 | 2026-07-29 17:30 | 已完成 | 配置模型校验通过。profile=full + staticGateway=caddy 强化 BUG-379；managerHost=0.0.0.0 证明 17800 确为 LAN 暴露且必须依赖 token/Hyper-V 防火墙；lanIpStrategy=auto 使 BUG-380 同时影响回环与 NIC LAN URL 探测。端口池仅应按实际使用端口最小放行；其余资源/镜像/限流字段不改变本次根因。 |
+| CHK-124 | 检查 | 复核补充的 local-web.yml 工作区感知与配置项解读 | 2026-07-29 17:31 | 2026-07-29 17:31 | 已完成 | 整体正确，修正三点：①多数运行命令从当前目录向上查找 local-web.yml，任一工作区子目录均可，不是只能在根目录；仅 init/update 提供显式 -w。②default 不是简单的功能更少，而是允许 Caddy 缺失时降级 builtin、能力门禁较宽；full 会 fail-closed 并可能暂停 daemon 容器自愈。③portPool 是分配范围，防火墙应按实际实例端口最小放行，不应把 18000-19999 当成单个端口或默认全开放。 |
+| CHK-125 | 检查 | 确认并修复今天新增的 BUG-379/380/381 | 2026-07-29 17:45 | 2026-07-29 17:45 | 已完成 | 源码与无效代理复现确认三项均成立；已修复并回归相关套件全绿。DOC-077 仍为待开发文档项，非 bug。 |
+| CHK-126 | 检查 | 按 §23 对齐并完成 BUG-379～381 与 DOC-077 的迭代开发与验证 | 2026-07-29 17:55 | 2026-07-29 17:55 | 已完成 | 认可规划；补齐 300s/单飞/失败语义、代理与 mismatch 矩阵测试、Hyper-V 文档；定向套件与 ruff 通过。23.09 实机与 23.10 多库溯源未在本机执行（无目标机/P2）。 |
+| CHK-127 | 检查 | 对照 0717 安装使用记录与 0.6.7：核实未解决项是否仍存在及处理方式 | 2026-07-29 18:00 | 2026-07-29 18:00 | 已完成 | §八-4/§八-5 仍为架构边界（Runtime 仅 shared-static\|docker-compose，无 adopt）；系统层项维持检测+指引；能力误报已由 BUG-376～381 覆盖。文档补 known-limitations/faq 明示边界（DOC-079）。 |
+| CHK-128 | 检查 | 复核 WSL2 工作区改名迁移全过程并提炼代码与文档迭代项 | 2026-07-29 18:18 | 2026-07-29 18:18 | 已完成 | 确认迁移主结果有效，但发现外部 down 后 start 身份陈旧、pageviews 绝对路径游标重复摄入、autostart repair gateway 语义三项确定缺陷；另确认 registry/Caddy/可编辑安装/daemon processed 等需纳入正式迁移契约。 |
 
+| CHK-129 | 检查 | 审查全部未提交改动（工作区迁移新功能 workspace_migrate/CLI/测试/文档 + 跨模块配套，约 2500 行） | 2026-07-29 20:08 | 2026-07-29 20:08 | 已完成 | 10 组并行审查 + 全部 major 逐项人工读码复核；全量 pytest 3 项失败（skills 计数 17→18 未同步，BUG-391）；确认 5 项 major（BUG-386~390，均集中于工作区迁移事务机：rollback 不逆改写/resume 快照重采丢恢复清单/无条件装自启/repair 启用 config 已关服务/--resume+NEW 不读 journal）；另有约 15 项 minor 暂未逐条登记（dry-run 非零副作用建 pageviews.db、WAL 热拷贝备份可能陈旧、journal backup_dir 迁移后失效、migrate_lock TOCTOU 且 rollback 不持锁、access 瞬时探测失败误判 IMP-023 触发误 rebuild、manager_api 开机 5 分钟内探测失败日志被节流哨兵吞掉、resume/失败注入路径零测试覆盖、plan 文档 regenerate/verify 承诺与实现不符、pageviews/access 文案滞后等）。 |
 ## 测试数据
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -630,6 +659,12 @@
 | DOC-073 | 文档 | faq.md:89-91 引用 python_version 报错文本与实际输出不符 | 2026-07-27 22:48 | 2026-07-28 09:15 | 已完成 | 示例改为「Python {版本} 不满足最低要求 ≥ 3.13」（对照 doctor.check_python_version）。 |
 | DOC-074 | 文档 | 文档写清 ?token= 查询参数泄漏面（保留策略）与管理页 token 显隐 | 2026-07-28 08:47 | 2026-07-28 08:47 | 已完成 | manager-page.md / security-boundary.md / known-limitations.md；对应审查 M6。 |
 | DOC-075 | 文档 | 同步 V0.6.7 用户文档：CSRF 本机写保护、setup --full 仅 ready 写 profile、inbox/failed 死信、access review 跳过 stopped | 2026-07-28 09:17 | 2026-07-28 09:17 | 已完成 | README/manager-page/runtime-workspace/operations-playbook/faq/security-boundary/release-checklist；skills lwa-review-access-urls。对照 BUG-295/297/301/305。DOC-066~073 已在 CHK-114 收口。 |
+| DOC-076 | 文档 | 补齐 WSL 运行前建议：宿主内存/防火墙/9p 性能、mirrored 网络、日志与 journal 保留 | 2026-07-29 00:07 | 2026-07-29 00:12 | 已完成 | 落点：docs/known-limitations.md（WSL2 宿主准备）、docs/autostart.md（唤醒确认 + mirrored）、docs/operations-playbook.md（运行前清单 + 日志与 journal）；README 交叉引用。不扩写成通用 WSL 教程。 |
+| DOC-077 | 文档 | 修正 WSL2 Mirrored LAN 防火墙与自测口径 | 2026-07-29 17:27 | 2026-07-29 17:51 | 已完成 | known-limitations/autostart/operations-playbook/README：Hyper-V firewall 逐端口示例、最小端口、分层验收；NIC 自测不作最终结论；autoProxy 与内部直连语义分离。 |
+| DOC-078 | 文档 | 更新新增功能点2607规划文档，纳入 WSL2 实机排障反哺 | 2026-07-29 17:41 | 2026-07-29 17:41 | 已完成 | 更新文档标题、状态与范围索引；新增 §23 共 9 个子节，明确 V0.6.7 已有能力、当前工作树 BUG-376～378、待修 BUG-379～381、DOC-077、数据库嵌套证据门槛和非目标。 |
+| DOC-079 | 文档 | 明示 V1 无本地 Python 运行时、不纳管外部 nginx/systemd 站点 | 2026-07-29 18:00 | 2026-07-29 18:00 | 已完成 | known-limitations 托管与容器；faq 两条问答。不实现 native runtime / adopt。 |
+| DOC-080 | 文档 | 同步 V0.6.8 用户文档与 Skills：能力周期刷新、探针直连、IMP-023 mismatch、update 重启 gateway、Hyper-V/架构边界 | 2026-07-29 18:17 | 2026-07-29 18:17 | 已完成 | README/faq/operations-playbook/manager-page/runtime-workspace/known-limitations/release-checklist；skills update-runtime/review-access-urls/build-frontend-static/import-zip；plan §23 状态纳入 V0.6.8。 |
+| DOC-081 | 文档 | 新增工作区改名迁移运维手册并纠正现场记录中的高风险步骤 | 2026-07-29 18:18 | 2026-07-29 18:44 | 已完成 | 【完成 2026-07-29 18:44】新增 docs/workspace-rename.md：路径清单、禁止 sed JSON/Caddyfile、勿删 daemon-processed、desiredState/pageviews 快照、停服/改名/结构化改写/registry/自启 repair、验收与回滚、生产 CLI 解耦；交叉链 README/playbook/runtime-workspace/autostart/faq。 |
 
 ## 功能开发
 
@@ -723,6 +758,7 @@
 | DEV-086 | 开发 | 实现 IMP-041：Vite 源码开发/预览端口元数据检测与展示 | 2026-07-20 18:53 | 2026-07-20 19:07 | 已关闭 | 原 IMP-041 Vite 端口元数据已从计划删除；范围取消。|
 | DEV-087 | 开发 | 实现 IMP-040：管理页/DTO LAN 地址新鲜度与漂移自愈（读时现算 + 节流 refresh） | 2026-07-20 19:07 | 2026-07-20 21:07 | 已完成 | status 读时合成 lanUrl；manager 节流单飞 refresh；POST /api/access/refresh + 前端 stale 横幅；daemon reconcile 复用；doctor JSON currentLanIp/driftedInstanceIds。 |
 | DEV-088 | 开发 | 实现 IMP-041：remove 阶段日志/orphan events + 修复容器别名残留（BUG-268） | 2026-07-20 20:09 | 2026-07-20 21:35 | 已完成 | 041.01～041.05：`cleanup_instance_routes`（BUG-268）；`_log_remove_stage` + orphan `remove_stage`；manager `audit remove`；FAQ/manager-page 对账说明。041.06 实机清残留为运维项可后续补。回归 test_remove_writes_stage_orphan_events / test_api_remove_writes_audit_log。 |
+| DEV-089 | 开发 | 按 IMP-042 / PLN-027 实现 LWA 工作区迁移（事务状态机 + `lwa workspace relocate` + Skill `lwa-relocate-workspace`） | 2026-07-29 18:45 | 2026-07-29 19:14 | 已完成 | 【完成】落地 workspace_migrate 状态机（锁/journal/preflight…complete）、CLI `lwa workspace relocate`（dry-run/json/resume/verify/rollback）、Skill lwa-relocate-workspace；DOC-081/IMP-042 §24 标已落地。pytest test_workspace_migrate + 相关回归通过。Task 11（路径相对化/跨盘 042.b）另案。 |
 
 ## 配置运维
 
@@ -790,6 +826,9 @@
 | OPS-060 | 运维 | 应用版本号提升至 V0.6.6：pyproject/version_info(_FALLBACK_VERSION+docstring×3)/cli docstring/test_version_info/skills·lwa-update-runtime/release-checklist 示例/pack-release-zip 注释同步 | 2026-07-21 14:49 | 2026-07-21 14:49 | 已完成 | task-list 历史 0.6.5 条目保留不动。lwa version 仍取 git HEAD 主题；提交 V0.6.6-BuildXXXX 后即显示 V0.6.6。runtime/skills 已同步 update-runtime。 |
 | OPS-061 | 运维 | 本地 runtime 更新部署至 V0.6.6：pip install -e . 同步元数据 + kickstart 重启 manager/daemon/gateway 加载 BUG-277~279 修复代码 | 2026-07-21 15:28 | 2026-07-21 15:33 | 已完成 | pip 0.6.5→0.6.6（editable，代码已链接工作区）。launchctl kickstart -k 重启：manager 96977→47121、daemon 96982→47123、gateway 97154→47288（caddy→47296）。BUG-277 验证：/api/health gatewayAccess admin_unavailable→ready（overlay_gateway_access_from_cache 生效），version V0.6.5→V0.6.6。access refresh 4 实例 0 漂移（LAN 10.181.239.115）；access review 总体 OK，demo-static/voiceprint-v3-demo/3d-demo-family-wakeup/prd-review-v035 直连+别名全 200；doctor 总体 OK（0 失败 0 警告）。 |
 | OPS-062 | 运维 | 应用版本号提升至 V0.6.7：pyproject/version_info(_FALLBACK_VERSION+docstring×3)/cli docstring/test_version_info/skills·lwa-update-runtime/release-checklist 示例/pack-release-zip 注释同步 | 2026-07-28 09:17 | 2026-07-28 09:17 | 已完成 | 全仓活跃 0.6.6→0.6.7；task-list 历史 OPS-060/061 与 CHK-101 等保留不动。lwa version 仍取 git HEAD 主题，提交 V0.6.7-BuildXXXX 后即显示 V0.6.7。test_version_info 全绿。 |
+| OPS-063 | 运维 | 本地 runtime 更新部署至 V0.6.7 并重启全部服务（manager/daemon/gateway/caddy） | 2026-07-28 14:47 | 2026-07-28 14:55 | 已完成 | pip 0.6.6->0.6.7（editable，git HEAD 已在 V0.6.7-Build1633-20260728）。lwa update 协调重启 manager(2333->44845)/daemon(2325->44850)，access review OK。doctor 初报 FAIL：端口池 18000/18001 被 3 个 pytest 残留 http.server 孤儿进程(74693/74728/78535)占用，清理后 doctor OK。gateway 因 lwa update 默认不重启，手动 off/on + autostart enable + launchctl kickstart 恢复 launchd 监督：gateway_service 2335->59765、caddy 3720->58812（autostart enable 连带停 daemon/manager，已 kickstart 恢复 manager 44845->59826、daemon 44850->59823）。最终三服务均 launchd 监管运行，autostart check 全绿，doctor 总体 OK，lwa version=V0.6.7。 |
+| OPS-064 | 运维 | 应用版本号提升至 V0.6.8：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/release-checklist/pack-release-zip 同步 | 2026-07-29 18:17 | 2026-07-29 18:17 | 已完成 | 全仓活跃 0.6.7→0.6.8；task-list 历史 OPS-062/063 与 CHK/DOC 中的 V0.6.7 叙事保留。lwa version 仍取 git HEAD 主题，提交 V0.6.8-BuildXXXX 后即显示。 |
+| OPS-065 | 运维 | prd-review-v035 原地更新至 v0.3.6（zip build0711-20260729） | 2026-07-29 19:43 | 2026-07-29 19:50 | 已完成 | lwa import --update prd-review-v035；sha256 8766458adf0e->3b4da3e98dd7；BUG-205 重建前从旧容器 /app/runtime/data 救出 app.db(364KB) 到宿主 data/；docker 镜像重建（pip install lancedb/pyarrow 等耗时约 2 分钟，前台 import 被 2 分钟超时中断后改 lwa rebuild 后台完成）；/api/health version=0.3.6；别名 /prd-review/ 与直连 :18004 均 HTTP 200；data/ 保留。 |
 
 ## 规划事项
 
@@ -820,17 +859,20 @@
 | PLN-023 | 规划 | 评审 IMP-037～041 开发优先级：038/039=P0，037=P1，040=P2可延后，041=P3建议搁置 | 2026-07-20 18:58 | 2026-07-20 18:58 | 已完成 | 写入 design/plan §17.3～17.4；推荐落地顺序 038→039→037；040/041 非近两轮刚需 |
 | PLN-024 | 规划 | IMP-040：管理页 LAN 地址新鲜度与漂移自愈（读时现算+节流落盘；替换已删的 update --pull） | 2026-07-20 19:07 | 2026-07-20 19:07 | 已完成 | design/plan §21；检查阶段 R1～R7；与 IMP-038 共享 refresh；落地 DEV-087 |
 | PLN-025 | 规划 | IMP-041：删除路径阶段日志 + 容器别名清理（含 BUG-268）WBS | 2026-07-20 20:09 | 2026-07-20 20:09 | 已完成 | design/plan §22；阶段 begin/stop/down/alias/pageviews/registry/purge/done；orphan events；破坏性 API 审计；与 BUG-268 同批；落地 DEV-088 |
+| PLN-026 | 规划 | 规划 2026-07-29 WSL2 Mirrored + Full Profile 实机排障反哺 §23 | 2026-07-29 17:41 | 2026-07-29 17:41 | 已完成 | 在 design/plan/local-webpage-access-新增功能点2607.md 新增 §23，不另占 IMP 编号；覆盖 BUG-379 manager 周期能力刷新、BUG-380 内部 HTTP 直连、BUG-381 别名资源 mismatch、DOC-077 Hyper-V firewall，以及 data/data 多库溯源边界；拆分 23.01～23.10 WBS、自动化/实机验收矩阵、风险与发布顺序。 |
+| PLN-027 | 规划 | 规划 LWA 工作区迁移一等支持能力（事务 + CLI + Skill） | 2026-07-29 18:18 | 2026-07-29 18:52 | 已完成 | 初版 18:44；18:52 吸收评审重写 docs/plans/2026-07-29-workspace-relocate.md：状态机 preflight…complete、同盘范围拍板、dry-run/resume/verify/rollback、Skill lwa-relocate-workspace。产品编号 IMP-042（§24）。实现 DEV-089。 |
+| PLN-028 | 规划 | IMP-042 LWA 工作区迁移：写入新增功能点 §24，并完善 PLN-027 实现计划（事务+CLI+Skill、同盘范围、状态机） | 2026-07-29 18:52 | 2026-07-29 18:52 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §24；docs/plans/2026-07-29-workspace-relocate.md 重写；DOC-081 更名为工作区迁移手册。实现仍 DEV-089。 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 371 | 368 | 3 | 99% |
+| 代码 Bug | 391 | 382 | 9 | 97.7% |
 | 调整事项 | 34 | 34 | 0 | 100% |
-| 检查事项 | 113 | 113 | 0 | 100% |
+| 检查事项 | 127 | 127 | 0 | 100% |
 | 测试数据 | 1 | 1 | 0 | 100% |
-| 文档维护 | 75 | 75 | 0 | 100% |
-| 功能开发 | 88 | 88 | 0 | 100% |
-| 配置运维 | 62 | 62 | 0 | 100% |
-| 规划事项 | 25 | 25 | 0 | 100% |
-| **总计** | 769 | 766 | 3 | 100% |
+| 文档维护 | 81 | 81 | 0 | 100% |
+| 功能开发 | 89 | 89 | 0 | 100% |
+| 配置运维 | 65 | 65 | 0 | 100% |
+| 规划事项 | 28 | 28 | 0 | 100% |
+| **总计** | 816 | 807 | 9 | 98.9% |

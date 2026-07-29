@@ -5,13 +5,13 @@
 ::
 
     识别上下文 → 预检（dry-run）→ pip install -e . → 同步 skills/templates
-    → 配置缺省字段补齐 → 重启 manager/daemon → 可选重启实例 → lwa doctor
+    → 配置缺省字段补齐 → 重启 manager/daemon/gateway → 可选重启实例 → lwa doctor
 
 设计约束（见 ``docs/plan/待改进功能点记录-20260706.md`` IMP-008）：
 
 * 每步**独立失败不中断后续**，最终退出码反映是否存在失败；
 * pip 成功但 manager 重启失败**不回滚** Python 包；提示查 ``run/manager.json``；
-* 重启 manager/daemon **仅在原本运行时**才 stop→start，原本 stopped 不自动开启；
+* 重启 manager/daemon/gateway **仅在原本运行时**才执行，原本 stopped 不自动开启；
 * 实例默认**不动**；``--restart-instances`` 时跳过 building/queued/pending；
 * ``--dry-run`` 不产生任何文件、进程、registry 变更；
 * ``--sync-templates`` 默认关闭（避免覆盖用户改过的模板）。
@@ -61,6 +61,7 @@ class UpdateOptions:
     sync_templates: bool = False
     restart_manager: bool = True
     restart_daemon: bool = True
+    restart_gateway: bool = True
     restart_instances: bool = False
     run_doctor: bool = True
     review_access: bool = True  # IMP-038：升级后默认轻量 access review
@@ -494,6 +495,50 @@ def restart_daemon(ws: Workspace, config: Config) -> dict[str, Any]:
     return {"wasRunning": True, "pid": pid, "message": f"daemon 已重启（pid={pid}）"}
 
 
+def restart_gateway(ws: Workspace, config: Config) -> dict[str, Any]:
+    """幂等重启 Caddy Gateway：仅对已运行的 Caddy 执行重启。
+
+    自启动监督器在管时由监督器重启 gateway_service，确保升级后的监督与能力缓存
+    刷新逻辑生效；未托管时 stop→start Caddy master。原本 stopped 不自动开启。
+    """
+    from local_webpage_access.cli._common import coordinated_autostart_restart
+    from local_webpage_access.gateway_service import (
+        is_gateway_running,
+        start_gateway,
+        stop_gateway,
+    )
+
+    if config.staticGateway != "caddy":
+        return {
+            "wasRunning": False,
+            "pid": None,
+            "message": f"staticGateway={config.staticGateway}，无需重启 Caddy Gateway",
+        }
+    if not is_gateway_running(ws, config):
+        return {
+            "wasRunning": False,
+            "pid": None,
+            "message": "Gateway 原本未运行，跳过重启",
+        }
+
+    note, ok, managed = coordinated_autostart_restart(ws, "gateway")
+    if managed:
+        if not ok:
+            raise RuntimeError(note or "Gateway 自启动监督器重启失败")
+        return {
+            "wasRunning": True,
+            "pid": None,
+            "message": note or "Gateway 已通过自启动重启",
+        }
+    if not stop_gateway(ws, config):
+        raise RuntimeError(
+            "Gateway 停止失败（Caddy master 可能仍在运行），已跳过重启；"
+            "可 `lwa gateway off` 后重试 `lwa gateway on`"
+        )
+    pid = start_gateway(ws, config)
+    return {"wasRunning": True, "pid": pid, "message": f"Gateway 已重启（pid={pid}）"}
+
+
 def restart_instances(
     ws: Workspace, config: Config, registry: Registry
 ) -> dict[str, Any]:
@@ -522,10 +567,36 @@ def restart_instances(
 
 
 def run_doctor_check(ws: Workspace, config: Config) -> str:
-    """跑 ``lwa doctor``，返回 overall（ok/warn/fail）。失败抛 RuntimeError。"""
+    """跑基础 doctor，并在 Full 档位核验合并后的能力缓存。
+
+    Full 报告会合并 manager/daemon/gateway 的新鲜缓存且校验对应角色仍存活；
+    任一能力未就绪都让 update 的 doctor 步骤失败，避免基础环境检查全绿但
+    ``gatewayAccess=unknown`` 的假通过。
+    """
+    from local_webpage_access.capability import (
+        collect_capability_report,
+        resolve_profile_name,
+    )
     from local_webpage_access.doctor import run_doctor
 
     report = run_doctor(ws, config)
+    profile = resolve_profile_name(config.profile, ws.root)
+    if profile == "full":
+        capability = collect_capability_report(
+            workspace_root=ws.root,
+            profile="full",
+            role="cli",
+            include_backend_cached=True,
+        )
+        if capability.overall != "ready":
+            raise RuntimeError(
+                "Full 能力验收未就绪："
+                f"overall={capability.overall}, "
+                f"managerDockerAccess={capability.manager_docker_access}, "
+                f"daemonDockerAccess={capability.daemon_docker_access}, "
+                f"gatewayAccess={capability.gateway_access}"
+                + (f"；建议：{capability.action}" if capability.action else "")
+            )
     return report.overall
 
 
@@ -598,6 +669,10 @@ def run_update(
         if options.restart_daemon:
             report.steps.append(
                 StepResult("restartDaemon", "skipped", "[dry-run] 计划重启 daemon（若原本运行）")
+            )
+        if options.restart_gateway:
+            report.steps.append(
+                StepResult("restartGateway", "skipped", "[dry-run] 计划重启 Gateway（若原本运行）")
             )
         if options.restart_instances:
             report.steps.append(
@@ -705,7 +780,18 @@ def run_update(
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("restartDaemon", "failed", str(exc)))
 
-    # ---- 8. 重启实例（默认关）----
+    # ---- 8. 重启 Gateway ----
+    if options.restart_gateway:
+        try:
+            info = restart_gateway(workspace, config)
+            status = "ok" if info["wasRunning"] else "skipped"
+            report.steps.append(
+                StepResult("restartGateway", status, info["message"], extra=info)
+            )
+        except Exception as exc:  # noqa: BLE001
+            report.steps.append(StepResult("restartGateway", "failed", str(exc)))
+
+    # ---- 9. 重启实例（默认关）----
     if options.restart_instances:
         try:
             info = restart_instances(workspace, config, registry)
@@ -722,7 +808,7 @@ def run_update(
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("restartInstances", "failed", str(exc)))
 
-    # ---- 8.5 IMP-038：后台重启后再 refresh（+ 可选 review），避免旧进程回写 ----
+    # ---- 9.5 IMP-038：后台重启后再 refresh（+ 可选 review），避免旧进程回写 ----
     from local_webpage_access.access_workflow import run_access_pass
 
     access = run_access_pass(
@@ -775,7 +861,7 @@ def run_update(
             StepResult("accessReview", "skipped", "已通过 --no-review-access 跳过")
         )
 
-    # ---- 9. doctor ----
+    # ---- 10. doctor / Full 能力缓存验收 ----
     if options.run_doctor:
         try:
             report.doctor_status = run_doctor_check(workspace, config)
@@ -828,6 +914,7 @@ __all__ = [
     "run_migrate_config_defaults",
     "restart_manager",
     "restart_daemon",
+    "restart_gateway",
     "restart_instances",
     "run_doctor_check",
     "run_update",

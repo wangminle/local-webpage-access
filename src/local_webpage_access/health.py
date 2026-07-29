@@ -11,14 +11,14 @@
 
 from __future__ import annotations
 
-import urllib.request
+import urllib.error
 from dataclasses import dataclass
 
 from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.models import InstanceManifest, Status
 from local_webpage_access.paths import Workspace
-from local_webpage_access.probe import mark_probe_url
+from local_webpage_access.probe import mark_probe_url, urlopen_direct
 from local_webpage_access.registry import Registry
 
 log = get_logger("health")
@@ -52,7 +52,7 @@ def http_ok(host_port: int, *, timeout: float = _DEFAULT_TIMEOUT) -> tuple[bool,
     """
     url = mark_probe_url(f"http://127.0.0.1:{host_port}/")
     try:
-        resp = urllib.request.urlopen(url, timeout=timeout)
+        resp = urlopen_direct(url, timeout=timeout)
         code = getattr(resp, "status", None) or resp.getcode()
         return (200 <= int(code) < 400, int(code))
     except urllib.error.HTTPError as exc:

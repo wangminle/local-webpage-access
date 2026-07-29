@@ -917,6 +917,50 @@ def test_update_preserves_path_alias(
     assert result.manifest.static.routeHost == "voiceprint"
 
 
+def test_update_preserves_container_path_alias(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """BUG-385：容器实例路径别名在 import --update 后必须保留。
+
+    别名经 alias set / IMP-014 写入 container.routeHost，不从 zip 推导；
+    更新重建 manifest 时若未对称保留，管理页 routeUrl 变空，但 Caddy 片段仍残留。
+    """
+    v1 = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    assert r1.manifest.runtime == Runtime.DOCKER_COMPOSE
+
+    mpath = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(mpath)
+    assert manifest.container is not None
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "prd-review"
+    manifest.save(mpath)
+    registry.upsert_from_manifest(manifest)
+
+    v2 = _make_zip(
+        tmp_path / "api-v2.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=2\n"},
+    )
+    result = importer.update_zip(v2, iid, restart=False)
+    assert result.manifest.container is not None
+    assert result.manifest.container.routeMode == "name"
+    assert result.manifest.container.routeHost == "prd-review"
+
+    reloaded = InstanceManifest.load(mpath)
+    assert reloaded.container is not None
+    assert reloaded.container.routeMode == "name"
+    assert reloaded.container.routeHost == "prd-review"
+
+    row = registry.get_container(iid)
+    assert row is not None
+    assert row.get("route_host") == "prd-review"
+    assert row.get("route_mode") == "name"
+
+
 def test_update_preserves_hostport_registration(
     importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
 ) -> None:

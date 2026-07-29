@@ -140,6 +140,21 @@ macOS 通常走 Docker Desktop 用户态 socket，较少出现 Linux 式 docker 
 V1 要求 Docker Compose 插件（`docker compose` 子命令）。安装 `docker-compose-plugin`，
 或升级 Docker Desktop。检测到 v1 独立二进制时会提示改用插件。
 
+### Python / Node 后端能否不用 Docker、本机直跑？
+
+**不能（V1 架构边界）。** lwa 运行时只有：
+
+* 静态 / 前端产物 → `shared-static`（Caddy 或 builtin）；
+* 含后端的全栈 → **仅** `docker-compose`。
+
+没有「venv + uvicorn/gunicorn + systemd」式的本地 Python 宿主路径。这与 PRODUCT 定位一致（小主机上 zip 导入后容器化隔离），不是遗漏的 bug。若环境禁止 Docker，只能托管纯静态/前端包，或在机外自行跑后端、不走 lwa 生命周期。详见 [已知限制 · 托管与容器](known-limitations.md#托管与容器)。
+
+### 已有的 nginx + systemd 站点能否被 lwa 纳管？
+
+**不能。** lwa 不提供 `adopt` / 登记外部进程：不会接管系统 nginx、用户自建 systemd 单元或非本工作区的 Caddy。`lwa autostart` 只监管本工作区的 manager/daemon/gateway。
+
+要把旧站纳入：把应用打成 zip，用 `lwa import` 重新部署（静态走统一入口，全栈走 Compose）。继续用外部 nginx 时，请与 lwa 端口错开，且 **不要** 把 Caddy admin `:2019` 或系统 `caddy.service` 与 Full Profile 工作区混用。详见 [已知限制](known-limitations.md#托管与容器)。
+
 ### 磁盘空间不足
 
 ```
@@ -280,13 +295,13 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 
 经路径别名访问 `http://<LAN-IP>:8080/<alias>/` 白屏，但端口直连 `http://<LAN-IP>:<hostPort>/` 正常：
 
-* **根因 A — SPA 绝对路径（IMP-023）**：Vite/Vue/React 等构建产物若用默认 `base: '/'`，HTML 里是 `/assets/app.js`（绝对）。别名 `/<alias>/` 是子路径，绝对路径会绕过别名打到入口根，Caddy 对未匹配路由返回**空 200**（0 字节）→ JS 为空 → 白屏。
-  * 自查：`curl -i http://127.0.0.1:8080/<alias>/`，看 HTML 里 `src=` 是 `/assets/...`（绝对＝有问题）还是 `./assets/...`（相对＝正常）；再 `curl -i http://127.0.0.1:8080/assets/<file>`，若返回 `200` 且 `Content-Length: 0` 即命中。
+* **根因 A — SPA 绝对路径（IMP-023）**：Vite/Vue/React 等构建产物若用默认 `base: '/'`，HTML 里是 `/assets/app.js`（绝对）。别名 `/<alias>/` 是子路径，绝对路径会绕过别名打到入口根，常见结果是**空 200**、**404**，或被 SPA/回落页吃成 **200 + text/html** → JS 无法执行 → 白屏。
+  * 自查：`curl -i http://127.0.0.1:8080/<alias>/`，看 HTML 里 `src=` 是 `/assets/...`（绝对＝有问题）还是 `./assets/...`（相对＝正常）；再分别 `curl -i` 无前缀与带 `/<alias>` 前缀的资源 URL，对照状态码 / Content-Length / Content-Type。
   * 修复：构建时设相对 base（Vite `base: './'`）后 `lwa rebuild <id>`；或 `lwa access review --rebuild-if-needed` 自动检出并重建命中实例。
 * **根因 B — 浏览器缓存了旧 HTML**：产物已重建为相对路径，但浏览器仍用重建前的旧 HTML（绝对路径 + 旧 hash）→ 同样白屏。重启 lwa / 网关无效（服务端已正确，问题在客户端缓存）。
   * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
   * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
-* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源空 200 对照，直接指出哪些实例需要 rebuild；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。
+* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME），直接指出哪些实例需要 rebuild；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。
 
 ### 如何在 Caddy 与 builtin 之间切换网关后端
 
@@ -330,3 +345,12 @@ lwa gateway switch builtin --dry-run     # 只看将影响的实例
 * 关键数据：每个实例的 `apps/<id>/data/`（SQLite 等）。
 * 元数据：`apps/<id>/local-web.json` 与 `registry/local-web.db`。
 * 冷备份：`stop` 所有实例后直接打包整个工作区目录。
+
+### 如何做 LWA 工作区迁移（改名 / 搬目录）
+
+准确说法是 **LWA 工作区迁移**：不要只做 `mv` 再 `lwa start`。自启单元、`pip editable`、Docker Mounts、manifest/registry 绝对路径、生成式 Caddyfile 都会绑旧路径。
+
+- **优先 CLI**：`lwa workspace relocate <NEW> --dry-run` → 确认后执行；Skill `lwa-relocate-workspace` 只调 CLI。
+- **人工逃生舱 / 跨盘**：见 **[LWA 工作区迁移手册](workspace-rename.md)**（DOC-081）。
+- **产品点**：IMP-042 / [PLN-027](plans/2026-07-29-workspace-relocate.md)；v1 支持 **macOS / Linux / WSL 同卷**原子改名，跨盘/跨机不自动。
+- 若迁前已 `docker compose down`：含 BUG-382 的版本用 `lwa start` 即可 `up -d`；旧版本可能需临时 `lwa rebuild`。

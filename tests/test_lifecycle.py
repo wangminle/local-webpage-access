@@ -56,6 +56,7 @@ class _FakeRuntime:
 
     calls: list[str] = []
     _running = False
+    _has_container = True
 
     def __init__(self, workspace=None, registry=None) -> None:
         self.workspace = workspace
@@ -73,6 +74,12 @@ class _FakeRuntime:
         return type(self)._running
 
     def start(self, iid, **kw):
+        if not type(self)._has_container:
+            from local_webpage_access.errors import DockerError
+
+            raise DockerError(
+                'service "app" has no container to start', instance_id=iid
+            )
         type(self).calls.append("start")
         type(self)._running = True
 
@@ -83,6 +90,7 @@ class _FakeRuntime:
     def down(self, iid, **kw):
         type(self).calls.append("down")
         type(self)._running = False
+        type(self)._has_container = False
 
     def build(self, iid, *, build_id=None, **kw):
         type(self).calls.append("build")
@@ -92,9 +100,14 @@ class _FakeRuntime:
     def up(self, iid, **kw):
         type(self).calls.append("up")
         type(self)._running = True
+        type(self)._has_container = True
 
-    def container_id(self, iid):
-        return "cid-x"
+    def container_id(self, iid, *, all_containers: bool = False):
+        if type(self)._running:
+            return "cid-x"
+        if all_containers and type(self)._has_container:
+            return "cid-x"
+        return None
 
     def image_id(self, iid):
         return "sha256:img"
@@ -110,6 +123,7 @@ class _FakeRuntime:
 def fake_runtime(monkeypatch):
     _FakeRuntime.calls = []
     _FakeRuntime._running = False
+    _FakeRuntime._has_container = True
     # hosting 在模块顶层导入了 DockerRuntime；lifecycle 用局部 import 解析到
     # docker_runtime.DockerRuntime。两处都要替换。
     monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
@@ -313,6 +327,45 @@ def test_start_deployed_container_uses_light_start(
     assert "start" in fake_runtime.calls
     assert "build" not in fake_runtime.calls
     assert "up" not in fake_runtime.calls
+
+
+def test_start_recreates_via_up_when_container_removed_externally(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-382：外部 compose down 后仍有 containerId，应 up -d 重建而非 start。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    # 模拟此前部署留下的 compose / env / 镜像
+    docker_dir = workspace.app_docker("api")
+    docker_dir.mkdir(parents=True, exist_ok=True)
+    (docker_dir / "compose.yaml").write_text("services:\n  app:\n    image: x\n")
+    (docker_dir / ".env").write_text("HOST_PORT=21000\n")
+    fake_runtime._has_container = False
+    fake_runtime._running = False
+    fake_runtime.calls.clear()
+
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert "up" in fake_runtime.calls
+    assert "start" not in fake_runtime.calls
+    assert "build" not in fake_runtime.calls
+    assert manifest.container is not None
+    assert manifest.container.containerId == "cid-x"
+
+
+def test_start_falls_back_to_full_rebuild_when_compose_missing(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-382：容器与生成文件均缺失时，回退完整 build+up。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._has_container = False
+    fake_runtime._running = False
+    fake_runtime.calls.clear()
+
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert "build" in fake_runtime.calls
+    assert "up" in fake_runtime.calls
+    assert "start" not in fake_runtime.calls
 
 
 def test_start_recovers_via_full_rebuild_after_rebuild_failure(

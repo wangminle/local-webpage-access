@@ -13,10 +13,15 @@ LWA 自身为启动等待、健康检查、访问复核发起的 HTTP 请求不�
 
 from __future__ import annotations
 
+import urllib.request
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 LWA_PROBE_PARAM = "__lwa_probe"
 LWA_PROBE_VALUE = "1"
+
+# BUG-380：内部本机/LAN 探测不得继承 http_proxy/https_proxy，否则代理异常会假阴性。
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def mark_probe_url(url: str) -> str:
@@ -36,4 +41,14 @@ def mark_probe_url(url: str) -> str:
     )
 
 
-__all__ = ["LWA_PROBE_PARAM", "LWA_PROBE_VALUE", "mark_probe_url"]
+def urlopen_direct(url: str | urllib.request.Request, *, timeout: float | None = None) -> Any:
+    """``urllib.request.urlopen`` 的直连封装：忽略环境代理（BUG-380）。"""
+    return _DIRECT_OPENER.open(url, timeout=timeout)
+
+
+__all__ = [
+    "LWA_PROBE_PARAM",
+    "LWA_PROBE_VALUE",
+    "mark_probe_url",
+    "urlopen_direct",
+]

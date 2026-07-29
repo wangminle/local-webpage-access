@@ -2,7 +2,7 @@
 
 lwa 在局域网小主机上的日常运维、选型与排障速查。面向已 `lwa init` 并跑过若干实例的维护者。
 
-> 配套阅读：[Runtime 工作区说明](runtime-workspace.md)（目录结构 / 端口）、[管理页说明](manager-page.md)、[开机自启](autostart.md)。
+> 配套阅读：[Runtime 工作区说明](runtime-workspace.md)（目录结构 / 端口）、[管理页说明](manager-page.md)、[开机自启](autostart.md)、[工作区改名迁移](workspace-rename.md)。
 
 ---
 
@@ -47,7 +47,61 @@ Linux 上 `usermod -aG docker` 后若当前进程仍无 docker 组：按提示�
 
 Windows **原生进程不受支持**，无内置安装脚本。请在 **WSL2**（Ubuntu LTS 22.04/24.04/26.04 或 Debian Stable 12/13）内执行 `lwa setup` / `lwa init`。装完后建议 `lwa setup` 复核，再 `lwa doctor`（需已 `init`；未初始化时 `lwa doctor --json` 仍可输出平台诊断）；Full 环境用 `lwa doctor --profile full`。WSL 下请勿把工作区放在 `/mnt/<drive>` 再跑 `--full` / `autostart`（写入前 fail-closed）。
 
-日志排障见 [FAQ · 症状→日志](faq.md#症状--日志文件--命令imp-034)。
+**运行前（尤其 WSL）**：先核对宿主内存配额、工作区是否在 Linux 盘、防火墙是否放行业务口——见 [已知限制 · WSL2 宿主准备](known-limitations.md#wsl2-宿主准备运行前)；自启与可选 mirrored 网络见 [开机自启](autostart.md#wsl-的-windows-侧)。
+
+日志排障见 [FAQ · 症状→日志](faq.md#症状--日志文件--命令imp-034)；保留策略见下文「日志与 journal 保留」。
+
+---
+
+## 零（附）、运行前检查清单（建议）
+
+首次部署或换机时，在 `lwa setup --full` / `lwa autostart install` 之外建议勾选：
+
+| 项 | 命令 / 动作 | 说明 |
+| --- | --- | --- |
+| 工作区路径 | `pwd` 应在 `/home/…`，非 `/mnt/c/…` | 正确性 + 9p 性能；见 [known-limitations](known-limitations.md#工作区放在-linux-文件系统正确性--性能) |
+| WSL 内存 | Windows 侧查 `%UserProfile%\.wslconfig` | 建议 ≥6GB（小主机按表调整）；改后 `wsl --shutdown` |
+| systemd | `/etc/wsl.conf` 含 `[boot] systemd=true` | 否则 `lwa autostart` 不可用 |
+| 自启 + 唤醒 | `lwa autostart install --with-caddy` + Windows 登录任务 | 见 [autostart](autostart.md) |
+| 防火墙 | 放行实际在用的 `:8080` / 管理页 / 实例口；**不**放行 `:2019`；**不**默认全开 portPool | Mirrored：Hyper-V firewall 逐端口；另见 ufw。详见 [LAN 与防火墙](known-limitations.md#lan-访问与防火墙) |
+| 能力闭环 | `lwa doctor --profile full`；`test -f run/capability-gateway.json` | Full 红条多为能力缓存/监管，未必是 Docker 坏了 |
+| 日志空间 | 见下一节 | 避免 journal + 应用日志双份撑满磁盘 |
+
+---
+
+## 零（附 2）、日志与 journal 保留
+
+LWA **应用侧**日志已按大小滚动，一般无需再配 logrotate：
+
+| 位置 | 机制 | 量级（默认） |
+| --- | --- | --- |
+| `logs/lwa.log`、`logs/manager.log`、`logs/daemon.log`、`logs/gateway.log` 等 | `RotatingFileHandler` | 单文件约 10MB × 保留 3 份备份 |
+| `apps/<id>/logs/*`、`static-gateway` 相关 access/gateway 日志 | 打开前按大小滚动（`logs.rotate_*`） | 避免单文件无限增长 |
+
+仍建议定期巡检磁盘：
+
+```bash
+du -sh logs apps/*/logs static-gateway 2>/dev/null
+df -h .
+```
+
+**systemd journal**（`journalctl --user -u lwa-*.service`）与上述文件日志是**两套**存储。长期常驻时请限制 journal，避免与 `logs/` 双份无限增长：
+
+```bash
+# 用户级（示例）：限制 journal 占用
+mkdir -p ~/.config/systemd
+# 在 ~/.config/systemd/user.conf 或系统 /etc/systemd/journald.conf.d/ 中设置，例如：
+# [Journal]
+# SystemMaxUse=200M
+# RuntimeMaxUse=100M
+sudo systemctl restart systemd-journald   # 改系统级配置后
+```
+
+查看占用：`journalctl --user --disk-usage`（或 `journalctl --disk-usage`）。
+
+Docker 构建缓存 / 镜像 / WSL VHD 也会胀盘；可人工 `docker system df` 查看，**不要**在无人值守脚本里默认 `docker system prune -a`（破坏性）。WSL 磁盘回收见微软 WSL 文档中的精简 VHD 说明。
+
+症状→文件对照仍以 [FAQ](faq.md#症状--日志文件--命令imp-034) 为准。
 
 ---
 
@@ -218,7 +272,7 @@ lwa list                 # 实例清单
 
 ## 七、网关切换交接与访问地址复核（gateway-switch-access-review）
 
-复盘（2026-07-09）确认缺口：换网后管理页链接指向失效 LAN IP（G1）；「入口 HTML 200」≠「页面可渲染」（G2/G5，IMP-023 SPA 绝对资源空 200）；builtin↔caddy 切换未彻底交接导致同端口双开（G3）；切换后应检查是否需 rebuild（G6，默认只提示）。下列能力已落地：
+复盘（2026-07-09）确认缺口：换网后管理页链接指向失效 LAN IP（G1）；「入口 HTML 200」≠「页面可渲染」（G2/G5，IMP-023 SPA 绝对资源空 200 / 404 / 错误 MIME）；builtin↔caddy 切换未彻底交接导致同端口双开（G3）；切换后应检查是否需 rebuild（G6，默认只提示）。下列能力已落地：
 
 ### 7.1 切换事务（G3 / IMP-037）
 
@@ -246,11 +300,11 @@ DHCP 换网后管理页「端口」链接会**读时合成**当前 IP（无需�
 ### 7.3 访问可用性复核（G2/G5）
 
 ```bash
-lwa access review    # 对声明 URL 做真探活（含 SPA 子资源空 200 检测）
+lwa access review    # 对声明 URL 做真探活（含 SPA 别名资源错位：空 200 / 404 / 错误 MIME）
 lwa access review --json   # 机器可读
 ```
 
-逐实例探测：回环 `127.0.0.1:<hostPort>`（权威，区分「服务没起」vs「LAN URL 陈旧」）、lanUrl、routeUrl；对别名入口解析 HTML 的绝对路径 `src`/`href`，对照「无前缀」与「带别名前缀」两种请求——前者 200 但 0 字节、后者有实体 → **IMP-023 风险**（SPA 需构建时设相对 base，如 Vite `base: './'`）。这才是别名下「可用」的真实口径，而非仅看入口 HTML 200。
+逐实例探测：回环 `127.0.0.1:<hostPort>`（权威，区分「服务没起」vs「LAN URL 陈旧」）、lanUrl、routeUrl；对别名入口解析 HTML 的绝对路径 `src`/`href`，对照「无前缀」与「带别名前缀」两种请求——前者空 200 / 404 / 错误 MIME、后者有正确实体 → **IMP-023 风险**（SPA 需构建时设相对 base，如 Vite `base: './'`）。这才是别名下「可用」的真实口径，而非仅看入口 HTML 200。
 
 **主动停止的实例**（`desiredState=stopped`）标 `[SKIP]`，不探活、不计入 FAIL（BUG-301），避免拖垮 `gateway on` / `gateway switch` 的 overall。
 
@@ -267,9 +321,9 @@ lwa access review                      # 单独复核；文末列出建议 rebui
 lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 ```
 
-- **触发 rebuild 建议 / 自动重建的条件**：仅 IMP-023 空 200。LAN 漂移、端口双开、回环不通等只提示对应命令，不触发 rebuild。
-- **rebuild 后复检**：自动重建成功后会再探别名入口；若仍空 200，报告 `[WARN] rebuild 完成但 IMP-023 仍命中`（退出码非零），不会假绿成「已修好」。
-- **注意**：自动 rebuild 不会改应用源码里的 Vite `base`；若未固化 `base: './'`（或等价），重建后别名下仍可能空 200——请先改构建配置再 rebuild。
+- **触发 rebuild 建议 / 自动重建的条件**：仅 IMP-023 别名资源错位（空 200 / 404 / 错误 MIME）。LAN 漂移、端口双开、回环不通等只提示对应命令，不触发 rebuild。
+- **rebuild 后复检**：自动重建成功后会再探别名入口；若仍命中 mismatch，报告 `[WARN] rebuild 完成但 IMP-023 仍命中`（退出码非零），不会假绿成「已修好」。
+- **注意**：自动 rebuild 不会改应用源码里的 Vite `base`；若未固化 `base: './'`（或等价），重建后别名下仍可能白屏——请先改构建配置再 rebuild。
 
 ### 7.5 doctor 新增检查项（建议 F/H）
 
@@ -289,7 +343,8 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 ## 相关文档
 
 - [Runtime 工作区说明](runtime-workspace.md) — 目录结构、端口、`.env.local`、资源档位
+- [工作区迁移](workspace-rename.md) — 优先 `lwa workspace relocate`；人工手册 DOC-081；计划 [PLN-027](plans/2026-07-29-workspace-relocate.md)
 - [管理页说明](manager-page.md) — 筛选 / 冗余清理 / 路径别名 / 浏览量 / 取消构建 / LAN stale / gateway switch
-- [开机自启](autostart.md) — launchd 细节
-- [已知限制](known-limitations.md)
+- [开机自启](autostart.md) — launchd / systemd；WSL 唤醒与可选 mirrored
+- [已知限制](known-limitations.md) — 含 WSL2 宿主准备（内存 / 防火墙 / 文件系统）
 - [排障 FAQ](faq.md) — 含 Full Profile / `setup --full --resume` / 症状→日志 / 内置安装脚本

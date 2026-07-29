@@ -146,6 +146,12 @@ class HostingError(LwaError):
     code = "HOSTING_ERROR"
 
 
+class MigrateError(LwaError):
+    """LWA 工作区迁移事务失败（预检阻断、跨卷、阶段中断等）。"""
+
+    code = "MIGRATE_ERROR"
+
+
 __all__ = [
     "LwaError",
     "ConfigError",
@@ -162,4 +168,5 @@ __all__ = [
     "LifecycleError",
     "DataNonemptyError",
     "HostingError",
+    "MigrateError",
 ]

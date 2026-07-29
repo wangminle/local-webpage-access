@@ -427,6 +427,26 @@ def test_health_check_true_for_real_server(gateway: StaticGateway, workspace: Wo
         gateway.disable("hc")
 
 
+def test_health_check_ignores_env_http_proxy(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-380：StaticGateway.health_check 直连，不受无效代理影响。"""
+    public = workspace.app_public("hc-proxy")
+    public.mkdir(parents=True)
+    (public / "index.html").write_text("<html>ok</html>")
+    port = _free_port()
+    gateway.enable("hc-proxy", port, public)
+    try:
+        time.sleep(0.3)
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        assert gateway.health_check(port, timeout=3) is True
+    finally:
+        gateway.disable("hc-proxy")
+
+
 # ---- 回归测试：BUG-007 ----------------------------------------------------
 #
 # BUG-007：reload_all 首次无旧配置且 reload 失败时，坏的新 Caddyfile 被留在原地

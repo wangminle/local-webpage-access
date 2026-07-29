@@ -32,7 +32,7 @@ from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.ports import resolve_lan_ip
-from local_webpage_access.probe import mark_probe_url
+from local_webpage_access.probe import mark_probe_url, urlopen_direct
 from local_webpage_access.registry import Registry
 
 log = get_logger("access")
@@ -47,6 +47,9 @@ _ABS_RESOURCE_RE = re.compile(
     r"""(?:src|href)\s*=\s*["'](/[^/"'][^"']*)["']""", re.IGNORECASE
 )
 
+# 静态资源扩展名：用于识别「绝对路径返回 HTML」类错误 MIME（BUG-381）。
+_ASSET_EXT_RE = re.compile(r"\.(js|mjs|cjs|css|map|woff2?|ttf|otf|eot)$", re.IGNORECASE)
+
 
 # ---- 数据结构 ---------------------------------------------------------------
 
@@ -58,6 +61,7 @@ class UrlProbe:
     url: str
     status_code: int | None = None
     content_length: int | None = None
+    content_type: str | None = None
     ok: bool = False
     note: str | None = None  # EMPTY_BODY / TIMEOUT / REFUSED / PARSE 等
 
@@ -68,6 +72,8 @@ class UrlProbe:
             "contentLength": self.content_length,
             "ok": self.ok,
         }
+        if self.content_type:
+            d["contentType"] = self.content_type
         if self.note:
             d["note"] = self.note
         return d
@@ -75,12 +81,13 @@ class UrlProbe:
 
 @dataclass
 class SubresourceFinding:
-    """SPA 绝对路径子资源的探测对照（IMP-023 空 200 检测）。"""
+    """SPA 绝对路径子资源的探测对照（IMP-023 / BUG-381）。"""
 
     path: str
     absolute: UrlProbe  # http://127.0.0.1:entry/assets/x.js（无别名前缀）
     prefixed: UrlProbe  # http://127.0.0.1:entry/alias/assets/x.js（带前缀）
     empty_200: bool = False  # 绝对路径返回 200 但 0 字节，带前缀有实体
+    alias_resource_mismatch: bool = False  # 含 empty_200 / 404 / 错误 MIME
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +95,7 @@ class SubresourceFinding:
             "absolute": self.absolute.to_dict(),
             "prefixed": self.prefixed.to_dict(),
             "empty200": self.empty_200,
+            "aliasResourceMismatch": self.alias_resource_mismatch,
         }
 
 
@@ -130,8 +138,8 @@ class InstanceAccessReport:
 
     @property
     def needs_rebuild(self) -> bool:
-        """G6：仅 IMP-023 空 200 触发「建议 / 可选自动 rebuild」。"""
-        return any(s.empty_200 for s in self.subresources)
+        """G6：IMP-023 别名资源不匹配触发「建议 / 可选自动 rebuild」。"""
+        return any(s.alias_resource_mismatch for s in self.subresources)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -497,16 +505,18 @@ def _http_get(url: str, *, timeout: float = _PROBE_TIMEOUT) -> UrlProbe:
         mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urlopen_direct(req, timeout=timeout) as resp:
             body = resp.read()
             probe.status_code = resp.status
             probe.content_length = _content_length(resp.headers) or len(body)
+            probe.content_type = _content_type(resp.headers)
             probe.ok = 200 <= resp.status < 300
             return probe
     except urllib.error.HTTPError as exc:
         # 4xx/5xx 仍拿到响应头
         probe.status_code = exc.code
         probe.content_length = _content_length(exc.headers)
+        probe.content_type = _content_type(exc.headers)
         probe.note = f"HTTP {exc.code}"
         probe.ok = 200 <= exc.code < 300
         return probe
@@ -536,6 +546,39 @@ def _content_length(headers: Any) -> int | None:
         return int(val)
     except (TypeError, ValueError):
         return None
+
+
+def _content_type(headers: Any) -> str | None:
+    """从响应头读 Content-Type（去掉参数，容忍缺失）。"""
+    if headers is None:
+        return None
+    try:
+        val = headers.get("Content-Type")
+    except Exception:  # noqa: BLE001
+        return None
+    if not val:
+        return None
+    return str(val).split(";", 1)[0].strip().lower() or None
+
+
+def _is_wrong_asset_mime(path: str, probe: UrlProbe) -> bool:
+    """绝对路径像静态资源，却返回 text/html（常见入口回落页）。"""
+    if not probe.ok or not probe.content_type:
+        return False
+    if not _ASSET_EXT_RE.search(path.split("?", 1)[0]):
+        return False
+    return probe.content_type.startswith("text/html")
+
+
+def _alias_resource_mismatch(path: str, absolute: UrlProbe, prefixed: UrlProbe) -> tuple[bool, bool]:
+    """判定 IMP-023：返回 ``(empty_200, alias_resource_mismatch)``。"""
+    prefixed_ok = prefixed.ok and (prefixed.content_length or 0) > 0
+    if not prefixed_ok:
+        return False, False
+    empty_200 = absolute.ok and (absolute.content_length == 0)
+    failed_absolute = not absolute.ok
+    wrong_mime = _is_wrong_asset_mime(path, absolute)
+    return empty_200, bool(empty_200 or failed_absolute or wrong_mime)
 
 
 def _extract_absolute_resources(html: str, *, limit: int = _MAX_SUBRESOURCES) -> list[str]:
@@ -757,7 +800,7 @@ def _check_subresources(
     path_alias: str,
     route_probe: UrlProbe,
 ) -> None:
-    """解析别名入口 HTML，对照绝对路径 vs 带前缀子资源（IMP-023 空 200）。"""
+    """解析别名入口 HTML，对照绝对路径 vs 带前缀子资源（IMP-023 / BUG-381）。"""
     entry_port = config.staticGatewayPort
     if entry_port is None:
         return
@@ -769,21 +812,35 @@ def _check_subresources(
     for path in resources:
         absolute = _http_get(f"http://127.0.0.1:{entry_port}{path}")
         prefixed = _http_get(f"http://127.0.0.1:{entry_port}/{path_alias}{path}")
-        empty_200 = (
-            absolute.ok
-            and (absolute.content_length == 0)
-            and prefixed.ok
-            and (prefixed.content_length or 0) > 0
-        )
+        empty_200, mismatch = _alias_resource_mismatch(path, absolute, prefixed)
         finding = SubresourceFinding(
-            path=path, absolute=absolute, prefixed=prefixed, empty_200=empty_200
+            path=path,
+            absolute=absolute,
+            prefixed=prefixed,
+            empty_200=empty_200,
+            alias_resource_mismatch=mismatch,
         )
         rep.subresources.append(finding)
-        if empty_200:
+        if mismatch:
+            if empty_200:
+                detail = (
+                    f"绝对路径 {path} 在别名入口根返回 200 但 0 字节，"
+                    f"带前缀 /{path_alias}{path} 有实体（{prefixed.content_length} 字节）"
+                )
+            elif not absolute.ok:
+                code = absolute.status_code or absolute.note or "失败"
+                detail = (
+                    f"绝对路径 {path} 返回 {code}，"
+                    f"带前缀 /{path_alias}{path} 有实体（{prefixed.content_length} 字节）"
+                )
+            else:
+                detail = (
+                    f"绝对路径 {path} 返回错误类型 "
+                    f"{absolute.content_type or 'unknown'}，"
+                    f"带前缀 /{path_alias}{path} 有实体（{prefixed.content_length} 字节）"
+                )
             rep.findings.append(
-                f"IMP-023 风险：绝对路径 {path} 在别名入口根返回 200 但 0 字节，"
-                f"带前缀 /{path_alias}{path} 有实体（{prefixed.content_length} 字节）"
-                "——SPA 需构建时设相对 base（Vite: base: './'）"
+                f"IMP-023 风险：{detail}——SPA 需构建时设相对 base（Vite: base: './'）"
             )
             if rep.status == "ok":
                 rep.status = "warn"
@@ -799,7 +856,7 @@ def _fetch_text(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | None:
         mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urlopen_direct(req, timeout=timeout) as resp:
             if not (200 <= resp.status < 300):
                 return None
             return resp.read().decode("utf-8", "replace")
@@ -808,7 +865,7 @@ def _fetch_text(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | None:
 
 
 def instances_needing_rebuild(report: AccessReviewReport) -> list[str]:
-    """G6：从复核报告收集建议 rebuild 的实例 ID（仅 IMP-023 空 200）。"""
+    """G6：从复核报告收集建议 rebuild 的实例 ID（IMP-023 别名资源不匹配）。"""
     return list(report.needs_rebuild_ids)
 
 
@@ -833,7 +890,7 @@ def instance_still_has_imp023(
     *,
     path_alias: str,
 ) -> bool:
-    """rebuild 后简要复检：别名入口 HTML 是否仍存在绝对路径空 200。
+    """rebuild 后简要复检：别名入口是否仍存在 IMP-023 别名资源不匹配。
 
     与 :func:`_check_subresources` 同口径；拉不到 HTML / 无绝对路径资源 → False
     （无法证明仍坏，不当作 still_imp023）。
@@ -850,12 +907,8 @@ def instance_still_has_imp023(
     for path in resources:
         absolute = _http_get(f"http://127.0.0.1:{entry_port}{path}")
         prefixed = _http_get(f"http://127.0.0.1:{entry_port}/{path_alias}{path}")
-        if (
-            absolute.ok
-            and (absolute.content_length == 0)
-            and prefixed.ok
-            and (prefixed.content_length or 0) > 0
-        ):
+        _, mismatch = _alias_resource_mismatch(path, absolute, prefixed)
+        if mismatch:
             return True
     return False
 
@@ -999,11 +1052,22 @@ def format_review_report(
                 f"{_probe_brief(rep.route_probe) if rep.route_probe else '未探'}"
             )
         for sub in rep.subresources:
-            if sub.empty_200:
-                lines.append(
-                    f"           ⚠ {sub.path}：绝对路径空 200，"
-                    f"带前缀 {sub.prefixed.content_length} 字节（IMP-023）"
-                )
+            if sub.alias_resource_mismatch:
+                if sub.empty_200:
+                    detail = (
+                        f"绝对路径空 200，带前缀 {sub.prefixed.content_length} 字节"
+                    )
+                elif not sub.absolute.ok:
+                    code = sub.absolute.status_code or sub.absolute.note or "失败"
+                    detail = (
+                        f"绝对路径 {code}，带前缀 {sub.prefixed.content_length} 字节"
+                    )
+                else:
+                    detail = (
+                        f"绝对路径错误类型 {sub.absolute.content_type or 'unknown'}，"
+                        f"带前缀 {sub.prefixed.content_length} 字节"
+                    )
+                lines.append(f"           ⚠ {sub.path}：{detail}（IMP-023）")
         if rep.port_listener and rep.port_listener.names:
             lines.append(
                 f"           监听进程：{', '.join(sorted(set(rep.port_listener.names)))}"

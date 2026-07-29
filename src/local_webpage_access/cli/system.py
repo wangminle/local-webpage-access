@@ -502,6 +502,9 @@ def update_cmd(
     no_restart_daemon: bool = typer.Option(
         False, "--no-restart-daemon", help="跳过重启 daemon"
     ),
+    no_restart_gateway: bool = typer.Option(
+        False, "--no-restart-gateway", help="跳过重启 Gateway"
+    ),
     review_access: bool = typer.Option(
         True,
         "--review-access/--no-review-access",
@@ -515,7 +518,7 @@ def update_cmd(
 
     ``git pull`` / 改代码后一条命令收敛运行态。默认**不动**已导入的实例
     （apps/）；变更涉及托管逻辑时加 ``--restart-instances``。仅当 manager /
-    daemon 原本 running 时才重启，原本 stopped 不会被自动开启。
+    daemon / Gateway 原本 running 时才重启，原本 stopped 不会被自动开启。
     """
     import json as json_mod
     from pathlib import Path
@@ -544,6 +547,7 @@ def update_cmd(
                 sync_templates=sync_templates,
                 restart_manager=not no_restart_manager,
                 restart_daemon=not no_restart_daemon,
+                restart_gateway=not no_restart_gateway,
                 restart_instances=restart_instances,
                 run_doctor=not no_doctor,
                 review_access=review_access,

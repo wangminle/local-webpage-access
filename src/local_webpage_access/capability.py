@@ -6,9 +6,11 @@ setup / doctor / autostart check / manager ``/api/health`` 共用同一判定源
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -576,18 +578,35 @@ def write_capability_cache(
     role: Literal["manager", "daemon", "gateway"],
     report: CapabilityReport,
 ) -> Path:
-    """后台进程把自身探测结果落到 ``run/capability-<role>.json``。"""
+    """后台进程把自身探测结果落到 ``run/capability-<role>.json``。
+
+    同目录临时文件 + ``flush``/``fsync`` + ``os.replace`` 原子替换，避免
+    manager/CLI 并发读取时撞上半截 JSON。
+    """
     run_dir = Path(workspace_root) / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / f"capability-{role}.json"
-    path.write_text(
-        json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    payload = json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(run_dir),
     )
+    tmp_path = Path(tmp_name)
     try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        with contextlib.suppress(OSError):
+            os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+    with contextlib.suppress(OSError):
         path.chmod(0o600)
-    except OSError:
-        pass
     return path
 
 

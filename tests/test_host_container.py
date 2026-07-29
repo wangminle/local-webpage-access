@@ -132,6 +132,7 @@ class _FakeRuntime:
 
     def up(self, iid, **kw):
         type(self).calls.append("up")
+        type(self)._running_state = True
         return None
 
     def stop(self, iid, **kw):
@@ -153,7 +154,7 @@ class _FakeRuntime:
         type(self).calls.append("restart")
         return None
 
-    def container_id(self, iid):
+    def container_id(self, iid, *, all_containers: bool = False):
         return "abc123def"
 
     def image_id(self, iid):
@@ -403,7 +404,7 @@ def test_host_container_observation_failure_stays_failed_without_stale_id(
     monkeypatch.setattr(
         fake_runtime,
         "container_id",
-        lambda self, iid: None,
+        lambda self, iid, *, all_containers=False: None,
     )
     monkeypatch.setattr(
         fake_runtime,
@@ -443,13 +444,26 @@ def test_start_container_keeps_ids_when_observe_returns_none(
         },
     )
 
-    monkeypatch.setattr(fake_runtime, "container_id", lambda self, iid: None)
-    monkeypatch.setattr(fake_runtime, "image_id", lambda self, iid: None)
+    monkeypatch.setattr(
+        fake_runtime,
+        "container_id",
+        lambda self, iid, *, all_containers=False: (
+            "cid-keep" if all_containers else None
+        ),
+    )
+    monkeypatch.setattr(
+        fake_runtime,
+        "image_id",
+        lambda self, iid: None,
+    )
 
     started = start_container(workspace, config, registry, "api")
     assert started.container.containerId == "cid-keep"
     assert started.container.imageId == "sha256:keep"
     assert started.status == Status.RUNNING
+    assert "start" in fake_runtime.calls
+    assert "up" not in fake_runtime.calls
+    assert "build" not in fake_runtime.calls
 
 
 def test_host_container_rejects_non_container_manifest(
@@ -561,7 +575,7 @@ def test_http_ok_returns_true_on_success(monkeypatch) -> None:
 
     import local_webpage_access.hosting as h
 
-    monkeypatch.setattr(h.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(h, "urlopen_direct", fake_urlopen)
     assert _http_ok(9999) is True
 
 
@@ -571,7 +585,7 @@ def test_http_ok_returns_false_on_exception(monkeypatch) -> None:
 
     import local_webpage_access.hosting as h
 
-    monkeypatch.setattr(h.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(h, "urlopen_direct", fake_urlopen)
     assert _http_ok(9999) is False
 
 

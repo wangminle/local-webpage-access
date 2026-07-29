@@ -71,7 +71,9 @@ Vite + React 项目：
 
 - 别名 `reverse_proxy` 会去掉 `/<alias>/` 前缀转发到 upstream，因此
   **相对路径资源**（`./assets/...`、`assets/...`）能正确解析为 `/<alias>/assets/...`；
-- 但 **绝对路径资源**（`/assets/...`，即 `base: '/'`）会绕过别名直接打到入口根 → 404。
+- 但 **绝对路径资源**（`/assets/...`，即 `base: '/'`）会绕过别名直接打到入口根 →
+  空 200 / 404 / 错误 MIME（如 JS 请求得到 HTML）→ 白屏。
+  `lwa access review` 会对照无前缀 vs 带前缀结果并告警（`aliasResourceMismatch`）。
 
 按框架设置（构建产物里资源引用变为相对路径或带 `/<alias>/` 前缀）：
 

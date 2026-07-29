@@ -4,9 +4,9 @@
 
 ## 代码与版本
 
-- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.7` / `1.0.0`）。
+- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.8` / `1.0.0`）。
 - [ ] `src/local_webpage_access/cli/` 包入口（`cli/__init__.py` 的 `version` 命令 / `version_info.py`）读取该版本号；`python3 -m local_webpage_access` 与 `python3 -m local_webpage_access.cli` 均可调用。
-- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart` / 宿主机装配 `setup|init --default|--full|--resume` / `doctor --profile full` / `lwa capabilities` / Full Profile 能力闭环 / IMP-035 安全删除 / IMP-036 正式平台矩阵 / IMP-037 `gateway switch` / IMP-038·040 访问复核与 LAN 新鲜度 / IMP-039 `cancel-build` / IMP-041 remove 阶段日志；skills 数为 17）。
+- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart` / 宿主机装配 `setup|init --default|--full|--resume` / `doctor --profile full` / `lwa capabilities` / Full Profile 能力闭环与周期刷新 / `lwa update` 默认重启 gateway / IMP-023 别名资源错位检测 / IMP-035 安全删除 / IMP-036 正式平台矩阵 / IMP-037 `gateway switch` / IMP-038·040 访问复核与 LAN 新鲜度 / IMP-039 `cancel-build` / IMP-041 remove 阶段日志；skills 数为 17）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。
 
 ## 测试

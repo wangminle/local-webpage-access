@@ -256,7 +256,8 @@ def start_instance(
 ) -> InstanceManifest:
     """启动实例（WBS-17.01）。
 
-    * 容器实例已部署过 → 轻量 ``compose start``（:func:`start_container`）；
+    * 容器实例已部署过 → :func:`start_container`（容器仍在则 ``compose start``；
+      外部 down 后若 compose/镜像仍在则 ``up -d`` 自愈；否则回退完整重建）；
     * 否则（首次启动 / 静态 / 前端）→ 全量 :func:`host_instance`。
     最终 ``desiredState=running``。
     """

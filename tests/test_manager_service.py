@@ -290,6 +290,39 @@ def test_health_ok_false_on_closed_port() -> None:
     assert health_ok("127.0.0.1", 1, timeout=0.2) is False
 
 
+def test_manager_health_ignores_env_http_proxy(monkeypatch) -> None:
+    """BUG-380：manager_service._fetch_health 不受无效代理影响。"""
+    import json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = json.dumps({"ok": True, "workspaceRoot": "/tmp/ws"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    port = 0
+    server = HTTPServer(("127.0.0.1", 0), _H)
+    port = server.server_address[1]
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        assert health_ok("127.0.0.1", port, timeout=2.0) is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_health_matches_workspace_legacy_without_workspace_root(
     workspace: Workspace,
 ) -> None:

@@ -81,7 +81,7 @@ sudo loginctl enable-linger $USER   # 登出后 user 服务仍保活（强烈建
 
 ### WSL 的 Windows 侧
 
-WSL 发行版不会随 Windows 开机自动启动。`lwa autostart install` 在 WSL 下会打印一段
+WSL 发行版不会随 Windows 开机自动启动；**systemd 用户服务也不会让发行版在无人唤醒时永久存活**（微软明确的行为）。`lwa autostart install` 在 WSL 下会打印一段
 Windows 登录任务用的 PowerShell 脚本（也可用 `doctor-hints` 查看），核心是唤醒发行版：
 
 ```powershell
@@ -89,8 +89,43 @@ Windows 登录任务用的 PowerShell 脚本（也可用 `doctor-hints` 查看�
 wsl.exe -d <Distro> -- bash -c 'sleep infinity'
 ```
 
-把它注册到 Windows 任务计划程序（触发器"登录时"）。WSL 网络可能变化，IP 变更后执行
-`lwa access refresh` + `lwa access review`。
+把它注册到 Windows 任务计划程序（触发器「登录时」）。登录后确认：
+
+```bash
+systemctl --user status lwa-daemon lwa-manager lwa-gateway   # 按安装组合
+lwa autostart check
+test -f run/capability-gateway.json   # Full + --with-caddy 时建议存在
+```
+
+宿主内存 / 防火墙 / 工作区路径等运行前项见 [已知限制 · WSL2 宿主准备](known-limitations.md#wsl2-宿主准备运行前)。
+
+### WSL 网络（可选 mirrored）
+
+默认多为 **NAT**：发行版有独立 IP，换网或休眠后地址可能变，管理页 LAN 链接会漂移——此时执行：
+
+```bash
+lwa access refresh
+lwa access review
+```
+
+若宿主为 **Windows 11 22H2+**，可评估 **mirrored** 网络（可选，非人人必开）：
+
+```ini
+# %UserProfile%\.wslconfig
+[wsl2]
+networkingMode=mirrored
+dnsTunneling=true
+autoProxy=true
+```
+
+改完执行 `wsl --shutdown`。常见收益：VPN / localhost 互通更顺、LAN 侧与 Windows 地址模型更接近，可减少反复 `access refresh` 的频率。官方说明见 [WSL 网络](https://learn.microsoft.com/windows/wsl/networking)。
+
+注意：
+
+* **Mirrored 入站走 Hyper-V firewall**（Windows 11 22H2+ / WSL 2.0.9+），须对实际业务口逐端口 `New-NetFirewallHyperVRule`（示例与验收分层见 [已知限制 · LAN 访问与防火墙](known-limitations.md#lan-访问与防火墙)）；**不要**只配普通 Windows 防火墙规则就以为 LAN 已通，也**不要**对 LAN 开放 Caddy admin `:2019`。
+* `dnsTunneling` / `autoProxy` 与 `networkingMode` 分开理解：`autoProxy` 帮助 WSL 用宿主代理访问外网依赖，**不会**也不应改变 LWA 内部本机/LAN 探针的直连语义。
+* `.wslconfig` 变更需 `wsl --shutdown` 后生效；若环境依赖旧 NAT 端口转发脚本，切换前先在测试机验证 `lwa doctor` 与别名入口。
+* 最终 LAN 验收必须用**另一台物理机/手机**访问共享 NIC IP；Windows 用自身 NIC IP 自测失败只能记为现场观察，不能单独定论。
 
 ## 停服与自启的协调（重要）
 
@@ -155,6 +190,15 @@ LWA 的 manager / daemon 继承**启动时**的用户组。刚执行 `usermod -a
 曾按旧文档（`lwa daemon on` 作 `ExecStart`）安装的单元没有崩溃恢复。`lwa autostart check`
 会识别为旧 detached 启动器并报 fail；`lwa autostart repair` 把它改写为前台监管单元并
 重新启用。
+
+**`repair` 与 gateway（BUG-384）**：默认**保留**磁盘上已安装的全部服务（含
+`gateway`），用于工作区路径漂移后重写 `--workspace` / `WorkingDirectory`。`--with-caddy`
+只表示「原先未安装时**新增** gateway」，**不是**「是否保留」。故意卸掉 gateway 请用
+`lwa autostart install`（不带 `--with-caddy`）或 `uninstall`，不要指望裸 `repair` 缩集。
+
+工作区整目录改名时，优先 `lwa workspace relocate`（见 [工作区迁移手册](workspace-rename.md)）；
+CLI 会调用 `autostart repair` 重写三单元路径。手工逃生时：修好 editable 后在新路径再
+`lwa autostart repair`。
 
 ## Windows 宿主（仅 WSL2）
 

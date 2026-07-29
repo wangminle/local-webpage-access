@@ -123,6 +123,34 @@ def test_full_overall_requires_caddy_gateway_and_backends() -> None:
     assert _compute_overall(owner_bad) == "unready"
 
 
+def test_write_capability_cache_uses_atomic_replace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """能力缓存须同目录临时文件 + os.replace，避免并发读到半截 JSON。"""
+    import os
+
+    replaced: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def tracking_replace(src, dst):  # noqa: ANN001
+        replaced.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", tracking_replace)
+    report = CapabilityReport(profile="full", overall="ready", gateway_access="ready")
+    path = write_capability_cache(tmp_path, "gateway", report)
+    assert path == tmp_path / "run" / "capability-gateway.json"
+    assert path.is_file()
+    assert len(replaced) == 1
+    src, dst = replaced[0]
+    assert Path(src).parent == path.parent
+    assert dst == str(path)
+    assert ".tmp" in Path(src).name or path.name in Path(src).name
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["capabilities"]["gatewayAccess"] == "ready"
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
 def test_write_capability_cache_and_merge(tmp_path: Path, monkeypatch) -> None:
     report = CapabilityReport(
         profile="full",

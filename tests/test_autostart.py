@@ -1314,6 +1314,66 @@ def test_reinstall_removes_orphan_services(tmp_path, monkeypatch) -> None:
     assert "gateway" not in asm.installed_services(ws, backend)
 
 
+def test_repair_preserves_installed_gateway_without_with_caddy(
+    tmp_path, monkeypatch
+) -> None:
+    """BUG-384：repair 默认保留已安装 gateway，不得当 orphan 卸载。"""
+    root, ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    record: list[list[str]] = []
+    asm.install(
+        ws, config, with_caddy=True, enable=False, python_exe=sys.executable
+    )
+    backend = asm.MacLaunchdBackend()
+    gw = backend.unit_path("gateway")
+    assert gw.is_file()
+    # 改坏工作区路径，模拟迁移后 repair
+    import plistlib
+
+    raw = plistlib.loads(gw.read_bytes())
+    args = list(raw["ProgramArguments"])
+    for i, a in enumerate(args):
+        if a == "--workspace":
+            args[i + 1] = str(tmp_path / "old-root")
+            break
+    raw["ProgramArguments"] = args
+    gw.write_bytes(plistlib.dumps(raw, fmt=plistlib.FMT_XML, sort_keys=False))
+
+    result, actions = asm.repair(
+        ws, config, with_caddy=False, python_exe=sys.executable,
+        runner=_fake_runner(record),
+    )
+    assert gw.is_file()
+    assert "gateway" in result.services
+    assert "gateway" in (asm.read_manifest(ws) or [])
+    # 工作区应被重写为当前
+    fixed = plistlib.loads(gw.read_bytes())
+    fargs = fixed["ProgramArguments"]
+    assert str(root) in fargs
+
+
+def test_repair_with_caddy_adds_gateway_when_missing(
+    tmp_path, monkeypatch
+) -> None:
+    """BUG-384：--with-caddy 只表示可新增 gateway，不是“是否保留”。"""
+    root, ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    asm.install(
+        ws, config, with_caddy=False, enable=False, python_exe=sys.executable
+    )
+    backend = asm.MacLaunchdBackend()
+    assert not backend.unit_path("gateway").is_file()
+
+    result, _actions = asm.repair(
+        ws, config, with_caddy=True, python_exe=sys.executable,
+        runner=_fake_runner([]),
+    )
+    assert "gateway" in result.services
+    assert backend.unit_path("gateway").is_file()
+
+
 def test_check_unit_path_rejects_useless_path(tmp_path, monkeypatch) -> None:
     """PATH=/definitely/missing 不得判 OK（BUG-164）。"""
     import plistlib

@@ -4,6 +4,8 @@
 
 > CLI 会自动向上查找包含 `local-web.yml` 的目录作为当前工作区。在 Runtime 目录内执行 `lwa` 命令即可，无需每次加 `-w`。
 
+> **改名 / 搬目录**：优先 `lwa workspace relocate`（IMP-042）；人工逃生舱见 [工作区迁移手册](workspace-rename.md)。
+
 ## 快速上手
 
 ```bash
@@ -191,7 +193,7 @@ lwa alias clear <id>
 
 ## 开发期：lwa 源码更新后如何重载
 
-V0.4.0 起优先运行 `lwa update`。当前实现已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon；**若开机自启单元在管，会走 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`），保证单一进程**，勿再手搓 `off && on` 与 KeepAlive 抢锁。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon 等后台子进程仍跑旧代码。
+V0.4.0 起优先运行 `lwa update`。当前实现已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon；**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）；**若开机自启单元在管，会走 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`），保证单一进程**，勿再手搓 `off && on` 与 KeepAlive 抢锁。Full Profile 收尾会验收合并后的能力缓存。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon、gateway 等后台子进程仍跑旧代码。
 
 升级收尾（IMP-038）：后台重启后会 **access refresh**，并默认跑一次轻量 **access review**（可用 `--no-review-access` 跳过）。DHCP 换网后的 LAN 漂移另见 [运维手册 §7.2](operations-playbook.md)；AI 协作流程见 Skill **`lwa-review-access-urls`**。
 
@@ -228,4 +230,5 @@ AI 助手可参照 Skill **`lwa-update-runtime`**（`lwa init` 后会复制到�
 
 - [README](../README.md) — 安装与命令总览
 - [运维手册](operations-playbook.md) — 网关选型、冗余清理、容器别名、浏览量、Caddy 排障
+- [工作区迁移](workspace-rename.md) — `lwa workspace relocate` + 人工逃生舱（DOC-081 / IMP-042）
 - [管理页说明](manager-page.md)

@@ -26,11 +26,11 @@ description: >-
 | 操作 | 默认 | 说明 |
 | --- | --- | --- |
 | `lwa access refresh` | 写盘 | 仅重写 `lanUrl`/`routeUrl`，**不** rebuild、不改业务代码 |
-| `lwa access review` | **只读** | HTTP 探活 + SPA 空 200 检测；不改文件 |
+| `lwa access review` | **只读** | HTTP 探活 + SPA 别名资源错位检测（空 200 / 404 / 错误 MIME）；不改文件 |
 | `lwa doctor --access` | 只读复核 | 复用同一套 `review_access()`，不另写探测 |
 | `--rebuild-if-needed` | **显式才写** | 仅对 IMP-023 命中实例 rebuild；**必须**经用户确认 |
 
-禁止把 DHCP / LAN IP 漂移解读为必须 rebuild。只有 IMP-023（绝对路径子资源空 200）才建议重建。
+禁止把 DHCP / LAN IP 漂移解读为必须 rebuild。只有 IMP-023（绝对路径子资源相对带前缀错位：空 200 / 404 / 错误 MIME）才建议重建。
 
 ## 推荐流程
 
@@ -61,7 +61,7 @@ lwa rebuild <id>
 2. **地址漂移**（`lan_url_stale` / `lanUrlStale`）→ `access refresh`；不必 rebuild。
 3. **服务未起**（回环探活失败）→ `lwa start` / 查 run 日志；与 LAN 无关。
 4. **`[SKIP] desiredState=stopped`**（BUG-301）→ 用户主动停止的实例，属预期，不计入 FAIL；需复核时先 `lwa start`。
-5. **IMP-023 空 200** → 修前端 `base` 后显式 `--rebuild-if-needed` 或 `lwa rebuild`。
+5. **IMP-023 别名资源错位**（空 200 / 404 / 错误 MIME）→ 修前端 `base` 后显式 `--rebuild-if-needed` 或 `lwa rebuild`。
 6. **端口双开 / 后端不一致 / 网关残留** → 优先 `lwa gateway switch <caddy|builtin>`（IMP-037）；仅启停 master 用 `lwa gateway on/off`；并用 `doctor` 的 `backend_handoff` 核对。
 
 ## 输出

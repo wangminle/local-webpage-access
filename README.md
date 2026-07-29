@@ -21,7 +21,8 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 - **可观测性**：分类日志（build / run / gateway / import / scan）与按大小滚动、HTTP 健康检查、状态聚合、整机与实例级资源统计；管理页**浏览量统计**（Caddy 别名入口 JSON access log / builtin gateway.log / 容器日志尽力解析）。
 - **构建队列**：跨进程闸门限流（默认并发 1，`registry/build-locks.db`），拿不到槽位即标记 `queued`，排队超时可控；`cancel-build` 可取消排队/进行中构建（不删缓存/镜像/用户数据，IMP-039）。
 - **网关原子切换（IMP-037）**：`lwa gateway switch <caddy|builtin>` 事务切换后端（预检/停旧启新/回滚/`degraded`）；结果区分 `accessOk` / `fullyOk`。
-- **访问地址新鲜度（IMP-038/040）**：管理页读时合成 `lanUrl`；`lwa access refresh` / `doctor --access` / update 收尾 review；LAN 漂移节流自愈。
+- **访问地址新鲜度（IMP-038/040）**：管理页读时合成 `lanUrl`；`lwa access refresh` / `doctor --access` / update 收尾 review；LAN 漂移节流自愈。`access review` 检测 SPA 别名资源错位（空 200 / 404 / 错误 MIME，IMP-023）。
+- **Full Profile 能力新鲜度**：`lwa gateway on` / 前台监管写 `capability-gateway.json`；manager 后台约每 5 分钟周期刷新完整能力；内部健康/access/Caddy admin 探针直连（不受 `http_proxy` 影响）；`lwa update` 默认重启原本在跑的 gateway，Full 收尾验收合并后的能力缓存。
 - **SQLite Registry**：七张表（instances / containers / static_sites / ports / events / builds / resources），外键级联、WAL 模式。
 - **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权，覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计。
 - **自动导入守护进程（WBS-21）**：`lwa daemon on` 后监听 `inbox/`，自动导入并启动可确定的轻量实例。
@@ -50,7 +51,7 @@ pip install -e ".[dev]"
 ## 正式支持平台（IMP-036）
 
 - **Linux 裸机**：Ubuntu **LTS**（当前矩阵：22.04/24.04/26.04）与 Debian **Stable**（12 bookworm / 13 trixie）；x86_64 / arm64；kernel ≥5.15、glibc ≥2.35、systemd
-- **WSL2**：同上发行版；WSL 包 ≥2.1.5 且 systemd 为 PID 1；工作区请放 Linux 文件系统。WSL 下 Full/autostart **禁止**把工作区放在 `/mnt/<drive>`（写入前 fail-closed）；普通 CLI 可读诊断仍可
+- **WSL2**：同上发行版；WSL 包 ≥2.1.5 且 systemd 为 PID 1；工作区请放 Linux 文件系统。WSL 下 Full/autostart **禁止**把工作区放在 `/mnt/<drive>`（写入前 fail-closed）；普通 CLI 可读诊断仍可。运行前请核对宿主 `.wslconfig` 内存、**Mirrored 下 Hyper-V 防火墙逐端口放行**与自启唤醒；LAN 最终以另一台物理机验收，见 [WSL2 宿主准备](docs/known-limitations.md#wsl2-宿主准备运行前) / [LAN 与防火墙](docs/known-limitations.md#lan-访问与防火墙) 与 [开机自启 · WSL](docs/autostart.md#wsl-的-windows-侧)
 - **macOS**：14 Sonoma+（滚动下限，截至 2026-07）
 - **不支持**：Windows 原生（请改用 WSL2）、WSL1、Ubuntu 非 LTS、Debian sid/testing、未列入的发行版/架构
 
@@ -113,7 +114,7 @@ lwa doctor                    # 全部环境检查
 lwa doctor --profile full     # Full Profile 能力契约（CapabilityReport）
 lwa capabilities --json       # 输出能力报告 JSON
 lwa doctor my-site            # 对单个实例深度诊断
-lwa access review             # 复核访问地址可用性（别名白屏 / 空 200 自查）
+lwa access review             # 复核访问地址（别名白屏 / IMP-023 空200·404·错误MIME）
 ```
 
 管理页 token 在首次 `lwa manager on` 或 `lwa manager start` 时生成；也可在工作区 `run/` 下查看。详见 [管理页说明](docs/manager-page.md)。
@@ -123,7 +124,7 @@ lwa access review             # 复核访问地址可用性（别名白屏 / 空
 | 命令 | 说明 |
 | --- | --- |
 | `lwa init [-w DIR] [--force] [--default\|--full] [--yes]` | 初始化工作区（目录 / 配置 / registry / skills），幂等；`--full` 装齐依赖并在能力闭环 **ready 后**写入 `profile: full` |
-| `lwa update` | 升级 lwa 包并热重载工作区：同步 skills、补齐配置、重启 manager/daemon、刷新访问地址（可选 review）、可选 doctor / restart 实例 |
+| `lwa update` | 升级 lwa 包并热重载：同步 skills、补齐配置、重启 manager/daemon、**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）、刷新访问地址（可选 review）、可选 doctor / restart 实例；Full 收尾验收能力缓存 |
 | `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名；`--update` 原地升级（容器自动 rebuild，静态/前端 restart；`--no-restart` 仅换源码） |
 | `lwa alias set <ID> <slug>` / `lwa alias clear <ID>` | 为静态或容器实例设置/清除路径别名（需 Caddy；与管理页/API 共用逻辑） |
 | `lwa scan [ID]` | 重新扫描实例（省略 ID 则扫所有 `pending`） |
@@ -148,7 +149,7 @@ lwa access review             # 复核访问地址可用性（别名白屏 / 空
 | `lwa gateway on / off / status` | 控制 Caddy 网关 master（admin :2019 探活；切 builtin 后仍可关残留 master，BUG-077）；`on` 默认复核访问地址，`--rebuild-if-needed` 对 IMP-023 命中实例自动 rebuild（G6） |
 | `lwa gateway switch <caddy\|builtin> [--dry-run] [--json] [--no-review]` | 原子切换网关后端（IMP-037）：预检 → 停旧启新 → 同步 manifest/registry → access 收尾；失败回滚，回滚失败标 `degraded`；`--json` 含 `accessOk` / `fullyOk` |
 | `lwa access refresh` | 用当前 LAN IP 重算所有实例 lanUrl/routeUrl（DHCP 换网、重启网关后地址漂移自愈，G1） |
-| `lwa access review [--json] [--rebuild-if-needed]` | 复核各实例声明 URL 的真实可用性（回环 / lanUrl / routeUrl + SPA 绝对路径空 200 检测 IMP-023）；默认仅提示需 rebuild 的实例 |
+| `lwa access review [--json] [--rebuild-if-needed]` | 复核各实例声明 URL 的真实可用性（回环 / lanUrl / routeUrl + SPA 别名资源错位检测 IMP-023：空 200 / 404 / 错误 MIME）；默认仅提示需 rebuild 的实例 |
 | `lwa autostart install [--with-caddy] [--no-enable] [--linger]` | 生成开机/登录自启单元（默认启用；`--no-enable` 只生成、不改 daemon 运行意图；macOS launchd / Linux·WSL systemd 前台监管，IMP-030） |
 | `lwa autostart enable / disable / status` | 加载 / 停用（持久 disable）/ 查看自启动单元与对应前台进程；迁移失败不会强行 enable |
 | `lwa autostart check [--json]` | 完备性深检（解释器 / PATH 可用性 / 工作区 / 单元形态 / 启用态 / MainPID 身份 / 进程 / Caddy·:2019 / linger / WSL / Docker），fail 退出码 1 |
@@ -248,14 +249,15 @@ python3 -m pytest           # 全量单元测试与集成测试（不依赖真�
 
 | 文档 | 内容 |
 | --- | --- |
-| [docs/runtime-workspace.md](docs/runtime-workspace.md) | Runtime 工作区目录说明与使用引导 |
-| [docs/operations-playbook.md](docs/operations-playbook.md) | 日常运维速查（宿主机装配 / Full Profile、网关选型、inbox、冗余、别名、Caddy 排障） |
+| [docs/runtime-workspace.md](docs/runtime-workspace.md) | Runtime 工作区目录、端口、资源档位 |
+| [docs/workspace-rename.md](docs/workspace-rename.md) | LWA 工作区迁移手册（DOC-081）；优先 `lwa workspace relocate` |
+| [docs/operations-playbook.md](docs/operations-playbook.md) | 日常运维速查（宿主机装配 / 运行前清单 / 日志与 journal、网关选型、inbox、冗余、别名、Caddy 排障） |
 | [docs/manager-page.md](docs/manager-page.md) | 管理页 API 端点、鉴权与使用（WBS-30.06） |
-| [docs/faq.md](docs/faq.md) | 常见问题与排障路径（WBS-30.09） |
+| [docs/faq.md](docs/faq.md) | 常见问题与排障路径（WBS-30.09）；含症状→日志 |
 | [docs/security-boundary.md](docs/security-boundary.md) | 安全边界与默认保护（WBS-30.10） |
 | [docs/release-checklist.md](docs/release-checklist.md) | V1 发布清单（WBS-30.11） |
-| [docs/known-limitations.md](docs/known-limitations.md) | V1 已知限制（WBS-30.12） |
-| [docs/autostart.md](docs/autostart.md) | 开机自启（macOS launchd / Linux·WSL2 systemd；Windows 仅作 WSL2 宿主） |
+| [docs/known-limitations.md](docs/known-limitations.md) | V1 已知限制（WBS-30.12）；含 WSL2 宿主准备（内存 / 防火墙 / 文件系统） |
+| [docs/autostart.md](docs/autostart.md) | 开机自启（macOS launchd / Linux·WSL2 systemd；WSL 唤醒与可选 mirrored 网络） |
 | [docs/testing.md](docs/testing.md) | 测试体系与运行方式 |
 | [docs/acceptance-checklist.md](docs/acceptance-checklist.md) | V1 端到端验收清单 |
 

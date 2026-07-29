@@ -36,7 +36,6 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import secrets
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -72,6 +71,12 @@ log = get_logger("manager")
 
 TOKEN_FILENAME = "manager-token.json"  # 相对 run/
 MANAGER_STATIC_DIR = "manager_static"  # 相对包目录
+# BUG-379：首次延后刷新（等 gateway 晚于 manager 就绪），之后周期刷新完整能力。
+# 默认 300s 与 §23 / gateway 前台周期同量级，降低 Docker/Caddy 子进程开销。
+_CAPABILITY_INITIAL_DELAY = 15.0
+_CAPABILITY_REFRESH_INTERVAL = 300.0
+_CAPABILITY_STOP_JOIN_TIMEOUT = 2.0
+_CAPABILITY_ERROR_LOG_INTERVAL = 300.0
 
 
 # ---- token 机制（WBS-22.12）-------------------------------------------------
@@ -350,8 +355,6 @@ def create_app(
     token: str,
 ) -> FastAPI:
     """构建管理页 FastAPI 应用（WBS-22.01）。"""
-    import threading
-
     from local_webpage_access.capability import (
         collect_capability_report,
         log_capability_probe,
@@ -362,46 +365,118 @@ def create_app(
 
     setup_logging(level=config.logLevel)  # type: ignore[arg-type]
 
+    # create_app 内共享状态：供 lifespan / refresh 闭包使用（单飞锁等）。
+    import threading as _threading
+
+    app_state_holder: dict[str, Any] = {
+        "refresh_cond": _threading.Condition(),
+        "refresh_inflight": False,
+        "refresh_result": None,
+        "refresh_error": None,
+        "last_error_log_at": 0.0,
+    }
+
     def _refresh_capability_cache() -> dict[str, Any]:
         """后台探测并刷新 capability-manager.json / 内存片段（BUG-254）。
 
         BUG-271：``include_backend_cached=True``，与 CLI/doctor 及「完整能力报告/
         刷新」契约一致，合并 daemon/gateway 缓存字段；manager 自身仍以实时探测为准。
+
+        BUG-379：进程内单飞——周期线程与 ``/api/capability?refresh=true`` 并发时
+        只跑一次探测，等待方共享同一结果，避免交错写缓存。
         """
-        report = collect_capability_report(
-            workspace_root=workspace.root,
-            role="manager",
-            config_profile=getattr(config, "profile", None),
-            include_backend_cached=True,
-        )
-        level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
-        log_capability_probe("manager", report, level=level)
-        write_capability_cache(workspace.root, "manager", report)
-        return report.to_health_fragment()
+        lock: _threading.Condition = app_state_holder["refresh_cond"]
+        with lock:
+            if app_state_holder["refresh_inflight"]:
+                while app_state_holder["refresh_inflight"]:
+                    lock.wait(timeout=120.0)
+                exc = app_state_holder.get("refresh_error")
+                if exc is not None:
+                    raise exc
+                result = app_state_holder.get("refresh_result")
+                if not isinstance(result, dict):
+                    raise RuntimeError("capability refresh finished without result")
+                return dict(result)
+            app_state_holder["refresh_inflight"] = True
+            app_state_holder["refresh_result"] = None
+            app_state_holder["refresh_error"] = None
+        try:
+            report = collect_capability_report(
+                workspace_root=workspace.root,
+                role="manager",
+                config_profile=getattr(config, "profile", None),
+                include_backend_cached=True,
+            )
+            level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
+            log_capability_probe("manager", report, level=level)
+            write_capability_cache(workspace.root, "manager", report)
+            frag = report.to_health_fragment()
+            with lock:
+                app_state_holder["refresh_result"] = frag
+            return frag
+        except Exception as exc:
+            with lock:
+                app_state_holder["refresh_error"] = exc
+            raise
+        finally:
+            with lock:
+                app_state_holder["refresh_inflight"] = False
+                lock.notify_all()
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
         # BUG-254：能力探测放到后台，保证 /api/health 立即可用、不阻塞 start 轮询。
-        def _bg_probe() -> None:
-            try:
-                frag = _refresh_capability_cache()
-                app.state.capability_fragment = frag
-            except Exception:  # noqa: BLE001 — 探测失败不阻断管理页
-                log.exception("manager 能力自检失败")
-            # BUG-277：gateway 常比 manager 晚就绪；延后重合并一次缓存
-            time.sleep(15)
-            try:
-                frag = _refresh_capability_cache()
-                app.state.capability_fragment = frag
-            except Exception:  # noqa: BLE001
-                log.exception("manager 延后能力自检失败")
+        # BUG-379：启动后周期刷新完整能力；停止事件在 lifespan 退出时置位收尾。
+        import time as _time
 
-        threading.Thread(
+        stop_event = _threading.Event()
+        app.state.capability_stop_event = stop_event
+
+        def _mark_probe_failed(exc: BaseException, *, force_log: bool = False) -> None:
+            """探测异常：不覆盖磁盘快照；Full/内存片段不得无限保留旧 ready。"""
+            prev = getattr(app.state, "capability_fragment", None) or {}
+            frag = dict(prev) if isinstance(prev, dict) else {}
+            frag["overall"] = "unknown"
+            frag["action"] = (
+                "capability_probe_failed；"
+                "请查 manager.log 或 GET /api/capability?refresh=true"
+            )
+            frag["probeError"] = str(exc)[:200]
+            caps = dict(frag.get("capabilities") or {})
+            # 保留上次字段供排障对照，但 overall 已 unknown，避免假绿。
+            frag["capabilities"] = caps
+            app.state.capability_fragment = frag
+            now = _time.monotonic()
+            if force_log or (
+                now - float(app_state_holder["last_error_log_at"])
+                >= _CAPABILITY_ERROR_LOG_INTERVAL
+            ):
+                app_state_holder["last_error_log_at"] = now
+                log.exception("manager 能力自检失败")
+
+        def _bg_probe() -> None:
+            delay = _CAPABILITY_INITIAL_DELAY
+            while True:
+                try:
+                    frag = _refresh_capability_cache()
+                    app.state.capability_fragment = frag
+                except Exception as exc:  # noqa: BLE001 — 探测失败不阻断管理页
+                    _mark_probe_failed(exc)
+                # BUG-277：首次延后等待 gateway 就绪；之后按间隔周期刷新。
+                if stop_event.wait(timeout=delay):
+                    break
+                delay = _CAPABILITY_REFRESH_INTERVAL
+
+        probe_thread = _threading.Thread(
             target=_bg_probe, name="lwa-capability-probe", daemon=True
-        ).start()
+        )
+        probe_thread.start()
+        app.state.capability_probe_thread = probe_thread
         try:
             yield
         finally:
+            stop_event.set()
+            probe_thread.join(timeout=_CAPABILITY_STOP_JOIN_TIMEOUT)
             with _suppress_close():
                 registry.close()
 

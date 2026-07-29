@@ -40,7 +40,7 @@ from local_webpage_access.file_lock import (
 )
 from local_webpage_access.logging import get_logger, write_instance_log
 from local_webpage_access.paths import Workspace
-from local_webpage_access.probe import mark_probe_url
+from local_webpage_access.probe import mark_probe_url, urlopen_direct
 
 log = get_logger("gateway")
 
@@ -673,7 +673,7 @@ class StaticGateway:
         """
         url = mark_probe_url(f"http://127.0.0.1:{host_port}{path}")
         try:
-            resp = urllib.request.urlopen(url, timeout=timeout)
+            resp = urlopen_direct(url, timeout=timeout)
             return 200 <= resp.status < 400
         except Exception:  # noqa: BLE001
             return False
@@ -890,7 +890,7 @@ class StaticGateway:
     def _admin_alive(self, *, timeout: float = _ADMIN_PROBE_TIMEOUT) -> bool:
         """探测 Caddy admin API（127.0.0.1:2019）是否在线。"""
         try:
-            urllib.request.urlopen(_ADMIN_CONFIG_URL, timeout=timeout)
+            urlopen_direct(_ADMIN_CONFIG_URL, timeout=timeout)
             return True
         except Exception:  # noqa: BLE001 — 探测失败即视为不在线
             return False
@@ -1015,7 +1015,7 @@ class StaticGateway:
             return True
         try:
             req = urllib.request.Request(_ADMIN_STOP_URL, method="POST")
-            urllib.request.urlopen(req, timeout=_CADDY_OP_TIMEOUT)
+            urlopen_direct(req, timeout=_CADDY_OP_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — POST /stop 响应后常立即断连，属正常
             log.debug("POST /stop 返回异常（通常正常）：%s", exc)
         deadline = time.monotonic() + _ADMIN_STARTUP_WAIT

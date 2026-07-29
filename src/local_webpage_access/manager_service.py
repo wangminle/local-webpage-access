@@ -17,7 +17,6 @@ import subprocess
 import sys
 import time
 import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -28,6 +27,7 @@ from local_webpage_access.gateway_service import maybe_start_gateway
 from local_webpage_access.errors import LifecycleError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
+from local_webpage_access.probe import urlopen_direct
 
 log = get_logger("manager")
 
@@ -120,7 +120,7 @@ def _fetch_health(host: str, port: int, *, timeout: float = 1.0) -> dict[str, An
     """``GET /api/health`` 解析 JSON；失败或非 200 时返回 ``None``。"""
     url = f"http://{_health_check_host(host)}:{port}/api/health"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+        with urlopen_direct(url, timeout=timeout) as resp:  # noqa: S310
             if resp.status != 200:
                 return None
             data = json.loads(resp.read().decode("utf-8"))

@@ -60,8 +60,9 @@ lwa alias clear <id>
 >   **`lwa gateway switch caddy`**；master 未起再 `lwa gateway on`。
 > - **SPA 子路径资源（IMP-023）**：别名 `reverse_proxy` 会去掉 `/<alias>/` 前缀，
 >   **相对路径资源**（`./assets/...`）正常；但 **绝对路径资源**（`/assets/...`，
->   Vue/React 默认 `base: '/'`）会绕过别名打到入口根 → 404 白屏。受影响项目应在
->   构建时设相对 base（Vite `base: './'`）或显式 `--base=/<alias>/`。纯静态 HTML
+>   Vue/React 默认 `base: '/'`）会绕过别名打到入口根 → 空 200 / 404 / 错误 MIME 白屏。
+>   受影响项目应在构建时设相对 base（Vite `base: './'`）或显式 `--base=/<alias>/`。
+>   `lwa access review` 会检出 `aliasResourceMismatch`。纯静态 HTML
 >   （相对路径或无外部资源）不受影响。详见 `lwa-build-frontend-static`。
 
 ## 误重复导入与冗余清理（IMP-012 / IMP-019）

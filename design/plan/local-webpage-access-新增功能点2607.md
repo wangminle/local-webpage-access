@@ -1,7 +1,7 @@
-# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～041（202607）
+# 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～042 / WSL2 实机排障反哺（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机可后续补）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 实机清单与 036.09 Windows 分支清理可后续补）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../achievement/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
-> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈；§22 为删除/purge 阶段日志与容器别名清理（IMP-034 后续 + BUG-268）。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机验收与 system unit SupplementaryGroups 完整路径可后续补强）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机可后续补）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 实机清单与 036.09 Windows 分支清理可后续补）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。**§23 已于 2026-07-29 根据 WSL2 Mirrored + Full Profile 实机排障补入；BUG-376～381 / DOC-077 已落地，纳入 V0.6.8。** **§24 IMP-042「LWA 工作区迁移」主路径已落地（2026-07-29，DEV-089）：事务 + `lwa workspace relocate` + Skill `lwa-relocate-workspace`；DOC-081 / PLN-027 完成；依赖 BUG-382/383/384。**编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../achievement/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈；§22 为删除/purge 阶段日志与容器别名清理（IMP-034 后续 + BUG-268）；§23 为 2026-07-29 WSL2 实机排障对能力缓存、HTTP 探针、别名子资源和宿主网络文档的反哺；§24 为 **LWA 工作区迁移**（同盘原子改名事务 + CLI + Skill）。
 
 ---
 
@@ -1777,3 +1777,566 @@ audit remove instance=<id> purge=<bool> force=<bool> status=<http> code=<error_c
 | `DEV-088` | IMP-041 开发主项（含关闭 BUG-268） |
 | `BUG-268` | 别名残留 —— 由本项 041.03 关闭 |
 | `CHK-094` | 发现问题的实机复核（已完成） |
+
+## 23. 2026-07-29 WSL2 实机排障反哺（BUG-376～381 / DOC-077）
+
+> **性质**：本节是对既有能力的实机反证与补强规划，不另设 IMP 编号。已确认缺陷继续用
+> `BUG-` 追踪，宿主操作口径用 `DOC-` 追踪；尚无充分证据的历史数据布局问题只保留为
+> 调查项，不提前登记成代码 Bug。
+>
+> **来源环境**：Windows 11 + WSL2 Ubuntu 24.04，`networkingMode=mirrored`；
+> 工作区 `/home/fenix-haier/local-webpage-access-20260717`；LWA V0.6.7；
+> AI Review 业务实例 `ai-review-prd-v0-2-7`；Windows/WSL 共享 LAN IP
+> `10.181.224.39/23`。
+>
+> **结论摘要**：BUG-102、BUG-198、BUG-205 与 IMP-023 的既有方向成立；
+> BUG-376～378补上了 gateway 能力快照和升级收尾的一部分缺口；BUG-379～381 与
+> DOC-077 已按本节设计落地（manager 300s 周期刷新+单飞、内部探针直连、
+> alias_resource_mismatch、Hyper-V firewall 文档）。`data/data/` 溯源仍为 P2 调查项。
+
+### 23.1 工作区配置基线与运行契约
+
+现场 `local-web.yml` 的关键配置为：
+
+| 配置 | 现场值 | 对本次排障的含义 |
+| --- | --- | --- |
+| `managerHost` / `managerPort` | `0.0.0.0` / `17800` | manager 确实监听所有网卡；LAN 不可达时需继续查 Hyper-V firewall、宿主策略与真实外部客户端，不能归因于只绑定回环 |
+| `managerEnabled` | `true` | 管理页属于该工作区的正式运行组件 |
+| `staticGateway` / `staticGatewayPort` | `caddy` / `8080` | `/<alias>/` 统一入口依赖 Caddy master、`:2019` admin、别名片段和 `capability-gateway.json` |
+| `portPool` | `18000–19999` | 是实例端口**分配范围**，不是应默认全量开放的防火墙范围；当前实例实际使用 `18000` |
+| `lanIpStrategy` / `manualLanIp` | `auto` / `null` | URL 由当前出口网卡自动推导；多网卡、VPN、换网时仍须接受漂移检测与 refresh/review |
+| `profile` | `full` | Caddy、Docker、manager、daemon、gateway 任一强制字段为 unknown/degraded 即 `unready`；不能用改成 default 掩盖假红 |
+| `serviceUser` | `fenix-haier` | Caddy owner 与 Docker 权限均应以该用户的真实后台上下文验收 |
+| `buildConcurrency` | `1` | 与本次网络、能力缓存和数据库路径问题无直接因果 |
+| `defaultResourceLimits` | `512m` / `0.75` | 仅是新实例默认资源档位；无 OOM/CPU throttling 证据时不纳入本次根因 |
+| `staticRateLimit.enabled` | `false` | 不导致本次故障；即使开启也不能替代 manager token 或业务登录限流 |
+| `buildMirrors.preset` | `china` | 只影响构建依赖源，不影响运行期网络路由 |
+
+工作区定位规则同时确认：
+
+1. `local-web.yml` 是工作区根标记与主配置源。
+2. 多数运行命令从当前目录**向上查找**该文件；在工作区任意子目录执行均可。
+3. 在整个工作区目录树之外执行会报 `PATH_ERROR`；目前仅少数命令（如
+   `lwa init`、`lwa update`）提供显式 `--workspace/-w`，不能假设所有命令都有全局
+   `-w`。
+
+### 23.2 现场问题与当前代码边界
+
+| 现场现象 | 已确认根因/边界 | 当前项目结论 |
+| --- | --- | --- |
+| `lwa gateway on` 曾因 `--pingback` 超时报失败，但 Caddy 实际已在线 | CLI 子进程结果与 admin/pidfile 真实运行态不一致 | BUG-102 已修：失败/超时后以工作区 pid + admin 探活兜底；不再新增同类修复 |
+| `/ai-review/` HTML 200，但 CSS/JS 为空或错路由 | 应用 HTML 使用 `/css/...`、`/js/...` 等根绝对路径，绕过 `/<alias>/` | 应用应改相对路径或显式 alias base；LWA 保留通用探测，不自动重写未知业务 HTML/JS |
+| `user-public` 登录 401，但密码哈希验证正确 | 应用实际读 `data/app.db`，历史业务库位于 `data/data/app.db` | 已恢复数据，但嵌套来源尚未定论；不得写成“rebuild 重置数据库” |
+| 管理页 Full Profile 长期显示“能力未就绪” | manager/daemon 缓存写于 Caddy 未恢复时；`gateway on` detached 路径又没有 gateway 能力快照 | BUG-376～378已覆盖 gateway 写缓存、原子写和 update 重启/验收；manager 完整快照仍缺周期刷新（BUG-379） |
+| `curl`/LWA 探针在代理环境下返回不可达 | `http_proxy/https_proxy` 介入本机或 LAN URL 请求 | 人工 `unset` 只能止血；LWA 内部探针必须自行保证直连（BUG-380） |
+| Mirrored 下本机服务正常，外部 LAN 是否可达不确定 | WSL 入站经过 Hyper-V firewall；Windows 自身 NIC IP 自测不等价于另一台物理机验收 | 文档须给正确防火墙层与外部验收矩阵，不把单次现场现象提升为无证据的“已知行为”（DOC-077） |
+
+### 23.3 已落地或当前工作树已补的能力
+
+#### 23.3.1 已在 V0.6.7 基线中的保护
+
+1. **BUG-102**：`caddy start --pingback` 非零/超时后回退 admin + 工作区 pid 归属探测，
+   防止“CLI 报失败但 master 已在线”。
+2. **BUG-198**：RUNTIME_ROOT 应用将宿主 `apps/<id>/data/` 挂载到
+   `/app/runtime/data`，普通 SQLite 应用挂载到 `/app/data`。
+3. **BUG-205**：rebuild 的 `down()` 默认 `remove_volumes=False`，不删除命名卷；
+   bind mount 本身不受 `down` 影响。老实例容器层数据在 down 前通过
+   `docker cp <container-path>/. <host-data>/` 尽力救出，复制的是目录内容而非再套一层
+   源目录名。
+4. **IMP-023 / IMP-038**：`lwa access review` 已能解析别名入口 HTML、抽样绝对资源，
+   并对“根路径空 200、别名前缀有实体”的场景告警；gateway/update 流程已有访问复核
+   编排。
+5. **BUG-277 / BUG-284 / BUG-290**：`/api/health` 可用新鲜且存活的 gateway 缓存纠正
+   `gatewayAccess`，纠偏后重算 `overall/action`，同时避免仅凭 gateway 快照把 manager
+   启动占位片段伪造为 ready。
+
+#### 23.3.2 当前工作树已补、待发布的闭环
+
+1. **BUG-376**：`start_gateway()` 成功和“已在线”两条路径均刷新
+   `capability-gateway.json`；gateway 前台监管约每 5 分钟周期刷新。
+2. **BUG-377**：能力缓存改为同目录临时文件 + `flush/fsync` + `os.replace` 原子替换，
+   避免 manager/CLI 并发读取半截 JSON。
+3. **BUG-378**：`lwa update` 默认重启原本正在运行的 gateway；有 systemd/launchd
+   监督器时交由监督器重启，无监督器时才 stop→start；Full 收尾额外验收合并后的能力
+   报告。
+
+上述三项不能等价为“能力缓存问题已经全部解决”：它们确保 gateway 角色有新鲜快照，
+但 manager 自己持有的 Caddy 完整字段仍可能长期停留在旧值，见下一节。
+
+### 23.4 确认待修问题
+
+#### 23.4.1 BUG-379：manager 完整能力快照缺少周期刷新（P1）
+
+**代码证据**：
+
+1. `manager_api.create_app()` 只在 lifespan 启动后台线程时立即探测一次，再固定
+   `sleep(15)` 后探测第二次，之后线程结束。
+2. `/api/health` 为避免同步执行昂贵探测，只读取 `app.state.capability_fragment`，
+   再调用 `overlay_gateway_access_from_cache()`。
+3. overlay 只覆盖 `gatewayAccess`；按 BUG-253 的安全边界，不用 gateway 缓存覆盖
+   manager 实时探测得到的 `caddyRuntime/caddyOwner/caddyWorkspaceAccess`。
+4. 问题在于 manager 的这些字段并非持续“实时”，而是启动时快照。若 Caddy 在 15 秒后
+   才恢复，或运行中掉线，`/api/health` 可继续显示旧值；磁盘缓存新鲜度上限 24 小时
+   不能替代运行期刷新。
+
+**设计方案**：
+
+1. 保留 `/api/health` 的纯缓存、低延迟语义，不在每次 HTTP 请求里同步探 Docker/Caddy。
+2. manager lifespan 启动一个带 `threading.Event` 的后台循环：
+   - 启动立即探测；
+   - 15 秒做启动收敛复探；
+   - 此后默认每 300 秒刷新完整 manager 能力；
+   - lifespan 退出时 `stop_event.set()` 并有界 `join`，不遗留线程。
+3. `_refresh_capability_cache()` 增加进程内单飞锁，避免周期线程与
+   `/api/capability?refresh=true` 同时写缓存或交错覆盖内存片段。
+4. 每次成功刷新同时更新 `capability-manager.json` 与
+   `app.state.capability_fragment`；写盘继续复用 BUG-377 的原子替换。
+5. 非预期探测异常：
+   - 不覆盖磁盘上最后一份可解析快照；
+   - Full 视角的内存 health 不能无限保留旧 ready，应标记探测失败/unknown 并给出
+     refresh/日志指引；
+   - 记录节流后的 ERROR，避免每 5 分钟无上下文刷屏。
+6. gateway overlay 继续只负责 `gatewayAccess`；不要为规避 manager 周期刷新而重新放宽
+   BUG-253 的 Caddy 字段所有权边界。
+
+**关键测试**：
+
+- manager 启动时 Caddy unready，超过 15 秒后恢复，下一周期自动转 ready；
+- manager 启动 ready，Caddy 后续掉线，下一周期转 unready；
+- `refresh=true` 与周期刷新并发时无半截 JSON、无旧结果覆盖新结果；
+- lifespan 退出能停止线程；
+- `/api/health` 仍不直接触发 Docker/Caddy 子进程探测。
+
+#### 23.4.2 BUG-380：内部 HTTP 探针继承环境代理（P1）
+
+**代码证据**：
+
+以下内部链路直接使用 `urllib.request.urlopen`，默认会读取
+`http_proxy/https_proxy/NO_PROXY`：
+
+- `health.http_ok()`：实例回环健康检查；
+- `hosting._http_probe_once()`：容器/静态实例启动等待；
+- `manager_service._fetch_health()`：manager 启动/归属确认；
+- `static_gateway._admin_alive()`、stop/reload 辅助探测及实例入口探测；
+- `access._http_get()`、`access._fetch_text()`：回环、LAN URL、别名入口和子资源复核。
+
+已用“本地真实 HTTP 200 服务 + 无效 `http_proxy` + 清空 `NO_PROXY`”完成最小复现：
+服务实际健康，但 `health.http_ok()` 返回 `(False, None)`。因此该问题不仅影响人工
+`curl`，还会造成启动超时、健康状态假红、gateway 误判和 access review 假失败。
+
+**设计方案**：
+
+1. 在共享探针模块（优先 `probe.py`）新增显式直连 opener：
+
+   ```python
+   _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+   def open_direct(request_or_url, *, timeout):
+       return _DIRECT_OPENER.open(request_or_url, timeout=timeout)
+   ```
+
+2. 只替换“访问本机回环、工作区 LAN URL、Caddy admin、实例入口”的内部探针；不调用
+   `urllib.request.install_opener()`，不修改全进程全局代理，也不改用户环境变量。
+3. 调用点继续各自解释 HTTP 状态和错误；共享 helper 只负责“确定走直连”，避免把所有
+   业务语义塞进一个万能请求函数。
+4. `NO_PROXY` 仍可作为用户工具的运维建议，但 LWA 正确性不得依赖它。
+5. 文档注明：`autoProxy=true` 适用于 WSL 访问互联网依赖源，不应改变 LWA 内部探针的
+   直连语义。
+
+**关键测试**：
+
+- 设置无效大小写代理环境变量并清空 `NO_PROXY`，真实回环 HTTP 服务仍探测成功；
+- LAN 私网 URL 探针同样不交给代理；
+- `Request` headers、`__lwa_probe=1`、timeout 与 HTTPError 状态解释保持不变；
+- 不修改 `os.environ`，不影响进程内其它确实需要代理的网络客户端。
+
+#### 23.4.3 BUG-381：IMP-023 仅识别空 200，遗漏常见错路由（P1）
+
+**代码证据**：
+
+当前 `_check_subresources()` 与 `instance_still_has_imp023()` 只有在下列条件同时成立时
+才判风险：
+
+```text
+absolute.ok
+AND absolute.content_length == 0
+AND prefixed.ok
+AND prefixed.content_length > 0
+```
+
+因此以下常见别名白屏不会进入告警/重建候选：
+
+1. `/assets/app.js` 返回 404，而 `/alias/assets/app.js` 返回 200；
+2. 根路径被 SPA/manager fallback 接管，JS 请求返回 200 + `text/html`；
+3. 根路径返回非空占位页或错误页，不能用“长度非零”证明资源正确。
+
+这与 `manager-page.md`、`operations-playbook.md`、alias/build Skills 已写的“绝对资源
+可能 404”口径不一致。
+
+**设计方案**：
+
+1. 将内部判断泛化为 `alias_resource_mismatch`，保留现有 `empty_200` 输出字段以兼容
+   API/测试/既有调用方。
+2. 高置信 mismatch 至少覆盖：
+   - prefixed 为 2xx 且有实体，absolute 为 404/5xx/连接失败；
+   - prefixed 为 2xx 且有实体，absolute 为 2xx 但正文为空；
+   - 非 HTML 资源扩展名请求在 absolute 返回 `text/html`，而 prefixed 返回合理的
+     JS/CSS/image/font MIME。
+3. `UrlProbe` 增加可选 `content_type`（规范化掉 charset）；服务未给 MIME 时不据此单独
+   判错，避免误伤简陋静态服务器。
+4. 报告应同时展示 absolute/prefixed 的状态码、长度和 MIME，明确是“别名资源路径错位”，
+   而不是笼统说服务死亡。
+5. `needs_rebuild` 沿用高置信 mismatch；rebuild 后仍命中时明确提示“需修改业务构建
+   base/HTML/API base”，不能假报已修复。容器应用源码硬编码绝对路径时，rebuild 很可能
+   仍失败，这是预期且必须可解释。
+6. LWA 不自动改写用户 HTML/JS：无法安全推断运行时 API base、动态 import、service
+   worker、WebSocket、SSE 与后端回调路径。
+
+**关键测试矩阵**：
+
+| absolute | prefixed | 预期 |
+| --- | --- | --- |
+| 200 / 0B | 200 / 非空 | mismatch（保留既有 IMP-023） |
+| 404 | 200 / 非空 | mismatch |
+| 200 `text/html` | 200 `application/javascript` | mismatch |
+| 200 正确 MIME / 非空 | 200 正确 MIME / 非空 | 仅记录，不告警 |
+| 两边均失败 | 失败 | 归入口/服务问题，不误判成 alias mismatch |
+| HTML 未含绝对资源 | — | 不产生候选 |
+
+#### 23.4.4 DOC-077：Mirrored 网络、防火墙与验收口径（P1）
+
+**必须修正的文档点**：
+
+1. Windows 11 22H2+、WSL 2.0.9+ 的 Mirrored 入站受 **Hyper-V firewall** 管理；文档应
+   给出 WSL `VMCreatorId` 维度的检查与规则示例：
+
+   ```powershell
+   Get-NetFirewallHyperVRule |
+     Where-Object DisplayName -Like "WSL-In-TCP-*"
+
+   New-NetFirewallHyperVRule `
+     -Name "WSL-In-TCP-8080" `
+     -DisplayName "WSL-In-TCP-8080" `
+     -Direction Inbound `
+     -VMCreatorId "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}" `
+     -Protocol TCP `
+     -LocalPorts 8080 `
+     -Action Allow
+   ```
+
+2. 优先给出**逐端口 allow**，不默认建议把整个 WSL 的
+   `DefaultInboundAction` 改为 Allow。
+3. 端口最小化：
+   - `17800`：仅在确需 LAN 管理时开放，并依赖 manager token；
+   - `8080`：统一别名入口；
+   - `18000`、`18001` 等：仅开放实际需要直连的实例端口；
+   - `18000–19999` 是分配池，不默认全开；
+   - `2019` 是 Caddy admin，只允许回环，绝不对 LAN/公网开放。
+4. 同时提醒发行版内 `ufw/firewalld` 与企业 GPO/EDR 仍可能叠加策略，但不要把普通
+   Defender 防火墙规则写成 Mirrored 唯一控制层。
+5. `.wslconfig` 变更需 `wsl --shutdown` 后生效；`dnsTunneling`/`autoProxy` 与
+   `networkingMode` 分开解释，避免为了 LAN 可达性随意关闭 DNS 能力。
+6. 验收必须分层：
+   - WSL 内 `127.0.0.1:<port>`：证明服务自身；
+   - Windows `localhost:<port>`：证明宿主/WSL localhost 互通；
+   - Windows 自身 NIC IP：只记录现场结果，不作为 LAN 最终结论；
+   - 另一台物理机/手机访问 `10.181.224.39:<port>`：最终 LAN 验收。
+7. “Windows 用自身 NIC IP 失败是 WSL 已知行为”目前缺少足够官方证据，只能写作现场
+   观察；在另一台物理机验证前，不得宣称 LAN 已通或配置必错。
+
+### 23.5 `data/data/app.db` 嵌套：已知事实、假设与证据门槛
+
+#### 23.5.1 已确认事实
+
+1. 应用配置 `database.path: runtime/data/app.db`，在容器内解析为
+   `/app/runtime/data/app.db`。
+2. 宿主 `apps/ai-review-prd-v0-2-7/data/` bind mount 到容器
+   `/app/runtime/data`。
+3. 故障时宿主同时存在：
+   - `data/app.db`：应用实际读取，初始只有默认 admin；
+   - `data/data/app.db`：包含 9 个历史用户及业务数据。
+4. 历史库中的 `user-public` bcrypt 哈希可验证 `user123456`，登录失败不是密码错误，
+   而是应用读取了另一份库。
+5. 当前 rebuild 的 `down()` 不带 `-v`，bind mount 不因 rebuild 删除；BUG-205 的
+   `docker cp <src>/.` 也明确复制目录内容。
+
+#### 23.5.2 目前不能下的结论
+
+- 不能因空库时间与 rebuild 相邻，就断言 rebuild 清空或重建了数据库。
+- 不能仅凭当前实现正确，就断言嵌套一定由业务应用产生。
+- 不能在不知道活跃库的情况下自动把任意 `.db` 移到根目录；这可能覆盖新数据或破坏
+  WAL/SHM 一致性。
+
+#### 23.5.3 待查证假设
+
+| 假设 | 需要的证据 |
+| --- | --- |
+| 原始 zip 自带 `data/data/app.db` 或等价目录 | 检查 `source/original.zip` 成员与首次导入日志 |
+| 老版本 compose 曾把父级目录挂载到 `/app/runtime`，形成额外 `data/` | 查历史 `docker/compose.yaml`、发布版本和构建归档 |
+| 老容器自身已写 `/app/runtime/data/data/app.db`，BUG-205 只是忠实救出 | 查 rebuild 前容器层/挂载 inspect、`run.log` 的 migrate 事件 |
+| 人工备份/复制命令把 `data/` 目录整体复制进已存在的 `data/` | 查 shell 历史、备份脚本和文件时间/所有者 |
+| 业务某版本把配置路径重复拼成 `data/data` | 对照历史源码 `runtime_paths`、`database.py`、`config.yaml` |
+
+#### 23.5.4 可选诊断增强（P2，先规划不自动修）
+
+1. `doctor` 或 rebuild 前对 SQLite 实例枚举宿主 `data/` 下的
+   `*.db/*.sqlite/*.sqlite3`，发现多库或 `data/data/` 时 WARN。
+2. 报告相对路径、大小、mtime；可尽力读取 SQLite schema/用户表计数，但不得打印密码
+   哈希、token 或业务隐私。
+3. 若 manifest/config 无法确定实际文件名，只报告“存在多个候选”，不声称哪一个正确。
+4. 提供人工处置模板：停容器 → 备份两份库 → 校验目标库 → 原子替换 → 权限恢复 →
+   启动 → 登录与数据量复核。
+5. 在拿到嵌套来源证据前，不单列新的 `BUG-`；若最终证明是 LWA 迁移/挂载造成，再从本
+   调查项转正式 Bug。
+
+### 23.6 实施 WBS
+
+| WBS | 优先级 | 任务 | 主要触点 | 完成定义 |
+| --- | --- | --- | --- | --- |
+| **23.01** | P1 | 先写 manager 能力从 unready→ready、ready→unready 的周期刷新失败测试 | `tests/test_manager_api.py`、`tests/test_capability.py` | 无周期实现时测试稳定失败；覆盖退出收尾与 refresh 并发 |
+| **23.02** | P1 | 实现 manager 完整能力周期刷新与单飞 | `manager_api.py`、必要时 `capability.py` | health 最迟一个周期反映 Caddy 后续变化；不在请求线程跑昂贵探测 |
+| **23.03** | P1 | 先写代理污染下的真实回环探针测试 | `tests/test_health_status.py`、`tests/test_access.py`、`tests/test_static_gateway.py`、`tests/test_manager_service.py` | 无效代理 + 空 NO_PROXY 时先稳定复现假阴性 |
+| **23.04** | P1 | 提取直连 HTTP opener 并替换内部探针 | `probe.py`、`health.py`、`hosting.py`、`access.py`、`static_gateway.py`、`manager_service.py` | 所有内部本机/LAN探针不受环境代理影响；不改变全局 opener |
+| **23.05** | P1 | 先写 IMP-023 的 404、HTML fallback、正确 MIME 对照测试 | `tests/test_access.py` | 三类错路由先红；正常资源不误报 |
+| **23.06** | P1 | 实现通用 alias resource mismatch 与兼容输出 | `access.py`、CLI/API 报告格式 | 空 200/404/错误 MIME 均可解释；rebuild 后复检同口径 |
+| **23.07** | P1 | 修正 WSL2 Mirrored 防火墙、端口和验收文档 | `docs/known-limitations.md`、`docs/autostart.md`、`docs/operations-playbook.md`、README | Hyper-V firewall 与逐端口规则准确；不开放 2019；外部物理机为最终验收 |
+| **23.08** | P1 | 跑单元、静态检查与全量回归 | capability/access/health/gateway/updater tests、ruff、mypy、pytest | 定向与全量测试无回归，`git diff --check` 通过 |
+| **23.09** | P1 | WSL2 Mirrored Full 实机闭环 | 10.181.224.39 或等价测试机 | manager/daemon/gateway 缓存自动收敛；代理开关不影响探针；另一台设备访问 17800/8080/实际实例端口 |
+| **23.10** | P2 | 取证 `data/data/` 来源并决定是否开发多库诊断 | 原始 zip、历史 compose、run/event、应用历史源码 | 形成可复核证据链；无证据不自动迁库、不错误归因 |
+
+### 23.7 验收矩阵
+
+#### 23.7.1 自动化验收
+
+1. **能力新鲜度**：
+   - manager 启动时 Caddy 未就绪，随后恢复；
+   - manager 启动时 ready，随后 Caddy 掉线；
+   - 两者均在配置周期内更新 `/api/health` 的完整字段和 overall/action。
+2. **代理隔离**：
+   - `http_proxy/https_proxy/HTTP_PROXY/HTTPS_PROXY` 指向不可达地址；
+   - `NO_PROXY/no_proxy` 为空；
+   - 回环实例、manager health、Caddy admin、LAN URL 仍按真实服务结果判断。
+3. **别名资源**：
+   - 空 200、404、HTML fallback 全部告警；
+   - 正常相对资源、根部署和无绝对资源 HTML 不误报；
+   - 报告不读取或泄漏响应正文中的敏感信息。
+4. **兼容性**：
+   - `UrlProbe` 既有 JSON 字段不删除；
+   - `empty_200` 保留；
+   - gateway cache 不越权覆盖 Caddy owner/runtime 字段；
+   - default profile 行为不因 Full 修复被无意收紧。
+
+#### 23.7.2 WSL2 实机验收
+
+按以下顺序逐层记录命令、HTTP 状态、源/目标地址与时间：
+
+1. WSL 内：
+   - `127.0.0.1:17800/api/health`
+   - `127.0.0.1:2019/config/`
+   - `127.0.0.1:8080/<alias>/`
+   - `127.0.0.1:<实际实例端口>/`
+2. Windows 宿主：
+   - `localhost:17800`
+   - `localhost:8080/<alias>/`
+   - 自身 NIC IP 结果单独记录，不作为最终 LAN 判定。
+3. 另一台物理机/手机：
+   - `10.181.224.39:17800`（带 token 登录）
+   - `10.181.224.39:8080/<alias>/`
+   - 仅在确需直连时测试 `10.181.224.39:<实际实例端口>`。
+4. 代理回归：
+   - 开启 Windows/WSL 代理配置；
+   - 保持互联网依赖下载可用；
+   - LWA 内部健康与 access review 结果不随代理开关改变。
+5. 能力回归：
+   - 停 Caddy，等待 manager 周期后应 unready；
+   - 恢复 Caddy，不手工刷新缓存，等待一个周期后应 ready；
+   - `lwa capabilities`、`/api/health`、`/api/capability` 三者关键字段一致。
+
+### 23.8 风险、非目标与发布顺序
+
+#### 风险
+
+| 风险 | 缓解 |
+| --- | --- |
+| manager 周期探测增加 Docker/Caddy 子进程开销 | 默认 300 秒；health 请求仍只读缓存；用单飞锁避免并发探测 |
+| 周期探测造成状态短暂抖动 | 报告 checkedAt/错误原因；只用真实结果更新，不合并死亡角色缓存 |
+| 禁用代理破坏需要代理的外部下载 | 仅内部探针使用专用 opener，不改 pip/npm/apt/updater 的网络策略 |
+| MIME 判定误报简陋服务器 | MIME 缺失时不单独判错；必须结合 prefixed 成功与资源扩展名 |
+| 自动迁库导致不可逆数据损坏 | 本期明确不自动迁库；只取证、告警、提供备份优先的人工流程 |
+
+#### 非目标
+
+- 不把 Full 改成 default 来隐藏能力错误。
+- 不让 gateway 缓存覆盖不属于 gateway 所有权的 manager Caddy 实时字段。
+- 不自动修改用户 HTML、JS、API base、service worker 或数据库路径。
+- 不自动开放 Windows/Hyper-V 防火墙端口。
+- 不把 `18000–19999` 整段默认暴露给 LAN。
+- 不把 Caddy admin `:2019` 暴露到非回环地址。
+
+#### 建议发布顺序
+
+1. 先合入并完整验证 BUG-376～378，形成可靠 gateway 快照基础。
+2. 同一修复批完成 BUG-379 与 BUG-380；二者共同决定 Full 能力和启动探针是否可信。
+3. 完成 BUG-381，统一 access review、rebuild 建议与复检口径。
+4. 同版本交付 DOC-077，避免代码正确但现场仍按错误防火墙层操作。
+5. 最后做 WSL2 实机验收；`data/data/` 溯源可并行，但未定论前不阻塞前三项修复。
+
+### 23.9 task-list 编号映射
+
+| task-list | 关系 |
+| --- | --- |
+| `BUG-102` | Caddy pingback 假失败，已修复，本节不重复开发 |
+| `BUG-198` / `BUG-205` | RUNTIME_ROOT 挂载与 rebuild 前数据救援，已修复 |
+| `BUG-376` | gateway on/已在线路径写能力缓存，当前工作树已修 |
+| `BUG-377` | 能力缓存原子写，当前工作树已修 |
+| `BUG-378` | update 重启 gateway + Full 收尾验收，当前工作树已修 |
+| `BUG-379` | manager 完整能力周期刷新，**已修复**（300s 周期 + 单飞锁 + 失败不覆盖磁盘） |
+| `BUG-380` | 内部 HTTP 探针强制直连，**已修复**（`probe.urlopen_direct`） |
+| `BUG-381` | IMP-023 扩展到 404/错误 MIME，**已修复**（`alias_resource_mismatch`） |
+| `DOC-077` | WSL2 Mirrored Hyper-V firewall 与验收口径，**已完成** |
+| `CHK-121` | 初步对照排障记录；其“缺口已全部覆盖”结论由后续检查纠正 |
+| `CHK-122` | 深入复核并识别 BUG-379～381 |
+| `CHK-123` | 结合现场 `local-web.yml` 校验 Full/LAN/端口语义 |
+| `CHK-124` | 复核工作区感知与配置项解读 |
+
+---
+
+## 24. IMP-042 — LWA 工作区迁移（同盘原子改名事务 + CLI + Skill）
+
+> **状态（2026-07-29）**：**主路径已落地**（DEV-089：`workspace_migrate` 事务 + `lwa workspace relocate` + Skill `lwa-relocate-workspace`）。文件夹改名只是同盘原子 rename 的最简场景；准确名称仍是 **「LWA 工作区迁移」**。
+
+> **前置运行时修复**：BUG-382（外部 down 后 start → `up -d`）、BUG-383（pageviews 路径无关游标）、BUG-384（`autostart repair` 保留 gateway）。
+
+> **文档**：人工逃生舱 [`docs/workspace-rename.md`](../../docs/workspace-rename.md)（DOC-081）；实现计划 [`docs/plans/2026-07-29-workspace-relocate.md`](../../docs/plans/2026-07-29-workspace-relocate.md)（PLN-027）。
+
+> **实现跟踪**：`DEV-089`。
+
+### 24.1 背景与动机
+
+2026-07-29 实机将工作区从 `…/local-webpage-access-20260717` 迁到 `…/local-webpage-access` 时证明：
+
+- 服务恢复、容器 bind mount、业务 `data/`、HTTP 访问**可以**成功；
+- 但依赖分散在 systemd/launchd、pip editable、Docker Mounts、manifest、**registry**、生成式 Caddy、能力缓存；
+- 现场 `sed` / 临时 bash **不能**作为通用标准；仅文档或仅 Skill 都无法保证事务一致性。
+
+### 24.2 产品形态（已确认）
+
+**不是** CLI 与 Skill 二选一，而是三层：
+
+| 层 | 职责 |
+| --- | --- |
+| **底层迁移事务** | 确定性检查、备份、状态迁移、锁与可恢复 journal、回滚钩子 |
+| **CLI** `lwa workspace relocate` | **唯一执行入口**；所有副作用只经此路径 |
+| **Skill** `lwa-relocate-workspace` | 读 `--dry-run --json`、解释风险、调用 CLI、特殊环境指导、出迁移报告；**禁止**直接 `sed` / `mv` / 删状态文件 |
+
+方案比较：
+
+1. **仅运维文档** — 成本最低，仍易漏 registry / pageviews / gateway / 容器状态 → 不推荐作唯一交付。
+
+2. **仅 Skill** — 比文档友好，但操作由模型临场拼接 → 安全性与可重复性不足。
+
+3. **CLI + Skill** — **推荐**。
+
+### 24.3 范围边界（已拍板）
+
+| 场景 | IMP-042 v1 | 后续 |
+| --- | --- | --- |
+| **同一卷原子改名**（macOS / Linux 裸机 / WSL Linux 盘） | ✅ **唯一自动路径** | — |
+| 跨磁盘 / 跨卷复制 | ❌ 预检 blocking | IMP-042.b |
+| 跨机器迁移 | ❌ | 另案 |
+| WSL `/mnt/...` → Linux 盘（通常跨设备） | ❌ 自动拒绝，指手册 | 随 042.b |
+| Windows 原生 | ❌ | — |
+
+「同卷 vs 跨卷 vs 跨机」差别很大，与是否叫 Linux/macOS 无关。**同一台 Mac 上、同一 APFS/HFS+ 卷内的改名迁移，v1 明确支持**（自启走 launchd `repair`）。跨外置盘或不同卷仍属跨卷，v1 不自动。
+
+### 24.4 CLI 表面
+
+```bash
+lwa workspace relocate /abs/new/path --dry-run
+lwa workspace relocate /abs/new/path --dry-run --json
+lwa workspace relocate /abs/new/path
+lwa workspace relocate /abs/new/path --yes
+lwa workspace relocate --resume
+lwa workspace relocate --verify
+lwa workspace relocate --rollback
+```
+
+可选：`--from OLD`、`--snapshot-out PATH`（快照写到工作区外）。
+
+### 24.5 内部状态机
+
+```text
+preflight → backup → quiesce → move → rebind → regenerate → restore → verify → complete
+```
+
+| Phase | 要点 |
+| --- | --- |
+| preflight | 目标冲突、同设备、WSL `/mnt`、path holders、editable 告警 |
+| backup | registry / pageviews / yml / manifests / unit；记录 desiredState 与自启 enabled |
+| quiesce | 停 daemon/manager/gateway；stop 实例；compose down；持锁；**不删** `daemon-processed.json` |
+| move | 同盘原子 rename；跨设备 fail-closed |
+| rebind | 结构化改写 manifest + registry；清陈旧 containerId |
+| regenerate | 重生 Caddy site/alias/主配置；`autostart repair`（三单元，preserve gateway）；只清 capability 缓存 |
+| restore | 恢复自启；仅 start 迁前 running 意图实例（BUG-382 → `up -d`） |
+| verify | autostart check、Full capability（适用时）、Docker Mounts、访问地址、pageviews 不变量 |
+| complete | 释锁；保留 journal 审计 |
+
+失败可 `--resume`；允许时 `--rollback`；否则 DOC-081 人工回滚。
+
+### 24.6 必须自动处理的契约
+
+- 迁移锁与可恢复 journal；
+- 记录原 desiredState 与自启动 enabled；
+- 暂停后台写入；
+- 备份关键库与配置；
+- 同盘原子改名；
+- 结构化路径改写（禁止整树 sed）；
+- pageviews 游标稳定 + 迁前迁后对账（BUG-383）；
+- 清陈旧容器身份并用 `compose up -d` 重建挂载（BUG-382）；
+- 重生 Caddy；重写 daemon/manager/gateway；
+- 只清可重建缓存；恢复 running 集合；完整验收。
+
+### 24.7 Skill：`lwa-relocate-workspace`
+
+- 读取 `--dry-run --json`，向用户解释停机范围与风险；
+- 确认后调用 CLI；
+- 对 editable install、WSL、跨盘拒绝、权限问题给针对性指导；
+- 最终生成迁移报告。
+
+### 24.8 关键决策
+
+| 编号 | 决策点 | 方案 |
+| --- | --- | --- |
+| **042.a** | 产品名称 | **LWA 工作区迁移**；文件夹改名是子集场景 |
+| **042.b** | 交付形态 | 事务内核 + CLI 唯一入口 + Skill 交互；非二选一 |
+| **042.c** | v1 范围 | **受支持平台上的同卷原子改名**（macOS / Linux / WSL Linux 盘）；跨盘/跨机另阶段 |
+| **042.d** | 路径改写 | 结构化 JSON + 参数化 SQL 前缀替换；禁止 sed 整树 |
+| **042.e** | Caddy / 自启 | 生成器重生 + `repair(preserve_installed)`；不手改 unit 当长期方案 |
+| **042.f** | 去重状态 | **保留** `daemon-processed.json` |
+| **042.g** | 容器恢复 | 依赖 BUG-382 的 `start`→`up -d`；不默认整镜像 rebuild |
+| **042.h** | 人工手册 | DOC-081 保留为 CLI 未就绪与失败逃生舱 |
+
+### 24.9 实施拆分（摘要）
+
+详见实现计划 Tasks 1–10：journal/锁 → preflight → backup → quiesce → move → rebind → regenerate → restore/verify → CLI → Skill/文档。P2：相对路径 schema、CLI/工作区解耦安装、跨盘 copy（042.b+）。
+
+### 24.10 验收标准
+
+- `--dry-run --json` 零副作用且列出全部 planned phases 与 blocking。
+
+- 同盘真迁后：自启三单元工作区=NEW；容器 Mounts 前缀=NEW；快照 running 实例 HTTP 200；pageviews 未异常翻倍；无关键配置残留 OLD；`daemon-processed.json` 仍在。
+
+- 跨设备目标：exit ≠ 0，journal 不进入 `move`。
+
+- Skill 文档明确禁止 sed/mv/删状态文件。
+
+### 24.11 task-list 编号映射
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-042` | 本功能点 |
+| `PLN-027` | 实现计划已完成 |
+| `DOC-081` | 人工手册已完成 |
+| `DEV-089` | 实现主项（已完成） |
+| `BUG-382` / `BUG-383` / `BUG-384` | 迁移依赖，已修复 |
+| `CHK-128` | 改名迁移复核，引出本 IMP |
