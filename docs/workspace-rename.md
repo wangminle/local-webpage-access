@@ -265,7 +265,9 @@ keys = (
 def rewrite(obj):
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if k in keys and isinstance(v, str) and v.startswith(old):
+            if k in keys and isinstance(v, str) and (
+                v == old or v.startswith(old + "/") or v.startswith(old + os.sep)
+            ):
                 obj[k] = new + v[len(old):]
             else:
                 rewrite(v)
@@ -452,7 +454,7 @@ lwa workspace relocate --verify
 # 失败：--resume / --rollback
 ```
 
-事务覆盖：状态机 `preflight → … → complete`、锁与 journal、快照备份、quiesce、同卷 rename、manifest/registry 结构化改写、Caddy 生成器重生、`autostart repair`、恢复 running 意图、pageviews 对账。Skill `lwa-relocate-workspace` 只调 CLI。
+事务覆盖：状态机 `preflight → … → complete`、锁（`O_CREAT|O_EXCL`）与 journal、SQLite online backup、quiesce、同卷 rename、manifest/registry/**sites·aliases** 结构化改写、主 Caddyfile 重生、**仅迁前已装自启时** `autostart repair`（不重启用 config 已关服务）、恢复 running 意图与 detached 控制面、pageviews 对账。`--dry-run` 零副作用；`--resume` 复用 journal 快照；`--rollback` 逆改写回 OLD。Skill `lwa-relocate-workspace` 只调 CLI。
 
 **本手册**用于：CLI 中断后的人工续作、跨盘/跨机、以及理解禁止整树 sed 的契约。实现计划：[2026-07-29-workspace-relocate.md](plans/2026-07-29-workspace-relocate.md)；功能点：[IMP-042 §24](../design/plan/local-webpage-access-新增功能点2607.md)。
 

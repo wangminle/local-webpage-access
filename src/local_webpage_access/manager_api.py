@@ -373,7 +373,7 @@ def create_app(
         "refresh_inflight": False,
         "refresh_result": None,
         "refresh_error": None,
-        "last_error_log_at": 0.0,
+        "last_error_log_at": float("-inf"),
     }
 
     def _refresh_capability_cache() -> dict[str, Any]:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -82,6 +83,8 @@ class MigrateSnapshot:
     restore_instance_ids: list[str] = field(default_factory=list)
     desired_states: dict[str, str] = field(default_factory=dict)
     autostart_installed: list[str] = field(default_factory=list)
+    #: 迁前正在跑的控制面（daemon/manager/gateway）；未装自启时 restore 据此拉回（BUG-395）
+    control_plane_running: list[str] = field(default_factory=list)
     pageview_hits: dict[str, int] = field(default_factory=dict)
     captured_at: str = ""
 
@@ -94,6 +97,7 @@ class MigrateSnapshot:
             restore_instance_ids=list(data.get("restore_instance_ids") or []),
             desired_states=dict(data.get("desired_states") or {}),
             autostart_installed=list(data.get("autostart_installed") or []),
+            control_plane_running=list(data.get("control_plane_running") or []),
             pageview_hits={
                 str(k): int(v) for k, v in (data.get("pageview_hits") or {}).items()
             },
@@ -226,23 +230,42 @@ def assert_phase_transition(current: str | None, target: str) -> None:
 
 @contextlib.contextmanager
 def migrate_lock(workspace: Workspace) -> Iterator[list[Path]]:
-    """简单 PID 文件锁；已持有且进程存活则拒绝。
+    """PID 文件锁（O_CREAT|O_EXCL 防 TOCTOU，BUG-396）。
 
     yield 一个可变的 ``[lock_path]`` 列表，move 后调用方可把路径改到新工作区，
     以便 finally 仍能正确释锁。
     """
     path = lock_path(workspace)
     workspace.run.mkdir(parents=True, exist_ok=True)
-    if path.is_file():
+
+    def _try_acquire() -> None:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         try:
-            old_pid = int(path.read_text(encoding="utf-8").strip() or "0")
-        except ValueError:
-            old_pid = 0
-        if old_pid and _pid_alive(old_pid) and old_pid != os.getpid():
-            raise MigrateError(
-                f"工作区迁移锁被占用（pid={old_pid}）；若确认无迁移在跑可删除 {path}"
-            )
-    path.write_text(str(os.getpid()), encoding="utf-8")
+            fd = os.open(str(path), flags, 0o600)
+        except FileExistsError:
+            try:
+                old_pid = int(path.read_text(encoding="utf-8").strip() or "0")
+            except (ValueError, OSError):
+                old_pid = 0
+            if old_pid and _pid_alive(old_pid) and old_pid != os.getpid():
+                raise MigrateError(
+                    f"工作区迁移锁被占用（pid={old_pid}）；若确认无迁移在跑可删除 {path}"
+                )
+            # 死锁或本进程残留：清掉后重试一次
+            with contextlib.suppress(OSError):
+                path.unlink()
+            try:
+                fd = os.open(str(path), flags, 0o600)
+            except FileExistsError as exc:
+                raise MigrateError(
+                    f"工作区迁移锁被占用；若确认无迁移在跑可删除 {path}"
+                ) from exc
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+
+    _try_acquire()
     holder: list[Path] = [path]
     try:
         yield holder
@@ -402,7 +425,12 @@ def preflight_migrate(old: Path, new: Path) -> PreflightReport:
 # ---- snapshot / backup -----------------------------------------------------
 
 
-def capture_snapshot(workspace: Workspace, registry: Registry) -> MigrateSnapshot:
+def capture_snapshot(
+    workspace: Workspace,
+    registry: Registry,
+    *,
+    read_only: bool = False,
+) -> MigrateSnapshot:
     restore: list[str] = []
     desired: dict[str, str] = {}
     for row in registry.list_instances():
@@ -414,17 +442,23 @@ def capture_snapshot(workspace: Workspace, registry: Registry) -> MigrateSnapsho
             restore.append(iid)
 
     pageview_hits: dict[str, int] = {}
-    try:
-        from local_webpage_access.pageviews import PageviewStore
-
-        store = PageviewStore.for_workspace(workspace)
+    pv_path = workspace.run / "pageviews.db"
+    # dry-run / read_only：不得因采样而创建 pageviews.db（BUG-394）
+    if pv_path.is_file() or not read_only:
         try:
-            for iid, info in store.summary().items():
-                pageview_hits[iid] = int(info.get("hits") or 0)
-        finally:
-            store.close()
-    except Exception as exc:  # noqa: BLE001
-        log.debug("采集 pageviews 基线失败（忽略）：%s", exc)
+            from local_webpage_access.pageviews import PageviewStore
+
+            if read_only and not pv_path.is_file():
+                pass
+            else:
+                store = PageviewStore.for_workspace(workspace)
+                try:
+                    for iid, info in store.summary().items():
+                        pageview_hits[iid] = int(info.get("hits") or 0)
+                finally:
+                    store.close()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("采集 pageviews 基线失败（忽略）：%s", exc)
 
     installed: list[str] = []
     try:
@@ -434,13 +468,59 @@ def capture_snapshot(workspace: Workspace, registry: Registry) -> MigrateSnapsho
     except Exception as exc:  # noqa: BLE001
         log.debug("采集自启清单失败（忽略）：%s", exc)
 
+    control_plane: list[str] = []
+    cfg: Config | None = None
+    try:
+        cfg = load_config(workspace)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("加载配置失败（控制面探测降级）：%s", exc)
+    try:
+        from local_webpage_access.daemon import is_running as daemon_is_running
+
+        if daemon_is_running(workspace):
+            control_plane.append("daemon")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("探测 daemon 运行态失败（忽略）：%s", exc)
+    if cfg is not None:
+        try:
+            from local_webpage_access.manager_service import (
+                is_running as manager_is_running,
+            )
+
+            if manager_is_running(workspace, cfg):
+                control_plane.append("manager")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("探测 manager 运行态失败（忽略）：%s", exc)
+        try:
+            from local_webpage_access.gateway_service import is_gateway_running
+
+            if is_gateway_running(workspace, cfg):
+                control_plane.append("gateway")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("探测 gateway 运行态失败（忽略）：%s", exc)
+
     return MigrateSnapshot(
         restore_instance_ids=restore,
         desired_states=desired,
         autostart_installed=installed,
+        control_plane_running=control_plane,
         pageview_hits=pageview_hits,
         captured_at=now_iso(),
     )
+
+
+def _backup_sqlite_file(src: Path, dest: Path) -> None:
+    """用 SQLite Online Backup API 拷贝，避免 WAL 热拷贝撕裂/丢提交（BUG-392）。"""
+    src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest_conn = sqlite3.connect(str(dest))
+        try:
+            src_conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+    finally:
+        src_conn.close()
 
 
 def write_backup(
@@ -462,11 +542,11 @@ def write_backup(
 
     reg = workspace.db_path
     if reg.is_file():
-        shutil.copy2(reg, dest / "local-web.db")
+        _backup_sqlite_file(reg, dest / "local-web.db")
 
     pv = workspace.run / "pageviews.db"
     if pv.is_file():
-        shutil.copy2(pv, dest / "pageviews.db")
+        _backup_sqlite_file(pv, dest / "pageviews.db")
 
     manifests = dest / "manifests"
     manifests.mkdir(exist_ok=True)
@@ -566,6 +646,45 @@ def rewrite_registry_paths(db_path: Path, old: str, new: str) -> None:
         conn.close()
 
 
+def _rewrite_text_paths(text: str, old: str, new: str) -> str:
+    """边界安全地替换文本中的工作区路径前缀（避免 /lwa 误伤 /lwa-backup）。"""
+    if old == new or not old:
+        return text
+    out = text
+    for sep in ("/", "\\"):
+        needle = old + sep
+        if needle in out:
+            out = out.replace(needle, new + sep)
+    # 精确等于 old 的片段（其后非路径字符）
+    out = re.sub(
+        re.escape(old) + r"(?![A-Za-z0-9_./\\-])",
+        new,
+        out,
+    )
+    return out
+
+
+def rewrite_gateway_fragment_paths(workspace: Workspace, old: str, new: str) -> list[str]:
+    """改写 static-gateway sites/aliases 片段内的绝对路径（BUG-404）。"""
+    changed: list[str] = []
+    for pattern in (
+        "static-gateway/sites/*.conf",
+        "static-gateway/aliases/*.conf",
+    ):
+        for path in workspace.root.glob(pattern):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            rewritten = _rewrite_text_paths(text, old, new)
+            if rewritten != text:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text(rewritten, encoding="utf-8")
+                os.replace(tmp, path)
+                changed.append(str(path.relative_to(workspace.root)))
+    return changed
+
+
 def rebind_workspace_paths(workspace: Workspace, old: str, new: str) -> list[str]:
     changed: list[str] = []
     if workspace.apps.is_dir():
@@ -575,6 +694,7 @@ def rebind_workspace_paths(workspace: Workspace, old: str, new: str) -> list[str
     if workspace.db_path.is_file():
         rewrite_registry_paths(workspace.db_path, old, new)
         changed.append("registry/local-web.db")
+    changed.extend(rewrite_gateway_fragment_paths(workspace, old, new))
     return changed
 
 
@@ -678,7 +798,12 @@ def move_workspace_root(old: Path, new: Path) -> None:
         raise MigrateError(f"工作区改名失败：{exc}") from exc
 
 
-def regenerate_after_move(workspace: Workspace, config: Config) -> list[str]:
+def regenerate_after_move(
+    workspace: Workspace,
+    config: Config,
+    *,
+    snapshot: MigrateSnapshot | None = None,
+) -> list[str]:
     actions: list[str] = []
     # capability 缓存
     for name in (
@@ -691,14 +816,23 @@ def regenerate_after_move(workspace: Workspace, config: Config) -> list[str]:
             p.unlink()
             actions.append(f"rm:{name}")
 
-    try:
-        from local_webpage_access import autostart as asm
+    installed = list((snapshot or MigrateSnapshot()).autostart_installed)
+    if installed:
+        try:
+            from local_webpage_access import autostart as asm
 
-        asm.repair(workspace, config, with_caddy=False)
-        actions.append("autostart_repair")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("autostart repair 失败：%s", exc)
-        actions.append(f"autostart_repair_failed:{exc}")
+            # 仅当迁前已装过对应单元时才 repair；with_caddy 跟快照走（BUG-388）
+            asm.repair(
+                workspace,
+                config,
+                with_caddy="gateway" in installed,
+            )
+            actions.append("autostart_repair")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("autostart repair 失败：%s", exc)
+            actions.append(f"autostart_repair_failed:{exc}")
+    else:
+        actions.append("autostart_skipped")
 
     try:
         from local_webpage_access.static_gateway import StaticGateway
@@ -726,10 +860,26 @@ def restore_instances(
         if snapshot.autostart_installed:
             with contextlib.suppress(Exception):
                 asm.enable(workspace, config)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("autostart enable 失败：%s", exc)
+        else:
+            # 未装自启：按迁前控制面运行态拉回 detached 进程（BUG-395）
+            for name in snapshot.control_plane_running:
+                try:
+                    if name == "daemon":
+                        from local_webpage_access.daemon import start_daemon
 
-    if config.staticGateway == "caddy":
+                        start_daemon(workspace, config)
+                    elif name == "manager":
+                        from local_webpage_access.manager_service import (
+                            maybe_start_manager,
+                        )
+
+                        maybe_start_manager(workspace, config)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("恢复 detached %s 失败：%s", name, exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("autostart/控制面恢复失败：%s", exc)
+
+    if config.staticGateway == "caddy" or "gateway" in snapshot.control_plane_running:
         try:
             from local_webpage_access.gateway_service import maybe_start_gateway
 
@@ -765,8 +915,13 @@ def verify_migrate(
         notes.append(f"当前工作区根 {root} ≠ 期望 {new}")
         ok = False
 
-    # 关键配置不应再含 OLD（日志除外）
-    for pattern in ("apps/*/local-web.json", "static-gateway/Caddyfile"):
+    # 关键配置不应再含 OLD（日志除外）；含 sites/aliases 片段（BUG-404）
+    for pattern in (
+        "apps/*/local-web.json",
+        "static-gateway/Caddyfile",
+        "static-gateway/sites/*.conf",
+        "static-gateway/aliases/*.conf",
+    ):
         for path in workspace.root.glob(pattern):
             try:
                 text = path.read_text(encoding="utf-8")
@@ -800,6 +955,16 @@ def verify_migrate(
     if not processed.exists():
         # 不一定必须存在；仅当备份时有才警告——此处只记录提示
         notes.append("info: daemon-processed.json 当前不存在（若迁前也没有则正常）")
+
+    if (
+        snapshot.control_plane_running
+        and not snapshot.autostart_installed
+    ):
+        notes.append(
+            "info: 迁前控制面为 detached 运行（"
+            + ",".join(snapshot.control_plane_running)
+            + "）；已尝试拉回，请用 lwa daemon/manager/gateway status 确认"
+        )
 
     try:
         from local_webpage_access import autostart as asm
@@ -851,7 +1016,17 @@ def run_migrate(
         )
 
     if rollback:
-        return _rollback_migrate(old, new)
+        # 与正向迁移共用锁，避免与并发 relocate 互踩（BUG-396）
+        old_r, new_r = old.resolve(), new.resolve()
+        lock_ws = (
+            Workspace(new_r)
+            if (new_r / "local-web.yml").is_file()
+            else Workspace(old_r)
+        )
+        if not lock_ws.root.exists():
+            raise MigrateError("回滚目标工作区不存在")
+        with migrate_lock(lock_ws):
+            return _rollback_migrate(old, new)
 
     old_r = old.resolve()
     new_r = new.resolve()
@@ -873,17 +1048,21 @@ def run_migrate(
         if preflight.ok:
             try:
                 ws = Workspace(old_r)
-                reg = Registry(ws.db_path)
-                reg.open()
-                try:
-                    snap = capture_snapshot(ws, reg)
-                    actions.extend(
-                        quiesce_workspace(
-                            ws, load_config(ws), reg, snap, dry_run=True
+                # 零副作用：只读打开；registry 不存在则跳过采样（BUG-394）
+                if not ws.db_path.is_file():
+                    actions.append("snapshot_preview_skipped:no_registry")
+                else:
+                    reg = Registry(ws.db_path)
+                    reg.open_readonly(immutable=True)
+                    try:
+                        snap = capture_snapshot(ws, reg, read_only=True)
+                        actions.extend(
+                            quiesce_workspace(
+                                ws, load_config(ws), reg, snap, dry_run=True
+                            )
                         )
-                    )
-                finally:
-                    reg.close()
+                    finally:
+                        reg.close()
             except Exception as exc:  # noqa: BLE001
                 actions.append(f"snapshot_preview_failed:{exc}")
         return MigrateResult(
@@ -995,12 +1174,18 @@ def _run_migrate_locked(
 
         # BACKUP
         if phase == MigratePhase.BACKUP.value:
-            snapshot = capture_snapshot(ws, reg)
-            bdir = write_backup(ws, snapshot)
-            backup_dir = str(bdir)
-            if snapshot_out is not None:
-                snapshot_out.parent.mkdir(parents=True, exist_ok=True)
-                _atomic_write_json(snapshot_out, snapshot.to_dict())
+            # resume：journal 已有快照则复用，避免 quiesce 中断后重采丢掉恢复清单（BUG-387）
+            if resume and journal and isinstance(journal.get("snapshot"), dict):
+                snapshot = MigrateSnapshot.from_dict(journal["snapshot"])
+                if not backup_dir:
+                    backup_dir = journal.get("backup_dir")
+            else:
+                snapshot = capture_snapshot(ws, reg)
+                bdir = write_backup(ws, snapshot)
+                backup_dir = str(bdir)
+                if snapshot_out is not None:
+                    snapshot_out.parent.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_json(snapshot_out, snapshot.to_dict())
             _save(MigratePhase.BACKUP.value)
             phase = MigratePhase.QUIESCE.value
 
@@ -1019,6 +1204,13 @@ def _run_migrate_locked(
                 move_workspace_root(old_r, new_r)
             ws = Workspace(new_r)
             lock_holder[0] = lock_path(ws)
+            # backup_dir 随目录树搬到 NEW，刷新 journal 内绝对路径（BUG-393）
+            if backup_dir:
+                old_s = str(old_r)
+                if backup_dir == old_s or backup_dir.startswith(
+                    old_s + os.sep
+                ) or backup_dir.startswith(old_s + "/"):
+                    backup_dir = str(new_r) + backup_dir[len(old_s) :]
             config = load_config(ws)
             reg.close()
             reg = Registry(ws.db_path)
@@ -1034,7 +1226,7 @@ def _run_migrate_locked(
 
         # REGENERATE
         if phase == MigratePhase.REGENERATE.value:
-            actions = regenerate_after_move(ws, config)
+            actions = regenerate_after_move(ws, config, snapshot=snapshot)
             _save(MigratePhase.REGENERATE.value, regenerate_actions=actions)
             phase = MigratePhase.RESTORE.value
 
@@ -1097,6 +1289,21 @@ def _run_migrate_locked(
             snapshot=snapshot,
             error=err,
         )
+    except KeyboardInterrupt:
+        # Ctrl-C 不是 Exception；必须落盘 journal 才能 --resume（BUG-387）
+        with contextlib.suppress(Exception):
+            write_journal(
+                ws,
+                {
+                    "phase": phase,
+                    "old": str(old_r),
+                    "new": str(new_r),
+                    "snapshot": snapshot.to_dict(),
+                    "backup_dir": backup_dir,
+                    "error": "KeyboardInterrupt",
+                },
+            )
+        raise
     finally:
         if reg is not None:
             with contextlib.suppress(Exception):
@@ -1104,7 +1311,7 @@ def _run_migrate_locked(
 
 
 def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
-    """v1 简版回滚：若 NEW 存在且 OLD 不存在，且 journal 指向二者，则 rename 回去。"""
+    """v1 回滚：rename 回 OLD，并反向改写路径 / 重生配置（BUG-386）。"""
     old_r, new_r = old.resolve(), new.resolve()
     ws_new = Workspace(new_r) if (new_r / "local-web.yml").is_file() else None
     journal = read_journal(ws_new) if ws_new else None
@@ -1116,6 +1323,8 @@ def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
 
     j_old = Path(str(journal.get("old") or old_r))
     j_new = Path(str(journal.get("new") or new_r))
+    snap = MigrateSnapshot.from_dict(journal.get("snapshot") or {})
+    notes: list[str] = []
     if j_new.exists() and not j_old.exists():
         # quiesce best-effort on new then rename back
         try:
@@ -1124,19 +1333,62 @@ def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
             reg = Registry(ws.db_path)
             reg.open()
             try:
-                snap = MigrateSnapshot.from_dict(journal.get("snapshot") or {})
                 quiesce_workspace(ws, config, reg, snap, dry_run=False)
             finally:
                 reg.close()
         except Exception as exc:  # noqa: BLE001
             log.warning("回滚前停服失败：%s", exc)
         move_workspace_root(j_new, j_old)
+
+        # 反向改写：NEW → OLD（REBIND 的逆操作）
+        ws = Workspace(j_old)
+        try:
+            changed = rebind_workspace_paths(ws, str(j_new), str(j_old))
+            notes.append(f"已反向改写 {len(changed)} 处路径")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("回滚反向改写失败：%s", exc)
+            notes.append(f"反向改写失败：{exc}")
+
+        config = load_config(ws)
+        try:
+            regen = regenerate_after_move(ws, config, snapshot=snap)
+            notes.append(f"regenerate: {', '.join(regen) or 'ok'}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("回滚 regenerate 失败：%s", exc)
+            notes.append(f"regenerate 失败：{exc}")
+
+        started: list[str] = []
+        reg = Registry(ws.db_path)
+        reg.open()
+        try:
+            started = restore_instances(ws, config, reg, snap)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("回滚后恢复实例失败：%s", exc)
+            notes.append(f"恢复实例失败：{exc}")
+        finally:
+            reg.close()
+
+        with contextlib.suppress(Exception):
+            write_journal(
+                ws,
+                {
+                    "phase": "rollback",
+                    "old": str(j_new),
+                    "new": str(j_old),
+                    "snapshot": snap.to_dict(),
+                    "rolled_back_at": now_iso(),
+                },
+            )
+
+        notes.insert(0, "已将工作区 rename 回旧路径并反向改写配置")
         return MigrateResult(
             ok=True,
             old=str(j_new),
             new=str(j_old),
             phase="rollback",
-            verify_notes=["已将工作区 rename 回旧路径；请人工检查服务与自启单元"],
+            snapshot=snap,
+            started=started,
+            verify_notes=notes,
         )
     raise MigrateError(
         "自动回滚条件不满足（需 NEW 在、OLD 不在）；请按 DOC-081 人工回滚"
@@ -1162,6 +1414,7 @@ __all__ = [
     "rebind_workspace_paths",
     "regenerate_after_move",
     "restore_instances",
+    "rewrite_gateway_fragment_paths",
     "rewrite_manifest_paths",
     "rewrite_registry_paths",
     "run_migrate",

@@ -191,14 +191,16 @@ LWA 的 manager / daemon 继承**启动时**的用户组。刚执行 `usermod -a
 会识别为旧 detached 启动器并报 fail；`lwa autostart repair` 把它改写为前台监管单元并
 重新启用。
 
-**`repair` 与 gateway（BUG-384）**：默认**保留**磁盘上已安装的全部服务（含
+**`repair` 与 gateway（BUG-384 / BUG-389）**：默认**保留**磁盘上已安装的全部服务（含
 `gateway`），用于工作区路径漂移后重写 `--workspace` / `WorkingDirectory`。`--with-caddy`
-只表示「原先未安装时**新增** gateway」，**不是**「是否保留」。故意卸掉 gateway 请用
-`lwa autostart install`（不带 `--with-caddy`）或 `uninstall`，不要指望裸 `repair` 缩集。
+只表示「原先未安装时**新增** gateway」，**不是**「是否保留」。启用时只 enable
+**当前配置目标集合**；config 已关闭的残留单元（如切到 `staticGateway=builtin` 后的
+gateway）会 **disable** 而非重启用，避免 KeepAlive/Restart 崩溃循环。故意卸掉
+gateway 请用 `lwa autostart install`（不带 `--with-caddy`）或 `uninstall`。
 
 工作区整目录改名时，优先 `lwa workspace relocate`（见 [工作区迁移手册](workspace-rename.md)）；
-CLI 会调用 `autostart repair` 重写三单元路径。手工逃生时：修好 editable 后在新路径再
-`lwa autostart repair`。
+仅当迁前已装过自启时才会 `autostart repair`（未装则跳过，不新装单元）。手工逃生时：
+修好 editable 后在新路径再 `lwa autostart repair`。
 
 ## Windows 宿主（仅 WSL2）
 

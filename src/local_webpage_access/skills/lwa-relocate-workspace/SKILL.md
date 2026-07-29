@@ -51,6 +51,7 @@ lwa workspace relocate /path/to/NEW --dry-run --json
    - `blocking` / `warnings`（尤其 `cross_device`、`wsl_drvfs`、`editable_inside_workspace`）
    - 停机范围（业务实例 + daemon/manager/gateway + 自启）
    - `planned_phases` / `planned_actions`
+   - dry-run **零副作用**（不建 pageviews.db、不以写模式开 registry）
 4. 用户确认后执行：
 
 ```bash
@@ -64,12 +65,12 @@ lwa workspace relocate /path/to/NEW --yes
 cd /path/to/NEW
 lwa workspace relocate --verify
 lwa version
-lwa autostart check   # 若用了自启
+lwa autostart check   # 仅当迁前用了自启
 ```
 
 6. 失败时：
-   - 先 `lwa workspace relocate --resume`
-   - 同卷且 journal 完整：`--rollback`
+   - 先 `lwa workspace relocate --resume`（可显式传 NEW；journal 权威 old/new）
+   - 同卷且 journal 完整：`--rollback`（会逆改写路径，不只 rename）
    - 仍失败：打开 [`docs/workspace-rename.md`](../../../../docs/workspace-rename.md) 人工逃生舱
 
 ## editable 安装提示

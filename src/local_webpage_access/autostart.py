@@ -777,7 +777,8 @@ def install(
 
     ``preserve_installed=True`` 时并入磁盘上已安装的服务（含 gateway），
     避免 repair 把既有单元当 orphan 卸载（BUG-384）。``with_caddy`` 只控制
-    是否**新增** gateway，不表示“是否保留”。
+    是否**新增** gateway，不表示“是否保留”。``enable=True`` 时仅启用
+    ``select_services`` 目标集合；保留但不在目标内的单元会 disable（BUG-389）。
     """
     # IMP-036 / BUG-260：仅 WSL + /mnt/<drive> 时 autostart 写路径 fail-closed
     from local_webpage_access.platform_support import (
@@ -801,7 +802,8 @@ def install(
             )
         ) from exc
     backend = select_backend(plat)
-    services = select_services(config, with_caddy=with_caddy)
+    target_services = select_services(config, with_caddy=with_caddy)
+    services = list(target_services)
     if preserve_installed:
         prev = installed_services(ws, backend)
         services = [s for s in ALL_SERVICES if s in set(services) | set(prev)]
@@ -858,10 +860,22 @@ def install(
     if enable:
         result.enabled = True
         all_ok = orphan_ok
+        # 仅启用配置目标集合；preserve 的残留单元只改写路径并 disable，
+        # 避免 config 已关闭的 gateway/manager 被重新启用形成崩溃循环（BUG-389）。
+        enable_names = set(target_services)
         # 仅在真正启用时置 daemon enabled；--no-enable 不得污染运行意图（BUG-160）。
-        if "daemon" in services:
+        if "daemon" in enable_names:
             _prepare_daemon_for_supervision(ws)
         for name in services:
+            if name not in enable_names:
+                outs, ok = backend.disable(name, runner)
+                result.enable_outcomes.extend(outs)
+                if not ok:
+                    all_ok = False
+                result.notes.append(
+                    f"保留但未启用 {name}（当前配置未纳入该服务）"
+                )
+                continue
             # 受控迁移：停 detached 进程，让监管进程持锁/绑端口并回写自身 pid（BUG-146/147）。
             # 迁移失败（旧进程未停）必须计入失败，且不得再加载单元（BUG-146/159）。
             if not _migrate_detached_for_supervision(ws, config, name):
@@ -1745,7 +1759,8 @@ def repair(
     """修复：重写失效路径、迁移旧启动器单元、重新 enable。返回 (结果, 修复说明)。
 
     默认保留磁盘上已安装的全部服务（含 gateway）；``with_caddy`` 仅在原先
-    未安装 gateway 时新增它，不会卸载已有单元（BUG-384）。
+    未安装 gateway 时新增它，不会卸载已有单元（BUG-384）。启用时只 enable
+    配置目标集合；config 已关闭的残留单元会 disable 而非重启用（BUG-389）。
     """
     actions: list[str] = []
     backend = select_backend()
@@ -1763,6 +1778,9 @@ def repair(
         preserve_installed=True,
         python_exe=python_exe, runner=runner,
     )
+    for note in result.notes:
+        if "保留但未启用" in note and note not in actions:
+            actions.append(note)
     if not actions:
         actions.append("重写单元（固化当前解释器/工作区/Caddy 路径）并重新启用")
     return result, actions

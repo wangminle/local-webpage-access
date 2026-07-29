@@ -7,13 +7,13 @@
   链接不再指向失效的旧 LAN IP。
 * :func:`review_access`（G2 / G5）—— 对每个实例的声明 URL 做**真探活**（入口
   HTML + 抽样绝对路径子资源 + 端口独占 + LAN IP 一致性），返回结构化报告。
-  避免「入口返回 200 ≠ 页面可渲染」（IMP-023 空 200）与「CLI 报 FAIL ≠ 真失败」
-  两类**状态报告缺口**。
+  避免「入口返回 200 ≠ 页面可渲染」（IMP-023：空 200 / 404 / 错误 MIME）与
+  「CLI 报 FAIL ≠ 真失败」两类**状态报告缺口**。
 * :func:`instances_needing_rebuild` / :func:`maybe_rebuild_after_review`（G6）——
   从复核报告收集 IMP-023 命中实例；默认只提示，``--rebuild-if-needed`` 时可选
   自动 ``rebuild_instance``。
 
-探测口径遵循复盘文档 §9：入口 OK ∧ 无空 200 子资源 ∧ 无端口双开/孤儿监听 ∧
+探测口径遵循复盘文档 §9：入口 OK ∧ 无 IMP-023 子资源错位 ∧ 无端口双开/孤儿监听 ∧
 lanUrl host 未过期，才允许对外宣称「可访问」。
 """
 
@@ -213,8 +213,9 @@ class AccessReviewReport:
 class RebuildActionResult:
     """单实例可选自动 rebuild 的结果（G6）。
 
-    ``ok``：rebuild 调用未抛异常。``still_imp023``：重建后复检仍检出空 200
-    （常见原因：Vite ``base`` 仍为 ``/``，产物未变）——调用成功但问题未解决。
+    ``ok``：rebuild 调用未抛异常。``still_imp023``：重建后复检仍检出 IMP-023
+    （空 200 / 404 / 错误 MIME；常见原因：Vite ``base`` 仍为 ``/``，产物未变）
+    ——调用成功但问题未解决。
     """
 
     instance_id: str
@@ -571,14 +572,19 @@ def _is_wrong_asset_mime(path: str, probe: UrlProbe) -> bool:
 
 
 def _alias_resource_mismatch(path: str, absolute: UrlProbe, prefixed: UrlProbe) -> tuple[bool, bool]:
-    """判定 IMP-023：返回 ``(empty_200, alias_resource_mismatch)``。"""
+    """判定 IMP-023：返回 ``(empty_200, alias_resource_mismatch)``。
+
+    仅把「拿到了 HTTP 响应但仍异常」算 mismatch：空 200 / 4xx·5xx / 错误 MIME。
+    连接级失败（TIMEOUT/REFUSED/UNREACHABLE、无 status_code）不算 IMP-023，
+    避免瞬时网络抖动触发误 rebuild（BUG-399）。
+    """
     prefixed_ok = prefixed.ok and (prefixed.content_length or 0) > 0
     if not prefixed_ok:
         return False, False
     empty_200 = absolute.ok and (absolute.content_length == 0)
-    failed_absolute = not absolute.ok
+    http_failed = absolute.status_code is not None and not absolute.ok
     wrong_mime = _is_wrong_asset_mime(path, absolute)
-    return empty_200, bool(empty_200 or failed_absolute or wrong_mime)
+    return empty_200, bool(empty_200 or http_failed or wrong_mime)
 
 
 def _extract_absolute_resources(html: str, *, limit: int = _MAX_SUBRESOURCES) -> list[str]:
@@ -648,7 +654,7 @@ def review_access(
        不一致则标 ``lan_url_stale``（G1 漂移）。
     3. **别名入口**：声明 ``routeUrl`` 发 GET；解析入口 HTML 的绝对路径 ``src``/``href``，
        对照 ``127.0.0.1:entry + 绝对路径``（无别名前缀）与 ``routeUrl + 路径``（带前缀）。
-       前者 200 但 0 字节、后者有实体 → **IMP-023 空 200 风险**（WARN）。
+       前者空 200 / 404 / 错误 MIME、后者有实体 → **IMP-023 别名资源错位**（WARN）。
     4. **端口监听**：best-effort lsof 列出 hostPort 监听者，供人工核对 builtin+caddy 双开。
 
     回环不通即 FAIL；LAN/别名问题为 WARN。
@@ -926,7 +932,7 @@ def maybe_rebuild_after_review(
 
     * ``rebuild_if_needed=False``（默认）：只返回候选列表，``skipped=True``，不执行重建。
     * ``rebuild_if_needed=True``：对候选依次调用 ``rebuild_instance``（或注入的
-      ``rebuild_fn``）；调用成功后再对该实例别名入口做空 200 复检——仍命中则
+      ``rebuild_fn``）；调用成功后再对该实例别名入口做 IMP-023 复检——仍命中则
       ``still_imp023=True``（避免「rebuild 成功但产物未变」假绿）。
     """
     candidates = instances_needing_rebuild(report)
@@ -983,7 +989,7 @@ def format_rebuild_advice(
     lines.append("── 构建兼容（G6 / IMP-023）──")
     if rebuild_report is not None and not rebuild_report.skipped:
         if not rebuild_report.candidates:
-            lines.append("  无需 rebuild（未检出 IMP-023 空 200）")
+            lines.append("  无需 rebuild（未检出 IMP-023 资源错位）")
         for r in rebuild_report.results:
             if not r.ok:
                 lines.append(
@@ -1002,13 +1008,13 @@ def format_rebuild_advice(
                 )
         return "\n".join(lines)
     lines.append(
-        f"  建议 rebuild {len(candidates)} 个实例（别名下 SPA 绝对路径空 200）："
+        f"  建议 rebuild {len(candidates)} 个实例（别名下 SPA 绝对路径资源错位）："
     )
     for iid in candidates:
         lines.append(f"    · {iid}  →  lwa rebuild {iid}")
     lines.append(
         "  仅检查不重建；需要自动重建时加 --rebuild-if-needed"
-        "（请先固化 Vite base: './' 等构建配置，否则 rebuild 后可能仍空 200）"
+        "（请先固化 Vite base: './' 等构建配置，否则 rebuild 后可能仍命中 IMP-023）"
     )
     return "\n".join(lines)
 

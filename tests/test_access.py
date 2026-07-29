@@ -582,9 +582,27 @@ def test_review_detects_spa_absolute_404_mismatch(
     assert any("IMP-023" in f for f in rep.findings)
 
 
+def test_alias_mismatch_ignores_connection_failures() -> None:
+    """BUG-399：绝对路径 TIMEOUT/REFUSED 不得判为 IMP-023。"""
+    from local_webpage_access.access import UrlProbe, _alias_resource_mismatch
+
+    prefixed = UrlProbe(url="http://x/alias/a.js", ok=True, content_length=10)
+    for note in ("TIMEOUT", "REFUSED", "UNREACHABLE"):
+        absolute = UrlProbe(
+            url="http://x/a.js", ok=False, status_code=None, note=note
+        )
+        empty, mismatch = _alias_resource_mismatch("/a.js", absolute, prefixed)
+        assert empty is False
+        assert mismatch is False, note
+    # HTTP 404 仍应命中
+    abs404 = UrlProbe(url="http://x/a.js", ok=False, status_code=404, note=None)
+    _e, mismatch404 = _alias_resource_mismatch("/a.js", abs404, prefixed)
+    assert mismatch404 is True
+
+
 def test_review_detects_spa_wrong_mime_mismatch(
     workspace, registry, config, spa_mime_server, monkeypatch
-):
+) -> None:
     """BUG-381：绝对路径错误 MIME（text/html）+ 带前缀 JS → mismatch。"""
     port = spa_mime_server
     config.staticGatewayPort = port

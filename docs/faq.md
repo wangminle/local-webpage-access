@@ -301,7 +301,7 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 * **根因 B — 浏览器缓存了旧 HTML**：产物已重建为相对路径，但浏览器仍用重建前的旧 HTML（绝对路径 + 旧 hash）→ 同样白屏。重启 lwa / 网关无效（服务端已正确，问题在客户端缓存）。
   * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
   * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
-* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME），直接指出哪些实例需要 rebuild；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。
+* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME），直接指出哪些实例需要 rebuild；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。瞬时连接失败（TIMEOUT / REFUSED）**不**算 IMP-023，避免误触发 `--rebuild-if-needed`。
 
 ### 如何在 Caddy 与 builtin 之间切换网关后端
 
@@ -351,6 +351,8 @@ lwa gateway switch builtin --dry-run     # 只看将影响的实例
 准确说法是 **LWA 工作区迁移**：不要只做 `mv` 再 `lwa start`。自启单元、`pip editable`、Docker Mounts、manifest/registry 绝对路径、生成式 Caddyfile 都会绑旧路径。
 
 - **优先 CLI**：`lwa workspace relocate <NEW> --dry-run` → 确认后执行；Skill `lwa-relocate-workspace` 只调 CLI。
+- **中断恢复**：失败后 `lwa workspace relocate --resume`（读 journal；可显式传 NEW）；必要时 `--rollback`（同卷 rename 回旧路径并逆改写配置）。
+- **dry-run**：只做预检与计划，不改磁盘（不建 pageviews.db、不以写模式开 registry）。
 - **人工逃生舱 / 跨盘**：见 **[LWA 工作区迁移手册](workspace-rename.md)**（DOC-081）。
 - **产品点**：IMP-042 / [PLN-027](plans/2026-07-29-workspace-relocate.md)；v1 支持 **macOS / Linux / WSL 同卷**原子改名，跨盘/跨机不自动。
 - 若迁前已 `docker compose down`：含 BUG-382 的版本用 `lwa start` 即可 `up -d`；旧版本可能需临时 `lwa rebuild`。

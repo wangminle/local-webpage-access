@@ -1374,6 +1374,45 @@ def test_repair_with_caddy_adds_gateway_when_missing(
     assert backend.unit_path("gateway").is_file()
 
 
+def test_repair_does_not_enable_config_disabled_gateway(
+    tmp_path, monkeypatch
+) -> None:
+    """BUG-389：staticGateway=builtin 时 repair 不得重新启用残留 gateway 单元。"""
+    root, ws, _ = _make_ws(tmp_path)
+    from local_webpage_access.config import Config
+
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # 先以 caddy 模式装上 gateway
+    caddy_cfg = Config(staticGateway="caddy", managerEnabled=True)
+    asm.install(
+        ws, caddy_cfg, with_caddy=True, enable=False, python_exe=sys.executable
+    )
+    backend = asm.MacLaunchdBackend()
+    gw = backend.unit_path("gateway")
+    assert gw.is_file()
+
+    record: list[list[str]] = []
+    builtin_cfg = Config(staticGateway="builtin", managerEnabled=True)
+    result, actions = asm.repair(
+        ws, builtin_cfg, with_caddy=False, python_exe=sys.executable,
+        runner=_fake_runner(record),
+    )
+    assert gw.is_file(), "单元文件应保留（BUG-384）"
+    assert "gateway" in result.services
+    # 不得对 gateway 执行 enable / bootstrap / kickstart
+    joined = [" ".join(c) for c in record]
+    assert not any(
+        "gateway" in j and ("bootstrap" in j or "kickstart" in j or "enable" in j)
+        for j in joined
+    ), joined
+    # 应对其 disable / bootout
+    assert any(
+        "gateway" in j and ("bootout" in j or "disable" in j or "unload" in j)
+        for j in joined
+    ), joined
+
+
 def test_check_unit_path_rejects_useless_path(tmp_path, monkeypatch) -> None:
     """PATH=/definitely/missing 不得判 OK（BUG-164）。"""
     import plistlib

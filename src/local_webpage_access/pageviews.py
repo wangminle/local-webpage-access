@@ -16,7 +16,8 @@
 设计要点：
 
 * **惰性摄入**：API 请求时按游标（``ingest_cursor``）只解析新增行，避免每次
-  全量重读。游标按"数据源文件路径 + 实例 id"持久化到 ``run/pageviews.db``。
+  全量重读。游标按路径无关稳定 key（如 ``builtin:<id>:gateway`` /
+  ``caddy-shared:static-access``）持久化到 ``run/pageviews.db``（BUG-383）。
 * **跨进程安全**：独立 SQLite（``run/pageviews.db``，WAL），与 registry DB 分库，
   避免写放大；多请求并发摄入靠 WAL + 连接级锁兜底。
 * **可降级**：任何单实例摄入失败（日志缺失 / docker 不可用 / 解析异常）只记
@@ -845,8 +846,8 @@ class PageviewStore:
     def clear_instance(self, instance_id: str) -> None:
         """清空实例所有浏览量数据（删除实例时调用，避免残留 / 同 ID 复用串数据）。
 
-        游标按精确前缀匹配：``container:<iid>`` 与 ``builtin:<iid>:<path>``。
-        ``caddy-shared:<path>`` 是共享游标（多实例共用同一 access log），不随单
+        游标按稳定 key 精确前缀匹配：``container:<iid>`` 与 ``builtin:<iid>:``。
+        ``caddy-shared:static-access`` 是共享游标（多实例共用同一 access log），不随单
         实例删除——历史用 ``%:<iid>%`` 的 LIKE 会把 ``builtin:demo-2:...`` 误伤
         （``:demo`` 是 ``:demo-2`` 的子串）。
         """

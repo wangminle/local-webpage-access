@@ -82,9 +82,9 @@ preflight
 | **quiesce** | 暂停 daemon/manager/gateway；stop 业务实例；容器 `compose down`；持迁移锁 | `stopped_ids`, `downed_ids` |
 | **move** | 同文件系统原子改名 OLD→NEW | `moved_at` |
 | **rebind** | 结构化改写 manifest + registry（及 builds.log_path）；清陈旧 containerId 以便 start 走 up -d | `rewritten` |
-| **regenerate** | 重生 Caddy site/alias/主配置；`autostart repair`（preserve gateway）；只清 capability 缓存 | `units`, `caddy` |
-| **restore** | enable 自启；只 start 快照中 running 意图的实例 | `restored_ids` |
-| **verify** | autostart check、Full capability（若 profile=full）、Docker Mounts 前缀、访问探测、pageviews 不变量 | `verify_report` |
+| **regenerate** | 重生主 Caddyfile（`_sync_main_config`）；sites/aliases 绝对路径已在 rebind 边界安全改写；`autostart repair`（仅迁前已装；preserve gateway）；只清 capability 缓存 | `units`, `caddy` |
+| **restore** | enable 自启（若有）；未装自启则按快照拉回 detached daemon/manager；只 start 快照中 running 意图的实例 | `restored_ids` |
+| **verify** | autostart check、pageviews 不变量、扫描 manifest + 主 Caddyfile + sites/aliases 无 OLD 残留 | `verify_report` |
 | **complete** | 释锁；保留 journal 供审计 | `completed_at` |
 
 失败时 journal `phase` 停在失败步 + `error`；`--resume` 从下一步安全点继续；不可恢复则 `--rollback` 或 DOC-081 人工回滚。
@@ -101,11 +101,11 @@ preflight
 - [ ] 结构化更新 manifest + registry 内部路径（禁止整树 sed）
 - [ ] pageviews：依赖 BUG-383 稳定游标；迁前基线 + 迁后对账（不重复累计）
 - [ ] 清陈旧容器身份；`lwa start` → compose `up -d`（BUG-382），非默认整镜像 rebuild
-- [ ] 重新生成 Caddy site、alias、主配置（生成器，非 sed）
-- [ ] 重写 daemon、manager、gateway 三个自启动单元（`repair` + preserve）
+- [ ] 重新生成主 Caddyfile；sites/aliases 片段在 rebind 阶段边界安全改写绝对路径
+- [ ] 重写 daemon、manager、gateway 三个自启动单元（仅迁前已装时 `repair` + preserve）
 - [ ] 只清可重建缓存（capability-*）；**不删** `daemon-processed.json`
-- [ ] 仅恢复迁前 running 意图实例
-- [ ] 验收：`autostart check`、Full capability（适用时）、Docker mount、访问地址、统计不变量
+- [ ] 仅恢复迁前 running 意图实例；未装自启时拉回迁前 running 的 detached 控制面
+- [ ] 验收：`autostart check`、manifest/Caddyfile/sites/aliases 无 OLD、统计不变量
 
 ---
 

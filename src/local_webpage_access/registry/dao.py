@@ -50,12 +50,19 @@ class Registry:
             self._conn = init_db(self.db_path)
         return self
 
-    def open_readonly(self) -> Registry:
-        """只读打开既有 registry，不创建文件、不迁移 schema（BUG-331）。"""
+    def open_readonly(self, *, immutable: bool = False) -> Registry:
+        """只读打开既有 registry，不创建文件、不迁移 schema（BUG-331）。
+
+        ``immutable=True`` 时使用 SQLite ``immutable=1``，避免只读打开 WAL 库时
+        物化 ``-wal``/``-shm`` 旁路文件（dry-run 零副作用，BUG-394）。
+        """
         if self._conn is None:
             if not self.db_path.is_file():
                 raise RegistryError(f"Registry 数据库不存在：{self.db_path}")
-            uri = f"file:{quote(str(self.db_path))}?mode=ro"
+            q = "mode=ro"
+            if immutable:
+                q += "&immutable=1"
+            uri = f"file:{quote(str(self.db_path))}?{q}"
             try:
                 conn = sqlite3.connect(
                     uri,

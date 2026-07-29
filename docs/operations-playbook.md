@@ -304,7 +304,7 @@ lwa access review    # 对声明 URL 做真探活（含 SPA 别名资源错位�
 lwa access review --json   # 机器可读
 ```
 
-逐实例探测：回环 `127.0.0.1:<hostPort>`（权威，区分「服务没起」vs「LAN URL 陈旧」）、lanUrl、routeUrl；对别名入口解析 HTML 的绝对路径 `src`/`href`，对照「无前缀」与「带别名前缀」两种请求——前者空 200 / 404 / 错误 MIME、后者有正确实体 → **IMP-023 风险**（SPA 需构建时设相对 base，如 Vite `base: './'`）。这才是别名下「可用」的真实口径，而非仅看入口 HTML 200。
+逐实例探测：回环 `127.0.0.1:<hostPort>`（权威，区分「服务没起」vs「LAN URL 陈旧」）、lanUrl、routeUrl；对别名入口解析 HTML 的绝对路径 `src`/`href`，对照「无前缀」与「带别名前缀」两种请求——前者空 200 / 404 / 错误 MIME、后者有正确实体 → **IMP-023 风险**（SPA 需构建时设相对 base，如 Vite `base: './'`）。瞬时连接失败（TIMEOUT/REFUSED）**不计** IMP-023。这才是别名下「可用」的真实口径，而非仅看入口 HTML 200。
 
 **主动停止的实例**（`desiredState=stopped`）标 `[SKIP]`，不探活、不计入 FAIL（BUG-301），避免拖垮 `gateway on` / `gateway switch` 的 overall。
 
@@ -337,6 +337,21 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 ### 7.6 管理页兜底链接（建议 D）
 
 实例列表除 LAN「端口」链接外，额外提供「本机」(`http://127.0.0.1:<hostPort>/`) 链接——LAN IP 漂移失效时仍可本机访问。`caddy start --pingback` 超时假失败（BUG-102）已修复：回退 admin :2019 探活，admin 在线即视为启动成功。
+
+---
+
+## 八、工作区迁移（IMP-042）
+
+同卷改名 / 搬目录优先 CLI，**不要**只 `mv`：
+
+```bash
+lwa workspace relocate /abs/NEW --dry-run --json   # 零副作用预演
+lwa workspace relocate /abs/NEW --yes              # 执行
+cd /abs/NEW && lwa workspace relocate --verify
+# 失败：--resume（可读 journal；可显式传 NEW）/ --rollback
+```
+
+事务：预检 → 快照备份（SQLite online backup）→ 停服 → 同卷 rename → 结构化改写 manifest/registry/sites/aliases → 有自启才 repair → 恢复 running 意图与 detached 控制面 → 验收。Skill：`lwa-relocate-workspace`。跨盘见 [工作区迁移手册](workspace-rename.md)。
 
 ---
 

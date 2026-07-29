@@ -52,9 +52,6 @@ def workspace_relocate(
     ),
 ) -> None:
     """将 LWA 工作区同卷原子迁移到新路径（IMP-042）。"""
-    from local_webpage_access.paths import find_workspace_root, require_workspace
-    from local_webpage_access.workspace_migrate import run_migrate
-
     mode_flags = sum(bool(x) for x in (resume, verify, rollback))
     if mode_flags > 1:
         typer.secho(
@@ -65,10 +62,31 @@ def workspace_relocate(
         raise typer.Exit(code=2)
 
     try:
+        from local_webpage_access.paths import Workspace, find_workspace_root, require_workspace
+        from local_webpage_access.workspace_migrate import read_journal, run_migrate
+
+        def _load_journal(*candidates: Path | None):
+            seen: set[Path] = set()
+            for cand in candidates:
+                if cand is None:
+                    continue
+                root = cand.expanduser().resolve()
+                if root in seen:
+                    continue
+                seen.add(root)
+                if not (root / "local-web.yml").is_file() and not (root / "run").is_dir():
+                    continue
+                try:
+                    journal = read_journal(Workspace(root))
+                except Exception:  # noqa: BLE001
+                    continue
+                if journal and (journal.get("old") or journal.get("new")):
+                    return journal
+            return None
+
         if from_path:
             old = Path(from_path).expanduser().resolve()
         elif resume or verify or rollback:
-            # 优先当前目录工作区；否则找 NEW
             found = find_workspace_root()
             if found is not None:
                 old = found
@@ -80,27 +98,34 @@ def workspace_relocate(
             old = require_workspace().root
 
         if resume or verify or rollback:
-            # new 可从 journal 推断；若给出则用给出的
-            if new_path:
+            # BUG-390：即使显式传入 NEW，也必须读 journal 拿权威 old/new
+            found = find_workspace_root()
+            journal = _load_journal(
+                Path(from_path).expanduser().resolve() if from_path else None,
+                found,
+                Path(new_path).expanduser().resolve() if new_path else None,
+                old,
+            )
+            if journal and journal.get("old") and journal.get("new"):
+                old = Path(str(journal["old"]))
+                new = Path(str(journal["new"]))
+            elif new_path:
                 new = Path(new_path).expanduser().resolve()
+            elif journal and journal.get("new"):
+                new = Path(str(journal["new"]))
+                if journal.get("old"):
+                    old = Path(str(journal["old"]))
+            elif resume or rollback:
+                hint = (
+                    "无法从 journal 解析目标路径。"
+                    "若工作区已搬迁，请传入 NEW（journal 在新路径 run/ 下）；"
+                    "或 cd 到新工作区后执行 --resume/--rollback。"
+                )
+                if from_path:
+                    hint += f" 当前 --from={from_path} 未找到含 new 字段的 journal。"
+                raise MigrateError(hint)
             else:
-                from local_webpage_access.paths import Workspace
-                from local_webpage_access.workspace_migrate import read_journal
-
-                journal = read_journal(Workspace(old))
-                if journal and journal.get("new"):
-                    new = Path(str(journal["new"]))
-                    if journal.get("old"):
-                        old = Path(str(journal["old"]))
-                elif new_path is None and not verify:
-                    # verify 可用当前 ws；rollback/resume 需要 journal
-                    if resume or rollback:
-                        raise MigrateError(
-                            "缺少目标路径且 journal 无 new；请传入 NEW 或 --from"
-                        )
-                    new = old
-                else:
-                    new = old
+                new = old
         else:
             if not new_path:
                 typer.secho(
@@ -164,7 +189,20 @@ def workspace_relocate(
         raise typer.Exit(code=1) from exc
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        if as_json:
+            typer.echo(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": getattr(exc, "code", None),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
 
     if as_json:

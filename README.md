@@ -30,7 +30,8 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 - **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；人类可读与 `--json` 均含平台矩阵报告（`--json` 未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。
 - **宿主机装配（IMP-031/032/033）**：`lwa setup` / `lwa init` 内置 macOS/Linux 的 Docker Engine+Compose、Caddy 安装脚本（默认国内源 + registry-mirrors）；`--default` 检测+指引，`--full` 装齐并做 **Full Profile 能力闭环**（CLI + manager/daemon/gateway 真实上下文、Caddy owner/工作区访问）；未闭环不假绿；`--resume` 在重登/权限刷新后续跑验收（非 TTY 需 `--yes`）。
 - **正式平台门禁（IMP-036）**：仅 Ubuntu LTS / Debian Stable / WSL2 / macOS；Windows 原生 hard fail。
-- **大模型 Skills（WBS-24）**：17 个 SKILL.md 覆盖环境初始化、导入、托管、容器、生命周期、自启动、访问复核、排障等场景，供 AI 编程助手协作。
+- **工作区迁移（IMP-042）**：`lwa workspace relocate` 同卷原子改名（预检 / 快照 / 停服 / rename / 路径改写 / 自启门控 repair / 恢复 / 验收）；支持 `--dry-run` / `--resume` / `--verify` / `--rollback`；跨盘见 [工作区迁移手册](docs/workspace-rename.md)。
+- **大模型 Skills（WBS-24）**：18 个 SKILL.md 覆盖环境初始化、导入、托管、容器、生命周期、自启动、工作区迁移、访问复核、排障等场景，供 AI 编程助手协作。
 
 ## 安装
 
@@ -125,6 +126,7 @@ lwa access review             # 复核访问地址（别名白屏 / IMP-023 空2
 | --- | --- |
 | `lwa init [-w DIR] [--force] [--default\|--full] [--yes]` | 初始化工作区（目录 / 配置 / registry / skills），幂等；`--full` 装齐依赖并在能力闭环 **ready 后**写入 `profile: full` |
 | `lwa update` | 升级 lwa 包并热重载：同步 skills、补齐配置、重启 manager/daemon、**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）、刷新访问地址（可选 review）、可选 doctor / restart 实例；Full 收尾验收能力缓存 |
+| `lwa workspace relocate <NEW> [--dry-run] [--yes] [--resume\|--verify\|--rollback]` | 同卷原子迁移工作区根（IMP-042）；见 docs/workspace-rename.md / Skill `lwa-relocate-workspace` |
 | `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名；`--update` 原地升级（容器自动 rebuild，静态/前端 restart；`--no-restart` 仅换源码） |
 | `lwa alias set <ID> <slug>` / `lwa alias clear <ID>` | 为静态或容器实例设置/清除路径别名（需 Caddy；与管理页/API 共用逻辑） |
 | `lwa scan [ID]` | 重新扫描实例（省略 ID 则扫所有 `pending`） |
@@ -201,7 +203,7 @@ logLevel: INFO
 ├─ logs/                    # 全局日志：lwa.log / manager.log / daemon.log / gateway.log / static-access.log
 ├─ templates/               # 用户可编辑模板副本
 ├─ manager/                 # 管理页静态资源与运行相关目录
-├─ skills/                  # 17 个大模型协作 SKILL.md（WBS-24）
+├─ skills/                  # 18 个大模型协作 SKILL.md（WBS-24）
 └─ apps/<id>/
    ├─ local-web.json        # 实例元数据（真相文件）
    ├─ source/               # 原始 zip 与解压快照

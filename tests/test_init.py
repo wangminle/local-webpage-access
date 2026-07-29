@@ -121,7 +121,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
     init_workspace(root)
     ws = Workspace(root)
     skill_docs = list(ws.skills.rglob("SKILL.md"))
-    assert len(skill_docs) == 17  # IMP-038 新增 lwa-review-access-urls
+    assert len(skill_docs) == 18  # IMP-042 新增 lwa-relocate-workspace
     # 索引 README 也应存在
     assert (ws.skills / "README.md").is_file()
     # 关键 skill 应在列
@@ -138,6 +138,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
         "lwa-update-runtime",
         "lwa-import-zip",
         "lwa-review-access-urls",
+        "lwa-relocate-workspace",
     ):
         assert expected in names, f"缺少 skill：{expected}"
 
@@ -146,7 +147,7 @@ def test_bundled_skills_have_discoverable_frontmatter() -> None:
     """内置 Skill 必须提供 Agent Skills 可发现的最小 YAML 元数据。"""
     skills_root = Path(__file__).parents[1] / "src/local_webpage_access/skills"
     skill_docs = sorted(skills_root.glob("lwa-*/SKILL.md"))
-    assert len(skill_docs) == 17
+    assert len(skill_docs) == 18
 
     for skill_doc in skill_docs:
         text = skill_doc.read_text(encoding="utf-8")
