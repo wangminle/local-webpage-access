@@ -785,23 +785,40 @@ def _compute_overall(report: CapabilityReport) -> OverallState:
             return "degraded"
         return "ready"
 
-    # full：任一强制项不满足 → unready / degraded（BUG-233：含 Caddy runtime/
-    # owner/工作区访问与 gatewayAccess；unknown 不得伪装 ready）
-    required = [
-        report.docker_engine,
-        report.docker_compose,
-        report.docker_access,
-        report.manager_docker_access,
-        report.daemon_docker_access,
-        report.caddy_binary,
-        report.caddy_runtime,
-        report.caddy_workspace_access,
-        report.gateway_access,
-    ]
-    # CLI 是安装/doctor 的强制能力；后台服务的健康视角不应因没有 CLI 缓存而
-    # 永久 unready。后台进程仍必须证明自身及其余后台角色能力。
-    if report.details.get("role", "cli") == "cli":
-        required.append(report.cli_docker_access)
+    # ADJ-035：角色快照只按「本角色职责」算 overall；全局聚合留给 CLI/manager。
+    # 否则 daemon/gateway 缓存会因 peer 字段 unknown 永久假红（即便 BUG-406 已合并）。
+    role = str(report.details.get("role") or "cli")
+    require_caddy_owner = True
+    if role == "daemon":
+        required = [
+            report.docker_engine,
+            report.docker_compose,
+            report.docker_access,
+            report.daemon_docker_access,
+        ]
+        require_caddy_owner = False
+    elif role == "gateway":
+        required = [
+            report.caddy_binary,
+            report.caddy_runtime,
+            report.caddy_workspace_access,
+            report.gateway_access,
+        ]
+    else:
+        # manager / cli：聚合视角（manager 不含 cliDockerAccess）
+        required = [
+            report.docker_engine,
+            report.docker_compose,
+            report.docker_access,
+            report.manager_docker_access,
+            report.daemon_docker_access,
+            report.caddy_binary,
+            report.caddy_runtime,
+            report.caddy_workspace_access,
+            report.gateway_access,
+        ]
+        if role == "cli":
+            required.append(report.cli_docker_access)
     if report.session_refresh_required:
         return "unready"
     hard_fail = {
@@ -819,12 +836,12 @@ def _compute_overall(report: CapabilityReport) -> OverallState:
     }
     if any(s in hard_fail for s in required):
         return "unready"
-    if report.caddy_owner in ("system_caddy", "foreign_process"):
+    if require_caddy_owner and report.caddy_owner in ("system_caddy", "foreign_process"):
         return "unready"
     # Full 下 unknown / timeout / degraded 一律视为尚未证明 ready
     if any(s in {"timeout", "unknown", "degraded"} for s in required):
         return "unready"
-    if report.caddy_owner != "lwa_service_user":
+    if require_caddy_owner and report.caddy_owner != "lwa_service_user":
         # owner 仍为 unknown 时同样未闭环
         return "unready"
     if any(s != "ready" for s in required):

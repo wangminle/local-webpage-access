@@ -542,7 +542,9 @@ def _refresh_gateway_capability(workspace: Workspace, config: Config) -> None:
             workspace_root=workspace.root,
             role="gateway",
             config_profile=getattr(config, "profile", None),
-            include_backend_cached=False,
+            # BUG-406：须合并 manager/daemon 存活缓存；False 会使 Full overall 因
+            # peer Docker=unknown 永久假红（每 5 分钟刷新也只是重复假红）。
+            include_backend_cached=True,
         )
         level = "WARNING" if report.gateway_access != "ready" else "INFO"
         log_capability_probe("gateway", report, level=level)

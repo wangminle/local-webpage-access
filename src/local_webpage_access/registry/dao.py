@@ -276,6 +276,14 @@ class Registry:
                 (now_iso(), instance_id),
             )
 
+    def update_name(self, instance_id: str, name: str) -> None:
+        """仅更新显示名（BUG-410：勿走 upsert_from_manifest，以免清空端口子表）。"""
+        with self.txn() as tx:
+            tx.execute(
+                "UPDATE instances SET name = ?, updated_at = ? WHERE id = ?",
+                (name, now_iso(), instance_id),
+            )
+
     def record_started(self, instance_id: str) -> None:
         with self.txn() as tx:
             tx.execute(

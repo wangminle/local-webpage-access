@@ -63,6 +63,10 @@ DEFAULT_FAILED_ZIP_MAX_ATTEMPTS = 5
 # DEV-042：周期自愈间隔——watcher 每隔该秒数跑一次 reconcile，恢复掉线的
 # desired=running 实例（builtin 静态进程存活监管 + 容器轻量拉起）。
 DEFAULT_SUPERVISE_INTERVAL = 60.0
+# BUG-407：能力缓存周期刷新（对齐 manager/gateway 默认 300s）；启动后再延后
+# capability_initial_delay 一次，吸收三 unit 同启竞态。
+DEFAULT_CAPABILITY_REFRESH_INTERVAL = 300.0
+DEFAULT_CAPABILITY_INITIAL_DELAY = 15.0
 RECONCILE_BACKOFF_BASE_SECONDS = 60.0
 RECONCILE_BACKOFF_MAX_SECONDS = 1800.0
 STATE_FILENAME = "daemon.json"
@@ -175,7 +179,11 @@ def clear_state(workspace: Workspace) -> None:
 
 
 def is_pid_alive(pid: int) -> bool:
-    """跨平台进程存活探测。复用 lifecycle 的实现逻辑。"""
+    """跨平台进程存活探测（通用工具；正式运行已由平台门禁拒绝 win32）。
+
+    036.09：保留 win32 OpenProcess 仅供单测 monkeypatch / import 可移植，
+    不构成 Windows 原生服务支持。
+    """
     if pid <= 0:
         return False
     try:
@@ -918,6 +926,8 @@ def run_watcher(
     supervise: Callable[[Workspace, Config, Registry], Any] | None = None,
     supervise_interval: float = DEFAULT_SUPERVISE_INTERVAL,
     heartbeat_interval: float | None = None,
+    capability_refresh_interval: float = DEFAULT_CAPABILITY_REFRESH_INTERVAL,
+    capability_initial_delay: float = DEFAULT_CAPABILITY_INITIAL_DELAY,
 ) -> None:
     """watcher 主循环（可注入 stop_event/process_fn/heartbeat/supervise，便于单测）。
 
@@ -935,6 +945,10 @@ def run_watcher(
     DEV-042：``supervise`` 每隔 ``supervise_interval`` 秒调用一次（默认
     :func:`reconcile`），周期恢复 ``desired=running`` 但掉线的实例，实现
     builtin 静态进程存活监管。
+
+    BUG-407：按 ``capability_initial_delay``（默认 15s）再探一次能力，之后按
+    ``capability_refresh_interval``（默认 300s）周期刷新 ``capability-daemon.json``，
+    与 manager/gateway 对齐，吸收 systemd 三 unit 同启竞态。
     """
     stop_event = stop_event or threading.Event()
     poll_interval = (
@@ -950,8 +964,9 @@ def run_watcher(
 
     log.info("daemon watcher 启动（poll=%.1fs）", poll_interval)
     last_supervise = clock()
-    # BUG-190：后台心跳线程——单轮超 LOCK_HEARTBEAT_TIMEOUT 时持续刷新锁，
-    # 避免被误判 stale 触发重复 watcher。
+    # _main 启动时已探过一次；此处先等 initial_delay 再探，之后走 refresh 周期。
+    next_capability_at = clock() + max(0.0, float(capability_initial_delay))
+    capability_period = max(1.0, float(capability_refresh_interval))
     hb_stop = threading.Event()
     if heartbeat is not None and heartbeat_interval > 0:
 
@@ -984,6 +999,15 @@ def run_watcher(
                     supervise(workspace, config, registry)
                 except Exception:  # noqa: BLE001 — 自愈失败不中断 watcher
                     log.exception("daemon supervise（reconcile）失败")
+
+            # BUG-407：周期刷新能力缓存（启动后 initial_delay，再按 refresh 周期）
+            now_ts = clock()
+            if now_ts >= next_capability_at:
+                next_capability_at = now_ts + capability_period
+                try:
+                    _probe_daemon_capability(workspace, config)
+                except Exception:  # noqa: BLE001 — 能力探测失败不中断 watcher
+                    log.exception("daemon 周期能力自检失败")
 
             processed = load_processed_set(workspace)
             for zip_path in scan_inbox(workspace):
@@ -1081,11 +1105,13 @@ def _spawn_watcher(workspace: Workspace, poll_interval: float) -> int:
         "stderr": subprocess.DEVNULL,
         "stdin": subprocess.DEVNULL,
     }
+    # 036.09：正式支持不含 Windows 原生；DETACHED_PROCESS 启动路径已删除。
     if sys.platform == "win32":
-        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
-    else:
-        popen_kwargs["start_new_session"] = True
+        raise RuntimeError(
+            "Windows 原生不受支持；无法启动 LWA daemon，"
+            "请在 WSL2 的 Ubuntu/Debian 中运行（IMP-036 / 036.09）"
+        )
+    popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
     return int(proc.pid)
 
@@ -1279,7 +1305,9 @@ def _probe_daemon_capability(workspace: Workspace, config: Config) -> None:
             workspace_root=workspace.root,
             role="daemon",
             config_profile=getattr(config, "profile", None),
-            include_backend_cached=False,
+            # BUG-406：合并 manager/gateway 存活缓存，避免 Full overall 因 peer
+            # 字段 unknown 永久假红。
+            include_backend_cached=True,
         )
         level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
         log_capability_probe("daemon", report, level=level)
@@ -1410,6 +1438,8 @@ __all__ = [
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_STABLE_SECONDS",
     "DEFAULT_SUPERVISE_INTERVAL",
+    "DEFAULT_CAPABILITY_REFRESH_INTERVAL",
+    "DEFAULT_CAPABILITY_INITIAL_DELAY",
     "read_state",
     "write_state",
     "clear_state",

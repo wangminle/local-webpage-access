@@ -70,6 +70,32 @@ lwa setup --full --resume     # 组权限刷新后继续；exit 2=session_refres
 
 Full 下系统 `caddy.service` / 外部占用 `:2019` 会 fail-closed；须由 LWA gateway 以 `serviceUser` 托管。
 
+### 后台 capability 缓存 `overall=unready`，但 `lwa doctor --profile full` 已是 ready？
+
+**以 `lwa doctor --profile full`（CLI 实时探活）为准。** 后台 `run/capability-{daemon,manager,gateway}.json` 的 `overall` 是各进程自己的合并视角，历史上曾出现「假红」：
+
+| 误判（勿再采用） | 实情 |
+| --- | --- |
+| 「`cliDockerAccess` 后台恒 unknown → 永远 unready」 | **不成立**。BUG-239 已让后台角色不把 `cliDockerAccess` 计入 Full `required`。 |
+| 「后台完全不周期刷新」 | **不成立**。manager（BUG-379）与 gateway（约 300s）会周期刷新；**仅 daemon** 曾只在启动探一次（BUG-407，已修）。 |
+| 真因 | **BUG-406**：gateway/daemon 写缓存曾 `include_backend_cached=False`，Full 仍要求 peer Docker/gateway 字段 → peer=`unknown` → overall 永久 unready（gateway 每 5 分钟只是重复假红）。 |
+
+**V0.6.10** 起：gateway/daemon 与 manager 一样合并存活 peer 缓存（BUG-406）；daemon 启动后约 15s 再探一次，随后约每 300s 刷新（BUG-407）；角色快照 `overall` 按本角色职责计算（ADJ-035），CLI/manager 仍做全局聚合。若仍见假红，先确认已部署本版并 `systemctl --user restart lwa-daemon.service lwa-manager.service lwa-gateway.service`。
+
+### `lwa-gateway` 卡死：Caddy 已通但 `gateway.json` 仍 `enabled=false`、无 capability 缓存？
+
+**V0.6.10 初版回归（BUG-412 / ADJ-036）**：`caddy_start` 曾用 `Popen(stdout/stderr=PIPE)` + 无超时 `communicate()`；`caddy start` daemonize 后 master 继承 pipe 写端，gateway 进程永久阻塞在启动，探活循环与缓存写入都不跑——但 Caddy 本身可能已起来（`:8080` 仍 200）。
+
+修复后（含本修复的构建）：`caddy_start` 改为 `DEVNULL` + `poll`/`wait(timeout=)`，不再读 PIPE。升级后执行：
+
+```bash
+systemctl --user restart lwa-gateway.service
+# 数秒内应出现「gateway 前台监管就绪」；run/gateway.json 为 enabled=true
+# run/capability-gateway.json 应写出；lwa doctor --profile full 的 Gateway 不再长期 unknown
+```
+
+若仍卡住：`systemctl --user stop lwa-gateway.service`，确认无残留 `caddy`/`gateway_service`，清理 `run/gateway-start.lock` 后再 start。
+
 ## 症状 → 日志文件 → 命令（IMP-034）
 
 | 症状 | 先看哪个文件 | 命令 |

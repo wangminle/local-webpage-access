@@ -3,7 +3,7 @@
 #
 # 用法（在仓库根目录）：
 #   bash scripts/pack-release-zip.sh
-#   bash scripts/pack-release-zip.sh /path/to/lwa-0.6.9-src.zip
+#   bash scripts/pack-release-zip.sh /path/to/lwa-0.6.10-src.zip
 #
 set -euo pipefail
 

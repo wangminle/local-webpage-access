@@ -417,6 +417,15 @@
 | BUG-403 | 修复 | docs/workspace-rename.md §7.3 人工迁移参考脚本用裸 v.startswith(old) 判前缀、无路径边界检查，OLD=/home/u/lwa 时 /home/u/lwa-backup/... 会被错改；该手册定位为「禁止盲目 sed 后的正确做法」但参考实现本身有前缀越界缺陷 | 2026-07-29 20:08 | 2026-07-29 20:35 | 已修复 | 【已修复】docs/workspace-rename.md §7.3 参考脚本改为路径边界判断（==old 或 startswith old+/）。 原备注：docs/workspace-rename.md:268；CLI 实现 _rewrite_str（workspace_migrate.py:497-500）特意要求 value==old or startswith(old+os.sep) |
 | BUG-404 | 修复 | relocate plan 文档承诺与实现不符：plan 称 regenerate「重新生成 Caddy site、alias、主配置」、verify 检查「Full capability/Docker Mounts/访问探测」，实现只做 _sync_main_config，verify 只 grep apps/*/local-web.json 与主 Caddyfile，不扫 sites/aliases 片段残留 | 2026-07-29 20:08 | 2026-07-29 20:35 | 已修复 | 【已修复】rebind 改写 sites/aliases 片段；verify 扫描这些路径；plan 文档承诺对齐实现。 原备注：docs/plans/2026-07-29-workspace-relocate.md:87,104 vs workspace_migrate.py:703-711,755-814；实测 runtime/static-gateway/sites/demo-static.conf 内含绝对路径 |
 | BUG-405 | 修复 | test_workspace_migrate 测试缺口：resume/失败注入路径零覆盖（journal 错误落盘、锁移交、ws 切换等中断恢复通道无测试）；锁测试只覆盖活 PID 分支，死锁接管与锁清理无断言；多他用例未 mock autostart 会扫描真实 ~/Library/LaunchAgents 并对真实系统跑 launchctl 探测 | 2026-07-29 20:08 | 2026-07-29 20:35 | 已修复 | 【已修复】补 dry-run/死锁接管/backup_dir/gateway rebind/CLI json 等回归；覆盖 resume 快照复用（BUG-387）。 原备注：tests/test_workspace_migrate.py:46-57,114-146,343-350,486-497；test_run_migrate_rollback 断言不足已并入 BUG-386 |
+| BUG-406 | 修复 | gateway/daemon 写能力缓存时 include_backend_cached=False，Full overall 仍强制 manager/daemon Docker，导致缓存与 probe 日志永久假红 | 2026-07-30 16:49 | 2026-07-30 17:10 | 已修复 | 【已修复】gateway/daemon 改 include_backend_cached=True（对齐 BUG-271 manager）。回归 test_refresh_gateway_capability_merges_backend_caches / test_probe_daemon_capability_merges_backend_caches。来源 CHK-133/134。 |
+| BUG-407 | 修复 | daemon 能力探测仅启动时执行一次，无周期刷新；systemd 三 unit 同启竞态后 capability-daemon.json 可长期卡在 unready | 2026-07-30 16:49 | 2026-07-30 17:10 | 已修复 | 【已修复】run_watcher：capability_initial_delay=15s + capability_refresh_interval=300s 周期调用 _probe_daemon_capability。回归 test_run_watcher_periodically_refreshes_capability。来源 CHK-133/134。 |
+| BUG-408 | 修复 | 管理页实例表「名称」列宽随内容抖动（table-layout:auto + 仅 max-width） | 2026-07-30 17:04 | 2026-07-30 17:04 | 已修复 | 改 table-layout:fixed、.col-name/.cell-name 固定 200px、名称按钮 block+ellipsis。归入 IMP-043。 |
+| BUG-409 | 修复 | 实例显示名由 titleize(zip slug) 乱起，未使用主页 HTML title | 2026-07-30 17:04 | 2026-07-30 17:04 | 已修复 | 导入/更新优先 <title>；nameSource 区分 user/html_title/slug；旧 slug 美化名在 all_statuses 回填。归入 IMP-043。 |
+| BUG-410 | 修复 | IMP-043 旧实例显示名回填调用 registry.upsert_from_manifest 全量覆盖 runtime 子表；当 hostPort 只存在于 registry、manifest 仍为空时，拉取实例列表会把已登记端口清空 | 2026-07-30 18:06 | 2026-07-30 18:15 | 已修复 | 【已修复】refresh_display_name_from_homepage 改 registry.update_name 仅更新 instances.name；新增 test_refresh_display_name_preserves_registered_host_port。 |
+| BUG-411 | 修复 | 新增 capability 回归测试重复定义，后一个同名函数覆盖前一个，导致 Ruff F811、发布静态质量门禁失败 | 2026-07-30 18:06 | 2026-07-30 18:15 | 已修复 | 【已修复】删除 test_daemon.py / test_gateway_service.py 中重复定义；ruff check src tests 通过。 |
+| BUG-412 | 修复 | ADJ-036 caddy_start 用 Popen+PIPE+裸 communicate，caddy daemon 继承写端导致 gateway_service 启动死锁；Caddy 已通但 gateway.json 不写、capability 缓存缺失 | 2026-07-30 18:48 | 2026-07-30 18:48 | 已修复 | 【已修复】stdout/stderr=DEVNULL；用 poll/wait(timeout=) 替代裸 communicate。回归 test_caddy_start_uses_devnull_not_pipes / test_caddy_start_does_not_call_bare_communicate_after_exit。WSL Ubuntu 0.6.10 升级实机复现。 |
+| BUG-413 | 修复 | V0.6.10 实例表固定布局导致其余列被平均压缩并互相覆盖，名称列仅支持单行省略 | 2026-07-30 19:16 | 2026-07-30 19:16 | 已修复 | 【已修复】恢复 V0.6.9 的 table-layout:auto 行为，仅名称表头/单元格固定 200px（width/min-width/max-width）；名称按钮改为最多两行 -webkit-line-clamp 省略。新增 CSS 契约回归；1900px 实测表格 auto、4 行名称均 200px、跨列覆盖 0；1366px 实测名称仍 200px并横向滚动、跨列覆盖 0。全量 pytest 通过（4 skipped），Ruff 与 mypy 通过。设计与实施记录见 docs/plans/2026-07-30-manager-table-layout-*.md。 |
+| BUG-414 | 修复 | BUG-413 初版仍固定名称列且操作列保留 240px 偏好宽度，未完全恢复 V0.6.9 表格布局 | 2026-07-30 19:31 | 2026-07-30 19:31 | 已修复 | 【已修复】最终按用户确认完整恢复 V0.6.9：app.js 移除名称表头 col-name；style.css 移除名称 width/min-width/max-width 200px，恢复 cell-name max-width 220px；操作列恢复仅 min-width 200px；表格保持 auto。唯一新增行为为 cell-name-btn 两行 -webkit-line-clamp 省略。git diff V0.6.9 确认 app.js 零差异、style.css 仅两行截断声明有差异；1900px 浏览器实测名称列随内容约 173~193px、跨列覆盖 0。全量 pytest 通过（4 skipped），Ruff 与 mypy 通过。 |
 
 ## 调整事项
 
@@ -456,6 +465,8 @@
 | ADJ-032 | 调整 | 修复 17 个内置 Skill 的 Agent Skills 可发现性与章节一致性 | 2026-07-21 14:31 | 2026-07-21 14:31 | 已完成 | 为 src/local_webpage_access/skills 与 runtime/skills 双份 17 个 SKILL.md 补齐仅含 name/description 的 YAML frontmatter；补 review-access-urls 的输入/禁止事项，并为 import/update/review 增加短示例；新增元数据契约测试。17 项 quick_validate、tests/test_init.py 13 项、双份一致性及 git diff --check 通过。 |
 | ADJ-033 | 优化 | 清理静态质量门禁：Ruff 30 项与 Mypy 14 项当前未通过 | 2026-07-27 19:38 | 2026-07-27 20:50 | 已完成 | 【已完成】ruff check src tests = 0；mypy src/local_webpage_access = 0。清：未用导入/变量、E402、dao lastrowid/None 行、ports IP 类型、importer runtime None、docker stdout 闭包与 raise _require_ok、daemon Path/restarter、fmt_bytes float。pyproject 补齐 [tool.ruff.lint]/[tool.mypy]。全量 pytest 通过。 |
 | ADJ-034 | 优化 | current_service_user 三元运算符优先级晦涩难维护 | 2026-07-28 08:30 | 2026-07-28 08:28 | 已完成 | 审查 L1；改为 getattr(os,'geteuid') 显式判断，语义不变。 |
+| ADJ-035 | 优化 | ADJ-035：Full Profile 角色快照 overall 按本角色职责计算，daemon/gateway 不因 peer unknown 假红 | 2026-07-30 17:50 | 2026-07-30 17:50 | 已完成 | capability._compute_overall 按 details.role 分支；回归 test_daemon_role_overall_only_requires_own_docker / test_gateway_role_overall_only_requires_caddy_fields。来源 CHK-134。 |
+| ADJ-036 | 优化 | ADJ-036：caddy_start 改为 Popen+并行探 admin/pidfile，避免空等 pingback ~20s | 2026-07-30 17:50 | 2026-07-30 17:50 | 已完成 | 保留 BUG-102 假失败兜底与孤儿 admin 拒绝；测试改 mock Popen。来源 CHK-134。 |
 
 ## 检查事项
 
@@ -592,11 +603,15 @@
 | CHK-130 | 检查 | 核实并修复 CHK-129 报告的 major BUG-386～391（rollback 逆改写/resume 快照/autostart 门控/repair 不重启用/--resume+NEW 读 journal/skills 计数） | 2026-07-29 20:22 | 2026-07-29 20:22 | 已完成 | 读码确认 6 项均成立；TDD 新增 5 条回归后落地修复；相关 suites 全绿（workspace_migrate/autostart/init + e2e init）。BUG-392～405 仍待修复未纳入本轮。 |
 | CHK-131 | 检查 | 复核新增 BUG-392～405 是否属于真实缺陷并校正分类 | 2026-07-29 20:30 | 2026-07-29 20:30 | 已完成 | 逐项对照 HEAD 基线、当前未提交工作树、最小复现与定向测试：14 条问题均有事实依据；BUG-392～399、401、404 属代码/行为或契约缺陷；BUG-400、402、403 应归文档维护；BUG-405 应归测试/检查事项。BUG-404 同时混合 Caddy 片段残留与计划验收口径，建议拆分。当前工作树已有多项并行修补，pytest tests/test_workspace_migrate.py tests/test_access.py 通过，但不据此改写原条目状态。 |
 | CHK-132 | 检查 | 核实并修复剩余 BUG-392～405（迁移事务加固 + access/manager/pageviews/文档）；确认 BUG-369～371 仍为低优 backlog 暂不修 | 2026-07-29 20:35 | 2026-07-29 20:35 | 已完成 | 读码确认 392～405 均成立并已修；相关 suites 全绿。BUG-369/370/371 备注标明低优 backlog，本轮不改。 |
+| CHK-133 | 检查 | 复核 WSL2 Ubuntu Full Profile 能力缓存假红：对照 doctor ready vs 后台 unready 与排障第 9 节结论 | 2026-07-30 16:49 | 2026-07-30 16:48 | 已完成 | 源码复核纠正误判：cliDockerAccess 死结已被 BUG-239 排除；真因见 BUG-406/407。复现：gateway 自身 ready、peer Docker=unknown → overall=unready；peer ready+cli unknown → overall=ready。 |
+| CHK-134 | 检查 | 审查 V0.6.9 安装运维记录及 systemd/Full Profile 关键链路代码 | 2026-07-30 16:50 | 2026-07-30 16:50 | 已完成 | 确认 BUG-406/407 与 DOC-083：gateway/daemon 聚合语义导致假红、daemon 无周期收敛；纠正 cliDockerAccess 死结与后台完全不刷新两项误判。补充优化建议：角色快照与全局聚合解耦、Caddy pingback 20s 启动延迟治理、增加 systemd 三服务时序集成测试。验证：1516 tests collected，全量 pytest 通过（4 skipped）；ruff check src tests、mypy src/local_webpage_access 通过。 |
+| CHK-135 | 检查 | 审查 V0.6.10 未提交代码是否仍有缺陷 | 2026-07-30 18:06 | 2026-07-30 18:06 | 已完成 | 发现端口登记被显示名回填清空、重复测试导致 Ruff 门禁失败、两处文档优先级错误；全量 pytest 1532 passed/4 skipped，mypy 65 files 通过，ruff 因 3 个 F811 失败。未修改业务代码。 |
 ## 测试数据
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
 | CHK-078 | 检查 | 独立验证 IMP-033 Full Profile 相关 4 个候选问题真伪（/api/health manager 口径、gateway 能力缓存、run_full_bootstrap ready 判定、doctor --json --profile full 输出契约） | 2026-07-19 08:58 | 2026-07-19 08:58 | 已完成 | 结合源码静态核查 + 最小运行时复现实验确认 4 条均成立：1) manager 视角 capability report 缺 CLI 缓存，full overall 永不到 ready；2) gateway 缓存只有读路径无写路径，caddyRuntime/caddyOwner 长期 unknown；3) run_full_bootstrap 仅检查 cli_docker_access/caddy_binary，忽略 report.overall 仍持久化 ready；4) doctor_cmd 在 --json 分支前先输出 Full Profile 文本，导致 --json --profile full 混入非 JSON 文本。未改业务代码。 |
+| TST-001 | 检查 | TST-001：mock 三角色 capability 缓存收敛后 manager/CLI Full overall=ready | 2026-07-30 17:50 | 2026-07-30 17:50 | 已完成 | test_three_role_caches_converge_manager_and_cli_overall_ready；非真 systemd。来源 CHK-134。 |
 
 ## 文档维护
 
@@ -684,6 +699,12 @@
 | DOC-080 | 文档 | 同步 V0.6.8 用户文档与 Skills：能力周期刷新、探针直连、IMP-023 mismatch、update 重启 gateway、Hyper-V/架构边界 | 2026-07-29 18:17 | 2026-07-29 18:17 | 已完成 | README/faq/operations-playbook/manager-page/runtime-workspace/known-limitations/release-checklist；skills update-runtime/review-access-urls/build-frontend-static/import-zip；plan §23 状态纳入 V0.6.8。 |
 | DOC-081 | 文档 | 新增工作区改名迁移运维手册并纠正现场记录中的高风险步骤 | 2026-07-29 18:18 | 2026-07-29 18:44 | 已完成 | 【完成 2026-07-29 18:44】新增 docs/workspace-rename.md：路径清单、禁止 sed JSON/Caddyfile、勿删 daemon-processed、desiredState/pageviews 快照、停服/改名/结构化改写/registry/自启 repair、验收与回滚、生产 CLI 解耦；交叉链 README/playbook/runtime-workspace/autostart/faq。 |
 | DOC-082 | 文档 | 同步 V0.6.9 用户文档与 Skills：IMP-042 事务机加固（rollback/resume/dry-run/autostart 门控）、IMP-023 连接失败不计 mismatch、workspace relocate 运维段 | 2026-07-29 20:49 | 2026-07-29 20:49 | 已完成 | README/faq/autostart/operations-playbook/known-limitations/workspace-rename/release-checklist；skills relocate-workspace/update-runtime；plan 状态行纳入 V0.6.9/BUG-386～405。 |
+| DOC-083 | 文档 | 纠正排障记录第 9 节：假红根因不是 cliDockerAccess 后台不可得，应改为 BUG-406/407 | 2026-07-30 16:49 | 2026-07-30 17:10 | 已完成 | 【已完成】本仓库无 WSL 侧「运行记录/lwa-排障记录-20260729.md」；已在 docs/faq.md 增补「后台 capability 缓存假红」正解（纠正 cliDockerAccess/完全不刷新误判，指向 BUG-406/407）。WSL 排障 §9 请人工对齐本 FAQ。 |
+| DOC-084 | 文档 | plan 新增 §25 IMP-043（显示名 title + 名称列宽） | 2026-07-30 17:04 | 2026-07-30 17:04 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md 状态行与范围同步 IMP-043。 |
+| DOC-085 | 文档 | 033.13/035.06/036.08 实机验收步骤写入 acceptance/release checklist；042.b 跨盘标延期 | 2026-07-30 17:50 | 2026-07-30 17:50 | 已完成 | docs/acceptance-checklist.md 增补 Full/删除/平台矩阵；release-checklist 勾选；plan 状态行同步。真机勾选仍属运维。 |
+| DOC-086 | 文档 | 同步 V0.6.10 用户文档与 Skills：BUG-406/407/ADJ-035/036、IMP-043 显示名、acceptance 实机清单、036.09 | 2026-07-30 17:56 | 2026-07-30 17:56 | 已完成 | README/faq/manager-page/operations-playbook/known-limitations/release-checklist；plan 状态行纳入 V0.6.10。 |
+| DOC-087 | 文档 | 纠正 IMP-043 显示名优先级文档：显式 --name 应高于主页 HTML title | 2026-07-30 18:06 | 2026-07-30 18:15 | 已完成 | 【已完成】known-limitations / manager-page / README 改为 --name > title > slug。 |
+| DOC-088 | 文档 | FAQ 补充 BUG-412：gateway 卡死但 Caddy 可达的排障与升级重启步骤 | 2026-07-30 18:48 | 2026-07-30 18:48 | 已完成 | docs/faq.md |
 
 ## 功能开发
 
@@ -778,6 +799,8 @@
 | DEV-087 | 开发 | 实现 IMP-040：管理页/DTO LAN 地址新鲜度与漂移自愈（读时现算 + 节流 refresh） | 2026-07-20 19:07 | 2026-07-20 21:07 | 已完成 | status 读时合成 lanUrl；manager 节流单飞 refresh；POST /api/access/refresh + 前端 stale 横幅；daemon reconcile 复用；doctor JSON currentLanIp/driftedInstanceIds。 |
 | DEV-088 | 开发 | 实现 IMP-041：remove 阶段日志/orphan events + 修复容器别名残留（BUG-268） | 2026-07-20 20:09 | 2026-07-20 21:35 | 已完成 | 041.01～041.05：`cleanup_instance_routes`（BUG-268）；`_log_remove_stage` + orphan `remove_stage`；manager `audit remove`；FAQ/manager-page 对账说明。041.06 实机清残留为运维项可后续补。回归 test_remove_writes_stage_orphan_events / test_api_remove_writes_audit_log。 |
 | DEV-089 | 开发 | 按 IMP-042 / PLN-027 实现 LWA 工作区迁移（事务状态机 + `lwa workspace relocate` + Skill `lwa-relocate-workspace`） | 2026-07-29 18:45 | 2026-07-29 19:14 | 已完成 | 【完成】落地 workspace_migrate 状态机（锁/journal/preflight…complete）、CLI `lwa workspace relocate`（dry-run/json/resume/verify/rollback）、Skill lwa-relocate-workspace；DOC-081/IMP-042 §24 标已落地。pytest test_workspace_migrate + 相关回归通过。Task 11（路径相对化/跨盘 042.b）另案。 |
+| DEV-090 | 开发 | IMP-043：实例显示名优先主页 HTML title + 管理页名称列固定宽度 | 2026-07-30 17:04 | 2026-07-30 17:04 | 已完成 | importer extract/find/resolve/refresh；manifest.nameSource；all_statuses 回填；style.css table-layout:fixed + col-name 200px；plan §25。回归 test_importer 命名相关全绿。 |
+| DEV-091 | 开发 | 036.09：删除 daemon/manager Windows DETACHED 启动路径，win32 硬拒绝 | 2026-07-30 17:50 | 2026-07-30 17:50 | 已完成 | 保留 is_pid_alive/cmdline/GetOwner 等通用工具 win32 分支供单测；新增 test_spawn_*_rejects_windows_native。 |
 
 ## 配置运维
 
@@ -849,6 +872,13 @@
 | OPS-064 | 运维 | 应用版本号提升至 V0.6.8：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/release-checklist/pack-release-zip 同步 | 2026-07-29 18:17 | 2026-07-29 18:17 | 已完成 | 全仓活跃 0.6.7→0.6.8；task-list 历史 OPS-062/063 与 CHK/DOC 中的 V0.6.7 叙事保留。lwa version 仍取 git HEAD 主题，提交 V0.6.8-BuildXXXX 后即显示。 |
 | OPS-065 | 运维 | prd-review-v035 原地更新至 v0.3.6（zip build0711-20260729） | 2026-07-29 19:43 | 2026-07-29 19:50 | 已完成 | lwa import --update prd-review-v035；sha256 8766458adf0e->3b4da3e98dd7；BUG-205 重建前从旧容器 /app/runtime/data 救出 app.db(364KB) 到宿主 data/；docker 镜像重建（pip install lancedb/pyarrow 等耗时约 2 分钟，前台 import 被 2 分钟超时中断后改 lwa rebuild 后台完成）；/api/health version=0.3.6；别名 /prd-review/ 与直连 :18004 均 HTTP 200；data/ 保留。 |
 | OPS-066 | 运维 | 应用版本号提升至 V0.6.9：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/release-checklist/pack-release-zip 同步 | 2026-07-29 20:49 | 2026-07-29 20:49 | 已完成 | 全仓活跃 0.6.8→0.6.9；task-list 历史 OPS-064 与 DOC-080 中 V0.6.8 叙事保留。lwa version 仍取 git HEAD 主题，提交 V0.6.9-BuildXXXX 后即显示。 |
+| OPS-067 | 运维 | 本地 runtime 更新部署至 V0.6.9（GitHub 已推 Build1755） | 2026-07-29 21:05 | 2026-07-29 21:08 | 已完成 | git HEAD 已在 V0.6.9-Build1755-20260729 且 origin/main 0 0 同步（用户已提交+推送）。lwa update：pip 0.6.8->0.6.9；syncSkills 新增1更新5未变13；三服务经自启单元协调重启 manager(59826->5507)/daemon(59823->5513)/gateway(59765->5522，caddy 58812->5547)——0.6.8 新增的 updater restart_gateway 首次在生产生效（不再需手动重启 gateway）；accessReview update 时瞬态 FAIL（gateway 刚重启 Caddy reload 过渡期），手动复测总体 OK 0 失败；doctor 总体 OK；4 实例直连+别名均 HTTP 200，/prd-review/ 别名仍通（BUG-385 别名元数据虽缺但 Caddy 片段在）。autostart check 三单元 active。 |
+| OPS-068 | 运维 | 恢复 prd-review-v035 路径别名元数据（BUG-385 历史数据回填） | 2026-07-29 21:12 | 2026-07-29 21:14 | 已完成 | BUG-385 代码修复已在 V0.6.8 生效（importer 对称保留 container.routeHost + 回归测试），仅防未来丢失、不回填历史。prd-review-v035 在 OPS-065 的 import --update 时已丢别名元数据。本次执行 lwa alias set prd-review-v035 prd-review 回填：manifest routeMode port->name、routeHost None->prd-review；管理页 /api/instances routeUrl/routeHost 由 null 恢复为 http://10.181.237.97:8080/prd-review/；access review 重新出现别名行 routeUrl->200（76620B）；/prd-review/ 仍 200。manifest/registry 与网关层元数据重新一致，消除下次完整重生 Caddyfile 时别名丢失风险。 |
+| OPS-069 | 运维 | 应用版本号提升至 V0.6.10：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/release-checklist/pack-release-zip 同步 | 2026-07-30 17:56 | 2026-07-30 17:56 | 已完成 | 全仓活跃 0.6.9→0.6.10；task-list 历史 OPS-066/067 与 DOC-082 中 V0.6.9 叙事保留。lwa version 仍取 git HEAD 主题，提交 V0.6.10-BuildXXXX 后即显示。 |
+| OPS-070 | 运维 | 本地 lwa 升级至 V0.6.10（pip 安装 0.6.10 + manager/daemon/gateway 协调重启 + access refresh/review 收尾） | 2026-07-30 18:41 | 2026-07-30 18:41 | 已完成 | lwa update 一次性完成；/api/health 已为 V0.6.10，doctor 与 access review 均全绿；4 实例地址无漂移 |
+| OPS-071 | 运维 | 清理 :17801 上残留的 V0.6.6 旧 manager 进程（pytest 临时工作区孤儿进程，PID 34564） | 2026-07-30 18:50 | 2026-07-30 18:50 | 已完成 | SIGTERM 优雅退出；:17801 已释放；唯一在线 manager 为 :17800 的 V0.6.10 正式工作区进程（PID 46757） |
+| OPS-072 | 运维 | 将 BUG-413 管理页实例表布局修复热更新至本地 V0.6.10 runtime | 2026-07-30 19:22 | 2026-07-30 19:22 | 已完成 | 执行 lwa update --workspace runtime --repo . --json：editable 安装 0.6.10 成功，19 个内置 Skill 均未变，manager/daemon/gateway 由自启单元协调重启，4 个实例地址刷新 0 漂移。即时 access review/doctor 在服务重启过渡期短暂 FAIL；稳定复测 lwa status 4 实例 running，access review 总体 ok（直连及 3 条路径别名均 HTTP 200），doctor 总体 ok，/api/health V0.6.10 overall ready，在线 style.css 已加载名称列 200px 下限与两行截断规则。未重启业务实例。 |
+| OPS-073 | 运维 | 重新热更新最终版 V0.6.9 布局兼容修复至本地 V0.6.10 runtime | 2026-07-30 19:31 | 2026-07-30 19:31 | 已完成 | 执行 lwa update --workspace runtime --repo . --json：0.6.10 editable 安装成功，manager/daemon/gateway 协调重启，地址刷新 4 个且 0 漂移。即时复核再次命中 gateway 重启过渡窗口；稳定复测 /api/health overall ready、access review 4 实例及全部别名 HTTP 200、doctor 0 失败 0 警告。在线 app.js/style.css 已确认无 col-name、无 width 240px、无 table-layout fixed，保留 max-width 220px 与两行截断。 |
 
 ## 规划事项
 
@@ -887,12 +917,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 405 | 402 | 3 | 99% |
-| 调整事项 | 34 | 34 | 0 | 100% |
-| 检查事项 | 130 | 130 | 0 | 100% |
-| 测试数据 | 1 | 1 | 0 | 100% |
-| 文档维护 | 82 | 82 | 0 | 100% |
-| 功能开发 | 89 | 89 | 0 | 100% |
-| 配置运维 | 66 | 66 | 0 | 100% |
+| 代码 Bug | 414 | 411 | 3 | 99% |
+| 调整事项 | 36 | 36 | 0 | 100% |
+| 检查事项 | 133 | 133 | 0 | 100% |
+| 测试数据 | 2 | 2 | 0 | 100% |
+| 文档维护 | 88 | 88 | 0 | 100% |
+| 功能开发 | 91 | 91 | 0 | 100% |
+| 配置运维 | 73 | 73 | 0 | 100% |
 | 规划事项 | 28 | 28 | 0 | 100% |
-| **总计** | 835 | 832 | 3 | 100% |
+| **总计** | 865 | 862 | 3 | 100% |

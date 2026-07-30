@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import contextlib
+import html as html_lib
 import os
 import re
 import shutil
@@ -142,6 +143,150 @@ def titleize(slug: str) -> str:
     return " ".join(part.capitalize() for part in slug.split("-") if part) or "Instance"
 
 
+_TITLE_RE = re.compile(r"<title\b[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_MAX_DISPLAY_NAME_LEN = 200
+
+
+def extract_html_title(html: str) -> str | None:
+    """从 HTML 文本提取 ``<title>`` 纯文本；缺失/空白返回 ``None``。"""
+    match = _TITLE_RE.search(html)
+    if match is None:
+        return None
+    raw = html_lib.unescape(match.group(1))
+    text = re.sub(r"<[^>]+>", "", raw)
+    text = " ".join(text.split())
+    if not text:
+        return None
+    if len(text) > _MAX_DISPLAY_NAME_LEN:
+        return text[:_MAX_DISPLAY_NAME_LEN].rstrip()
+    return text
+
+
+def find_homepage_index(project_dir: Path, *, max_depth: int = 3) -> Path | None:
+    """定位主页 ``index.html``：优先根目录，否则取最浅一层。
+
+    跳过 ``node_modules`` / ``.git`` / ``venv`` 等噪音目录，避免大仓扫描。
+    """
+    root = Path(project_dir)
+    direct = root / "index.html"
+    if direct.is_file():
+        return direct
+    skip = {
+        "node_modules",
+        ".git",
+        ".svn",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+    }
+    found: list[tuple[int, Path]] = []
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth >= max_depth:
+            continue
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            if name in skip or name.startswith("."):
+                continue
+            if entry.is_file() and name.lower() == "index.html":
+                found.append((depth + 1, entry))
+            elif entry.is_dir():
+                stack.append((entry, depth + 1))
+    if not found:
+        return None
+    found.sort(key=lambda item: (item[0], str(item[1])))
+    return found[0][1]
+
+
+def resolve_auto_display_name(project_dir: Path, *, slug: str) -> str:
+    """自动显示名：主页 ``<title>`` 优先，否则 ``titleize(slug)``。"""
+    index = find_homepage_index(project_dir)
+    if index is not None:
+        try:
+            title = extract_html_title(
+                index.read_text(encoding="utf-8", errors="replace")
+            )
+        except OSError:
+            title = None
+        if title:
+            return title
+    return titleize(slug)
+
+
+def is_auto_titleized_name(
+    name: str,
+    instance_id: str,
+    *,
+    name_source: str | None = None,
+) -> bool:
+    """是否允许用主页 ``<title>`` 覆盖当前显示名。
+
+    - ``nameSource=user``：永不覆盖
+    - ``nameSource=html_title``：已是 title，无需再当「slug 美化」处理
+    - ``nameSource=slug`` 或旧数据 ``None``：仅当 name 等于 ``titleize(id)`` 时允许
+    """
+    if name_source == "user":
+        return False
+    if name_source == "html_title":
+        return False
+    return bool(name) and name == titleize(instance_id)
+
+
+def refresh_display_name_from_homepage(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+) -> str | None:
+    """若当前名仍是可覆盖的自动美化名，且主页有 ``<title>``，则回写 manifest+registry。
+
+    返回新名称；无需更新或无法解析时返回 ``None``。
+    """
+    row = registry.get_instance(instance_id)
+    if row is None:
+        return None
+    current_name = str(row.get("name") or "")
+    manifest_path = workspace.app_manifest_path(instance_id)
+    name_source: str | None = None
+    manifest: InstanceManifest | None = None
+    if manifest_path.is_file():
+        try:
+            manifest = InstanceManifest.load(manifest_path)
+            name_source = getattr(manifest, "nameSource", None)
+        except Exception:  # noqa: BLE001 — 回填失败不阻断列表
+            log.warning("实例 %s 回填显示名时读取 manifest 失败", instance_id)
+            return None
+    if not is_auto_titleized_name(
+        current_name, instance_id, name_source=name_source
+    ):
+        return None
+    current_dir = workspace.app_current(instance_id)
+    if not current_dir.is_dir():
+        return None
+    new_name = resolve_auto_display_name(current_dir, slug=instance_id)
+    if new_name == current_name:
+        return None
+    if manifest is None:
+        return None
+    manifest.name = new_name
+    manifest.nameSource = "html_title"
+    manifest.touch()
+    manifest.save(manifest_path)
+    # BUG-410：只改 instances.name；勿 upsert_from_manifest（manifest.hostPort
+    # 常为空时会把 static_sites/containers 已登记端口清成 NULL）。
+    registry.update_name(instance_id, new_name)
+    return new_name
+
+
 # ---- Importer ---------------------------------------------------------------
 
 
@@ -194,7 +339,7 @@ class Importer:
 
         base = name if name else src.stem
         slug = slugify(base)
-        display_name = name if name else titleize(slug)
+        # display_name：显式 --name 优先；否则解压后取主页 <title>（见下方）
 
         # IMP-006：路径别名在写盘前校验，避免半成品写入后才发现冲突。
         if path_alias is not None:
@@ -223,6 +368,25 @@ class Importer:
             # 扫描识别
             detection = self.scanner.detect(current_dir)
 
+            # 显示名：CLI --name > 主页 <title> > titleize(slug)
+            if name:
+                display_name = name
+                name_source = "user"
+            else:
+                index = find_homepage_index(current_dir)
+                page_title = None
+                if index is not None:
+                    with contextlib.suppress(OSError):
+                        page_title = extract_html_title(
+                            index.read_text(encoding="utf-8", errors="replace")
+                        )
+                if page_title:
+                    display_name = page_title
+                    name_source = "html_title"
+                else:
+                    display_name = titleize(slug)
+                    name_source = "slug"
+
             # IMP-006：路径别名当前仅支持静态实例；容器实例的别名路由需要容器
             # 托管路径额外生成 reverse_proxy 片段，V1 暂不支持，明确拒绝而非静默忽略。
             if path_alias is not None and detection.runtime != Runtime.SHARED_STATIC:
@@ -234,7 +398,12 @@ class Importer:
 
             # 构建 manifest
             manifest = self._build_manifest(
-                instance_id, display_name, zip_hash, detection, path_alias=path_alias
+                instance_id,
+                display_name,
+                zip_hash,
+                detection,
+                path_alias=path_alias,
+                name_source=name_source,
             )
             manifest.save(self.ws.app_manifest_path(instance_id))
 
@@ -519,6 +688,18 @@ class Importer:
                 manifest = apply_detection_to_manifest(
                     old_manifest, detection, self.ws
                 )
+                # 若旧名仍是 slug 美化名，且新包主页有 <title>，顺带刷新显示名
+                if is_auto_titleized_name(
+                    old_manifest.name,
+                    instance_id,
+                    name_source=getattr(old_manifest, "nameSource", None),
+                ):
+                    refreshed = resolve_auto_display_name(
+                        current_dir, slug=instance_id
+                    )
+                    if refreshed != old_manifest.name:
+                        manifest.name = refreshed
+                        manifest.nameSource = "html_title"
                 manifest.sourceZipHash = new_hash  # type: ignore[attr-defined]
                 manifest.desiredState = old_manifest.desiredState
                 manifest.status = old_manifest.status
@@ -892,6 +1073,7 @@ class Importer:
         detection: DetectionResult,
         *,
         path_alias: str | None = None,
+        name_source: str | None = None,
     ) -> InstanceManifest:
         return build_manifest_from_detection(
             instance_id=instance_id,
@@ -900,6 +1082,7 @@ class Importer:
             workspace=self.ws,
             zip_hash=zip_hash,
             path_alias=path_alias,
+            name_source=name_source,
         )
 
     # ---- 失败清理 -----------------------------------------------------------
@@ -937,6 +1120,7 @@ def build_manifest_from_detection(
     workspace: Workspace,
     zip_hash: str | None = None,
     path_alias: str | None = None,
+    name_source: str | None = None,
 ) -> InstanceManifest:
     """根据扫描结果构造一个完整且 schema 一致的 :class:`InstanceManifest`。
 
@@ -963,6 +1147,7 @@ def build_manifest_from_detection(
     kwargs: dict = dict(
         id=instance_id,
         name=display_name,
+        nameSource=name_source,
         version="1",
         kind=kind,
         runtime=runtime,
@@ -1024,6 +1209,7 @@ def apply_detection_to_manifest(
         detection=detection,
         workspace=workspace,
         zip_hash=getattr(manifest, "sourceZipHash", None),
+        name_source=getattr(manifest, "nameSource", None),
     )
     # 保留版本号与原始 zip 路径（重扫不应改变这些）
     fresh.version = manifest.version
@@ -1039,6 +1225,11 @@ __all__ = [
     "UpdateResult",
     "slugify",
     "titleize",
+    "extract_html_title",
+    "find_homepage_index",
+    "resolve_auto_display_name",
+    "is_auto_titleized_name",
+    "refresh_display_name_from_homepage",
     "build_manifest_from_detection",
     "apply_detection_to_manifest",
 ]

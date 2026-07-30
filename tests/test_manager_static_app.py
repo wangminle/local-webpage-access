@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "src" / "local_webpage_access" / "manager_static"
 HELPERS_JS = STATIC / "helpers.js"
 APP_JS = STATIC / "app.js"
+STYLE_CSS = STATIC / "style.css"
 
 
 # 共享的 vm 上下文骨架（window/document/location 等桩）
@@ -39,6 +40,42 @@ def _load_helpers_body() -> str:
 
 def _load_app_body() -> str:
     return f'fs.readFileSync({str(APP_JS)!r}, "utf8")'
+
+
+def _css_rule(css: str, selector: str) -> str:
+    """返回简单选择器对应的声明块。"""
+    marker = selector + " {"
+    start = css.index(marker) + len(marker)
+    return css[start : css.index("}", start)]
+
+
+def test_instance_table_matches_v069_layout_except_two_line_name_clamp() -> None:
+    """BUG-414：完整恢复 V0.6.9 列宽规则，仅保留名称两行省略。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    app_js = APP_JS.read_text(encoding="utf-8")
+    table_rule = _css_rule(css, "table.instances")
+    name_cell_rule = _css_rule(css, ".cell-name")
+    name_button_rule = _css_rule(css, ".cell-name-btn")
+    ops_column_rule = _css_rule(css, ".col-ops")
+    name_cell_declarations = {line.strip() for line in name_cell_rule.splitlines()}
+    name_button_declarations = {line.strip() for line in name_button_rule.splitlines()}
+
+    assert "table-layout: fixed" not in table_rule
+    assert ".col-name" not in css
+    assert "col-name" not in app_js
+    assert "max-width: 220px" in name_cell_rule
+    assert not any(line.startswith("width:") for line in name_cell_declarations)
+    assert not any(line.startswith("min-width:") for line in name_cell_declarations)
+    assert "min-width: 200px" in ops_column_rule
+    assert "width: 240px" not in ops_column_rule
+    assert "display: -webkit-box" in name_button_rule
+    assert "max-width: 100%" in name_button_rule
+    assert not any(line.startswith("width:") for line in name_button_declarations)
+    assert "-webkit-line-clamp: 2" in name_button_rule
+    assert "-webkit-box-orient: vertical" in name_button_rule
+    assert "white-space: normal" in name_button_rule
+    assert "overflow-wrap: anywhere" in name_button_rule
+    assert "white-space: nowrap" not in name_button_rule
 
 
 def test_helpers_format_local_date_time() -> None:

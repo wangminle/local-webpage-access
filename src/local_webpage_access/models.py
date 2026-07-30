@@ -170,6 +170,9 @@ class InstanceManifest(BaseModel):
     schemaVersion: int = SCHEMA_VERSION
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
+    # IMP-043：显示名来源。user=用户 ``--name``；html_title=主页 <title>；slug=titleize(id)。
+    # 缺省 None 表示升级前旧实例——仅当 name==titleize(id) 时才允许 title 回填。
+    nameSource: str | None = None
     version: str = Field(min_length=1)
     kind: Kind
     stack: list[str] = Field(default_factory=list)

@@ -392,7 +392,7 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   text-overflow: ellipsis;
 }
 .cell-name-btn {
-  display: inline;
+  display: -webkit-box;
   margin: 0;
   padding: 0;
   border: 0;
@@ -405,6 +405,10 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .cell-name-btn:hover,
 .cell-name-btn:focus-visible {

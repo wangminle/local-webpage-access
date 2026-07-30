@@ -226,8 +226,13 @@ def all_statuses(
     workspace: Workspace, config: Config, registry: Registry
 ) -> list[InstanceStatus]:
     """全部实例状态快照（按创建时间排序）。"""
+    from local_webpage_access.importer import refresh_display_name_from_homepage
+
     statuses: list[InstanceStatus] = []
     for row in registry.list_instances():
+        # 自动美化名 → 主页 <title> 一次性回填（用户自定义名不改）
+        with contextlib.suppress(Exception):
+            refresh_display_name_from_homepage(workspace, registry, row["id"])
         statuses.append(instance_status(workspace, config, registry, row["id"]))
     return statuses
 

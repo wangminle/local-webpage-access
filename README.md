@@ -22,9 +22,9 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 - **构建队列**：跨进程闸门限流（默认并发 1，`registry/build-locks.db`），拿不到槽位即标记 `queued`，排队超时可控；`cancel-build` 可取消排队/进行中构建（不删缓存/镜像/用户数据，IMP-039）。
 - **网关原子切换（IMP-037）**：`lwa gateway switch <caddy|builtin>` 事务切换后端（预检/停旧启新/回滚/`degraded`）；结果区分 `accessOk` / `fullyOk`。
 - **访问地址新鲜度（IMP-038/040）**：管理页读时合成 `lanUrl`；`lwa access refresh` / `doctor --access` / update 收尾 review；LAN 漂移节流自愈。`access review` 检测 SPA 别名资源错位（空 200 / 404 / 错误 MIME，IMP-023）。
-- **Full Profile 能力新鲜度**：`lwa gateway on` / 前台监管写 `capability-gateway.json`；manager 后台约每 5 分钟周期刷新完整能力；内部健康/access/Caddy admin 探针直连（不受 `http_proxy` 影响）；`lwa update` 默认重启原本在跑的 gateway，Full 收尾验收合并后的能力缓存。
+- **Full Profile 能力新鲜度**：`lwa gateway on` / 前台监管写 `capability-gateway.json`；manager / gateway / daemon 均周期刷新能力缓存；角色快照 overall 按本角色职责计算（避免 peer `unknown` 假红）；内部健康/access/Caddy admin 探针直连（不受 `http_proxy` 影响）；`lwa update` 默认重启原本在跑的 gateway，Full 收尾验收合并后的能力缓存。
 - **SQLite Registry**：七张表（instances / containers / static_sites / ports / events / builds / resources），外键级联、WAL 模式。
-- **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权，覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计。
+- **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权，覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计；**显示名优先 `--name`，其次主页 HTML `<title>`**，名称列固定宽度防抖动（IMP-043）。
 - **自动导入守护进程（WBS-21）**：`lwa daemon on` 后监听 `inbox/`，自动导入并启动可确定的轻量实例。
 - **安全审计（WBS-25）**：对生成的 Compose / Dockerfile / zip 成员做 critical/warn/info 分级审计，critical 问题拒绝写出；管理页绑定校验（LAN 绑定 + token）。
 - **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；人类可读与 `--json` 均含平台矩阵报告（`--json` 未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。

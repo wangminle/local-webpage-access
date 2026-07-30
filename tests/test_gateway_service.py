@@ -690,3 +690,31 @@ def test_run_gateway_foreground_refreshes_capability_after_start(
     assert cache.is_file()
     data = json.loads(cache.read_text(encoding="utf-8"))
     assert data["capabilities"]["gatewayAccess"] == "ready"
+
+
+def test_refresh_gateway_capability_merges_backend_caches(
+    workspace: Workspace, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-406：gateway 写缓存须 include_backend_cached=True，否则 Full overall 永久假红。"""
+    import local_webpage_access.capability as cap_mod
+    from local_webpage_access.capability import CapabilityReport
+    from local_webpage_access.gateway_service import _refresh_gateway_capability
+
+    seen: dict[str, object] = {}
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        seen.update(kwargs)
+        return CapabilityReport(
+            profile="full",
+            gateway_access="ready",
+            caddy_runtime="ready",
+            details={"role": "gateway"},
+        )
+
+    monkeypatch.setattr(cap_mod, "collect_capability_report", fake_collect)
+    monkeypatch.setattr(cap_mod, "log_capability_probe", lambda *a, **k: None)
+    monkeypatch.setattr(cap_mod, "write_capability_cache", lambda *a, **k: None)
+
+    _refresh_gateway_capability(workspace, config)
+    assert seen.get("include_backend_cached") is True
+    assert seen.get("role") == "gateway"

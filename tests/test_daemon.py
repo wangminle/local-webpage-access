@@ -841,6 +841,13 @@ def test_read_pid_cmdline_windows_powershell(monkeypatch) -> None:
     assert daemon_mod.pid_cmdline_contains(1234, "http.server", "C:\\apps\\x\\public")
 
 
+def test_spawn_watcher_rejects_windows_native(monkeypatch, workspace: Workspace) -> None:
+    """036.09：Windows 原生不得 DETACHED_PROCESS 启动 daemon。"""
+    monkeypatch.setattr(daemon_mod.sys, "platform", "win32")
+    with pytest.raises(RuntimeError, match="Windows 原生不受支持"):
+        daemon_mod._spawn_watcher(workspace, 1.0)
+
+
 # ---- IMP-011：inbox 防污染（on_conflict=error + processed 归档）-------------
 
 
@@ -1614,3 +1621,68 @@ def test_import_zip_keyboardinterrupt_cleans_claimed_dir(
         assert not Path(claimed["dir"]).exists()
     finally:
         reg.close()
+
+
+def test_probe_daemon_capability_merges_backend_caches(
+    workspace: Workspace, config: Config, monkeypatch
+) -> None:
+    """BUG-406：daemon 写缓存须 include_backend_cached=True。"""
+    import local_webpage_access.capability as cap_mod
+    from local_webpage_access.capability import CapabilityReport
+
+    seen: dict[str, object] = {}
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        seen.update(kwargs)
+        return CapabilityReport(
+            profile="full",
+            docker_access="ready",
+            daemon_docker_access="ready",
+            details={"role": "daemon"},
+        )
+
+    monkeypatch.setattr(cap_mod, "collect_capability_report", fake_collect)
+    monkeypatch.setattr(cap_mod, "log_capability_probe", lambda *a, **k: None)
+    monkeypatch.setattr(cap_mod, "write_capability_cache", lambda *a, **k: None)
+
+    daemon_mod._probe_daemon_capability(workspace, config)
+    assert seen.get("include_backend_cached") is True
+    assert seen.get("role") == "daemon"
+
+
+def test_run_watcher_periodically_refreshes_capability(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-407：daemon watcher 须周期刷新能力缓存（对齐 manager/gateway ~300s）。"""
+    import time as _time
+
+    probes: list[float] = []
+    base = [_time.monotonic()]
+
+    def fake_clock():
+        base[0] += 50
+        return base[0]
+
+    stop = threading.Event()
+
+    def fake_probe(ws, cfg):
+        probes.append(fake_clock())
+        if len(probes) >= 2:
+            stop.set()
+
+    monkeypatch.setattr(daemon_mod, "_probe_daemon_capability", fake_probe)
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=stop,
+        poll_interval=0.01,
+        stable_seconds=0.0,
+        process_fn=lambda *a: {"action": "skipped"},
+        clock=fake_clock,
+        sleep=lambda *_a: None,
+        capability_refresh_interval=100.0,
+        capability_initial_delay=10.0,
+    )
+    assert len(probes) >= 2

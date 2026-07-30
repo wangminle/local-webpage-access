@@ -208,10 +208,13 @@ def _spawn_manager(workspace: Workspace) -> int:
         "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
     }
+    # 036.09：正式支持不含 Windows 原生；DETACHED_PROCESS 启动路径已删除。
     if sys.platform == "win32":
-        popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
-    else:
-        popen_kwargs["start_new_session"] = True
+        raise RuntimeError(
+            "Windows 原生不受支持；无法启动 LWA manager，"
+            "请在 WSL2 的 Ubuntu/Debian 中运行（IMP-036 / 036.09）"
+        )
+    popen_kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
     finally:
@@ -265,6 +268,7 @@ def _terminate_pid(
         log.warning("管理页 PID %s 身份不匹配，拒绝终止", pid)
         return True
     try:
+        # 正式平台均为 POSIX；win32 分支仅保留可移植工具语义（036.09）。
         os.kill(pid, 15 if sys.platform != "win32" else 9)
     except OSError:
         return not is_pid_alive(pid)
@@ -273,12 +277,8 @@ def _terminate_pid(
         if not is_pid_alive(pid):
             return True
         time.sleep(0.05)
-    if sys.platform == "win32":
-        with contextlib.suppress(OSError):
-            os.kill(pid, 9)
-    else:
-        with contextlib.suppress(OSError):
-            os.kill(pid, 9)
+    with contextlib.suppress(OSError):
+        os.kill(pid, 9)
     return not is_pid_alive(pid)
 
 

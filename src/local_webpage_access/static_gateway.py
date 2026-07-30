@@ -911,6 +911,9 @@ class StaticGateway:
         进程，避免认领 pytest/外部孤儿 admin（复盘 §10.2-C2）。
 
         ``FileNotFoundError``（PATH 无 caddy）**立即失败**，不做 admin 兜底。
+
+        BUG-412 / ADJ-036：并行探活用 ``Popen``，但 stdout/stderr 必须 ``DEVNULL``，
+        且不得对可能被 daemon 继承的 PIPE 做无超时 ``communicate()``。
         """
         _refuse_caddy_admin_in_pytest("start")
         main = self.main_config_path()
@@ -932,24 +935,92 @@ class StaticGateway:
             str(self.caddy_pid_path()),
         ]
         pingback_failed = False
-        result = None
+        result: subprocess.CompletedProcess[bytes] | None = None
+        # ADJ-036：Popen 后并行探 admin/pidfile，就绪即成功。
+        # BUG-412：切勿 stdout/stderr=PIPE + 裸 communicate()——caddy start 会
+        # daemonize，master 继承 pipe 写端不关闭 → communicate 永久阻塞，
+        # gateway_service 卡死在启动、不写 gateway.json / capability 缓存。
+        # 0.6.9 的 subprocess.run(..., timeout=) 无此问题；此处用 DEVNULL +
+        # poll/wait(timeout=) 保留并行探活且不死锁。
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=_CADDY_START_TIMEOUT)
+            proc = subprocess.Popen(  # noqa: S603
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except FileNotFoundError:
-            # PATH 无 caddy：真失败，绝不能用孤儿 admin 假绿（§10.2-C2）。
             log.warning("caddy start 失败：未找到 caddy 可执行文件")
             return False
-        except subprocess.TimeoutExpired as exc:
-            # BUG-102：pingback 超时常见为 TimeoutExpired，master 可能已起。
-            log.warning("caddy start 超时（将探测 admin + pidfile 确认）：%s", exc)
-            pingback_failed = True
         except OSError as exc:
             log.warning("caddy start 执行异常：%s", exc)
             return False
+
+        deadline = time.monotonic() + float(_CADDY_START_TIMEOUT)
+        early_ready = False
+        while time.monotonic() < deadline:
+            if self._admin_alive(timeout=0.3) and self._workspace_caddy_pid_alive():
+                early_ready = True
+                break
+            rc = proc.poll()
+            if rc is not None:
+                result = subprocess.CompletedProcess(
+                    args=cmd, returncode=rc, stdout=b"", stderr=b""
+                )
+                break
+            time.sleep(0.2)
+
+        if early_ready:
+            # master 已就绪；pingback 可能仍阻塞——不再空等满超时。
+            if proc.poll() is None:
+                pingback_failed = True
+                log.info(
+                    "caddy admin+pidfile 已就绪，提前结束等待（ADJ-036；"
+                    "若随后 pingback 超时属预期假失败）"
+                )
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    # 不杀 master（已 daemonize）；只结束仍挂起的 caddy start 前台
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    with contextlib.suppress(Exception):
+                        proc.wait(timeout=1.0)
+            elif result is None:
+                result = subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=int(proc.returncode or 0),
+                    stdout=b"",
+                    stderr=b"",
+                )
+            if result is not None and result.returncode != 0:
+                pingback_failed = True
+            if pingback_failed:
+                log.warning(
+                    "caddy start 的 --pingback 未确认成功，但本工作区 Caddy "
+                    "admin :2019 与 pidfile 均就绪——视为启动成功（BUG-102/ADJ-036）"
+                )
+            return True
+
+        if result is None:
+            # 仍未退出且 admin 未就绪：按超时假失败路径处理
+            log.warning("caddy start 超时（将探测 admin + pidfile 确认）")
+            pingback_failed = True
+            with contextlib.suppress(Exception):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=1.0)
+            if proc.returncode is not None and result is None:
+                result = subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=int(proc.returncode),
+                    stdout=b"",
+                    stderr=b"",
+                )
+
         if result is not None and result.returncode != 0:
             log.warning(
-                "caddy start 非零退出（将探测 admin + pidfile 确认）：%s",
-                result.stderr.decode("utf-8", "replace").strip(),
+                "caddy start 非零退出（将探测 admin + pidfile 确认）"
+                "（BUG-412：stderr 已弃用 PIPE，细节见 gateway/caddy 日志）"
             )
             pingback_failed = True
         # 轮询 admin；若曾出现 pingback 类失败，还须本工作区 pidfile 存活才算成功。
@@ -1467,10 +1538,11 @@ class StaticGateway:
 
     @staticmethod
     def _process_user_for_pid(pid: int) -> str | None:
-        """跨平台读取进程有效用户名（BUG-252：macOS/Windows 无 /proc）。
+        """跨平台读取进程有效用户名（BUG-252：macOS 无 /proc）。
 
-        Linux 优先 ``/proc/<pid>/status`` Uid；其余 POSIX 用 ``ps -o user=``；
-        Windows 用 ``Invoke-CimMethod -MethodName GetOwner``（BUG-255）。
+        Linux 优先 ``/proc/<pid>/status`` Uid；其余 POSIX 用 ``ps -o user=``。
+        036.09：win32 ``Invoke-CimMethod GetOwner`` 仅保留为可移植工具/单测
+        （BUG-255），正式运行已由平台门禁拒绝 Windows 原生。
         读不到返回 None（调用方 fail-closed）。
         """
         if pid <= 0:

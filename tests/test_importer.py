@@ -9,7 +9,16 @@ import pytest
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import PathError, ZipImportError
-from local_webpage_access.importer import Importer, slugify, titleize
+from local_webpage_access.importer import (
+    Importer,
+    extract_html_title,
+    find_homepage_index,
+    is_auto_titleized_name,
+    refresh_display_name_from_homepage,
+    resolve_auto_display_name,
+    slugify,
+    titleize,
+)
 from local_webpage_access.models import (
     DesiredState,
     InstanceManifest,
@@ -76,6 +85,163 @@ def test_slugify_truncates() -> None:
 
 def test_titleize() -> None:
     assert titleize("my-cool-app") == "My Cool App"
+
+
+def test_extract_html_title_basic() -> None:
+    assert extract_html_title("<html><head><title>AI 评审</title></head></html>") == "AI 评审"
+
+
+def test_extract_html_title_entities_and_whitespace() -> None:
+    html = "<html><title>\n  Foo&amp;Bar  Demo\n</title></html>"
+    assert extract_html_title(html) == "Foo&Bar Demo"
+
+
+def test_extract_html_title_missing_or_empty() -> None:
+    assert extract_html_title("<html><body>no title</body></html>") is None
+    assert extract_html_title("<html><title>  </title></html>") is None
+
+
+def test_find_homepage_index_prefers_root(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<title>Root</title>", encoding="utf-8")
+    nested = tmp_path / "site"
+    nested.mkdir()
+    (nested / "index.html").write_text("<title>Nested</title>", encoding="utf-8")
+    assert find_homepage_index(tmp_path) == tmp_path / "index.html"
+
+
+def test_find_homepage_index_nested_fallback(tmp_path: Path) -> None:
+    nested = tmp_path / "public"
+    nested.mkdir()
+    (nested / "index.html").write_text("<title>Nested</title>", encoding="utf-8")
+    assert find_homepage_index(tmp_path) == nested / "index.html"
+
+
+def test_resolve_auto_display_name_prefers_html_title(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text(
+        "<html><title>Distributed Wake Demo</title></html>", encoding="utf-8"
+    )
+    assert resolve_auto_display_name(tmp_path, slug="distributed-wake-demo") == (
+        "Distributed Wake Demo"
+    )
+
+
+def test_resolve_auto_display_name_falls_back_to_titleize(tmp_path: Path) -> None:
+    assert resolve_auto_display_name(tmp_path, slug="my-cool-app") == "My Cool App"
+
+
+def test_import_uses_html_title_as_display_name(
+    importer: Importer, registry: Registry, tmp_path: Path
+) -> None:
+    zip_path = _make_zip(
+        tmp_path / "ai-review-prd-v0-2-7.zip",
+        {
+            "index.html": (
+                "<html><head><title>AI Review · PRD</title></head>"
+                "<body>hi</body></html>"
+            )
+        },
+    )
+    result = importer.import_zip(zip_path)
+    assert result.manifest.name == "AI Review · PRD"
+    row = registry.get_instance(result.instance_id)
+    assert row is not None
+    assert row["name"] == "AI Review · PRD"
+
+
+def test_import_explicit_name_overrides_html_title(
+    importer: Importer, tmp_path: Path
+) -> None:
+    zip_path = _make_zip(
+        tmp_path / "demo.zip",
+        {"index.html": "<html><title>From HTML</title></html>"},
+    )
+    result = importer.import_zip(zip_path, name="My Custom Site")
+    assert result.manifest.name == "My Custom Site"
+
+
+def test_is_auto_titleized_name() -> None:
+    assert is_auto_titleized_name("Ai Review Prd V0 2 7", "ai-review-prd-v0-2-7")
+    assert is_auto_titleized_name(
+        "Ai Review Prd V0 2 7", "ai-review-prd-v0-2-7", name_source="slug"
+    )
+    assert not is_auto_titleized_name(
+        "Keep Me", "keep-me", name_source="user"
+    )
+    assert not is_auto_titleized_name("AI Review · PRD", "ai-review-prd-v0-2-7")
+    assert not is_auto_titleized_name(
+        "AI Review · PRD", "ai-review-prd-v0-2-7", name_source="html_title"
+    )
+
+
+def test_refresh_display_name_from_homepage_updates_auto_name(
+    workspace: Workspace, registry: Registry, importer: Importer, tmp_path: Path
+) -> None:
+    zip_path = _make_zip(
+        tmp_path / "demo-site.zip",
+        {"index.html": "<html><body>no title yet</body></html>"},
+    )
+    result = importer.import_zip(zip_path)
+    assert result.manifest.name == "Demo Site"
+    current = workspace.app_current(result.instance_id)
+    (current / "index.html").write_text(
+        "<html><title>真实站点名</title></html>", encoding="utf-8"
+    )
+    new_name = refresh_display_name_from_homepage(
+        workspace, registry, result.instance_id
+    )
+    assert new_name == "真实站点名"
+    row = registry.get_instance(result.instance_id)
+    assert row is not None and row["name"] == "真实站点名"
+    loaded = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
+    assert loaded.name == "真实站点名"
+
+
+def test_refresh_display_name_preserves_registered_host_port(
+    workspace: Workspace, registry: Registry, importer: Importer, tmp_path: Path
+) -> None:
+    """BUG-410：显示名回填不得清空只存在于 registry 的 host_port。"""
+    zip_path = _make_zip(
+        tmp_path / "port-demo.zip",
+        {"index.html": "<html><body>no title</body></html>"},
+    )
+    result = importer.import_zip(zip_path)
+    instance_id = result.instance_id
+    # 模拟 hosting 已登记端口，但未回写到 manifest.hostPort
+    registry.upsert_static_site(instance_id, {"hostPort": 21001})
+    manifest = InstanceManifest.load(workspace.app_manifest_path(instance_id))
+    assert manifest.static is not None
+    manifest.static.hostPort = None
+    manifest.save(workspace.app_manifest_path(instance_id))
+    assert registry.get_static_site(instance_id)["host_port"] == 21001
+
+    (workspace.app_current(instance_id) / "index.html").write_text(
+        "<html><title>端口保留测试</title></html>", encoding="utf-8"
+    )
+    assert (
+        refresh_display_name_from_homepage(workspace, registry, instance_id)
+        == "端口保留测试"
+    )
+    site = registry.get_static_site(instance_id)
+    assert site is not None
+    assert site["host_port"] == 21001
+    row = registry.get_instance(instance_id)
+    assert row is not None and row["name"] == "端口保留测试"
+
+
+def test_refresh_display_name_skips_user_custom_name(
+    workspace: Workspace, registry: Registry, importer: Importer, tmp_path: Path
+) -> None:
+    zip_path = _make_zip(
+        tmp_path / "demo.zip",
+        {"index.html": "<html><title>HTML Title</title></html>"},
+    )
+    result = importer.import_zip(zip_path, name="Keep Me")
+    assert (
+        refresh_display_name_from_homepage(workspace, registry, result.instance_id)
+        is None
+    )
+    row = registry.get_instance(result.instance_id)
+    assert row is not None and row["name"] == "Keep Me"
 
 
 # ---- 基础导入 --------------------------------------------------------------

@@ -81,6 +81,51 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 
 > 如手工验收发现新问题，请在此表追加，并在对应代码/文档中修复后回归。
 
+## Full Profile / 平台 / 删除补强验收（033.13 · 035.06 · 036.08）
+
+主路径代码已落地；下列为**实机**补强项（本机单元/集成测试不能替代）。验收时勾选并填「验收记录」附录。
+
+### 033.13 — Full Profile Ubuntu / systemd 完整链路
+
+| 项 | 手工步骤 | 通过标准 |
+| --- | --- | --- |
+| A | Ubuntu 22.04+/Debian 12+ 或 WSL2 Ubuntu（标明 Desktop vs Engine）执行 `lwa setup --full`（可 `--resume`） | 组件安装/接管完成；不得把「仅组件安装成功」写成 Full ready |
+| B | 预启系统 `caddy.service` 后再 `setup --full` | LWA 接管 Caddy owner=`lwa_service_user`；系统 unit 被 disable 或明确不再冲突 |
+| C | `systemctl --user enable --now lwa-daemon lwa-manager lwa-gateway`（或等价 autostart） | 三 unit 启动；`lwa doctor --profile full` overall=ready |
+| D | 设别名 → reload → 写 log → 重启三服务 | 别名可达、容器/管理页状态一致 |
+| E | system unit `SupplementaryGroups=docker` | **user unit 无法直接设 SupplementaryGroups**；以用户进 `docker` 组 + 重新登录/`newgrp` 验证 `daemonDockerAccess=ready`。system unit 路径仅在改用 system scope 时验收 |
+
+> **macOS 不替代本项权限验收**（见 plan §13.1.3）。
+
+### 035.06 — 管理页安全删除浏览器实机
+
+| 场景 | 步骤 | 通过标准 |
+| --- | --- | --- |
+| 普通实例 | 打开删除模态 → 取消 | 实例仍在；无删除事件 |
+| 普通实例 | 仅移除（不 purge） | 实例消失；`data/` 按契约保留或按 UI 文案 |
+| 普通实例 | 彻底删除（purge） | 目录与 registry 清空 |
+| 冗余实例 | 冗余批量删除路径 | 仅删冗余；保留最早者（若走 redundant API） |
+| 静态 / 容器 | 各走一次取消 / 仅移除 / 彻底删除 | 无 500；`data_nonempty` → HTTP 409 + 可理解提示 |
+
+可用 Playwright 或手工；记录浏览器与 OS。
+
+### 036.08 — 正式平台实机矩阵
+
+| 平台 | 最低冒烟 | Full / autostart（若宣称） |
+| --- | --- | --- |
+| Ubuntu 22.04 | init → import → start → status | setup --full + doctor --profile full |
+| Ubuntu 24.04 | 同上 | 同上 |
+| Debian 12 | 同上；apt 源不为 Ubuntu | 同上 |
+| WSL2 Ubuntu | 工作区在 Linux 盘；拒绝 `/mnt/<drive>` Full 写路径 | systemd user + doctor ready |
+| macOS arm64 | 同上 smoke | Docker Desktop 可用时 Full |
+| macOS Intel（仍承诺时） | smoke 即可 | 不要求与 arm64 同等 Full |
+
+Windows 原生：任意实际 `lwa` 命令须在写工作区前 fail-fast（已由门禁覆盖；实机抽查即可）。
+
+### IMP-042.b — 跨盘 / 跨机迁移（延期）
+
+**不在本期实现。** `lwa workspace relocate` 仅同卷；跨盘预检 blocking。人工路径见 [workspace-rename.md](workspace-rename.md)。
+
 ## 自动化测试运行
 
 ```bash

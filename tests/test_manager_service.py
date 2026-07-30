@@ -426,6 +426,15 @@ def test_spawn_manager_redirects_stdout_to_manager_log(workspace: Workspace) -> 
     assert getattr(kwargs["stdout"], "closed", False) is True
 
 
+def test_spawn_manager_rejects_windows_native(workspace: Workspace, monkeypatch) -> None:
+    """036.09：Windows 原生不得 DETACHED_PROCESS 启动 manager。"""
+    import local_webpage_access.manager_service as ms
+
+    monkeypatch.setattr(ms.sys, "platform", "win32")
+    with pytest.raises(RuntimeError, match="Windows 原生不受支持"):
+        _spawn_manager(workspace)
+
+
 def test_spawn_manager_rotates_manager_log_before_open(
     workspace: Workspace, monkeypatch
 ) -> None:

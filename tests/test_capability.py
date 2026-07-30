@@ -206,6 +206,44 @@ def test_full_manager_view_does_not_require_cli_cache() -> None:
     assert _compute_overall(report) == "ready"
 
 
+def test_daemon_role_overall_only_requires_own_docker() -> None:
+    """ADJ-035：daemon 角色快照 overall 不因 peer/Caddy unknown 假红。"""
+    report = CapabilityReport(
+        profile="full",
+        docker_engine="ready",
+        docker_compose="ready",
+        docker_access="ready",
+        daemon_docker_access="ready",
+        manager_docker_access="unknown",
+        gateway_access="unknown",
+        caddy_binary="unknown",
+        caddy_runtime="unknown",
+        caddy_owner="unknown",
+        caddy_workspace_access="unknown",
+        details={"role": "daemon"},
+    )
+    assert _compute_overall(report) == "ready"
+
+
+def test_gateway_role_overall_only_requires_caddy_fields() -> None:
+    """ADJ-035：gateway 角色快照 overall 不因 manager/daemon Docker unknown 假红。"""
+    report = CapabilityReport(
+        profile="full",
+        docker_engine="unknown",
+        docker_compose="unknown",
+        docker_access="unknown",
+        manager_docker_access="unknown",
+        daemon_docker_access="unknown",
+        caddy_binary="ready",
+        caddy_runtime="ready",
+        caddy_owner="lwa_service_user",
+        caddy_workspace_access="ready",
+        gateway_access="ready",
+        details={"role": "gateway"},
+    )
+    assert _compute_overall(report) == "ready"
+
+
 def test_live_manager_probe_is_not_overwritten_by_own_cache(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -605,3 +643,97 @@ def test_overlay_keeps_unready_when_other_capability_still_bad(
     assert out["capabilities"]["gatewayAccess"] == "ready"
     assert out["overall"] == "unready"
     assert out["action"]
+
+
+def test_three_role_caches_converge_manager_and_cli_overall_ready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """TST-001：三角色写缓存后 manager/CLI Full overall 可收敛到 ready（mock，非真 systemd）。"""
+    write_capability_cache(
+        tmp_path,
+        "manager",
+        CapabilityReport(
+            profile="full",
+            docker_engine="ready",
+            docker_compose="ready",
+            docker_access="ready",
+            manager_docker_access="ready",
+        ),
+    )
+    write_capability_cache(
+        tmp_path,
+        "daemon",
+        CapabilityReport(
+            profile="full",
+            docker_engine="ready",
+            docker_compose="ready",
+            docker_access="ready",
+            daemon_docker_access="ready",
+            details={"role": "daemon"},
+        ),
+    )
+    write_capability_cache(
+        tmp_path,
+        "gateway",
+        CapabilityReport(
+            profile="full",
+            caddy_binary="ready",
+            caddy_runtime="ready",
+            caddy_owner="lwa_service_user",
+            caddy_workspace_access="ready",
+            gateway_access="ready",
+            details={"role": "gateway"},
+        ),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive",
+        lambda _root, role: role in ("manager", "daemon", "gateway"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_docker_access_state", lambda: "ready"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_runtime_fields",
+        lambda _root: ("ready", "lwa_service_user", "lwa", "ready"),
+    )
+
+    manager = collect_capability_report(
+        workspace_root=tmp_path,
+        profile="full",
+        role="manager",
+        include_backend_cached=True,
+    )
+    assert manager.daemon_docker_access == "ready"
+    assert manager.gateway_access == "ready"
+    assert manager.overall == "ready"
+
+    cli = collect_capability_report(
+        workspace_root=tmp_path,
+        profile="full",
+        role="cli",
+        include_backend_cached=True,
+    )
+    assert cli.cli_docker_access == "ready"
+    assert cli.manager_docker_access == "ready"
+    assert cli.daemon_docker_access == "ready"
+    assert cli.gateway_access == "ready"
+    assert cli.overall == "ready"
+
+    # 角色局部快照不因 peer unknown 假红（ADJ-035 + 缓存合并后仍保持）
+    daemon = collect_capability_report(
+        workspace_root=tmp_path,
+        profile="full",
+        role="daemon",
+        include_backend_cached=True,
+    )
+    assert daemon.overall == "ready"
+    gateway = collect_capability_report(
+        workspace_root=tmp_path,
+        profile="full",
+        role="gateway",
+        include_backend_cached=True,
+    )
+    assert gateway.overall == "ready"

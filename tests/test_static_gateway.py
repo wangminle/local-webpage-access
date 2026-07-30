@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import time
 from pathlib import Path
 
@@ -1243,6 +1244,97 @@ def test_ensure_caddy_running_returns_false_when_start_fails(
     assert gateway.ensure_caddy_running() is False
 
 
+class _FakeCaddyPopen:
+    """ADJ-036 / BUG-412：模拟 ``caddy start`` 子进程（Popen + poll/wait）。"""
+
+    def __init__(
+        self,
+        cmd,
+        *,
+        returncode: int | None = 0,
+        stderr: bytes = b"",
+        hang: bool = False,
+        hang_communicate: bool = False,
+    ):
+        self.args = cmd
+        self._returncode = returncode
+        self.returncode = None if hang else returncode
+        self._stderr = stderr
+        self._hang = hang
+        self._hang_communicate = hang_communicate
+        self._killed = False
+        self.communicate_calls = 0
+
+    def poll(self):
+        if self._hang and not self._killed:
+            return None
+        return self._returncode
+
+    def communicate(self, timeout=None):  # noqa: ANN001
+        import subprocess as sp
+
+        self.communicate_calls += 1
+        if self._hang_communicate:
+            # 模拟 caddy daemon 继承 PIPE 写端：无超时则永久阻塞
+            if timeout is None:
+                raise AssertionError(
+                    "BUG-412：caddy_start 不得对 PIPE 调用无超时 communicate()"
+                )
+            raise sp.TimeoutExpired(cmd=self.args, timeout=timeout)
+        self.returncode = self._returncode if self._returncode is not None else 0
+        return b"", self._stderr
+
+    def wait(self, timeout=None):  # noqa: ANN001
+        import subprocess as sp
+
+        if self._hang and not self._killed:
+            raise sp.TimeoutExpired(cmd=self.args, timeout=timeout or 0)
+        self.returncode = self._returncode if self._returncode is not None else 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self._killed = True
+        self.returncode = self._returncode if self._returncode is not None else -9
+
+
+def test_caddy_start_uses_devnull_not_pipes(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """BUG-412：Popen 必须 DEVNULL，避免 daemon 继承 PIPE 写端死锁。"""
+    captured: dict = {}
+
+    def fake_popen(cmd, **kw):
+        captured["kwargs"] = kw
+        return _FakeCaddyPopen(cmd, returncode=0)
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.Popen", fake_popen
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
+    assert gateway.caddy_start() is True
+    assert captured["kwargs"].get("stdout") is subprocess.DEVNULL
+    assert captured["kwargs"].get("stderr") is subprocess.DEVNULL
+
+
+def test_caddy_start_does_not_call_bare_communicate_after_exit(
+    gateway: StaticGateway, monkeypatch
+) -> None:
+    """BUG-412：前台已退出时不得调用会永久阻塞的 communicate()。"""
+    fake = _FakeCaddyPopen(
+        ["caddy", "start"], returncode=1, hang_communicate=True, stderr=b"x"
+    )
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.subprocess.Popen",
+        lambda cmd, **kw: fake,
+    )
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
+    assert gateway.caddy_start() is True
+    assert fake.communicate_calls == 0
+
+
 def test_caddy_start_uses_main_when_present(
     gateway: StaticGateway, workspace: Workspace, monkeypatch
 ) -> None:
@@ -1252,16 +1344,12 @@ def test_caddy_start_uses_main_when_present(
     main.write_text("# real config\n", encoding="utf-8")
     captured = {}
 
-    class _OK:
-        returncode = 0
-        stderr = b""
-
-    def fake_run(cmd, **kw):
+    def fake_popen(cmd, **kw):
         captured["cmd"] = cmd
-        return _OK()
+        return _FakeCaddyPopen(cmd, returncode=0)
 
     monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", fake_run
+        "local_webpage_access.static_gateway.subprocess.Popen", fake_popen
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
 
@@ -1279,16 +1367,12 @@ def test_caddy_start_falls_back_to_bootstrap_when_no_main(
     assert not main.exists()
     captured = {}
 
-    class _OK:
-        returncode = 0
-        stderr = b""
-
-    def fake_run(cmd, **kw):
+    def fake_popen(cmd, **kw):
         captured["cmd"] = cmd
-        return _OK()
+        return _FakeCaddyPopen(cmd, returncode=0)
 
     monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", fake_run
+        "local_webpage_access.static_gateway.subprocess.Popen", fake_popen
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
 
@@ -1301,13 +1385,11 @@ def test_caddy_start_admin_probe_when_cmd_fails_but_admin_alive(
     gateway: StaticGateway, monkeypatch
 ) -> None:
     """BUG-102：caddy start 非零退出但 admin + 本工作区 pidfile 就绪 → True。"""
-    class _Fail:
-        returncode = 1
-        stderr = b"pingback timeout"
-
     monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run",
-        lambda *a, **kw: _Fail(),
+        "local_webpage_access.static_gateway.subprocess.Popen",
+        lambda cmd, **kw: _FakeCaddyPopen(
+            cmd, returncode=1, stderr=b"pingback timeout"
+        ),
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
@@ -1318,29 +1400,24 @@ def test_caddy_start_returns_false_when_cmd_fails_and_admin_down(
     gateway: StaticGateway, monkeypatch
 ) -> None:
     """BUG-102：caddy start 命令失败且 admin 始终不可达 → 真失败，返回 False。"""
-    class _Fail:
-        returncode = 1
-        stderr = b"real error"
-
     monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run",
-        lambda *a, **kw: _Fail(),
+        "local_webpage_access.static_gateway.subprocess.Popen",
+        lambda cmd, **kw: _FakeCaddyPopen(cmd, returncode=1, stderr=b"real error"),
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway._ADMIN_STARTUP_WAIT", 0.05
+    )
     assert gateway.caddy_start() is False
 
 
 def test_caddy_start_recovers_on_timeout_exception(
     gateway: StaticGateway, monkeypatch
 ) -> None:
-    """BUG-102：TimeoutExpired（pingback）但本工作区 admin+pidfile 就绪 → True。"""
-    import subprocess as sp
-
-    def _timeout(*a, **kw):
-        raise sp.TimeoutExpired(cmd=a[0] if a else "caddy", timeout=20)
-
+    """ADJ-036/BUG-102：pingback 子进程挂起但本工作区 admin+pidfile 就绪 → 提前 True。"""
     monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", _timeout
+        "local_webpage_access.static_gateway.subprocess.Popen",
+        lambda cmd, **kw: _FakeCaddyPopen(cmd, hang=True),
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
@@ -1356,7 +1433,7 @@ def test_caddy_start_file_not_found_is_hard_fail(
         raise FileNotFoundError("caddy")
 
     monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", _missing
+        "local_webpage_access.static_gateway.subprocess.Popen", _missing
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
@@ -1367,13 +1444,11 @@ def test_caddy_start_rejects_orphan_admin_without_workspace_pid(
     gateway: StaticGateway, monkeypatch
 ) -> None:
     """§10.2-C2：pingback 失败后 admin 在线但本工作区 pidfile 无效 → 不认领。"""
-    class _Fail:
-        returncode = 1
-        stderr = b"pingback timeout"
-
     monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run",
-        lambda *a, **kw: _Fail(),
+        "local_webpage_access.static_gateway.subprocess.Popen",
+        lambda cmd, **kw: _FakeCaddyPopen(
+            cmd, returncode=1, stderr=b"pingback timeout"
+        ),
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: False)

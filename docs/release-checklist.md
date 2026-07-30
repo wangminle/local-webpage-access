@@ -4,9 +4,9 @@
 
 ## 代码与版本
 
-- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.9` / `1.0.0`）。
+- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.10` / `1.0.0`）。
 - [ ] `src/local_webpage_access/cli/` 包入口（`cli/__init__.py` 的 `version` 命令 / `version_info.py`）读取该版本号；`python3 -m local_webpage_access` 与 `python3 -m local_webpage_access.cli` 均可调用。
-- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart` / 宿主机装配 `setup|init --default|--full|--resume` / `doctor --profile full` / `lwa capabilities` / Full Profile 能力闭环与周期刷新 / `lwa update` 默认重启 gateway / IMP-023 别名资源错位检测 / IMP-035 安全删除 / IMP-036 正式平台矩阵 / IMP-037 `gateway switch` / IMP-038·040 访问复核与 LAN 新鲜度 / IMP-039 `cancel-build` / IMP-041 remove 阶段日志 / IMP-042 `lwa workspace relocate`；skills 数为 18）。
+- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart` / 宿主机装配 `setup|init --default|--full|--resume` / `doctor --profile full` / `lwa capabilities` / Full Profile 能力闭环与周期刷新 / `lwa update` 默认重启 gateway / IMP-023 别名资源错位检测 / IMP-035 安全删除 / IMP-036 正式平台矩阵 / IMP-037 `gateway switch` / IMP-038·040 访问复核与 LAN 新鲜度 / IMP-039 `cancel-build` / IMP-041 remove 阶段日志 / IMP-042 `lwa workspace relocate` / IMP-043 显示名与名称列宽；skills 数为 18）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。
 
 ## 测试
@@ -15,14 +15,16 @@
 - [ ] 静态门禁：`python3 -m ruff check src tests` 与 `python3 -m mypy src/local_webpage_access` 均为 0（配置见 `pyproject.toml`，ADJ-033）。
 - [ ] 端到端验收 `tests/test_e2e_acceptance.py` 全部通过。
 - [ ] 在具备 Docker 的 Linux 主机上执行 `LWA_RUN_DOCKER_TESTS=1 python3 -m pytest tests/test_docker_integration.py`。
-- [ ] 按 [acceptance-checklist.md](acceptance-checklist.md) 完成手工验收（尤其 WBS-29.09/11/12 容器构建启动与数据持久化）。
+- [ ] 按 [acceptance-checklist.md](acceptance-checklist.md) 完成手工验收（尤其 WBS-29.09/11/12 容器构建启动与数据持久化；以及 033.13 Full/systemd、035.06 删除浏览器、036.08 平台矩阵）。
 - [ ] 验收记录与问题清单已填写（acceptance-checklist.md 的「验收记录」「问题清单」两节）。
+- [ ] 036.09：确认 daemon/manager 在 win32 上拒绝 DETACHED 启动（单元测试覆盖）；文档无 Windows 原生推销。
+- [ ] IMP-042.b 跨盘/跨机迁移仍标延期，勿在发布说明中宣称已支持。
 
 ## 文档
 
-- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、capabilities、Full Profile、skills、浏览量、冗余、运维手册、`setup|init --full --resume`、正式支持平台索引、`gateway switch` / `cancel-build` / `doctor --access` / LAN stale / `workspace relocate`）。
-- [ ] [faq.md](faq.md) / [operations-playbook.md](operations-playbook.md) / [known-limitations.md](known-limitations.md) / [manager-page.md](manager-page.md) / [autostart.md](autostart.md) / [workspace-rename.md](workspace-rename.md) 与 IMP-033/034/035/036/037/038/039/040/041/042 行为一致。
-- [ ] [docs/manager-page.md](manager-page.md) API 端点表与实际路由一致（含 pageviews / redundant / remove / path-alias IMP-022；`POST .../cancel-build`；`POST /api/gateway/switch`；`POST /api/access/refresh`；删除模态焦点管理；前端取消构建与 LAN stale 横幅）。
+- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、capabilities、Full Profile、skills、浏览量、冗余、运维手册、`setup|init --full --resume`、正式支持平台索引、`gateway switch` / `cancel-build` / `doctor --access` / LAN stale / `workspace relocate` / IMP-043 显示名）。
+- [ ] [faq.md](faq.md) / [operations-playbook.md](operations-playbook.md) / [known-limitations.md](known-limitations.md) / [manager-page.md](manager-page.md) / [autostart.md](autostart.md) / [workspace-rename.md](workspace-rename.md) 与 IMP-033/034/035/036/037/038/039/040/041/042/043 行为一致。
+- [ ] [docs/manager-page.md](manager-page.md) API 端点表与实际路由一致（含 pageviews / redundant / remove / path-alias IMP-022；`POST .../cancel-build`；`POST /api/gateway/switch`；`POST /api/access/refresh`；删除模态焦点管理；前端取消构建与 LAN stale 横幅；IMP-043 显示名/`nameSource`/名称列宽）。
 - [ ] [docs/operations-playbook.md](operations-playbook.md) 与网关选型 / `gateway switch` / 访问复核 / `cancel-build` / 宿主机装配档位 / 冗余 / 容器别名 / Caddy 排障一致。
 - [ ] [docs/faq.md](faq.md) 覆盖导入/容器/管理页/端口/磁盘各类排障（含 slug 冲突与 `--update`、内置 Docker/Caddy 安装，不再写自动 `-2/-3`；`doctor --json` 未初始化亦可输出 platformSupport；取消构建；网关切换 `accessOk`/`fullyOk`；删除对账）。
 - [ ] [docs/security-boundary.md](security-boundary.md) 审计项与 `security.py` 实现一致。

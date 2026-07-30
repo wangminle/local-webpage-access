@@ -33,8 +33,8 @@ lwa capabilities --json            # 机器可读能力快照
 Full 不仅「装上二进制」，还要求：
 
 1. **统一身份**：固化 `serviceUser`（真实登录用户，而非临时 sudo 的 root）。
-2. **多上下文 Docker**：CLI / manager / daemon 各自探测并写入 `run/capability-{manager,daemon,gateway}.json`；父 CLI **不得冒充**后台写缓存。
-3. **Caddy 严格托管**：禁用冲突的系统 `caddy.service`；`:2019` 须为本工作区 LWA Caddy（owner / euid / pid）；工作区配置与日志路径可读写。
+2. **多上下文 Docker**：CLI / manager / daemon 各自探测并写入 `run/capability-{manager,daemon,gateway}.json`；父 CLI **不得冒充**后台写缓存。后台三角色均会周期刷新；daemon/gateway 写缓存时合并存活 peer（BUG-406/407）。角色快照 `overall` 按本角色职责计算（ADJ-035）；以 `lwa doctor --profile full`（CLI 实时）为准排查假红，见 [FAQ](faq.md)。
+3. **Caddy 严格托管**：禁用冲突的系统 `caddy.service`；`:2019` 须为本工作区 LWA Caddy（owner / euid / pid）；工作区配置与日志路径可读写。`caddy start` 在 pingback 等待期并行探 admin/pidfile（ADJ-036），就绪即成功。
 4. **退出码**：`ready`→0；`session_refresh_required`（组权限未生效）→2；`unready`→1。
 
 Linux 上 `usermod -aG docker` 后若当前进程仍无 docker 组：按提示重登或 `newgrp docker`，再 `--resume`。  
