@@ -17,16 +17,16 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 - **端口池管理**：从配置端口池中分配，跳过 registry 已登记端口与宿主机实际监听端口，生成 `lanUrl` / `healthUrl`；静态与容器实例均可选**路径别名**（`/<slug>/` 统一入口，**需 Caddy**；builtin 下设置会被拦截）。
 - **静态托管**：default 档在 Caddy 可用时用 Caddy，否则降级内置 `http.server`；Full 档要求 Caddy 严格可用（不静默降级）。支持嵌套 `index.html` 与同级资源。
 - **容器托管**：按技术栈生成 Dockerfile（非 root、`EXPOSE` 内部端口）与 Compose（端口/资源限额/`restart: unless-stopped`/SQLite `data/` 持久化 bind mount）。
-- **生命周期编排**：`start` / `stop` / `restart` / `rebuild` / `cancel-build` / `remove`，实例级双层锁（进程内 `RLock` + 跨进程文件锁 + 陈旧锁回收）串行化同一实例操作；容器复用已登记端口保证 `lanUrl` 稳定。
+- **生命周期编排**：`start` / `stop` / `restart` / `recover` / `rebuild` / `cancel-build` / `remove`，实例级双层锁（进程内 `RLock` + 跨进程文件锁 + 陈旧锁回收）串行化同一实例操作；容器复用已登记端口保证 `lanUrl` 稳定。
 - **可观测性**：分类日志（build / run / gateway / import / scan）与按大小滚动、HTTP 健康检查、状态聚合、整机与实例级资源统计；管理页**浏览量统计**（Caddy 别名入口 JSON access log / builtin gateway.log / 容器日志尽力解析）。
 - **构建队列**：跨进程闸门限流（默认并发 1，`registry/build-locks.db`），拿不到槽位即标记 `queued`，排队超时可控；`cancel-build` 可取消排队/进行中构建（不删缓存/镜像/用户数据，IMP-039）。
 - **网关原子切换（IMP-037）**：`lwa gateway switch <caddy|builtin>` 事务切换后端（预检/停旧启新/回滚/`degraded`）；结果区分 `accessOk` / `fullyOk`。
 - **访问地址新鲜度（IMP-038/040）**：管理页读时合成 `lanUrl`；`lwa access refresh` / `doctor --access` / update 收尾 review；LAN 漂移节流自愈。`access review` 检测 SPA 别名资源错位（空 200 / 404 / 错误 MIME，IMP-023）。
 - **Full Profile 能力新鲜度**：`lwa gateway on` / 前台监管写 `capability-gateway.json`；manager / gateway / daemon 均周期刷新能力缓存；角色快照 overall 按本角色职责计算（避免 peer `unknown` 假红）；内部健康/access/Caddy admin 探针直连（不受 `http_proxy` 影响）；`lwa update` 默认重启原本在跑的 gateway，Full 收尾验收合并后的能力缓存。
 - **SQLite Registry**：七张表（instances / containers / static_sites / ports / events / builds / resources），外键级联、WAL 模式。
-- **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权，覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计；**显示名优先 `--name`，其次主页 HTML `<title>`**，名称列固定宽度防抖动（IMP-043）。
+- **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权，覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计；**显示名优先 `--name`，其次主页 HTML `<title>`**（IMP-043）。
 - **自动导入守护进程（WBS-21）**：`lwa daemon on` 后监听 `inbox/`，自动导入并启动可确定的轻量实例。
-- **安全审计（WBS-25）**：对生成的 Compose / Dockerfile / zip 成员做 critical/warn/info 分级审计，critical 问题拒绝写出；管理页绑定校验（LAN 绑定 + token）。
+- **安全审计（WBS-25）**：对生成的 Compose / Dockerfile / zip 成员做 critical/warn/info 分级审计；Compose 与 Dockerfile 均在写出前拦截 critical（Dockerfile 的 `ADD <url>`、`curl\|sh` 为 critical），zip 路径穿越/符号链接/炸弹拒绝导入；管理页绑定校验（LAN 绑定 + token）。
 - **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；人类可读与 `--json` 均含平台矩阵报告（`--json` 未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。
 - **宿主机装配（IMP-031/032/033）**：`lwa setup` / `lwa init` 内置 macOS/Linux 的 Docker Engine+Compose、Caddy 安装脚本（默认国内源 + registry-mirrors）；`--default` 检测+指引，`--full` 装齐并做 **Full Profile 能力闭环**（CLI + manager/daemon/gateway 真实上下文、Caddy owner/工作区访问）；未闭环不假绿；`--resume` 在重登/权限刷新后续跑验收（非 TTY 需 `--yes`）。
 - **正式平台门禁（IMP-036）**：仅 Ubuntu LTS / Debian Stable / WSL2 / macOS；Windows 原生 hard fail。
@@ -91,9 +91,10 @@ lwa status
 lwa logs my-site --category run --tail 200
 lwa stats
 
-# 6. 停止 / 重启 / 重建 / 移除
+# 6. 停止 / 重启 / 恢复 / 重建 / 移除
 lwa stop my-site
 lwa restart my-site
+lwa recover my-site           # 网关掉线等场景的一键恢复（对齐管理页）
 lwa rebuild my-site
 lwa remove my-site            # 默认保留 apps/<id>/ 磁盘文件，仅删 registry 索引
 lwa remove my-site --purge --force   # 连同磁盘文件与非空 data/ 一起删除
@@ -108,7 +109,8 @@ lwa gateway on                # staticGateway=caddy 时启动 Caddy master（:80
 lwa autostart install         # 生成并启用前台监管单元（IMP-030），见 docs/autostart.md
 # lwa autostart install --with-caddy   # staticGateway=caddy 时额外监管 gateway
 # lwa autostart check                   # 完备性深检（解释器/单元/启用态/进程/Caddy/linger）
-# lwa setup --autostart                 # 兼容旧入口，等价 lwa autostart install
+# lwa autostart doctor-hints            # 打印自启相关 doctor 提示文案
+# lwa setup --autostart                 # 兼容旧入口，委托 lwa autostart install
 
 # 8.（可选）环境/实例排障
 lwa doctor                    # 全部环境检查
@@ -116,6 +118,8 @@ lwa doctor --profile full     # Full Profile 能力契约（CapabilityReport）
 lwa capabilities --json       # 输出能力报告 JSON
 lwa doctor my-site            # 对单个实例深度诊断
 lwa access review             # 复核访问地址（别名白屏 / IMP-023 空200·404·错误MIME）
+lwa pageviews                 # 浏览量汇总（对齐管理页）
+lwa pageviews my-site         # 单实例浏览量详情
 ```
 
 管理页 token 在首次 `lwa manager on` 或 `lwa manager start` 时生成；也可在工作区 `run/` 下查看。详见 [管理页说明](docs/manager-page.md)。
@@ -133,6 +137,7 @@ lwa access review             # 复核访问地址（别名白屏 / IMP-023 空2
 | `lwa start <ID>` | 启动实例（容器已部署走轻量 `compose start`，否则全量部署） |
 | `lwa stop <ID>` | 停止实例（静态禁用网关+释放端口；容器 `compose stop`，不删数据） |
 | `lwa restart <ID>` | 先停再启（容器走轻量 start，不重建镜像） |
+| `lwa recover <ID>` | 一键恢复（静态：必要时先拉起 Caddy master 再 restart；容器等价 restart） |
 | `lwa rebuild <ID>` | 强制重建镜像/产物，经构建队列限流 |
 | `lwa cancel-build <ID>` | 取消排队中或进行中的构建（不删缓存/镜像/用户数据） |
 | `lwa remove <ID> [--purge] [--force]` | 移除实例；`--purge` 删磁盘文件，非空 `data/` 需 `--force` |
@@ -140,6 +145,7 @@ lwa access review             # 复核访问地址（别名白屏 / IMP-023 空2
 | `lwa logs <ID> [-c CATEGORY] [-n TAIL]` | 查看实例日志（build/run/gateway/import/scan） |
 | `lwa status [ID]` | 查看实例状态（省略 ID 显示全部） |
 | `lwa stats [ID]` | 查看资源占用（整机 + 实例目录/镜像/容器） |
+| `lwa pageviews [ID] [-n LIMIT]` | 浏览量汇总 / 单实例详情（先惰性摄入日志；对齐管理页） |
 | `lwa list` | 列出所有实例及端口 |
 | `lwa setup [--script] [--json] [--default\|--full] [--yes] [--resume] [--autostart] [--with-caddy]` | 检测宿主机工具；`--full` 安装并做能力闭环验收；`--resume` 从权限刷新后继续；`--autostart` 委托 `lwa autostart install` |
 | `lwa doctor [ID] [--json] [--profile default\|full] [--access]` | 诊断环境与实例；`--access` 附加访问复核；`--profile full` 附加 CapabilityReport；`--json` 含 `currentLanIp`/`driftedInstanceIds`，有 fail / Full unready 时退出码 1 |
@@ -157,6 +163,7 @@ lwa access review             # 复核访问地址（别名白屏 / IMP-023 空2
 | `lwa autostart check [--json]` | 完备性深检（解释器 / PATH 可用性 / 工作区 / 单元形态 / 启用态 / MainPID 身份 / 进程 / Caddy·:2019 / linger / WSL / Docker），fail 退出码 1 |
 | `lwa autostart repair [--with-caddy]` | 重写失效路径、迁移旧 detached 启动器并重新启用 |
 | `lwa autostart uninstall [--purge-linger]` | 停服务 + 删单元文件（不删工作区数据） |
+| `lwa autostart doctor-hints` | 打印自启相关 doctor 提示文案（排障辅助） |
 | `lwa version` | 显示版本号 |
 
 全局选项 `-v/--verbose` 输出 DEBUG 日志。各命令的参数细节可用 `lwa <command> --help` 查看。
@@ -262,6 +269,7 @@ python3 -m pytest           # 全量单元测试与集成测试（不依赖真�
 | [docs/autostart.md](docs/autostart.md) | 开机自启（macOS launchd / Linux·WSL2 systemd；WSL 唤醒与可选 mirrored 网络） |
 | [docs/testing.md](docs/testing.md) | 测试体系与运行方式 |
 | [docs/acceptance-checklist.md](docs/acceptance-checklist.md) | V1 端到端验收清单 |
+| [skills/README.md](src/local_webpage_access/skills/README.md) | 内置大模型 Skills 总览（18 个） |
 
 ## 路线图
 

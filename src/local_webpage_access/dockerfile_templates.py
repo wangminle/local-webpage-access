@@ -12,6 +12,8 @@
 4. 生成的 Dockerfile 带注释头，记录模板来源和关键参数，方便 skill 二次修复。
 5. SQLite 项目通过 Compose 的 ``env_file`` 注入 ``DATABASE_URL=sqlite:////app/data/app.sqlite``，
    Dockerfile 只负责约定 ``/app/data`` 目录存在（WBS-12.09）。
+6. 写出前调用 ``audit_dockerfile``：``ADD <url>`` / ``curl|sh`` 为 critical，拒绝落盘
+   （与 ``generate_compose`` 对称）。
 """
 
 from __future__ import annotations
@@ -81,6 +83,19 @@ def generate_dockerfile(
     else:
         # 容器实例只可能是 node/python；兜底用通用 shell 启动
         content = _render_generic(manifest, internal_port)
+
+    # 与 generate_compose 对称：写出前审计；pipe_to_shell / add_remote_url 为
+    # critical，拒绝落盘（防止模板改动或 entry.install/build 注入供应链风险）。
+    from local_webpage_access.security import audit_dockerfile, has_critical
+
+    findings = audit_dockerfile(content)
+    if has_critical(findings):
+        codes = ", ".join(f.code for f in findings if f.level == "critical")
+        raise RuntimeError(
+            f"生成的 Dockerfile 含 critical 安全问题（{codes}），已拒绝写出"
+        )
+    for f in findings:
+        log.warning("Dockerfile 安全审计 [%s] %s", f.code, f.message)
 
     out_path.write_text(content, encoding="utf-8")
     # BUG-117：构建上下文是 apps/<id>/，.dockerignore 与 Dockerfile 一并生成。

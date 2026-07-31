@@ -40,6 +40,9 @@ description: >-
 - 不 `pip install` 到系统 site-packages（用虚拟环境或 `--user`）。
 - 不用 `python:3` 这类浮动 tag（固定到 `python:3.13-slim` 等）。
 - 不 `--reload` 生产启动（FastAPI/Flask 生产模式）。
+- **禁止** `ADD https://...` 与 `RUN curl|sh` / `wget|sh`：经
+  `dockerfile_templates.generate_dockerfile` 写出时会因 critical 审计失败被拒绝
+  （见 [安全边界](../../../../docs/security-boundary.md)）。远程依赖改用 `COPY` + `pip install`。
 
 ## 处理流程
 

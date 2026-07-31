@@ -1172,3 +1172,292 @@ def test_read_new_lines_ingests_archive_when_new_file_smaller(
     batch = _read_new_lines(log_path, cursor_key, store)
     joined = "\n".join(batch.lines)
     assert "/tiny" in joined
+
+
+def test_read_new_lines_ingests_caddy_gzip_rotated_archive(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """BUG-416：Caddy roll_size 把旧日志压成 <stem>-<ts>-size.log.gz，须识别并补读尾部。
+
+    回归对端实测：轮转后新文件增长到 size ≥ 旧 offset 时，旧的 .log.1 检测失效，
+    ingest 误判未轮转、从旧 offset 处 seek 新文件，跳过开头新日志。
+    """
+    import gzip as _gzip
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    old_content = (
+        '127.0.0.1 - - [30/Jul/2026 21:49:00] "GET /old HTTP/1.1" 200 -\n'
+        '127.0.0.1 - - [30/Jul/2026 21:49:40] "GET /tail HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(old_content, encoding="utf-8")
+    cursor_key = f"builtin:demo:{log_path.as_posix()}"
+    # 游标停在第一行之后，模拟尚未摄入第二行
+    first_line = old_content.splitlines(keepends=True)[0]
+    store.set_cursor(cursor_key, len(first_line.encode("utf-8")), None)
+
+    # Caddy roll_size 轮转：旧内容 gzip 归档为 <stem>-<ts>-size.log.gz，新文件重写
+    archive = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T13-49-50.266-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(archive, "wb") as fh:
+        fh.write(old_content.encode("utf-8"))
+    log_path.write_text(
+        '10.181.237.97 - - [30/Jul/2026 21:49:51] "GET /new HTTP/1.1" 200 -\n'
+        '10.181.237.97 - - [30/Jul/2026 21:49:52] "GET /new2 HTTP/1.1" 200 -\n',
+        encoding="utf-8",
+    )
+    # 关键：新文件体积 ≥ 旧游标（正是 BUG-416 触发条件：size<offset 判定失效）
+    assert log_path.stat().st_size >= store.get_cursor(cursor_key)[0]
+
+    batch = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(batch.lines)
+    assert "/tail" in joined      # 归档尾部补读
+    assert "/new" in joined       # 新文件内容
+    assert "/old" not in joined   # 游标之前的不重读
+
+
+def test_read_new_lines_does_not_reread_archive_after_cursor_advanced(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """轮转补读后再次 ingest 不得重读同一归档尾部（0.6.11 回归）。
+
+    现场：cursor 已落到新文件尾部，但归档仍在且未压缩体积 ≥ offset；
+    归档头与当前文件头永远不同 → 每次误判 rotated，archive_raw[offset:] 被反复计入。
+    """
+    import gzip as _gzip
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # 归档未压缩体积须明显大于新文件，才能复现 archive_raw[offset:] 重读
+    old_lines = [
+        f'127.0.0.1 - - [30/Jul/2026 21:49:00] "GET /old{i} HTTP/1.1" 200 -\n'
+        for i in range(20)
+    ]
+    old_lines.append(
+        '127.0.0.1 - - [30/Jul/2026 21:49:40] "GET /tail HTTP/1.1" 200 -\n'
+    )
+    old_content = "".join(old_lines)
+    log_path.write_text(old_content, encoding="utf-8")
+    cursor_key = f"builtin:demo:{log_path.as_posix()}"
+    # 游标停在最后一行之前，尚未摄入 /tail
+    encoded_lines = [ln.encode("utf-8") for ln in old_lines]
+    offset = sum(len(ln) for ln in encoded_lines[:-1])
+    store.set_cursor(cursor_key, offset, None)
+
+    archive = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T13-49-50.266-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(archive, "wb") as fh:
+        fh.write(old_content.encode("utf-8"))
+    new_content = (
+        '10.0.0.1 - - [30/Jul/2026 21:49:51] "GET /new HTTP/1.1" 200 -\n'
+        '10.0.0.1 - - [30/Jul/2026 21:49:52] "GET /new2 HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(new_content, encoding="utf-8")
+    assert len(old_content.encode("utf-8")) > log_path.stat().st_size
+
+    first = _read_new_lines(log_path, cursor_key, store)
+    first_joined = "\n".join(first.lines)
+    assert "/tail" in first_joined
+    assert "/new" in first_joined
+    # 提交游标（与 ingest 路径一致）；修复后应一并持久化归档消费标记
+    meta = getattr(first, "cursor_meta", None)
+    store.set_cursor(cursor_key, first.next_offset, meta)
+
+    second = _read_new_lines(log_path, cursor_key, store)
+    second_joined = "\n".join(second.lines)
+    assert "/tail" not in second_joined
+    assert "/old" not in second_joined
+    assert "/new" not in second_joined
+    assert second.lines == []
+
+
+def test_read_new_lines_processes_newer_archive_after_prior_consumed(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """已消费归档 A 后，若再轮转出归档 B，仍须补读 B 的尾部。"""
+    import gzip as _gzip
+    import time
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    gen1 = (
+        '127.0.0.1 - - [30/Jul/2026 21:00:00] "GET /a1 HTTP/1.1" 200 -\n'
+        '127.0.0.1 - - [30/Jul/2026 21:00:01] "GET /a-tail HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(gen1, encoding="utf-8")
+    cursor_key = "builtin:demo:gateway"
+    store.set_cursor(cursor_key, len(gen1.splitlines(keepends=True)[0].encode()), None)
+
+    arch1 = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T13-00-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch1, "wb") as fh:
+        fh.write(gen1.encode("utf-8"))
+    gen2 = '10.0.0.1 - - [30/Jul/2026 21:01:00] "GET /b1 HTTP/1.1" 200 -\n'
+    log_path.write_text(gen2, encoding="utf-8")
+
+    first = _read_new_lines(log_path, cursor_key, store)
+    assert "/a-tail" in "\n".join(first.lines)
+    assert "/b1" in "\n".join(first.lines)
+    store.set_cursor(cursor_key, first.next_offset, first.cursor_meta)
+
+    # 第二次轮转：当前 gen2 归档为 arch2，新文件 gen3；mtime 须更新
+    time.sleep(0.05)
+    arch2 = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T13-01-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch2, "wb") as fh:
+        fh.write(
+            (
+                gen2
+                + '10.0.0.1 - - [30/Jul/2026 21:01:30] "GET /b-tail HTTP/1.1" 200 -\n'
+            ).encode("utf-8")
+        )
+    # 游标停在 gen2 末尾；归档含 gen2+/b-tail，新文件为 gen3
+    store.set_cursor(cursor_key, len(gen2.encode("utf-8")), first.cursor_meta)
+    log_path.write_text(
+        '10.0.0.2 - - [30/Jul/2026 21:02:00] "GET /c1 HTTP/1.1" 200 -\n',
+        encoding="utf-8",
+    )
+
+    third = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(third.lines)
+    assert "/b-tail" in joined
+    assert "/c1" in joined
+    assert "/a-tail" not in joined
+
+
+def test_read_new_lines_cold_start_ingests_all_archives(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """offset=0 冷启动须读齐全部轮转归档 + 当前文件（不只最新一个）。
+
+    现场：多份 ``-size.log.gz`` 并存时，旧实现 ``sorted(...)[-1]`` 只取最新，
+    且 ``offset==0`` 整段跳过归档 → 重置重建丢历史（如 ai-review 全在旧归档）。
+    """
+    import gzip as _gzip
+    import time
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    arch1_body = (
+        '127.0.0.1 - - [29/Jul/2026 10:00:00] "GET /old-arch HTTP/1.1" 200 -\n'
+    )
+    arch1 = log_path.with_name(
+        f"{log_path.stem}-2026-07-29T09-09-45.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch1, "wb") as fh:
+        fh.write(arch1_body.encode("utf-8"))
+    time.sleep(0.05)
+    arch2_body = (
+        '127.0.0.1 - - [30/Jul/2026 13:00:00] "GET /new-arch HTTP/1.1" 200 -\n'
+    )
+    arch2 = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T13-49-50.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch2, "wb") as fh:
+        fh.write(arch2_body.encode("utf-8"))
+    log_path.write_text(
+        '10.0.0.1 - - [31/Jul/2026 09:00:00] "GET /current HTTP/1.1" 200 -\n',
+        encoding="utf-8",
+    )
+    cursor_key = "builtin:demo:cold"
+    store.set_cursor(cursor_key, 0, None)
+
+    batch = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(batch.lines)
+    assert "/old-arch" in joined
+    assert "/new-arch" in joined
+    assert "/current" in joined
+
+
+def test_read_new_lines_catches_up_two_archives_between_ingests(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """两次 ingest 之间发生两次轮转：须补读旧归档尾 + 中间归档全文 + 当前文件。"""
+    import gzip as _gzip
+    import time
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    gen_a = (
+        '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /a-head HTTP/1.1" 200 -\n'
+        '127.0.0.1 - - [30/Jul/2026 10:00:01] "GET /a-tail HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(gen_a, encoding="utf-8")
+    cursor_key = "builtin:demo:multi-rot"
+    # 游标停在第一行后，尚未读 /a-tail
+    offset = len(gen_a.splitlines(keepends=True)[0].encode())
+    store.set_cursor(cursor_key, offset, None)
+
+    arch1 = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch1, "wb") as fh:
+        fh.write(gen_a.encode("utf-8"))
+    time.sleep(0.05)
+    gen_b = (
+        '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /b-full HTTP/1.1" 200 -\n'
+    )
+    arch2 = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T11-00-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch2, "wb") as fh:
+        fh.write(gen_b.encode("utf-8"))
+    log_path.write_text(
+        '10.0.0.2 - - [30/Jul/2026 12:00:00] "GET /c-now HTTP/1.1" 200 -\n',
+        encoding="utf-8",
+    )
+
+    batch = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(batch.lines)
+    assert "/a-tail" in joined
+    assert "/b-full" in joined
+    assert "/c-now" in joined
+    assert "/a-head" not in joined
+
+
+def test_ingest_all_counts_direct_port_for_aliased_static(
+    monkeypatch, workspace: Workspace, store: PageviewStore
+) -> None:
+    """BUG-415：有别名+端口的 shared-static 实例，其直连端口访问须被计入。
+
+    回归：ingest_all 构建 alias_to_id/port_to_id 时用 if/elif 互斥，有别名的
+    实例不进 port_to_id，致直连端口访问（path=/ 无别名前缀）被整批丢弃。
+    """
+    import local_webpage_access.pageviews as pv
+    from local_webpage_access.pageviews import ingest_all
+
+    monkeypatch.setattr(pv, "_detect_static_backend", lambda cfg: "caddy")
+    cfg = type("Cfg", (), {"staticGateway": "caddy"})()
+
+    # demo 既有别名(demo)又有端口(18002)——正是 BUG-415 受体
+    reg = _FakeReg(
+        instances=[
+            {"id": "demo", "runtime": "shared-static", "serving_mode": "shared-static"}
+        ],
+        static={"demo": {"route_host": "demo", "host_port": 18002, "route_mode": "name"}},
+    )
+
+    access_log = workspace.root / ACCESS_LOG_REL
+    access_log.parent.mkdir(parents=True, exist_ok=True)
+    access_log.write_text(
+        # 直连端口访问（BUG-415 场景）：path=/ 无别名前缀，host 含端口 18002
+        '{"ts":1752043200.0,"request":{"method":"GET","uri":"/","remote_ip":"10.0.0.1","host":"10.0.0.1:18002"},"status":200}\n'
+        # 别名前缀访问：path=/demo/，host :8080
+        '{"ts":1752043201.0,"request":{"method":"GET","uri":"/demo/","remote_ip":"10.0.0.2","host":"10.0.0.1:8080"},"status":200}\n',
+        encoding="utf-8",
+    )
+
+    ingest_all(workspace, cfg, reg, store)
+    summ = store.summary()
+    # 直连端口 + 别名前缀各计 1（修复前直连端口被丢，仅 1）
+    assert summ["demo"]["hits"] == 2

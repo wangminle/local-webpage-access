@@ -125,7 +125,7 @@ swap=4GB
 ## 管理页与 API
 
 * **鉴权**：单一静态 token，无过期、无自动轮换、无角色分级（如需轮换：删掉工作区 `run/manager-token.json` 后重启 manager 会重新生成，目前没有专门的 CLI 轮换命令）。多用户场景不适用。
-* **实例显示名（IMP-043）**：导入优先显式 `--name`，其次主页 `<title>`，否则 slug 美化；管理页名称列固定宽度。旧 slug 美化名会在拉列表时一次性回填（不会覆盖用户手工名）。
+* **实例显示名（IMP-043）**：导入优先显式 `--name`，其次主页 `<title>`，否则 slug 美化；管理页名称列随内容自然分配宽度（V0.6.9 `table-layout: auto`，名称最多两行省略）。旧 slug 美化名会在拉列表时一次性回填（不会覆盖用户手工名）。
 * **`?token=` 查询参数**：有意保留以便新标签带入鉴权；会进入浏览器历史 / Referer / 反代 access log。日常 API 请优先用 Header。详见 [管理页](manager-page.md#鉴权)。
 * **并发写入**：registry 用 SQLite WAL + 连接级锁，适合单机管理页并发；
   不适合多进程/多机水平扩展。
@@ -154,10 +154,11 @@ swap=4GB
 
 ## 大模型 Skills
 
-* 当前内置的 **17** 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
+* 当前内置的 **18** 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
   Skills 是提示工程资产，效果取决于模型与上下文窗口。
 * Skills 不会自动执行带副作用的操作，所有变更需人工确认。
 * Full Profile / 宿主机装配排障优先走 [`lwa-setup-host-environment`](../src/local_webpage_access/skills/lwa-setup-host-environment/SKILL.md) 与 FAQ。
+* Skills 总览见 [`skills/README.md`](../src/local_webpage_access/skills/README.md)。
 
 ## 升级路径
 

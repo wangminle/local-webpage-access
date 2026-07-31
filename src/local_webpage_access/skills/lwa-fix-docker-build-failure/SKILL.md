@@ -10,14 +10,14 @@ description: >-
 
 ## 何时触发
 
-- 实例状态为 `failed`，`logs/<id>/build.log` 含构建错误。
+- 实例状态为 `failed`，`apps/<id>/logs/build.log` 含构建错误。
 - 管理页"重建"操作后构建仍失败。
 - 构建长时间卡在 `queued` / `building`，需先停掉再改 Dockerfile。
 
 ## 输入
 
-1. `logs/<id>/build.log`（完整构建输出）。
-2. `apps/<id>/current/Dockerfile`。
+1. `apps/<id>/logs/build.log`（完整构建输出）。
+2. `apps/<id>/docker/Dockerfile`。
 3. 依赖清单：`package.json` / `requirements.txt` / `pyproject.toml`。
 4. `apps/<id>/local-web.json`。
 
@@ -28,15 +28,15 @@ description: >-
 
 ## 可修改文件
 
-- `apps/<id>/current/Dockerfile`。
-- `apps/<id>/current/.dockerignore`。
+- `apps/<id>/docker/Dockerfile`。
+- `apps/<id>/.dockerignore`。
 - `apps/<id>/current/package.json` / `requirements.txt`（仅当构建错误源于依赖声明时）。
 - `apps/<id>/local-web.json`。
 
 ## 禁止事项
 
 - 不为"让构建通过"而删除业务代码或测试。
-- 不放宽安全约束（如改回 root、加 privileged）来规避权限错误。
+- 不放宽安全约束（如改回 root、加 privileged、`curl|sh`、`ADD https://...`）来规避权限或依赖错误；`generate_dockerfile` 会对后两者 critical 拒绝写出。
 - 不引入 `--no-cache` 之外的危险构建参数。
 - 同一错误重试超过 2 轮应转人工，不死循环。
 

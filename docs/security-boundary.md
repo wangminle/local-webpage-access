@@ -35,15 +35,22 @@
 
 ## Dockerfile 审计（`audit_dockerfile`）
 
+`generate_dockerfile` 在写出 `apps/<id>/docker/Dockerfile` **之前**做自检（与
+`generate_compose` 对称）；任何 critical 都会阻止文件写入。内置 Node/Python
+模板本身不含 critical；此门禁防止模板被改动、Skill 覆盖或 `entry.install` /
+`entry.build` 注入供应链风险指令。
+
 | 检查项 | 级别 | code |
 | --- | --- | --- |
 | 显式 `USER root` 或 `USER 0` | warn | `root_user` |
 | 未声明 `USER`（默认 root） | info | `no_user` |
-| `ADD <url>`（远程下载，不可复现且有供应链风险） | warn | `add_remote_url` |
-| `RUN` 中含 `curl ... \| sh` / `wget ... \| sh` 模式 | warn | `pipe_to_shell` |
+| `ADD <url>`（远程下载，不可复现且有供应链风险） | **critical** | `add_remote_url` |
+| `RUN` 中含 `curl ... \| sh` / `wget ... \| sh` 模式 | **critical** | `pipe_to_shell` |
 
 > V1 生成的 Dockerfile 默认非 root（`node:24-alpine` 用 `node` 用户，
-> `python:3.13-slim` 创建 `app` 用户并切换）。审计主要针对用户/skill 覆盖的模板。
+> `python:3.13-slim` 创建 `app` 用户并切换）。warn/info 仍记录日志但不阻断写出。
+> 手工改写 `docker/Dockerfile` 且不经 `generate_dockerfile` 的路径本期不扫描；
+> 下次 `lwa rebuild` / 宿主流程重新生成时会再次过门禁。
 
 ## zip 成员审计（`audit_zip_members`）
 

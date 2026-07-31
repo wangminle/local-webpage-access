@@ -1,4 +1,4 @@
-"""生命周期命令：``lwa start/stop/restart/rebuild/remove/logs``。
+"""生命周期命令：``lwa start/stop/restart/recover/rebuild/remove/logs``。
 
 DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 """
@@ -76,6 +76,23 @@ def restart(instance_id: str = typer.Argument(..., help="要重启的实例 ID")
         finally:
             reg.close()
         typer.secho(f"已重启实例：{instance_id}", fg=typer.colors.GREEN)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+def recover(instance_id: str = typer.Argument(..., help="要恢复的实例 ID")) -> None:
+    """恢复实例（网关掉线时先拉起 Caddy，再 restart；对齐管理页 recover）。"""
+    from local_webpage_access.lifecycle import recover_instance
+
+    try:
+        ws, config, reg = open_workspace_registry()
+        try:
+            recover_instance(ws, config, reg, instance_id)
+        finally:
+            reg.close()
+        typer.secho(f"已恢复实例：{instance_id}", fg=typer.colors.GREEN)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -259,6 +276,7 @@ def register(app: typer.Typer) -> None:
     app.command()(start)
     app.command()(stop)
     app.command()(restart)
+    app.command()(recover)
     app.command()(rebuild)
     app.command("cancel-build")(cancel_build)
     app.command()(remove)

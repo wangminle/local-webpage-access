@@ -17,7 +17,7 @@ def import_cmd(
     path_alias: str = typer.Option(
         None,
         "--path-alias",
-        help="路径别名 slug（IMP-006，仅静态站点）；启用后可通过 http://<LAN-IP>:<staticGatewayPort>/<alias>/ 访问",
+        help="路径别名 slug（IMP-006，静态或容器实例均可；需 Caddy）；启用后可通过 http://<LAN-IP>:<staticGatewayPort>/<alias>/ 访问",
     ),
     update: str = typer.Option(
         None,

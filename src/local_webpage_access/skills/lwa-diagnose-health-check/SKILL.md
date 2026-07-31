@@ -17,7 +17,7 @@ description: >-
 ## 输入
 
 1. 健康检查结果：HTTP 状态码、超时、连接拒绝（由 `lwa` 提供）。
-2. `logs/<id>/run.log`（确认应用是否真的起来了）。
+2. `apps/<id>/logs/run.log`（确认应用是否真的起来了）。
 3. `local-web.json`（`container.hostPort` / `static.hostPort`）。
 4. 应用路由线索（根路径 `/` 是否返回 2xx；是否只有 `/health`、`/healthz` 可探）。
 

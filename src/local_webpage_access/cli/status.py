@@ -1,4 +1,4 @@
-"""状态查看命令：``lwa status`` / ``lwa stats`` / ``lwa list``。
+"""状态查看命令：``lwa status`` / ``lwa stats`` / ``lwa list`` / ``lwa pageviews``。
 
 DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 注意：本模块路径为 ``local_webpage_access.cli.status``，与数据层的
@@ -144,8 +144,80 @@ def list_cmd() -> None:
         raise typer.Exit(code=1)
 
 
+def pageviews(
+    instance_id: str = typer.Argument(None, help="实例 ID（省略则显示全部汇总）"),
+    limit: int = typer.Option(
+        50, "--limit", "-n", help="单实例详情时最近命中行数（1–500）"
+    ),
+) -> None:
+    """查看浏览量统计（对齐管理页 /api/pageviews；先惰性摄入日志再汇总）。"""
+    from local_webpage_access.pageviews import PageviewStore, ingest_all
+
+    if limit < 1 or limit > 500:
+        typer.secho("--limit 须在 1–500", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        ws, config, reg = open_workspace_registry()
+        try:
+            if instance_id is not None and reg.get_instance(instance_id) is None:
+                typer.secho(f"实例不存在：{instance_id}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+            store = PageviewStore.shared_for_workspace(ws)
+            try:
+                ingest_all(ws, config, reg, store)
+            except Exception as exc:  # noqa: BLE001 — 摄入失败不阻断，返回已聚合数据
+                log.debug("浏览量摄入失败：%s", exc)
+            if instance_id:
+                detail = store.detail(instance_id, limit=limit)
+                typer.secho(f"== 浏览量：{instance_id} ==", fg=typer.colors.CYAN)
+                typer.echo(f"  来源：{detail.get('source') or '-'}")
+                by_day = detail.get("byDay") or []
+                total_hits = sum(int(d.get("hits") or 0) for d in by_day)
+                ip_list = detail.get("uniqueIpList") or []
+                typer.echo(f"  命中（近天合计）：{total_hits}")
+                typer.echo(f"  独立 IP：{len(ip_list)}")
+                if by_day:
+                    typer.secho("  -- 按天 --", fg=typer.colors.CYAN)
+                    for d in by_day[:14]:
+                        typer.echo(
+                            f"    {d.get('day')}: hits={d.get('hits', 0)} "
+                            f"uniqueIps={d.get('uniqueIps', 0)}"
+                        )
+                recent = detail.get("recent") or []
+                if recent:
+                    typer.secho("  -- 最近命中 --", fg=typer.colors.CYAN)
+                    for r in recent[:limit]:
+                        typer.echo(
+                            f"    {r.get('ts')} {r.get('method')} {r.get('path')} "
+                            f"{r.get('status')} {r.get('remote')}"
+                        )
+            else:
+                summary = store.summary()
+                if not summary:
+                    typer.echo("（暂无浏览量数据）")
+                    return
+                typer.echo(
+                    f"{'ID':24} {'HITS':8} {'UNIQUE_IP':10} {'SOURCE':10} LAST_SEEN"
+                )
+                for iid, row in sorted(summary.items()):
+                    typer.echo(
+                        f"{iid[:24]:24} {row.get('hits', 0):<8} "
+                        f"{row.get('uniqueIps', 0):<10} "
+                        f"{str(row.get('source') or '-'):10} "
+                        f"{row.get('lastSeen') or '-'}"
+                    )
+        finally:
+            reg.close()
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
 def register(app: typer.Typer) -> None:
     """把本模块命令注册到根 app（保持顶层命令名不变）。"""
     app.command()(status)
     app.command()(stats)
     app.command("list")(list_cmd)
+    app.command()(pageviews)

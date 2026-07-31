@@ -54,7 +54,7 @@ def setup_cmd(
     autostart: bool = typer.Option(
         False,
         "--autostart",
-        help="OPS-025：生成 macOS launchd plist，登录自启 daemon + manager（需已初始化工作区）",
+        help="兼容入口：委托 `lwa autostart install`（跨平台前台监管；需已初始化工作区）",
     ),
     with_caddy: bool = typer.Option(
         False,
@@ -68,8 +68,8 @@ def setup_cmd(
     ``--default`` / ``--full``（IMP-032）：环境装配档位；缺省即 default。
     工作区就绪后用 ``lwa doctor`` 做完整诊断（含端口池与 registry）。
 
-    ``--autostart``（OPS-025）：基于当前工作区生成 launchd plist，开机自启
-    daemon + manager（``--with-caddy`` 额外含 caddy）。
+    ``--autostart``：委托 ``lwa autostart install``（IMP-030；macOS launchd /
+    Linux·WSL systemd 前台监管），推荐直接使用 ``lwa autostart`` 命令组。
     """
     import json as json_mod
 

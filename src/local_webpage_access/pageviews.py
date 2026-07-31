@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
 import shutil
@@ -650,11 +651,15 @@ class PageviewStore:
         source: str,
         cursor_key: str,
         next_offset: int,
+        last_ts: str | None = None,
     ) -> int:
         """原子写入文件日志整批命中并推进游标（BUG-133）。
 
         Caddy 共享日志可能同时归属多个实例；任一实例写入失败时，已写实例与
         文件游标一并回滚，下一次可安全重试整批，不会漏计或重复累计。
+
+        ``last_ts`` 对文件源用于持久化已消费的轮转归档指纹（``rotarch:…``），
+        防止同一归档被反复补读。
         """
         conn = self._conn_or_open()
         total = 0
@@ -669,7 +674,7 @@ class PageviewStore:
                     "ON CONFLICT(source_key) DO UPDATE SET "
                     "offset_bytes=excluded.offset_bytes, last_ts=excluded.last_ts, "
                     "updated_at=excluded.updated_at",
-                    (cursor_key, next_offset, None, now_iso()),
+                    (cursor_key, next_offset, last_ts, now_iso()),
                 )
                 conn.execute("COMMIT")
             except Exception:
@@ -929,6 +934,83 @@ class _InstanceSource:
 class _TailBatch:
     lines: list[str]
     next_offset: int
+    # 已消费的轮转归档指纹（写入 ingest_cursor.last_ts），避免同一归档被反复补读。
+    cursor_meta: str | None = None
+
+
+_ROTARCH_PREFIX = "rotarch:"
+_ROTARCHS_PREFIX = "rotarchs:"
+
+
+def _archive_fingerprint(archive: Path) -> str:
+    """归档身份：文件名 + mtime_ns + 压缩体积，足以区分连续多次轮转。"""
+    st = archive.stat()
+    return f"{_ROTARCH_PREFIX}{archive.name}:{st.st_mtime_ns}:{st.st_size}"
+
+
+def _parse_consumed_archives(meta: str | None) -> set[str]:
+    """解析 ingest_cursor.last_ts 中已消费的归档指纹集合。"""
+    if not meta:
+        return set()
+    if meta.startswith(_ROTARCHS_PREFIX):
+        return {part for part in meta[len(_ROTARCHS_PREFIX) :].split(",") if part}
+    if meta.startswith(_ROTARCH_PREFIX):
+        return {meta}
+    return set()
+
+
+def _format_consumed_archives(fps: set[str]) -> str | None:
+    """序列化已消费归档指纹；空集返回 None。"""
+    if not fps:
+        return None
+    return _ROTARCHS_PREFIX + ",".join(sorted(fps))
+
+
+def _list_rotated_archives(path: Path) -> list[Path]:
+    """列出全部轮转归档，按 mtime 升序（最旧在前）。
+
+    Caddy ``roll_size``：``<stem>-<ts>-size.log.gz``；兼容 ``.log.1``。
+    """
+    candidates = sorted(
+        path.parent.glob(f"{path.stem}-*-size{path.suffix}.gz"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if candidates:
+        return candidates
+    legacy = path.with_name(path.name + ".1")
+    return [legacy] if legacy.is_file() else []
+
+
+def _find_rotated_archive(path: Path) -> Path | None:
+    """兼容旧调用：返回 mtime 最新的一个归档。"""
+    archives = _list_rotated_archives(path)
+    return archives[-1] if archives else None
+
+
+def _archive_uncompressed(archive: Path) -> bytes | None:
+    """读取归档的未压缩字节：``.gz`` 自动解压，``.log.1`` 原样读。
+
+    解压/读取失败返回 None（调用方按无归档处理，不阻断摄入）。
+    """
+    try:
+        if archive.suffix == ".gz":
+            with gzip.open(archive, "rb") as fh:
+                return fh.read()
+        return archive.read_bytes()
+    except (OSError, EOFError):
+        return None
+
+
+def _decode_archive_chunk(raw: bytes) -> list[str]:
+    """把归档字节切片解码为完整行；尾半行丢弃等下次（归档通常已闭合）。"""
+    if not raw:
+        return []
+    if raw.endswith(b"\n"):
+        return raw.decode("utf-8", "replace").splitlines()
+    text = raw.decode("utf-8", "replace")
+    if "\n" not in text:
+        return []
+    return text.rsplit("\n", 1)[0].splitlines()
 
 
 def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailBatch:
@@ -939,64 +1021,100 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
     半行保护：写入方可能正写到最后一条行、尚未落 ``\\n``。若把游标推进到
     EOF，下次只会读到这条行的"续写"片段而丢失整行；故末尾无换行时回退到最后
     一个换行处，未完成行留给下次再读。
+
+    轮转补读：未消费归档按 mtime 升序处理。冷启动（offset=0）读齐全部；
+    增量路径以「能容纳旧 offset 的那份归档」为 pivot 切尾，更旧未消费归档整份
+    补入。消费指纹写入 ``cursor_meta``（``rotarchs:...``），避免同一归档重计。
     """
     if not path.is_file():
         return _TailBatch([], 0)
-    offset, _ = store.get_cursor(cursor_key)
+    offset, meta = store.get_cursor(cursor_key)
     size = path.stat().st_size
     archived_lines: list[str] = []
-    archive = path.with_name(path.name + ".1")
-    rotated = size < offset
-    if (
-        not rotated
-        and offset > 0
-        and archive.is_file()
-        and archive.stat().st_size >= offset
-    ):
-        # 新文件体积碰巧 ≥ 旧游标时 size<offset 无法发现滚动；对比文件头判断
-        # 是否已换成新 inode 内容（BUG-328）。
+    consumed = _parse_consumed_archives(meta)
+    all_archives = _list_rotated_archives(path)
+    unconsumed = [
+        arch
+        for arch in all_archives
+        if _archive_fingerprint(arch) not in consumed
+    ]
+    new_meta = meta
+
+    # pivot：未消费归档中、未压缩体积 ≥ offset 的最新一份（游标语义所在文件）。
+    pivot: Path | None = None
+    pivot_raw: bytes | None = None
+    if offset > 0:
+        for arch in reversed(unconsumed):
+            raw = _archive_uncompressed(arch)
+            if raw is not None and len(raw) >= offset:
+                pivot, pivot_raw = arch, raw
+                break
+
+    need_archive_catchup = False
+    if unconsumed and offset == 0:
+        # 冷启动 / 重置：读齐全部未消费归档，再读当前文件。
+        need_archive_catchup = True
+    elif unconsumed and size < offset:
+        need_archive_catchup = True
+    elif pivot is not None and pivot_raw is not None:
         try:
-            with archive.open("rb") as old_fh, path.open("rb") as new_fh:
-                n = min(64, offset, size, archive.stat().st_size)
-                rotated = old_fh.read(n) != new_fh.read(n)
+            with path.open("rb") as new_fh:
+                n = min(64, offset, size, len(pivot_raw))
+                need_archive_catchup = pivot_raw[:n] != new_fh.read(n)
         except OSError:
-            rotated = False
-    if rotated:
-        # BUG-328：常规滚动会把旧文件改名为 .log.1。先从旧游标补读归档尾部，
-        # 再从新文件开头读取，避免两次摄入之间的尾部请求永久丢失。
-        if archive.is_file() and archive.stat().st_size >= offset:
-            with archive.open("rb") as old_fh:
-                old_fh.seek(offset)
-                archived = old_fh.read()
-            if archived.endswith(b"\n"):
-                archived_lines = archived.decode("utf-8", "replace").splitlines()
-            elif archived:
-                # 归档尾半行：仍按已有字节尽量解码完整行
-                text = archived.decode("utf-8", "replace")
-                if "\n" in text:
-                    archived_lines = text.rsplit("\n", 1)[0].splitlines()
+            need_archive_catchup = False
+    elif unconsumed and offset > 0 and pivot is None:
+        # 游标已在当前文件上，仅残留更旧、从未标记的归档：视为历史已计入
+        # （或只能靠 offset=0 重建），标记消费以免日后轮转时整份回灌双计。
+        new_meta = _format_consumed_archives(
+            consumed | {_archive_fingerprint(a) for a in all_archives}
+        )
+
+    if need_archive_catchup:
+        if offset == 0:
+            for arch in unconsumed:
+                raw = _archive_uncompressed(arch)
+                if raw is not None:
+                    archived_lines.extend(_decode_archive_chunk(raw))
+        else:
+            for arch in unconsumed:
+                raw = (
+                    pivot_raw
+                    if arch == pivot and pivot_raw is not None
+                    else _archive_uncompressed(arch)
+                )
+                if raw is None:
+                    continue
+                if arch == pivot and offset > 0 and len(raw) >= offset:
+                    archived_lines.extend(_decode_archive_chunk(raw[offset:]))
+                else:
+                    archived_lines.extend(_decode_archive_chunk(raw))
         offset = 0
+        new_meta = _format_consumed_archives(
+            consumed | {_archive_fingerprint(a) for a in all_archives}
+        )
     with path.open("rb") as fh:
         fh.seek(offset)
         new_bytes = fh.read()
     if not new_bytes:
-        return _TailBatch(archived_lines, offset)
+        return _TailBatch(archived_lines, offset, new_meta)
     if not new_bytes.endswith(b"\n"):
         last_nl = new_bytes.rfind(b"\n")
         if last_nl == -1:
             # 尚无任何完整行：不推进游标，等写入方补完换行
-            return _TailBatch(archived_lines, offset)
+            return _TailBatch(archived_lines, offset, new_meta)
         new_bytes = new_bytes[: last_nl + 1]
     return _TailBatch(
         archived_lines + new_bytes.decode("utf-8", "replace").splitlines(),
         offset + len(new_bytes),
+        new_meta,
     )
 
 
 def _tail_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> list[str]:
     """兼容性包装：读取新增行并立即推进游标。摄入路径使用延迟提交版本。"""
     batch = _read_new_lines(path, cursor_key, store)
-    store.set_cursor(cursor_key, batch.next_offset, None)
+    store.set_cursor(cursor_key, batch.next_offset, batch.cursor_meta)
     return batch.lines
 
 
@@ -1123,7 +1241,10 @@ def ingest_all(
                     continue
                 if s.alias:
                     alias_to_id["/" + s.alias] = s.instance_id
-                elif s.host_port:
+                if s.host_port:
+                    # BUG-415：有别名的实例也要进 port_to_id，否则其「直连端口访问」
+                    # （host:port/，path 无别名前缀）会因两个映射都匹配不上而被丢弃。
+                    # 别名前缀匹配优先（命中后端口匹配被短路），不会双计。
                     port_to_id[s.host_port] = s.instance_id
             if alias_to_id or port_to_id:
                 _ingest_caddy_shared(
@@ -1149,7 +1270,11 @@ def _ingest_builtin(
     batch = _read_new_lines(log_path, cursor_key, store)
     hits = [h for h in (parse_clf_line(ln) for ln in batch.lines) if h]
     store.record_file_batch(
-        {src.instance_id: hits}, "builtin", cursor_key, batch.next_offset
+        {src.instance_id: hits},
+        "builtin",
+        cursor_key,
+        batch.next_offset,
+        last_ts=batch.cursor_meta,
     )
 
 
@@ -1179,7 +1304,13 @@ def _ingest_caddy_shared(
     cursor_key = caddy_shared_cursor_key()
     batch = _read_new_lines(log_path, cursor_key, store)
     if not batch.lines:
-        store.record_file_batch({}, "caddy", cursor_key, batch.next_offset)
+        store.record_file_batch(
+            {},
+            "caddy",
+            cursor_key,
+            batch.next_offset,
+            last_ts=batch.cursor_meta,
+        )
         return
     # 按前缀长度降序，避免短别名被长别名前缀误吞（如 /api 与 /api-v2）
     prefixes = sorted(alias_to_id.keys(), key=len, reverse=True)
@@ -1206,7 +1337,13 @@ def _ingest_caddy_shared(
             per_instance[matched_id].append(
                 AccessHit(hit.ts, hit.method, stripped, hit.status, hit.remote)
             )
-    store.record_file_batch(per_instance, "caddy", cursor_key, batch.next_offset)
+    store.record_file_batch(
+        per_instance,
+        "caddy",
+        cursor_key,
+        batch.next_offset,
+        last_ts=batch.cursor_meta,
+    )
 
 
 def _ingest_container(

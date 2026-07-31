@@ -62,8 +62,8 @@ python3 -m pytest tests/test_docker_integration.py
 | 28.07 zip 导入 | `test_importer.py` | 解压、zip slip、slug 冲突 |
 | 28.08 项目识别 | `test_scanner.py` | static / node / python / pending |
 | 28.09 静态配置 | `test_static_gateway.py` | 网关路由、端口 |
-| 28.10 Dockerfile | `test_dockerfile_templates.py` | 模板渲染 |
-| 28.11 Compose | `test_compose.py` | 模板、env、安全审计 |
+| 28.10 Dockerfile | `test_dockerfile_templates.py`、`test_security.py`（生成门禁） | 模板渲染；`audit_dockerfile` critical 拒绝写出 |
+| 28.11 Compose | `test_compose.py`、`test_security.py` | 模板、env、安全审计 |
 | 28.12 生命周期 | `test_lifecycle.py`、`test_health_status.py` | start/stop/restart/rebuild/remove / 冗余清理 |
 | 28.13 资源统计 | `test_stats.py` | 磁盘、内存解析 |
 | 28.14 管理页 API | `test_manager_api.py` | token、全部端点（含 pageviews / redundant / remove / path-alias） |

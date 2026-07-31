@@ -169,3 +169,86 @@ def test_scan_holds_instance_lock_while_saving(
     result = CliRunner().invoke(app, ["scan", "demo"])
     assert result.exit_code == 0, result.output
     assert saved_under_lock, "scan 保存 manifest 时未持实例锁"
+
+
+def test_cli_recover_calls_lifecycle(monkeypatch, tmp_path: Path) -> None:
+    """CLI recover 应委托 lifecycle.recover_instance。"""
+    from local_webpage_access.cli import app
+    from local_webpage_access.init_workspace import init_workspace
+
+    root = tmp_path / "ws"
+    init_workspace(root)
+    called: list[str] = []
+
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "local_webpage_access.platform_support.require_supported_platform",
+        lambda **kw: None,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.recover_instance",
+        lambda ws, cfg, reg, iid: called.append(iid),
+    )
+
+    result = CliRunner().invoke(app, ["recover", "demo"])
+    assert result.exit_code == 0, result.output
+    assert called == ["demo"]
+    assert "已恢复实例" in result.output
+
+
+def test_cli_pageviews_summary_and_detail(monkeypatch, tmp_path: Path) -> None:
+    """CLI pageviews 汇总与详情：对齐 store.summary/detail。"""
+    from local_webpage_access.cli import app
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.pageviews import PageviewStore
+    from local_webpage_access.paths import Workspace
+    from local_webpage_access.registry import Registry
+
+    root = tmp_path / "ws"
+    init_workspace(root)
+    ws = Workspace(root)
+    reg = Registry(ws.db_path)
+    reg.open()
+    try:
+        reg.upsert_from_manifest(make_static_manifest("demo"))
+    finally:
+        reg.close()
+
+    store = PageviewStore.shared_for_workspace(ws)
+    conn = store._conn_or_open()
+    with store._lock:
+        conn.execute(
+            "INSERT INTO pageviews(instance_id, day, hits, unique_ips, last_seen, source) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "2026-07-30", 3, 1, "2026-07-30T12:00:00+00:00", "builtin"),
+        )
+        conn.execute(
+            "INSERT INTO pageview_ip_stats(instance_id, remote, hits, last_seen) "
+            "VALUES (?, ?, ?, ?)",
+            ("demo", "127.0.0.1", 3, "2026-07-30T12:00:00+00:00"),
+        )
+        conn.commit()
+
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "local_webpage_access.platform_support.require_supported_platform",
+        lambda **kw: None,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.pageviews.ingest_all",
+        lambda *a, **k: None,
+    )
+
+    summary = CliRunner().invoke(app, ["pageviews"])
+    assert summary.exit_code == 0, summary.output
+    assert "demo" in summary.output
+    assert "3" in summary.output
+
+    detail = CliRunner().invoke(app, ["pageviews", "demo"])
+    assert detail.exit_code == 0, detail.output
+    assert "浏览量：demo" in detail.output
+    assert "builtin" in detail.output
+
+    missing = CliRunner().invoke(app, ["pageviews", "no-such"])
+    assert missing.exit_code == 1
+    assert "不存在" in missing.output

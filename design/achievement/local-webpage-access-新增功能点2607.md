@@ -1,7 +1,7 @@
 # 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～043 / WSL2 实机排障反哺（202607）
 
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机清单已写入 `docs/acceptance-checklist.md`，真机勾选仍属运维验收）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机清单已写入 acceptance，真机勾选仍属运维验收）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 平台矩阵清单已写入 acceptance；036.09 daemon/manager 的 Windows DETACHED 启动分支已删除/硬拒绝）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。**§23 已于 2026-07-29 根据 WSL2 Mirrored + Full Profile 实机排障补入；BUG-376～381 / DOC-077 已落地，纳入 V0.6.8。** **§24 IMP-042「LWA 工作区迁移」主路径已落地（2026-07-29，DEV-089）；跨盘/跨机（IMP-042.b）明确延期。** **V0.6.9：事务机加固 BUG-386～405 及 IMP-023 连接失败误判修复已纳入。** **V0.6.10：能力缓存假红 BUG-406/407、FAQ DOC-083、角色局部 overall ADJ-035、caddy_start 并行探活 ADJ-036、三角色收敛 TST-001、036.09 Windows DETACHED 启动硬拒绝、033.13/035.06/036.08 实机清单入 acceptance；§25 IMP-043 显示名与名称列宽已落地。**编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../achievement/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
-> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈；§22 为删除/purge 阶段日志与容器别名清理（IMP-034 后续 + BUG-268）；§23 为 2026-07-29 WSL2 实机排障对能力缓存、HTTP 探针、别名子资源和宿主网络文档的反哺；§24 为 **LWA 工作区迁移**（同盘原子改名事务 + CLI + Skill）；§25 为管理页**实例显示名（主页 `<title>`）**与**名称列宽稳定**。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机清单已写入 `docs/acceptance-checklist.md`，真机勾选仍属运维验收）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机清单已写入 acceptance，真机勾选仍属运维验收）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 平台矩阵清单已写入 acceptance；036.09 daemon/manager 的 Windows DETACHED 启动分支已删除/硬拒绝）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。**§23 已于 2026-07-29 根据 WSL2 Mirrored + Full Profile 实机排障补入；BUG-376～381 / DOC-077 已落地，纳入 V0.6.8。** **§24 IMP-042「LWA 工作区迁移」主路径已落地（2026-07-29，DEV-089）；跨盘/跨机（IMP-042.b）明确延期。** **V0.6.9：事务机加固 BUG-386～405 及 IMP-023 连接失败误判修复已纳入。** **V0.6.10：能力缓存假红 BUG-406/407、FAQ DOC-083、角色局部 overall ADJ-035、caddy_start 并行探活 ADJ-036、三角色收敛 TST-001、036.09 Windows DETACHED 启动硬拒绝、033.13/035.06/036.08 实机清单入 acceptance；§25 IMP-043 显示名（主页 `<title>`）已落地；名称列/实例表 CSS 固定布局设想已废弃，经 BUG-413/414 恢复为 V0.6.9 前端 CSS 布局（仅保留名称最多两行截断）。**编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../achievement/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈；§22 为删除/purge 阶段日志与容器别名清理（IMP-034 后续 + BUG-268）；§23 为 2026-07-29 WSL2 实机排障对能力缓存、HTTP 探针、别名子资源和宿主网络文档的反哺；§24 为 **LWA 工作区迁移**（同盘原子改名事务 + CLI + Skill）；§25 为管理页**实例显示名（主页 `<title>`）**；原「名称列宽固定 / `table-layout: fixed`」前端设想已撤销，布局以 V0.6.9 为准。
 
 ---
 
@@ -2343,21 +2343,21 @@ preflight → backup → quiesce → move → rebind → regenerate → restore 
 
 ---
 
-## 25. IMP-043 — 管理页实例显示名用主页 `<title>` + 名称列宽稳定（2026-07-30）
+## 25. IMP-043 — 管理页实例显示名用主页 `<title>`（2026-07-30）
 
-> **状态**：已落地（2026-07-30，纳入 **V0.6.10**）。来源：WSL2 Ubuntu 管理页实机反馈——①「名称」列宽随内容抖动；②名称是 zip slug 的 `titleize`（如 `Ai Review Prd V0 2 7`），不是站点自己的标题。
+> **状态**：显示名主路径已落地（2026-07-30，纳入 **V0.6.10**）。**前端表格布局设想已撤销**：初版曾用 `table-layout: fixed` + 名称列固定 200px 追求「列宽稳定」，实机导致其余列被平均压缩、互相覆盖（BUG-413）；随后完整恢复 **V0.6.9** 的 `table-layout: auto` 与列宽规则（BUG-414）。当前相对 V0.6.9 前端 CSS **唯一保留的增量**是名称按钮最多两行 `-webkit-line-clamp: 2`。来源：WSL2 Ubuntu 管理页实机反馈——①名称是 zip slug 的 `titleize`（如 `Ai Review Prd V0 2 7`），不是站点自己的标题；②曾抱怨列宽抖动，但固定布局方案经验证不如 V0.6.9 自然分配，故不再沿用。
 
-### 25.1 需求
+### 25.1 需求（现行）
 
-1. **名称列宽稳定**：实例表「名称」列不应随其他列内容或视口微调而明显变宽变窄。
-2. **显示名取自网页**：导入时优先用项目主页 HTML 的 `<title>`；仅当找不到/为空时才回退 `titleize(slug)`。用户 `lwa import --name` 仍最高优先。已导入且仍为 slug 美化名的实例，在管理页拉列表时一次性回填。
+1. **显示名取自网页**：导入时优先用项目主页 HTML 的 `<title>`；仅当找不到/为空时才回退 `titleize(slug)`。用户 `lwa import --name` 仍最高优先。已导入且仍为 slug 美化名的实例，在管理页拉列表时一次性回填。
+2. **前端布局**：实例表 CSS **以 V0.6.9 为准**（`table-layout: auto`；`.cell-name` 仅 `max-width: 220px`；操作列 `min-width: 200px`；无 `.col-name` / 无整表 fixed）。超长名称用两行截断即可，**不再追求**固定列宽或「刷新后列宽零抖动」。
 
 ### 25.2 根因（改前）
 
 | 点 | 根因 |
 | --- | --- |
-| 列宽抖动 | `table.instances` 默认 `table-layout: auto` + `width:100%`；名称列仅有 `max-width:220px`、无固定 `width`，浏览器按各列内容重分配。 |
 | 乱起名 | `importer.import_zip`：`display_name = name if name else titleize(slug)`，从未读 `index.html` 的 `<title>`。 |
+| 列宽抖动（历史） | `table.instances` 为 `table-layout: auto`，名称列仅有 `max-width:220px`。曾尝试 fixed + 固定宽，副作用大于收益，已回退。 |
 
 ### 25.3 关键决策
 
@@ -2367,7 +2367,7 @@ preflight → backup → quiesce → move → rebind → regenerate → restore 
 | **043.b** | 优先级 | `--name`（user）> HTML title（html_title）> `titleize(slug)`（slug） |
 | **043.c** | 溯源字段 | manifest 新增可选 `nameSource`：`user` \| `html_title` \| `slug`。旧实例为 `null` 时，仅当 `name == titleize(id)` 才允许 title 回填（避免误改用户手工名）。 |
 | **043.d** | 旧实例回填 | `status.all_statuses` 拉列表时对可覆盖名调用 `refresh_display_name_from_homepage`（写回 manifest + registry）；已是 user/html_title 则跳过。 |
-| **043.e** | 列宽 | `table-layout: fixed`；`.col-name` / `.cell-name` 固定 `width/max-width: 200px`；名称按钮 `display:block` + ellipsis，保证截断稳定。 |
+| **043.e** | 列宽 / 表格布局 | **已废弃原方案**（原：`table-layout: fixed` + `.col-name` / `.cell-name` 固定 200px）。**现行**：恢复 V0.6.9 布局；仅名称按钮 `-webkit-line-clamp: 2`。详见 BUG-413 / BUG-414 与 `docs/plans/2026-07-30-manager-table-layout*.md`。 |
 | **043.f** | update | `import --update`：若旧名仍可覆盖（slug / 旧 null+titleize 匹配），则按新包主页 title 刷新。 |
 
 ### 25.4 触点
@@ -2375,21 +2375,23 @@ preflight → backup → quiesce → move → rebind → regenerate → restore 
 - `importer.py`：`extract_html_title` / `find_homepage_index` / `resolve_auto_display_name` / `refresh_display_name_from_homepage`；`import_zip` / `update_zip`
 - `models.py`：`InstanceManifest.nameSource`
 - `status.py`：`all_statuses` 回填钩子
-- `manager_static/style.css`、`app.js`：名称列固定宽
+- `manager_static/style.css`：相对 V0.6.9 仅名称两行截断；**不含** fixed 表布局 / `.col-name`
 
 ### 25.5 验收
 
 - 导入含 `<title>AI Review · PRD</title>` 的 zip → 管理页名称即为该 title，不是 `Ai Review …`
 - `--name` 覆盖 title
 - 旧实例名仍为 `titleize(id)` 时，刷新管理页后变为 title（若 current 有 title）
-- 名称列在刷新/改筛选后宽度不再明显跳动；超长名省略号截断
+- 实例表布局与 V0.6.9 一致（auto 分配列宽）；超长名最多两行省略，列间无互相覆盖
 
 ### 25.6 task-list 映射
 
 | ID | 关系 |
 | --- | --- |
-| `IMP-043` | 本功能点 |
-| `DEV-090` | 实现主项（已完成） |
-| `BUG-408` | 名称列宽抖动（已修复） |
-| `BUG-409` | 显示名未用 HTML title（已修复） |
-| `DOC-084` | 本 §25 文档（已完成） |
+| `IMP-043` | 本功能点（显示名保留；列宽固定设想撤销） |
+| `DEV-090` | 显示名实现主项（已完成） |
+| `BUG-408` | 名称列宽抖动（初版按 fixed 修；随后被 BUG-413/414 纠正） |
+| `BUG-409` | 显示名未用 HTML title（已修复，仍有效） |
+| `BUG-413` | V0.6.10 固定布局致列压缩覆盖（已修复：向 V0.6.9 回退） |
+| `BUG-414` | 413 初版未完全恢复 V0.6.9（已修复：完整恢复 auto + 仅两行截断） |
+| `DOC-084` | 本 §25 文档（已完成；布局决策以本节修订为准） |

@@ -201,6 +201,22 @@ ZipImportError: 检测到路径穿越（zip slip）：../../etc/passwd
 导入器对所有 zip 成员做 `safe_extract` 检查，任何成员解析后落在解压目录之外都会被拒绝。
 这是 [安全边界](security-boundary.md) 的强制保护。请用正规工具重新打包。
 
+### 生成 Dockerfile / Compose 失败：critical 安全问题
+
+```
+RuntimeError: 生成的 Dockerfile 含 critical 安全问题（pipe_to_shell），已拒绝写出
+RuntimeError: 生成的 compose.yaml 含 critical 安全问题（privileged），已拒绝写出
+```
+
+`generate_dockerfile` / `generate_compose` 在落盘前跑审计：Dockerfile 的 `ADD <url>`、
+`curl|sh` / `wget|sh`，以及 Compose 的 privileged / Docker socket 等为 **critical**，
+直接拒绝写出。常见原因：
+
+* `local-web.json` 的 `entry.install` / `entry.build` 含管道装脚本（如 `curl … | sh`）。
+* Skill 或手工改写的模板引入了远程 `ADD` / 危险 Compose 字段。
+
+处理：去掉供应链风险指令，改用 `COPY` + 包管理器安装；详见 [安全边界](security-boundary.md)。
+
 ### 实例识别为 pending
 
 ```
@@ -302,6 +318,8 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 * **有路径别名的容器**：走 Caddy `static-access.log`（IMP-027），不是 docker logs。
 * **无别名静态 + Caddy**：经 Caddy 伺服的 **hostPort 直连**也会写入同一 access log，按端口归属（IMP-028）——**会计入**。
 * **builtin** 或无别名容器：仍分别靠 `gateway.log` / docker logs（后者为近似）。
+* **V0.6.11 归档补读回归（BUG-418）**：若升级后 hits 每次打开管理页都暴涨，是同一 `-size.log.gz` 归档被反复补读；代码已修。脏数据可删 `run/pageviews.db`（下次打开管理页按日志重计），或手工改聚合表后把对应 `ingest_cursor.last_ts` 置为已消费归档指纹。
+* **多归档 / 冷启动漏计（BUG-419）**：多份 `-size.log.gz` 并存时须全部补读；`offset=0` 重置也会读齐未消费归档。清脏时四表一起看：`pageviews` / `pageview_detail` / `pageview_ip_stats`（弹窗 IP 次数）/ `pageview_ips`（按天去重，一般不用清）。删库重建前停 manager，并去掉 `pageviews.db-wal`/`-shm`，避免 WAL 盖回。
 
 详见 [manager-page 浏览量](manager-page.md) 与 [known-limitations](known-limitations.md)。
 

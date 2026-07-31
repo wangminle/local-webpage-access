@@ -4,8 +4,9 @@
 
 * :func:`audit_compose` —— 审计 Compose 文本：禁止 ``privileged``、禁止挂载
   Docker socket、只允许实例自己的 ``data/``（WBS-25.03/04/05）。
-* :func:`audit_dockerfile` —— 审计 Dockerfile：检测 root 运行、远程 ADD、
-  管道执行脚本等供应链风险。
+* :func:`audit_dockerfile` —— 审计 Dockerfile：``ADD <url>`` / ``curl|sh`` 为
+  critical（``generate_dockerfile`` 写出前拒绝）；``USER root`` 为 warn；
+  未声明 ``USER`` 为 info。
 * :func:`audit_zip_members` —— zip slip / 路径穿越 / 符号链接防御纵深
   （WBS-25.10，BUG-049 增强符号链接检测）。importer 解压前做 critical 级拦截，
   此处亦可用于 skill 或外部产出的成员名二次校验。
@@ -404,8 +405,8 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
     检查项：
     * ``USER root`` → warn
     * 无 ``USER`` 指令 → info（默认 root 运行）
-    * ``ADD <url>`` → warn（应改用 COPY + 校验）
-    * ``RUN ... | sh`` / ``| bash`` 管道执行 → warn（供应链风险）
+    * ``ADD <url>`` → **critical**（远程下载，不可复现且有供应链风险；生成路径拒绝写出）
+    * ``RUN ... | sh`` / ``| bash`` 管道执行 → **critical**（供应链风险；生成路径拒绝写出）
     """
     findings: list[SecurityFinding] = []
     # BUG-330：先合并 Dockerfile 反斜杠续行，避免把 curl 与 |sh 拆到物理行绕过。
@@ -431,7 +432,7 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
         elif upper.startswith("ADD ") and ("http://" in line or "https://" in line):
             findings.append(
                 SecurityFinding(
-                    LEVEL_WARN,
+                    LEVEL_CRITICAL,
                     "add_remote_url",
                     "Dockerfile 使用 ADD 拉取远程地址，建议改用 COPY 并校验",
                     detail=line,
@@ -445,7 +446,7 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
             if pipe_shell and ("curl" in lowered or "wget" in lowered):
                 findings.append(
                     SecurityFinding(
-                        LEVEL_WARN,
+                        LEVEL_CRITICAL,
                         "pipe_to_shell",
                         "Dockerfile 存在 curl|sh 类管道执行，存在供应链风险",
                         detail=line,

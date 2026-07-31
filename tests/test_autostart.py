@@ -627,7 +627,16 @@ def test_cli_autostart_group_registered() -> None:
 
     res = CliRunner().invoke(app, ["autostart", "--help"])
     assert res.exit_code == 0
-    for cmd in ("install", "enable", "disable", "status", "check", "repair", "uninstall"):
+    for cmd in (
+        "install",
+        "enable",
+        "disable",
+        "status",
+        "check",
+        "repair",
+        "uninstall",
+        "doctor-hints",
+    ):
         assert cmd in res.output
 
 

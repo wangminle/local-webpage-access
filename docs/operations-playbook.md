@@ -201,7 +201,7 @@ lwa remove --redundant --purge  # 确认后连磁盘一起清
 | 现象 | 排查 | 处置 |
 | --- | --- | --- |
 | `lwa gateway status` 显示未运行 | admin :2019 不可达 | `lwa gateway on`（自动 validate→start→探活） |
-| 别名 502 / 站点不通 | 实例 hostPort 未监听 / 容器未起 | `lwa status <id>` 看状态；`lwa start <id>`；实例 `gateway_down` 用管理页「恢复」或 `POST /api/instances/{id}/recover` |
+| 别名 502 / 站点不通 | 实例 hostPort 未监听 / 容器未起 | `lwa status <id>` 看状态；`lwa start <id>`；实例 `gateway_down` 用 `lwa recover <id>`（或管理页「恢复」/ `POST /api/instances/{id}/recover`） |
 | `caddy validate` 报悬空 import | BUG-069 类残留（已根治，偶发于历史脏配置） | `lwa gateway off` 再 `on`，会基于实际存在的 conf 重组主 Caddyfile |
 | 切 builtin 后 Caddy 还在跑 | stale pid / 旧 master | `lwa gateway off`（不校验版本，强制 `caddy stop` + 清 `run/gateway.json`） |
 | `lwa doctor` 报 Caddy 健康 FAIL | admin/validate/站点端口探测 | 按 doctor 提示处置；常见为 master 未起（`lwa gateway on`） |
@@ -266,7 +266,7 @@ lwa daemon status        # daemon 自动导入状态
 lwa list                 # 实例清单
 ```
 
-异常态识别（DEV-043）：`gateway_down`（master 不可达）/ `config_invalid`（站点路由异常）会单独标注，管理页标"需恢复"并提供一键 recover。
+异常态识别（DEV-043）：`gateway_down`（master 不可达）/ `config_invalid`（站点路由异常）会单独标注，管理页标"需恢复"并提供一键 recover；CLI 对齐为 `lwa recover <id>`。
 
 ---
 

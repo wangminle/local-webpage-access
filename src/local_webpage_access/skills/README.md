@@ -23,9 +23,9 @@
 | [`lwa-build-frontend-static`](lwa-build-frontend-static/SKILL.md) | 前端 SPA 需构建为静态产物 | 修改 `local-web.json` + 构建脚本 |
 | [`lwa-dockerize-node-app`](lwa-dockerize-node-app/SKILL.md) | Node 后端容器化 | 生成 `Dockerfile` |
 | [`lwa-dockerize-python-app`](lwa-dockerize-python-app/SKILL.md) | Python 后端容器化 | 生成 `Dockerfile` |
-| [`lwa-dockerize-fullstack-sqlite`](lwa-dockerize-fullstack-sqlite/SKILL.md) | 全栈 + SQLite 容器化 | 生成 `Dockerfile` + `docker-compose.yml` |
+| [`lwa-dockerize-fullstack-sqlite`](lwa-dockerize-fullstack-sqlite/SKILL.md) | 全栈 + SQLite 容器化 | 生成 `docker/Dockerfile` + `docker/compose.yaml` |
 | [`lwa-generate-static-gateway-config`](lwa-generate-static-gateway-config/SKILL.md) | 静态实例需网关 | 核对/触发生成 `sites/<id>.conf`（主 Caddyfile 由 lwa 组装） |
-| [`lwa-generate-compose`](lwa-generate-compose/SKILL.md) | 多服务需编排 | 生成 `docker-compose.yml` |
+| [`lwa-generate-compose`](lwa-generate-compose/SKILL.md) | 多服务需编排 | 生成/扩展 `docker/compose.yaml`（V1 默认同服务） |
 | [`lwa-fix-docker-build-failure`](lwa-fix-docker-build-failure/SKILL.md) | 构建失败 | 诊断 + 修复 `Dockerfile`/依赖 |
 | [`lwa-fix-container-startup-failure`](lwa-fix-container-startup-failure/SKILL.md) | 容器启动失败 | 诊断 + 修复启动配置 |
 | [`lwa-fix-port-binding`](lwa-fix-port-binding/SKILL.md) | 端口冲突 | 修改端口映射 |
@@ -39,8 +39,8 @@
 
 1. **项目目录结构** —— `apps/<id>/current/` 的文件树。
 2. **初始 `local-web.json`** —— `apps/<id>/local-web.json`。
-3. **构建日志** —— `logs/<id>/build.log`。
-4. **启动日志** —— `logs/<id>/run.log`。
+3. **构建日志** —— `apps/<id>/logs/build.log`。
+4. **启动日志** —— `apps/<id>/logs/run.log`。
 5. **健康检查结果** —— registry 的 `last_health_check_at` / `last_error`。
 
 ## 输出约定
@@ -48,8 +48,8 @@
 skill 的输出**只**落到以下位置（设计 §18）：
 
 1. 修改后的 `local-web.json`。
-2. `Dockerfile`（容器实例）。
-3. `docker-compose.yml`（多服务实例）。
+2. `apps/<id>/docker/Dockerfile`（容器实例）。
+3. `apps/<id>/docker/compose.yaml`（容器编排；V1 默认同服务模板）。
 4. 静态网关配置（`static-gateway/` 下）。
 5. 诊断说明（写入事件日志或返回给 `lwa`）。
 
@@ -60,6 +60,7 @@ skill 的输出**只**落到以下位置（设计 §18）：
 - **不直接运行长期服务**（`docker run -d`、`npm start` 守护进程等由 `lwa` 决定）。
 - **不修改 `data/` 内容**（用户数据，只读）。
 - **不引入 privileged、Docker socket 挂载、宿主敏感目录**（安全边界，§17）。
+- **不在 Dockerfile 使用 `ADD <url>` 或 `curl|sh` / `wget|sh`**（`generate_dockerfile` critical 门禁会拒绝写出）。
 - **不在容器内以 root 运行**（如非必要）。
 - **不改动工作区外的文件**（`apps/<id>/` 和 `static-gateway/` 之外只读）。
 - **不修改 registry SQLite**（由 `lwa` 通过 lifecycle 写入）。
