@@ -1126,12 +1126,43 @@ def test_disable_leaves_no_dangling_import(
     assert "demo.conf" not in main.read_text()
 
 
+def test_write_main_config_writes_assembled_without_reload(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-420：write_main_config 只原子落盘组装结果，不 reload / self-heal。"""
+    monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
+    side_effects: list[str] = []
+    monkeypatch.setattr(
+        gateway,
+        "_reload_with_self_heal",
+        lambda: side_effects.append("reload") or (True, ""),
+    )
+    monkeypatch.setattr(
+        gateway,
+        "ensure_caddy_running",
+        lambda: side_effects.append("ensure") or True,
+    )
+    main = gateway.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text("# stale\nimport `/old/workspace/missing.conf`\n", encoding="utf-8")
+
+    gateway.write_main_config()
+
+    content = main.read_text(encoding="utf-8")
+    assert "missing.conf" not in content
+    assert "import" not in content
+    assert side_effects == []
+
+
 def test_sync_main_config_writes_assembled_content(
     gateway: StaticGateway, workspace: Workspace, monkeypatch
 ) -> None:
-    """_sync_main_config 按磁盘实际文件重写主 Caddyfile（BUG-069）。"""
+    """_sync_main_config 经 write_main_config 落盘后 reload（BUG-069 / BUG-420）。"""
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
-    monkeypatch.setattr(gateway, "_reload_with_self_heal", lambda: (True, ""))
+    reloads: list[int] = []
+    monkeypatch.setattr(
+        gateway, "_reload_with_self_heal", lambda: reloads.append(1) or (True, "")
+    )
     main = gateway.main_config_path()
     main.parent.mkdir(parents=True, exist_ok=True)
     main.write_text("# stale\nimport `/nope/missing.conf`\n", encoding="utf-8")
@@ -1142,6 +1173,7 @@ def test_sync_main_config_writes_assembled_content(
     content = main.read_text(encoding="utf-8")
     assert "missing.conf" not in content
     assert "import" not in content
+    assert reloads == [1]
 
 
 # ---- 回归测试：IMP-010（Caddy master 生命周期 + reload 自愈）--------------

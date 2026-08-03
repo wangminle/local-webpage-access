@@ -492,17 +492,82 @@ def test_image_id_via_inspect(workspace, monkeypatch) -> None:
     assert DockerRuntime(workspace).image_id("api") == "sha256:deadbeef"
 
 
-def test_image_id_fallback_to_docker_images(workspace, monkeypatch) -> None:
-    """无容器时回退 docker images -q <project>-<service>。"""
+def test_image_id_fallback_to_compose_config_images(workspace, monkeypatch) -> None:
+    """无容器时回退 compose config --images + docker image inspect（BUG-425）。
+
+    ``docker compose images`` 只列出已创建容器使用的镜像，容器不存在时通常
+    返回空；必须先经 ``config --images`` 取镜像引用，再 inspect 解析 ID。
+    """
     _seed_compose_files(workspace, "api")
     fake = _FakeExecute()
     fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")  # 无容器
-    fake.by_subcmd["images"] = ComposeResult(args=[], returncode=0, stdout="img999\n")
+    fake.by_subcmd["config"] = ComposeResult(
+        args=[], returncode=0, stdout="lwa-api-app:latest\n"
+    )
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=0, stdout="sha256:img999\n"
+    )
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
-    assert DockerRuntime(workspace).image_id("api") == "img999"
-    # 确认查询的是默认镜像名 <project>-<service>
-    images_call = [c for c in fake.calls if "images" in c["args"]][0]
-    assert "lwa-api-app" in images_call["args"]
+    assert DockerRuntime(workspace).image_id("api") == "sha256:img999"
+    config_call = [c for c in fake.calls if "config" in c["args"]][0]
+    assert config_call["args"][:2] == ["docker", "compose"]
+    assert "--images" in config_call["args"]
+    inspect_call = [c for c in fake.calls if "inspect" in c["args"]][0]
+    assert inspect_call["args"][:3] == ["docker", "image", "inspect"]
+    assert "lwa-api-app:latest" in inspect_call["args"]
+
+
+def test_image_id_fallback_custom_project_uses_compose(
+    workspace, monkeypatch
+) -> None:
+    """自定义 project/image 时经 config --images 取引用，不猜 legacy 镜像名。"""
+    workspace.ensure_app_dirs("api")
+    workspace.app_compose_path("api").write_text(
+        "name: custom-proj\n"
+        "services:\n"
+        "  app:\n"
+        "    image: my-custom-image:latest\n"
+    )
+    workspace.app_env_path("api").write_text("HOST_PORT=18000\n")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    fake.by_subcmd["config"] = ComposeResult(
+        args=[], returncode=0, stdout="my-custom-image:latest\n"
+    )
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=0, stdout="sha256:customimg\n"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).image_id("api") == "sha256:customimg"
+    config_call = [c for c in fake.calls if "config" in c["args"]][0]
+    assert config_call["args"][:2] == ["docker", "compose"]
+    assert "--images" in config_call["args"]
+    inspect_call = [c for c in fake.calls if "inspect" in c["args"]][0]
+    assert "my-custom-image:latest" in inspect_call["args"]
+    assert "lwa-api-app" not in inspect_call["args"]
+
+
+def test_image_id_fallback_returns_none_when_image_missing(
+    workspace, monkeypatch
+) -> None:
+    """config --images 无输出或 image inspect 失败（镜像已删）→ None（BUG-425）。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    fake.by_subcmd["config"] = ComposeResult(args=[], returncode=0, stdout="")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).image_id("api") is None
+
+    fake2 = _FakeExecute()
+    fake2.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    fake2.by_subcmd["config"] = ComposeResult(
+        args=[], returncode=0, stdout="gone-image:latest\n"
+    )
+    fake2.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=1, stderr="No such image"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake2)
+    assert DockerRuntime(workspace).image_id("api") is None
 
 
 def test_status_parses_json_lines(workspace, monkeypatch) -> None:
@@ -867,3 +932,93 @@ def test_container_id_all_containers_param(workspace, monkeypatch) -> None:
     assert "--all" in seen[-1]
     assert rt.container_id("api") == "cid1"
     assert "--all" not in seen[-1]
+
+
+# ---- bind_mounts（BUG-421）-------------------------------------------------
+
+
+def test_bind_mounts_parses_inspect_json(workspace, monkeypatch) -> None:
+    """BUG-421：解析 inspect Mounts JSON，仅保留 Type=bind。"""
+    _seed_compose_files(workspace, "api")
+    mounts = [
+        {
+            "Type": "bind",
+            "Source": "/old/workspace/apps/api/data",
+            "Destination": "/app/data",
+            "Mode": "rw",
+            "RW": True,
+        },
+        {
+            "Type": "volume",
+            "Name": "anon",
+            "Source": "/var/lib/docker/volumes/anon/_data",
+            "Destination": "/var/lib",
+        },
+        {
+            "Type": "bind",
+            "Source": "/old/workspace/apps/api/current",
+            "Destination": "/app",
+        },
+    ]
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="cid-abc\n")
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=0, stdout=json.dumps(mounts) + "\n"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    result = DockerRuntime(workspace).bind_mounts("api", all_containers=True)
+
+    assert len(result) == 2
+    assert result[0].type == "bind"
+    assert result[0].source == "/old/workspace/apps/api/data"
+    assert result[0].destination == "/app/data"
+    assert result[1].source == "/old/workspace/apps/api/current"
+    assert result[1].destination == "/app"
+    # 使用 all_containers 查容器 + inspect Mounts
+    assert any("--all" in c["args"] for c in fake.calls if "ps" in c["args"])
+    inspect_call = [c for c in fake.calls if "inspect" in c["args"]][0]
+    assert "cid-abc" in inspect_call["args"]
+    assert "{{json .Mounts}}" in inspect_call["args"]
+
+
+def test_bind_mounts_empty_when_no_container(workspace, monkeypatch) -> None:
+    """BUG-421：无容器时返回空 list，不调用 inspect。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    assert DockerRuntime(workspace).bind_mounts("api") == []
+    assert not any("inspect" in c["args"] for c in fake.calls)
+
+
+def test_bind_mounts_inspect_failure_raises(workspace, monkeypatch) -> None:
+    """BUG-421：inspect 失败抛 DockerError（调用方 fail-safe，禁止破坏性操作）。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="cid-abc\n")
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr="permission denied"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    with pytest.raises(DockerError, match="挂载|Mounts|inspect"):
+        DockerRuntime(workspace).bind_mounts("api")
+
+
+def test_bind_mounts_ignores_volume_mounts(workspace, monkeypatch) -> None:
+    """BUG-421：仅返回 bind，忽略 volume / tmpfs。"""
+    _seed_compose_files(workspace, "api")
+    mounts = [
+        {"Type": "volume", "Source": "/var/lib/docker/volumes/x/_data", "Destination": "/data"},
+        {"Type": "tmpfs", "Destination": "/tmp"},
+    ]
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="cid1\n")
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=0, stdout=json.dumps(mounts)
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    assert DockerRuntime(workspace).bind_mounts("api") == []

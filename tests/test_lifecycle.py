@@ -867,6 +867,52 @@ def test_observe_container_programming_error_preserves_trusted_state(
     assert row["runtime_access"] == "unknown"
 
 
+def test_observe_container_trusted_state_refresh_on_concurrent_update(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-369：观测降级写回前须重读 registry，保留并发更新的 last_trusted_state。"""
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    registry.update_status(
+        "api",
+        S.STOPPED.value,
+        last_trusted_state=S.STOPPED.value,
+    )
+
+    class _ConcurrentUpdateRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            # 观测入口已读到 stopped；抛错前模拟另一写者更新为 running。
+            registry.update_status(
+                iid,
+                S.RUNNING.value,
+                last_trusted_state=S.RUNNING.value,
+            )
+            raise DockerError(
+                "Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`"
+            )
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime",
+        _ConcurrentUpdateRuntime,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.health.http_ok", lambda port, **kw: (False, None)
+    )
+
+    observed = observe_status(workspace, config, registry, "api")
+    row = registry.get_instance("api")
+    assert observed == Status.RUNNING
+    assert row["status"] == "running"
+    assert row.get("observed_state") == "unknown"
+    assert row.get("observation_error") == "permission_denied"
+    assert row.get("last_trusted_state") == "running"
+
+
 def test_observe_status_no_change_no_event(
     workspace, registry, config, fake_runtime
 ) -> None:

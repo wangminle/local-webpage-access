@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -663,6 +664,372 @@ def _list_listeners(port: int) -> list[tuple[str, str]]:
     return listeners
 
 
+# ---- DEV-094：工作区路径一致性（裸 mv 后残留诊断）---------------------------
+
+
+_CADDY_BACKTICK_PATH = re.compile(r"`([^`]+)`")
+_CADDY_DOUBLE_QUOTED_PATH = re.compile(r'"((?:\\.|[^"\\])*)"')
+
+
+def _is_local_filesystem_path(raw: str) -> bool:
+    """判断 Caddy 引号内字符串是否像本地绝对路径（非 URL）。"""
+    s = raw.strip()
+    if not s:
+        return False
+    lower = s.lower()
+    if lower.startswith(("http://", "https://", "file:")):
+        return False
+    # Unix 绝对路径，或 Windows 盘符路径（含正斜杠形式）
+    if s.startswith("/"):
+        return True
+    if len(s) >= 3 and s[1] == ":" and s[0].isalpha() and s[2] in "/\\":
+        return True
+    return False
+
+
+_CADDY_OUTPUT_FILE_LINE = re.compile(
+    r"^\s*output\s+file\s+", re.MULTILINE
+)
+
+
+def _extract_caddy_local_paths(text: str) -> list[str]:
+    """从 Caddyfile / 片段文本提取反引号或双引号包裹的本地路径。"""
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _CADDY_BACKTICK_PATH.finditer(text):
+        raw = match.group(1)
+        if _is_local_filesystem_path(raw) and raw not in seen:
+            seen.add(raw)
+            found.append(raw)
+    for match in _CADDY_DOUBLE_QUOTED_PATH.finditer(text):
+        raw = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+        if _is_local_filesystem_path(raw) and raw not in seen:
+            seen.add(raw)
+            found.append(raw)
+    return found
+
+
+def _is_caddy_runtime_created_path(text: str, ref: str) -> bool:
+    """判断 Caddy 片段中的路径是否由 Caddy 运行时按需创建（不应要求预先存在）。
+
+    ``log { output file <path> { ... } }`` 指向的日志文件由 Caddy 在首次写
+    日志时自动创建（``static_gateway.generate_site_config`` 与主 Caddyfile
+    统一入口块都会写入 ``<workspace>/logs/static-access.log``）。全新工作区或
+    网关刚生成配置但尚无访问时该文件不存在属正常；若对其做
+    ``Path.exists()`` 校验会误报“引用路径不存在”（BUG-428）。此类路径只需
+    校验落在当前工作区内、且父目录可创建/写入即可。
+
+    注意必须扫描**所有**出现位置：``generate_site_config`` 会在指令行之前
+    写入 ``# 渲染变量：…`` 注释头，其中也含同一日志路径。若只看首次出现
+    （BUG-429），命中的是注释行而非 ``output file`` 指令行，豁免失效。
+    """
+    start = 0
+    while True:
+        idx = text.find(ref, start)
+        if idx == -1:
+            return False
+        # 取该路径所在行的前缀（到行首），判断是否以 `output file` 指令开头
+        line_start = text.rfind("\n", 0, idx) + 1
+        prefix = text[line_start:idx]
+        if _CADDY_OUTPUT_FILE_LINE.match(prefix):
+            return True
+        start = idx + len(ref)
+
+
+def _caddy_fragment_texts(ws: Workspace) -> list[tuple[str, str]]:
+    """返回 [(label, text), ...]：主 Caddyfile + sites/*.conf + aliases/*.conf。"""
+    out: list[tuple[str, str]] = []
+    main = ws.static_gateway / "Caddyfile"
+    if main.is_file():
+        try:
+            out.append((str(main), main.read_text(encoding="utf-8")))
+        except OSError:
+            pass
+    for folder in (ws.static_sites, ws.static_aliases):
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.glob("*.conf")):
+            try:
+                out.append((str(path), path.read_text(encoding="utf-8")))
+            except OSError:
+                continue
+    return out
+
+
+def _path_field_mismatch(
+    instance_id: str,
+    field: str,
+    actual: str | None,
+    expected: str,
+    *,
+    source: str,
+) -> str | None:
+    """若 actual 存在且与期望不等，返回一行诊断；否则 None。"""
+    if actual is None or actual == "":
+        return None
+    if actual == expected:
+        return None
+    return (
+        f"{instance_id} {source}.{field}: actual={actual} expected={expected}"
+    )
+
+
+def check_workspace_path_consistency(
+    ws: Workspace,
+    config: Config,
+    registry: Registry | None = None,
+) -> CheckResult:
+    """DEV-094：只读检查工作区派生路径、Caddy 引用与 SQLite data 挂载一致性。
+
+    聚合为单一 ``workspace_path_consistency`` 结果：
+    * 活跃 manifest/registry 的可确定派生字段 vs 当前 workspace 规范值；
+    * 主 Caddyfile / sites / aliases 片段中本地路径必须在当前工作区内且存在
+      （旧路径被 Docker 自动重建后仍"存在"，仅查存在性会漏报，BUG-426）；
+    * Docker 可用时，SQLite 实例 LWA 管理的 data bind mount Source 是否漂移。
+
+    历史 builds/events 与合法外部 ``sourceZipPath`` 不告警。Docker 不可用或
+    挂载观测失败时挂载子项 SKIP（无其他发现时整体 STATUS_SKIP，BUG-427），
+    不把整个 doctor 判 FAIL。
+    """
+    from local_webpage_access.compose import _is_sqlite, container_data_paths
+    from local_webpage_access.docker_runtime import DockerError, DockerRuntime
+    from local_webpage_access.hosting import expected_workspace_derived_paths
+    from local_webpage_access.models import InstanceManifest
+
+    findings: list[str] = []
+    mount_notes: list[str] = []
+
+    # ---- 1) manifest / registry 派生字段 ---------------------------------
+    rows: list[dict[str, Any]] = []
+    if registry is not None:
+        try:
+            rows = registry.list_instances()
+        except Exception:  # noqa: BLE001 — 只读诊断，registry 异常不阻断
+            rows = []
+
+    for row in rows:
+        iid = row["id"]
+        expected = expected_workspace_derived_paths(ws, iid)
+        manifest: InstanceManifest | None = None
+        manifest_path = ws.app_manifest_path(iid)
+        if manifest_path.is_file():
+            try:
+                manifest = InstanceManifest.load(manifest_path)
+            except Exception:  # noqa: BLE001
+                findings.append(f"{iid} manifest: 解析失败，跳过派生字段比对")
+                continue
+
+        if manifest is not None:
+            miss = _path_field_mismatch(
+                iid,
+                "appPath",
+                manifest.appPath,
+                expected["appPath"],
+                source="manifest",
+            )
+            if miss:
+                findings.append(miss)
+            if manifest.container is not None:
+                miss = _path_field_mismatch(
+                    iid,
+                    "composePath",
+                    manifest.container.composePath,
+                    expected["composePath"],
+                    source="manifest",
+                )
+                if miss:
+                    findings.append(miss)
+                miss = _path_field_mismatch(
+                    iid,
+                    "dockerfilePath",
+                    manifest.container.dockerfilePath,
+                    expected["dockerfilePath"],
+                    source="manifest",
+                )
+                if miss:
+                    findings.append(miss)
+            if manifest.static is not None:
+                miss = _path_field_mismatch(
+                    iid,
+                    "gatewayConfigPath",
+                    manifest.static.gatewayConfigPath,
+                    expected["gatewayConfigPath"],
+                    source="manifest",
+                )
+                if miss:
+                    findings.append(miss)
+
+        # registry 侧同名字段（snake_case）
+        if registry is not None:
+            inst = registry.get_instance(iid) or row
+            miss = _path_field_mismatch(
+                iid,
+                "appPath",
+                inst.get("app_path"),
+                expected["appPath"],
+                source="registry",
+            )
+            if miss:
+                findings.append(miss)
+            crec = registry.get_container(iid)
+            if crec:
+                miss = _path_field_mismatch(
+                    iid,
+                    "composePath",
+                    crec.get("compose_path"),
+                    expected["composePath"],
+                    source="registry",
+                )
+                if miss:
+                    findings.append(miss)
+                miss = _path_field_mismatch(
+                    iid,
+                    "dockerfilePath",
+                    crec.get("dockerfile_path"),
+                    expected["dockerfilePath"],
+                    source="registry",
+                )
+                if miss:
+                    findings.append(miss)
+            srec = registry.get_static_site(iid)
+            if srec:
+                miss = _path_field_mismatch(
+                    iid,
+                    "gatewayConfigPath",
+                    srec.get("gateway_config_path"),
+                    expected["gatewayConfigPath"],
+                    source="registry",
+                )
+                if miss:
+                    findings.append(miss)
+
+    # ---- 2) Caddy 本地路径引用：必须在当前工作区内且存在 -------------------
+    ws_root = ws.root
+    for label, text in _caddy_fragment_texts(ws):
+        for ref in _extract_caddy_local_paths(text):
+            ref_path = Path(ref)
+            try:
+                resolved = ref_path.resolve()
+            except OSError:
+                resolved = ref_path
+            if not resolved.is_relative_to(ws_root):
+                # BUG-426：旧路径可能仍然存在（如 Docker 自动重建的旧工作区），
+                # 仅查存在性会漏报——必须按当前工作区判定规范归属。
+                findings.append(
+                    f"caddy {label}: 引用路径不在当前工作区 "
+                    f"actual={ref} expected={ws_root} 之内"
+                )
+                continue
+            # BUG-428：``log { output file <path> }`` 指向的日志文件由 Caddy
+            # 运行时按需创建（全新工作区/无访问时尚不存在属正常），不应要求
+            # 文件本身预先存在；只校验父目录落在工作区内（上面已校验整体在
+            # 工作区内）即可。其余路径（root/import 等）必须预先存在。
+            if _is_caddy_runtime_created_path(text, ref):
+                continue
+            if not ref_path.exists():
+                findings.append(
+                    f"caddy {label}: 引用路径不存在 "
+                    f"actual={ref} expected=当前工作区内存在的本地路径"
+                )
+
+    # ---- 3) SQLite data bind mount（Docker 可用时）------------------------
+    docker_ok = False
+    try:
+        docker_ok = bool(DockerRuntime.is_available())
+    except Exception:  # noqa: BLE001
+        docker_ok = False
+
+    if not docker_ok:
+        has_sqlite = False
+        for row in rows:
+            mp = ws.app_manifest_path(row["id"])
+            if not mp.is_file():
+                continue
+            try:
+                m = InstanceManifest.load(mp)
+            except Exception:  # noqa: BLE001
+                continue
+            if _is_sqlite(m):
+                has_sqlite = True
+                break
+        if has_sqlite:
+            mount_notes.append(
+                "data mount: Docker 不可用，跳过挂载漂移检查（SKIP）"
+            )
+    else:
+        runtime = DockerRuntime(ws, registry)
+        for row in rows:
+            iid = row["id"]
+            mp = ws.app_manifest_path(iid)
+            if not mp.is_file():
+                continue
+            try:
+                manifest = InstanceManifest.load(mp)
+            except Exception:  # noqa: BLE001
+                continue
+            if not _is_sqlite(manifest):
+                continue
+            try:
+                mounts = runtime.bind_mounts(iid, all_containers=True)
+            except DockerError as exc:
+                mount_notes.append(
+                    f"{iid} data mount: 观测失败，跳过（SKIP）：{exc}"
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001
+                mount_notes.append(
+                    f"{iid} data mount: 观测失败，跳过（SKIP）：{exc}"
+                )
+                continue
+            expected_src = ws.app_data(iid).resolve()
+            destinations = set(
+                container_data_paths(ws.app_current(iid), manifest)
+            )
+            managed = [m for m in mounts if m.destination in destinations]
+            for mount in managed:
+                actual = (
+                    Path(mount.source).resolve() if mount.source else None
+                )
+                if actual != expected_src:
+                    findings.append(
+                        f"{iid} dataMount[{mount.destination}]: "
+                        f"actual={mount.source} expected={expected_src}"
+                    )
+
+    # ---- 聚合结果 --------------------------------------------------------
+    detail_parts = findings + mount_notes
+    detail = "\n".join(detail_parts) if detail_parts else None
+    suggestion = (
+        "优先运行 `lwa workspace relocate --verify` 核对迁移；"
+        "若已裸 mv 到新路径，对受影响实例执行 `lwa rebuild <id>` / "
+        "`lwa recover`（或 gateway on）修复派生路径与挂载"
+    )
+    if findings:
+        return CheckResult(
+            "workspace_path_consistency",
+            STATUS_WARN,
+            f"发现 {len(findings)} 处工作区路径不一致",
+            detail=detail,
+            suggestion=suggestion,
+        )
+    if mount_notes:
+        # BUG-427：挂载检查未完成不得报 OK——JSON/自动化消费者会误以为
+        # 数据挂载已验证。返回 SKIP 并附完成检查的前置条件。
+        return CheckResult(
+            "workspace_path_consistency",
+            STATUS_SKIP,
+            "派生路径与 Caddy 引用一致；数据挂载检查未完成（SKIP）",
+            detail=detail,
+            suggestion="待 Docker 可用 / 挂载观测恢复后重跑 lwa doctor，"
+            "以完成数据挂载一致性检查",
+        )
+    return CheckResult(
+        "workspace_path_consistency",
+        STATUS_OK,
+        "工作区派生路径、Caddy 引用与数据挂载一致",
+    )
+
+
 def check_lan_url_stale(
     ws: Workspace, config: Config, registry: Registry
 ) -> CheckResult:
@@ -1215,6 +1582,9 @@ def run_doctor(
             else CheckResult(
                 "lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"
             ),
+            check_workspace_path_consistency(
+                ws, config, registry=caddy_probe_registry
+            ),
             check_backend_handoff(
                 ws, config, caddy_probe_registry
             ) if caddy_probe_registry is not None
@@ -1324,6 +1694,7 @@ __all__ = [
     "check_registry",
     "check_static_gateway",
     "check_caddy_health",
+    "check_workspace_path_consistency",
     "check_lan_url_stale",
     "check_backend_handoff",
     "check_port_contention",

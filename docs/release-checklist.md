@@ -4,9 +4,9 @@
 
 ## 代码与版本
 
-- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.11` / `1.0.0`）。
+- [ ] `pyproject.toml` 的 `version` 已设为目标发布版本（如 `0.6.12` / `1.0.0`）。
 - [ ] `src/local_webpage_access/cli/` 包入口（`cli/__init__.py` 的 `version` 命令 / `version_info.py`）读取该版本号；`python3 -m local_webpage_access` 与 `python3 -m local_webpage_access.cli` 均可调用。
-- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart`（含 `doctor-hints`）/ 宿主机装配 `setup|init --default|--full|--resume` / `doctor --profile full` / `lwa capabilities` / Full Profile 能力闭环与周期刷新 / `lwa update` 默认重启 gateway / IMP-023 别名资源错位检测 / IMP-035 安全删除 / IMP-036 正式平台矩阵 / IMP-037 `gateway switch` / IMP-038·040 访问复核与 LAN 新鲜度 / IMP-039 `cancel-build` / IMP-041 remove 阶段日志 / IMP-042 `lwa workspace relocate` / IMP-043 显示名 / `lwa recover` / `lwa pageviews`；skills 数为 18）。
+- [ ] `README.md` 的特性、命令、路线图与实际实现一致（Phase 0~7 全部「已完成」；含浏览量 / 冗余 / 运维手册 / 自启动 `lwa autostart`（含 `doctor-hints`）/ 宿主机装配 `setup|init --default|--full|--resume` / `doctor --profile full` / `lwa capabilities` / Full Profile 能力闭环与周期刷新 / `lwa update` 默认重启 gateway / IMP-023 别名资源错位检测 / IMP-035 安全删除 / IMP-036 正式平台矩阵 / IMP-037 `gateway switch` / IMP-038·040 访问复核与 LAN 新鲜度 / IMP-039 `cancel-build` / IMP-041 remove 阶段日志 / IMP-042 `lwa workspace relocate` / IMP-043 显示名 / `lwa recover` / `lwa pageviews` / V0.6.12 裸 mv 防复发（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、`workspace_path_consistency`）；skills 数为 18）。
 - [ ] 工作区无未提交的调试代码、`print`、`TODO` 残留（`grep -rn "TODO\|print(" src/`）。
 
 ## 测试
@@ -22,7 +22,7 @@
 
 ## 文档
 
-- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、capabilities、Full Profile、skills、浏览量、冗余、运维手册、`setup|init --full --resume`、正式支持平台索引、`gateway switch` / `cancel-build` / `doctor --access` / LAN stale / `workspace relocate` / IMP-043 显示名）。
+- [ ] [README.md](../README.md) 已更新（含管理页、daemon、doctor、capabilities、Full Profile、skills、浏览量、冗余、运维手册、`setup|init --full --resume`、正式支持平台索引、`gateway switch` / `cancel-build` / `doctor --access` / LAN stale / `workspace relocate` / IMP-043 显示名 / V0.6.12 工作区一致性与挂载漂移防护）。
 - [ ] [faq.md](faq.md) / [operations-playbook.md](operations-playbook.md) / [known-limitations.md](known-limitations.md) / [manager-page.md](manager-page.md) / [autostart.md](autostart.md) / [workspace-rename.md](workspace-rename.md) 与 IMP-033/034/035/036/037/038/039/040/041/042/043 行为一致。
 - [ ] [docs/manager-page.md](manager-page.md) API 端点表与实际路由一致（含 pageviews / redundant / remove / path-alias IMP-022；`POST .../cancel-build`；`POST /api/gateway/switch`；`POST /api/access/refresh`；删除模态焦点管理；前端取消构建与 LAN stale 横幅；IMP-043 显示名/`nameSource`）。
 - [ ] [docs/operations-playbook.md](operations-playbook.md) 与网关选型 / `gateway switch` / 访问复核 / `cancel-build` / 宿主机装配档位 / 冗余 / 容器别名 / Caddy 排障一致。

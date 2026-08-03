@@ -27,10 +27,10 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 - **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权，覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计；**显示名优先 `--name`，其次主页 HTML `<title>`**（IMP-043）。
 - **自动导入守护进程（WBS-21）**：`lwa daemon on` 后监听 `inbox/`，自动导入并启动可确定的轻量实例。
 - **安全审计（WBS-25）**：对生成的 Compose / Dockerfile / zip 成员做 critical/warn/info 分级审计；Compose 与 Dockerfile 均在写出前拦截 critical（Dockerfile 的 `ADD <url>`、`curl\|sh` 为 critical），zip 路径穿越/符号链接/炸弹拒绝导入；管理页绑定校验（LAN 绑定 + token）。
-- **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；人类可读与 `--json` 均含平台矩阵报告（`--json` 未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。
+- **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；人类可读与 `--json` 均含平台矩阵报告（`--json` 未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。**V0.6.12** 起另含 `workspace_path_consistency`：核对活跃 manifest/registry 派生路径、Caddy 引用是否落在当前工作区、SQLite data bind mount 是否漂移（Docker 不可用时该子项 SKIP，不报假绿）。
 - **宿主机装配（IMP-031/032/033）**：`lwa setup` / `lwa init` 内置 macOS/Linux 的 Docker Engine+Compose、Caddy 安装脚本（默认国内源 + registry-mirrors）；`--default` 检测+指引，`--full` 装齐并做 **Full Profile 能力闭环**（CLI + manager/daemon/gateway 真实上下文、Caddy owner/工作区访问）；未闭环不假绿；`--resume` 在重登/权限刷新后续跑验收（非 TTY 需 `--yes`）。
 - **正式平台门禁（IMP-036）**：仅 Ubuntu LTS / Debian Stable / WSL2 / macOS；Windows 原生 hard fail。
-- **工作区迁移（IMP-042）**：`lwa workspace relocate` 同卷原子改名（预检 / 快照 / 停服 / rename / 路径改写 / 自启门控 repair / 恢复 / 验收）；支持 `--dry-run` / `--resume` / `--verify` / `--rollback`；跨盘见 [工作区迁移手册](docs/workspace-rename.md)。
+- **工作区迁移（IMP-042）**：`lwa workspace relocate` 同卷原子改名（预检 / 快照 / 停服 / rename / 路径改写 / 自启门控 repair / 恢复 / 验收）；支持 `--dry-run` / `--resume` / `--verify` / `--rollback`；跨盘见 [工作区迁移手册](docs/workspace-rename.md)。**V0.6.12** 起防复发：`gateway on` 启动前按当前工作区原子落盘主 Caddyfile；容器 `start` 检测 SQLite data mount 漂移并 fail-safe 救援后重建；成功 host/start 回写可确定派生路径；裸 `mv` 后请优先 `lwa doctor` / `relocate --verify`，必要时 `rebuild`/`recover`。
 - **大模型 Skills（WBS-24）**：18 个 SKILL.md 覆盖环境初始化、导入、托管、容器、生命周期、自启动、工作区迁移、访问复核、排障等场景，供 AI 编程助手协作。
 
 ## 安装

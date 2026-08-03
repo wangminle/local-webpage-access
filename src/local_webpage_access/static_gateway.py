@@ -814,19 +814,31 @@ class StaticGateway:
         return False, stderr
 
     @_serialized_gateway_mutation
-    def _sync_main_config(self) -> None:
-        """按磁盘实际存在的 site/alias 片段重组主 Caddyfile 并尽力 reload（BUG-069）。
+    def write_main_config(self) -> None:
+        """按磁盘 site/alias 片段组装主 Caddyfile 并原子落盘（BUG-420）。
 
-        在 :meth:`enable` 失败回滚或 :meth:`disable` 删除片段后调用。
-        :meth:`_assemble_main_config` 基于磁盘真实文件生成内容，因此**无条件写回**
-        （不回滚到可能含悬空 import 的旧版本），保证主 Caddyfile 永不 import 已删文件。
-        reload 失败仅记 WARN：配置已正确落盘，下次 ``caddy start``/reload 会加载它。
+        只写盘，不 reload、不 self-heal、不启动 Caddy。供 ``start_gateway`` 在
+        ``caddy_start`` 前调用，避免冷启动信任迁移前残留的旧绝对路径；
+        :meth:`_sync_main_config` 复用本方法后再 reload。
         """
         if self.detect_backend() != "caddy":
             return
         main = self.main_config_path()
         main.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(main, self._assemble_main_config())
+
+    @_serialized_gateway_mutation
+    def _sync_main_config(self) -> None:
+        """按磁盘实际存在的 site/alias 片段重组主 Caddyfile 并尽力 reload（BUG-069）。
+
+        在 :meth:`enable` 失败回滚或 :meth:`disable` 删除片段后调用。
+        经 :meth:`write_main_config` **无条件写回**（不回滚到可能含悬空 import
+        的旧版本），保证主 Caddyfile 永不 import 已删文件。
+        reload 失败仅记 WARN：配置已正确落盘，下次 ``caddy start``/reload 会加载它。
+        """
+        if self.detect_backend() != "caddy":
+            return
+        self.write_main_config()
         ok, stderr = self._reload_with_self_heal()
         if not ok:
             log.warning(

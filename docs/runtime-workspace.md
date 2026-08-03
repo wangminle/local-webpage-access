@@ -230,5 +230,5 @@ AI 助手可参照 Skill **`lwa-update-runtime`**（`lwa init` 后会复制到�
 
 - [README](../README.md) — 安装与命令总览
 - [运维手册](operations-playbook.md) — 网关选型、冗余清理、容器别名、浏览量、Caddy 排障
-- [工作区迁移](workspace-rename.md) — `lwa workspace relocate` + 人工逃生舱（DOC-081 / IMP-042）
+- [工作区迁移](workspace-rename.md) — `lwa workspace relocate` + 人工逃生舱（DOC-081 / IMP-042）；V0.6.12 起另见运维手册 §8.1 裸 mv 防复发与 doctor `workspace_path_consistency`
 - [管理页说明](manager-page.md)

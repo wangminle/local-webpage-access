@@ -297,13 +297,20 @@ def _rescue_container_data_before_rebuild(
     manifest: InstanceManifest,
     instance_id: str,
     runtime: DockerRuntime,
+    *,
+    strict: bool = False,
 ) -> None:
     """BUG-205：重建 ``down`` 前把容器内数据救出到宿主 ``data/``。
 
     既有容器实例的数据库可能写在容器可写层（旧版未挂载 ``data/``、或挂载路径与新
     版不同），重建 ``down`` 删容器会丢库。此处 best-effort 用 ``docker cp`` 把候选
-    路径的内容拷出；宿主 ``data/`` 已有内容（挂载已持久化）或无容器时跳过。失败仅
-    记日志、不抛错——迁移是保护性措施，不得阻断重建。
+    路径的内容拷出；宿主 ``data/`` 已有内容（挂载已持久化）或无容器时跳过。
+
+    默认（``strict=False``，普通重建）失败仅记日志、不抛错——迁移是保护性措施，
+    不得阻断重建。``strict=True``（BUG-424，挂载漂移修复）改为 fail-safe：宿主
+    ``data/`` 非空视为两侧数据冲突、未救出任何文件、或过程异常，均抛
+    :class:`HostingError` 中止，要求人工确认数据归属后再 ``lwa rebuild``——
+    禁止带着不确定性继续 down/up（新容器可能改用旧版或种子库，造成 split-brain）。
     """
     from local_webpage_access.compose import _is_sqlite, container_data_paths
 
@@ -311,8 +318,33 @@ def _rescue_container_data_before_rebuild(
         return  # 非 SQLite 文件库无 data/ 挂载，无需迁移
     try:
         host_data = workspace.app_data(instance_id)
+        try:
+            host_has_data = host_data.is_dir() and any(host_data.iterdir())
+        except OSError as exc:
+            if strict:
+                raise HostingError(
+                    f"实例 {instance_id} 无法读取当前工作区 data/（{host_data}），"
+                    "挂载漂移修复已中止，请人工检查",
+                    instance_id=instance_id,
+                ) from exc
+            host_has_data = False  # 非 strict：交给 rescue_container_data 自行处理
+        if strict and host_has_data:
+            # 两侧都可能有数据且无法自动判定哪份更新：中止，要求人工确认（BUG-424）
+            raise HostingError(
+                f"实例 {instance_id} 数据挂载漂移，且当前工作区 data/ 非空"
+                f"（{host_data}）——无法自动判定哪侧数据更新，已中止自动修复。"
+                f"请人工比对新旧两侧数据后执行 lwa rebuild {instance_id}",
+                instance_id=instance_id,
+            )
         candidates = container_data_paths(workspace.app_current(instance_id), manifest)
         rescued = runtime.rescue_container_data(instance_id, host_data, candidates)
+        if strict and rescued <= 0:
+            raise HostingError(
+                f"实例 {instance_id} 数据挂载漂移，但未能从旧容器救出任何数据"
+                f"（当前工作区 data/ 为空），已中止自动修复。"
+                f"请人工确认旧挂载中的数据后执行 lwa rebuild {instance_id}",
+                instance_id=instance_id,
+            )
         if rescued:
             log.warning(
                 "BUG-205：实例 %s 宿主 data/ 原为空，已从旧容器救出 %d 个文件，"
@@ -320,8 +352,71 @@ def _rescue_container_data_before_rebuild(
                 instance_id,
                 rescued,
             )
-    except Exception:  # noqa: BLE001 — 迁移失败不阻断重建
+    except HostingError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            log.exception("BUG-424 挂载漂移数据救援异常（fail-safe，中止修复）")
+            raise HostingError(
+                f"实例 {instance_id} 挂载漂移数据救援异常，已中止自动修复：{exc}",
+                instance_id=instance_id,
+            ) from exc
         log.exception("BUG-205 重建前数据迁移异常（忽略，继续重建）")
+
+
+def _managed_sqlite_data_mount_drifted(
+    workspace: Workspace,
+    manifest: InstanceManifest,
+    instance_id: str,
+    runtime: DockerRuntime,
+) -> bool:
+    """BUG-421：检查 LWA 管理的 SQLite data bind mount 是否相对当前工作区漂移。
+
+    仅比较 ``compose.container_data_paths`` 中的管理目标（``/app/data`` 与/或
+    ``/app/runtime/data``）对应 bind 的 Source 是否等于
+    ``workspace.app_data(instance_id).resolve()``。
+
+    Returns:
+        True 表示已漂移，调用方应 rescue + down + up；False 表示无需处理
+        （非 SQLite、无容器、或无比对的管理挂载）。
+
+    Raises:
+        HostingError: 挂载观测失败——fail-safe，禁止据此做破坏性重建。
+    """
+    from local_webpage_access.compose import _is_sqlite, container_data_paths
+
+    if not _is_sqlite(manifest):
+        return False
+    existing = _safe(lambda: runtime.container_id(instance_id, all_containers=True))
+    if not existing:
+        return False
+    try:
+        mounts = runtime.bind_mounts(instance_id, all_containers=True)
+    except DockerError as exc:
+        raise HostingError(
+            f"实例 {instance_id} 无法检查数据挂载是否漂移（禁止自动重建）：{exc}",
+            instance_id=instance_id,
+        ) from exc
+
+    expected = workspace.app_data(instance_id).resolve()
+    destinations = set(
+        container_data_paths(workspace.app_current(instance_id), manifest)
+    )
+    managed = [m for m in mounts if m.destination in destinations]
+    if not managed:
+        return False
+    for mount in managed:
+        actual = Path(mount.source).resolve() if mount.source else None
+        if actual != expected:
+            log.warning(
+                "BUG-421：实例 %s 数据挂载漂移 destination=%s actual=%s expected=%s",
+                instance_id,
+                mount.destination,
+                mount.source,
+                expected,
+            )
+            return True
+    return False
 
 
 def host_container(
@@ -489,6 +584,8 @@ def host_container(
     manifest.status = Status.RUNNING
     manifest.desiredState = DesiredState.RUNNING
     manifest.lastError = None
+    # BUG-422：成功落盘前刷新可确定派生路径（裸 mv 后陈旧绝对路径）
+    _refresh_manifest_workspace_paths(workspace, manifest)
     manifest.touch()
     manifest.save(workspace.app_manifest_path(instance_id))
     registry.upsert_from_manifest(manifest)
@@ -540,8 +637,35 @@ def start_container(
     DockerRuntime.ensure_available()
     runtime = DockerRuntime(workspace, registry)
 
-    # 已在跑：直接同步状态，避免重复 start
-    if runtime.is_running(instance_id):
+    # BUG-421：在 running skip / stopped start 之前检查 SQLite data mount 漂移。
+    # 漂移时禁止轻量 start，必须 rescue → down → 清身份 → up。
+    if _managed_sqlite_data_mount_drifted(workspace, manifest, instance_id, runtime):
+        log.info(
+            "容器实例 %s 数据挂载已漂移，先救援再 down/up 重建",
+            instance_id,
+        )
+        # BUG-424：fail-safe 救援——两侧数据冲突 / 救援失败 / 异常均抛
+        # HostingError 中止，要求人工确认，不进入 down。
+        _rescue_container_data_before_rebuild(
+            workspace, manifest, instance_id, runtime, strict=True
+        )
+        try:
+            runtime.down(instance_id)
+        except DockerError as exc:
+            # BUG-423：down 失败仍继续 up 可能复用旧容器/旧挂载或报冲突，
+            # 后续却把实例标记为运行——必须立即失败，不得继续。
+            raise HostingError(
+                f"实例 {instance_id} 挂载漂移修复中 down 失败，已中止"
+                f"（禁止继续 up 复用旧挂载）：{exc}",
+                instance_id=instance_id,
+            ) from exc
+        manifest.container.containerId = None
+        manifest.container.imageId = None
+        manifest.touch()
+        manifest.save(workspace.app_manifest_path(instance_id))
+        runtime.up(instance_id)
+        action = "up"
+    elif runtime.is_running(instance_id):
         log.info("容器实例 %s 已在运行，跳过 start", instance_id)
         action = "start"
     else:
@@ -608,6 +732,8 @@ def start_container(
     manifest.status = Status.RUNNING
     manifest.desiredState = DesiredState.RUNNING
     manifest.lastError = None
+    # BUG-422：成功落盘前刷新可确定派生路径（裸 mv 后陈旧绝对路径）
+    _refresh_manifest_workspace_paths(workspace, manifest)
     manifest.touch()
     manifest.save(workspace.app_manifest_path(instance_id))
     registry.upsert_from_manifest(manifest)
@@ -680,6 +806,29 @@ def stop_container(
 
 
 # ---- 容器辅助 --------------------------------------------------------------
+
+
+def expected_workspace_derived_paths(workspace: Workspace, instance_id: str) -> dict[str, str]:
+    """返回当前 workspace 下可确定派生路径（不含 sourceZipPath）。"""
+    return {
+        "appPath": str(workspace.app_current(instance_id)),
+        "composePath": str(workspace.app_compose_path(instance_id)),
+        "dockerfilePath": str(workspace.app_dockerfile_path(instance_id)),
+        "gatewayConfigPath": str(workspace.app_gateway_config(instance_id)),
+    }
+
+
+def _refresh_manifest_workspace_paths(
+    workspace: Workspace, manifest: InstanceManifest
+) -> None:
+    """就地刷新可确定派生路径；不改写 sourceZipPath。"""
+    paths = expected_workspace_derived_paths(workspace, manifest.id)
+    manifest.appPath = paths["appPath"]
+    if manifest.container is not None:
+        manifest.container.composePath = paths["composePath"]
+        manifest.container.dockerfilePath = paths["dockerfilePath"]
+    if manifest.static is not None:
+        manifest.static.gatewayConfigPath = paths["gatewayConfigPath"]
 
 
 def _container_path_alias(manifest: InstanceManifest) -> str | None:
@@ -846,6 +995,8 @@ def _enable_static(
         gatewayConfigPath=str(gateway.site_config_path(instance_id)),
         enabled=True,
     )
+    # BUG-422：防御性一致化派生路径（含 gatewayConfigPath / appPath）
+    _refresh_manifest_workspace_paths(workspace, manifest)
     entry = build_network_entry(config, host_port, path_alias=path_alias)
     manifest.network = NetworkConfig(**entry)
     registry.set_static_enabled(instance_id, True)
@@ -1173,6 +1324,7 @@ __all__ = [
     "start_container",
     "stop_container",
     "stop_instance",
+    "expected_workspace_derived_paths",
     "find_index_html",
     "find_build_output",
     "sync_static_to_public",

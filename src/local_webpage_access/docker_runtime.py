@@ -4,7 +4,8 @@
 
 * :meth:`DockerRuntime.build` / :meth:`up` / :meth:`stop` / :meth:`start` /
   :meth:`restart` / :meth:`down` / :meth:`logs` 对应 Compose 子命令；
-* :meth:`container_id` / :meth:`image_id` / :meth:`status` 提供容器观测；
+* :meth:`container_id` / :meth:`image_id` / :meth:`bind_mounts` / :meth:`status`
+  提供容器观测；
 * :func:`is_available` / :func:`ensure_available` 检查 Docker 前置条件。
 
 设计要点（对应 V1 设计说明第 13、14 节与 WBS-14）：
@@ -138,6 +139,15 @@ class ContainerStatus:
     @property
     def is_running(self) -> bool:
         return self.state == "running"
+
+
+@dataclass(frozen=True)
+class BindMount:
+    """容器 bind mount 观测条目（BUG-421 / DEV-094）。"""
+
+    source: str
+    destination: str
+    type: str = "bind"
 
 
 # ---- 模块级执行器 ------------------------------------------------------------
@@ -774,8 +784,10 @@ class DockerRuntime:
     def image_id(self, instance_id: str) -> str | None:
         """查询镜像 id（WBS-14.10）。
 
-        优先用容器 inspect 取 ``.Image``；容器不存在时回退到
-        ``docker images -q <project>-<service>``（Compose 默认镜像命名）。
+        优先用容器 inspect 取 ``.Image``；容器不存在时用
+        ``docker compose config --images`` 取渲染后配置中的镜像引用，再
+        ``docker image inspect`` 解析为镜像 ID（BUG-425：``compose images`` 只
+        列出已创建容器所使用的镜像，容器不存在时通常返回空，不能作为兜底）。
         """
         cid = self.container_id(instance_id)
         if cid:
@@ -787,16 +799,85 @@ class DockerRuntime:
             if r.ok and r.stdout.strip():
                 return r.stdout.strip()
 
-        project, service = self._project_service(instance_id)
         r = _execute(
-            ["docker", "images", "-q", f"{project}-{service}"],
+            self._compose_cmd(instance_id, "config", "--images"),
             cwd=self.workspace.app_dir(instance_id),
             timeout=_QUERY_TIMEOUT,
         )
-        if r.ok:
-            lines = r.stdout.strip().splitlines()
-            return lines[0] if lines else None
+        if not r.ok:
+            return None
+        refs = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+        if not refs:
+            return None
+        ir = _execute(
+            ["docker", "image", "inspect", refs[0], "--format", "{{.Id}}"],
+            cwd=self.workspace.app_dir(instance_id),
+            timeout=_QUERY_TIMEOUT,
+        )
+        if ir.ok and ir.stdout.strip():
+            return ir.stdout.strip()
         return None
+
+    def bind_mounts(
+        self, instance_id: str, *, all_containers: bool = True
+    ) -> list[BindMount]:
+        """读取容器 bind mount 列表（BUG-421，只读观测）。
+
+        用 ``docker inspect <cid> --format '{{json .Mounts}}'`` 解析挂载，
+        仅返回 ``Type=bind`` 条目。无容器时返回空 list；inspect 失败抛
+        :class:`DockerError`（调用方须 fail-safe，禁止据此做破坏性操作）。
+        """
+        cid = self.container_id(instance_id, all_containers=all_containers)
+        if not cid:
+            return []
+        result = _execute(
+            ["docker", "inspect", cid, "--format", "{{json .Mounts}}"],
+            cwd=self.workspace.app_dir(instance_id),
+            timeout=_QUERY_TIMEOUT,
+        )
+        if not result.ok:
+            summary = (result.stderr or result.stdout or "").strip()[:300]
+            raise DockerError(
+                f"读取容器挂载失败（实例 {instance_id}，inspect Mounts，"
+                f"exit {result.returncode}）：{summary or '无详细输出'}",
+                instance_id=instance_id,
+                action="inspect_mounts",
+            )
+        raw = (result.stdout or "").strip()
+        if not raw or raw == "null":
+            return []
+        try:
+            mounts = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise DockerError(
+                f"解析容器挂载 JSON 失败（实例 {instance_id}）：{exc}",
+                instance_id=instance_id,
+                action="inspect_mounts",
+            ) from exc
+        if not isinstance(mounts, list):
+            raise DockerError(
+                f"容器挂载 JSON 格式异常（实例 {instance_id}）：期望 list",
+                instance_id=instance_id,
+                action="inspect_mounts",
+            )
+        out: list[BindMount] = []
+        for item in mounts:
+            if not isinstance(item, dict):
+                continue
+            if (item.get("Type") or "").lower() != "bind":
+                continue
+            source = item.get("Source") or ""
+            destination = item.get("Destination") or ""
+            if not destination:
+                continue
+            out.append(
+                BindMount(
+                    source=source,
+                    destination=destination,
+                    type="bind",
+                )
+            )
+        return out
 
     def status(self, instance_id: str) -> ContainerStatus | None:
         """容器状态观测（WBS-14.11）。无容器时返回 None。
@@ -851,17 +932,6 @@ class DockerRuntime:
         cmd += ["-f", str(compose_file)]
         cmd += list(args)
         return cmd
-
-    def _project_service(self, instance_id: str) -> tuple[str, str]:
-        """从 registry / manifest 兜底取 (projectName, serviceName)。"""
-        project = f"lwa-{instance_id}"
-        service = "app"
-        if self.registry is not None:
-            row = self.registry.get_container(instance_id)
-            if row:
-                project = row.get("compose_project") or project
-                service = row.get("service_name") or service
-        return project, service
 
     def _event(self, instance_id: str, event_type: str, message: str) -> None:
         """记录状态变化事件（WBS-14.15）。registry 未设置时跳过。"""
@@ -952,6 +1022,7 @@ def _tail(text: str, n: int) -> str:
 
 
 __all__ = [
+    "BindMount",
     "ComposeResult",
     "ContainerStatus",
     "DOCKER_PERMISSION_HINT",

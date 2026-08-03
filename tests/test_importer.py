@@ -768,7 +768,7 @@ def test_import_conflict_error_mode(importer: Importer, tmp_path: Path) -> None:
 def test_import_conflict_error_mode_is_atomic(
     importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
 ) -> None:
-    """BUG-313：检查后目录被并发认领时 error 模式不能静默创建 -2。"""
+    """BUG-313/BUG-370：检查后目录被并发认领时 error 模式不能静默创建 -2。"""
     zip_path = _make_static_zip(tmp_path / "demo.zip")
     original_mkdir = Path.mkdir
     raced = False
@@ -786,8 +786,10 @@ def test_import_conflict_error_mode_is_atomic(
 
     monkeypatch.setattr(Path, "mkdir", racing_mkdir)
 
-    with pytest.raises(ZipImportError, match="--update"):
+    with pytest.raises(ZipImportError, match="已被并发创建.*--update"):
         importer.import_zip(zip_path, on_conflict="error")
+    # 并发者已占用原始 slug；error 模式不得改名另建，也不得清掉对方目录。
+    assert workspace.app_dir("demo").exists()
     assert not workspace.app_dir("demo-2").exists()
 
 

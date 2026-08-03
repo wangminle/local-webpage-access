@@ -333,6 +333,7 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 - `backend_handoff`——enabled 静态 hostPort 上是否 builtin + caddy 双开（FAIL，提示 `lwa gateway off` 再 `on`）。
 - `port_contention`——`:2019` / 别名入口上是否有非预期监听者（测试/外部孤儿，§2.7 现场即 pytest 泄漏的 Caddy 占 :2019）；仅 caddy 后端检查。
 - `port_pool`（建议 H）——排除 lwa 自用端口（managerPort、staticGatewayPort、registry 已分配 hostPort），不再把这些合法自用端口误报为冲突。
+- `workspace_path_consistency`（V0.6.12 / DEV-094）——活跃 manifest/registry 派生路径是否等于当前工作区规范值；Caddy 主配置/sites/aliases 引用是否落在当前工作区且存在；Docker 可用时 SQLite data bind mount Source 是否指向 `apps/<id>/data`。外部 `sourceZipPath`、历史 builds/events 不告警。Docker 不可用或挂载观测失败时挂载子项 SKIP（整体不报假绿 OK）。提示优先 `lwa workspace relocate --verify`，已裸 mv 场景按 `rebuild` / `recover` / `gateway on` 修复。
 
 ### 7.6 管理页兜底链接（建议 D）
 
@@ -352,6 +353,16 @@ cd /abs/NEW && lwa workspace relocate --verify
 ```
 
 事务：预检 → 快照备份（SQLite online backup）→ 停服 → 同卷 rename → 结构化改写 manifest/registry/sites/aliases → 有自启才 repair → 恢复 running 意图与 detached 控制面 → 验收。Skill：`lwa-relocate-workspace`。跨盘见 [工作区迁移手册](workspace-rename.md)。
+
+### 8.1 若已经裸 `mv`（V0.6.12 防复发）
+
+代码侧已加固，但**仍应优先用 `relocate`**。若已手工搬迁：
+
+1. 新路径 `pip install -e .` + `lwa autostart install --with-caddy`（或 `repair`）。
+2. `lwa doctor`：关注 `workspace_path_consistency`（路径陈旧 / Caddy 引用落在旧根 / data mount 漂移）。
+3. `lwa gateway on`：启动前会按当前工作区原子落盘主 Caddyfile（BUG-420），避免首次加载旧绝对路径。
+4. SQLite 容器：`lwa start` / `rebuild` 会检测 data bind mount 漂移；漂移时先 fail-safe 救援，`down` 失败或数据冲突会中止并要求人工确认（BUG-421/423/424），不要强行继续。
+5. 成功 host/start 后会回写 `appPath` / compose / dockerfile / gatewayConfigPath（BUG-422）；外部合法 `sourceZipPath` 不会被无条件改写。
 
 ---
 

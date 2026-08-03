@@ -910,3 +910,51 @@ def test_host_static_alias_writes_caddy_fragment(
     stop_instance(workspace, config, registry, "demo")
     # stop 后别名片段已清理（disable 在 caddy 路径删除片段 + reload）
     assert not fragment.exists()
+
+
+# ---- BUG-422：静态派生路径回写 ---------------------------------------------
+
+
+def test_derived_path_host_static_refreshes_stale_paths(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """host_static / _enable_static 成功后刷新 appPath 与 gatewayConfigPath。"""
+    from local_webpage_access.models import InstanceManifest
+
+    _seed_static_instance(workspace, registry, "demo")
+    manifest = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    external_zip = "/external/old.zip"
+    manifest.appPath = "/old/workspace/apps/demo/current"
+    manifest.sourceZipPath = external_zip
+    if manifest.static is None:
+        from local_webpage_access.models import StaticConfig
+
+        manifest.static = StaticConfig(root="public", gateway="builtin")
+    manifest.static.gatewayConfigPath = "/old/workspace/static-gateway/sites/demo.conf"
+    manifest.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(manifest)
+
+    try:
+        hosted = host_static(workspace, config, registry, "demo")
+        expected_app = str(workspace.app_current("demo"))
+        expected_gw = str(workspace.app_gateway_config("demo"))
+        assert hosted.appPath == expected_app
+        assert hosted.sourceZipPath == external_zip
+        assert hosted.static is not None
+        assert hosted.static.gatewayConfigPath == expected_gw
+
+        reloaded = InstanceManifest.load(workspace.app_manifest_path("demo"))
+        assert reloaded.appPath == expected_app
+        assert reloaded.sourceZipPath == external_zip
+        assert reloaded.static is not None
+        assert reloaded.static.gatewayConfigPath == expected_gw
+
+        row = registry.get_instance("demo")
+        assert row is not None
+        assert row["app_path"] == expected_app
+        assert row["source_zip_path"] == external_zip
+        srow = registry.get_static_site("demo")
+        assert srow is not None
+        assert srow["gateway_config_path"] == expected_gw
+    finally:
+        stop_instance(workspace, config, registry, "demo")

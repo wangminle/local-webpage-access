@@ -95,6 +95,7 @@ def fake_gateway(monkeypatch, workspace):
         "start_calls": 0,
         "stop_calls": 0,
         "sync_calls": 0,
+        "write_main_calls": 0,
         "stop_builtin_calls": 0,
         "reload_calls": 0,
         "call_order": [],
@@ -145,9 +146,15 @@ def fake_gateway(monkeypatch, workspace):
         def main_config_path(self) -> Path:
             return self.ws.static_gateway / "Caddyfile"
 
+        def write_main_config(self) -> None:
+            # BUG-420：start_gateway 在 caddy_start 前无条件落盘当前主配置。
+            state["write_main_calls"] += 1
+            state["call_order"].append("write_main_config")
+
         def _sync_main_config(self) -> None:
-            # BUG-074：start_gateway 在无主 Caddyfile 时应调此方法加载真实站点。
+            # BUG-074 遗留：写盘+reload。冷启动已改用 write_main_config，保留计数便于回归。
             state["sync_calls"] += 1
+            state["call_order"].append("_sync_main_config")
 
         def stop_all_builtin(self) -> list[str]:
             # I1 / G3：start_gateway 在 caddy_start **之前**调用（先停旧再拉新）。
@@ -273,39 +280,52 @@ def test_start_gateway_refreshes_capability_when_already_running(
 def test_start_gateway_stops_builtin_before_caddy_start(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
-    """I1 / §4.1：先 stop_all_builtin，再 caddy_start；清过孤儿且主配置已存在则 reload。"""
+    """I1 / §4.1 / BUG-420：stop_all_builtin → write_main_config → caddy_start；清孤儿后 reload。"""
     fake_gateway["admin_alive"] = False
     fake_gateway["stopped_builtin"] = ["demo-static"]
-    # 主 Caddyfile 已存在时走 reload 分支（无主配置时走 _sync_main_config）
+    # 主 Caddyfile 已存在：启动前仍须 write_main_config，启动后因清过 builtin 再 reload
     workspace.static_gateway.mkdir(parents=True, exist_ok=True)
     (workspace.static_gateway / "Caddyfile").write_text(":2019 {}\n", encoding="utf-8")
     start_gateway(workspace, config)
     assert fake_gateway["stop_builtin_calls"] == 1
+    assert fake_gateway["write_main_calls"] == 1
     assert fake_gateway["start_calls"] == 1
-    assert fake_gateway["call_order"][:2] == ["stop_all_builtin", "caddy_start"]
+    assert fake_gateway["call_order"][:3] == [
+        "stop_all_builtin",
+        "write_main_config",
+        "caddy_start",
+    ]
     assert fake_gateway["reload_calls"] == 1
 
 
-def test_start_gateway_syncs_main_config_when_no_main(
+def test_start_gateway_writes_main_config_when_no_main(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
-    """BUG-074：caddy_start 用 bootstrap（无主 Caddyfile）后应 sync 真实站点配置。"""
+    """BUG-420：无主 Caddyfile 时在 caddy_start 前落盘，不再依赖启动后 _sync_main_config。"""
     fake_gateway["admin_alive"] = False
     assert not (workspace.static_gateway / "Caddyfile").exists()
     start_gateway(workspace, config)
-    assert fake_gateway["sync_calls"] == 1
+    assert fake_gateway["write_main_calls"] == 1
+    assert fake_gateway["sync_calls"] == 0
+    assert fake_gateway["call_order"].index("write_main_config") < fake_gateway[
+        "call_order"
+    ].index("caddy_start")
 
 
-def test_start_gateway_skips_sync_when_main_exists(
+def test_start_gateway_writes_main_config_when_main_exists(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
-    """主 Caddyfile 已存在且非空时 caddy_start 已加载它，无需再 sync。"""
+    """BUG-420：已有非空旧 Caddyfile 时仍须在 caddy_start 前 write_main_config（防旧路径）。"""
     fake_gateway["admin_alive"] = False
     main = workspace.static_gateway / "Caddyfile"
     main.parent.mkdir(parents=True, exist_ok=True)
-    main.write_text("# real config\n")
+    main.write_text("# stale old absolute paths\n")
     start_gateway(workspace, config)
+    assert fake_gateway["write_main_calls"] == 1
     assert fake_gateway["sync_calls"] == 0
+    assert fake_gateway["call_order"].index("write_main_config") < fake_gateway[
+        "call_order"
+    ].index("caddy_start")
 
 
 def test_start_gateway_recovers_state_when_already_running(

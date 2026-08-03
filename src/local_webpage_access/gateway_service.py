@@ -232,14 +232,16 @@ def start_gateway(
                 log.info("网关已在运行（pid=%s），不重复启动", pid if pid else "?")
             # 即使网关已在线，也清理可能残留的 builtin 孤儿（含 pid-less 孤儿，
             # §2.7）+ 刷新地址（建议 A/B）。不重复 caddy start，但交接收尾必须执行。
-            # I1：先停旧再必要时 reload，避免 hostPort 仍被 Python 占用时站点半死。
+            # BUG-420：已在线也不重启，但先落盘当前主配置再 reload，修复 mv 后陈旧路径。
+            # I1：先停旧再 reload，避免 hostPort 仍被 Python 占用时站点半死。
+            gateway.write_main_config()
             stopped_builtin = gateway.stop_all_builtin()
             if stopped_builtin:
                 log.info("网关已在线：清理残留 builtin 静态服务 %s", ", ".join(stopped_builtin))
-                try:
-                    gateway.reload_all()
-                except Exception as exc:  # noqa: BLE001 — reload 失败不阻断已在线网关
-                    log.warning("清理 builtin 后 reload 失败（不阻断）：%s", exc)
+            try:
+                gateway.reload_all()
+            except Exception as exc:  # noqa: BLE001 — reload 失败不阻断已在线网关
+                log.warning("已在线网关写盘后 reload 失败（不阻断）：%s", exc)
             _post_switch_finalize(
                 workspace, config, registry, pid, started=False,
                 stopped_builtin=stopped_builtin,
@@ -257,18 +259,17 @@ def start_gateway(
                 ", ".join(stopped_builtin),
             )
 
+        # BUG-420：caddy_start 前无条件按当前 workspace 组装落盘主配置，
+        # 避免信任磁盘上可能含迁移前旧绝对路径的非空 Caddyfile（亦覆盖 BUG-074
+        # 无主配置 bootstrap：启动时直接加载真实主配置，无需启动后再 sync）。
+        gateway.write_main_config()
+
         if not gateway.caddy_start():
             raise LifecycleError(
                 "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）；"
                 "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019",
             )
-        # BUG-074：caddy_start 无主 Caddyfile 时加载最小 bootstrap（仅保证 admin 在线），
-        # 真实站点/别名片段不会自动加载。若磁盘上有 sites/aliases 片段但主配置缺失，
-        # 启动后立即 _sync_main_config 按 disk 实际文件组装并 reload，使别名入口就绪。
-        main = gateway.main_config_path()
-        if not (main.is_file() and main.read_text(encoding="utf-8").strip()):
-            gateway._sync_main_config()
-        elif stopped_builtin:
+        if stopped_builtin:
             # 启动前清过占用 hostPort 的 builtin：再 reload 一次确保站点绑定生效。
             try:
                 gateway.reload_all()

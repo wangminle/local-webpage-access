@@ -21,6 +21,7 @@
   - **BUG-382**：外部 `compose down` 后，`lwa start` 可在 compose/env/镜像仍在时 `up -d` 自愈（不必整镜像 `rebuild`）。
   - **BUG-383**：pageviews 游标不再绑定日志绝对路径；升级时 v3→v4 保留 offset。
   - **BUG-384**：`lwa autostart repair` **默认保留**已安装的 gateway；`--with-caddy` 只表示「没有时新增」。
+  - **V0.6.12（BUG-420/421/422/423/424 + DEV-094）**：`gateway on` 启动前按当前工作区原子落盘主 Caddyfile；`start` 检测 SQLite data mount 漂移并 fail-safe 救援（`down` 失败或两侧数据冲突立即中止）；成功 host/start 回写可确定派生路径；`lwa doctor` 的 `workspace_path_consistency` 主动暴露裸 `mv` 残留（含「旧路径仍存在但不属于当前工作区」）。
 
 ---
 

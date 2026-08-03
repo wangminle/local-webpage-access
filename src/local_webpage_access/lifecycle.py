@@ -1024,6 +1024,17 @@ def _observe_container_status(
         keep: Status,
         via_http: bool = False,
     ) -> Status:
+        # BUG-369：写回前重读，避免入口快照覆盖并发更新的可信状态。
+        latest = registry.get_instance(instance_id) or {}
+        latest_trusted = (
+            latest.get("last_trusted_state")
+            or latest.get("status")
+            or trusted
+        )
+        latest_status_raw = latest.get("status")
+        if latest_status_raw:
+            with contextlib.suppress(ValueError):
+                keep = Status(latest_status_raw)
         suffix = "（观测已降级为 HTTP 探活）" if via_http else ""
         full_msg = f"{msg}{suffix}"
         observed_label = keep.value if via_http else "unknown"
@@ -1033,7 +1044,7 @@ def _observe_container_status(
             last_error=full_msg[:500],
             observed_state=observed_label,
             observation_error=error,
-            last_trusted_state=trusted,
+            last_trusted_state=latest_trusted,
             last_observed_at=now_iso(),
             runtime_access=error,
         )
@@ -1042,7 +1053,7 @@ def _observe_container_status(
                 instance_id,
                 "observe_degraded",
                 f"observationError={error} observedState={observed_label} "
-                f"lastTrustedState={trusted} role=observer {full_msg[:200]}",
+                f"lastTrustedState={latest_trusted} role=observer {full_msg[:200]}",
             )
         log.warning(
             "实例 %s：观测降级 observationError=%s，保留 status=%s",

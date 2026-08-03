@@ -563,6 +563,7 @@ def test_run_doctor_full_report(env) -> None:
     assert "port_pool" in names
     assert "registry" in names
     assert "disk_space" in names
+    assert "workspace_path_consistency" in names
 
 
 def test_run_doctor_with_instance(env) -> None:
@@ -1217,4 +1218,460 @@ def test_check_registry_does_not_create_or_migrate(tmp_path: Path) -> None:
         conn.close()
     assert version == 1
     assert version != CURRENT_SCHEMA_VERSION
+
+
+# ---- DEV-094：workspace_path_consistency ------------------------------------
+
+
+def _seed_static_with_canonical_paths(ws, reg, iid="demo", *, host_port=18000):
+    """落盘静态实例，派生路径字段与当前 workspace 一致。"""
+    from local_webpage_access.hosting import expected_workspace_derived_paths
+    from local_webpage_access.models import (
+        DesiredState,
+        InstanceManifest,
+        Kind,
+        NetworkConfig,
+        ResourceProfile,
+        Runtime,
+        ServingMode,
+        StaticConfig,
+        Status,
+    )
+
+    ws.ensure_app_dirs(iid)
+    expected = expected_workspace_derived_paths(ws, iid)
+    m = InstanceManifest(
+        id=iid,
+        name=iid,
+        version="1",
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.TINY,
+        desiredState=DesiredState.RUNNING,
+        status=Status.RUNNING,
+        appPath=expected["appPath"],
+        sourceZipPath="/external/archives/demo.zip",
+        static=StaticConfig(
+            hostPort=host_port,
+            enabled=True,
+            gatewayConfigPath=expected["gatewayConfigPath"],
+        ),
+        network=NetworkConfig(hostPort=host_port),
+    )
+    m.save(ws.app_manifest_path(iid))
+    reg.upsert_from_manifest(m)
+    return m
+
+
+def _seed_sqlite_container_with_canonical_paths(ws, reg, iid="api"):
+    """落盘 SQLite 容器实例，派生路径与当前 workspace 一致。"""
+    from local_webpage_access.hosting import expected_workspace_derived_paths
+    from local_webpage_access.models import (
+        ContainerConfig,
+        DatabaseConfig,
+        DesiredState,
+        InstanceManifest,
+        Kind,
+        ResourceProfile,
+        Runtime,
+        ServingMode,
+        Status,
+    )
+
+    ws.ensure_app_dirs(iid)
+    expected = expected_workspace_derived_paths(ws, iid)
+    m = InstanceManifest(
+        id=iid,
+        name=iid,
+        version="1",
+        kind=Kind.PYTHON,
+        runtime=Runtime.DOCKER_COMPOSE,
+        servingMode=ServingMode.CONTAINER,
+        resourceProfile=ResourceProfile.SMALL,
+        desiredState=DesiredState.RUNNING,
+        status=Status.RUNNING,
+        hasDatabase=True,
+        database=DatabaseConfig(type="sqlite"),
+        appPath=expected["appPath"],
+        sourceZipPath="/external/archives/api.zip",
+        container=ContainerConfig(
+            projectName=f"lwa-{iid}",
+            internalPort=8000,
+            hostPort=21000,
+            containerId="abc123def",
+            composePath=expected["composePath"],
+            dockerfilePath=expected["dockerfilePath"],
+        ),
+    )
+    m.save(ws.app_manifest_path(iid))
+    reg.upsert_from_manifest(m)
+    return m
+
+
+def test_workspace_consistency_ok_when_paths_canonical(env, monkeypatch) -> None:
+    """当前规范路径 → OK。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    _seed_static_with_canonical_paths(ws, reg, "demo")
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.name == "workspace_path_consistency"
+    assert r.status == STATUS_OK
+
+
+def test_workspace_consistency_warns_on_stale_derived_fields(
+    env, monkeypatch
+) -> None:
+    """manifest/registry 派生字段陈旧 → WARN，detail 含实例、字段、实际/期望。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+    from local_webpage_access.hosting import expected_workspace_derived_paths
+
+    ws, config, reg = env
+    m = _seed_static_with_canonical_paths(ws, reg, "demo")
+    expected = expected_workspace_derived_paths(ws, "demo")
+    stale_app = "/old/workspace/apps/demo/current"
+    stale_gw = "/old/workspace/static-gateway/sites/demo.conf"
+    m.appPath = stale_app
+    assert m.static is not None
+    m.static.gatewayConfigPath = stale_gw
+    m.save(ws.app_manifest_path("demo"))
+    reg.upsert_from_manifest(m)
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_WARN
+    detail = r.detail or ""
+    assert "demo" in detail
+    assert "appPath" in detail
+    assert stale_app in detail
+    assert expected["appPath"] in detail
+    assert "gatewayConfigPath" in detail
+    assert stale_gw in detail
+    assert expected["gatewayConfigPath"] in detail
+    assert r.suggestion is not None
+    assert "relocate" in r.suggestion
+
+
+def test_workspace_consistency_warns_on_missing_caddy_paths(
+    env, monkeypatch
+) -> None:
+    """Caddy 片段引用不存在本地路径 → WARN。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    _seed_static_with_canonical_paths(ws, reg, "demo")
+    missing = "/nonexistent/old/apps/demo/public"
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(
+        f"import `{ws.static_sites / 'demo.conf'}`\n"
+        f"root * `{missing}`\n",
+        encoding="utf-8",
+    )
+    site = ws.static_sites / "demo.conf"
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_text(f":18000 {{\n\troot * `{missing}`\n}}\n", encoding="utf-8")
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_WARN
+    assert missing in (r.detail or "")
+    assert r.suggestion is not None
+
+
+def test_workspace_consistency_warns_on_sqlite_mount_drift(
+    env, monkeypatch
+) -> None:
+    """SQLite data mount 漂移 → WARN。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import BindMount
+
+    ws, config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    expected_src = str(ws.app_data("api").resolve())
+    drifted = "/old/workspace/apps/api/data"
+
+    class _FakeRT:
+        def __init__(self, workspace, registry=None):
+            self.workspace = workspace
+
+        @staticmethod
+        def is_available():
+            return True
+
+        def bind_mounts(self, iid, *, all_containers=True):
+            return [
+                BindMount(
+                    source=drifted,
+                    destination="/app/data",
+                    type="bind",
+                )
+            ]
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime", _FakeRT
+    )
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_WARN
+    detail = r.detail or ""
+    assert "api" in detail
+    assert drifted in detail
+    assert expected_src in detail
+    assert r.suggestion is not None
+
+
+def test_workspace_consistency_ignores_external_zip_and_history(
+    env, monkeypatch
+) -> None:
+    """外部 sourceZipPath 与历史 builds/events → 不告警。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    m = _seed_static_with_canonical_paths(ws, reg, "demo")
+    # 外部源 ZIP（合法，不在当前 workspace）
+    m.sourceZipPath = "/somewhere/else/archives/demo-v1.zip"
+    m.save(ws.app_manifest_path("demo"))
+    reg.upsert_from_manifest(m)
+    # 历史 builds / events 里塞旧路径字符串，不应触发 WARN
+    reg.add_build(
+        "demo",
+        status="success",
+        log_path="/old/workspace/apps/demo/logs/build-old.log",
+    )
+    reg.add_event(
+        "demo",
+        "info",
+        "historical note mentioning /old/workspace/apps/demo/current",
+    )
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_OK
+    assert "/somewhere/else" not in (r.detail or "")
+    assert "/old/workspace" not in (r.detail or "")
+
+
+def test_workspace_consistency_skips_mounts_when_docker_unavailable(
+    env, monkeypatch
+) -> None:
+    """Docker 不可用/观测失败 → 挂载部分 SKIP，仍返回其他路径检查结果。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerError
+
+    ws, config, reg = env
+    m = _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    # 同时制造一个陈旧派生字段，确保路径检查仍生效
+    stale = "/old/workspace/apps/api/current"
+    m.appPath = stale
+    m.save(ws.app_manifest_path("api"))
+    reg.upsert_from_manifest(m)
+
+    class _FakeUnavailable:
+        def __init__(self, workspace, registry=None):
+            self.workspace = workspace
+
+        @staticmethod
+        def is_available():
+            return False
+
+        def bind_mounts(self, iid, *, all_containers=True):
+            raise AssertionError("Docker 不可用时不应调用 bind_mounts")
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime", _FakeUnavailable
+    )
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_WARN  # 陈旧 appPath 仍 WARN
+    assert stale in (r.detail or "")
+    assert "appPath" in (r.detail or "")
+    # 挂载子项应标记跳过，不得因 Docker 把整体 FAIL
+    assert r.status != STATUS_FAIL
+    detail_lower = (r.detail or "").lower() + " " + (r.message or "").lower()
+    assert "skip" in detail_lower or "跳过" in detail_lower or "不可用" in (
+        r.detail or ""
+    ) or "不可用" in (r.message or "")
+
+    class _FakeInspectFail:
+        def __init__(self, workspace, registry=None):
+            self.workspace = workspace
+
+        @staticmethod
+        def is_available():
+            return True
+
+        def bind_mounts(self, iid, *, all_containers=True):
+            raise DockerError("inspect mounts failed", instance_id=iid)
+
+    # 恢复规范路径，仅测观测失败时挂载 SKIP、整体不 FAIL
+    m2 = _seed_sqlite_container_with_canonical_paths(ws, reg, "api2")
+    assert m2.appPath
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime", _FakeInspectFail
+    )
+    r2 = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r2.status != STATUS_FAIL
+    # api 的陈旧字段仍在；api2 规范路径 + 挂载 SKIP → 仍可能 WARN（来自 api）
+    # 但不得因为挂载观测失败而整体 FAIL
+    assert "api2" not in (r2.detail or "") or "bind" not in (
+        (r2.detail or "").lower()
+    ) or "skip" in ((r2.detail or "") + (r2.message or "")).lower() or "跳过" in (
+        (r2.detail or "") + (r2.message or "")
+    )
+
+
+def test_workspace_consistency_warns_on_caddy_ref_outside_workspace_even_if_exists(
+    env, monkeypatch, tmp_path
+) -> None:
+    """BUG-426：旧路径被 Docker 重建后仍存在，仅查存在性会漏报——越界即 WARN。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    _seed_static_with_canonical_paths(ws, reg, "demo")
+    # 旧工作区路径真实存在（模拟 Docker 自动重建的 bind 源目录）
+    old_root = tmp_path / "old-workspace" / "apps" / "demo" / "public"
+    old_root.mkdir(parents=True)
+    (old_root / "index.html").write_text("stale", encoding="utf-8")
+    site = ws.static_sites / "demo.conf"
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_text(f":18000 {{\n\troot * `{old_root}`\n}}\n", encoding="utf-8")
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_WARN
+    detail = r.detail or ""
+    assert str(old_root) in detail
+    assert "不在当前工作区" in detail
+
+
+@pytest.mark.parametrize("quote", ['"', "`"])
+def test_workspace_consistency_ignores_missing_caddy_output_log(
+    env, monkeypatch, quote
+) -> None:
+    """BUG-428：``log { output file <path> }`` 的日志文件由 Caddy 运行时
+    按需创建，全新工作区/无访问时尚不存在属正常——不得对它做存在性校验
+    而误报并错误建议 rebuild/recover（双引号与反引号两种引用格式均覆盖）。
+    """
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    _seed_static_with_canonical_paths(ws, reg, "demo")
+    site = ws.static_sites / "demo.conf"
+    site.parent.mkdir(parents=True, exist_ok=True)
+    # static_gateway 实际生成格式：output file "<ws>/logs/static-access.log"
+    log_ref = (ws.logs / "static-access.log").as_posix()
+    site.write_text(
+        "log {\n"
+        f"\toutput file {quote}{log_ref}{quote} {{\n"
+        "\t\troll_size 10mb\n"
+        "\t}\n"
+        "\tformat json\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    # 日志文件确实不存在（模拟全新工作区/无访问）
+    assert not (ws.logs / "static-access.log").exists()
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    # 不得因缺失日志文件而误报 WARN
+    assert r.status == STATUS_OK
+    assert r.detail is None
+
+
+def test_workspace_consistency_ignores_missing_log_with_comment_header(
+    env, monkeypatch
+) -> None:
+    """BUG-429：``generate_site_config`` 生成的片段首行是 ``# 渲染变量：…``
+    注释头，其中已含同一日志路径；若豁免逻辑只看首次出现位置，命中的是
+    注释行而非 ``output file`` 指令行，豁免失效仍会误报。必须扫描所有
+    出现位置，任一处于 ``output file`` 指令行即豁免。
+    """
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    _seed_static_with_canonical_paths(ws, reg, "demo")
+    site = ws.static_sites / "demo.conf"
+    site.parent.mkdir(parents=True, exist_ok=True)
+    log_ref = (ws.logs / "static-access.log").as_posix()
+    public_ref = (ws.apps / "demo" / "public").as_posix()
+    # 真实 generate_site_config 输出格式：注释头先含日志路径，之后才是指令
+    site.write_text(
+        f"# 渲染变量：18000、`{public_ref}`、demo、`{log_ref}`（IMP-028）\n"
+        f"# 访问日志统一写 `{log_ref}`\n"
+        ":18000 {\n"
+        f"\troot * `{public_ref}`\n"
+        "\tlog {\n"
+        f"\t\toutput file `{log_ref}` {{\n"
+        "\t\t\troll_size 10mb\n"
+        "\t\t}\n"
+        "\t\tformat json\n"
+        "\t}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    assert not (ws.logs / "static-access.log").exists()
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_OK
+    assert r.detail is None
+
+
+def test_workspace_consistency_warns_on_caddy_output_log_outside_workspace(
+    env, monkeypatch
+) -> None:
+    """BUG-428 配套：``output file`` 路径落在当前工作区之外（挂载漂移残留）
+    仍必须 WARN——log 路径豁免的只是“文件本身不存在”，不是“越界”。
+    """
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    _seed_static_with_canonical_paths(ws, reg, "demo")
+    site = ws.static_sites / "demo.conf"
+    site.parent.mkdir(parents=True, exist_ok=True)
+    drifted = "/old/workspace/logs/static-access.log"
+    site.write_text(
+        "log {\n"
+        f'\toutput file "{drifted}" {{\n'
+        "\t\troll_size 10mb\n"
+        "\t}\n"
+        "\tformat json\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_WARN
+    assert drifted in (r.detail or "")
+    assert "不在当前工作区" in (r.detail or "")
+
+
+def test_workspace_consistency_skip_status_when_mount_check_not_done(
+    env, monkeypatch
+) -> None:
+    """BUG-427：无其他发现但挂载检查未完成 → STATUS_SKIP，不得报 OK。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    ws, config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
+
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_SKIP
+    assert "SKIP" in (r.message or "") or "跳过" in (r.detail or "")
+    assert r.suggestion is not None
 
