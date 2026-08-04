@@ -2207,7 +2207,7 @@ AND prefixed.content_length > 0
 
 > **前置运行时修复**：BUG-382（外部 down 后 start → `up -d`）、BUG-383（pageviews 路径无关游标）、BUG-384（`autostart repair` 保留 gateway）。
 
-> **文档**：人工逃生舱 [`docs/workspace-rename.md`](../../docs/workspace-rename.md)（DOC-081）；实现计划 [`docs/plans/2026-07-29-workspace-relocate.md`](../../docs/plans/2026-07-29-workspace-relocate.md)（PLN-027）。
+> **文档**：人工逃生舱 [`docs/workspace-rename.md`](../../docs/workspace-rename.md)（DOC-081）；实现计划 [`design/plans/…实施计划合集` · 工作区迁移](../plans/local-webpage-access-实施计划合集-20260804.md#2026-07-29-工作区迁移workspace-relocate实施计划)（PLN-027）。
 
 > **实现跟踪**：`DEV-089`。
 
@@ -2367,7 +2367,7 @@ preflight → backup → quiesce → move → rebind → regenerate → restore 
 | **043.b** | 优先级 | `--name`（user）> HTML title（html_title）> `titleize(slug)`（slug） |
 | **043.c** | 溯源字段 | manifest 新增可选 `nameSource`：`user` \| `html_title` \| `slug`。旧实例为 `null` 时，仅当 `name == titleize(id)` 才允许 title 回填（避免误改用户手工名）。 |
 | **043.d** | 旧实例回填 | `status.all_statuses` 拉列表时对可覆盖名调用 `refresh_display_name_from_homepage`（写回 manifest + registry）；已是 user/html_title 则跳过。 |
-| **043.e** | 列宽 / 表格布局 | **已废弃原方案**（原：`table-layout: fixed` + `.col-name` / `.cell-name` 固定 200px）。**现行**：恢复 V0.6.9 布局；仅名称按钮 `-webkit-line-clamp: 2`。详见 BUG-413 / BUG-414 与 `docs/plans/2026-07-30-manager-table-layout*.md`。 |
+| **043.e** | 列宽 / 表格布局 | **已废弃原方案**（原：`table-layout: fixed` + `.col-name` / `.cell-name` 固定 200px）。**现行**：恢复 V0.6.9 布局；仅名称按钮 `-webkit-line-clamp: 2`。详见 BUG-413 / BUG-414 与 [`design/plans/…实施计划合集` · 管理页表布局](../plans/local-webpage-access-实施计划合集-20260804.md#2026-07-30-管理页实例表布局修复设计)。 |
 | **043.f** | update | `import --update`：若旧名仍可覆盖（slug / 旧 null+titleize 匹配），则按新包主页 title 刷新。 |
 
 ### 25.4 触点

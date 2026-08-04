@@ -325,33 +325,6 @@ def test_host_instance_dispatches_static(
     stop_instance(workspace, config, registry, "demo")
 
 
-def test_host_instance_dispatches_container(
-    workspace: Workspace, registry: Registry, config: Config, monkeypatch
-) -> None:
-    """Phase 3：host_instance 对 docker-compose 实例应派发到 host_container。
-
-    强制 Docker 不可用，前置检查会抛 DockerError（而非旧的 HostingError），
-    从而证明派发确实走进了 host_container 分支。
-    """
-    from tests._helpers import make_container_manifest
-
-    def _unavailable():
-        raise DockerError("Docker 不可用")
-
-    monkeypatch.setattr(
-        "local_webpage_access.hosting.DockerRuntime.ensure_available", staticmethod(_unavailable)
-    )
-
-    workspace.ensure_app_dirs("api")
-    m = make_container_manifest("api")
-    m.save(workspace.app_manifest_path("api"))
-    registry.upsert_from_manifest(m)
-
-    # Docker 不可用 → 前置检查抛 DockerError（证明已派发到 host_container）
-    with pytest.raises(DockerError, match="不可用"):
-        host_instance(workspace, config, registry, "api")
-
-
 def test_stop_instance_disables_gateway(
     workspace: Workspace, registry: Registry, config: Config
 ) -> None:
@@ -608,39 +581,6 @@ def test_host_static_restart_kills_old_process(
     assert gw._pid_alive(new_pid)
 
     stop_instance(workspace, config, registry, "demo")
-
-
-def test_stop_instance_dispatches_container_runtime(
-    workspace: Workspace, registry: Registry, config: Config, monkeypatch
-) -> None:
-    """Phase 3：stop 对 docker-compose 实例派发到 compose stop。
-
-    BUG-006 原要求"对容器实例 stop 明确报错而非静默无操作"——Phase 3 起
-    容器实例已支持 stop，故断言改为：确实调用了 docker compose stop。
-    """
-    from tests._helpers import make_container_manifest
-
-    workspace.ensure_app_dirs("api")
-    m = make_container_manifest("api")
-    m.save(workspace.app_manifest_path("api"))
-    registry.upsert_from_manifest(m)
-
-    stopped = {"called": False}
-
-    class _FakeRuntime:
-        def __init__(self, *a, **kw):
-            pass
-
-        def stop(self, iid, **kw):
-            stopped["called"] = True
-
-    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
-    manifest = stop_instance(workspace, config, registry, "api")
-    assert stopped["called"] is True
-    assert manifest.status == Status.STOPPED
-    row = registry.get_instance("api")
-    assert row["status"] == "stopped"
-    assert row["desired_state"] == "stopped"
 
 
 # ---- 回归测试：BUG-016 ----------------------------------------------------

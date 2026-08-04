@@ -33,8 +33,9 @@ description: >-
 lwa import inbox/foo.zip
 # 可选：给静态站点起一个路径别名（IMP-006），通过 http://<LAN-IP>:<gatewayPort>/<alias>/ 访问
 lwa import inbox/foo.zip --path-alias myapp
-# 可选：自定义显示名称（影响 instance id slug）
+# 可选：自定义显示名称（优先于主页 <title>；影响 instance id slug）
 lwa import inbox/foo.zip --name "My App"
+# 未传 --name 时：优先解析主页 <title>（含 dist/build 等托管产物入口），否则 slug 美化
 ```
 
 导入后也可在线修改路径别名（V0.4.1 起）：

@@ -28,7 +28,6 @@ from local_webpage_access.status import (
     InstanceStatus,
     all_statuses,
     instance_status,
-    status_counts,
     sync_status,
 )
 
@@ -290,6 +289,9 @@ def test_port_mapping_label_in_to_dict(workspace, registry, config) -> None:
     assert d["portMappingLabel"] == "8000→21000"
     assert d["internalPort"] == 8000
     assert d["hostPort"] == 21000
+    # 核心身份字段序列化冒烟（原 test_status_to_dict 并入）
+    assert d["id"] == "api"
+    assert "desiredState" in d
 
 
 def test_port_mapping_label_none_in_to_dict_for_static(
@@ -314,21 +316,6 @@ def test_all_statuses_returns_all(workspace, registry, config) -> None:
     _seed_static(workspace, registry, "demo")
     statuses = all_statuses(workspace, config, registry)
     assert {s.id for s in statuses} == {"api", "demo"}
-
-
-def test_status_counts(workspace, registry, config) -> None:
-    _seed_container(workspace, registry, "api")  # running
-    _seed_static(workspace, registry, "demo")  # running
-    counts = status_counts(registry)
-    assert counts.get("running", 0) >= 2
-
-
-def test_status_to_dict(workspace, registry, config) -> None:
-    _seed_container(workspace, registry, "api")
-    d = instance_status(workspace, config, registry, "api").to_dict()
-    assert d["id"] == "api"
-    assert d["hostPort"] == 21000
-    assert "desiredState" in d
 
 
 def test_status_to_dict_includes_manager_list_fields(

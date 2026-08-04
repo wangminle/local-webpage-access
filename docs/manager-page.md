@@ -164,7 +164,7 @@ Content-Type: application/json
 
 | 字段 | 说明 |
 | --- | --- |
-| `name` | 显示名（优先 `--name` / 主页 `<title>` / slug 美化；见 IMP-043） |
+| `name` | 显示名（优先 `--name` / 主页 `<title>`（含 `dist/`/`build/` 等产物入口） / slug 美化；见 IMP-043） |
 | `hostPort` | 实例宿主端口 |
 | `internalPort` | manifest 中的内部/期望端口（容器或 scanner 识别） |
 | `portMappingLabel` | 形如 `33001 → 18001` 的映射说明 |
@@ -270,7 +270,7 @@ Authorization: Bearer <token>
 单页前端（`/`，Vue 3）提供：
 
 * **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）；任一实例 `lanAddressStale` 时另有 **LAN 地址漂移**横幅，并可一键「刷新访问地址」（`POST /api/access/refresh`，IMP-040）。
-* **实例列表**：每行显示名称（**IMP-043**：导入优先显式 `--name`，其次主页 HTML `<title>`，否则 slug 美化；`nameSource` 区分 `user` / `html_title` / `slug`；名称最多两行省略，列宽随内容自然分配）、冗余实例带「冗余」徽章与行高亮、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **取消构建** / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing/cancelling` 时相应禁用）；状态为 `queued` / `building` / `cancelling` 时显示「取消构建」（IMP-039）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043；CLI：`lwa recover <id>`）。
+* **实例列表**：每行显示名称（**IMP-043**：导入优先显式 `--name`，其次主页 HTML `<title>`——含 `dist/`/`build/` 等托管产物入口，实体按浏览器语义解码——否则 slug 美化；`nameSource` 区分 `user` / `html_title` / `slug`；旧自动名回填持实例锁；名称最多两行省略，列宽随内容自然分配）、冗余实例带「冗余」徽章与行高亮、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **取消构建** / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing/cancelling` 时相应禁用）；状态为 `queued` / `building` / `cancelling` 时显示「取消构建」（IMP-039）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043；CLI：`lwa recover <id>`）。
 * **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，规则不变）。
 * **删除确认（IMP-035）**：受控双阶段模态——① 选择「仅移除」（默认，`purge=false`）或「彻底删除」（`purge=true`）；② 输入完整项目 ID；彻底删除须勾选「理解数据不可恢复」。非空 `data/` 首次 purge 得 409 `data_nonempty` 后，再勾选强制确认才发 `force=true`（不自动重试）。打开时焦点进入对话框，Tab 限制在模态内，Esc/关闭后恢复触发按钮焦点。
 * **路径别名对话框**：`shared-static` 与 `docker-compose` 实例操作区「路径别名」按钮可用（pending/building/queued 态禁用）；输入 slug 保存或清除；校验错误在对话框内展示。builtin 后端下设置会失败并展示后端错误信息（IMP-022）。

@@ -440,6 +440,17 @@
 | BUG-426 | 修复 | BUG-426：doctor 仅查 Caddy 引用路径存在性，旧路径被 Docker 自动重建后仍存在导致漏报（本次迁移事故形态） | 2026-08-03 19:07 | 2026-08-03 19:07 | 已修复 | doctor.check_workspace_path_consistency 第 2 段改为：引用路径必须在当前 workspace 根之内（越界即 WARN）且存在；新增「存在但越界」测试（tmp 真实旧目录） |
 | BUG-427 | 修复 | BUG-427：doctor 挂载检查被跳过（Docker 不可用/inspect 失败）却返回 STATUS_OK，JSON 消费者误判已验证 | 2026-08-03 19:07 | 2026-08-03 19:07 | 已修复 | 无其他发现但挂载子项未完成时改返回 STATUS_SKIP 并附 suggestion；新增 SKIP 状态测试。验证：定向套件 171 项全绿；全量 pytest 1577 passed/4 skipped；compileall/ruff/mypy 通过；真实环境 lwa doctor 的 workspace_path_consistency 返回真 OK |
 | BUG-428 | 修复 | doctor._is_caddy_runtime_created_path 只查路径首次出现位置，而 generate_site_config 生成的站点片段首行 # 渲染变量 注释头已含同一日志路径，命中的是注释行而非 output file 指令行，BUG-428 豁免失效，全新工作区仍误报 static-access.log 不存在 | 2026-08-03 19:19 | 2026-08-03 19:19 | 已修复 | 改为循环扫描所有出现位置，任一处于 output file 指令行即豁免；新增 test_workspace_consistency_ignores_missing_log_with_comment_header 回归测试（真实注释头格式）；实测真实片段 exempt True；全量 1581 passed、ruff/mypy 通过 |
+| BUG-429 | 修复 | 容器查询失败被当作无容器，挂载漂移 fail-safe 可被绕过并 compose start 带旧挂载容器 | 2026-08-04 10:26 | 2026-08-04 10:26 | 已修复 | docker_runtime 新增 container_id_strict（仅'查询成功但无容器'返回 None，ps 非零退出抛 DockerError）；宽松版 container_id 语义不变（委托 strict+吞错）；bind_mounts 改走 strict（ps 失败不再误报无挂载）；hosting._managed_sqlite_data_mount_drifted 改用 strict，查询失败抛 HostingError 中止启动。新增 ps 失败中止、strict 抛错、bind_mounts ps 失败抛错 3 个测试 |
+| BUG-430 | 修复 | doctor workspace_path_consistency 在 registry 不可用/读取失败时静默 rows=[]，错误报告全部一致 OK（假绿） | 2026-08-04 10:26 | 2026-08-04 10:26 | 已修复 | registry=None（run_doctor 降级路径）或 list_instances 抛错时记录未完成原因并返回 STATUS_SKIP（聚合分支与 BUG-427 共用，文案泛化）；SKIP 分支 suggestion 更新。新增 registry None / 读取失败两个 SKIP 测试。验证：定向 180 项全绿；全量 1586 passed/4 skipped；compileall/ruff/mypy 通过；真实环境 lwa doctor 全绿 |
+| BUG-431 | 修复 | pageviews 双轮转时逆序选最新 len>=offset 归档为 pivot，重读最旧已消费前缀并跳过较新归档开头 | 2026-08-04 10:55 | 2026-08-04 10:55 | 已修复 | CHK-148/CHK-150 P2-1。_read_new_lines pivot 改为 mtime 升序取最旧可读且 len>=offset 的归档（BUG-431）。回归 test_read_new_lines_pivot_oldest_when_newer_archive_also_long_enough；pageviews 62 passed。 |
+| BUG-432 | 修复 | 旧版非零游标无 rotarch meta 时把头比对失败当成新轮转，升级后重读历史 gzip 与当前文件开头导致浏览量双计 | 2026-08-04 10:55 | 2026-08-04 10:55 | 已修复 | CHK-148/CHK-150 P2-2。size>=offset 且无 rotarch 时，mtime 早于 cursor.updated_at 的归档写入迁移态（已消费）而非 catchup（BUG-432）。get_cursor_with_updated_at 辅助。回归 test_read_new_lines_legacy_cursor_does_not_reread_preexisting_archives。 |
+| BUG-433 | 修复 | 归档解压失败仍把指纹写入已消费集合，恢复可读后永久漏计 | 2026-08-04 10:55 | 2026-08-04 10:55 | 已修复 | CHK-148/CHK-150 P2-3。catchup/残留路径只标记本轮成功读取的归档；全部失败时不重置 offset（BUG-433）。回归 test_read_new_lines_does_not_mark_unreadable_archive_consumed。验证：定向轮转 10 项+全量 test_pageviews 62 passed；三场景最小复现均通过。 |
+| BUG-434 | 修复 | refresh_display_name_from_homepage 无锁写回陈旧整份 manifest，可覆盖并发 start/stop/update 的 desiredState/状态/端口 | 2026-08-04 12:06 | 2026-08-04 12:06 | 已修复 | CHK-152 P1。instance_lock 内重读后只改 name/nameSource；回归 test_refresh_display_name_holds_lock_and_rereads_manifest。 |
+| BUG-435 | 修复 | find_homepage_index 跳过 dist/build，预构建静态包导入/回填只能用 slug 名 | 2026-08-04 12:06 | 2026-08-04 12:06 | 已修复 | CHK-152 P2。对齐 hosting.find_build_output，优先扫描产物目录 index.html；skip 集移除 dist/build。回归 test_find_homepage_index_supports_dist_and_build。 |
+| BUG-436 | 修复 | extract_html_title 先 unescape 再剥标签，合法实体标题如 &lt;Admin&gt; 被误删 | 2026-08-04 12:06 | 2026-08-04 12:06 | 已修复 | CHK-152 P2。先去原始标签再 html.unescape（RCDATA）。回归 test_extract_html_title_preserves_entity_angle_brackets。验证：test_importer 全绿。 |
+| BUG-437 | 修复 | 复核 CHK-154：工作区迁移 rollback/resume/Caddy/autostart/备份/锁/JSON/IMP-023/Skill 计数等 15 项；确认 BUG-386～405 已落地，并加固 resume 空 PREFLIGHT snapshot 不得跳过采样 | 2026-08-04 12:16 | 2026-08-04 12:16 | 已修复 | 读码+定向 pytest 确认 9×P1+6×P2 均已修；仅发现 resume 对 journal 空 snapshot={} 仍会误复用，改为要求 captured_at 非空；新增 test_resume_empty_preflight_snapshot_recaptures；相关 suites 全绿。 |
+| BUG-438 | 修复 | 多归档追赶中部分归档解压失败仍重置 offset 并续读当前日志，失败归档恢复后前缀被误切（永久漏计）且当前日志重复摄入 | 2026-08-04 12:36 | 2026-08-04 12:36 | 已修复 | CHK-158 P2。改为仅当本轮全部待读归档成功解压才重置游标/写指纹/续读当前日志，任一失败整轮延后（不摄入、不推进、不写指纹）下轮重试；同步更新 _archive_uncompressed 与 _read_new_lines docstring。回归 test_read_new_lines_defers_catchup_when_any_archive_unreadable。验证：test_pageviews 63 passed；test_daemon+test_doctor 158 passed。 |
+| BUG-439 | 修复 | pageviews：size≥offset 且 pivot 因归档不可解压选不出时仍推进游标并误标短归档，导致漏计 | 2026-08-04 12:42 | 2026-08-04 12:42 | 已修复 | CHK-158 残留。BUG-438 只覆盖 need_archive_catchup 路径的全有或全无；pivot is None 分支在任一归档不可解压时改为整轮延后。回归 test_read_new_lines_defers_when_pivot_missing_due_to_unreadable；test_pageviews 全绿。 |
 
 ## 调整事项
 
@@ -484,6 +495,8 @@
 | ADJ-037 | 调整 | 按二次源码核查结论细化裸 mv 迁移防复发任务记录与优先级 | 2026-08-03 16:17 | 2026-08-03 16:17 | 已完成 | 更新 CHK-137：由含混的“3 处缺口”改为 3 个核心缺口+2 个候选增强，并关联 BUG-420/421/422、DEV-094；更正 OPS-085/086 对 gateway on 自动重装配的因果表述；P4 明确暂缓盲目旧新路径文本替换。使用 task-list CLI 追加待办、重算统计摘要并通过 check 与 git diff --check。 |
 | ADJ-038 | 调整 | task-list 标准化整理：CHK-078 迁回检查事项；关闭 DOC-093/DEV-093 重复登记 | 2026-08-03 19:20 | 2026-08-03 19:20 | 已完成 | 来源 standardize 报告：CHK-078 误放测试数据分区（期望 TST-）；DOC-093=DOC-092、DEV-093=DEV-092 同内容双记。ID 均不复用。历史约 15 条发现时间晚于完成时间（多差 1～2 分钟）暂不改写。未启用 extended/优化事项分区。 |
 | ADJ-039 | 调整 | task-list 标准化整理：CHK-078 迁回检查事项；关闭 DOC-093/DEV-093 重复登记 | 2026-08-03 19:20 | 2026-08-03 19:20 | 已完成 | 来源 standardize 报告：CHK-078 误放测试数据分区（期望 TST-）；DOC-093=DOC-092、DEV-093=DEV-092 同内容双记。ID 均不复用。历史约 15 条发现时间晚于完成时间（多差 1～2 分钟）暂不改写。未启用 extended/优化事项分区。 |
+| ADJ-040 | 优化 | 清理证据充分的重复/过时测试与死代码：phase57 迁删、函数级去重、setup.generate_launchd_plists、合并 _is_lwa_repo | 2026-08-04 12:54 | 2026-08-04 12:54 | 已完成 | 核实后执行：删 test_integration_phase57（独有 daemon→manager 迁入 test_daemon；compose 审计已在 test_security）；删 hosting 两 Phase3 / compose env_local / build_queue timeout 子集 / static_gateway 恒真+health 重复；gateway_service 两 writes_main 合并参数化；删 health_status.status_counts 透传测。src：删除无生产调用方的 generate_launchd_plists+format_autostart_report；updater 复用 version_info._is_lwa_repo。docs/testing.md 同步。疑似 8 处未动。全量 pytest exit 0（4 Docker skip）。 |
+| ADJ-041 | 优化 | 勾选并处理测试审查疑似 8 处中的 5 处：删 pageviews_summary/dry_run 子集/fixtures 三个 kind 断言，status_to_dict 与 default_status_pending 并入更强用例 | 2026-08-04 13:07 | 2026-08-04 13:07 | 已完成 | 核实 ADJ-040 属实后执行。删：test_pageviews_summary_returns_dict、test_dry_run_makes_no_changes、fixtures 的 node_express/fastapi/vite_react 三条 kind 断言（参数化用例已覆盖）；并：status_to_dict 的 desiredState 断言并入 test_port_mapping_label_in_to_dict、default_status_pending 的 desiredState STOPPED 并入 test_static_manifest_valid。保留 3 处：is_running BUG-065 公开入口、build_queue 两条并发序列化（不同修复层）、e2e skills==18 双保险。验证：受影响 5 套件 197 passed、ruff 全绿、全量 1572 passed, 4 skipped（Docker opt-in），与 1579-7 自洽。 |
 
 ## 检查事项
 
@@ -635,6 +648,19 @@
 | CHK-144 | 检查 | task-list-initialization standardize/check：结构诊断与整理收口 | 2026-08-03 19:20 | 2026-08-03 19:20 | 已完成 | check 通过；standardize 报告 docs/task-list-standardize-report.md；profile=planning；待办 0；维护规则 CLAUDE.md + Stop hook 已装。整理见 ADJ 本轮条目。 |
 | CHK-145 | 检查 | （去重）与 CHK-144 内容完全重复 | 2026-08-03 19:20 | 2026-08-03 19:21 | 已关闭 | 去重合并至 CHK-144；ID 不复用，本条仅留审计痕迹。 |
 | CHK-146 | 检查 | 复查全部待提交代码（29 文件 +1908 行）是否仍有 bug：8 个源码文件逐一核查 + 测试核对 | 2026-08-03 19:39 | 2026-08-03 19:39 | 已完成 | 结论：未发现明确 bug。逐项排除：BUG-369 写回前重读 rescue（Status 无 unknown 值，ValueError 被抑制，keep 保留可信态）；BUG-421 漂移检测（../data 相对 compose 解析，docker 创建时固化为绝对路径，裸 mv 必漂移；两管理目标同源）＋strict rescue fail-safe；BUG-422 派生路径刷新先于 manifest.save/upsert；BUG-424 宿主 data 非空即中止；BUG-426 越界判定用 is_relative_to 而非存在性；BUG-428/429 日志路径豁免扫描全部出现位置（真实模板注释头先于指令行）；write_main_config 只写盘不 reload、重入锁无死锁；_project_service 移除无调用者。门禁：1581 passed/4 skipped，ruff 与 mypy 通过。边角（非 bug）：单行 log{ output file } 形式豁免不匹配（实际生成多行形式）；image_id 取 refs[0]（单服务 compose）；在线路径 write_main_config 先于 reload_all 为冗余无害 |
+| CHK-147 | 检查 | 审查相对 main 合并基准 f2ac669 的代码变更 | 2026-08-04 09:46 | 2026-08-04 09:46 | 已完成 | HEAD 与合并基准均为 f2ac669，git diff 文件数与字节数均为 0，无代码变更可审查、无发现项 |
+| CHK-148 | 检查 | 审查提交 0f6a62af（V0.6.11-Build1853-20260731）的代码变更 | 2026-08-04 10:22 | 2026-08-04 10:22 | 已完成 | 发现 pageviews 轮转归档游标算法存在多轮转错选 pivot、升级重复计数及归档读取失败仍标记已消费等问题；定向测试 207 passed；全量测试受沙箱禁用本地端口及中断影响未完成。 |
+| CHK-149 | 检查 | 复核审查意见 P1/P2：容器查询失败绕过挂载 fail-safe、registry 不可读时 doctor 假绿是否已修复 | 2026-08-04 10:28 | 2026-08-04 10:28 | 已完成 | 对照源码+回归：P1 已用 container_id_strict（hosting._managed_sqlite_data_mount_drifted / bind_mounts），ps 失败抛 HostingError/DockerError，禁止当无容器启动；P2 registry=None 或 list_instances 抛错记 mount_notes 并返回 STATUS_SKIP。6 项定向测试全绿（test_mount_drift_ps_failure_aborts_without_start、test_container_id_strict_raises_on_ps_failure、test_bind_mounts_raises_on_ps_failure、test_workspace_consistency_skip_when_registry_*、test_workspace_consistency_skip_status_when_mount_check_not_done） |
+| CHK-150 | 检查 | 复核 CHK-148 三项 pageviews 轮转审查意见是否已修复 | 2026-08-04 10:44 | 2026-08-04 10:44 | 已完成 | 结论：三项均未修复，代码仍停在 0f6a62a 算法。P2-1 逆序选最新 len>=offset 为 pivot，双轮转且较新归档也够长时会重读最旧归档前缀并跳过较新归档开头；P2-2 offset>0 且 last_ts 空时头比对会把历史 gzip 当新轮转致升级双计；P2-3 catchup 后把 all_archives 指纹写入已消费，解压失败归档永久漏计。最小复现三场景均触发。现有 test_read_new_lines_catches_up_two_archives_between_ingests 因中间归档短于 offset 未覆盖错选 pivot。未见对应 BUG 条目落地修复。 |
+| CHK-151 | 检查 | 复核 CHK-148 三项 pageviews 轮转审查意见（BUG-431/432/433）修复有效性 | 2026-08-04 10:58 | 2026-08-04 10:58 | 已完成 | 对照源码逐项核实：①pivot 代际选择——pageviews.py:1109-1119 按 mtime 升序取最旧可读且 len>=offset 归档（不再逆序选最新长度匹配项）；②旧游标迁移——:1079-1107 无 rotarch meta 且 size>=offset 时，mtime 早于 cursor.updated_at 的归档写入迁移态（标记已消费）而非头比对追赶；③消费指纹——:1141-1145/1155-1174 仅收录本轮成功解压读取的归档，全部失败时不重置 offset 不写指纹可重试。验证：test_pageviews 62 passed；三个专项回归测试（pivot_oldest/legacy_cursor/unreadable_archive）3 passed。修复为 10:55 另一轮工作落地，本次为独立复核 |
+| CHK-152 | 检查 | 审查提交 2a8968fa（V0.6.10-Build1816-20260730） | 2026-08-04 11:29 | 2026-08-04 11:29 | 已完成 | 完成目标提交差异、相关调用链与定向测试复核；发现 3 项可操作问题：列表回填并发覆写 manifest、dist/build 首页标题被跳过、HTML 实体标题被误删。定向测试在受限沙箱中除依赖本机端口的既有用例外通过。 |
+| CHK-153 | 检查 | 复核 CHK-152 三项 importer 审查意见（BUG-434/435/436）修复有效性 | 2026-08-04 12:08 | 2026-08-04 12:08 | 已完成 | 对照源码逐项核实：①并发覆写——refresh_display_name_from_homepage（importer.py:298-318）写回移入 instance_lock，锁内重读 manifest 并以新数据复核可覆盖性，仅改 name/nameSource，registry 侧只 update_name 不 upsert（避免清端口，BUG-410 注释在案）；②dist/build 跳过——find_homepage_index（:183-188）优先 find_build_output 解析产物目录 index.html，skip 集已无 dist/build，与 hosting.find_build_output 对齐；③实体顺序——extract_html_title（:159-162）先剥源码真实标签再 html.unescape，&lt;Admin&gt; 类合法实体不再被误删。验证：三个专项回归测试 3 passed；test_importer 全量 82 passed。修复为 12:06 另一轮工作落地，本次为独立复核 |
+| CHK-154 | 检查 | 审查提交 30b50df（V0.6.8-Build1718-20260729）的代码变更 | 2026-08-04 12:10 | 2026-08-04 12:10 | 已完成 | 发现 15 项可操作问题：rollback 未逆改写、resume 重采快照、Caddy 片段残留旧路径、autostart 非预期安装/重启禁用服务、SQLite 热拷贝、detached 控制面不恢复、显式 NEW 恢复失效、dry-run 写盘、迁移锁竞态、JSON 错误输出破约、IMP-023 瞬时失败误判、首轮错误日志被抑制、Skill 数量导致测试失败、backup_dir 迁移后失效。定向确认 tests/test_init.py::test_bundled_skills_have_discoverable_frontmatter 失败（18 != 17）。 |
+| CHK-155 | 检查 | 复核 CHK-154 审查意见是否仍存在并验证修复 | 2026-08-04 12:16 | 2026-08-04 12:16 | 已完成 | 15 项均已在 BUG-386～405 修完；本轮加固空 snapshot resume 边界并全量定向测试通过。 |
+| CHK-156 | 检查 | 复核 CHK-154：工作区迁移 9×P1 + 6×P2 是否仍存在 | 2026-08-04 12:19 | 2026-08-04 12:19 | 已完成 | 结论：15 项均已修复（BUG-386～405；CHK-155/BUG-437 已有先例）。读码确认 rollback rebind、resume 复用 captured_at 快照、sites/aliases 改写、autostart 门控、repair 不重启用已关服务、SQLite online backup、detached 控制面恢复、CLI journal 权威、skills=18、dry-run 只读、O_EXCL 锁、JSON LwaError、IMP-023 忽略连接失败、last_error_log_at=-inf、backup_dir 重映射。定向 13 项 pytest 全绿。 |
+| CHK-157 | 检查 | 复核 CHK-154 十五项工作区迁移审查意见是否仍存在 | 2026-08-04 12:21 | 2026-08-04 12:21 | 已完成 | 结论：15 项均已修复，无残留。逐项读码核实：①rollback 反向 rebind+重生配置（:1320，BUG-386）；②resume 复用 captured_at 非空的快照（:1177-1182，BUG-437 加固空 PREFLIGHT 边界）；③rebind 含 rewrite_gateway_fragment_paths（:697）；④autostart repair 按 snapshot.autostart_installed 门控（:860）；⑤repair 对配置已关闭的残留单元 disable 而非重启用（BUG-389）；⑥SQLite Online Backup API（:513-519，BUG-392）；⑦快照含 control_plane_running 并恢复 detached 控制面（:86，BUG-395）；⑧CLI resume/verify/rollback 以 journal OLD/NEW 为权威；⑨Skill 计数断言=18（test_init.py:124/150）；⑩dry-run 只读 registry+read_only 采样不建 pageviews.db（:1051-1056/:445-449，BUG-394）；⑪O_CREAT\|O_EXCL 原子锁（:242，BUG-396）；⑫LwaError 在 --json 下输出结构化错误；⑬IMP-023 仅 HTTP 响应异常判 mismatch，连接级失败豁免（BUG-399）；⑭last_error_log_at 初值 -inf 首轮必记；⑮MOVE 后 backup_dir 前缀重映射（:1213-1216，BUG-393）。验证：test_workspace_migrate/autostart/access/manager_api/init 五套件 252 passed。此前 CHK-155/CHK-156 两轮复核结论一致，本次为第三轮独立复核 |
+| CHK-158 | 检查 | 审查相对 main 合并基准 f2ac6697 的代码变更（V0.6.13 待提交工作树） | 2026-08-04 12:27 | 2026-08-04 12:27 | 已完成 | 发现 1 项 P2：pageviews 多归档追赶中部分归档不可读时仍重置 offset，后续恢复会漏读该归档前缀并重复读取当前日志；最小复现已确认。ruff 通过；pageviews/importer/docker_runtime/workspace_migrate 定向套件通过；全量测试受沙箱禁用本地端口影响，host_container 另受无 LAN 环境影响。 |
+| CHK-159 | 检查 | 复核 CHK-158：多归档部分不可读时浏览量漏计/双计是否仍存在 | 2026-08-04 12:42 | 2026-08-04 12:42 | 已完成 | 结论：catchup 全有或全无（BUG-438）已生效；另发现并修复 size≥offset+pivot 缺失残留（见同期 BUG）。定向+全量 test_pageviews 通过。 |
 
 ## 测试数据
 
@@ -742,6 +768,10 @@
 | DOC-094 | 文档 | FAQ 补充 BUG-418：pageviews 归档重计导致 hits 暴涨的症状与脏数据清理 | 2026-07-31 12:39 | 2026-07-31 12:39 | 已完成 | docs/faq.md 浏览量条目 |
 | DOC-095 | 文档 | FAQ：多归档冷启动补读（BUG-419）与脏数据四表说明 | 2026-07-31 13:00 | 2026-07-31 13:00 | 已完成 | docs/faq.md 浏览量条目补充 BUG-419 |
 | DOC-096 | 文档 | 同步 V0.6.12 用户文档：README/faq/operations-playbook/known-limitations/workspace-rename/runtime-workspace/acceptance/release-checklist 与七项计划状态横幅 | 2026-08-03 19:17 | 2026-08-03 19:17 | 已完成 | 对齐裸 mv 防复发（BUG-420/421/422/423/424 + DEV-094）、doctor workspace_path_consistency（含 BUG-426/427/428）、镜像兜底 compose config --images（BUG-425）。计划 design/implementation 标为已落地。 |
+| DOC-097 | 文档 | 同步 V0.6.13 用户文档：README/faq/operations-playbook/known-limitations/manager-page/workspace-rename/runtime-workspace/acceptance/release-checklist 与 import/update skills | 2026-08-04 12:14 | 2026-08-04 12:14 | 已完成 | 对齐 BUG-428～436（挂载查询 fail-safe、registry SKIP、pageviews 轮转、显示名锁内回填/产物目录 title/实体解码）。功能引入仍标注 V0.6.12 处保留。 |
+| DOC-098 | 文档 | 合并 design/plans 下 7 篇历史计划为合集.md，并修正 docs/achievement 引用 | 2026-08-04 12:27 | 2026-08-04 12:27 | 已完成 | 新建 design/plans/合集.md + README.md；删除 7 篇独立 md；faq/workspace-rename/operations-playbook/新增功能点2607 链接改指向合集锚点；task-list 历史备注保留原路径不动。 |
+| DOC-099 | 文档 | 将 design/plans/合集.md 重命名为 local-webpage-access-实施计划合集-20260804.md，并入原 README，更新引用 | 2026-08-04 12:30 | 2026-08-04 12:30 | 已完成 | 删除 design/plans/README.md；faq/workspace-rename/operations-playbook/新增功能点2607 链接同步；命名对齐 design/achievement 惯例。 |
+| DOC-100 | 文档 | docs 去耦 design：移除 faq/workspace-rename/operations-playbook 对 design 的外链 | 2026-08-04 12:32 | 2026-08-04 12:32 | 已完成 | docs 自成体系；设计归档仅留在 design/；引用改为 docs 内文档互链。 |
 
 ## 功能开发
 
@@ -935,6 +965,7 @@
 | OPS-088 | 运维 | 执行迁移残留四步修复：重建 prd-review-v035 容器、批量改写 db/manifest 旧路径、重启 gateway 释放 caddy 旧 fd、安排旧目录观察期 | 2026-08-03 15:59 | 2026-08-03 15:59 | 已完成 | ①lwa rebuild prd-review-v035：容器重建（新挂载源=新工作区 data），数据完好（app.db 364544 为用户真实数据，含 7/31 密码与默认模型修改），:18004 与 /prd-review/ 均 200；②复用 workspace_migrate 思路批量改写：4 个 manifest、daemon-processed.json、db 六类字段（instances 4+4、containers 1+1、static_sites 1、builds 41、events 2）全部旧路径清零，doctor 全绿（首次执行因 REPLACE 参数写反空跑一轮，已纠正并复核）；③launchctl kickstart -k gateway：caddy 旧 fd 已释放，活动配置旧路径=0，三服务运行中；④发现 split-brain 曾真实发生：旧容器 15:20 在挂载空目录下重初始化种子库写入旧路径（无用户数据损失），Docker VM 仍持旧文件只读缓存句柄（无害）。已设 8/5 10:23 一次性提醒（cron 3b2319c4）：确认零新增后将旧目录移入废纸篓。注意：全部容器挂载已复查无旧路径 |
 | OPS-089 | 运维 | 旧目录已由用户自行移入废纸篓，取消 8/5 观察期删除提醒；清理迁移携带的陈旧 __pycache__ | 2026-08-03 19:07 | 2026-08-03 19:07 | 已完成 | 发现 ~/.Trash 有两份 8-本地简单网页部署基座（16:03 与稍晚各一份），步骤 4 提前完成，取消 cron 3b2319c4；排查 pytest SKIP 行显示旧路径之谜：系迁移带入的旧 __pycache__（pyc 内嵌旧源码路径），已全项目清理并复跑确认显示正确 |
 | OPS-090 | 运维 | 应用版本号提升至 V0.6.12：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/release-checklist/pack-release-zip 同步 | 2026-08-03 19:17 | 2026-08-03 19:17 | 已完成 | 活跃引用 0.6.11→0.6.12；task-list 历史 OPS-077 等保留不动。含七项待办收口与 BUG-423～428。lwa version 仍取 git HEAD 主题，提交 V0.6.12-Build1584 后即显示。 |
+| OPS-091 | 运维 | 应用版本号提升至 V0.6.13：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/pack-release-zip 同步 | 2026-08-04 12:14 | 2026-08-04 12:14 | 已完成 | 活跃引用 0.6.12→0.6.13；task-list 历史 OPS-090 等保留。含 pageviews 轮转、显示名回填、挂载/doctor fail-safe 加固。 |
 
 ## 规划事项
 
@@ -973,12 +1004,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 428 | 428 | 0 | 100% |
+| 代码 Bug | 437 | 437 | 0 | 100% |
 | 调整事项 | 39 | 39 | 0 | 100% |
-| 检查事项 | 144 | 144 | 0 | 100% |
+| 检查事项 | 157 | 157 | 0 | 100% |
 | 测试数据 | 1 | 1 | 0 | 100% |
-| 文档维护 | 96 | 96 | 0 | 100% |
+| 文档维护 | 97 | 97 | 0 | 100% |
 | 功能开发 | 94 | 94 | 0 | 100% |
-| 配置运维 | 89 | 89 | 0 | 100% |
+| 配置运维 | 90 | 90 | 0 | 100% |
 | 规划事项 | 28 | 28 | 0 | 100% |
-| **总计** | 919 | 919 | 0 | 100% |
+| **总计** | 943 | 943 | 0 | 100% |

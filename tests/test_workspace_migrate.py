@@ -623,6 +623,47 @@ def test_resume_reuses_journal_snapshot(
     assert result.snapshot.restore_instance_ids == ["keep-me"]
 
 
+def test_resume_empty_preflight_snapshot_recaptures(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-387 边界：PREFLIGHT 写入的空 snapshot 不得当有效快照跳过采样。"""
+    _patch_migrate_side_effects(monkeypatch)
+    new = tmp_path / "new-ws"
+    old = ws_root.resolve()
+    ws = Workspace(ws_root)
+    wm.write_journal(
+        ws,
+        {
+            "phase": "preflight",
+            "old": str(old),
+            "new": str(new.resolve()),
+            "snapshot": {},
+        },
+    )
+
+    captures: list[str] = []
+
+    def _capture(workspace, registry, **kwargs):
+        captures.append("ok")
+        return wm.MigrateSnapshot(
+            restore_instance_ids=["fresh"],
+            captured_at="2026-08-04T00:00:00Z",
+        )
+
+    monkeypatch.setattr(wm, "capture_snapshot", _capture)
+    monkeypatch.setattr(
+        wm,
+        "write_backup",
+        lambda *a, **k: ws.run / "migrate-backup-empty",
+    )
+
+    result = wm.run_migrate(old, new, resume=True, yes=True)
+    assert result.ok, result.error
+    assert captures == ["ok"], "空 snapshot 必须重采"
+    assert result.snapshot is not None
+    assert result.snapshot.restore_instance_ids == ["fresh"]
+
+
 def test_regenerate_skips_autostart_when_never_installed(
     ws_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

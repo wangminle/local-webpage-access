@@ -29,7 +29,7 @@ lwa doctor <id>     # 对单个实例做深度诊断（日志、状态、文件�
 lwa doctor --json   # 机器可读报告（含 platformSupport；未 init 亦可输出平台诊断）
 ```
 
-`doctor` 有 fail 时退出码为 1，可在脚本/CI 中用作门禁。未初始化工作区时，人类可读模式仍需工作区；`--json` 会尽量输出 `platformSupport` 供平台排障。`workspace_path_consistency`（V0.6.12）会核对派生路径、Caddy 引用是否落在当前工作区、SQLite data mount；挂载检查未完成时返回 SKIP 而非假绿 OK。
+`doctor` 有 fail 时退出码为 1，可在脚本/CI 中用作门禁。未初始化工作区时，人类可读模式仍需工作区；`--json` 会尽量输出 `platformSupport` 供平台排障。`workspace_path_consistency`（V0.6.12）会核对派生路径、Caddy 引用是否落在当前工作区、SQLite data mount；**V0.6.13** 起 registry 不可读、Docker 不可用或挂载观测失败时对应子项返回 SKIP（而非假绿 OK）。
 
 `doctor` 是唯一豁免平台门禁的命令（其余命令在平台 unsupported 时会直接 exit 2），所以它的人类可读输出**总会**在末尾追加「平台支持」段——平台不达标时，这里是你唯一能看到原因的地方：
 
@@ -320,6 +320,7 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 * **builtin** 或无别名容器：仍分别靠 `gateway.log` / docker logs（后者为近似）。
 * **V0.6.11 归档补读回归（BUG-418）**：若升级后 hits 每次打开管理页都暴涨，是同一 `-size.log.gz` 归档被反复补读；代码已修。脏数据可删 `run/pageviews.db`（下次打开管理页按日志重计），或手工改聚合表后把对应 `ingest_cursor.last_ts` 置为已消费归档指纹。
 * **多归档 / 冷启动漏计（BUG-419）**：多份 `-size.log.gz` 并存时须全部补读；`offset=0` 重置也会读齐未消费归档。清脏时四表一起看：`pageviews` / `pageview_detail` / `pageview_ip_stats`（弹窗 IP 次数）/ `pageview_ips`（按天去重，一般不用清）。删库重建前停 manager，并去掉 `pageviews.db-wal`/`-shm`，避免 WAL 盖回。
+* **V0.6.13 轮转游标加固（BUG-431/432/433）**：多轮转按最旧可读归档切尾；旧版无 rotarch 元数据的游标升级时不会把历史 gzip 误当新轮转双计；解压失败的归档不会标成已消费（恢复可读后可补读）。
 
 详见 [manager-page 浏览量](manager-page.md) 与 [known-limitations](known-limitations.md)。
 
@@ -398,6 +399,6 @@ lwa gateway switch builtin --dry-run     # 只看将影响的实例
 - **中断恢复**：失败后 `lwa workspace relocate --resume`（读 journal；可显式传 NEW）；必要时 `--rollback`（同卷 rename 回旧路径并逆改写配置）。
 - **dry-run**：只做预检与计划，不改磁盘（不建 pageviews.db、不以写模式开 registry）。
 - **人工逃生舱 / 跨盘**：见 **[LWA 工作区迁移手册](workspace-rename.md)**（DOC-081）。
-- **产品点**：IMP-042 / [PLN-027](plans/2026-07-29-workspace-relocate.md)；v1 支持 **macOS / Linux / WSL 同卷**原子改名，跨盘/跨机不自动。
+- **能力范围**：`lwa workspace relocate`（IMP-042）支持 **macOS / Linux / WSL 同卷**原子改名；跨盘/跨机不自动，请按 [工作区迁移手册](workspace-rename.md) 人工处理。
 - 若迁前已 `docker compose down`：含 BUG-382 的版本用 `lwa start` 即可 `up -d`；旧版本可能需临时 `lwa rebuild`。
-- **V0.6.12 起裸 mv 防复发**：`lwa doctor` 的 `workspace_path_consistency` 会报告陈旧派生路径、落在旧工作区的 Caddy 引用、SQLite data mount 漂移；`gateway on` 启动前按当前工作区落盘主配置；容器 start 遇挂载漂移会 fail-safe 救援，`down` 失败或两侧数据冲突时中止并要求人工确认。修复入口：`relocate --verify` / `rebuild` / `recover` / `gateway on`。
+- **V0.6.12 起裸 mv 防复发**：`lwa doctor` 的 `workspace_path_consistency` 会报告陈旧派生路径、落在旧工作区的 Caddy 引用、SQLite data mount 漂移；`gateway on` 启动前按当前工作区落盘主配置；容器 start 遇挂载漂移会 fail-safe 救援，`down` 失败或两侧数据冲突时中止并要求人工确认。**V0.6.13** 起：容器状态查询失败禁止当作「无容器」继续 start；registry 不可读时一致性检查 SKIP。修复入口：`relocate --verify` / `rebuild` / `recover` / `gateway on`。

@@ -24,9 +24,8 @@ python3 -m pytest tests/test_doctor.py
 | 层 | 说明 | 是否需要 Docker | 典型文件 |
 | --- | --- | --- | --- |
 | 单元测试 | 纯逻辑，无 IO | 否 | `test_config.py`、`test_paths.py`、`test_models.py`、`test_registry.py`、`test_ports.py`、`test_scanner.py` |
-| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_compose.py`、`test_daemon.py`、`test_manager_api.py`、`test_security.py`、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime）、`test_pageviews.py`、`test_build_queue.py`、`test_zip_processor.py`、`test_manager_static_app.py` |
+| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_compose.py`、`test_daemon.py`（含 daemon→manager API）、`test_manager_api.py`、`test_security.py`（含 generate_compose 审计）、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime）、`test_pageviews.py`、`test_build_queue.py`、`test_zip_processor.py`、`test_manager_static_app.py` |
 | 样例夹具 | 验证 6 个样例识别正确 | 否 | `test_fixtures.py`、`tests/fixtures/` |
-| 跨模块集成 | daemon×manager×security×doctor | 否 | `test_integration_phase57.py` |
 | 真实 Docker | 端到端容器构建与运行 | **是** | `test_docker_integration.py` |
 
 ## Docker 测试跳过条件（WBS-28.15）
@@ -68,7 +67,7 @@ python3 -m pytest tests/test_docker_integration.py
 | 28.13 资源统计 | `test_stats.py` | 磁盘、内存解析 |
 | 28.14 管理页 API | `test_manager_api.py` | token、全部端点（含 pageviews / redundant / remove / path-alias） |
 | 28.15 Docker 跳过 | `conftest.py`、`test_docker_integration.py` | `requires_docker` / `LWA_RUN_DOCKER_TESTS` |
-| — 浏览量（IMP-024～028） | `test_pageviews.py` | page 判定、IP 聚合、`uniqueIpList`、别名容器 Caddy 源、无别名静态直连端口归属、CLF/JSON 解析与摄入游标 |
+| — 浏览量（IMP-024～028） | `test_pageviews.py` | page 判定、IP 聚合、`uniqueIpList`、别名容器 Caddy 源、无别名静态直连端口归属、CLF/JSON 解析与摄入游标（含 Caddy gzip 轮转/多归档，V0.6.13） |
 | — 能力 / Full（IMP-033） | `test_capability.py`、`test_host_bootstrap.py` | CapabilityReport、setup --full/--resume |
 | — 网关切换（IMP-037） | `test_gateway_switch.py` | 原子切换事务、access 收尾 |
 | — 访问复核（IMP-038/040） | `test_access.py`、`test_access_workflow.py`、`test_status_lan_freshness.py` | refresh/review、LAN 新鲜度 |

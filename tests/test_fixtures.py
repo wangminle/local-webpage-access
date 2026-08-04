@@ -132,7 +132,7 @@ def test_pending_sample_writes_risk_event(env, tmp_path: Path) -> None:
     )
 
 
-# ---- 四个核心样例的 manifest 形态 -----------------------------------------
+# ---- 静态样例的 manifest 形态（kind 矩阵由参数化用例覆盖）--------------------
 
 
 def test_static_html_manifest_is_static(env, tmp_path: Path) -> None:
@@ -145,36 +145,6 @@ def test_static_html_manifest_is_static(env, tmp_path: Path) -> None:
     assert manifest.kind.value == "static"
     # 静态实例应有 static 配置
     assert manifest.static is not None
-
-
-def test_node_express_manifest_has_container(env, tmp_path: Path) -> None:
-    ws, config, reg = env
-    zp = build_zip("node_express", tmp_path)
-    from local_webpage_access.importer import Importer
-
-    result = Importer(ws, config, reg).import_zip(str(zp))
-    manifest = result.manifest
-    assert manifest.kind.value == "node"
-
-
-def test_fastapi_manifest_is_python(env, tmp_path: Path) -> None:
-    ws, config, reg = env
-    zp = build_zip("fastapi_sqlite", tmp_path)
-    from local_webpage_access.importer import Importer
-
-    result = Importer(ws, config, reg).import_zip(str(zp))
-    manifest = result.manifest
-    assert manifest.kind.value == "python"
-
-
-def test_vite_react_manifest_is_node(env, tmp_path: Path) -> None:
-    ws, config, reg = env
-    zp = build_zip("vite_react", tmp_path)
-    from local_webpage_access.importer import Importer
-
-    result = Importer(ws, config, reg).import_zip(str(zp))
-    manifest = result.manifest
-    assert manifest.kind.value == "node"
 
 
 # ---- build_failure 样例 ---------------------------------------------------

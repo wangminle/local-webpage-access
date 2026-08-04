@@ -119,13 +119,13 @@ swap=4GB
 * **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。
 * **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。
 * **别名下 SPA 绝对资源路径（IMP-023）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 → **空 200、404 或错误 MIME（如 JS 请求得到 text/html）**，页面白屏。受影响项目应构建时设相对 base（Vite `base: './'`）或 `--base=/<alias>/`，或继续用 hostPort 直达。`lwa access review` 会对照「无前缀 vs 带前缀」子资源并告警（入口 HTML 200 ≠ 别名下可渲染）；瞬时连接失败（TIMEOUT/REFUSED）不计 IMP-023。
-* **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。
-* **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），但仍不能替代正式 relocate 事务。
+* **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。**V0.6.13** 起 Caddy `-size.log.gz` 多轮转/旧游标迁移/归档暂时不可读时的补读逻辑已加固（避免双计或永久漏计）。
+* **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），**V0.6.13** 起容器查询失败禁止绕过挂载 fail-safe、registry 不可读时一致性检查 SKIP，但仍不能替代正式 relocate 事务。
 
 ## 管理页与 API
 
 * **鉴权**：单一静态 token，无过期、无自动轮换、无角色分级（如需轮换：删掉工作区 `run/manager-token.json` 后重启 manager 会重新生成，目前没有专门的 CLI 轮换命令）。多用户场景不适用。
-* **实例显示名（IMP-043）**：导入优先显式 `--name`，其次主页 `<title>`，否则 slug 美化；管理页名称列随内容自然分配宽度（V0.6.9 `table-layout: auto`，名称最多两行省略）。旧 slug 美化名会在拉列表时一次性回填（不会覆盖用户手工名）。
+* **实例显示名（IMP-043）**：导入优先显式 `--name`，其次主页 `<title>`（含托管入口 `dist/`/`build/`/`out/` 等产物目录的 `index.html`；HTML 实体按浏览器语义解码），否则 slug 美化；管理页名称列随内容自然分配宽度（V0.6.9 `table-layout: auto`，名称最多两行省略）。旧 slug 美化名会在拉列表时一次性回填（不会覆盖用户手工名；**V0.6.13** 起回填持实例锁并重读 manifest，避免覆盖并发 start/stop 状态）。
 * **`?token=` 查询参数**：有意保留以便新标签带入鉴权；会进入浏览器历史 / Referer / 反代 access log。日常 API 请优先用 Header。详见 [管理页](manager-page.md#鉴权)。
 * **并发写入**：registry 用 SQLite WAL + 连接级锁，适合单机管理页并发；
   不适合多进程/多机水平扩展。

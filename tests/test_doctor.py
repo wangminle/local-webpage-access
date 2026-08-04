@@ -1591,7 +1591,7 @@ def test_workspace_consistency_ignores_missing_caddy_output_log(
 def test_workspace_consistency_ignores_missing_log_with_comment_header(
     env, monkeypatch
 ) -> None:
-    """BUG-429：``generate_site_config`` 生成的片段首行是 ``# 渲染变量：…``
+    """BUG-428：``generate_site_config`` 生成的片段首行是 ``# 渲染变量：…``
     注释头，其中已含同一日志路径；若豁免逻辑只看首次出现位置，命中的是
     注释行而非 ``output file`` 指令行，豁免失效仍会误报。必须扫描所有
     出现位置，任一处于 ``output file`` 指令行即豁免。
@@ -1674,4 +1674,33 @@ def test_workspace_consistency_skip_status_when_mount_check_not_done(
     assert r.status == STATUS_SKIP
     assert "SKIP" in (r.message or "") or "跳过" in (r.detail or "")
     assert r.suggestion is not None
+
+
+def test_workspace_consistency_skip_when_registry_unavailable(env) -> None:
+    """BUG-430：registry 为 None（run_doctor 降级路径）→ STATUS_SKIP，不得假绿。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+
+    ws, config, _reg = env
+    r = check_workspace_path_consistency(ws, config, registry=None)
+    assert r.status == STATUS_SKIP
+    assert "registry" in (r.detail or "")
+    assert r.suggestion is not None
+
+
+def test_workspace_consistency_skip_when_registry_read_fails(
+    env, monkeypatch
+) -> None:
+    """BUG-430：registry.list_instances 抛错 → STATUS_SKIP，不得静默 rows=[] 报 OK。"""
+    from local_webpage_access.doctor import check_workspace_path_consistency
+
+    ws, config, reg = env
+
+    def _boom():
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(reg, "list_instances", _boom)
+    r = check_workspace_path_consistency(ws, config, registry=reg)
+    assert r.status == STATUS_SKIP
+    assert "registry" in (r.detail or "")
+    assert "database is locked" in (r.detail or "")
 

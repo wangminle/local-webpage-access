@@ -516,13 +516,23 @@ class PageviewStore:
     # ---- 游标 ----
 
     def get_cursor(self, source_key: str) -> tuple[int, str | None]:
+        offset, last_ts, _updated_at = self.get_cursor_with_updated_at(source_key)
+        return (offset, last_ts)
+
+    def get_cursor_with_updated_at(
+        self, source_key: str
+    ) -> tuple[int, str | None, str | None]:
+        """返回 ``(offset, last_ts, updated_at)``；无行时 ``(0, None, None)``。"""
         conn = self._conn_or_open()
         with self._lock:
             row = conn.execute(
-                "SELECT offset_bytes, last_ts FROM ingest_cursor WHERE source_key=?",
+                "SELECT offset_bytes, last_ts, updated_at FROM ingest_cursor "
+                "WHERE source_key=?",
                 (source_key,),
             ).fetchone()
-        return (int(row[0]) if row else 0, (row[1] if row else None))
+        if not row:
+            return (0, None, None)
+        return (int(row[0]), row[1], row[2])
 
     def set_cursor(self, source_key: str, offset: int, last_ts: str | None) -> None:
         conn = self._conn_or_open()
@@ -966,6 +976,29 @@ def _format_consumed_archives(fps: set[str]) -> str | None:
     return _ROTARCHS_PREFIX + ",".join(sorted(fps))
 
 
+def _is_rotarch_meta(meta: str | None) -> bool:
+    """是否已写入轮转归档消费指纹（含空集合以外的 rotarch / rotarchs）。"""
+    return bool(
+        meta
+        and (
+            meta.startswith(_ROTARCHS_PREFIX) or meta.startswith(_ROTARCH_PREFIX)
+        )
+    )
+
+
+def _cursor_updated_at_ns(updated_at: str | None) -> int | None:
+    """把 ingest_cursor.updated_at 解析为 epoch ns；失败返回 None。"""
+    if not updated_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(updated_at).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return int(dt.timestamp() * 1_000_000_000)
+    except ValueError:
+        return None
+
+
 def _list_rotated_archives(path: Path) -> list[Path]:
     """列出全部轮转归档，按 mtime 升序（最旧在前）。
 
@@ -990,7 +1023,8 @@ def _find_rotated_archive(path: Path) -> Path | None:
 def _archive_uncompressed(archive: Path) -> bytes | None:
     """读取归档的未压缩字节：``.gz`` 自动解压，``.log.1`` 原样读。
 
-    解压/读取失败返回 None（调用方按无归档处理，不阻断摄入）。
+    解压/读取失败返回 None（由调用方决定重试策略；归档追赶轮中任一失败
+    会整轮延后、下轮重试，见 _read_new_lines 的 CHK-158 说明）。
     """
     try:
         if archive.suffix == ".gz":
@@ -1023,12 +1057,16 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
     一个换行处，未完成行留给下次再读。
 
     轮转补读：未消费归档按 mtime 升序处理。冷启动（offset=0）读齐全部；
-    增量路径以「能容纳旧 offset 的那份归档」为 pivot 切尾，更旧未消费归档整份
-    补入。消费指纹写入 ``cursor_meta``（``rotarchs:...``），避免同一归档重计。
+    增量路径以「游标所属代际」的最旧可读归档为 pivot 切尾（BUG-431），更旧未
+    消费归档整份补入。    消费指纹只收录本轮成功读取的归档（BUG-433）。旧版无
+    rotarch meta 的游标：mtime 早于 cursor.updated_at 的盘上归档视为历史已计入
+    （BUG-432），写入迁移态而非头比对追赶。任一待读归档解压失败时整轮延后
+    （不摄入、不推进游标、不误标短归档），下轮重试（CHK-158）；归档若永久
+    损坏，该日志源会暂停计入而非漏计，需人工处理损坏文件。
     """
     if not path.is_file():
         return _TailBatch([], 0)
-    offset, meta = store.get_cursor(cursor_key)
+    offset, meta, updated_at = store.get_cursor_with_updated_at(cursor_key)
     size = path.stat().st_size
     archived_lines: list[str] = []
     consumed = _parse_consumed_archives(meta)
@@ -1039,22 +1077,54 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
         if _archive_fingerprint(arch) not in consumed
     ]
     new_meta = meta
+    updated_ns = _cursor_updated_at_ns(updated_at)
 
-    # pivot：未消费归档中、未压缩体积 ≥ offset 的最新一份（游标语义所在文件）。
+    # BUG-432：旧游标无 rotarch 且游标仍落在当前文件（size>=offset）时，
+    # mtime 早于游标更新的归档是升级前残留——标记迁移态，禁止头比对当新轮转。
+    # size<offset 已是截断/轮转，历史过滤不适用。
+    recent_unconsumed = list(unconsumed)
+    if (
+        offset > 0
+        and size >= offset
+        and not _is_rotarch_meta(meta)
+        and updated_ns is not None
+        and unconsumed
+    ):
+        historical: list[Path] = []
+        recent_unconsumed = []
+        for arch in unconsumed:
+            try:
+                arch_ns = arch.stat().st_mtime_ns
+            except OSError:
+                recent_unconsumed.append(arch)
+                continue
+            if arch_ns < updated_ns:
+                historical.append(arch)
+            else:
+                recent_unconsumed.append(arch)
+        if historical:
+            new_meta = _format_consumed_archives(
+                consumed
+                | {_archive_fingerprint(a) for a in historical}
+            )
+            consumed = _parse_consumed_archives(new_meta)
+
+    # pivot：游标所属代际 = 未消费中可读且体积 ≥ offset 的最旧一份（BUG-431）。
     pivot: Path | None = None
     pivot_raw: bytes | None = None
+    raw_by_arch: dict[Path, bytes | None] = {}
     if offset > 0:
-        for arch in reversed(unconsumed):
+        for arch in recent_unconsumed:  # mtime 升序：最旧优先
             raw = _archive_uncompressed(arch)
+            raw_by_arch[arch] = raw
             if raw is not None and len(raw) >= offset:
                 pivot, pivot_raw = arch, raw
                 break
 
     need_archive_catchup = False
-    if unconsumed and offset == 0:
-        # 冷启动 / 重置：读齐全部未消费归档，再读当前文件。
+    if recent_unconsumed and offset == 0:
         need_archive_catchup = True
-    elif unconsumed and size < offset:
+    elif recent_unconsumed and size < offset:
         need_archive_catchup = True
     elif pivot is not None and pivot_raw is not None:
         try:
@@ -1063,36 +1133,65 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
                 need_archive_catchup = pivot_raw[:n] != new_fh.read(n)
         except OSError:
             need_archive_catchup = False
-    elif unconsumed and offset > 0 and pivot is None:
-        # 游标已在当前文件上，仅残留更旧、从未标记的归档：视为历史已计入
-        # （或只能靠 offset=0 重建），标记消费以免日后轮转时整份回灌双计。
-        new_meta = _format_consumed_archives(
-            consumed | {_archive_fingerprint(a) for a in all_archives}
-        )
+    elif recent_unconsumed and offset > 0 and pivot is None:
+        # 游标看似已在当前文件上：仅当全部残留归档均可解压时，才把更短归档
+        # 标为历史并继续读当前日志。任一不可解压 → 可能仍有「本应作 pivot」
+        # 的代际尚未读到；此时推进游标会漏计新文件前缀，并把短归档误标已
+        # 消费（CHK-158 残留 / BUG-438 补完）。
+        any_unreadable = False
+        migrated: set[str] = set()
+        for arch in recent_unconsumed:
+            raw = raw_by_arch.get(arch)
+            if arch not in raw_by_arch:
+                raw = _archive_uncompressed(arch)
+                raw_by_arch[arch] = raw
+            if raw is None:
+                any_unreadable = True
+                continue
+            migrated.add(_archive_fingerprint(arch))
+        if any_unreadable:
+            return _TailBatch([], offset, meta)
+        if migrated:
+            new_meta = _format_consumed_archives(consumed | migrated)
 
     if need_archive_catchup:
+        processed: set[str] = set()
         if offset == 0:
-            for arch in unconsumed:
-                raw = _archive_uncompressed(arch)
-                if raw is not None:
-                    archived_lines.extend(_decode_archive_chunk(raw))
+            for arch in recent_unconsumed:
+                raw = raw_by_arch.get(arch)
+                if arch not in raw_by_arch:
+                    raw = _archive_uncompressed(arch)
+                    raw_by_arch[arch] = raw
+                if raw is None:
+                    continue
+                archived_lines.extend(_decode_archive_chunk(raw))
+                processed.add(_archive_fingerprint(arch))
         else:
-            for arch in unconsumed:
-                raw = (
-                    pivot_raw
-                    if arch == pivot and pivot_raw is not None
-                    else _archive_uncompressed(arch)
-                )
+            for arch in recent_unconsumed:
+                if arch == pivot and pivot_raw is not None:
+                    raw = pivot_raw
+                else:
+                    raw = raw_by_arch.get(arch)
+                    if arch not in raw_by_arch:
+                        raw = _archive_uncompressed(arch)
+                        raw_by_arch[arch] = raw
                 if raw is None:
                     continue
                 if arch == pivot and offset > 0 and len(raw) >= offset:
                     archived_lines.extend(_decode_archive_chunk(raw[offset:]))
                 else:
                     archived_lines.extend(_decode_archive_chunk(raw))
-        offset = 0
-        new_meta = _format_consumed_archives(
-            consumed | {_archive_fingerprint(a) for a in all_archives}
-        )
+                processed.add(_archive_fingerprint(arch))
+        # CHK-158：仅当本轮全部待读归档均成功解压，才重置游标、记录指纹并
+        # 继续读当前日志；任一失败则整轮延后（不摄入、不推进、不写指纹），
+        # 下轮重试。否则失败归档恢复可读后，游标已落在当前文件 EOF，其偏移
+        # 会被误用于切该归档前缀（永久漏计），且当前日志因 offset 归零被
+        # 重复摄入。失败指纹始终不写入已消费集合（BUG-433）。
+        if len(processed) == len(recent_unconsumed):
+            offset = 0
+            new_meta = _format_consumed_archives(consumed | processed)
+        else:
+            return _TailBatch([], offset, meta)
     with path.open("rb") as fh:
         fh.seek(offset)
         new_bytes = fh.read()

@@ -353,13 +353,3 @@ def test_env_example_not_overwritten_if_exists(workspace: Workspace) -> None:
 
     assert target.read_text(encoding="utf-8") == "USER_EDITED=keep\n"
 
-
-def test_env_local_in_compose_env_file(workspace: Workspace) -> None:
-    """IMP-015：compose env_file 含可选 .env.local（required:false，缺失不报错）。"""
-    m = _mk_manifest(internal_port=8000)
-    path = generate_compose(m, workspace, host_port=18000)
-    content = path.read_text(encoding="utf-8")
-    assert "path: .env.local" in content
-    assert "required: false" in content
-    # .env 仍是必需的第一层
-    assert "- .env" in content

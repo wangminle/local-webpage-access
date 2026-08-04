@@ -124,7 +124,7 @@ Windows 原生：任意实际 `lwa` 命令须在写工作区前 fail-fast（已�
 
 ### IMP-042.b — 跨盘 / 跨机迁移（延期）
 
-**不在本期实现。** `lwa workspace relocate` 仅同卷；跨盘预检 blocking。人工路径见 [workspace-rename.md](workspace-rename.md)。V0.6.12 起对裸 `mv` 提供代码防复发与 doctor 诊断，但仍不能替代正式 relocate。
+**不在本期实现。** `lwa workspace relocate` 仅同卷；跨盘预检 blocking。人工路径见 [workspace-rename.md](workspace-rename.md)。V0.6.12 起对裸 `mv` 提供代码防复发与 doctor 诊断，V0.6.13 加固挂载查询 fail-safe 与 registry SKIP，但仍不能替代正式 relocate。
 
 ## 自动化测试运行
 

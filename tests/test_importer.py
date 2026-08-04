@@ -96,6 +96,12 @@ def test_extract_html_title_entities_and_whitespace() -> None:
     assert extract_html_title(html) == "Foo&Bar Demo"
 
 
+def test_extract_html_title_preserves_entity_angle_brackets() -> None:
+    """CHK-152/BUG-436：须先去标签再 unescape，否则 &lt;Admin&gt; 会被当标签删掉。"""
+    html = "<html><title>&lt;Admin&gt; Dashboard</title></html>"
+    assert extract_html_title(html) == "<Admin> Dashboard"
+
+
 def test_extract_html_title_missing_or_empty() -> None:
     assert extract_html_title("<html><body>no title</body></html>") is None
     assert extract_html_title("<html><title>  </title></html>") is None
@@ -114,6 +120,23 @@ def test_find_homepage_index_nested_fallback(tmp_path: Path) -> None:
     nested.mkdir()
     (nested / "index.html").write_text("<title>Nested</title>", encoding="utf-8")
     assert find_homepage_index(tmp_path) == nested / "index.html"
+
+
+def test_find_homepage_index_supports_dist_and_build(tmp_path: Path) -> None:
+    """CHK-152/BUG-435：预构建包只有 dist/index.html 或 build/index.html 时须能解析标题。"""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<title>Dist App</title>", encoding="utf-8")
+    assert find_homepage_index(tmp_path) == dist / "index.html"
+    assert resolve_auto_display_name(tmp_path, slug="dist-app") == "Dist App"
+
+    build_root = tmp_path / "build-only"
+    build_root.mkdir()
+    build = build_root / "build"
+    build.mkdir()
+    (build / "index.html").write_text("<title>Build App</title>", encoding="utf-8")
+    assert find_homepage_index(build_root) == build / "index.html"
+    assert resolve_auto_display_name(build_root, slug="build-app") == "Build App"
 
 
 def test_resolve_auto_display_name_prefers_html_title(tmp_path: Path) -> None:
@@ -242,6 +265,71 @@ def test_refresh_display_name_skips_user_custom_name(
     )
     row = registry.get_instance(result.instance_id)
     assert row is not None and row["name"] == "Keep Me"
+
+
+def test_refresh_display_name_holds_lock_and_rereads_manifest(
+    workspace: Workspace,
+    registry: Registry,
+    importer: Importer,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """CHK-152/BUG-434：回填须持 instance_lock 并在锁内重读，避免覆盖并发状态写入。"""
+    import contextlib
+
+    from local_webpage_access.models import DesiredState, Status
+
+    zip_path = _make_zip(
+        tmp_path / "lock-demo.zip",
+        {"index.html": "<html><body>no title</body></html>"},
+    )
+    result = importer.import_zip(zip_path)
+    instance_id = result.instance_id
+    manifest_path = workspace.app_manifest_path(instance_id)
+    (workspace.app_current(instance_id) / "index.html").write_text(
+        "<html><title>锁内回填</title></html>", encoding="utf-8"
+    )
+
+    lock_held = False
+    saved_under_lock = False
+    original_save = InstanceManifest.save
+
+    def checked_save(self, path):
+        nonlocal saved_under_lock
+        saved_under_lock = lock_held
+        return original_save(self, path)
+
+    import local_webpage_access.lifecycle as lifecycle_mod
+
+    real_lock = lifecycle_mod.instance_lock
+
+    @contextlib.contextmanager
+    def tracked_lock(ws, iid, **kwargs):
+        nonlocal lock_held
+        with real_lock(ws, iid, **kwargs):
+            # 模拟并发 start：锁内、回填重读之前，运行态已写入磁盘
+            live = InstanceManifest.load(manifest_path)
+            live.desiredState = DesiredState.RUNNING
+            live.status = Status.RUNNING
+            original_save(live, manifest_path)
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+    monkeypatch.setattr(InstanceManifest, "save", checked_save)
+    monkeypatch.setattr(lifecycle_mod, "instance_lock", tracked_lock)
+
+    assert (
+        refresh_display_name_from_homepage(workspace, registry, instance_id)
+        == "锁内回填"
+    )
+    assert saved_under_lock is True
+    loaded = InstanceManifest.load(manifest_path)
+    assert loaded.name == "锁内回填"
+    assert loaded.desiredState == DesiredState.RUNNING
+    assert loaded.status == Status.RUNNING
 
 
 # ---- 基础导入 --------------------------------------------------------------

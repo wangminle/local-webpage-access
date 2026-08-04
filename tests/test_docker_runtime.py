@@ -1007,6 +1007,35 @@ def test_bind_mounts_inspect_failure_raises(workspace, monkeypatch) -> None:
         DockerRuntime(workspace).bind_mounts("api")
 
 
+def test_container_id_strict_raises_on_ps_failure(workspace, monkeypatch) -> None:
+    """BUG-429：ps 查询失败——strict 版抛 DockerError；宽松版仍折叠为 None。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr="daemon unreachable"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    runtime = DockerRuntime(workspace)
+    with pytest.raises(DockerError, match="查询容器失败|compose ps"):
+        runtime.container_id_strict("api", all_containers=True)
+    assert runtime.container_id("api", all_containers=True) is None
+
+
+def test_bind_mounts_raises_on_ps_failure(workspace, monkeypatch) -> None:
+    """BUG-429：ps 查询失败不得误报"无挂载"——bind_mounts 抛 DockerError。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr="daemon unreachable"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    with pytest.raises(DockerError, match="查询容器失败|compose ps"):
+        DockerRuntime(workspace).bind_mounts("api")
+    assert not any("inspect" in c["args"] for c in fake.calls)
+
+
 def test_bind_mounts_ignores_volume_mounts(workspace, monkeypatch) -> None:
     """BUG-421：仅返回 bind，忽略 volume / tmpfs。"""
     _seed_compose_files(workspace, "api")

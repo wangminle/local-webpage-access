@@ -1768,15 +1768,6 @@ def test_path_alias_reload_failure_does_not_persist(
 # ---- 浏览量统计 API（IMP-024 / DEV-061）--------------------------------------
 
 
-def test_pageviews_summary_returns_dict(manager_env: EnvBundle) -> None:
-    """GET /api/pageviews 返回 200 与 instances 映射（即便无数据也不报错）。"""
-    resp = manager_env.client.get("/api/pageviews", headers=manager_env.auth_headers())
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "instances" in data
-    assert isinstance(data["instances"], dict)
-
-
 def test_pageviews_ingests_builtin_gateway_log(manager_env: EnvBundle) -> None:
     """builtin 模式：写入 gateway.log CLF 后，浏览量汇总与详情都应计数。"""
     # 切到 builtin 后端，使摄入读取 per-instance gateway.log

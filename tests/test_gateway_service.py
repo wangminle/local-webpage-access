@@ -298,28 +298,22 @@ def test_start_gateway_stops_builtin_before_caddy_start(
     assert fake_gateway["reload_calls"] == 1
 
 
-def test_start_gateway_writes_main_config_when_no_main(
-    workspace: Workspace, config: Config, fake_gateway
+@pytest.mark.parametrize(
+    "seed_stale_main",
+    [False, True],
+    ids=["no_main", "stale_main_exists"],
+)
+def test_start_gateway_writes_main_config_before_caddy_start(
+    workspace: Workspace, config: Config, fake_gateway, seed_stale_main: bool
 ) -> None:
-    """BUG-420：无主 Caddyfile 时在 caddy_start 前落盘，不再依赖启动后 _sync_main_config。"""
-    fake_gateway["admin_alive"] = False
-    assert not (workspace.static_gateway / "Caddyfile").exists()
-    start_gateway(workspace, config)
-    assert fake_gateway["write_main_calls"] == 1
-    assert fake_gateway["sync_calls"] == 0
-    assert fake_gateway["call_order"].index("write_main_config") < fake_gateway[
-        "call_order"
-    ].index("caddy_start")
-
-
-def test_start_gateway_writes_main_config_when_main_exists(
-    workspace: Workspace, config: Config, fake_gateway
-) -> None:
-    """BUG-420：已有非空旧 Caddyfile 时仍须在 caddy_start 前 write_main_config（防旧路径）。"""
+    """BUG-420：无论主 Caddyfile 是否已存在，均须在 caddy_start 前 write_main_config。"""
     fake_gateway["admin_alive"] = False
     main = workspace.static_gateway / "Caddyfile"
-    main.parent.mkdir(parents=True, exist_ok=True)
-    main.write_text("# stale old absolute paths\n")
+    if seed_stale_main:
+        main.parent.mkdir(parents=True, exist_ok=True)
+        main.write_text("# stale old absolute paths\n")
+    else:
+        assert not main.exists()
     start_gateway(workspace, config)
     assert fake_gateway["write_main_calls"] == 1
     assert fake_gateway["sync_calls"] == 0

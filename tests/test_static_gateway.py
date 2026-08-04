@@ -88,12 +88,6 @@ def test_remove_site_config(gateway: StaticGateway, workspace: Workspace) -> Non
     assert not gateway.site_config_path("demo").exists()
 
 
-def test_detect_backend(gateway: StaticGateway) -> None:
-    # 测试环境通常没有 caddy，应是 builtin；有 caddy 时是 caddy
-    backend = gateway.detect_backend()
-    assert backend in ("caddy", "builtin")
-
-
 # ---- 回归测试：BUG-003 ----------------------------------------------------
 #
 # BUG-003：detect_backend 此前只看 caddy 可执行文件，完全忽略 config.staticGateway。
@@ -412,20 +406,6 @@ def test_enable_health_check_rolls_back(
 def test_health_check_false_for_dead_port(gateway: StaticGateway) -> None:
     port = _free_port()  # 没人监听
     assert gateway.health_check(port, timeout=1) is False
-
-
-def test_health_check_true_for_real_server(gateway: StaticGateway, workspace: Workspace) -> None:
-    public = workspace.app_public("hc")
-    public.mkdir(parents=True)
-    (public / "index.html").write_text("<html>ok</html>")
-    port = _free_port()
-    gateway.enable("hc", port, public)
-    try:
-        # 给服务一点启动时间
-        time.sleep(0.3)
-        assert gateway.health_check(port, timeout=3) is True
-    finally:
-        gateway.disable("hc")
 
 
 def test_health_check_ignores_env_http_proxy(

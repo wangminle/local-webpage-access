@@ -148,12 +148,17 @@ _MAX_DISPLAY_NAME_LEN = 200
 
 
 def extract_html_title(html: str) -> str | None:
-    """从 HTML 文本提取 ``<title>`` 纯文本；缺失/空白返回 ``None``。"""
+    """从 HTML 文本提取 ``<title>`` 纯文本；缺失/空白返回 ``None``。
+
+    ``<title>`` 为 RCDATA：须先去掉源码中的真实标签，再 ``html.unescape``，
+    否则 ``&lt;Admin&gt;`` 会先变成 ``<Admin>`` 再被当标签删掉（BUG-436）。
+    """
     match = _TITLE_RE.search(html)
     if match is None:
         return None
-    raw = html_lib.unescape(match.group(1))
+    raw = match.group(1)
     text = re.sub(r"<[^>]+>", "", raw)
+    text = html_lib.unescape(text)
     text = " ".join(text.split())
     if not text:
         return None
@@ -166,11 +171,21 @@ def find_homepage_index(project_dir: Path, *, max_depth: int = 3) -> Path | None
     """定位主页 ``index.html``：优先根目录，否则取最浅一层。
 
     跳过 ``node_modules`` / ``.git`` / ``venv`` 等噪音目录，避免大仓扫描。
+    受 hosting 支持的构建产物目录（``dist`` / ``build`` / ``out`` 等）会扫描
+    （BUG-435），与 :func:`hosting.find_build_output` 对齐。
     """
+    from local_webpage_access.hosting import find_build_output
+
     root = Path(project_dir)
     direct = root / "index.html"
     if direct.is_file():
         return direct
+    # 预构建静态包常见只有 dist/index.html，优先按托管入口解析标题
+    build_dir = find_build_output(root)
+    if build_dir is not None:
+        build_index = build_dir / "index.html"
+        if build_index.is_file():
+            return build_index
     skip = {
         "node_modules",
         ".git",
@@ -178,8 +193,6 @@ def find_homepage_index(project_dir: Path, *, max_depth: int = 3) -> Path | None
         "__pycache__",
         ".venv",
         "venv",
-        "dist",
-        "build",
         ".tox",
         ".mypy_cache",
         ".pytest_cache",
@@ -250,21 +263,27 @@ def refresh_display_name_from_homepage(
     """若当前名仍是可覆盖的自动美化名，且主页有 ``<title>``，则回写 manifest+registry。
 
     返回新名称；无需更新或无法解析时返回 ``None``。
+
+    写回在 :func:`instance_lock` 内重新加载 manifest 后只改名称字段，避免与
+    start/stop/update 并发时用陈旧整份对象覆盖 desiredState/状态/端口（BUG-434）。
     """
+    from local_webpage_access.lifecycle import instance_lock
+
     row = registry.get_instance(instance_id)
     if row is None:
         return None
     current_name = str(row.get("name") or "")
     manifest_path = workspace.app_manifest_path(instance_id)
     name_source: str | None = None
-    manifest: InstanceManifest | None = None
     if manifest_path.is_file():
         try:
-            manifest = InstanceManifest.load(manifest_path)
-            name_source = getattr(manifest, "nameSource", None)
+            preview = InstanceManifest.load(manifest_path)
+            name_source = getattr(preview, "nameSource", None)
         except Exception:  # noqa: BLE001 — 回填失败不阻断列表
             log.warning("实例 %s 回填显示名时读取 manifest 失败", instance_id)
             return None
+    else:
+        return None
     if not is_auto_titleized_name(
         current_name, instance_id, name_source=name_source
     ):
@@ -275,15 +294,27 @@ def refresh_display_name_from_homepage(
     new_name = resolve_auto_display_name(current_dir, slug=instance_id)
     if new_name == current_name:
         return None
-    if manifest is None:
-        return None
-    manifest.name = new_name
-    manifest.nameSource = "html_title"
-    manifest.touch()
-    manifest.save(manifest_path)
-    # BUG-410：只改 instances.name；勿 upsert_from_manifest（manifest.hostPort
-    # 常为空时会把 static_sites/containers 已登记端口清成 NULL）。
-    registry.update_name(instance_id, new_name)
+
+    with instance_lock(workspace, instance_id):
+        try:
+            manifest = InstanceManifest.load(manifest_path)
+        except Exception:  # noqa: BLE001
+            log.warning("实例 %s 回填显示名时锁内重读 manifest 失败", instance_id)
+            return None
+        fresh_source = getattr(manifest, "nameSource", None)
+        if not is_auto_titleized_name(
+            manifest.name, instance_id, name_source=fresh_source
+        ):
+            return None
+        if manifest.name == new_name:
+            return None
+        manifest.name = new_name
+        manifest.nameSource = "html_title"
+        manifest.touch()
+        manifest.save(manifest_path)
+        # BUG-410：只改 instances.name；勿 upsert_from_manifest（manifest.hostPort
+        # 常为空时会把 static_sites/containers 已登记端口清成 NULL）。
+        registry.update_name(instance_id, new_name)
     return new_name
 
 

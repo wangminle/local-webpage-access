@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +31,8 @@ from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
+from local_webpage_access.version_info import _PACKAGE_NAME as _PROJECT_NAME
+from local_webpage_access.version_info import _is_lwa_repo
 
 log = get_logger("updater")
 
@@ -45,7 +46,6 @@ _RESTARTABLE_STATUSES = frozenset({"running", "stopped", "failed"})
 
 # pip install 超时（大依赖网络慢，留足窗口）
 _PIP_TIMEOUT = 300
-_PROJECT_NAME = "local-webpage-access"
 
 
 # ---- 数据结构 --------------------------------------------------------------
@@ -116,16 +116,6 @@ class UpdateReport:
 
 
 # ---- 上下文识别 ------------------------------------------------------------
-
-
-def _is_lwa_repo(path: Path) -> bool:
-    pyproject = path / "pyproject.toml"
-    try:
-        with pyproject.open("rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
-    return str(data.get("project", {}).get("name", "")).strip() == _PROJECT_NAME
 
 
 def locate_repo(explicit: str | None = None) -> Path | None:

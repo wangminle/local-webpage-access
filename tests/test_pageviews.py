@@ -1425,6 +1425,288 @@ def test_read_new_lines_catches_up_two_archives_between_ingests(
     assert "/a-head" not in joined
 
 
+def test_read_new_lines_pivot_oldest_when_newer_archive_also_long_enough(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """CHK-148/BUG-431：双轮转且较新归档未压缩体积也 ≥ offset 时，pivot 须为最旧归档。
+
+    逆序选「最新 len>=offset」会把较新归档当 pivot：重读最旧归档已消费前缀并
+    跳过较新归档开头 → /a-head 双计、/b-head 漏计。
+    """
+    import gzip as _gzip
+    import time
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    line_a0 = '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /a-head HTTP/1.1" 200 -\n'
+    line_a1 = '127.0.0.1 - - [30/Jul/2026 10:00:01] "GET /a-tail HTTP/1.1" 200 -\n'
+    gen_a = line_a0 + line_a1
+    log_path.write_text(gen_a, encoding="utf-8")
+    cursor_key = "builtin:demo:pivot-oldest"
+    offset = len(line_a0.encode("utf-8"))
+    store.set_cursor(cursor_key, offset, None)
+
+    arch1 = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch1, "wb") as fh:
+        fh.write(gen_a.encode("utf-8"))
+    time.sleep(0.05)
+    # 较新归档也足够长（≥ offset），触发错选最新 pivot 的边界
+    line_b0 = '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /b-head HTTP/1.1" 200 -\n'
+    line_b1 = '10.0.0.1 - - [30/Jul/2026 11:00:01] "GET /b-tail HTTP/1.1" 200 -\n'
+    gen_b = line_b0 + line_b1
+    assert len(gen_b.encode("utf-8")) >= offset
+    arch2 = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T11-00-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch2, "wb") as fh:
+        fh.write(gen_b.encode("utf-8"))
+    log_path.write_text(
+        '10.0.0.2 - - [30/Jul/2026 12:00:00] "GET /c-now HTTP/1.1" 200 -\n',
+        encoding="utf-8",
+    )
+
+    batch = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(batch.lines)
+    assert "/a-tail" in joined
+    assert "/b-head" in joined
+    assert "/b-tail" in joined
+    assert "/c-now" in joined
+    assert "/a-head" not in joined
+
+
+def test_read_new_lines_legacy_cursor_does_not_reread_preexisting_archives(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """CHK-148/BUG-432：旧版非零游标（无 rotarch meta）+ 盘上历史 gzip 不得当新轮转。
+
+    升级后首次摄入若把头比对失败当成轮转，会重读归档尾与当前文件开头 → 双计。
+    """
+    import gzip as _gzip
+    from local_webpage_access.pageviews import _read_new_lines
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    current = (
+        '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /already-counted HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(current, encoding="utf-8")
+    cursor_key = "builtin:demo:legacy-upgrade"
+    offset = len(current.encode("utf-8"))
+    store.set_cursor(cursor_key, offset, None)
+
+    # 历史归档：mtime 早于游标 updated_at（旧版本留下、从未纳入 rotarch）
+    hist = (
+        '10.0.0.1 - - [29/Jul/2026 09:00:00] "GET /hist-old HTTP/1.1" 200 -\n'
+        '10.0.0.1 - - [29/Jul/2026 09:00:01] "GET /hist-new HTTP/1.1" 200 -\n'
+    )
+    arch = log_path.with_name(
+        f"{log_path.stem}-2026-07-29T09-00-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(arch, "wb") as fh:
+        fh.write(hist.encode("utf-8"))
+    os.utime(arch, (1_700_000_000, 1_700_000_000))
+
+    batch = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(batch.lines)
+    assert "/already-counted" not in joined
+    assert "/hist-old" not in joined
+    assert "/hist-new" not in joined
+    assert batch.lines == []
+    # 应写入迁移态，避免下次再把头比对当成新轮转
+    assert batch.cursor_meta is not None
+    assert "rotarch" in batch.cursor_meta
+
+
+def test_read_new_lines_does_not_mark_unreadable_archive_consumed(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """CHK-148/BUG-433：解压失败的归档不得写入已消费集合，恢复可读后须补读。"""
+    import gzip as _gzip
+    from local_webpage_access.pageviews import (
+        _archive_fingerprint,
+        _parse_consumed_archives,
+        _read_new_lines,
+    )
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    old = (
+        '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /old HTTP/1.1" 200 -\n'
+        '127.0.0.1 - - [30/Jul/2026 10:00:01] "GET /tail HTTP/1.1" 200 -\n'
+    )
+    log_path.write_text(old, encoding="utf-8")
+    cursor_key = "builtin:demo:unreadable-arch"
+    offset = len(old.splitlines(keepends=True)[0].encode("utf-8"))
+    store.set_cursor(cursor_key, offset, None)
+
+    bad = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
+    )
+    bad.write_bytes(b"not-a-gzip-file")
+    # 新文件更短，强制走归档 catchup（经典截断）
+    log_path.write_text(
+        '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /new HTTP/1.1" 200 -\n',
+        encoding="utf-8",
+    )
+    assert log_path.stat().st_size < offset
+
+    first = _read_new_lines(log_path, cursor_key, store)
+    consumed = _parse_consumed_archives(first.cursor_meta)
+    assert _archive_fingerprint(bad) not in consumed
+
+    # 归档恢复可读后，同一游标应能补读 /tail 与当前 /new
+    with _gzip.open(bad, "wb") as fh:
+        fh.write(old.encode("utf-8"))
+    store.set_cursor(cursor_key, offset, first.cursor_meta)
+    second = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(second.lines)
+    assert "/tail" in joined
+    assert "/new" in joined
+    assert "/old" not in joined
+    assert _archive_fingerprint(bad) in _parse_consumed_archives(second.cursor_meta)
+
+
+def test_read_new_lines_defers_catchup_when_any_archive_unreadable(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """CHK-158：多归档仅部分可读时须整轮延后，全部可读后一次性补读。
+
+    回归：旧逻辑 processed 非空即把 offset 重置为 0 并继续读当前日志；失败
+    归档恢复可读后，当前文件 EOF 偏移被误用于切其前缀（永久漏计），当前
+    日志也因 offset 归零被重复摄入。
+    """
+    import gzip as _gzip
+    from local_webpage_access.pageviews import (
+        _archive_fingerprint,
+        _parse_consumed_archives,
+        _read_new_lines,
+    )
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    line_old = '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /old HTTP/1.1" 200 -\n'
+    line_tail = '127.0.0.1 - - [30/Jul/2026 10:00:01] "GET /tail HTTP/1.1" 200 -\n'
+    line_mid = '127.0.0.1 - - [30/Jul/2026 10:30:00] "GET /mid HTTP/1.1" 200 -\n'
+    line_new = '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /new HTTP/1.1" 200 -\n'
+    log_path.write_text(line_old + line_tail, encoding="utf-8")
+    cursor_key = "builtin:demo:partial-arch"
+    offset = len((line_old + line_tail).encode("utf-8"))
+    store.set_cursor(cursor_key, offset, None)
+
+    # 两次轮转：较旧归档（游标所属代际）可读，较新归档损坏
+    older = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
+    )
+    newer = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T10-30-00.000-size{log_path.suffix}.gz"
+    )
+    with _gzip.open(older, "wb") as fh:
+        fh.write((line_old + line_tail).encode("utf-8"))
+    newer.write_bytes(b"not-a-gzip-file")
+    # 当前文件更短，强制走归档 catchup（经典截断）
+    log_path.write_text(line_new, encoding="utf-8")
+    assert log_path.stat().st_size < offset
+
+    # 部分可读 ≠ 全部可读：整轮延后——不摄入、不推进、不写任何指纹
+    first = _read_new_lines(log_path, cursor_key, store)
+    assert first.lines == []
+    assert first.next_offset == offset
+    assert _parse_consumed_archives(first.cursor_meta) == set()
+
+    # 损坏归档恢复可读：一次性补读两归档切尾 + 当前日志，无遗漏
+    with _gzip.open(newer, "wb") as fh:
+        fh.write(line_mid.encode("utf-8"))
+    store.set_cursor(cursor_key, first.next_offset, first.cursor_meta)
+    second = _read_new_lines(log_path, cursor_key, store)
+    assert second.lines == [line_mid.rstrip("\n"), line_new.rstrip("\n")]
+    consumed = _parse_consumed_archives(second.cursor_meta)
+    assert _archive_fingerprint(older) in consumed
+    assert _archive_fingerprint(newer) in consumed
+
+    # 再次调用无重复摄入
+    store.set_cursor(cursor_key, second.next_offset, second.cursor_meta)
+    third = _read_new_lines(log_path, cursor_key, store)
+    assert third.lines == []
+
+
+def test_read_new_lines_defers_when_pivot_missing_due_to_unreadable(
+    workspace: Workspace, store: PageviewStore
+) -> None:
+    """CHK-158 残留：size≥offset 且应作 pivot 的归档不可解压时不得推进游标。
+
+    旧逻辑在 pivot 选不出时，把「更短但可读」的归档标成已消费并继续按旧
+    offset 读当前文件：新文件前缀漏计、短归档内容永久漏计；损坏归档恢复后
+    也因游标已越过而无法正确补读。
+    """
+    import gzip as _gzip
+    import os
+    import time
+
+    from local_webpage_access.pageviews import (
+        _archive_fingerprint,
+        _parse_consumed_archives,
+        _read_new_lines,
+    )
+
+    log_path = workspace.app_logs("demo") / "gateway.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    line_old = '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /old HTTP/1.1" 200 -\n'
+    line_tail = '127.0.0.1 - - [30/Jul/2026 10:00:01] "GET /tail HTTP/1.1" 200 -\n'
+    line_mid = '127.0.0.1 - - [30/Jul/2026 10:30:00] "GET /mid HTTP/1.1" 200 -\n'
+    pad = "Z" * 180
+    line_new = (
+        '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /new HTTP/1.1" 200 -\n'
+        f"{pad}\n"
+    )
+    log_path.write_text(line_old + line_tail, encoding="utf-8")
+    cursor_key = "builtin:demo:pivot-missing"
+    offset = len((line_old + line_tail).encode("utf-8"))
+    store.set_cursor(cursor_key, offset, None)
+
+    older = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
+    )
+    newer = log_path.with_name(
+        f"{log_path.stem}-2026-07-30T10-30-00.000-size{log_path.suffix}.gz"
+    )
+    older.write_bytes(b"not-a-gzip-file")
+    with _gzip.open(newer, "wb") as fh:
+        fh.write(line_mid.encode("utf-8"))
+    assert len(line_mid.encode("utf-8")) < offset
+
+    future = time.time() + 3600
+    os.utime(older, (future, future))
+    os.utime(newer, (future + 1, future + 1))
+    log_path.write_text(line_new, encoding="utf-8")
+    assert log_path.stat().st_size >= offset
+
+    first = _read_new_lines(log_path, cursor_key, store)
+    assert first.lines == []
+    assert first.next_offset == offset
+    assert _parse_consumed_archives(first.cursor_meta) == set()
+
+    with _gzip.open(older, "wb") as fh:
+        fh.write((line_old + line_tail).encode("utf-8"))
+    os.utime(older, (future, future))
+    store.set_cursor(cursor_key, first.next_offset, first.cursor_meta)
+    second = _read_new_lines(log_path, cursor_key, store)
+    joined = "\n".join(second.lines)
+    assert "/mid" in joined
+    assert "/new" in joined
+    assert "/old" not in joined
+    assert "/tail" not in joined
+    consumed = _parse_consumed_archives(second.cursor_meta)
+    assert _archive_fingerprint(older) in consumed
+    assert _archive_fingerprint(newer) in consumed
+
+    store.set_cursor(cursor_key, second.next_offset, second.cursor_meta)
+    third = _read_new_lines(log_path, cursor_key, store)
+    assert third.lines == []
+
+
 def test_ingest_all_counts_direct_port_for_aliased_static(
     monkeypatch, workspace: Workspace, store: PageviewStore
 ) -> None:

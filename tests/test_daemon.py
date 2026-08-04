@@ -1686,3 +1686,35 @@ def test_run_watcher_periodically_refreshes_capability(
         capability_initial_delay=10.0,
     )
     assert len(probes) >= 2
+
+
+# ---- 跨模块：daemon → manager API（原 phase57 独有场景）---------------------
+
+
+def test_daemon_import_visible_in_manager_api(
+    workspace: Workspace, config: Config, registry: Registry, tmp_path: Path
+) -> None:
+    """daemon.process_zip 导入的实例应出现在 manager API /api/instances。"""
+    from fastapi.testclient import TestClient
+
+    from local_webpage_access.daemon import process_zip
+    from local_webpage_access.lifecycle import stop_instance_op
+    from local_webpage_access.manager_api import create_app, ensure_token
+    from tests.fixtures import build_zip
+
+    zp = build_zip("static_html", tmp_path / "static.zip")
+    inbox_zip = workspace.inbox / "static.zip"
+    inbox_zip.write_bytes(zp.read_bytes())
+
+    process_zip(workspace, config, registry, inbox_zip)
+
+    token = ensure_token(workspace)
+    app = create_app(workspace, config, registry, token=token)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {token}"}
+    r = client.get("/api/instances", headers=headers)
+    assert r.status_code == 200
+    data = r.json()
+    assert any(i["id"] == "static" for i in data["instances"])
+    # 泄漏兜底：process_zip 自动 start 的内置静态服务须 stop
+    stop_instance_op(workspace, config, registry, "static")

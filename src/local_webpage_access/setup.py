@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import plistlib
 import shutil
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -439,98 +437,11 @@ _SCRIPT_GENERIC = """\
 """
 
 
-# ---- 开机自启（IMP-030：launchd 前台监管 plist 生成）------------------------
-
-LAUNCHD_LABEL_PREFIX = "com.fenix.lwa"
-
-
-def generate_launchd_plists(
-    workspace_root: Path,
-    config: Config,
-    *,
-    python_exe: str | None = None,
-    include_caddy: bool = False,
-    dest_dir: Path | None = None,
-) -> list[tuple[str, Path]]:
-    """生成 macOS launchd plist（**前台监管**，IMP-030）。
-
-    返回 ``[(服务名, plist 路径)]``。非 macOS 抛错；dest_dir 默认
-    ``~/Library/LaunchAgents/``。生成的 plist 用绝对 python 路径执行前台入口
-    ``python -m local_webpage_access.<daemon|manager_service|gateway_service>
-    --workspace <root>``，并固化 ``EnvironmentVariables.PATH``（含 Homebrew）+
-    ``KeepAlive``——launchd 直接监管真实前台进程，崩溃即拉起（修复 BUG-138/139）。
-    生成逻辑复用 :mod:`autostart`，避免两套实现（030.h）；与 ``lwa X off`` 的冲突
-    由 ``lwa autostart disable`` / off 协调先 bootout 单元解决（030.b）。
-    """
-    from local_webpage_access.autostart import (
-        build_launchd_plist,
-        launchd_label,
-        select_services,
-    )
-    from local_webpage_access.errors import LifecycleError
-
-    if detect_platform() != "macos":
-        raise LifecycleError(
-            "launchd 开机自启仅支持 macOS；Linux/WSL 请用 `lwa autostart install`"
-            "（systemd user service）；Windows 原生不受支持，请在 WSL2 内配置（参考 docs/autostart.md）",
-        )
-    python = python_exe or sys.executable
-    dest = dest_dir or (Path.home() / "Library" / "LaunchAgents")
-    dest.mkdir(parents=True, exist_ok=True)
-    # launchd 写 stdout/stderr 到 logs/，确保目录存在
-    (workspace_root / "logs").mkdir(parents=True, exist_ok=True)
-
-    written: list[tuple[str, Path]] = []
-    for name in select_services(config, with_caddy=include_caddy):
-        plist = build_launchd_plist(
-            name, python_exe=python, workspace_root=workspace_root, keep_alive=True
-        )
-        path = dest / f"{launchd_label(name)}.plist"
-        path.write_bytes(
-            plistlib.dumps(plist, fmt=plistlib.FMT_XML, sort_keys=False)
-        )
-        written.append((name, path))
-    return written
-
-
-def format_autostart_report(
-    written: list[tuple[str, Path]],
-    *,
-    skipped_caddy: bool = False,
-) -> str:
-    """渲染开机自启报告（生成的 plist + 启用/完备性检查指引）。"""
-    lines: list[str] = ["── 开机自启（macOS launchd，前台监管）──"]
-    for name, path in written:
-        lines.append(f"  · {name}: {path}")
-    if skipped_caddy:
-        lines.append("  （未生成 caddy 自启：staticGateway 非 caddy；如需请先切换后重跑）")
-    lines.append("")
-    lines.append("推荐用新命令完成启用 + 完备性检查（IMP-030）：")
-    lines.append("  lwa autostart enable     # bootstrap 加载单元（KeepAlive 拉起前台进程）")
-    lines.append("  lwa autostart check      # 深检解释器/PATH/进程/Caddy 是否完备")
-    lines.append("")
-    lines.append("或手动 launchctl：")
-    for _name, path in written:
-        lines.append(f"  launchctl bootstrap gui/$(id -u) {path}")
-    lines.append("取消自启：")
-    for _name, path in written:
-        lines.append(f"  launchctl bootout gui/$(id -u)/$(basename {path} .plist)")
-    lines.append("")
-    lines.append(
-        "提示：plist 以 KeepAlive 直接监管前台 watcher/uvicorn，崩溃即拉起（BUG-138）；"
-        "停服前请先 `lwa autostart disable`，否则会被立刻拉回（030.b）。"
-    )
-    return "\n".join(lines)
-
-
 __all__ = [
     "SetupItem",
     "SetupReport",
-    "LAUNCHD_LABEL_PREFIX",
     "detect_platform",
     "format_setup_report",
-    "format_autostart_report",
-    "generate_launchd_plists",
     "render_setup_script",
     "run_setup",
 ]

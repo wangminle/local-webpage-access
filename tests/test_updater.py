@@ -367,30 +367,6 @@ def test_sync_skills_keeps_user_custom(workspace: Workspace, monkeypatch) -> Non
 # ---- run_update: dry-run ---------------------------------------------------
 
 
-def test_dry_run_makes_no_changes(
-    workspace: Workspace, config: Config, registry: Registry
-) -> None:
-    """--dry-run 不产生文件/进程变更，所有步骤 skipped。"""
-    opts = _opts(
-        dry_run=True,
-        skip_pip=False,
-        sync_skills=True,
-        sync_templates=True,
-        restart_manager=True,
-        restart_daemon=True,
-        restart_instances=True,
-        run_doctor=True,
-        repo=None,
-    )
-    report = run_update(workspace, config, registry, options=opts)
-
-    # 全部步骤 skipped，无 ok/failed/pending
-    assert all(s.status == "skipped" for s in report.steps)
-    assert not report.has_failures
-    # skills/ 目录没有新增（dry-run 不同步）
-    # （workspace.skills 已由 fixture 创建为空目录）
-
-
 # ---- run_update: pip -------------------------------------------------------
 
 

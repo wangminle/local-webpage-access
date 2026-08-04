@@ -1174,11 +1174,17 @@ def _run_migrate_locked(
 
         # BACKUP
         if phase == MigratePhase.BACKUP.value:
-            # resume：journal 已有快照则复用，避免 quiesce 中断后重采丢掉恢复清单（BUG-387）
-            if resume and journal and isinstance(journal.get("snapshot"), dict):
-                snapshot = MigrateSnapshot.from_dict(journal["snapshot"])
+            # resume：仅当 journal 已有真正采集过的快照时复用（captured_at 非空），
+            # 避免 PREFLIGHT 写入的空 snapshot={} 导致跳过采样（BUG-387）
+            prior = (journal or {}).get("snapshot") if resume else None
+            prior_ok = (
+                isinstance(prior, dict)
+                and bool(str(prior.get("captured_at") or "").strip())
+            )
+            if prior_ok:
+                snapshot = MigrateSnapshot.from_dict(prior)  # type: ignore[arg-type]
                 if not backup_dir:
-                    backup_dir = journal.get("backup_dir")
+                    backup_dir = (journal or {}).get("backup_dir")
             else:
                 snapshot = capture_snapshot(ws, reg)
                 bdir = write_backup(ws, snapshot)

@@ -112,6 +112,7 @@ class _FakeRuntime:
     _bind_mounts_error: BaseException | None = None
     _rescue_result = 0  # BUG-424：可配置的救援救出文件数
     _down_error: BaseException | None = None  # BUG-423：可配置的 down 失败
+    _ps_error: BaseException | None = None  # BUG-429：可配置的容器查询失败
 
     def __init__(self, workspace=None, registry=None) -> None:
         self.workspace = workspace
@@ -170,6 +171,13 @@ class _FakeRuntime:
             return "abc123def"
         return "abc123def"
 
+    def container_id_strict(self, iid, *, all_containers: bool = False):
+        """BUG-429：严格版容器查询替身，查询失败抛错而非折叠为 None。"""
+        err = type(self)._ps_error
+        if err is not None:
+            raise err
+        return self.container_id(iid, all_containers=all_containers)
+
     def image_id(self, iid):
         return "sha256:deadbeef"
 
@@ -199,6 +207,7 @@ def fake_runtime(monkeypatch):
     _FakeRuntime._bind_mounts_error = None
     _FakeRuntime._rescue_result = 0
     _FakeRuntime._down_error = None
+    _FakeRuntime._ps_error = None
     monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
     # 健康检查直接成功，避免真实 HTTP 等待
     monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: True)
@@ -860,6 +869,25 @@ def test_mount_drift_rescue_exception_aborts(
     assert "down" not in fake_runtime.calls
     assert "up" not in fake_runtime.calls
     assert "start" not in fake_runtime.calls
+
+
+def test_mount_drift_ps_failure_aborts_without_start(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-429：容器查询失败不得当作"无容器"——中止，禁止 compose start 带旧挂载。"""
+    _seed_deployed_sqlite(workspace, registry, "api")
+    fake_runtime._running_state = False
+    fake_runtime._ps_error = DockerError(
+        "compose ps failed", instance_id="api", action="ps"
+    )
+
+    with pytest.raises(HostingError, match="无法查询容器状态"):
+        start_container(workspace, config, registry, "api")
+
+    assert "start" not in fake_runtime.calls
+    assert "down" not in fake_runtime.calls
+    assert "up" not in fake_runtime.calls
+    assert "rescue" not in fake_runtime.calls
 
 
 def test_mount_drift_non_sqlite_keeps_original_start(

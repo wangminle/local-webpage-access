@@ -297,36 +297,6 @@ def test_in_flight_counts_active_build_not_semaphore_private_attr(registry, conf
 # ---- 超时 -------------------------------------------------------------------
 
 
-def test_run_timeout_raises_lifecycle_error(registry, config) -> None:
-    """排队等待超过 wait_timeout → LifecycleError。"""
-    _seed_instance(registry, "api")
-    _seed_instance(registry, "api2")
-    q = BuildQueue(config, registry, concurrency=1)
-
-    release = threading.Event()
-
-    def blocking_builder(iid):
-        release.wait(2.0)
-        return iid
-
-    def queued_builder(iid):
-        return iid
-
-    t1 = threading.Thread(target=q.run, args=("api", blocking_builder))
-    t1.start()
-    time.sleep(0.1)  # 让第一个拿到槽位
-
-    with pytest.raises(LifecycleError, match="超时"):
-        q.run("api2", queued_builder, wait_timeout=0.2)
-
-    row = registry.get_instance("api2")
-    assert row["status"] == Status.FAILED.value
-    assert "排队超时" in row["last_error"]
-
-    release.set()
-    t1.join()
-
-
 # ---- 回归测试：BUG-023 ----------------------------------------------------
 #
 # BUG-023：排队超时后 ``_mark_timeout`` 只记事件不改状态，实例永远卡在

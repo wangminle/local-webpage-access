@@ -381,13 +381,20 @@ def _managed_sqlite_data_mount_drifted(
         （非 SQLite、无容器、或无比对的管理挂载）。
 
     Raises:
-        HostingError: 挂载观测失败——fail-safe，禁止据此做破坏性重建。
+        HostingError: 容器状态查询或挂载观测失败——fail-safe，禁止把查询失败
+            当作"无容器/无漂移"继续启动（BUG-429），也禁止据此做破坏性重建。
     """
     from local_webpage_access.compose import _is_sqlite, container_data_paths
 
     if not _is_sqlite(manifest):
         return False
-    existing = _safe(lambda: runtime.container_id(instance_id, all_containers=True))
+    try:
+        existing = runtime.container_id_strict(instance_id, all_containers=True)
+    except DockerError as exc:
+        raise HostingError(
+            f"实例 {instance_id} 无法查询容器状态（禁止据此判定无漂移并启动）：{exc}",
+            instance_id=instance_id,
+        ) from exc
     if not existing:
         return False
     try:

@@ -721,7 +721,7 @@ def _is_caddy_runtime_created_path(text: str, ref: str) -> bool:
 
     注意必须扫描**所有**出现位置：``generate_site_config`` 会在指令行之前
     写入 ``# 渲染变量：…`` 注释头，其中也含同一日志路径。若只看首次出现
-    （BUG-429），命中的是注释行而非 ``output file`` 指令行，豁免失效。
+    （BUG-428），命中的是注释行而非 ``output file`` 指令行，豁免失效。
     """
     start = 0
     while True:
@@ -787,9 +787,9 @@ def check_workspace_path_consistency(
       （旧路径被 Docker 自动重建后仍"存在"，仅查存在性会漏报，BUG-426）；
     * Docker 可用时，SQLite 实例 LWA 管理的 data bind mount Source 是否漂移。
 
-    历史 builds/events 与合法外部 ``sourceZipPath`` 不告警。Docker 不可用或
-    挂载观测失败时挂载子项 SKIP（无其他发现时整体 STATUS_SKIP，BUG-427），
-    不把整个 doctor 判 FAIL。
+    历史 builds/events 与合法外部 ``sourceZipPath`` 不告警。Docker 不可用、
+    挂载观测失败、或 registry 不可用/读取失败（BUG-430）时对应子项记 SKIP
+    （无其他发现时整体 STATUS_SKIP，BUG-427），不把整个 doctor 判 FAIL。
     """
     from local_webpage_access.compose import _is_sqlite, container_data_paths
     from local_webpage_access.docker_runtime import DockerError, DockerRuntime
@@ -800,12 +800,25 @@ def check_workspace_path_consistency(
     mount_notes: list[str] = []
 
     # ---- 1) manifest / registry 派生字段 ---------------------------------
+    # BUG-430：registry 不可用（None 或读取失败）时 rows 为空会漏掉全部
+    # manifest/registry 字段比对与数据挂载检查——必须记 SKIP 而非静默假绿。
     rows: list[dict[str, Any]] = []
-    if registry is not None:
+    registry_note: str | None = None
+    if registry is None:
+        registry_note = (
+            "registry 不可用（未提供），manifest/registry 字段与数据挂载检查未完成（SKIP）"
+        )
+    else:
         try:
             rows = registry.list_instances()
-        except Exception:  # noqa: BLE001 — 只读诊断，registry 异常不阻断
+        except Exception as exc:  # noqa: BLE001 — 只读诊断，registry 异常不阻断
             rows = []
+            registry_note = (
+                f"registry 读取失败，manifest/registry 字段与数据挂载检查未完成"
+                f"（SKIP）：{exc}"
+            )
+    if registry_note is not None:
+        mount_notes.append(registry_note)
 
     for row in rows:
         iid = row["id"]
@@ -1013,15 +1026,15 @@ def check_workspace_path_consistency(
             suggestion=suggestion,
         )
     if mount_notes:
-        # BUG-427：挂载检查未完成不得报 OK——JSON/自动化消费者会误以为
-        # 数据挂载已验证。返回 SKIP 并附完成检查的前置条件。
+        # BUG-427/BUG-430：挂载检查或 registry 读取未完成不得报 OK——
+        # JSON/自动化消费者会误以为已验证。返回 SKIP 并附未完成原因。
         return CheckResult(
             "workspace_path_consistency",
             STATUS_SKIP,
-            "派生路径与 Caddy 引用一致；数据挂载检查未完成（SKIP）",
+            "已完成项未见不一致；部分检查未完成（SKIP）",
             detail=detail,
-            suggestion="待 Docker 可用 / 挂载观测恢复后重跑 lwa doctor，"
-            "以完成数据挂载一致性检查",
+            suggestion="待 registry / Docker 可用后重跑 lwa doctor，"
+            "以完成全部一致性检查",
         )
     return CheckResult(
         "workspace_path_consistency",

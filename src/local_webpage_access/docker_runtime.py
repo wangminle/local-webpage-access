@@ -769,6 +769,25 @@ class DockerRuntime:
 
         默认 ``docker compose ps -q``（仅运行中）。``all_containers=True`` 时加
         ``--all``，以便数据救援识别已停止但尚未删除的容器（BUG-318）。
+
+        查询失败（daemon 瞬断/超时/Compose 错误）与"无容器"都返回 None；
+        fail-safe 场景（如挂载漂移检查）必须改用 :meth:`container_id_strict`
+        区分两者（BUG-429）。
+        """
+        try:
+            return self.container_id_strict(
+                instance_id, all_containers=all_containers
+            )
+        except DockerError:
+            return None
+
+    def container_id_strict(
+        self, instance_id: str, *, all_containers: bool = False
+    ) -> str | None:
+        """严格版 :meth:`container_id`：仅"查询成功但无容器"返回 None。
+
+        查询失败（非零退出）抛 :class:`DockerError`——调用方须 fail-safe，
+        禁止把查询失败当作"无容器"进而跳过安全检查（BUG-429）。
         """
         ps_args = ("ps", "--all", "-q") if all_containers else ("ps", "-q")
         result = _execute(
@@ -777,7 +796,13 @@ class DockerRuntime:
             timeout=_QUERY_TIMEOUT,
         )
         if not result.ok:
-            return None
+            summary = (result.stderr or result.stdout or "").strip()[:300]
+            raise DockerError(
+                f"查询容器失败（实例 {instance_id}，compose ps，"
+                f"exit {result.returncode}）：{summary or '无详细输出'}",
+                instance_id=instance_id,
+                action="ps",
+            )
         cid = result.stdout.strip().splitlines()
         return cid[0] if cid else None
 
@@ -824,10 +849,11 @@ class DockerRuntime:
         """读取容器 bind mount 列表（BUG-421，只读观测）。
 
         用 ``docker inspect <cid> --format '{{json .Mounts}}'`` 解析挂载，
-        仅返回 ``Type=bind`` 条目。无容器时返回空 list；inspect 失败抛
-        :class:`DockerError`（调用方须 fail-safe，禁止据此做破坏性操作）。
+        仅返回 ``Type=bind`` 条目。"查询成功但无容器"时返回空 list；容器查询
+        （compose ps）或 inspect 失败抛 :class:`DockerError`——调用方须
+        fail-safe，禁止把查询失败误当"无挂载"（BUG-429）。
         """
-        cid = self.container_id(instance_id, all_containers=all_containers)
+        cid = self.container_id_strict(instance_id, all_containers=all_containers)
         if not cid:
             return []
         result = _execute(

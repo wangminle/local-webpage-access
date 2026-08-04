@@ -41,6 +41,8 @@ def test_static_manifest_valid() -> None:
     assert m.servingMode == ServingMode.SHARED_STATIC
     assert m.resourceProfile == ResourceProfile.TINY
     assert m.status == Status.PENDING
+    # 默认期望状态（原 test_default_status_pending 并入）
+    assert m.desiredState == DesiredState.STOPPED
 
 
 def test_container_manifest_valid() -> None:
@@ -136,12 +138,6 @@ def test_load_invalid_json(tmp_path: Path) -> None:
     path.write_text("{bad json", encoding="utf-8")
     with pytest.raises(SchemaError):
         InstanceManifest.load(path)
-
-
-def test_default_status_pending() -> None:
-    m = InstanceManifest.from_dict(_static_manifest_dict())
-    assert m.status == Status.PENDING
-    assert m.desiredState == DesiredState.STOPPED
 
 
 def test_schema_version_is_one() -> None:

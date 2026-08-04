@@ -333,7 +333,7 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 - `backend_handoff`——enabled 静态 hostPort 上是否 builtin + caddy 双开（FAIL，提示 `lwa gateway off` 再 `on`）。
 - `port_contention`——`:2019` / 别名入口上是否有非预期监听者（测试/外部孤儿，§2.7 现场即 pytest 泄漏的 Caddy 占 :2019）；仅 caddy 后端检查。
 - `port_pool`（建议 H）——排除 lwa 自用端口（managerPort、staticGatewayPort、registry 已分配 hostPort），不再把这些合法自用端口误报为冲突。
-- `workspace_path_consistency`（V0.6.12 / DEV-094）——活跃 manifest/registry 派生路径是否等于当前工作区规范值；Caddy 主配置/sites/aliases 引用是否落在当前工作区且存在；Docker 可用时 SQLite data bind mount Source 是否指向 `apps/<id>/data`。外部 `sourceZipPath`、历史 builds/events 不告警。Docker 不可用或挂载观测失败时挂载子项 SKIP（整体不报假绿 OK）。提示优先 `lwa workspace relocate --verify`，已裸 mv 场景按 `rebuild` / `recover` / `gateway on` 修复。
+- `workspace_path_consistency`（V0.6.12 / DEV-094；**V0.6.13** 加固）——活跃 manifest/registry 派生路径是否等于当前工作区规范值；Caddy 主配置/sites/aliases 引用是否落在当前工作区且存在；Docker 可用时 SQLite data bind mount Source 是否指向 `apps/<id>/data`。外部 `sourceZipPath`、历史 builds/events 不告警。Docker 不可用、挂载观测失败或 **registry 不可用/读取失败** 时对应子项 SKIP（整体不报假绿 OK）。容器查询失败会中止启动（禁止当作「无容器」绕过挂载 fail-safe）。提示优先 `lwa workspace relocate --verify`，已裸 mv 场景按 `rebuild` / `recover` / `gateway on` 修复。
 
 ### 7.6 管理页兜底链接（建议 D）
 
@@ -369,7 +369,7 @@ cd /abs/NEW && lwa workspace relocate --verify
 ## 相关文档
 
 - [Runtime 工作区说明](runtime-workspace.md) — 目录结构、端口、`.env.local`、资源档位
-- [工作区迁移](workspace-rename.md) — 优先 `lwa workspace relocate`；人工手册 DOC-081；计划 [PLN-027](plans/2026-07-29-workspace-relocate.md)
+- [工作区迁移](workspace-rename.md) — 优先 `lwa workspace relocate`；人工手册 DOC-081
 - [管理页说明](manager-page.md) — 筛选 / 冗余清理 / 路径别名 / 浏览量 / 取消构建 / LAN stale / gateway switch
 - [开机自启](autostart.md) — launchd / systemd；WSL 唤醒与可选 mirrored
 - [已知限制](known-limitations.md) — 含 WSL2 宿主准备（内存 / 防火墙 / 文件系统）

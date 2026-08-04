@@ -8,7 +8,7 @@
 > `lwa workspace relocate <NEW> --dry-run` → 确认后 `lwa workspace relocate <NEW> [--yes]`；  
 > Skill [`lwa-relocate-workspace`](../src/local_webpage_access/skills/lwa-relocate-workspace/SKILL.md) **只调用 CLI**，禁止直接 `sed`/`mv`。  
 > **本手册**仍是：CLI 失败时的逃生舱、跨盘/跨机人工路径，以及理解「为何不能整树 sed」的契约说明。  
-> **配套**：实现计划 [PLN-027](plans/2026-07-29-workspace-relocate.md)；目录结构见 [runtime-workspace.md](runtime-workspace.md)；自启见 [autostart.md](autostart.md)；日常运维见 [operations-playbook.md](operations-playbook.md)；功能点见 [design/plan/…2607.md §24](../design/plan/local-webpage-access-新增功能点2607.md)。
+> **配套**：目录结构见 [runtime-workspace.md](runtime-workspace.md)；自启见 [autostart.md](autostart.md)；日常运维见 [operations-playbook.md](operations-playbook.md)；排障见 [faq.md](faq.md)。
 
 ---
 
@@ -22,6 +22,7 @@
   - **BUG-383**：pageviews 游标不再绑定日志绝对路径；升级时 v3→v4 保留 offset。
   - **BUG-384**：`lwa autostart repair` **默认保留**已安装的 gateway；`--with-caddy` 只表示「没有时新增」。
   - **V0.6.12（BUG-420/421/422/423/424 + DEV-094）**：`gateway on` 启动前按当前工作区原子落盘主 Caddyfile；`start` 检测 SQLite data mount 漂移并 fail-safe 救援（`down` 失败或两侧数据冲突立即中止）；成功 host/start 回写可确定派生路径；`lwa doctor` 的 `workspace_path_consistency` 主动暴露裸 `mv` 残留（含「旧路径仍存在但不属于当前工作区」）。
+  - **V0.6.13（BUG-428 挂载查询 fail-safe / BUG-429·430 registry SKIP / BUG-431～433 pageviews 轮转）**：容器 `ps` 失败不得当作无容器继续 start；doctor 在 registry 不可读时 SKIP 而非假绿；浏览量多轮转/旧游标/归档暂不可读时的补读已加固。
 
 ---
 
@@ -444,7 +445,7 @@ lwa list
 
 ---
 
-## 12. 与 `lwa workspace relocate`（IMP-042 / PLN-027）的关系
+## 12. 与 `lwa workspace relocate`（IMP-042）的关系
 
 **CLI 已落地**（DEV-089）。同卷迁移优先：
 
@@ -457,7 +458,7 @@ lwa workspace relocate --verify
 
 事务覆盖：状态机 `preflight → … → complete`、锁（`O_CREAT|O_EXCL`）与 journal、SQLite online backup、quiesce、同卷 rename、manifest/registry/**sites·aliases** 结构化改写、主 Caddyfile 重生、**仅迁前已装自启时** `autostart repair`（不重启用 config 已关服务）、恢复 running 意图与 detached 控制面、pageviews 对账。`--dry-run` 零副作用；`--resume` 复用 journal 快照；`--rollback` 逆改写回 OLD。Skill `lwa-relocate-workspace` 只调 CLI。
 
-**本手册**用于：CLI 中断后的人工续作、跨盘/跨机、以及理解禁止整树 sed 的契约。实现计划：[2026-07-29-workspace-relocate.md](plans/2026-07-29-workspace-relocate.md)；功能点：[IMP-042 §24](../design/plan/local-webpage-access-新增功能点2607.md)。
+**本手册**用于：CLI 中断后的人工续作、跨盘/跨机、以及理解禁止整树 sed 的契约。日常操作与排障还可对照 [operations-playbook.md](operations-playbook.md)、[faq.md](faq.md)。
 
 ---
 
