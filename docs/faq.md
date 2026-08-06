@@ -247,6 +247,18 @@ status: pending
 
   或在管理页勾选「仅冗余」后「批量删除冗余」。任意项目的行内「删除」走 IMP-035 双阶段确认（可仅移除或彻底删除）。详见 [管理页](manager-page.md) 与 [运维手册](operations-playbook.md)。
 
+### 文件夹源导入（IMP-047 / V0.7.0）
+
+```bash
+lwa import --from-dir /abs/path/to/my-site
+lwa import --from-dir /abs/path/to/my-site --update <id>
+```
+
+* 路径必须是**绝对路径**；相对路径会被拒绝。
+* LWA **复制**进 `apps/<id>/`，不会在关联目录就地运行。
+* `--update` 时传入的目录须与实例关联路径一致，否则 Exit 2（不会静默改用别的目录）。
+* 内容未变会跳过更新。详见 [运维手册 · 文件夹源](operations-playbook.md) 与 Skill `lwa-import-folder`。
+
 ## 容器类问题
 
 ### 构建失败（OOM）
@@ -301,6 +313,8 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 ### 管理页打不开 / 401
 
 * 确认端口未被占用：`lwa doctor` 的 port_pool 检查**排除** lwa 自用端口（`managerPort`、`staticGatewayPort`、registry 已分配 hostPort），只报外部冲突；管理页端口请单独用 `ss`/`lsof` 或 `lwa manager status` 核对。
+* **本机** `http://127.0.0.1:17800/` 免 token；**局域网**访问须带有效 Bearer token。
+* **V0.7.0 / IMP-046**：token 默认每 168h 自动轮换，旧 token 立即失效。本机执行 `lwa manager token`（或 `--json`）取新 token；也可用 `managerTokenRotateHours` 调整周期。详见 [管理页 · Token 自动轮换](manager-page.md#token-自动轮换imp-046)。
 * 确认 token 正确（复制时勿带前后空格）。
 * 若绑定到 `0.0.0.0` 但无 token，启动会被 `validate_manager_binding` 拒绝。
 

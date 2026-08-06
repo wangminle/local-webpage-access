@@ -147,6 +147,9 @@ class Config(BaseModel):
     managerPort: int = Field(default=MANAGER_PORT_DEFAULT, ge=1, le=65535)
     managerHost: str = "0.0.0.0"
     managerEnabled: bool = True
+    # IMP-046：管理页 API token 自动轮换周期（小时），默认 168h（7×24）。
+    # 到期后 manager 进程内后台线程自动换新 token；旧 token 立即失效。
+    managerTokenRotateHours: int = Field(default=168, ge=1, le=8760)
     portPool: PortPool = Field(default_factory=PortPool)
     staticGateway: str = "caddy"
     # IMP-006：路径别名统一入口端口。仅当存在已启用的别名时，Caddy 才会在该
@@ -305,6 +308,11 @@ managerHost: 0.0.0.0
 
 # 是否在 lwa init 后自动后台启动管理页（false 时需手动 lwa manager on）
 managerEnabled: true
+
+# 管理页 API token 自动轮换周期（小时），默认 168h=7 天（IMP-046）
+# 到期后 manager 后台线程自动换新 token；旧 token 立即失效。
+# 本机 loopback 访问免 token，不受影响。
+managerTokenRotateHours: 168
 
 # 实例端口池
 portPool:

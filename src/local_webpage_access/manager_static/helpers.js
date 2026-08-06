@@ -305,6 +305,16 @@
     html += LWA.opBtn(id, "stop", "停止", !isRunning || inProgress);
     html += LWA.opBtn(id, "restart", "重启", inProgress);
     html += LWA.opBtn(id, "rebuild", "重建", inProgress);
+    // IMP-047：文件夹源实例显示「从源更新」按钮
+    if (i.sourceKind === "folder") {
+      html += LWA.opBtn(
+        id,
+        "update-from-dir",
+        "从源更新",
+        inProgress,
+        inProgress ? "实例正在构建/流转，暂时不能更新" : "从关联文件夹源同步更新"
+      );
+    }
     if (canCancelBuild || i.status === "cancelling") {
       html += LWA.opBtn(
         id,

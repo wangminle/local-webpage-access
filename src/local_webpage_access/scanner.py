@@ -73,6 +73,7 @@ class FileSummary:
     root: Path
     top_files: set[str] = field(default_factory=set)  # 顶层文件名（小写）
     has_index_html: bool = False
+    has_html: bool = False  # 任意 .html（含非 index 名）
     has_package_json: bool = False
     has_requirements_txt: bool = False
     has_requirements_prod: bool = False
@@ -99,6 +100,8 @@ def summarize(root: Path) -> FileSummary:
             name = entry.name.lower()
             summary.top_files.add(name)
             summary.total_files += 1
+            if name.endswith(".html"):
+                summary.has_html = True
             if name == "index.html":
                 summary.has_index_html = True
             elif name == "package.json":
@@ -310,11 +313,11 @@ class Scanner:
         elif summary.has_package_json and not has_python_signal:
             # package.json 存在但既非真 Node 也无 Python 工程文件：仍按 Node 兜底尝试
             self._detect_node(summary, result)
-        elif summary.has_index_html:
+        elif summary.has_index_html or summary.has_html:
             self._detect_static(summary, result)
         else:
-            # 兜底：如果有 index.html 在子目录，尝试当作静态
-            if _has_index_anywhere(project_dir):
+            # 兜底：子目录 index.html，或任意可打开的 .html
+            if _has_index_anywhere(project_dir) or _has_html_anywhere(project_dir):
                 self._detect_static(summary, result)
             else:
                 result.pending = True
@@ -633,6 +636,14 @@ def _python_start_command(matched: list[str], summary: FileSummary) -> str | Non
 def _has_index_anywhere(root: Path, *, max_depth: int = 2) -> bool:
     for path in _walk(root, max_depth=max_depth):
         if path.is_file() and path.name.lower() == "index.html":
+            return True
+    return False
+
+
+def _has_html_anywhere(root: Path, *, max_depth: int = 2) -> bool:
+    """是否存在任意可打开的 ``*.html``（不要求文件名是 index.html）。"""
+    for path in _walk(root, max_depth=max_depth):
+        if path.is_file() and path.name.lower().endswith(".html"):
             return True
     return False
 

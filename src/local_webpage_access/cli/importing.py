@@ -5,6 +5,8 @@ DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 
 from local_webpage_access.cli._common import log, open_workspace_registry
@@ -12,7 +14,9 @@ from local_webpage_access.errors import LwaError
 
 
 def import_cmd(
-    zip_path: str = typer.Argument(..., help="要导入的 zip 文件路径"),
+    zip_path: str = typer.Argument(
+        None, help="要导入的 zip 文件路径（与 --from-dir 互斥）"
+    ),
     name: str = typer.Option(None, "--name", "-n", help="实例显示名称（默认从文件名推导）"),
     path_alias: str = typer.Option(
         None,
@@ -24,6 +28,12 @@ def import_cmd(
         "--update",
         "-u",
         help="更新已有实例（IMP-009）：原地覆盖 current/、保留 id/hostPort/data/，而非新建",
+    ),
+    from_dir: str = typer.Option(
+        None,
+        "--from-dir",
+        help="IMP-047：从本机文件夹源导入（复制进工作区，非就地运行）。"
+        "与 zip_path 互斥；加 --update <id> 时从关联源目录更新。",
     ),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="非交互确认（CI / daemon 调用）"
@@ -47,14 +57,34 @@ def import_cmd(
         help="允许新 zip 的 kind/runtime 与原实例不同（默认拒绝；确认迁移时仍保留 hostPort 登记）",
     ),
 ) -> None:
-    """导入一个 zip 包：解压、识别、登记实例。
+    """导入一个 zip 包或本机文件夹源：解压、识别、登记实例。
 
     加 ``--update <id>``（IMP-009）则改为原地更新已有实例：保留 instance_id、
     hostPort、data/、desiredState 与路径别名，仅覆盖业务源码并按需 restart。
+
+    加 ``--from-dir <path>``（IMP-047）则从本机文件夹源导入：复制源目录内容
+    进入工作区实例目录，而非就地运行关联目录。加 ``--update <id>`` 时
+    从该实例的关联源目录更新。
     """
     from local_webpage_access.importer import Importer
 
     try:
+        # --from-dir 与 zip_path 互斥
+        if from_dir is not None and zip_path is not None:
+            typer.secho(
+                "--from-dir 与位置参数 zip_path 互斥，请只指定一个",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if from_dir is None and zip_path is None:
+            typer.secho(
+                "请提供 zip 文件路径或 --from-dir <目录>",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
         if update is not None and path_alias is not None:
             typer.secho(
                 "--path-alias 不能与 --update 同时使用",
@@ -65,7 +95,32 @@ def import_cmd(
         ws, config, reg = open_workspace_registry()
         try:
             importer = Importer(ws, config, reg)
-            if update is not None:
+            if from_dir is not None:
+                # IMP-047：文件夹源路径
+                if update is not None:
+                    _do_update_from_dir(
+                        importer,
+                        ws,
+                        config,
+                        reg,
+                        instance_id=update,
+                        from_dir=from_dir,
+                        restart=not no_restart,
+                        keep_data=not no_keep_data,
+                        yes=yes,
+                        dry_run=dry_run,
+                        force_kind_change=force_kind_change,
+                    )
+                else:
+                    result = importer.import_from_dir(
+                        from_dir,
+                        name=name,
+                        path_alias=path_alias,
+                        on_conflict="error",
+                    )
+                    _print_import_result(result, config)
+                    _print_folder_source_note(result, importer)
+            elif update is not None:
                 _do_update(
                     importer,
                     ws,
@@ -139,6 +194,119 @@ def _print_import_result(result, config) -> None:
             f"  注意：{result.manifest.lastError}（已标记 pending，需人工或 skill 介入）",
             fg=typer.colors.YELLOW,
         )
+
+
+def _print_folder_source_note(result, importer) -> None:
+    """IMP-047：文件夹源导入成功后的补充提示。"""
+    from local_webpage_access.models import InstanceManifest
+
+    manifest_path = importer.ws.app_manifest_path(result.instance_id)
+    if manifest_path.is_file():
+        manifest = InstanceManifest.load(manifest_path)
+        source_dir = getattr(manifest, "sourceDirPath", None)
+        if source_dir:
+            typer.secho(
+                f"  来源类型：本机文件夹（{source_dir}）",
+                fg=typer.colors.CYAN,
+            )
+            typer.secho(
+                "  更新：lwa import --from-dir <目录> --update "
+                f"{result.instance_id}",
+                fg=typer.colors.CYAN,
+            )
+
+
+def _do_update_from_dir(
+    importer,
+    ws,
+    config,
+    reg,
+    *,
+    instance_id: str,
+    from_dir: str | None,
+    restart: bool,
+    keep_data: bool,
+    yes: bool,
+    dry_run: bool,
+    force_kind_change: bool,
+) -> None:
+    """IMP-047：``lwa import --from-dir --update <id>`` 的编排。
+
+    ``from_dir`` 是用户在命令行传入的目录；若提供则须与 manifest 中记录的
+    ``sourceDirPath`` 一致，否则拒绝（防止更新时误传另一个目录）。
+    不传时使用 manifest 中的关联目录（向后兼容）。
+    """
+    if from_dir is not None:
+        from local_webpage_access.models import InstanceManifest
+
+        manifest_path = ws.app_manifest_path(instance_id)
+        if manifest_path.is_file():
+            manifest = InstanceManifest.load(manifest_path)
+            recorded = getattr(manifest, "sourceDirPath", None)
+            if recorded and str(Path(from_dir).resolve()) != str(Path(recorded).resolve()):
+                typer.secho(
+                    f"传入的目录 {from_dir} 与实例 {instance_id} 关联的源目录 {recorded} 不一致。\n"
+                    "如需更换关联目录，请先删除实例再用新目录重新导入。",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+
+    result = importer.update_from_dir(
+        instance_id,
+        restart=restart,
+        keep_data=keep_data,
+        yes=yes,
+        dry_run=dry_run,
+        force_kind_change=force_kind_change,
+    )
+
+    prev_short = result.prev_hash[:12] if result.prev_hash else "∅"
+    new_short = result.zip_hash[:12]
+
+    if result.skipped:
+        typer.secho(
+            f"实例 {instance_id} 的文件夹源内容未变化（指纹 {new_short}），已跳过更新。",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    if result.dry_run:
+        typer.secho(
+            f"[dry-run] 实例 {instance_id}：文件夹源指纹 {prev_short} -> {new_short}",
+            fg=typer.colors.CYAN,
+        )
+        if result.detection is not None:
+            typer.echo(f"  新形态：{result.detection.form}")
+        if result.kind_changed:
+            typer.secho(
+                "  ⚠ 形态将变化，需 --force-kind-change 才能实际更新",
+                fg=typer.colors.YELLOW,
+            )
+        return
+
+    typer.secho(f"已从文件夹源更新实例：{instance_id}", fg=typer.colors.GREEN)
+    typer.echo(f"  指纹：{prev_short} -> {new_short}")
+    if result.detection is not None:
+        typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
+    typer.echo(f"  目录：{result.app_dir}")
+
+    # DEV-067 / BUG-112：容器源码已换 -> rebuild 镜像；静态/前端 -> restart。
+    if result.needs_rebuild:
+        from local_webpage_access.lifecycle import rebuild_instance
+
+        typer.secho(
+            "  正在 rebuild（容器源码已更新，须重建镜像）…",
+            fg=typer.colors.CYAN,
+        )
+        rebuild_instance(ws, config, reg, instance_id)
+        typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
+    elif result.needs_restart:
+        from local_webpage_access.lifecycle import restart_instance
+
+        typer.secho("  正在 restart…", fg=typer.colors.CYAN)
+        restart_instance(ws, config, reg, instance_id)
+        typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
 
 
 def _do_update(

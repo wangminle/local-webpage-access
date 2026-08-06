@@ -41,6 +41,20 @@ lwa manager off         # 停止
 * token 为一次性生成的随机串，仅在本工作区有效；重置方式：删除 `run/` 下的 token 文件后重启管理页。
 * 管理页登录框默认隐藏输入；可用眼睛图标切换可见/隐藏，便于核对粘贴结果。
 
+### Token 自动轮换（IMP-046）
+
+管理页启动后，后台线程以 **168 小时（7×24）** 为周期自动轮换 API token（可通过 `local-web.yml` 的 `managerTokenRotateHours` 配置，单位小时，默认 168）。
+
+* **本机 loopback 访问不受影响**——`127.0.0.1` / `localhost` / `::1` 继续免 token（IMP-003）。
+* **局域网访问**：轮换后旧 token 立即失效，使用旧 token 的请求收到 `401`。局域网用户需获取新 token。
+* **获取新 token**：
+  * 在管理页所在机器上运行 `lwa manager token`（打印明文 token + 颁发时间 + 下次轮换时间）。
+  * 或在本机浏览器打开管理页（loopback 免 token），在页面内查看。
+  * `--json` 选项输出 JSON 格式，便于 Agent 解析：`lwa manager token --json`。
+* **轮换不重置周期**：manager 重启不会重新计时——若 token 未到期，重启后继续使用原 token 和原计时。仅当 token 文件丢失或 `createdAt` 缺失时才重新颁发。
+* 轮换后 `_verify_token` 每次请求从磁盘读取，故新 token 立即生效，**无需重启管理页**。
+* **不做多 token 宽限期**：旧 token 一旦轮换即刻失效，不支持新旧 token 并存。
+
 ### `?token=` 查询参数泄漏面（有意保留）
 
 产品策略：**保留** `?token=`，方便从已登录页用带 token 的链接打开新标签；同时须知：
@@ -69,6 +83,8 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/cancel-build` | 取消排队中或进行中的构建（IMP-039）；返回 `outcome`：`cancelled` / `cancel_failed` / `noop` / `already_done`；`cancel_failed` 为 **409**；不删缓存/镜像/用户数据；`cancelling` 期间其它生命周期操作返回 409 |
 | POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁；CLI：`lwa recover <id>` |
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
+| POST | `/api/instances/{id}/update-from-dir` | 从关联文件夹源同步更新实例（IMP-047；仅 sourceKind=folder） |
+| POST | `/api/import-from-dir` | 从本机文件夹导入新实例（IMP-047） |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
 | GET | `/api/instances/{id}/pageviews?limit=` | 单实例浏览量详情：按天分布 + 最近命中 + `uniqueIpList`（IMP-024/026；page 级过滤见 IMP-025）；CLI：`lwa pageviews <id>` |
@@ -133,6 +149,39 @@ Content-Type: application/json
   - **静态 / 前端**：`restarted=true`。
   - `restart=false`（对应 CLI `--no-restart`）：只换源码；容器需稍后 `lwa rebuild` / `POST .../rebuild`。
 * 与 CLI `lwa import inbox/foo.zip --update <id>` 共用 `importer.update_zip` 代码路径。
+
+### 文件夹源导入与更新（IMP-047）
+
+#### 从文件夹导入
+
+```http
+POST /api/import-from-dir
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"sourceDir": "/home/user/my-site", "name": "可选", "pathAlias": "可选"}
+```
+
+* `sourceDir`：本机文件夹绝对路径（必须以 `/` 开头）。
+* LWA 将文件夹内容**复制**进工作区 `apps/<id>/current/`（非就地运行）。
+* 导入后实例 `sourceKind=folder`，`sourceDirPath` 记录关联目录路径。
+* 与 CLI `lwa import --from-dir <path>` 共用 `importer.import_from_dir` 代码路径。
+
+#### 从源目录更新
+
+```http
+POST /api/instances/{id}/update-from-dir
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"restart": true, "keepData": true, "forceKindChange": false}
+```
+
+* 仅适用于 `sourceKind=folder` 的实例；zip 源实例返回 400。
+* 内容指纹（SHA256 of sorted file paths + contents）与 `sourceSyncHash` 一致时
+  自动跳过（`skipped=true`），不 rebuild / restart。
+* 源目录不存在时返回错误（不会回退到 mount 模式）。
+* 与 CLI `lwa import --from-dir <path> --update <id>` 共用 `importer.update_from_dir` 代码路径。
 
 ### 路径别名（IMP-006 / IMP-014 / IMP-022）
 

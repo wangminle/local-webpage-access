@@ -346,7 +346,9 @@ def test_import_static_html(importer: Importer, workspace: Workspace, tmp_path: 
     assert result.detection.kind == Kind.STATIC
     assert result.manifest.kind == Kind.STATIC
     assert result.manifest.runtime == Runtime.SHARED_STATIC
-    assert result.manifest.status == Status.PENDING
+    # 识别成功 → stopped（可启动）；仅 detection.pending 才 status=pending
+    assert result.manifest.status == Status.STOPPED
+    assert result.manifest.lastError is None
 
     # 目录结构
     assert workspace.app_original_zip("demo").is_file()
@@ -369,7 +371,7 @@ def test_import_writes_registry(importer: Importer, registry: Registry, tmp_path
     row = registry.get_instance(result.instance_id)
     assert row is not None
     assert row["kind"] == "static"
-    assert row["status"] == "pending"
+    assert row["status"] == "stopped"
 
     events = registry.list_events(result.instance_id)
     assert any(e["event_type"] == "import" for e in events)
@@ -572,6 +574,21 @@ def test_import_unrecognized_marks_pending(importer: Importer, tmp_path: Path) -
     result = importer.import_zip(zip_path)
     assert result.manifest.status == Status.PENDING
     assert result.manifest.lastError is not None
+
+
+def test_import_non_index_html_is_static_stopped(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """非 index 文件名的 HTML 包应识别为静态且落盘 stopped（非 pending）。"""
+    zip_path = _make_zip(
+        tmp_path / "chapters.zip",
+        {"kakeya-3d-chapters.html": "<html><title>K</title></html>"},
+    )
+    result = importer.import_zip(zip_path)
+    assert result.detection.pending is False
+    assert result.detection.form == "static"
+    assert result.manifest.status == Status.STOPPED
+    assert result.manifest.kind == Kind.STATIC
 
 
 # ---- 回归测试：BUG-003 ----------------------------------------------------

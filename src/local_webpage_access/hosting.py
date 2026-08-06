@@ -1,8 +1,8 @@
 """静态托管与前端构建流程（WBS-10 / WBS-11）。
 
 两条静态路径：
-1. **纯静态 HTML**（WBS-10）：识别 ``index.html`` → 同步到 ``public/`` →
-   分配端口 → 启用网关 → 健康检查。
+1. **纯静态 HTML**（WBS-10）：识别入口 HTML（``index.html`` 优先，否则任意
+   ``*.html``）→ 同步到 ``public/`` → 分配端口 → 启用网关 → 健康检查。
 2. **纯前端 SPA**（WBS-11）：``npm ci``/``install`` → ``npm run build`` →
    识别 ``dist/`` 等产物 → 复制到 ``public/`` → 启用网关 → 健康检查；
    构建失败时标记 ``build_failed`` 并写入 builds/events 表。
@@ -151,11 +151,11 @@ def host_static(
 
     registry.update_status(instance_id, Status.BUILDING.value)
     try:
-        # 1. 识别入口 index.html（WBS-10.01）
+        # 1. 识别入口 HTML（index.html 优先，否则任意 .html）
         index = find_index_html(current_dir)
         if index is None:
             raise HostingError(
-                f"未找到 index.html：{current_dir}",
+                f"未找到可托管的 HTML：{current_dir}",
                 instance_id=instance_id,
             )
 
@@ -167,6 +167,7 @@ def host_static(
         sync_static_to_public(current_dir, public_dir)
         if static_root != current_dir:
             _promote_to_root(static_root, public_dir)
+        _ensure_public_index(public_dir, index, current_dir)
 
         # 3-4. 分配端口 + 启用网关（WBS-10.03/04）
         manifest = _enable_static(workspace, config, registry, instance_id, manifest, public_dir)
@@ -1014,19 +1015,68 @@ def _enable_static(
 
 
 def find_index_html(directory: Path) -> Path | None:
-    """寻找入口 ``index.html``（顶层优先，深一层兜底）。"""
+    """寻找入口 HTML：优先 ``index.html``，否则任意顶层/一层 ``*.html``。"""
     top = directory / "index.html"
     if top.is_file():
         return top
+    # 顶层任意 .html（非 index）：字典序稳定选一个
+    try:
+        top_html = sorted(
+            p
+            for p in directory.iterdir()
+            if p.is_file() and p.name.lower().endswith(".html")
+        )
+    except (PermissionError, OSError):
+        top_html = []
+    if top_html:
+        return top_html[0]
     try:
         for sub in sorted(directory.iterdir()):
             if sub.is_dir():
                 candidate = sub / "index.html"
                 if candidate.is_file():
                     return candidate
+        # 一层子目录内任意 .html
+        for sub in sorted(directory.iterdir()):
+            if not sub.is_dir():
+                continue
+            try:
+                nested = sorted(
+                    p
+                    for p in sub.iterdir()
+                    if p.is_file() and p.name.lower().endswith(".html")
+                )
+            except (PermissionError, OSError):
+                continue
+            if nested:
+                return nested[0]
     except (PermissionError, OSError):
         pass
     return None
+
+
+def _ensure_public_index(public_dir: Path, entry: Path, current_dir: Path) -> None:
+    """保证 ``public/index.html`` 存在，使网关根路径可打开。
+
+    入口若本就叫 index.html，sync/promote 后通常已在位；否则把入口页复制为
+    ``public/index.html``（相对资源路径仍按同源目录解析）。
+    """
+    dest = public_dir / "index.html"
+    if dest.is_file():
+        return
+    src: Path | None = None
+    if (public_dir / entry.name).is_file():
+        src = public_dir / entry.name
+    else:
+        with contextlib.suppress(ValueError):
+            rel = entry.relative_to(current_dir)
+            candidate = public_dir / rel
+            if candidate.is_file():
+                src = candidate
+    if src is None and entry.is_file():
+        src = entry
+    if src is not None and src.is_file():
+        shutil.copy2(src, dest)
 
 
 def find_build_output(project_dir: Path) -> Path | None:

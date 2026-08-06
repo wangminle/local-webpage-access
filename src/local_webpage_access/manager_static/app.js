@@ -79,7 +79,8 @@
         if (resp.status === 401) {
           if (isLocalhostAccess()) throw new Error("unauthorized");
           if (storage) storage.removeItem(TOKEN_KEY);
-          self.toast("token 无效，请重新输入", "error");
+          // IMP-046：提示可能因 token 自动轮换导致旧 token 失效
+          self.toast("token 无效或已过期（可能已自动轮换），请重新输入", "error");
           setTimeoutFn(function () {
             self.requireToken();
           }, 800);
@@ -153,6 +154,18 @@
       return opLabels[op] || op;
     }
 
+    function sourceInfoHtml(inst) {
+      if (inst.sourceKind !== "folder") return "";
+      var html = '<dl class="detail-kv">';
+      html += "<dt>来源类型</dt><dd>本机文件夹</dd>";
+      if (inst.sourceDirPath) {
+        html += '<dt>关联目录</dt><dd class="detail-path" title="' +
+          LWA.esc(inst.sourceDirPath) + '">' +
+          LWA.esc(inst.sourceDirPath) + "</dd>";
+      }
+      return html + "</dl>";
+    }
+
     function renderDetailHtml(data) {
       var inst = data.instance || {};
       var manifest = data.manifest || {};
@@ -168,7 +181,7 @@
           ["observedState", "观测状态"], ["runtimeAccess", "运行时访问"],
           ["observationError", "观测错误"], ["lastTrustedState", "最后可信状态"],
           ["lastHealthCheckAt", "最近健康检查"], ["updatedAt", "更新时间"],
-        ])
+        ]) + sourceInfoHtml(inst)
       );
       if (manifest && !manifest._error) {
         html += section(
@@ -374,6 +387,8 @@
           currentDetailId: null,
           logs: { open: false, title: "", category: "run", content: "", instanceId: null },
           pathAlias: { open: false, title: "", value: "", error: "", instanceId: null },
+          // IMP-047：文件夹源导入弹窗
+          folderImport: { open: false, sourceDir: "", name: "", pathAlias: "", error: "", submitting: false },
           pageview: { open: false, title: "", body: "", instanceId: null },
           // IMP-035：双阶段删除模态（step 1 选范围 → step 2 输 ID；needForce 再确认）
           removeDialog: {
@@ -613,6 +628,7 @@
             if (op === "path-alias") { this.openPathAlias(id); return; }
             if (op === "remove") { this.openRemoveDialog(id); return; }
             if (op === "pageview") { this.openPageview(id); return; }
+            if (op === "update-from-dir") { this.doUpdateFromDir(id); return; }
             this.doOperation(id, op);
             return;
           }
@@ -657,6 +673,25 @@
               self.refresh();
             })
             .catch(function (e) { self.toast(opLabel(op) + "失败：" + e.message, "error"); });
+        },
+
+        // IMP-047：从关联文件夹源更新
+        doUpdateFromDir: function (id) {
+          var self = this;
+          this.toast("正在从文件夹源更新…");
+          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/update-from-dir", {
+            method: "POST",
+            body: JSON.stringify({ restart: true, keepData: true }),
+          })
+            .then(function (data) {
+              if (data.skipped) {
+                self.toast("文件夹源内容未变化，无需更新", "info");
+              } else {
+                self.toast("已从文件夹源更新", "success");
+              }
+              self.refresh();
+            })
+            .catch(function (e) { self.toast("从文件夹源更新失败：" + e.message, "error"); });
         },
 
         // ---- IMP-035：双阶段安全删除 ----
@@ -906,6 +941,54 @@
         },
         clearPathAlias: function () { this.submitPathAlias(null); },
 
+        // ---- IMP-047：文件夹源导入 ----
+        openFolderImport: function () {
+          this.folderImport.sourceDir = "";
+          this.folderImport.name = "";
+          this.folderImport.pathAlias = "";
+          this.folderImport.error = "";
+          this.folderImport.submitting = false;
+          this.folderImport.open = true;
+        },
+        closeFolderImport: function () {
+          this.folderImport.open = false;
+          this.folderImport.error = "";
+        },
+        doFolderImport: function () {
+          var dir = this.folderImport.sourceDir.trim();
+          if (!dir) {
+            this.folderImport.error = "请输入源目录的绝对路径";
+            return;
+          }
+          if (!dir.startsWith("/")) {
+            this.folderImport.error = "路径必须是绝对路径（以 / 开头）";
+            return;
+          }
+          var self = this;
+          this.folderImport.error = "";
+          this.folderImport.submitting = true;
+          var body = { sourceDir: dir };
+          var name = this.folderImport.name.trim();
+          if (name) body.name = name;
+          var alias = this.folderImport.pathAlias.trim();
+          if (alias) body.pathAlias = alias;
+          apiFetch(this, "/api/import-from-dir", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          })
+            .then(function (data) {
+              self.folderImport.open = false;
+              self.folderImport.submitting = false;
+              self.toast("已从文件夹导入：" + (data.instanceId || (data.instance && data.instance.name) || ""), "success");
+              self.refresh();
+            })
+            .catch(function (e) {
+              self.folderImport.submitting = false;
+              self.folderImport.error = e.message;
+            });
+        },
+
         // ---- 浏览量详情 ----
         openPageview: function (id) {
           var self = this;
@@ -937,6 +1020,7 @@
           }
           if (e.key !== "Escape") return;
           if (this.removeDialog.open) this.closeRemoveDialog();
+          else if (this.folderImport.open) this.closeFolderImport();
           else if (this.pageview.open) this.closePageview();
           else if (this.pathAlias.open) this.closePathAlias();
           else if (this.logs.open) this.closeLogs();
@@ -1054,6 +1138,7 @@
     '      <label><input type="checkbox" v-model="filters.pending" /> 仅待处理/失败</label>',
     '      <label><input type="checkbox" v-model="filters.redundant" /> 仅冗余</label>',
     '      <button class="btn btn-sm btn-warn" title="移除同包重复导入的冗余实例（保留每组最早者），不删最早者与唯一实例" @click="removeRedundant">批量删除冗余</button>',
+    '      <button class="btn btn-sm" title="从本机文件夹导入（复制进工作区，非就地运行）" @click="openFolderImport">导入文件夹</button>',
     "    </div>",
     "  </div>",
     '  <div class="table-wrap">',
@@ -1121,7 +1206,24 @@
     '        <button class="btn btn-ghost" type="button" @click="closePathAlias">取消</button>',
     '        <button class="btn btn-primary" type="button" @click="savePathAlias">保存</button>',
     "      </div></div></div></div>",
-    // 浏览量
+    // IMP-047：文件夹源导入
+    '<div class="modal" :hidden="!folderImport.open">',
+    '  <div class="modal-inner path-alias-box"><div class="modal-head">',
+    '    <h2>从文件夹导入</h2>',
+    '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭" @click="closeFolderImport">✕</button></div>',
+    '    <p class="path-alias-hint">输入本机文件夹的<strong>绝对路径</strong>，LWA 会将其复制进工作区（非就地运行）。</p>',
+    '    <label class="path-alias-field"><span>源目录路径</span>',
+    '      <input type="text" placeholder="/home/user/my-site" autocomplete="off" spellcheck="false" v-model="folderImport.sourceDir" @keydown.enter="doFolderImport" /></label>',
+    '    <label class="path-alias-field"><span>实例名称（可选）</span>',
+    '      <input type="text" placeholder="留空则用目录名" autocomplete="off" spellcheck="false" v-model="folderImport.name" @keydown.enter="doFolderImport" /></label>',
+    '    <label class="path-alias-field"><span>路径别名（可选）</span>',
+    '      <input type="text" placeholder="my-slug" autocomplete="off" spellcheck="false" v-model="folderImport.pathAlias" @keydown.enter="doFolderImport" /></label>',
+    '    <p class="path-alias-error" :hidden="!folderImport.error">{{ folderImport.error }}</p>',
+    '    <div class="path-alias-actions">',
+    '      <div class="path-alias-actions-main">',
+    '        <button class="btn btn-ghost" type="button" @click="closeFolderImport">取消</button>',
+    '        <button class="btn btn-primary" type="button" :disabled="folderImport.submitting" @click="doFolderImport">{{ folderImport.submitting ? "导入中…" : "导入" }}</button>',
+    "      </div></div></div></div>",
     '<div class="modal" :hidden="!pageview.open">',
     '  <div class="modal-inner pageview-box"><div class="modal-head">',
     '    <h2>{{ pageview.title }}</h2>',

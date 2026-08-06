@@ -1,8 +1,21 @@
 # local-webpage-access 实施计划合集（历史归档）
 
-> 本文件是 `design/plans/` 目录下唯一归档文档。
-> 合并自原 7 篇独立设计/实施计划（2026-07-27～2026-08-03）；均为已落地的历史记录，供审计查阅。
-> 日常运维与用户说明见 `docs/`；进行中的任务见根目录 `task-list.md`。
+> 本文件是原 `design/plans/` 下 7 篇独立设计/实施计划的合并归档（2026-07-27～2026-08-03），现位于 `design/achievement/`。
+> **核对（2026-08-06）**：**七份计划的主交付均已落地**（见下「完成度速查」）。Task 11 中**路径相对化 / CLI 解耦**已移植到 [`../plans/local-webpage-access-新增功能点2608.md`](../plans/local-webpage-access-新增功能点2608.md)（IMP-049 / IMP-050）。**跨盘 IMP-042.b 暂不开发、不迁入 2608 待办**（仍保留本节历史口径与预检 blocking 行为）。
+> **补记（2026-08-06 晚）**：文件夹导入「识别成功却卡待识别 / 任意 HTML 不识别 / 管理页不自动部署」三道坎已按 BUG-443 收口（见文末新增块）；活文档方案以 2608 **IMP-047** 落地后修订为准。
+> 日常运维与用户说明见 `docs/`；进行中的任务见根目录 `task-list.md` 与 2608。
+
+### 完成度速查（2026-08-06）
+
+| 计划块 | 结论 | 证据 / 残留 |
+| --- | --- | --- |
+| 2026-07-27 Bug 全量收口（BUG-293～320） | **已落地** | task-list 28 条均为已修复 |
+| 2026-07-29 工作区迁移（IMP-042） | **主路径已落地** | DEV-089；同卷 `lwa workspace relocate` |
+| └ Task 11（P2）路径相对化 / CLI 与工作区解耦 | **未实现 → 已迁 2608** | IMP-049 / IMP-050 |
+| └ Task 11（P2）跨盘 042.b | **暂不开发**（不迁 2608 待办） | 历史口径仍见本节 |
+| 2026-07-30 管理页表布局 | **已落地** | BUG-413/414；`table-layout` 非 fixed；名称两行截断 |
+| 2026-08-03 七项待办（BUG-369/370/371/420/421/422 + DEV-094） | **已落地** | CHK-139；跟进 BUG-423～430 等亦已修 |
+| 2026-08-06 文件夹导入三道坎（BUG-443） | **已落地** | 任意 `.html` 识别；识别成功→`stopped`；`import-from-dir` 自动 start；runtime 验收 3-src/4-output |
 
 ## 目录
 
@@ -13,6 +26,7 @@
 - [2026-07-30 · 管理页实例表布局修复实施计划](#2026-07-30-管理页实例表布局修复实施计划)
 - [2026-08-03 · Task List 七项待办收口设计](#2026-08-03-task-list-七项待办收口设计)
 - [2026-08-03 · Task List 七项待办收口实施计划](#2026-08-03-task-list-七项待办收口实施计划)
+- [2026-08-06 · 文件夹导入识别/部署死胡同收口（BUG-443）](#2026-08-06-文件夹导入识别部署死胡同收口bug-443)
 
 ---
 
@@ -187,8 +201,8 @@
 
 **Tech Stack:** Python 3.13、Typer、SQLite、DockerRuntime、AutostartBackend、pytest。
 
-**产品编号：** IMP-042（见 `design/plan/local-webpage-access-新增功能点2607.md` §24）。  
-**跟踪：** DEV-089；人工过渡契约 DOC-081（`docs/workspace-rename.md`）。  
+**产品编号：** IMP-042（见 `design/plan/local-webpage-access-新增功能点2607.md` §24）。
+**跟踪：** DEV-089；人工过渡契约 DOC-081（`docs/workspace-rename.md`）。
 **前置已落地：** BUG-382 / BUG-383 / BUG-384。
 
 ---
@@ -318,8 +332,8 @@ DOC-081 手册保留为：CLI 未就绪时的人工路径，以及 CLI 失败时
 - Create: `src/local_webpage_access/workspace_migrate.py`
 - Create: `tests/test_workspace_migrate.py`
 
-**Step 1:** 失败测试 — `acquire_migrate_lock` 互斥；journal 原子写读；非法 phase 转换拒绝。  
-**Step 3:** `MigratePhase` 枚举、`MigrateJournal`、`with_migrate_lock`。  
+**Step 1:** 失败测试 — `acquire_migrate_lock` 互斥；journal 原子写读；非法 phase 转换拒绝。
+**Step 3:** `MigratePhase` 枚举、`MigrateJournal`、`with_migrate_lock`。
 **Step 5:** Commit `feat: workspace migrate lock and journal`
 
 ---
@@ -328,8 +342,8 @@ DOC-081 手册保留为：CLI 未就绪时的人工路径，以及 CLI 失败时
 
 **Files:** 同上
 
-**Step 1:** 测试 — `target_exists` / `cross_device` / `not_workspace` / `/mnt` WSL blocking；path holders 列表。  
-**Step 3:** `preflight_migrate(old, new) -> PreflightReport`（`ok`, `blocking`, `warnings`, `planned`）。  
+**Step 1:** 测试 — `target_exists` / `cross_device` / `not_workspace` / `/mnt` WSL blocking；path holders 列表。
+**Step 3:** `preflight_migrate(old, new) -> PreflightReport`（`ok`, `blocking`, `warnings`, `planned`）。
 **Step 5:** Commit `feat: workspace migrate preflight`
 
 ---
@@ -338,8 +352,8 @@ DOC-081 手册保留为：CLI 未就绪时的人工路径，以及 CLI 失败时
 
 **Files:** 同上
 
-**Step 1:** 测试 — 快照含 `restore_instance_ids`、`autostart_enabled`、`pageview_hits`；备份目录含 registry/pageviews/yml/manifests。  
-**Step 3:** `capture_snapshot` / `write_backup`；支持 `--snapshot-out`。  
+**Step 1:** 测试 — 快照含 `restore_instance_ids`、`autostart_enabled`、`pageview_hits`；备份目录含 registry/pageviews/yml/manifests。
+**Step 3:** `capture_snapshot` / `write_backup`；支持 `--snapshot-out`。
 **Step 5:** Commit `feat: workspace migrate backup and snapshot`
 
 ---
@@ -348,40 +362,40 @@ DOC-081 手册保留为：CLI 未就绪时的人工路径，以及 CLI 失败时
 
 **Files:** 同上 + fake runtime / autostart stubs
 
-**Step 1:** 测试 — 只 stop 快照 running；compose down 容器实例；autostart disable；**不**删 daemon-processed。  
-**Step 3:** `quiesce_workspace(...)`。  
+**Step 1:** 测试 — 只 stop 快照 running；compose down 容器实例；autostart disable；**不**删 daemon-processed。
+**Step 3:** `quiesce_workspace(...)`。
 **Step 5:** Commit `feat: workspace migrate quiesce`
 
 ---
 
 #### Task 5: move（同盘原子）
 
-**Step 1:** 同盘 rename 成功；跨设备 mock `EXDEV` → RelocateError。  
-**Step 3:** `move_workspace_root`。  
+**Step 1:** 同盘 rename 成功；跨设备 mock `EXDEV` → RelocateError。
+**Step 3:** `move_workspace_root`。
 **Step 5:** Commit `feat: workspace migrate atomic move`
 
 ---
 
 #### Task 6: rebind（manifest + registry + 清容器身份）
 
-**Step 1:** 前缀替换；非前缀子串不动；containerId 清空以便 BUG-382 up -d。  
-**Step 3:** 结构化 JSON 原子写 + 参数化 SQL。  
+**Step 1:** 前缀替换；非前缀子串不动；containerId 清空以便 BUG-382 up -d。
+**Step 3:** 结构化 JSON 原子写 + 参数化 SQL。
 **Step 5:** Commit `feat: workspace migrate path rebind`
 
 ---
 
 #### Task 7: regenerate（Caddy + autostart 三单元）
 
-**Step 1:** 断言调用 `StaticGateway._sync_main_config`（或公开 regenerate API）与 `autostart.repair(preserve_installed=True)`；只删 capability-*.json。  
-**Step 3:** 实现 regenerate phase。  
+**Step 1:** 断言调用 `StaticGateway._sync_main_config`（或公开 regenerate API）与 `autostart.repair(preserve_installed=True)`；只删 capability-*.json。
+**Step 3:** 实现 regenerate phase。
 **Step 5:** Commit `feat: workspace migrate regenerate caddy and autostart`
 
 ---
 
 #### Task 8: restore + verify
 
-**Step 1:** 只 start 快照 ID；verify 检查 Mounts 前缀、无关键配置 OLD、pageviews 未翻倍、可选 autostart check / capability。  
-**Step 3:** `restore_instances` / `verify_migrate`。  
+**Step 1:** 只 start 快照 ID；verify 检查 Mounts 前缀、无关键配置 OLD、pageviews 未翻倍、可选 autostart check / capability。
+**Step 3:** `restore_instances` / `verify_migrate`。
 **Step 5:** Commit `feat: workspace migrate restore and verify`
 
 ---
@@ -393,8 +407,8 @@ DOC-081 手册保留为：CLI 未就绪时的人工路径，以及 CLI 失败时
 - Create: `src/local_webpage_access/cli/workspace.py`
 - Modify: `cli/__init__.py` 注册 `workspace` 组
 
-**Step 1:** dry-run 不 move；resume 从 journal 继续；rollback 在测试夹具上恢复。  
-**Step 3:** Typer 子命令对齐 §1。  
+**Step 1:** dry-run 不 move；resume 从 journal 继续；rollback 在测试夹具上恢复。
+**Step 3:** Typer 子命令对齐 §1。
 **Step 5:** Commit `feat: add lwa workspace relocate CLI`
 
 ---
@@ -411,11 +425,13 @@ DOC-081 手册保留为：CLI 未就绪时的人工路径，以及 CLI 失败时
 
 ---
 
-#### Task 11（P2，可另 PR）
+#### Task 11（P2，可另 PR）— **未在本合集迭代落地**
 
-- 路径相对化写入（减少未来 rebind 面）
-- 生产 CLI 与工作区解耦安装脚本
-- **IMP-042.b** 跨磁盘 copy 迁移（独立状态机与双倍磁盘预检）
+> **2026-08-06**：下列三项未实现，已移植至 [`../plans/local-webpage-access-新增功能点2608.md`](../plans/local-webpage-access-新增功能点2608.md)。
+
+- 路径相对化写入（减少未来 rebind 面）→ **IMP-049**（2608 §7）
+- 生产 CLI 与工作区解耦安装脚本 → **IMP-050**（2608 §7）
+- **IMP-042.b** 跨磁盘 copy 迁移 → **暂不开发**（不迁入 2608 待办；预检仍 blocking）
 
 ---
 
@@ -863,5 +879,70 @@ Run: `git diff --check`
 Run: `git status --short`
 
 确认不覆盖用户先前的 `task-list.md` 记录，且只修改计划内文件。
+
+---
+
+## 2026-08-06 · 文件夹导入识别/部署死胡同收口（BUG-443）
+
+<a id="2026-08-06-文件夹导入识别部署死胡同收口bug-443"></a>
+
+> 补记入本合集（非原 `design/plans/` 七篇之一）。活文档对应修订见 [`../plans/local-webpage-access-新增功能点2608.md`](../plans/local-webpage-access-新增功能点2608.md) **§5 IMP-047 落地后修订**。task-list：`BUG-443` / `OPS-097`。
+
+### 问题与证据
+
+管理页「本机文件夹」导入后，用户连续导入多个目录均停在「待识别」，启停按钮灰掉，无法走到可访问 URL。对照日志与 registry：
+
+| 实例 | 源目录 | 识别结果 | 卡点 |
+| --- | --- | --- | --- |
+| `3d` / `4-output` | 仅有 `kakeya-3d-chapters.html`（无 `index.html`） | `unknown` → pending | Scanner / hosting **只认文件名 `index.html`** |
+| `3-scripts` | 同上 + `vendor/` + 构建脚本 | `unknown` → pending | 同上 |
+| `v1` / `3-src` | Vite 前端，已有 `dist/` | **`frontend-static` 成功** | 仍写 `status=pending`；`/api/import-from-dir` **不调用** `start_instance`；管理页把 `pending` 算进 `inProgress` → **禁用「启动」**（死胡同） |
+
+对照：daemon 收 zip 在识别成功且 `resourceProfile ∈ {tiny,small}` 时会自动 `start_instance`；文件夹导入 API 缺对称一步。
+
+### 方案（B → C → A）
+
+1. **B · 状态语义**
+   - `build_manifest_from_detection`：仅 `detection.pending`（或 `kind is None`）→ `status=pending`；识别成功 → **`status=stopped`**（可启动，文案「已停止」而非「待识别」）。
+   - `apply_detection_to_manifest`：重扫时保留已 running/stopped 的生命周期；从真 pending 识别成功 → 升为 `stopped`。
+   - 管理页：`stopped` 可点启动；真 `pending` 仍禁用启动（避免误部署完全无法识别的包）。
+
+2. **C · 文件夹导入自动部署**
+   - 抽出 `daemon.try_auto_start_after_import`（与 `process_zip` 同规则：非 pending + tiny/small → `start_instance`；启动失败置期望 running 待自愈）。
+   - `POST /api/import-from-dir` 在导入成功后调用，响应增加 `autoStart: {action, note}`。
+
+3. **A · 任意可打开 HTML 即静态**
+   - Scanner：顶层/浅层存在任意 `*.html` 且无 Node/Python 工程信号 → `static`（不强制 `index.html`）。
+   - `hosting.find_index_html`：`index.html` 优先，否则任意顶层/一层 `.html`。
+   - 同步到 `public/` 后若无 `index.html`，将入口页复制为 `public/index.html`，保证 `GET /` 可开。
+
+### 明确不做（本期）
+
+- 不对「仅有 `.txt` / 无 HTML」的目录强行托管。
+- CLI `lwa import --from-dir` 仍可不自动 start（与历史 CLI 习惯一致）；管理页导入对齐 daemon。若后续要 CLI 对称，另开子项。
+- 不做「试探性临时 http.server 探活」式识别（可选后续）。
+
+### 触点文件
+
+- `scanner.py`（`has_html` / `_has_html_anywhere`）
+- `importer.py`（`build_manifest_from_detection` / `apply_detection_to_manifest`）
+- `hosting.py`（`find_index_html` / `_ensure_public_index`）
+- `daemon.py`（`try_auto_start_after_import` / `AUTO_START_PROFILES`）
+- `manager_api.py`（`import-from-dir` 自动 start）
+- 回归：`test_scanner` / `test_importer` / `test_hosting` / `test_manager_api` / `test_daemon` / `test_manager_static_app`
+
+### 验收（2026-08-06 runtime）
+
+| 步骤 | 结果 |
+| --- | --- |
+| `4-output` 仅留 `kakeya-3d-chapters.html` → detect | `static` / high / 非 pending |
+| 管理页 API 自该目录新建导入 | `autoStart.action=started`，端口可 `HTTP 200` |
+| `3-src` 关联实例 `v1` restart | `http://127.0.0.1:18006/` → 200 |
+| `4-output` 关联实例 `3d` update/restart + 别名 | `18002/` 与 `/3d-kakeya-animation/` → 200 |
+| 定向 pytest（scanner/importer/hosting/daemon/folder/manager 切片） | 全绿 |
+
+### 与 IMP-047 关系
+
+IMP-047（文件夹源复制进工作区）主路径已在 DEV-096 落地；本块是其**部署闭环与识别容错**补丁，不改「关联≠就地运行」红线。方案描述以 2608 §5「落地后修订」为权威。
 
 ---

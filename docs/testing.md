@@ -24,7 +24,7 @@ python3 -m pytest tests/test_doctor.py
 | 层 | 说明 | 是否需要 Docker | 典型文件 |
 | --- | --- | --- | --- |
 | 单元测试 | 纯逻辑，无 IO | 否 | `test_config.py`、`test_paths.py`、`test_models.py`、`test_registry.py`、`test_ports.py`、`test_scanner.py` |
-| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_compose.py`、`test_daemon.py`（含 daemon→manager API）、`test_manager_api.py`、`test_security.py`（含 generate_compose 审计）、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime）、`test_pageviews.py`、`test_build_queue.py`、`test_zip_processor.py`、`test_manager_static_app.py` |
+| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_folder_source.py`（IMP-047）、`test_compose.py`、`test_daemon.py`（含 daemon→manager API）、`test_manager_api.py`、`test_security.py`（含 generate_compose 审计）、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime）、`test_pageviews.py`、`test_build_queue.py`、`test_zip_processor.py`、`test_manager_static_app.py` |
 | 样例夹具 | 验证 6 个样例识别正确 | 否 | `test_fixtures.py`、`tests/fixtures/` |
 | 真实 Docker | 端到端容器构建与运行 | **是** | `test_docker_integration.py` |
 
@@ -59,6 +59,7 @@ python3 -m pytest tests/test_docker_integration.py
 | 28.05 registry DAO | `test_registry.py` | CRUD、事件、构建记录 |
 | 28.06 端口分配 | `test_ports.py` | 分配、释放、并发（BUG-017） |
 | 28.07 zip 导入 | `test_importer.py` | 解压、zip slip、slug 冲突 |
+| — 文件夹源（IMP-047） | `test_folder_source.py` | 绝对路径校验、打包/指纹、import/update、scan 保元数据、CLI 路径一致性、隔离红线 |
 | 28.08 项目识别 | `test_scanner.py` | static / node / python / pending |
 | 28.09 静态配置 | `test_static_gateway.py` | 网关路由、端口 |
 | 28.10 Dockerfile | `test_dockerfile_templates.py`、`test_security.py`（生成门禁） | 模板渲染；`audit_dockerfile` critical 拒绝写出 |

@@ -135,4 +135,4 @@ defaultResourceLimits:
 * **不做多租户隔离**：所有实例共享同一 Docker daemon 与主机内核。
 * **不做网络隔离**：默认 bridge 网络，实例间可通信（V1 未启用自定义网络隔离）。
 * **不做镜像签名校验**：基线镜像来自 Docker Hub，未做签名验证。
-* **token 为静态随机串**：无过期、无细粒度权限（V2 规划）；可通过删除 token 文件并重启管理页轮换。
+* **token 有周期轮换**：默认每 168h 自动轮换（IMP-046，可配 `managerTokenRotateHours`）；`lwa manager token` 可查询/取新 token。无多 token 宽限期、无细粒度角色权限。

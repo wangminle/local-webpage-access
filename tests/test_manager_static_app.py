@@ -183,6 +183,10 @@ assert.ok(btn(stat, "path-alias").indexOf("disabled") === -1);
 
 var pending = opsHtml({{ id: "p", name: "p", status: "pending", runtime: "docker-compose", servingMode: "container", stack: [], redundant: false }});
 assert.ok(btn(pending, "path-alias").indexOf("disabled") !== -1);
+assert.ok(btn(pending, "start").indexOf("disabled") !== -1, "真·pending 仍禁用启动");
+
+var stopped = opsHtml({{ id: "s", name: "s", status: "stopped", runtime: "shared-static", servingMode: "shared-static", stack: [], redundant: false }});
+assert.ok(btn(stopped, "start").indexOf("disabled") === -1, "识别成功后的 stopped 必须可启动");
 """
     )
 

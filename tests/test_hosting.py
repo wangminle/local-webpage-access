@@ -139,6 +139,13 @@ def test_find_index_html_missing(tmp_path: Path) -> None:
     assert find_index_html(tmp_path) is None
 
 
+def test_find_index_html_accepts_arbitrary_html_name(tmp_path: Path) -> None:
+    """无 index.html 时，顶层任意 .html 可作为入口。"""
+    page = tmp_path / "kakeya-3d-chapters.html"
+    page.write_text("<html></html>", encoding="utf-8")
+    assert find_index_html(tmp_path) == page
+
+
 # ---- find_build_output ----------------------------------------------------
 
 
@@ -309,11 +316,34 @@ def test_host_static_missing_index_html(
     # 删掉 index.html
     (workspace.app_current("demo") / "index.html").unlink()
 
-    with pytest.raises(HostingError, match="index.html"):
+    with pytest.raises(HostingError, match="HTML"):
         host_static(workspace, config, registry, "demo")
 
     row = registry.get_instance("demo")
     assert row["status"] == "failed"
+
+
+def test_host_static_arbitrary_html_entry_serves_root(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """仅有非 index 名 HTML 时也应托管，并使 GET / 可用（写入 public/index.html）。"""
+    _seed_static_instance(workspace, registry, "chapters")
+    current = workspace.app_current("chapters")
+    # 换成非 index 入口
+    (current / "index.html").unlink(missing_ok=True)
+    (current / "kakeya-3d-chapters.html").write_text(
+        "<html><body>chapters</body></html>", encoding="utf-8"
+    )
+    (current / "vendor").mkdir(exist_ok=True)
+    (current / "vendor" / "a.js").write_text("1", encoding="utf-8")
+
+    manifest = host_static(workspace, config, registry, "chapters")
+    assert manifest.status == Status.RUNNING
+    public = workspace.app_public("chapters")
+    assert (public / "index.html").is_file()
+    assert (public / "kakeya-3d-chapters.html").is_file()
+    assert (public / "vendor" / "a.js").is_file()
+    stop_instance(workspace, config, registry, "chapters")
 
 
 def test_host_instance_dispatches_static(

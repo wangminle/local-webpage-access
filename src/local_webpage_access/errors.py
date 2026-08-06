@@ -79,6 +79,12 @@ class ZipImportError(LwaError):
     code = "ZIP_IMPORT_ERROR"
 
 
+class FolderSourceError(LwaError):
+    """文件夹源校验或打包失败（IMP-047）。"""
+
+    code = "FOLDER_SOURCE_ERROR"
+
+
 # ---- 识别 ------------------------------------------------------------------
 
 
@@ -160,6 +166,7 @@ __all__ = [
     "RegistryError",
     "PortError",
     "ZipImportError",
+    "FolderSourceError",
     "RecognitionError",
     "GatewayError",
     "BuildError",

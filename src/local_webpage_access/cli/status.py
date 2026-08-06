@@ -45,6 +45,9 @@ def status(
             # IMP-007：容器实例展示端口映射（internalPort→hostPort）
             if s.port_mapping_label:
                 typer.echo(f"  ↳ 映射：{s.port_mapping_label}")
+            # IMP-047：文件夹源标识
+            if s.source_kind == "folder":
+                typer.echo(f"  ↳ 来源：本机文件夹 {s.source_dir_path or ''}")
             # IMP-006：路径别名入口 URL
             if s.route_url:
                 typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
@@ -138,6 +141,9 @@ def list_cmd() -> None:
             # IMP-007：容器实例展示端口映射（internalPort→hostPort）
             if s.port_mapping_label:
                 typer.echo(f"  ↳ 映射：{s.port_mapping_label}")
+            # IMP-047：文件夹源标识
+            if s.source_kind == "folder":
+                typer.echo(f"  ↳ 来源：本机文件夹 {s.source_dir_path or ''}")
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

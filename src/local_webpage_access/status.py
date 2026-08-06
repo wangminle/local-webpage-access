@@ -94,6 +94,9 @@ class InstanceStatus:
     last_trusted_state: str | None = None
     last_observed_at: str | None = None
     runtime_access: str | None = None
+    # IMP-047：来源类型与关联路径
+    source_kind: str = "zip"
+    source_dir_path: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -159,6 +162,9 @@ class InstanceStatus:
             "lastTrustedState": self.last_trusted_state,
             "lastObservedAt": self.last_observed_at,
             "runtimeAccess": self.runtime_access,
+            # IMP-047：来源类型与关联路径
+            "sourceKind": self.source_kind,
+            "sourceDirPath": self.source_dir_path,
             **self.extra,
         }
 
@@ -183,6 +189,20 @@ def instance_status(
     )
     net = _resolve_network_urls(workspace, config, instance_id, host_port)
     resources = registry.get_resources(instance_id) or {}
+
+    # IMP-047：从 manifest 读取来源类型与关联路径
+    source_kind = "zip"
+    source_dir_path: str | None = None
+    manifest_path = workspace.app_manifest_path(instance_id)
+    if manifest_path.is_file():
+        try:
+            from local_webpage_access.models import InstanceManifest
+
+            manifest = InstanceManifest.load(manifest_path)
+            source_kind = getattr(manifest, "sourceKind", "zip") or "zip"
+            source_dir_path = getattr(manifest, "sourceDirPath", None)
+        except Exception:  # noqa: BLE001 - manifest 读取失败不阻断状态
+            pass
 
     return InstanceStatus(
         id=row["id"],
@@ -219,6 +239,8 @@ def instance_status(
         last_trusted_state=row.get("last_trusted_state"),
         last_observed_at=row.get("last_observed_at"),
         runtime_access=row.get("runtime_access"),
+        source_kind=source_kind,
+        source_dir_path=source_dir_path,
     )
 
 

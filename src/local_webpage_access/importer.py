@@ -881,6 +881,209 @@ class Importer:
             sanitized=sanitized,
         )
 
+    # ---- 文件夹源导入与更新（IMP-047）---------------------------------------
+
+    def import_from_dir(
+        self,
+        source_dir: str | Path,
+        *,
+        name: str | None = None,
+        path_alias: str | None = None,
+        on_conflict: str = "rename",
+    ) -> ImportResult:
+        """从本机文件夹源导入实例（IMP-047）。
+
+        红线流程：
+        1. :func:`~folder_source.validate_source_dir` 校验源目录。
+        2. :func:`~folder_source.pack_source_dir` 把源目录**只读复制**为临时 zip。
+        3. 复用 :meth:`import_zip` 完成解压、扫描、manifest、registry 登记。
+        4. 写回 ``sourceKind="folder"`` + ``sourceDirPath`` + ``sourceSyncHash``。
+
+        关联目录只是复制来源；运行根永远在 ``apps/<id>/current/``。
+        """
+        from local_webpage_access.folder_source import (
+            compute_source_hash,
+            pack_source_dir,
+            validate_source_dir,
+        )
+
+        resolved_dir = validate_source_dir(
+            source_dir, workspace_root=self.ws.root
+        )
+        sync_hash = compute_source_hash(resolved_dir)
+        log.info(
+            "文件夹源导入：%s（指纹 %s）", resolved_dir, sync_hash[:12]
+        )
+
+        # 打包为临时 zip 后复用 import_zip
+        import tempfile
+
+        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-folder-import-")
+        os.close(fd)
+        tmp_zip = Path(tmp_zip_path)
+        try:
+            pack_source_dir(resolved_dir, dest_zip=tmp_zip)
+            result = self.import_zip(
+                tmp_zip,
+                name=name or resolved_dir.name,
+                path_alias=path_alias,
+                on_conflict=on_conflict,
+            )
+        finally:
+            with contextlib.suppress(OSError):
+                tmp_zip.unlink(missing_ok=True)
+
+        # 写回文件夹源元数据
+        manifest_path = self.ws.app_manifest_path(result.instance_id)
+        manifest = InstanceManifest.load(manifest_path)
+        manifest.sourceKind = "folder"
+        manifest.sourceDirPath = str(resolved_dir)
+        manifest.sourceSyncHash = sync_hash
+        manifest.touch()
+        manifest.save(manifest_path)
+
+        self.registry.add_event(
+            result.instance_id,
+            "import",
+            f"文件夹源导入：{resolved_dir}（指纹 {sync_hash[:12]}）",
+        )
+
+        log.info(
+            "文件夹源导入成功：%s（源 %s）", result.instance_id, resolved_dir
+        )
+        return result
+
+    def update_from_dir(
+        self,
+        instance_id: str,
+        *,
+        restart: bool = True,
+        keep_data: bool = True,
+        yes: bool = False,  # noqa: ARG002 - 交互确认由 CLI 层处理
+        dry_run: bool = False,
+        force_kind_change: bool = False,
+    ) -> UpdateResult:
+        """从关联文件夹源更新实例（IMP-047）。
+
+        流程：
+        1. 读 manifest 的 ``sourceDirPath``；缺失或非 folder 源 -> 报错。
+        2. 校验源目录仍存在/可读；缺失 -> 明确错误（禁止挂载回退）。
+        3. 计算当前源目录指纹，与 ``sourceSyncHash`` 比较：
+           - 相同 -> ``skipped=True``（无需更新），不 rebuild / 不重启。
+           - 不同 -> 打包为临时 zip，调用 :meth:`update_zip`。
+        4. 更新成功后写回新的 ``sourceSyncHash``。
+
+        Raises:
+            ZipImportError: 实例不存在、非 folder 源、源目录缺失、更新失败。
+        """
+        from local_webpage_access.folder_source import (
+            compute_source_hash,
+            pack_source_dir,
+            validate_source_dir,
+        )
+
+        if not self.registry.instance_exists(instance_id):
+            raise ZipImportError(
+                f"实例 {instance_id} 不存在，无法更新",
+                instance_id=instance_id,
+            )
+
+        manifest_path = self.ws.app_manifest_path(instance_id)
+        if not manifest_path.is_file():
+            raise ZipImportError(
+                f"实例 {instance_id} 缺少 local-web.json，无法更新",
+                instance_id=instance_id,
+            )
+        old_manifest = InstanceManifest.load(manifest_path)
+
+        source_kind = getattr(old_manifest, "sourceKind", "zip")
+        source_dir_str = getattr(old_manifest, "sourceDirPath", None)
+        if source_kind != "folder" or not source_dir_str:
+            raise ZipImportError(
+                f"实例 {instance_id} 不是文件夹源实例（sourceKind={source_kind!r}），"
+                f"无法用 update-from-dir 更新；请用 lwa import --update 加 zip。",
+                instance_id=instance_id,
+            )
+
+        source_dir = Path(source_dir_str)
+        try:
+            validate_source_dir(source_dir, workspace_root=self.ws.root)
+        except Exception as exc:
+            # 源目录缺失/不可读 -> 明确错误，禁止挂载回退
+            raise ZipImportError(
+                f"关联源目录不可用：{exc}",
+                instance_id=instance_id,
+            ) from exc
+
+        new_sync_hash = compute_source_hash(source_dir)
+        old_sync_hash = getattr(old_manifest, "sourceSyncHash", None)
+
+        # 无变更短路
+        if new_sync_hash == old_sync_hash:
+            log.info(
+                "实例 %s 的文件夹源内容未变化（指纹 %s），跳过更新",
+                instance_id,
+                new_sync_hash[:12],
+            )
+            self.registry.add_event(
+                instance_id,
+                "update",
+                f"文件夹源内容未变化（指纹 {new_sync_hash[:12]}），跳过更新",
+            )
+            return UpdateResult(
+                instance_id=instance_id,
+                manifest=old_manifest,
+                detection=None,
+                app_dir=self.ws.app_dir(instance_id),
+                zip_hash=new_sync_hash,
+                prev_hash=old_sync_hash,
+                skipped=True,
+                was_running=old_manifest.desiredState == DesiredState.RUNNING,
+                needs_restart=False,
+            )
+
+        log.info(
+            "实例 %s 文件夹源有变更（指纹 %s -> %s）",
+            instance_id,
+            (old_sync_hash[:12] if old_sync_hash else "∅"),
+            new_sync_hash[:12],
+        )
+
+        # 打包为临时 zip 后复用 update_zip
+        import tempfile
+
+        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-folder-update-")
+        os.close(fd)
+        tmp_zip = Path(tmp_zip_path)
+        try:
+            pack_source_dir(source_dir, dest_zip=tmp_zip)
+            result = self.update_zip(
+                tmp_zip,
+                instance_id,
+                restart=restart,
+                keep_data=keep_data,
+                yes=yes,
+                dry_run=dry_run,
+                force_kind_change=force_kind_change,
+            )
+        finally:
+            with contextlib.suppress(OSError):
+                tmp_zip.unlink(missing_ok=True)
+
+        # 写回文件夹源元数据（非 dry_run 且非 skipped 时）。
+        # update_zip 重建 manifest 后 sourceKind 会回到默认 "zip"，
+        # 必须同时恢复 sourceKind/sourceDirPath/sourceSyncHash，否则下一次
+        # update_from_dir 会被判为非 folder 源而拒绝（P0 回归）。
+        if not result.dry_run and not result.skipped:
+            updated_manifest = InstanceManifest.load(manifest_path)
+            updated_manifest.sourceKind = "folder"
+            updated_manifest.sourceDirPath = str(source_dir)
+            updated_manifest.sourceSyncHash = new_sync_hash
+            updated_manifest.touch()
+            updated_manifest.save(manifest_path)
+
+        return result
+
     @staticmethod
     def _kind_changed(
         old: InstanceManifest, detection: DetectionResult
@@ -1168,12 +1371,16 @@ def build_manifest_from_detection(
         serving_mode = ServingMode.SHARED_STATIC
         resource_profile = ResourceProfile.TINY
         last_error = "; ".join(detection.notes) if detection.notes else "未识别项目类型"
+        initial_status = Status.PENDING
     else:
         kind = detection.kind
         runtime = detection.runtime  # type: ignore[assignment]
         serving_mode = detection.servingMode  # type: ignore[assignment]
         resource_profile = detection.resourceProfile
         last_error = None
+        # 识别成功：stopped（可启动）。勿再用 pending——管理页会把 pending
+        # 当成「待识别」并禁用启动按钮，造成文件夹导入死胡同。
+        initial_status = Status.STOPPED
 
     kwargs: dict = dict(
         id=instance_id,
@@ -1188,7 +1395,7 @@ def build_manifest_from_detection(
         hasDatabase=detection.hasDatabase,
         database=detection.database,
         desiredState=DesiredState.STOPPED,
-        status=Status.PENDING,
+        status=initial_status,
         entry=detection.entry,
         sourceZipPath=str(workspace.app_original_zip(instance_id)),
         appPath=str(workspace.app_current(instance_id)),
@@ -1233,6 +1440,9 @@ def apply_detection_to_manifest(
 
     会正确处理 static ↔ container 配置的切换，保持 schema 一致性。
     保留 id/name/version/sourceZipPath/appPath 等既有字段。
+    亦保留 IMP-047 文件夹源字段（``sourceKind`` / ``sourceDirPath`` /
+    ``sourceSyncHash``）：``build_manifest_from_detection`` 默认
+    ``sourceKind="zip"``，若不透传则 ``lwa scan`` 会静默抹掉文件夹源身份。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -1247,6 +1457,23 @@ def apply_detection_to_manifest(
     fresh.sourceZipPath = manifest.sourceZipPath
     fresh.appPath = manifest.appPath
     fresh.createdAt = manifest.createdAt
+    # 生命周期：真·未识别 → pending；从 pending 识别成功 → stopped；
+    # 已在跑/已停的实例重扫不得把 status 打回 pending。
+    if detection.pending or detection.kind is None:
+        fresh.status = Status.PENDING
+        fresh.desiredState = DesiredState.STOPPED
+    elif manifest.status == Status.PENDING:
+        fresh.status = Status.STOPPED
+        fresh.desiredState = DesiredState.STOPPED
+    else:
+        fresh.status = manifest.status
+        fresh.desiredState = manifest.desiredState
+    fresh.lastStartedAt = manifest.lastStartedAt
+    fresh.lastHealthCheckAt = manifest.lastHealthCheckAt
+    # IMP-047：文件夹源身份与同步指纹不得因 scan / update_zip 重建而丢失
+    fresh.sourceKind = getattr(manifest, "sourceKind", "zip") or "zip"
+    fresh.sourceDirPath = getattr(manifest, "sourceDirPath", None)
+    fresh.sourceSyncHash = getattr(manifest, "sourceSyncHash", None)
     return fresh
 
 

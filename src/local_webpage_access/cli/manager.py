@@ -97,6 +97,74 @@ def manager_status_cmd() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command("token")
+def manager_token(
+    json_output: bool = typer.Option(
+        False, "--json", help="以 JSON 格式输出（便于 Agent 解析）"
+    ),
+) -> None:
+    """IMP-046：查看当前管理页 API token 及轮换信息。
+
+    显示 token 明文、颁发时间（createdAt）、下次轮换时间。
+    本机 loopback 访问免 token，但 token 仍用于局域网访问。
+    """
+    from local_webpage_access.manager_api import read_token_metadata, TOKEN_ROTATE_HOURS_DEFAULT
+
+    try:
+        ws, config, _reg = open_workspace_registry()
+        _reg.close()
+        meta = read_token_metadata(ws)
+        token = meta["token"]
+        created_at = meta["createdAt"]
+        rotate_hours = getattr(
+            config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT
+        ) or TOKEN_ROTATE_HOURS_DEFAULT
+
+        if not token:
+            if json_output:
+                typer.echo('{"token": null, "message": "token 未颁发；请运行 lwa manager on"}')
+            else:
+                typer.secho("token 未颁发；请运行 lwa manager on", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+
+        # 计算下次轮换时间
+        next_rotate_at = None
+        if created_at:
+            from datetime import datetime, timedelta
+            try:
+                created_dt = datetime.fromisoformat(created_at)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.astimezone()
+                next_rotate_at = (created_dt + timedelta(hours=rotate_hours)).isoformat(timespec="seconds")
+            except (ValueError, TypeError):
+                pass
+
+        if json_output:
+            import json as _json
+            payload = {
+                "token": token,
+                "createdAt": created_at,
+                "rotateHours": rotate_hours,
+                "nextRotateAt": next_rotate_at,
+            }
+            typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            typer.echo(f"token：{token}")
+            if created_at:
+                typer.echo(f"  颁发时间：{created_at}")
+            else:
+                typer.echo("  颁发时间：未知（旧文件缺少 createdAt）")
+            typer.echo(f"  轮换周期：{rotate_hours} 小时")
+            if next_rotate_at:
+                typer.echo(f"  下次轮换：{next_rotate_at}")
+            typer.echo("  本机访问免 token（loopback）；局域网访问须携带此 token。")
+            typer.echo("  轮换后旧 token 立即失效，局域网客户端需更新。")
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command("start")
 def manager_start(
     host: str = typer.Option(

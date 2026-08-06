@@ -361,6 +361,21 @@ def test_detect_unknown_marks_pending(tmp_path: Path) -> None:
     assert result.confidence == "low"
 
 
+def test_detect_arbitrary_html_as_static(tmp_path: Path) -> None:
+    """任意可打开的 .html（不必叫 index.html）应识别为纯静态。"""
+    (tmp_path / "kakeya-3d-chapters.html").write_text(
+        "<html><body>ok</body></html>", encoding="utf-8"
+    )
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "three.min.js").write_text("/* stub */", encoding="utf-8")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.form == "static"
+    assert result.kind == Kind.STATIC
+    assert result.runtime == Runtime.SHARED_STATIC
+    assert result.confidence == "high"
+
+
 def test_detect_missing_dir(tmp_path: Path) -> None:
     result = Scanner().detect(tmp_path / "does-not-exist")
     assert result.pending is True

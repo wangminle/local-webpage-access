@@ -50,6 +50,7 @@ from local_webpage_access.errors import (
     ConfigError,
     DataNonemptyError,
     DockerError,
+    FolderSourceError,
     GatewayError,
     HostingError,
     LifecycleError,
@@ -109,11 +110,17 @@ def ensure_token(workspace: Workspace) -> str:
 
 
 def rotate_token(workspace: Workspace) -> str:
-    """轮换管理页 API token（BUG-118）。
+    """轮换管理页 API token（BUG-118 / IMP-046）。
 
-    覆盖写入新 token 并收紧权限；调用方需重启管理页使新 token 生效。
+    覆盖写入新 token 并收紧权限。``_verify_token`` 每次请求读盘，故轮换后
+    新 token 立即生效、旧 token 立即失效，无需重启管理页。
     """
     return _write_token(workspace, secrets.token_urlsafe(24))
+
+
+# IMP-046：7×24h 自动轮换常量
+TOKEN_ROTATE_HOURS_DEFAULT = 168
+_TOKEN_ROTATE_TICK_INTERVAL = 1800.0  # 30 min
 
 
 def _write_token(workspace: Workspace, token: str) -> str:
@@ -156,6 +163,93 @@ def read_token(workspace: Workspace) -> str | None:
         return None
     token = str(data.get("token", "")).strip()
     return token or None
+
+
+def read_token_metadata(workspace: Workspace) -> dict[str, str | None]:
+    """IMP-046：读取 token 文件元数据（token + createdAt）。
+
+    返回 ``{"token": str | None, "createdAt": str | None}``。
+    文件不存在或损坏时两个字段均为 ``None``。
+    旧文件缺少 ``createdAt`` 时该字段为 ``None``（调用方可据此补写）。
+    """
+    import json
+
+    path = token_path(workspace)
+    if not path.is_file():
+        return {"token": None, "createdAt": None}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"token": None, "createdAt": None}
+    token = str(data.get("token", "")).strip() or None
+    created = data.get("createdAt")
+    created_str = str(created).strip() if created else None
+    return {"token": token, "createdAt": created_str}
+
+
+def should_rotate_token(
+    created_at: str | None, *, now: str, hours: int = TOKEN_ROTATE_HOURS_DEFAULT
+) -> bool:
+    """IMP-046：判定 token 是否到期需要轮换（纯函数，无 IO）。
+
+    * ``created_at`` 为 ``None`` 或非法时间 -> ``True``（视为需补写/轮换）。
+    * ``now`` 必须为合法 ISO 时间戳。
+    * ``hours`` 默认 168（7×24）；差 1 秒未到期返回 ``False``。
+    """
+    from datetime import datetime
+
+    if not created_at:
+        return True
+    try:
+        created_dt = datetime.fromisoformat(created_at)
+        now_dt = datetime.fromisoformat(now)
+    except (ValueError, TypeError):
+        return True
+    # 确保-aware 比较：naive 时间补本地时区
+    if created_dt.tzinfo is None:
+        created_dt = created_dt.astimezone()
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.astimezone()
+    elapsed = now_dt - created_dt
+    return elapsed.total_seconds() >= hours * 3600
+
+
+def maybe_rotate_token(
+    workspace: Workspace,
+    *,
+    hours: int = TOKEN_ROTATE_HOURS_DEFAULT,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """IMP-046：检查 token 是否到期，到期则轮换。
+
+    返回 ``{"rotated": bool, "token": str, "createdAt": str | None}``。
+    若 token 文件不存在，调用 :func:`ensure_token` 颁发。
+    若 ``createdAt`` 缺失但 token 有效，补写 ``createdAt`` 且不视为轮换。
+
+    ``now`` 用于测试注入；默认取当前时间。
+    """
+    meta = read_token_metadata(workspace)
+    current_token = meta["token"]
+    created_at = meta["createdAt"]
+    now_str = now or _now_iso()
+
+    # token 不存在 -> 颁发
+    if not current_token:
+        new_token = ensure_token(workspace)
+        return {"rotated": True, "token": new_token, "createdAt": _now_iso()}
+
+    # createdAt 缺失 -> 补写但不换 token（避免旧文件触发无谓轮换）
+    if not created_at:
+        _write_token(workspace, current_token)
+        return {"rotated": False, "token": current_token, "createdAt": _now_iso()}
+
+    # 到期检查
+    if should_rotate_token(created_at, now=now_str, hours=hours):
+        new_token = rotate_token(workspace)
+        log.info("管理页 token 已自动轮换（上次颁发：%s）", created_at)
+        return {"rotated": True, "token": new_token, "createdAt": _now_iso()}
+
+    return {"rotated": False, "token": current_token, "createdAt": created_at}
 
 
 def _verify_token(workspace: Workspace, candidate: str | None) -> bool:
@@ -472,11 +566,42 @@ def create_app(
         )
         probe_thread.start()
         app.state.capability_probe_thread = probe_thread
+
+        # IMP-046：Token 7×24h 自动轮换。
+        # 046.04：启动时立即检查一次（过期 -> 轮换；缺 createdAt -> 补写）。
+        # 046.05：后台 tick 守护线程，默认每 30 min 检查一次。
+        # 046.06：_verify_token 每次请求读盘，轮换后新 token 立即生效、旧 token 立即 401。
+        rotate_hours = getattr(config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT) or TOKEN_ROTATE_HOURS_DEFAULT
+        token_stop_event = _threading.Event()
+        app.state.token_rotate_stop_event = token_stop_event
+
+        def _bg_token_rotate() -> None:
+            # 启动时立即检查一次
+            try:
+                maybe_rotate_token(workspace, hours=rotate_hours)
+            except Exception:  # noqa: BLE001 - 轮换失败不阻断管理页
+                log.warning("启动时 token 轮换检查失败", exc_info=True)
+            while True:
+                if token_stop_event.wait(timeout=_TOKEN_ROTATE_TICK_INTERVAL):
+                    break
+                try:
+                    maybe_rotate_token(workspace, hours=rotate_hours)
+                except Exception:  # noqa: BLE001
+                    log.warning("周期 token 轮换检查失败", exc_info=True)
+
+        token_thread = _threading.Thread(
+            target=_bg_token_rotate, name="lwa-token-rotate", daemon=True
+        )
+        token_thread.start()
+        app.state.token_rotate_thread = token_thread
+
         try:
             yield
         finally:
             stop_event.set()
             probe_thread.join(timeout=_CAPABILITY_STOP_JOIN_TIMEOUT)
+            token_stop_event.set()
+            token_thread.join(timeout=2.0)
             with _suppress_close():
                 registry.close()
 
@@ -1115,6 +1240,158 @@ def _register_routes(app: FastAPI) -> None:
             "instance": snap.to_dict(),
         }
 
+    @app.post(
+        "/api/instances/{instance_id}/update-from-dir",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def update_from_dir_op(
+        instance_id: str, payload: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        """IMP-047：从关联文件夹源更新实例。
+
+        Body: ``{"restart": true, "keepData": true, "forceKindChange": false}``。
+        仅对 ``sourceKind=folder`` 的实例有效；源目录从 manifest 的
+        ``sourceDirPath`` 读取。
+        """
+        from local_webpage_access.importer import Importer
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+        row = ctx.registry.get_instance(instance_id) or {}
+        if row.get("status") == Status.CANCELLING.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "cancelling",
+                        "message": "实例正在取消构建，暂时不能 update",
+                    }
+                },
+            )
+
+        restart = bool(payload.get("restart", True))
+        keep_data = bool(payload.get("keepData", True))
+        force_kind_change = bool(payload.get("forceKindChange", False))
+
+        importer = Importer(ctx.workspace, ctx.config, ctx.registry)
+        result = importer.update_from_dir(
+            instance_id,
+            restart=restart,
+            keep_data=keep_data,
+            yes=True,
+            dry_run=False,
+            force_kind_change=force_kind_change,
+        )
+
+        restarted = False
+        rebuilt_runtime = False
+        if result.needs_rebuild:
+            from local_webpage_access.lifecycle import rebuild_instance
+
+            rebuild_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id
+            )
+            rebuilt_runtime = True
+        elif result.needs_restart:
+            from local_webpage_access.lifecycle import restart_instance
+
+            restart_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id
+            )
+            restarted = True
+
+        sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        snap = instance_status(
+            ctx.workspace, ctx.config, ctx.registry, instance_id
+        )
+        return {
+            "instanceId": instance_id,
+            "action": "update-from-dir",
+            "skipped": result.skipped,
+            "rebuilt": result.rebuilt,
+            "restarted": restarted,
+            "rebuiltRuntime": rebuilt_runtime,
+            "needsRebuild": result.needs_rebuild,
+            "prevHash": result.prev_hash,
+            "zipHash": result.zip_hash,
+            "instance": snap.to_dict(),
+        }
+
+    @app.post(
+        "/api/import-from-dir",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def import_from_dir_op(
+        payload: dict[str, Any] = Body(default={}),
+    ) -> dict[str, Any]:
+        """IMP-047：从本机文件夹源导入新实例。
+
+        Body: ``{"sourceDir": "/abs/path/to/src", "name": "可选名",
+        "pathAlias": "可选别名"}``。
+        """
+        from local_webpage_access.importer import Importer
+
+        ctx = _Ctx(app)
+
+        source_dir = str(payload.get("sourceDir") or "").strip()
+        if not source_dir:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "bad_request",
+                        "message": "缺少 sourceDir",
+                    }
+                },
+            )
+
+        name = payload.get("name") or None
+        path_alias = payload.get("pathAlias") or None
+        if path_alias is not None:
+            path_alias = str(path_alias).strip() or None
+
+        importer = Importer(ctx.workspace, ctx.config, ctx.registry)
+        try:
+            result = importer.import_from_dir(
+                source_dir,
+                name=name,
+                path_alias=path_alias,
+                on_conflict="error",
+            )
+        except LwaError as exc:
+            code = _lwa_error_code(exc)
+            http_status = _ERROR_STATUS.get(
+                code, status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(
+                status_code=http_status,
+                detail={"error": {"code": code, "message": str(exc)}},
+            ) from exc
+
+        # 对齐 daemon process_zip：识别成功且档位轻量则自动部署
+        from local_webpage_access.daemon import try_auto_start_after_import
+
+        auto_start = try_auto_start_after_import(
+            ctx.workspace,
+            ctx.config,
+            ctx.registry,
+            result,
+            log_prefix="import-from-dir",
+        )
+
+        sync_status(ctx.workspace, ctx.config, ctx.registry, result.instance_id)
+        snap = instance_status(
+            ctx.workspace, ctx.config, ctx.registry, result.instance_id
+        )
+        return {
+            "instanceId": result.instance_id,
+            "action": "import-from-dir",
+            "autoStart": auto_start,
+            "instance": snap.to_dict(),
+        }
+
     @app.patch(
         "/api/instances/{instance_id}/path-alias",
         dependencies=[api],
@@ -1373,6 +1650,7 @@ _LWA_ERROR_CODE_BY_CLASS: dict[type[LwaError], str] = {
     PathError: "bad_request",
     ZipImportError: "bad_request",
     RecognitionError: "bad_request",
+    FolderSourceError: "bad_request",
     # 服务端依赖不可用（端口池耗尽 / Docker 不可用）→ 503
     PortError: "service_unavailable",
     DockerError: "service_unavailable",
@@ -1495,11 +1773,15 @@ def run_manager(
 
 __all__ = [
     "TOKEN_FILENAME",
+    "TOKEN_ROTATE_HOURS_DEFAULT",
     "MANAGER_STATIC_DIR",
     "token_path",
     "ensure_token",
     "rotate_token",
     "read_token",
+    "read_token_metadata",
+    "should_rotate_token",
+    "maybe_rotate_token",
     "create_app",
     "run_manager",
     "require_token",

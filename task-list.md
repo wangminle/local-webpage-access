@@ -451,6 +451,10 @@
 | BUG-437 | 修复 | 复核 CHK-154：工作区迁移 rollback/resume/Caddy/autostart/备份/锁/JSON/IMP-023/Skill 计数等 15 项；确认 BUG-386～405 已落地，并加固 resume 空 PREFLIGHT snapshot 不得跳过采样 | 2026-08-04 12:16 | 2026-08-04 12:16 | 已修复 | 读码+定向 pytest 确认 9×P1+6×P2 均已修；仅发现 resume 对 journal 空 snapshot={} 仍会误复用，改为要求 captured_at 非空；新增 test_resume_empty_preflight_snapshot_recaptures；相关 suites 全绿。 |
 | BUG-438 | 修复 | 多归档追赶中部分归档解压失败仍重置 offset 并续读当前日志，失败归档恢复后前缀被误切（永久漏计）且当前日志重复摄入 | 2026-08-04 12:36 | 2026-08-04 12:36 | 已修复 | CHK-158 P2。改为仅当本轮全部待读归档成功解压才重置游标/写指纹/续读当前日志，任一失败整轮延后（不摄入、不推进、不写指纹）下轮重试；同步更新 _archive_uncompressed 与 _read_new_lines docstring。回归 test_read_new_lines_defers_catchup_when_any_archive_unreadable。验证：test_pageviews 63 passed；test_daemon+test_doctor 158 passed。 |
 | BUG-439 | 修复 | pageviews：size≥offset 且 pivot 因归档不可解压选不出时仍推进游标并误标短归档，导致漏计 | 2026-08-04 12:42 | 2026-08-04 12:42 | 已修复 | CHK-158 残留。BUG-438 只覆盖 need_archive_catchup 路径的全有或全无；pivot is None 分支在任一归档不可解压时改为整轮延后。回归 test_read_new_lines_defers_when_pivot_missing_due_to_unreadable；test_pageviews 全绿。 |
+| BUG-440 | 修复 | IMP-047 审查修复 5 项：P0 update_from_dir 后 sourceKind 丢失（连续更新失败）；P1 status.py 未导入 InstanceManifest 导致 sourceKind 始终 zip；P1 FolderSourceError 未映射 400 返回 500；P2 --from-dir --update 传入目录被忽略不校验；P3 前端导入成功提示读取不存在字段显示 undefined | 2026-08-06 15:45 | 2026-08-06 15:45 | 已修复 | CHK-164 审查发现；P0～P3 源码已落地；P2 补 TestCliFromDirUpdatePathGuard（3 passed）。ruff/mypy/folder 测全绿；全量曾 1633 passed。 |
+| BUG-441 | 修复 | IMP-047：lwa scan / apply_detection_to_manifest 抹除 sourceKind/sourceDirPath/sourceSyncHash，folder 实例身份丢失 | 2026-08-06 15:50 | 2026-08-06 15:50 | 已修复 | apply_detection_to_manifest 透传三字段；补 TestScanPreservesFolderSource。update_from_dir 写回 sourceKind 此前已修；Toast 已用 instanceId；FolderSourceError 已映射 bad_request。 |
+| BUG-442 | 修复 | folder_source.validate_source_dir 相对路径被放行：resolve() 恒返回绝对路径，先 resolve 再判 is_absolute() 为死代码，'./x'、'.' 等被解析到服务端 cwd（CHK-166 minor） | 2026-08-06 15:57 | 2026-08-06 15:57 | 已修复 | 改为 resolve() 前判 p.is_absolute()；新增 test_rejects_relative_path 覆盖相对路径/./my-site/. 三例；test_folder_source 全绿 |
+| BUG-443 | 修复 | 文件夹导入：识别成功仍写 pending+禁用启动；任意 HTML 不识别；import-from-dir 不自动部署 | 2026-08-06 17:56 | 2026-08-06 17:56 | 已修复 | B: build_manifest 识别成功→stopped；apply_detection 保留生命周期。C: try_auto_start_after_import 供 daemon+import-from-dir。A: scanner/hosting 任意 .html。已救活 3-scripts:18005、v1:18006；3d:18002 保持。回归 test_detect_arbitrary_html / import_non_index / host_static_arbitrary / import_from_dir_auto_starts 等。 |
 
 ## 调整事项
 
@@ -661,12 +665,26 @@
 | CHK-157 | 检查 | 复核 CHK-154 十五项工作区迁移审查意见是否仍存在 | 2026-08-04 12:21 | 2026-08-04 12:21 | 已完成 | 结论：15 项均已修复，无残留。逐项读码核实：①rollback 反向 rebind+重生配置（:1320，BUG-386）；②resume 复用 captured_at 非空的快照（:1177-1182，BUG-437 加固空 PREFLIGHT 边界）；③rebind 含 rewrite_gateway_fragment_paths（:697）；④autostart repair 按 snapshot.autostart_installed 门控（:860）；⑤repair 对配置已关闭的残留单元 disable 而非重启用（BUG-389）；⑥SQLite Online Backup API（:513-519，BUG-392）；⑦快照含 control_plane_running 并恢复 detached 控制面（:86，BUG-395）；⑧CLI resume/verify/rollback 以 journal OLD/NEW 为权威；⑨Skill 计数断言=18（test_init.py:124/150）；⑩dry-run 只读 registry+read_only 采样不建 pageviews.db（:1051-1056/:445-449，BUG-394）；⑪O_CREAT\|O_EXCL 原子锁（:242，BUG-396）；⑫LwaError 在 --json 下输出结构化错误；⑬IMP-023 仅 HTTP 响应异常判 mismatch，连接级失败豁免（BUG-399）；⑭last_error_log_at 初值 -inf 首轮必记；⑮MOVE 后 backup_dir 前缀重映射（:1213-1216，BUG-393）。验证：test_workspace_migrate/autostart/access/manager_api/init 五套件 252 passed。此前 CHK-155/CHK-156 两轮复核结论一致，本次为第三轮独立复核 |
 | CHK-158 | 检查 | 审查相对 main 合并基准 f2ac6697 的代码变更（V0.6.13 待提交工作树） | 2026-08-04 12:27 | 2026-08-04 12:27 | 已完成 | 发现 1 项 P2：pageviews 多归档追赶中部分归档不可读时仍重置 offset，后续恢复会漏读该归档前缀并重复读取当前日志；最小复现已确认。ruff 通过；pageviews/importer/docker_runtime/workspace_migrate 定向套件通过；全量测试受沙箱禁用本地端口影响，host_container 另受无 LAN 环境影响。 |
 | CHK-159 | 检查 | 复核 CHK-158：多归档部分不可读时浏览量漏计/双计是否仍存在 | 2026-08-04 12:42 | 2026-08-04 12:42 | 已完成 | 结论：catchup 全有或全无（BUG-438）已生效；另发现并修复 size≥offset+pivot 缺失残留（见同期 BUG）。定向+全量 test_pageviews 通过。 |
+| CHK-160 | 检查 | 对 http://10.181.224.39:8080/prd-review-workflow/ 做 200 次打流测试（50 req/s × 4s） | 2026-08-04 16:30 | 2026-08-04 16:30 | 已完成 | 200/200 HTTP 200 成功率 100%；延迟 P50=102ms P90=217ms P95=267ms P99=1240ms 最大=1287ms 平均=128.5ms；实际耗时 4.21s。P99 长尾(~1.2s)系少数请求 GC/调度抖动，不影响成功率。Caddy 网关+docker-compose 后端 prd-review-v035(18004) 承压正常 |
+| CHK-161 | 检查 | 审查 task-list-initialization 技能的优化空间：通读 SKILL.md、CLI 源码(1622行)、maintenance-rule.md、template.md，结合实际使用痛点提出 11 条优化建议 | 2026-08-04 17:04 | 2026-08-04 17:04 | 已完成 | 高优4条：摘要自动同步+校验、错误信息附合法值、补全section_aliases、增加update子命令；中优3条：list/search、状态枚举扩展、install-maintenance；低优4条。已验证摘要漂移943vs953 |
+| CHK-162 | 检查 | 核对新增功能点2607（IMP-025～043）完成度：对照文首状态、各节声明与 task-list DEV-068～091，并抽查源码触点 | 2026-08-06 12:27 | 2026-08-06 12:30 | 已完成 | 结论：主路径均已落地。不计入欠账：原 IMP-040 update --pull / 原 IMP-041 Vite（范围删除）；033.13/035.06/036.08 为真机勾选运维项；IMP-042.b 明确延期；IMP-029 在待改进记录。已建 2608 月度账本。；2608 月度账本权威路径后改为 design/plans/（DOC-104）。 |
+| CHK-163 | 检查 | 核对 design/achievement/实施计划合集-20260804 七计划是否均已实现，未实现项移植 2608 | 2026-08-06 12:51 | 2026-08-06 13:00 | 已完成 | 结论见合集完成度速查与 2608 §0.4。唯一未做=Task 11 三项。；嗣后从 2608 删除 042.b 专节（暂不开发，DOC-107）。 |
+| CHK-164 | 检查 | 评审 IMP-046/047 初稿：确认 047 update_from_dir 冲掉 sourceKind 等缺陷 | 2026-08-06 15:04 | 2026-08-06 15:00 | 已完成 | Critical：update_from_dir 有变更后 sourceKind 被重置为 zip，二次更新失败（已本地复现）；测试假绿。Important：相对路径未拒、FolderSourceError→500、CLI --from-dir --update 忽略路径、前端 toast 读错字段。046 未见阻断级。详见会话评审。 |
+| CHK-165 | 检查 | 独立复核 3 个目录导入候选问题真伪（toast 字段、绝对路径校验、FolderSourceError HTTP 映射） | 2026-08-06 15:06 | 2026-08-06 15:06 | 已完成 | 结论：1) 前端 success toast 读取 data.name\|\|data.id，而 /api/import-from-dir 仅返回 instanceId/action/instance，属实；2) validate_source_dir 先 Path.resolve() 再判 resolved.is_absolute()，单看该函数会接受可解析相对路径，但当前前端已拒绝相对路径，成立范围主要在 CLI/其他调用方；3) _lwa_error_code 未映射 FolderSourceError，/api/import-from-dir 捕获后会落到 internal→HTTP 500，属实。未改代码，仅静态复核。 |
+| CHK-166 | 检查 | 独立验证 4 个目录导入候选问题真伪与严重级别（绝对路径校验、FolderSourceError 映射、前端 toast 字段、CLI --from-dir --update 语义） | 2026-08-06 15:08 | 2026-08-06 15:08 | 已完成 | 结论：4 项均属实；严重级别分别为 minor、major、minor、minor。运行时复核确认 validate_source_dir 接受相对路径，_lwa_error_code(FolderSourceError)=internal/500；前端成功 toast 读取不存在的 data.name/data.id；CLI update-from-dir 模式要求提供 --from-dir <目录> 但实际更新来源固定为 manifest.sourceDirPath。 |
+| CHK-167 | 检查 | 代码审查二次校验：核实 import-from-dir 前后端返回字段、绝对路径校验与 FolderSourceError 错误码映射 | 2026-08-06 15:09 | 2026-08-06 15:09 | 已完成 | 静态阅读 manager_static/app.js、manager_api.py、folder_source.py 与相关测试，并用 TestClient 最小复现验证：1) 成功返回仅含 instanceId/action/instance，前端 toast 使用 data.name\|\|data.id 会显示 undefined；2) validate_source_dir 先 resolve 再判 absolute，'.' 被放行并解析到服务端 cwd；3) FolderSourceError 未映射，import-from-dir 对不存在路径返回 internal/500。未修改业务代码。 |
+| CHK-168 | 检查 | 审查当前未提交代码并复核目录导入/管理页改动缺陷 | 2026-08-06 15:10 | 2026-08-06 15:10 | 已完成 | 审查 git diff 与相关 tests，确认 4 项问题：1) FolderSourceError 在 /api/import-from-dir 下被映射为 internal/500；2) validate_source_dir 会放行可解析相对路径；3) 管理页文件夹导入成功 toast 读取不存在的 data.name/data.id；4) CLI --from-dir --update 要求提供目录值但实际忽略该值。运行 pytest -q tests/test_folder_source.py tests/test_manager_api.py 通过。 |
+| CHK-169 | 检查 | 核对 BUG-440 声称的 5 项修复是否已落地到源码与测试 | 2026-08-06 15:54 | 2026-08-06 15:54 | 已完成 | 5/5 源码均已落地；P0/P1/P3 有回归或映射验证；P2 CLI 路径一致性校验已实现，未见专用单测。另 BUG-441（scan 抹元数据）已修。test_folder_source 47 passed。 |
+| CHK-170 | 检查 | 复核当前未提交代码（IMP-046 token 轮换 / IMP-047 文件夹源）：确认 CHK-164~168 所列 4 项已修复（sourceKind 恢复、FolderSourceError→400、toast 字段、相对路径），全量回归 | 2026-08-06 15:57 | 2026-08-06 15:57 | 已完成 | 逐项核实：1) sourceKind 写回；2) FolderSourceError→400；3) toast instanceId；4) 相对路径 BUG-442。另：CHK-170 原文写「--from-dir X --update 忽略 X 为文档化语义」已过时——BUG-440 P2 / TST-002 已改为路径不一致则 Exit(2)，见 TestCliFromDirUpdatePathGuard。更新源仍固定取 manifest；传入 X 仅作一致性校验，不用于切换关联目录。 |
+| CHK-171 | 检查 | 复核他方审查结论：BUG-442/相对路径属实；纠正「--from-dir 更新忽略路径」过时说法 | 2026-08-06 15:59 | 2026-08-06 15:59 | 已完成 | 相对路径 resolve 前 is_absolute 已落地。忽略 X≠现行行为：不一致拒绝，一致才继续；更换关联目录仍须删实例重导。已改 CHK-170 备注。 |
+| CHK-172 | 检查 | 审查未提交改动：导入识别、静态托管与管理端自动启动 | 2026-08-06 18:12 | 2026-08-06 18:12 | 已完成 | 相关 pytest 测试集通过；未发现可证实的功能性 Bug。git diff --check 仍报告两份设计文档共 17 处行尾空白，建议提交前清理。 |
 
 ## 测试数据
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
 | TST-001 | 检查 | TST-001：mock 三角色 capability 缓存收敛后 manager/CLI Full overall=ready | 2026-07-30 17:50 | 2026-07-30 17:50 | 已完成 | test_three_role_caches_converge_manager_and_cli_overall_ready；非真 systemd。来源 CHK-134。 |
+| TST-002 | 检查 | 补 BUG-440 P2 回归：--from-dir --update 路径不一致须拒绝（TestCliFromDirUpdatePathGuard 3 例） | 2026-08-06 15:56 | 2026-08-06 15:56 | 已完成 | 单元：mismatched Exit(2)+匹配允许；CLI CliRunner exit 2 且输出含「不一致」。顺手去掉 importing._do_update_from_dir 残留 docstring 字符串。 |
 
 ## 文档维护
 
@@ -772,6 +790,21 @@
 | DOC-098 | 文档 | 合并 design/plans 下 7 篇历史计划为合集.md，并修正 docs/achievement 引用 | 2026-08-04 12:27 | 2026-08-04 12:27 | 已完成 | 新建 design/plans/合集.md + README.md；删除 7 篇独立 md；faq/workspace-rename/operations-playbook/新增功能点2607 链接改指向合集锚点；task-list 历史备注保留原路径不动。 |
 | DOC-099 | 文档 | 将 design/plans/合集.md 重命名为 local-webpage-access-实施计划合集-20260804.md，并入原 README，更新引用 | 2026-08-04 12:30 | 2026-08-04 12:30 | 已完成 | 删除 design/plans/README.md；faq/workspace-rename/operations-playbook/新增功能点2607 链接同步；命名对齐 design/achievement 惯例。 |
 | DOC-100 | 文档 | docs 去耦 design：移除 faq/workspace-rename/operations-playbook 对 design 的外链 | 2026-08-04 12:32 | 2026-08-04 12:32 | 已完成 | docs 自成体系；设计归档仅留在 design/；引用改为 docs 内文档互链。 |
+| DOC-101 | 文档 | 新建 local-webpage-access-新增功能点2608.md，承接 2607 收口与本月功能点记录（权威路径后迁至 design/plans/，见 DOC-104） | 2026-08-06 12:27 | 2026-08-06 12:30 | 已完成 | 样式对齐 2607：文首状态/范围、§分节、决策表、WBS、验收、task-list 映射、变更日志。补记已落地 IMP-044（recover/pageviews CLI）与 IMP-045（裸 mv 防复发/doctor 路径一致性）；承接 IMP-042.b 与 IMP-029 候选；提供 IMP-046+ 追加模板。2607 文首增加指向 2608 的后续月份链接。；路径更正：权威副本现为 design/plans/local-webpage-access-新增功能点2608.md（DOC-104）；achievement/ 仅保留跳转短链。；口径：2608 进行中只在 design/plans/，暂不进入 achievement（DOC-105）。 |
+| DOC-102 | 文档 | 更新新增功能点2608：写入 IMP-046/047/048（路径随用户挪移，权威现为 design/plans/，见 DOC-104） | 2026-08-06 12:43 | 2026-08-06 12:45 | 已完成 | 正文含 IMP-046/047/048；权威路径 design/plans/…2608.md；暂不进入 achievement（DOC-105）。 |
+| DOC-103 | 文档 | 补强 2608 IMP-047：关联目录只读复制、LWA 工作区内运行、无变更提示无需更新 | 2026-08-06 12:45 | 2026-08-06 12:50 | 已完成 | 更新 §5.1～5.4 与变更日志；同步 PLN-030 备注。；权威路径 design/plans/…2608.md（DOC-104）。 |
+| DOC-104 | 文档 | 纠正 2608 权威路径：design/plans/local-webpage-access-新增功能点2608.md；修正 task-list/2607 链接与 achievement 短链 | 2026-08-06 12:47 | 2026-08-06 12:50 | 已完成 | 用户将 2608 从 achievement 挪至 plans；同步 DOC-101～103/PLN-029～031/CHK-162 备注；2607 后续月份链接改指向 ../plans/；achievement/2608 改为跳转短链。；随后删除 achievement 短链，进行中文档仅留 plans（DOC-105）。 |
+| DOC-105 | 文档 | 删除 achievement 下 2608 短链：进行中月度文档仅保留 design/plans/，暂不进入 achievement | 2026-08-06 12:48 | 2026-08-06 12:55 | 已完成 | 用户确认暂不归档进 achievement；2607 仍链到 ../plans/…2608.md；更新 2608 文档约定与 DOC-101/102/104 备注。 |
+| DOC-106 | 文档 | 合集完成度速查 + 2608 移植 IMP-049/050 与 §0.4 核对表；Task 11 标注未落地并链到 2608 | 2026-08-06 12:51 | 2026-08-06 13:00 | 已完成 | 更新 achievement/实施计划合集-20260804.md 与 plans/新增功能点2608.md。；042.b 专节已从 2608 移除（DOC-107）。 |
+| DOC-107 | 文档 | 从 2608 删除 §3 IMP-042.b：跨盘/跨机暂不开发、不纳入本月待办 | 2026-08-06 12:54 | 2026-08-06 13:05 | 已完成 | 仅保留 §0.2 边界说明；合集 Task 11 第三条改为暂不开发；049/050 仍在 §7。 |
+| DOC-108 | 文档 | 2608：确认先做 IMP-046/047；IMP-049/050 标为优先级中·不着急 | 2026-08-06 13:00 | 2026-08-06 13:10 | 已完成 | 更新文首、§0.4、§7 标题与分节标签、约定与变更日志；同步 PLN-029/030/032/033 备注。 |
+| DOC-109 | 文档 | 2608：拆解 IMP-046/047 可执行 WBS（§4.4 046.01～12；§5.4 047.01～17） | 2026-08-06 13:05 | 2026-08-06 13:10 | 已完成 | design/plans/local-webpage-access-新增功能点2608.md；含阶段依赖、交付物、完成标准与推荐顺序；同步 PLN-029/030。 |
+| DOC-110 | 文档 | IMP-046 文档：docs/manager-page.md 新增 Token 自动轮换章节；design/plans/2608 §4 状态改「已落地」 | 2026-08-06 13:28 | 2026-08-06 13:28 | 已完成 | docs/manager-page.md：新增「### Token 自动轮换（IMP-046）」章节，涵盖 168h 周期、managerTokenRotateHours 配置、loopback 免 token、LAN 旧 token 401、lwa manager token / --json 取新 token、重启不重置周期、无多 token 宽限期。design/plans/local-webpage-access-新增功能点2608.md §4 标题与状态行已改为「已落地」。 |
+| DOC-111 | 文档 | 同步 IMP-046：known-limitations / security-boundary 去掉「无自动轮换、无 CLI」过时表述 | 2026-08-06 15:50 | 2026-08-06 15:50 | 已完成 | docs/known-limitations.md 鉴权条；docs/security-boundary.md token 条；对齐 168h 自动轮换与 lwa manager token。 |
+| DOC-112 | 文档 | 同步 V0.7.0 用户文档与 Skill：README/faq/operations/release-checklist/acceptance/testing + 新增 lwa-import-folder（skills=19） | 2026-08-06 16:06 | 2026-08-06 16:06 | 已完成 | 覆盖 IMP-046 token 轮换、IMP-047 --from-dir；test_init/e2e skill 计数 19；manager-page/known-limitations 既有 046/047 章节保留。 |
+| DOC-113 | 文档 | 合集与 2608 IMP-047：补记 BUG-443 文件夹导入闭环方案与 3-src/4-output 验收 | 2026-08-06 18:01 | 2026-08-06 18:01 | 已完成 | 合集文首速查+文末新块；2608 §5.2 047.i/j/k、§5.5/§5.7、变更日志；runtime：v1:18006、3d:18002+别名、仅非index HTML 时 API autoStart 200 |
+| DOC-114 | 文档 | 2608 入账 IMP-051：管理页文件夹导入「选择文件夹」按钮需求与方案 | 2026-08-06 18:05 | 2026-08-06 18:05 | 已完成 | §6 全文；文首状态/范围；047.h 交叉引用；章节顺延 048→§7、049/050→§8；PLN-035 |
+| DOC-115 | 文档 | 清理合集与 2608 设计文档行尾空白（git diff --check） | 2026-08-06 18:14 | 2026-08-06 18:14 | 已完成 | CHK-172 指出 17 处 trailing whitespace；已 rstrip 两文件，git diff --check 干净 |
 
 ## 功能开发
 
@@ -871,6 +904,8 @@
 | DEV-092 | 开发 | CLI 新增 lwa recover / lwa pageviews，对齐管理页 API | 2026-07-31 10:52 | 2026-07-31 10:52 | 已完成 | lifecycle.recover + PageviewStore.summary/detail；README/operations-playbook/manager-page 同步；test_cli_validation 覆盖 |
 | DEV-093 | 开发 | （去重）与 DEV-092 内容完全重复 | 2026-07-31 10:52 | 2026-08-03 19:19 | 已关闭 | 去重合并至 DEV-092；ID 不复用，本条仅留审计痕迹。 |
 | DEV-094 | 开发 | P1：doctor 新增 workspace 路径一致性与容器挂载漂移检查，主动发现裸 mv 后的持久化残留 | 2026-08-03 16:16 | 2026-08-03 17:51 | 已完成 | 【已完成】`check_workspace_path_consistency`：复用 `expected_workspace_derived_paths` 与 `bind_mounts`；检查活跃派生字段、Caddy 本地引用、SQLite data mount；外部 sourceZipPath/builds/events 不告警；Docker 不可用时挂载 SKIP。接入 `run_doctor`。回归 `workspace_consistency*`；test_doctor 全绿。 |
+| DEV-095 | 开发 | IMP-046：管理页 API Token 每 168h（7×24）自动轮换——库内核（read_token_metadata/should_rotate_token/maybe_rotate_token）+ manager lifespan 启动检查+30min tick 守护线程 + config managerTokenRotateHours + CLI lwa manager token（含 --json）+ 前端 401 文案 + docs/manager-page.md 文档 + 17 条新增测试 | 2026-08-06 13:28 | 2026-08-06 13:28 | 已完成 | WBS 046.01～12 全部完成。阶段 A：read_token_metadata/should_rotate_token/maybe_rotate_token 纯函数；阶段 B：lifespan 启动即 maybe_rotate + daemon 线程 30min tick；阶段 C：config.py managerTokenRotateHours(1~8760, 默认 168) + lwa manager token/--json CLI；阶段 D：app.js 401 文案更新 + docs/manager-page.md 新增 Token 自动轮换章节；阶段 E：17 条新测试全绿。回归 1589 passed/4 skipped/0 failed。真机验证：过期 token（createdAt 2026-07-14）重启后立即轮换，旧 token 401、新 token 200、loopback 免 token 不变。设计计划 2608 §4 状态已改「已落地」。ruff/mypy/compileall 全部通过。 |
+| DEV-096 | 开发 | IMP-047 本机文件夹源导入与一键更新：folder_source.py（validate/pack/hash）+ importer.import_from_dir/update_from_dir + CLI --from-dir + manager API（/api/import-from-dir, /api/instances/{id}/update-from-dir）+ 前端导入/更新/详情面板 + status.py sourceKind/sourceDirPath + lwa-import-folder Skill + 文档（manager-page/operations-playbook/known-limitations）+ 隔离红线硬断言测试 42 用例 | 2026-08-06 14:45 | 2026-08-06 14:45 | 已完成 | DEV-096；全量 1631 passed, 4 skipped (Docker)；compileall OK；设计计划 §5 已标已落地 |
 
 ## 配置运维
 
@@ -966,6 +1001,15 @@
 | OPS-089 | 运维 | 旧目录已由用户自行移入废纸篓，取消 8/5 观察期删除提醒；清理迁移携带的陈旧 __pycache__ | 2026-08-03 19:07 | 2026-08-03 19:07 | 已完成 | 发现 ~/.Trash 有两份 8-本地简单网页部署基座（16:03 与稍晚各一份），步骤 4 提前完成，取消 cron 3b2319c4；排查 pytest SKIP 行显示旧路径之谜：系迁移带入的旧 __pycache__（pyc 内嵌旧源码路径），已全项目清理并复跑确认显示正确 |
 | OPS-090 | 运维 | 应用版本号提升至 V0.6.12：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/release-checklist/pack-release-zip 同步 | 2026-08-03 19:17 | 2026-08-03 19:17 | 已完成 | 活跃引用 0.6.11→0.6.12；task-list 历史 OPS-077 等保留不动。含七项待办收口与 BUG-423～428。lwa version 仍取 git HEAD 主题，提交 V0.6.12-Build1584 后即显示。 |
 | OPS-091 | 运维 | 应用版本号提升至 V0.6.13：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/pack-release-zip 同步 | 2026-08-04 12:14 | 2026-08-04 12:14 | 已完成 | 活跃引用 0.6.12→0.6.13；task-list 历史 OPS-090 等保留。含 pageviews 轮转、显示名回填、挂载/doctor fail-safe 加固。 |
+| OPS-092 | 运维 | 本地 lwa 升级 0.6.11->0.6.13 并按 setup --full 方式重启全部服务 | 2026-08-04 14:13 | 2026-08-04 14:13 | 已完成 | pip install -e .（0.6.11->0.6.13 editable）；lwa setup --full --yes 环境工具全绿（Caddy v2.11.4/Docker 29.6.1/Compose 5.3.0/Node v24.16.0）；lwa update --skip-pip --restart-instances 重启 gateway+4实例+syncSkills(更新2)+accessReview OK；手动拉起 manager(pid=53829)+daemon(pid=53861)；lwa doctor Full Profile overall=ready 0失败0警告含 workspace_path_consistency 一致。最终：gateway(pid=53578)/manager(pid=53829)/daemon(pid=53861) 全部新代码运行；4实例全部 running（demo-static:18000/voiceprint-v3-demo:18003/3d-demo-family-wakeup:18001/prd-review-v035:18004） |
+| OPS-093 | 运维 | 应用版本号提升至 V0.7.0：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/pack-release-zip 同步 | 2026-08-06 16:06 | 2026-08-06 16:06 | 已完成 | 活跃引用 0.6.13→0.7.0；历史「V0.6.13 起」功能引入标记保留。lwa version 在提交 V0.7.0-Build… 主题前仍读 git HEAD 显示 0.6.13，fallback 已是 0.7.0。含 IMP-046/047。 |
+| OPS-094 | 运维 | 补跑 lwa update 将本机 runtime 对齐 V0.7.0（skills 同步 / 配置补齐 / kickstart 协调重启） | 2026-08-06 17:05 | 2026-08-06 17:05 | 已完成 | 此前半手工重启遗漏 syncSkills（import-folder 等 3 文件落后）与 migrateConfig（managerTokenRotateHours）；17:03 标准路径：pip→syncSkills 更新3→补齐 token 轮换字段→manager/daemon/gateway kickstart→access refresh/review 4/4 OK→doctor ready。无双次停启竞态。 |
+| OPS-095 | 运维 | 修复 Claude Stop hook 相对路径：改用 CLAUDE_PROJECT_DIR，避免 cwd≠仓库根时报脚本缺失 | 2026-08-06 17:08 | 2026-08-06 17:08 | 已完成 | 根因非脚本缺失（.claude/hooks/tasklist_sync_reminder.sh 一直在）；相对路径在 runtime/ 下失败。settings.json 已改；skill install-maintenance 模板同步升级并可幂等改写旧命令。 |
+| OPS-096 | 运维 | 解除实例 3d（三维挂谷猜想论文3d动画）pending 卡住并启动+设置路径别名 | 2026-08-06 17:31 | 2026-08-06 17:31 | 已完成 | 源目录仅有 kakeya-3d-chapters.html 无 index.html，scanner 标记 pending；复制为 index.html 后 lwa import --from-dir --update 3d → static high；lwa start 端口 18002；lwa alias set 3d 3d-kakeya-animation；直连与 /3d-kakeya-animation/ 均 HTTP 200 |
+| OPS-097 | 运维 | 重扫并启动卡住的 3-scripts 与 v1（多户型），验证三端口 200 | 2026-08-06 17:56 | 2026-08-06 17:56 | 已完成 | lwa scan+start；18002/18005/18006 HTTP 200；manager off/on 加载新 API |
+| OPS-098 | 运维 | 服务重启后复核三实例部署一致性：3-scripts 端口漂移 18006→18007 后 registry/ports/static_sites/caddy conf 全对齐，三站点与 3d 别名路由复验 200 | 2026-08-06 18:05 | 2026-08-06 18:05 | 已完成 | 承接 BUG-443/OPS-097。18:03 manager+daemon off/on 加载新代码后 lwa scan 3-scripts→static(high)、start 3-scripts:18007、start v1:18005（npm ci+vite build 成功）；18006 已释放且无 conf 残留；GET /、/kakeya-3d-chapters.html、/vendor/three.module.js、v1 /assets/* 及 /3d-kakeya-animation/ 均 200；顺带清理 scanner.py 冗余 html_files 字段。 |
+| OPS-099 | 运维 | 4-output 去掉 index.html 后 update 3d：任意 HTML 识别并托管验证 | 2026-08-06 18:10 | 2026-08-06 18:10 | 已完成 | 仅 kakeya-3d-chapters.html；detect static high；public 自动补 index.html；:18002 与 /3d-kakeya-animation/ 均 200 |
+| OPS-100 | 运维 | 4-output 无 index：从源更新 + 删除后 API 重导入双路径验收 | 2026-08-06 18:12 | 2026-08-06 18:12 | 已完成 | 步骤1 update 跳过未变但仍 200；步骤2 purge 后 import-from-dir autoStart=started，current 仅 kakeya html、public 自动补 index，:18002 与别名均 200 |
 
 ## 规划事项
 
@@ -999,17 +1043,24 @@
 | PLN-026 | 规划 | 规划 2026-07-29 WSL2 Mirrored + Full Profile 实机排障反哺 §23 | 2026-07-29 17:41 | 2026-07-29 17:41 | 已完成 | 在 design/plan/local-webpage-access-新增功能点2607.md 新增 §23，不另占 IMP 编号；覆盖 BUG-379 manager 周期能力刷新、BUG-380 内部 HTTP 直连、BUG-381 别名资源 mismatch、DOC-077 Hyper-V firewall，以及 data/data 多库溯源边界；拆分 23.01～23.10 WBS、自动化/实机验收矩阵、风险与发布顺序。 |
 | PLN-027 | 规划 | 规划 LWA 工作区迁移一等支持能力（事务 + CLI + Skill） | 2026-07-29 18:18 | 2026-07-29 18:52 | 已完成 | 初版 18:44；18:52 吸收评审重写 docs/plans/2026-07-29-workspace-relocate.md：状态机 preflight…complete、同盘范围拍板、dry-run/resume/verify/rollback、Skill lwa-relocate-workspace。产品编号 IMP-042（§24）。实现 DEV-089。 |
 | PLN-028 | 规划 | IMP-042 LWA 工作区迁移：写入新增功能点 §24，并完善 PLN-027 实现计划（事务+CLI+Skill、同盘范围、状态机） | 2026-07-29 18:52 | 2026-07-29 18:52 | 已完成 | design/plan/local-webpage-access-新增功能点2607.md §24；docs/plans/2026-07-29-workspace-relocate.md 重写；DOC-081 更名为工作区迁移手册。实现仍 DEV-089。 |
+| PLN-029 | 规划 | IMP-046：管理页 API Token 每 7×24h（168h）自动轮换；保留本机 loopback 免 token，LAN 访问 17800 须有效 token | 2026-08-06 12:43 | 2026-08-06 13:27 | 已完成 | 入账 design/plans/…2608.md §4。WBS：046.01～12（阶段 A–E）。复用 rotate_token/createdAt；manager 启动+tick；鉴权读盘热生效。本月优先（与 IMP-047 同批）。**已落地：DEV-095 / DOC-110；WBS 046.01～12 全部完成，回归 1589 passed/0 failed。** |
+| PLN-030 | 规划 | IMP-047：本机文件夹源导入（打 zip 复用既有管线）+ 管理页/CLI/Skill 一键从源目录更新；前端标注来源类型 | 2026-08-06 12:43 | 2026-08-06 15:50 | 已完成 | 入账 2608 §5。WBS 047.01～17。已落地 DEV-096；另修 scan 抹元数据（见最新 BUG）。红线：只读复制、禁止就地运行。 |
+| PLN-031 | 规划 | IMP-048：实例 ZIP 包模式与文件夹源模式自由转换（后续待办，不与 046/047 同期实现） | 2026-08-06 12:43 | - | 待办 | 入账 design/plans/local-webpage-access-新增功能点2608.md §6。047 仅预留 sourceKind；转换状态机/UI/迁移另择期。 |
+| PLN-032 | 规划 | IMP-049：工作区派生路径相对化写入（合集 Task 11 移植），减少 relocate/裸 mv 后的 rebind 面 | 2026-08-06 12:51 | - | 待办 | 入账 2608 §7.1。优先级：中 · 不着急；先做 046/047，本项不抢档。真痛（绝对路径残留频繁）再开。 |
+| PLN-033 | 规划 | IMP-050：生产 CLI 与工作区解耦安装（合集 Task 11 移植），避免工具安装钉死工作区路径 | 2026-08-06 12:51 | - | 待办 | 入账 2608 §7.2。优先级：中 · 不着急；先做 046/047。多工作区/正式部署时再优先考虑。 |
+| PLN-034 | 规划 | 核对实施计划合集七计划完成度：主路径已落地；Task 11 三项移植至 2608（042.b/049/050） | 2026-08-06 12:51 | 2026-08-06 13:00 | 已完成 | 主路径已落地。Task 11：049/050 迁 2608；042.b 按用户要求不迁入 2608、暂不开发（DOC-107）。 |
+| PLN-035 | 规划 | IMP-051 管理页文件夹导入增加「选择文件夹」原生选目录按钮 | 2026-08-06 18:02 | - | 待办 | 入账 2608；源路径输入框右侧按钮；macOS Finder / Ubuntu 文件管理器；须填 LWA 宿主机绝对路径 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 437 | 437 | 0 | 100% |
-| 调整事项 | 39 | 39 | 0 | 100% |
-| 检查事项 | 157 | 157 | 0 | 100% |
-| 测试数据 | 1 | 1 | 0 | 100% |
-| 文档维护 | 97 | 97 | 0 | 100% |
-| 功能开发 | 94 | 94 | 0 | 100% |
-| 配置运维 | 90 | 90 | 0 | 100% |
-| 规划事项 | 28 | 28 | 0 | 100% |
-| **总计** | 943 | 943 | 0 | 100% |
+| 代码 Bug | 443 | 443 | 0 | 100% |
+| 调整事项 | 41 | 41 | 0 | 100% |
+| 检查事项 | 171 | 171 | 0 | 100% |
+| 测试数据 | 2 | 2 | 0 | 100% |
+| 文档维护 | 115 | 115 | 0 | 100% |
+| 功能开发 | 96 | 96 | 0 | 100% |
+| 配置运维 | 99 | 99 | 0 | 100% |
+| 规划事项 | 35 | 31 | 4 | 89% |
+| **总计** | 1002 | 998 | 4 | 100% |

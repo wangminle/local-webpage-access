@@ -505,6 +505,12 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 }
 .detail-kv dt { color: var(--text-muted); }
 .detail-kv dd { margin: 0; word-break: break-all; }
+.detail-kv dd.detail-path {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 .detail-hint {
   margin: 0 0 8px;
   font-size: 13px;

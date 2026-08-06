@@ -82,9 +82,68 @@ LOCK_HEARTBEAT_TIMEOUT = 60.0
 _LOCK_HEARTBEAT_POLL_MULTIPLE = 4  # 心跳超时至少为 poll_interval 的 N 倍
 
 # daemon 自动启动的资源档位白名单（其余 medium/heavy 不自动启动，设计 §16.5）
-_AUTO_START_PROFILES = {"tiny", "small"}
+AUTO_START_PROFILES = frozenset({"tiny", "small"})
+_AUTO_START_PROFILES = AUTO_START_PROFILES  # 兼容旧引用
 _START_LOCK_MUTEX = threading.Lock()
 _reconcile_failures: dict[tuple[str, str], tuple[int, float]] = {}
+
+
+def try_auto_start_after_import(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    result: Any,
+    *,
+    log_prefix: str = "daemon",
+) -> dict[str, Any]:
+    """导入成功后按档位决定是否自动启动（daemon zip 与管理页文件夹导入共用）。
+
+    返回 ``{"action": "pending"|"started"|"imported", "note": str}``。
+    ``action=imported`` 表示已导入但自动启动失败（已置期望运行，待自愈）。
+    """
+    from local_webpage_access.lifecycle import start_instance
+
+    iid = result.instance_id
+    manifest = result.manifest
+    if result.detection.pending:
+        note = (
+            f"未识别（{manifest.lastError or 'detection pending'}），"
+            "已标记 pending，等待人工或 skill 介入"
+        )
+        log.info("%s: %s → pending（%s）", log_prefix, iid, note)
+        return {"action": "pending", "note": note}
+
+    profile = (
+        manifest.resourceProfile.value
+        if hasattr(manifest.resourceProfile, "value")
+        else str(manifest.resourceProfile)
+    )
+    if profile not in AUTO_START_PROFILES:
+        note = f"资源档位 {profile}，不自动启动，请人工确认后 lwa start"
+        log.info("%s: %s → 不自动启动（%s）", log_prefix, iid, profile)
+        return {"action": "pending", "note": note}
+
+    try:
+        start_instance(workspace, config, registry, iid)
+        note = f"已自动启动（profile={profile}）"
+        log.info("%s: %s → 自动启动（profile=%s）", log_prefix, iid, profile)
+        return {"action": "started", "note": note}
+    except Exception as exc:  # noqa: BLE001 — 导入已成功，启动失败不回滚导入
+        with contextlib.suppress(Exception):
+            registry.update_status(iid, "stopped", desired_state="running")
+            registry.add_event(
+                iid,
+                "start",
+                f"{log_prefix} 自动启动失败，已置期望运行待自愈重试：{exc}",
+            )
+        note = f"已导入；自动启动失败（待自愈重试）：{exc}"
+        log.warning(
+            "%s: %s 导入成功但自动启动失败，置期望运行待自愈：%s",
+            log_prefix,
+            iid,
+            exc,
+        )
+        return {"action": "imported", "note": note}
 
 
 # ---- 状态持久化（WBS-21.04）-------------------------------------------------
@@ -632,7 +691,6 @@ def process_zip(
     任何异常都被捕获并记录，绝不向上冒泡打断 watcher 主循环。
     """
     from local_webpage_access.importer import Importer
-    from local_webpage_access.lifecycle import start_instance
 
     summary: dict[str, Any] = {
         "zip": str(zip_path),
@@ -647,52 +705,12 @@ def process_zip(
         result = importer.import_zip(str(zip_path), on_conflict="error")
         iid = result.instance_id
         summary["instance_id"] = iid
-        manifest = result.manifest
-
-        if result.detection.pending:
-            summary["action"] = "pending"
-            summary["note"] = (
-                f"未识别（{manifest.lastError or 'detection pending'}），"
-                "已标记 pending，等待人工或 skill 介入"
-            )
-            log.info("daemon: %s → pending（%s）", iid, summary["note"])
-            return summary
-
-        profile = (
-            manifest.resourceProfile.value
-            if hasattr(manifest.resourceProfile, "value")
-            else str(manifest.resourceProfile)
+        # 可确定且轻量：自动启动（WBS-21.08）；与管理页文件夹导入共用 try_auto_start_after_import
+        auto = try_auto_start_after_import(
+            workspace, config, registry, result, log_prefix="daemon"
         )
-        if profile not in _AUTO_START_PROFILES:
-            summary["action"] = "pending"
-            summary["note"] = (
-                f"资源档位 {profile}，daemon 不自动启动，请人工确认后 lwa start"
-            )
-            log.info("daemon: %s → 不自动启动（%s）", iid, profile)
-            return summary
-
-        # 可确定且轻量：自动启动（WBS-21.08）
-        # BUG-188：自动启动与导入解耦——启动失败不再冒泡到外层 except 被判 "failed"，
-        # 从而在下轮重导（撞 slug 冲突、误报 import_conflict、实例停在 stopped 被孤儿）。
-        # 导入已成功即以终态归档 zip；启动失败置期望运行，交自愈 reconcile 后续轮次重试。
-        try:
-            start_instance(workspace, config, registry, iid)
-            summary["action"] = "started"
-            summary["note"] = f"已自动启动（profile={profile}）"
-            log.info("daemon: %s → 自动启动（profile=%s）", iid, profile)
-        except Exception as exc:  # noqa: BLE001 — 导入已成功，启动失败不重导
-            try:
-                registry.update_status(iid, "stopped", desired_state="running")
-                registry.add_event(
-                    iid,
-                    "start",
-                    f"daemon 自动启动失败，已置期望运行待自愈重试：{exc}",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            summary["action"] = "imported"
-            summary["note"] = f"已导入；自动启动失败（待自愈重试）：{exc}"
-            log.warning("daemon: %s 导入成功但自动启动失败，置期望运行待自愈：%s", iid, exc)
+        summary["action"] = auto["action"]
+        summary["note"] = auto["note"]
         return summary
     except ZipImportError as exc:
         # IMP-011：区分"slug 冲突"（携带 instance_id）与"zip 校验/解压失败"。

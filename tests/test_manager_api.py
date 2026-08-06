@@ -198,7 +198,280 @@ def test_read_token_none_when_absent(workspace: Workspace) -> None:
     assert read_token(workspace) is None
 
 
-# ---- 鉴权（WBS-22.12）-------------------------------------------------------
+# ---- Token 自动轮换（IMP-046）------------------------------------------------
+
+
+def test_read_token_metadata_returns_token_and_created_at(
+    workspace: Workspace,
+) -> None:
+    """046.01：read_token_metadata 返回 token + createdAt。"""
+    from local_webpage_access.manager_api import read_token_metadata
+
+    ensure_token(workspace)
+    meta = read_token_metadata(workspace)
+    assert meta["token"] is not None
+    assert meta["createdAt"] is not None  # _write_token 总是写 createdAt
+
+
+def test_read_token_metadata_none_when_absent(workspace: Workspace) -> None:
+    """046.01：文件不存在时返回 None。"""
+    from local_webpage_access.manager_api import read_token_metadata
+
+    meta = read_token_metadata(workspace)
+    assert meta["token"] is None
+    assert meta["createdAt"] is None
+
+
+def test_read_token_metadata_handles_missing_created_at(
+    workspace: Workspace,
+) -> None:
+    """046.01：旧文件缺 createdAt 时 token 有值、createdAt 为 None。"""
+    import json
+
+    from local_webpage_access.manager_api import read_token_metadata, token_path
+
+    ensure_token(workspace)
+    path = token_path(workspace)
+    # 模拟旧文件：只有 token，没有 createdAt
+    path.write_text(json.dumps({"token": "old-token-xyz"}), encoding="utf-8")
+    meta = read_token_metadata(workspace)
+    assert meta["token"] == "old-token-xyz"
+    assert meta["createdAt"] is None
+
+
+def test_should_rotate_token_returns_true_for_none_created(
+    workspace: Workspace,
+) -> None:
+    """046.02：created_at=None -> 需要轮换。"""
+    from local_webpage_access.manager_api import should_rotate_token
+    from local_webpage_access.logging import now_iso
+
+    assert should_rotate_token(None, now=now_iso()) is True
+
+
+def test_should_rotate_token_returns_true_for_invalid_time(
+    workspace: Workspace,
+) -> None:
+    """046.02：非法时间 -> 需要轮换。"""
+    from local_webpage_access.manager_api import should_rotate_token
+    from local_webpage_access.logging import now_iso
+
+    assert should_rotate_token("not-a-date", now=now_iso()) is True
+
+
+def test_should_rotate_token_returns_false_before_expiry(
+    workspace: Workspace,
+) -> None:
+    """046.02：未到期 -> False（差 1 秒也不轮换）。"""
+    from datetime import datetime, timedelta
+
+    from local_webpage_access.manager_api import should_rotate_token
+
+    now = datetime.now().astimezone()
+    created = now - timedelta(hours=167, minutes=59, seconds=59)
+    assert should_rotate_token(
+        created.isoformat(timespec="seconds"), now=now.isoformat(timespec="seconds")
+    ) is False
+
+
+def test_should_rotate_token_returns_true_at_expiry(
+    workspace: Workspace,
+) -> None:
+    """046.02：正好 168h -> True。"""
+    from datetime import datetime, timedelta
+
+    from local_webpage_access.manager_api import should_rotate_token
+
+    now = datetime.now().astimezone()
+    created = now - timedelta(hours=168)
+    assert should_rotate_token(
+        created.isoformat(timespec="seconds"), now=now.isoformat(timespec="seconds")
+    ) is True
+
+
+def test_should_rotate_token_custom_hours(workspace: Workspace) -> None:
+    """046.02：自定义 hours 参数。"""
+    from datetime import datetime, timedelta
+
+    from local_webpage_access.manager_api import should_rotate_token
+
+    now = datetime.now().astimezone()
+    created = now - timedelta(hours=2)
+    # hours=1 -> 已过期
+    assert should_rotate_token(
+        created.isoformat(timespec="seconds"),
+        now=now.isoformat(timespec="seconds"),
+        hours=1,
+    ) is True
+    # hours=3 -> 未过期
+    assert should_rotate_token(
+        created.isoformat(timespec="seconds"),
+        now=now.isoformat(timespec="seconds"),
+        hours=3,
+    ) is False
+
+
+def test_maybe_rotate_token_no_rotation_when_not_expired(
+    workspace: Workspace,
+) -> None:
+    """046.03：未到期不轮换。"""
+    from local_webpage_access.manager_api import maybe_rotate_token
+
+    token = ensure_token(workspace)
+    result = maybe_rotate_token(workspace, hours=168)
+    assert result["rotated"] is False
+    assert result["token"] == token
+    assert result["createdAt"] is not None
+
+
+def test_maybe_rotate_token_rotates_when_expired(workspace: Workspace) -> None:
+    """046.03：到期轮换新 token。"""
+    import json
+    from datetime import datetime, timedelta
+
+    from local_webpage_access.manager_api import (
+        maybe_rotate_token,
+        read_token,
+        token_path,
+    )
+
+    old_token = ensure_token(workspace)
+    # 伪造过期 createdAt
+    past = (datetime.now().astimezone() - timedelta(hours=200)).isoformat(timespec="seconds")
+    path = token_path(workspace)
+    path.write_text(
+        json.dumps({"token": old_token, "createdAt": past}), encoding="utf-8"
+    )
+
+    result = maybe_rotate_token(workspace, hours=168)
+    assert result["rotated"] is True
+    assert result["token"] != old_token
+    assert read_token(workspace) == result["token"]
+
+
+def test_maybe_rotate_token_backfills_missing_created_at(
+    workspace: Workspace,
+) -> None:
+    """046.03：createdAt 缺失 -> 补写但不换 token。"""
+    import json
+
+    from local_webpage_access.manager_api import (
+        maybe_rotate_token,
+        read_token_metadata,
+        token_path,
+    )
+
+    token = ensure_token(workspace)
+    # 模拟旧文件：只有 token
+    path = token_path(workspace)
+    path.write_text(json.dumps({"token": token}), encoding="utf-8")
+
+    result = maybe_rotate_token(workspace, hours=168)
+    assert result["rotated"] is False
+    assert result["token"] == token
+    assert result["createdAt"] is not None  # 补写了 createdAt
+
+    # 文件现在有 createdAt
+    meta = read_token_metadata(workspace)
+    assert meta["token"] == token
+    assert meta["createdAt"] is not None
+
+
+def test_maybe_rotate_token_generates_when_absent(workspace: Workspace) -> None:
+    """046.03：token 不存在 -> 颁发。"""
+    from local_webpage_access.manager_api import maybe_rotate_token, read_token
+
+    # 确保文件不存在
+    assert read_token(workspace) is None
+    result = maybe_rotate_token(workspace, hours=168)
+    assert result["rotated"] is True
+    assert result["token"] is not None
+    assert read_token(workspace) == result["token"]
+
+
+def test_maybe_rotate_token_injected_now(workspace: Workspace) -> None:
+    """046.03：now 参数注入用于测试。"""
+    from datetime import datetime, timedelta
+
+    from local_webpage_access.manager_api import maybe_rotate_token
+
+    ensure_token(workspace)
+    # 注入一个未来的 now，使 token 看起来未过期
+    future = (datetime.now().astimezone() + timedelta(hours=1)).isoformat(timespec="seconds")
+    result = maybe_rotate_token(workspace, hours=168, now=future)
+    assert result["rotated"] is False
+
+
+def test_config_has_manager_token_rotate_hours() -> None:
+    """046.07：Config 有 managerTokenRotateHours 字段，默认 168。"""
+    from local_webpage_access.config import Config
+
+    cfg = Config()
+    assert cfg.managerTokenRotateHours == 168
+
+
+def test_config_manager_token_rotate_hours_validation() -> None:
+    """046.07：非法值被拒绝。"""
+    from local_webpage_access.config import Config
+
+    with pytest.raises(ValueError):
+        Config(managerTokenRotateHours=0)
+    with pytest.raises(ValueError):
+        Config(managerTokenRotateHours=-1)
+    with pytest.raises(ValueError):
+        Config(managerTokenRotateHours=10000)  # > 8760 (1 year)
+
+
+def test_token_rotation_in_lifespan_starts_and_stops_cleanly(
+    workspace: Workspace, config
+) -> None:
+    """046.04/05：lifespan 启动 token 轮换线程并在退出时清理。"""
+    from local_webpage_access.manager_api import create_app, ensure_token
+    from local_webpage_access.registry import Registry
+
+    ws = workspace
+    ws.ensure_workspace_dirs()
+    _write_config(ws)
+    ensure_token(ws)
+    reg = Registry(ws.db_path)
+    reg.open()
+    try:
+        app = create_app(ws, config, reg, token="test")
+        with TestClient(app) as client:
+            # 线程应已启动
+            assert hasattr(app.state, "token_rotate_thread")
+            assert app.state.token_rotate_thread.is_alive()
+            # 管理页正常响应
+            resp = client.get("/api/health")
+            assert resp.status_code == 200
+        # 退出后线程应已停止
+        assert not app.state.token_rotate_thread.is_alive()
+    finally:
+        reg.close()
+
+
+def test_old_token_fails_after_rotation(manager_env: EnvBundle) -> None:
+    """046.06：轮换后旧 token -> 401，新 token -> 200。"""
+    from local_webpage_access.manager_api import rotate_token
+
+    old_token = manager_env.token
+    # 轮换
+    new_token = rotate_token(manager_env.workspace)
+    assert new_token != old_token
+
+    # 旧 token -> 401（用非 loopback 模拟 LAN）
+    resp = manager_env.client.get(
+        "/api/instances",
+        headers={"Authorization": f"Bearer {old_token}"},
+    )
+    assert resp.status_code == 401
+
+    # 新 token -> 200
+    resp = manager_env.client.get(
+        "/api/instances",
+        headers={"Authorization": f"Bearer {new_token}"},
+    )
+    assert resp.status_code == 200
 
 
 def test_api_rejects_missing_token(manager_env: EnvBundle) -> None:
@@ -2466,3 +2739,72 @@ def test_update_blocked_while_cancelling(manager_env: EnvBundle) -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "cancelling"
+
+
+def test_import_from_dir_auto_starts_static(manager_env: EnvBundle, tmp_path: Path) -> None:
+    """文件夹导入识别成功且档位轻量时，应自动 start（对齐 daemon process_zip）。"""
+    src = tmp_path / "folder-site"
+    src.mkdir()
+    (src / "index.html").write_text("<html><body>folder</body></html>", encoding="utf-8")
+
+    started: list[str] = []
+
+    def fake_start(ws, cfg, reg, iid):
+        started.append(iid)
+        from local_webpage_access.models import DesiredState, InstanceManifest, Status
+
+        m = InstanceManifest.load(ws.app_manifest_path(iid))
+        m.status = Status.RUNNING
+        m.desiredState = DesiredState.RUNNING
+        m.save(ws.app_manifest_path(iid))
+        reg.update_status(
+            iid, Status.RUNNING.value, desired_state=DesiredState.RUNNING.value
+        )
+        return m
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("local_webpage_access.lifecycle.start_instance", fake_start)
+        resp = manager_env.client.post(
+            "/api/import-from-dir",
+            headers=manager_env.auth_headers(),
+            json={"sourceDir": str(src), "name": "folder-site"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    iid = body["instanceId"]
+    assert started == [iid]
+    assert body.get("autoStart", {}).get("action") == "started"
+    # sync_status 在假 start 后可能观测为 stopped（无真实网关进程）；以 autoStart 为准
+    assert body["instance"]["id"] == iid
+
+
+def test_import_from_dir_skips_autostart_when_unrecognized(
+    manager_env: EnvBundle, tmp_path: Path
+) -> None:
+    """仅 notes.txt 等无法识别目录：保持 pending，不调用 start。"""
+    src = tmp_path / "mystery-dir"
+    src.mkdir()
+    (src / "notes.txt").write_text("nope", encoding="utf-8")
+
+    started: list[str] = []
+
+    def fake_start(ws, cfg, reg, iid):
+        started.append(iid)
+        from local_webpage_access.models import InstanceManifest
+
+        return InstanceManifest.load(ws.app_manifest_path(iid))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("local_webpage_access.lifecycle.start_instance", fake_start)
+        resp = manager_env.client.post(
+            "/api/import-from-dir",
+            headers=manager_env.auth_headers(),
+            json={"sourceDir": str(src), "name": "mystery-dir"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert started == []
+    assert body.get("autoStart", {}).get("action") == "pending"
+    row = manager_env.registry.get_instance(body["instanceId"])
+    assert row is not None
+    assert row["status"] == "pending"

@@ -187,6 +187,12 @@ class InstanceManifest(BaseModel):
     container: ContainerConfig | None = None
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
+    # IMP-047：来源类型与关联路径。旧实例默认 "zip"（迁移时由 from_dict extra 兜底）。
+    sourceKind: str = "zip"
+    sourceDirPath: str | None = None
+    # IMP-047：文件夹源上次同步的内容指纹（compute_source_hash），供无变更短路。
+    sourceSyncHash: str | None = None
+    # sourceZipHash 通过 extra="allow" 存储（未显式声明），保持向后兼容。
     sourceZipPath: str | None = None
     appPath: str | None = None
     createdAt: str = Field(default_factory=now_iso)
