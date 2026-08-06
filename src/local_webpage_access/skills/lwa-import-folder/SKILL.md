@@ -57,7 +57,7 @@ zip 实例不能用 `--from-dir --update`；folder 实例日常更新用本路�
 
 ## 管理页
 
-管理页支持「本机文件夹」导入与「从源更新」；展示来源类型与关联路径。API：`POST /api/import-from-dir`、`POST /api/instances/{id}/update-from-dir`。
+管理页支持「本机文件夹」导入与「从源更新」；展示来源类型与关联路径。API：`POST /api/import-from-dir`、`POST /api/instances/{id}/update-from-dir`。本机 loopback 打开管理页时可用「选择文件夹」（`POST /api/pick-directory`，IMP-051）；局域网访问须手输宿主机绝对路径。请选**项目根或 dist/**，不要只选 `src/`；识别失败（pending）时管理页会报错并保持对话框，不会冒充成功。导入进行中勿立刻 `lwa update`。
 
 ## 导入后启动
 

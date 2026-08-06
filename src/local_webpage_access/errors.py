@@ -85,6 +85,16 @@ class FolderSourceError(LwaError):
     code = "FOLDER_SOURCE_ERROR"
 
 
+class DirectoryPickerError(LwaError):
+    """宿主机原生目录选择失败（IMP-051）。
+
+    常用 ``code``：``cancelled``（用户取消）、``unavailable``（无 GUI/工具）、
+    ``timeout``（超时）。API 层映射为 400，不阻断手输路径。
+    """
+
+    code = "DIRECTORY_PICKER_ERROR"
+
+
 # ---- 识别 ------------------------------------------------------------------
 
 
@@ -167,6 +177,7 @@ __all__ = [
     "PortError",
     "ZipImportError",
     "FolderSourceError",
+    "DirectoryPickerError",
     "RecognitionError",
     "GatewayError",
     "BuildError",

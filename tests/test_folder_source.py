@@ -23,7 +23,7 @@ from local_webpage_access.folder_source import (
     validate_source_dir,
 )
 from local_webpage_access.importer import Importer
-from local_webpage_access.models import InstanceManifest
+from local_webpage_access.models import InstanceManifest, Status
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 
@@ -307,6 +307,22 @@ class TestImportFromDir:
         assert original_files == after_files
 
 
+    def test_chinese_name_uses_folder_basename_as_id(
+        self, importer: Importer, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        """纯中文显示名不得把 instance id 全部落到 instance。"""
+        from local_webpage_access.models import Status
+
+        d = tmp_path / "multidevices-arbitration-simulator"
+        d.mkdir()
+        d.joinpath("index.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+        result = importer.import_from_dir(d, name="分布式唤醒示意图")
+        assert result.instance_id == "multidevices-arbitration-simulator"
+        manifest = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
+        assert manifest.name == "分布式唤醒示意图"
+        assert manifest.status == Status.STOPPED
+
+
 # ---- update_from_dir -------------------------------------------------------
 
 
@@ -409,6 +425,34 @@ class TestUpdateFromDir:
         # 第三次：无变化 -> skipped
         r3 = importer.update_from_dir(result.instance_id)
         assert r3.skipped is True
+
+    def test_pending_heals_to_stopped_after_source_fix(
+        self, importer: Importer, tmp_path: Path, workspace: Workspace
+    ) -> None:
+        """BUG-444：pending 源修好后再从源更新，须落到 stopped（可启动）。
+
+        update_zip 曾在 apply_detection 后强制 status=old_manifest.status，
+        导致识别成功仍卡 pending、启动按钮继续禁用。
+        """
+        pending_dir = tmp_path / "mystery-site"
+        pending_dir.mkdir()
+        pending_dir.joinpath("notes.txt").write_text("hello", encoding="utf-8")
+
+        result = importer.import_from_dir(pending_dir)
+        assert result.manifest.status == Status.PENDING
+
+        pending_dir.joinpath("index.html").write_text(
+            "<html><body>fixed</body></html>", encoding="utf-8"
+        )
+        update_result = importer.update_from_dir(result.instance_id)
+        assert update_result.skipped is False
+
+        manifest = InstanceManifest.load(
+            workspace.app_manifest_path(result.instance_id)
+        )
+        assert manifest.status == Status.STOPPED
+        assert manifest.sourceKind == "folder"
+        assert manifest.lastError is None
 
 
 # ---- P2：CLI --from-dir --update 路径须与关联目录一致 ------------------------

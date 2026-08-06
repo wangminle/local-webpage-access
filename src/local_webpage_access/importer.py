@@ -28,6 +28,7 @@ from pathlib import Path
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LwaError, ZipImportError
+from local_webpage_access.import_activity import import_activity_lock
 from local_webpage_access.logging import get_logger
 from local_webpage_access.security import ZipSanitizeResult
 from local_webpage_access.models import (
@@ -136,6 +137,21 @@ def slugify(text: str) -> str:
     if len(s) > _MAX_SLUG_LEN:
         s = s[:_MAX_SLUG_LEN].rstrip("-")
     return s or "instance"
+
+
+def slug_basis_for_id(*, name: str | None, path_stem: str) -> str:
+    """选择用于生成 instance id 的原始文本。
+
+    显示名可以是纯中文，但 id 必须是 ASCII slug。若 ``name`` 不含任何
+    ``[a-zA-Z0-9]``（slugify 会落到万能回退 ``instance``），改用路径 stem
+    （zip 文件名 / 文件夹名），避免多次中文导入全部撞在 ``instance`` 上。
+    """
+    if name and re.search(r"[a-zA-Z0-9]", name):
+        return name
+    stem = (path_stem or "").strip()
+    if stem:
+        return stem
+    return name or "instance"
 
 
 def titleize(slug: str) -> str:
@@ -346,6 +362,7 @@ class Importer:
         name: str | None = None,
         path_alias: str | None = None,
         on_conflict: str = "rename",
+        id_basis: str | None = None,
     ) -> ImportResult:
         """导入一个 zip 包，返回 :class:`ImportResult`。
 
@@ -358,17 +375,38 @@ class Importer:
             on_conflict: slug 冲突策略。``"rename"``（默认，daemon 友好）按
                 ``-2`` / ``-3`` 自动改名新建；``"error"``（IMP-009 CLI）直接报错
                 并建议改用 ``--update``，避免无脑新建历史误导入实例。
+            id_basis: 可选的 instance id 候选原文（文件夹导入传真实目录名）。
+                未提供时用 zip stem。纯中文 ``name`` 会回退到此字段，避免
+                全部撞成 ``instance``。
 
         Raises:
             ZipImportError: zip 不存在、格式非法、路径穿越、解压失败、
                 或 ``on_conflict="error"`` 时 slug 已被占用。
             PathError: 路径别名格式非法、命中保留字或已被占用。
         """
+        with import_activity_lock(self.ws):
+            return self._import_zip_locked(
+                zip_path,
+                name=name,
+                path_alias=path_alias,
+                on_conflict=on_conflict,
+                id_basis=id_basis,
+            )
+
+    def _import_zip_locked(
+        self,
+        zip_path: str | Path,
+        *,
+        name: str | None = None,
+        path_alias: str | None = None,
+        on_conflict: str = "rename",
+        id_basis: str | None = None,
+    ) -> ImportResult:
         src = Path(zip_path).resolve()
         validate_zip(src)
         zip_hash = compute_zip_hash(src)
 
-        base = name if name else src.stem
+        base = slug_basis_for_id(name=name, path_stem=id_basis or src.stem)
         slug = slugify(base)
         # display_name：显式 --name 优先；否则解压后取主页 <title>（见下方）
 
@@ -556,6 +594,28 @@ class Importer:
         Raises:
             ZipImportError: zip 非法 / 实例不存在 / 形态变化被拒绝 / 解压失败。
         """
+        with import_activity_lock(self.ws):
+            return self._update_zip_locked(
+                zip_path,
+                instance_id,
+                restart=restart,
+                keep_data=keep_data,
+                yes=yes,
+                dry_run=dry_run,
+                force_kind_change=force_kind_change,
+            )
+
+    def _update_zip_locked(
+        self,
+        zip_path: str | Path,
+        instance_id: str,
+        *,
+        restart: bool = True,
+        keep_data: bool = True,
+        yes: bool = False,
+        dry_run: bool = False,
+        force_kind_change: bool = False,
+    ) -> UpdateResult:
         src = Path(zip_path).resolve()
         validate_zip(src)
         new_hash = compute_zip_hash(src)
@@ -715,7 +775,10 @@ class Importer:
                     raise
                 current_swapped = True
 
-                # 重建 manifest：保留 id/createdAt/desiredState/status/路径别名
+                # 重建 manifest：保留 id/createdAt/路径别名。
+                # status/desiredState 由 apply_detection_to_manifest 决定
+                # （pending→识别成功 → stopped；已在跑/已停则保留），
+                # 勿再强制写回 old status（BUG-444）。
                 manifest = apply_detection_to_manifest(
                     old_manifest, detection, self.ws
                 )
@@ -732,8 +795,6 @@ class Importer:
                         manifest.name = refreshed
                         manifest.nameSource = "html_title"
                 manifest.sourceZipHash = new_hash  # type: ignore[attr-defined]
-                manifest.desiredState = old_manifest.desiredState
-                manifest.status = old_manifest.status
                 manifest.lastStartedAt = old_manifest.lastStartedAt
                 manifest.lastHealthCheckAt = old_manifest.lastHealthCheckAt
                 if old_manifest.static is not None and manifest.static is not None:
@@ -901,6 +962,22 @@ class Importer:
 
         关联目录只是复制来源；运行根永远在 ``apps/<id>/current/``。
         """
+        with import_activity_lock(self.ws):
+            return self._import_from_dir_locked(
+                source_dir,
+                name=name,
+                path_alias=path_alias,
+                on_conflict=on_conflict,
+            )
+
+    def _import_from_dir_locked(
+        self,
+        source_dir: str | Path,
+        *,
+        name: str | None = None,
+        path_alias: str | None = None,
+        on_conflict: str = "rename",
+    ) -> ImportResult:
         from local_webpage_access.folder_source import (
             compute_source_hash,
             pack_source_dir,
@@ -915,19 +992,20 @@ class Importer:
             "文件夹源导入：%s（指纹 %s）", resolved_dir, sync_hash[:12]
         )
 
-        # 打包为临时 zip 后复用 import_zip
-        import tempfile
-
-        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-folder-import-")
+        # 打包为临时 zip 后复用 import_zip（已持锁，走 _locked）
+        fd, tmp_zip_path = tempfile.mkstemp(
+            suffix=".zip", prefix="lwa-folder-import-"
+        )
         os.close(fd)
         tmp_zip = Path(tmp_zip_path)
         try:
             pack_source_dir(resolved_dir, dest_zip=tmp_zip)
-            result = self.import_zip(
+            result = self._import_zip_locked(
                 tmp_zip,
                 name=name or resolved_dir.name,
                 path_alias=path_alias,
                 on_conflict=on_conflict,
+                id_basis=resolved_dir.name,
             )
         finally:
             with contextlib.suppress(OSError):
@@ -976,6 +1054,26 @@ class Importer:
         Raises:
             ZipImportError: 实例不存在、非 folder 源、源目录缺失、更新失败。
         """
+        with import_activity_lock(self.ws):
+            return self._update_from_dir_locked(
+                instance_id,
+                restart=restart,
+                keep_data=keep_data,
+                yes=yes,
+                dry_run=dry_run,
+                force_kind_change=force_kind_change,
+            )
+
+    def _update_from_dir_locked(
+        self,
+        instance_id: str,
+        *,
+        restart: bool = True,
+        keep_data: bool = True,
+        yes: bool = False,
+        dry_run: bool = False,
+        force_kind_change: bool = False,
+    ) -> UpdateResult:
         from local_webpage_access.folder_source import (
             compute_source_hash,
             pack_source_dir,
@@ -1049,15 +1147,15 @@ class Importer:
             new_sync_hash[:12],
         )
 
-        # 打包为临时 zip 后复用 update_zip
-        import tempfile
-
-        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-folder-update-")
+        # 打包为临时 zip 后复用 update_zip（已持锁，走 _locked）
+        fd, tmp_zip_path = tempfile.mkstemp(
+            suffix=".zip", prefix="lwa-folder-update-"
+        )
         os.close(fd)
         tmp_zip = Path(tmp_zip_path)
         try:
             pack_source_dir(source_dir, dest_zip=tmp_zip)
-            result = self.update_zip(
+            result = self._update_zip_locked(
                 tmp_zip,
                 instance_id,
                 restart=restart,
@@ -1253,9 +1351,9 @@ class Importer:
                 else f"实例 {base_slug} 已存在"
             )
             return ZipImportError(
-                f"{prefix}。如需更新该实例，请使用："
-                f"lwa import <zip> --update {base_slug}；"
-                f"如需另建新实例，请用 --name 指定不同的名称。",
+                f"{prefix}。请换一个含英文/数字的名称，或先删除该实例后再导入；"
+                f"若要覆盖更新已有实例，可用「从源更新」或 "
+                f"`lwa import --update {base_slug}`。",
                 instance_id=base_slug,
             )
 
@@ -1482,6 +1580,7 @@ __all__ = [
     "ImportResult",
     "UpdateResult",
     "slugify",
+    "slug_basis_for_id",
     "titleize",
     "extract_html_title",
     "find_homepage_index",

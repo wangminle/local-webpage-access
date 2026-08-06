@@ -121,7 +121,9 @@ swap=4GB
 * **别名下 SPA 绝对资源路径（IMP-023）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 → **空 200、404 或错误 MIME（如 JS 请求得到 text/html）**，页面白屏。受影响项目应构建时设相对 base（Vite `base: './'`）或 `--base=/<alias>/`，或继续用 hostPort 直达。`lwa access review` 会对照「无前缀 vs 带前缀」子资源并告警（入口 HTML 200 ≠ 别名下可渲染）；瞬时连接失败（TIMEOUT/REFUSED）不计 IMP-023。
 * **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。**V0.6.13** 起 Caddy `-size.log.gz` 多轮转/旧游标迁移/归档暂时不可读时的补读逻辑已加固（避免双计或永久漏计）。
 * **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），**V0.6.13** 起容器查询失败禁止绕过挂载 fail-safe、registry 不可读时一致性检查 SKIP，但仍不能替代正式 relocate 事务。
-* **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>` 或管理页「从源更新」同步。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。`sourceKind=zip` 的实例不能用 `--from-dir --update`。
+* **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>` 或管理页「从源更新」同步。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。`sourceKind=zip` 的实例不能用 `--from-dir --update`。请选项目根或 `dist/`，不要只选 `src/`。
+* **选择文件夹（IMP-051 / V0.7.1）**：管理页原生目录对话框仅 **loopback** 可用；局域网即使持有 token 也不能远程弹窗，须手输宿主机绝对路径。
+* **升级与导入互斥（V0.7.1）**：`lwa update` 重启 manager/daemon 前会等待导入空闲（约 180s）；超时跳过重启，避免打断进行中的导入。
 
 ## 管理页与 API
 

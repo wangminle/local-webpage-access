@@ -1,7 +1,7 @@
 # 新增功能点计划（202608）— 编号续接 IMP-043
 
-> **状态（2026-08-06）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**高优 UX 待办：IMP-051 管理页「选择文件夹」按钮**。 **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
-> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（高优 UX）**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
+> **状态（2026-08-06）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。 **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
+> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
 
 ---
 
@@ -341,68 +341,133 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 - `.../multidevices-wakeup-demo-3d/3-src` → 实例 `v1`，`:18006` 200
 - `.../20260730-三维挂谷猜想的3d动画/4-output` → 实例 `3d`，`:18002` 与别名 `/3d-kakeya-animation/` 200；仅 `kakeya-3d-chapters.html` 时 API 新建亦可 autoStart 200
 
+### 5.8 V0.7.1 相关修补（指向 §6.8）
+
+文件夹导入真机验收后追加的 **pending 自愈、中文名 ID、管理页 UX、`lwa update` 与导入互斥** 等，统一记入 **§6.8**（与 IMP-051 同属 047 体验闭环），避免本节再拆一条 IMP。
+
 ---
 
-## 6. IMP-051 — 管理页「选择文件夹」按钮（待办 · 高优 UX）
+## 6. IMP-051 — 管理页「选择文件夹」按钮（已落地）
 
-> **状态**：**待办**（2026-08-06 入账，`PLN-035`）。属 IMP-047 管理页导入对话框的体验补强；**优先于** IMP-048/049/050。
-> **一句话**：用户不应靠手敲绝对路径；源目录输入框右侧提供「选择文件夹」按钮，唤起本机常见的目录选择器（macOS 访达 / Ubuntu 文件管理器同类控件），选完回填路径。
+> **状态**：**已落地**（2026-08-06，`DEV-097` / `PLN-035` / `DOC-116`）。属 IMP-047 管理页导入对话框的体验补强。
+> **一句话**：用户不应靠手敲绝对路径；源目录输入框右侧提供「选择文件夹」按钮，唤起本机常见的目录选择器（macOS 访达 / Ubuntu 文件管理器同类控件），选完回填路径。**仅 loopback 启用。**
+> **实现计划**：[`docs/plans/2026-08-06-imp-051-pick-directory.md`](../../../docs/plans/2026-08-06-imp-051-pick-directory.md)。
 
 ### 6.1 需求
 
 1. **触点**：管理页「从文件夹导入」模态框（三字段：源目录路径 / 实例名称 / 路径别名）。
-2. **控件位置**：第一个字段「源目录路径」输入框**右侧**增加按钮（文案示例：「选择…」/「浏览…」/ 文件夹图标 +「选择文件夹」）；与输入框同一行，视觉上为常见「路径 + 浏览」组合。
+2. **控件位置**：第一个字段「源目录路径」输入框**右侧**增加按钮（文案：「选择文件夹」）；与输入框同一行，视觉上为常见「路径 + 浏览」组合。
 3. **交互**：
    - 点击按钮 → 打开**本机目录选择对话框**（非文件多选；只选目录）。
    - 用户确认后，将所选目录的**绝对路径**写入「源目录路径」输入框（可继续手工改）。
    - 取消对话框 → 不改动现有输入。
-4. **平台**：与 LWA 正式支持平台对齐——**macOS**（访达目录面板）与 **Ubuntu / Linux**（系统文件管理器或等价 `zenity`/`kdialog` 等目录选择器）。两端都应是「最基础、用户最熟悉」的选文件夹体验。
+4. **平台**：与 LWA 正式支持平台对齐——**macOS**（访达目录面板）与 **Ubuntu / Linux**（`zenity`/`kdialog` 等目录选择器）。
 5. **仍保留手输**：高级用户 / 远程场景 / 无图形会话时可继续粘贴绝对路径；选择器是增强，不是唯一入口。
-6. **语义不变**：选中的仍是 **LWA 宿主机上的本机路径**（IMP-047 红线：关联后复制进工作区，非就地运行）。选择器不得改成「把浏览器所在机器的目录上传当 zip」之类另一套模型（除非未来另开 IMP）。
+6. **语义不变**：选中的仍是 **LWA 宿主机上的本机路径**（IMP-047 红线：关联后复制进工作区，非就地运行）。选择器不得改成「把浏览器所在机器的目录上传当 zip」。
 
-### 6.2 关键决策（草案）
+### 6.2 关键决策（已拍板）
 
 | 编号 | 决策点 | 方案 |
 | --- | --- | --- |
-| **051.a** | 为何不「只靠浏览器 `<input type=file webkitdirectory>`」 | 纯网页出于安全**通常拿不到宿主机真实绝对路径**；而 LWA API 要的是宿主机 `sourceDir`。优先采用能得到 **POSIX 绝对路径** 的方案。 |
-| **051.b** | 推荐实现（本机图形会话） | 管理页调 **Manager API**（如 `POST /api/pick-directory`），由 **运行在 LWA 宿主机上的 manager 进程** 调起原生目录对话框，再把路径返回前端填入输入框。macOS：`osascript`/`choose folder` 等；Linux：`zenity --file-selection --directory` / `kdialog --getexistingdirectory`（按可用性探测）。 |
-| **051.c** | 无显示器 / SSH 无 GUI / 对话框失败 | API 返回明确错误；前端 Toast「无法打开目录选择器，请手动粘贴绝对路径」；**不阻塞**手输导入。 |
-| **051.d** | 从另一台电脑打开管理页 | 对话框若在**服务器**弹出，用户在客户端看不到——须在 UI 注明「在 LWA 所在机器上选择」；或检测无本地显示时禁用按钮并提示手输。禁止静默填入「客户端机器路径」导致宿主机 `import-from-dir` 失败。 |
-| **051.e** | 权限 | 与其它管理 API 相同：需 manager token；不因选目录而扩大文件系统写权限（只读列举/返回路径字符串）。 |
-| **051.f** | 不做 | 不在关联目录内打开；不改 CLI（CLI 仍传 `--from-dir`）；不做跨机浏览远端盘符。 |
+| **051.a** | 为何不「只靠浏览器 `<input type=file webkitdirectory>`」 | 纯网页拿不到宿主机真实绝对路径；LWA API 要的是宿主机 `sourceDir`。 |
+| **051.b** | 实现 | 管理页 `POST /api/pick-directory` → manager 进程调原生对话框 → 返回 `{path}`。macOS：`osascript`/`choose folder`；Linux：`zenity --file-selection --directory` / `kdialog --getexistingdirectory`。 |
+| **051.c** | 无显示器 / SSH 无 GUI / 对话框失败 | API：`cancelled` / `unavailable` / `timeout`（400）；前端 Toast；**不阻塞**手输。 |
+| **051.d** | 从另一台电脑打开管理页 | **仅 loopback 启用按钮与 API**；非 loopback → 按钮禁用 + 文案提示手输；API 即使有 token 也 **403 `loopback_required`**（防远程弹服务器 GUI）。 |
+| **051.e** | 权限 | 与其它管理 API 相同：需 manager token；只返回路径字符串，不扩大写权限。 |
+| **051.f** | 不做 | 不在关联目录内打开；不改 CLI（仍 `--from-dir`）；不做跨机浏览远端盘符。 |
 
-### 6.3 现状触点
+### 6.3 落地触点（已实现）
 
-- `manager_static/app.js`：`folderImport` 模态；`sourceDir` 目前为纯 `<input type="text">`（约「源目录路径」标签行）。
-- `manager_api.py`：`POST /api/import-from-dir`（消费路径字符串）；缺「挑目录」端点。
-- 平台探测可复用 `setup` / `capabilities` 一类宿主机能力思路（有无 DISPLAY、zenity 等）。
+| 模块 | 路径 / 说明 |
+| --- | --- |
+| 选目录 helper | `directory_picker.py` + `DirectoryPickerError` |
+| API | `POST /api/pick-directory`（`manager_api.py`）；loopback 门禁 + 错误码映射 |
+| 前端 | `manager_static/app.js`：`pickFolder` / `canPickFolder` / `folderImport.picking`；`style.css`：`.path-with-browse` |
+| 文档 | `docs/manager-page.md`（API + UI）；Skill `lwa-import-folder` |
+| 测试 | `test_directory_picker.py`；`test_manager_api` pick 用例；`test_manager_static_app` |
 
-### 6.4 WBS（可执行，草案）
+### 6.4 WBS（已完成）
 
-| ID | 工作包 | 规模 | 触点 | 交付物 | 完成标准 |
-| --- | --- | --- | --- | --- | --- |
-| **051.01** | 宿主机选目录 helper | M | 新模块或 `manager_service` 旁路 | macOS / Linux 调起目录对话框并返回绝对路径；超时/取消/无 GUI 错误码清晰 | 单测 mock 子进程；真机手工各测一次 |
-| **051.02** | Manager API | S | `manager_api` | 鉴权端点返回 `{ path }` 或统一 error | API 测：有 token；取消/失败不 500 乱码 |
-| **051.03** | 管理页按钮与回填 | M | `app.js` / `style.css` | 路径框右侧按钮；成功回填；失败 Toast；加载中禁用防连点 | 模态布局不挤；键盘仍可手输回车导入 |
-| **051.04** | 文案与文档 | S | 对话框 hint、`docs/manager-page.md` | 说明「在 LWA 本机选目录」；远程访问限制 | 与 047 红线一致 |
-| **051.05** | 回归 / task-list | S | tests + DEV | 前端 hook 测按钮存在；API mock | DEV 关闭；PLN-035 → 完成 |
+| ID | 工作包 | 状态 | 交付物 |
+| --- | --- | --- | --- |
+| **051.01** | 宿主机选目录 helper | ✅ | `directory_picker.py`；取消/无 GUI/超时错误码 |
+| **051.02** | Manager API | ✅ | `POST /api/pick-directory`；loopback 403；鉴权 |
+| **051.03** | 管理页按钮与回填 | ✅ | 路径行浏览按钮；LAN 禁用提示；picking 态 |
+| **051.04** | 文案与文档 | ✅ | manager-page / Skill / 对话框 hint |
+| **051.05** | 回归 / task-list | ✅ | DEV-097、PLN-035、DOC-114/116 |
 
-### 6.5 验收标准
+### 6.5 验收标准（已满足）
 
-- 管理页打开「从文件夹导入」：源路径右侧有「选择文件夹」（或等价）按钮。
-- 在 **macOS** 与 **Ubuntu（有桌面会话）** 上点击后出现系统目录选择 UI；确认后输入框为绝对路径（如 `/Users/...` 或 `/home/...`）。
-- 选完可直接点「导入」，行为与手输同一路径一致（复制进工作区，非就地运行）。
-- 取消选择 / 无 GUI：可继续手输；有可读错误提示。
-- 不引入「只选到浏览器沙箱文件、却假称宿主机路径」的静默错误。
+- 管理页「从文件夹导入」：源路径右侧有「选择文件夹」；本机 `127.0.0.1` 可弹系统对话框并回填绝对路径。
+- 局域网 IP 打开管理页：按钮禁用，须手输 LWA 机器路径；API 403 `loopback_required`。
+- 取消 / 无 GUI：可继续手输；不 500。
+- 选完导入行为与手输同一路径一致（复制进工作区，非就地运行）。
 
 ### 6.6 task-list 映射
 
 | ID | 关系 |
 | --- | --- |
 | `IMP-051` | 本功能点 |
-| `PLN-035` | 规划入账 |
-| `DEV-*` | 实施时开项 |
+| `PLN-035` | 规划入账 → 已完成 |
+| `DEV-097` | 实现 |
+| `DOC-114` / `DOC-116` | 2608 入账与用户文档 |
 | 关联 | IMP-047（对话框与 `sourceDir`）；不替代 IMP-048 |
+
+### 6.7 落地实现摘要
+
+**架构**：前端 `isLocalhostAccess()` 门禁 + 服务端 `_is_localhost_client` 双检；禁止浏览器 `webkitdirectory` 假路径。
+
+**关键代码**：
+
+1. `pick_directory()`：darwin → osascript；linux → zenity 优先否则 kdialog；规范化去尾 `/`（根除外）。
+2. API 鉴权后先判 loopback，再调 picker；`DirectoryPickerError.code` → HTTP 业务码。
+3. 前端：成功回填 `folderImport.sourceDir`；`cancelled` 静默；其它 Toast。
+
+### 6.8 V0.7.1 收口 — 导入 UX 护栏与 046/047 回归修补（已落地）
+
+> **状态**：**已落地**（2026-08-06；版本 **V0.7.1**）。不新开 IMP 号：属 046/047/051 真机验收后的缺陷与体验收口。
+> **台账**：`BUG-444`～`448`、`ADJ-042`～`043`、`OPS-101`、`DOC-117`。
+
+#### 6.8.1 问题与方案
+
+| 编号 | 现象 | 方案（已实现） |
+| --- | --- | --- |
+| **BUG-444** | `update_zip` 在 `apply_detection` 后强制 `status=old`，pending 修好源再更新仍卡 pending | 去掉强制覆盖，保留 `apply_detection` 的 pending→stopped |
+| **BUG-445** | 管理页 `pending` 时禁用「从源更新」，无法自愈 | folder 更新按钮改用 `updateBusy`（不含 pending）；启动仍禁用 |
+| **BUG-446** | `manager on/start` 打印 token 早于 lifespan 轮换，冷启动可打印已失效 token | lifespan `yield` 前同步 `maybe_rotate`；CLI 打印前 rotate + `read_token` |
+| **BUG-447** | `_write_token` 非原子 `O_TRUNC`，轮换窗口可读残缺 | temp(0o600) + `os.replace` |
+| **BUG-448** | 纯中文名 `slugify` 全落到 `instance`，重导冲突 | `slug_basis_for_id`；`import_zip(..., id_basis=文件夹名)`；冲突文案去 CLI 腔 |
+| **ADJ-042** | 识别失败（pending）管理页冒充成功 | `describeFolderImportOutcome`：error toast、对话框保持打开、提示改选根/`dist` |
+| **BUG-449** | 同上函数误把「识别成功但档位 medium/heavy 不自动启动」（`auto.action=pending`、`status=stopped`）报成「未能识别/请删除」 | 仅 `status==="pending"` 才报未识别；档位高未自动启动 → 成功 toast「已导入 + 档位说明」，可手动启动 |
+| **ADJ-043** | 失败后才提示勿选 `src/`；错误带 `[ZIP_IMPORT_ERROR]`；导入中 `lwa update` 打断请求 | ① 对话框**提前** hint；② API/`friendlyApiMessage` 剥错误码前缀；③ `import_activity` 锁 + `lwa update` 重启前等待空闲（约 180s，超时跳过重启） |
+
+#### 6.8.2 实现触点
+
+| 能力 | 模块 |
+| --- | --- |
+| 导入活动锁 | `import_activity.py`（`run/import.lock`，可重入）；`importer` 的 import/update（含 from_dir）持锁 |
+| update 等空闲 | `updater.run_update`：重启 manager/daemon 前 `wait_until_import_idle` |
+| 管理页文案 | `helpers.js`：`describeFolderImportOutcome` / `friendlyApiMessage`；`app.js` 对话框 hint + `apiFetch` |
+| ID 回退 | `importer.slug_basis_for_id` / `import_from_dir` 传 `id_basis` |
+
+#### 6.8.3 验收要点
+
+- 只选 `src/` → pending：错误 toast，对话框不关，可改路径重试；删除 pending 实例后可再导。
+- 识别成功但档位 medium/heavy（`autoStart.action=pending`、`status=stopped`）：**成功**提示「已导入 + 不自动启动说明」，**不得**引导删除（BUG-449）。
+- 纯中文显示名 + 英文文件夹名 → 实例 ID 取文件夹 basename，不撞成万能 `instance`。
+- pending 文件夹实例仍可点「从源更新」；识别成功后可启动。
+- 导入进行中执行 `lwa update`：等待或跳过重启，不静默杀掉半成品导入。
+- 管理页错误不再展示裸 `[ZIP_IMPORT_ERROR] …` 前缀（`error.code` 仍在 JSON）。
+
+#### 6.8.4 task-list 映射
+
+| ID | 关系 |
+| --- | --- |
+| `BUG-444`～`449` | 回归缺陷（含 medium 档误报未识别） |
+| `ADJ-042` / `ADJ-043` | UX / 运维护栏 |
+| `OPS-101` | 版本升至 V0.7.1 |
+| `DOC-117` | 用户文档与 Skill 同步 |
+| 关联 | IMP-046 / 047 / 051 |
 
 ---
 
@@ -410,25 +475,25 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 > **状态**：**后续待办 / 明确不在 IMP-046、IMP-047 同期实现**（2026-08-06 记入）。找到合适时间点再规划与开发。
 
-### 6.1 需求（占位）
+### 7.1 需求（占位）
 
 允许已存在实例在两种来源模式间切换，例如：
 
 - zip 源实例 → 绑定本机文件夹，之后用文件夹更新；
 - 文件夹源实例 → 改为仅保留 `original.zip` / inbox zip 更新路径，解除对源目录的依赖。
 
-### 6.2 边界（现阶段）
+### 7.2 边界（现阶段）
 
 - **不做**自动双向同步设计；**不做**与 047 抢同一迭代带宽。
 - 047 落地时预留 `sourceKind` 字段即可，转换状态机、UI、数据迁移留待本项。
 
-### 6.3 规划时必须回答
+### 7.3 规划时必须回答
 
 1. 转换是否保留 `data/`、别名、端口、desiredState。
 2. 转换后「更新」入口如何切换且不误导。
 3. 源目录删除后文件夹→zip 的强制降级是否自动。
 
-### 6.4 task-list 映射
+### 7.4 task-list 映射
 
 | ID | 关系 |
 | --- | --- |
@@ -521,7 +586,7 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 | 约定 | 说明 |
 | --- | --- |
 | 月度文件 | `design/plans/local-webpage-access-新增功能点YYMM.md`（本文件；进行中权威位置） |
-| IMP 号 | 全局递增不复用；046/047 已落地；**051=高优 UX 待办**；048=后续；049/050=**优先级中 / 不着急**；042.b 不在本文件 |
+| IMP 号 | 全局递增不复用；046/047/**051 已落地**（含 §6.8 V0.7.1 收口）；048=后续；049/050=**优先级中 / 不着急**；042.b 不在本文件 |
 | 与 task-list | 规划 `PLN-`；开发 `DEV-`；文档 `DOC-` |
 | 与 2607 | 7 月账本在 `design/achievement/`；本月只改本文件 |
 | achievement | **暂不入账**：本月进行中的 2608 只放 `design/plans/`；收口归档后再迁入 `achievement/`（若需要） |
@@ -544,3 +609,6 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 | 2026-08-06 | **拆解 IMP-046 / IMP-047 可执行 WBS**：§4.4（046.01～12，阶段 A–E）、§5.4（047.01～17，阶段 A–F）；含依赖、交付物、完成标准与落地顺序。 |
 | 2026-08-06 | **IMP-047 落地后修订（BUG-443）**：§5.2 增 047.i/j/k；§5.5/§5.7 补自动部署与任意 HTML；合集文末归档方案与 runtime 验收（3-src / 4-output）。 |
 | 2026-08-06 | **入账 IMP-051**：管理页「从文件夹导入」源路径右侧「选择文件夹」按钮（macOS 访达 / Ubuntu 文件选择器）；§6 全文；优先于 048/049/050；`PLN-035`。 |
+| 2026-08-06 | **IMP-051 落地**：§6 决策/WBS/触点改为已实现；链到 `docs/plans/2026-08-06-imp-051-pick-directory.md`；`DEV-097`。 |
+| 2026-08-06 | **V0.7.1 收口记入 §6.8**：BUG-444～448、ADJ-042/043（pending UX、错误前缀、`import_activity` + update 等空闲、中文 ID）；§5.8 交叉引用；§7 小节编号修正；用户文档见 `DOC-117`。 |
+| 2026-08-06 | **§6.8 补 BUG-449**：medium/heavy「不自动启动」不得误报「未能识别」；`describeFolderImportOutcome` 仅以 `status===pending` 判未识别。 |

@@ -610,6 +610,26 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   color: var(--text);
   font-family: var(--font-mono);
 }
+/* IMP-051：路径 + 浏览按钮同一行 */
+.path-with-browse {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.path-with-browse input {
+  flex: 1;
+  min-width: 0;
+}
+.path-with-browse .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.path-browse-note {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
 .path-alias-error {
   margin: 0 0 12px;
   color: oklch(0.55 0.2 28);

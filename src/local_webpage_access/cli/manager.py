@@ -17,15 +17,25 @@ app = typer.Typer(help="控制管理页 HTTP 服务")
 @app.command("on")
 def manager_on() -> None:
     """后台启动管理页（默认 init 后自动执行；managerEnabled=false 时禁用）。"""
-    from local_webpage_access.manager_api import ensure_token
+    from local_webpage_access.manager_api import (
+        TOKEN_ROTATE_HOURS_DEFAULT,
+        maybe_rotate_token,
+        read_token,
+    )
     from local_webpage_access.manager_service import start_manager
     from local_webpage_access.ports import resolve_lan_ip
 
     try:
         ws, config, _reg = open_workspace_registry()
         _reg.close()
+        # BUG-446：打印前同步到期轮换，再 read_token，避免打印已失效 token。
+        rotate_hours = (
+            getattr(config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT)
+            or TOKEN_ROTATE_HOURS_DEFAULT
+        )
+        maybe_rotate_token(ws, hours=rotate_hours)
         pid = start_manager(ws, config)
-        token = ensure_token(ws)
+        token = read_token(ws) or ""
         lan_ip = resolve_lan_ip(config) or "127.0.0.1"
         typer.secho(f"管理页已启动（pid={pid}）", fg=typer.colors.GREEN)
         typer.echo(f"  本机：http://127.0.0.1:{config.managerPort}/")
@@ -181,13 +191,24 @@ def manager_start(
     ),
 ) -> None:
     """启动管理页 HTTP 服务（前台运行，Ctrl+C 退出）。"""
-    from local_webpage_access.manager_api import ensure_token, run_manager
+    from local_webpage_access.manager_api import (
+        TOKEN_ROTATE_HOURS_DEFAULT,
+        maybe_rotate_token,
+        read_token,
+        run_manager,
+    )
     from local_webpage_access.security import assert_no_critical, validate_manager_binding
 
     try:
         ws, config, _reg = open_workspace_registry()
         _reg.close()  # manager 会自行打开 registry
-        token = ensure_token(ws)
+        # BUG-446：打印前同步到期轮换，避免冷启动打印已失效 token。
+        rotate_hours = (
+            getattr(config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT)
+            or TOKEN_ROTATE_HOURS_DEFAULT
+        )
+        maybe_rotate_token(ws, hours=rotate_hours)
+        token = read_token(ws) or ""
         bind_host = host or config.managerHost
         bind_port = port if port is not None else config.managerPort
         assert_no_critical(

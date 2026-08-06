@@ -49,6 +49,7 @@ from local_webpage_access.errors import (
     BuildError,
     ConfigError,
     DataNonemptyError,
+    DirectoryPickerError,
     DockerError,
     FolderSourceError,
     GatewayError,
@@ -136,17 +137,32 @@ def _write_token(workspace: Workspace, token: str) -> str:
         )
         + "\n"
     )
-    # BUG-334：一步以 0o600 创建/截断，避免 write_text 后 chmod 的权限窗口。
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # BUG-447：先写临时文件再 os.replace，避免 O_TRUNC 窗口并发读到空/残缺 → 401。
+    # BUG-334：临时文件一步以 0o600 创建，避免 write_text 后 chmod 的权限窗口。
+    tmp_path = path.with_name(
+        f".manager-token.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    )
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with contextlib.suppress(OSError):
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fd = -1
             fh.write(payload)
+            fh.flush()
+            with contextlib.suppress(OSError):
+                os.fsync(fh.fileno())
+        os.replace(str(tmp_path), str(path))
+        tmp_path = None  # type: ignore[assignment]
     finally:
         if fd >= 0:
-            os.close(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
     return token
 
 
@@ -289,6 +305,10 @@ _ERROR_STATUS: dict[str, int] = {
     "conflict": status.HTTP_409_CONFLICT,
     "data_nonempty": status.HTTP_409_CONFLICT,  # IMP-035：purge 非空 data/
     "unauthorized": status.HTTP_401_UNAUTHORIZED,
+    "loopback_required": status.HTTP_403_FORBIDDEN,  # IMP-051
+    "cancelled": status.HTTP_400_BAD_REQUEST,  # IMP-051 pick-directory
+    "unavailable": status.HTTP_400_BAD_REQUEST,
+    "timeout": status.HTTP_400_BAD_REQUEST,
     "service_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
     "internal": status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
@@ -568,19 +588,19 @@ def create_app(
         app.state.capability_probe_thread = probe_thread
 
         # IMP-046：Token 7×24h 自动轮换。
-        # 046.04：启动时立即检查一次（过期 -> 轮换；缺 createdAt -> 补写）。
+        # BUG-446：yield 前主线程同步 maybe_rotate，避免冷启动窗口打印/使用已失效 token。
         # 046.05：后台 tick 守护线程，默认每 30 min 检查一次。
         # 046.06：_verify_token 每次请求读盘，轮换后新 token 立即生效、旧 token 立即 401。
         rotate_hours = getattr(config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT) or TOKEN_ROTATE_HOURS_DEFAULT
+        try:
+            maybe_rotate_token(workspace, hours=rotate_hours)
+        except Exception:  # noqa: BLE001 - 轮换失败不阻断管理页
+            log.warning("启动时 token 轮换检查失败", exc_info=True)
+
         token_stop_event = _threading.Event()
         app.state.token_rotate_stop_event = token_stop_event
 
         def _bg_token_rotate() -> None:
-            # 启动时立即检查一次
-            try:
-                maybe_rotate_token(workspace, hours=rotate_hours)
-            except Exception:  # noqa: BLE001 - 轮换失败不阻断管理页
-                log.warning("启动时 token 轮换检查失败", exc_info=True)
             while True:
                 if token_stop_event.wait(timeout=_TOKEN_ROTATE_TICK_INTERVAL):
                     break
@@ -630,7 +650,7 @@ def create_app(
     @app.exception_handler(LwaError)
     async def _handle_lwa_error(request: Request, exc: LwaError):  # noqa: ARG001
         code = _lwa_error_code(exc)
-        return error_response(code, str(exc), detail=exc.context or None)
+        return error_response(code, exc.message or str(exc), detail=exc.context or None)
 
     @app.exception_handler(HTTPException)
     async def _handle_http_exception(request: Request, exc: HTTPException):  # noqa: ARG001
@@ -1367,7 +1387,7 @@ def _register_routes(app: FastAPI) -> None:
             )
             raise HTTPException(
                 status_code=http_status,
-                detail={"error": {"code": code, "message": str(exc)}},
+                detail={"error": {"code": code, "message": exc.message or str(exc)}},
             ) from exc
 
         # 对齐 daemon process_zip：识别成功且档位轻量则自动部署
@@ -1391,6 +1411,54 @@ def _register_routes(app: FastAPI) -> None:
             "autoStart": auto_start,
             "instance": snap.to_dict(),
         }
+
+    @app.post(
+        "/api/pick-directory",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def pick_directory_op(request: Request) -> dict[str, str]:
+        """IMP-051：在 LWA 宿主机上打开原生目录选择器。
+
+        仅允许 **loopback** 客户端调用（与管理页按钮门禁一致）。局域网/远程
+        即使持有 token 也返回 403 ``loopback_required``，避免对话框在无人值守
+        的服务器屏幕上弹出。
+
+        成功：``{"path": "/abs/..."}``。取消/无 GUI/超时：400 + 对应 code。
+        """
+        if not _is_localhost_client(request):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": {
+                        "code": "loopback_required",
+                        "message": (
+                            "目录选择器仅在本机（127.0.0.1 / ::1）访问管理页时可用；"
+                            "请粘贴 LWA 所在机器上的绝对路径，或改用本机地址打开管理页"
+                        ),
+                    }
+                },
+            )
+
+        from local_webpage_access.directory_picker import pick_directory
+
+        try:
+            path = pick_directory()
+        except DirectoryPickerError as exc:
+            code = getattr(exc, "code", None) or "bad_request"
+            if code not in {"cancelled", "unavailable", "timeout"}:
+                code = "bad_request"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": code,
+                        "message": exc.message or str(exc),
+                    }
+                },
+            ) from exc
+
+        return {"path": path}
 
     @app.patch(
         "/api/instances/{instance_id}/path-alias",

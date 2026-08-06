@@ -247,7 +247,7 @@ status: pending
 
   或在管理页勾选「仅冗余」后「批量删除冗余」。任意项目的行内「删除」走 IMP-035 双阶段确认（可仅移除或彻底删除）。详见 [管理页](manager-page.md) 与 [运维手册](operations-playbook.md)。
 
-### 文件夹源导入（IMP-047 / V0.7.0）
+### 文件夹源导入（IMP-047 / V0.7.0+；管理页选目录 IMP-051 / V0.7.1）
 
 ```bash
 lwa import --from-dir /abs/path/to/my-site
@@ -255,9 +255,14 @@ lwa import --from-dir /abs/path/to/my-site --update <id>
 ```
 
 * 路径必须是**绝对路径**；相对路径会被拒绝。
+* 请选**项目根或 `dist/`**（含 `index.html` / `package.json`），不要只选 `src/`——否则易落入「待识别」且无法启动。
 * LWA **复制**进 `apps/<id>/`，不会在关联目录就地运行。
 * `--update` 时传入的目录须与实例关联路径一致，否则 Exit 2（不会静默改用别的目录）。
 * 内容未变会跳过更新。详见 [运维手册 · 文件夹源](operations-playbook.md) 与 Skill `lwa-import-folder`。
+* **管理页「选择文件夹」**（IMP-051）：仅用 `http://127.0.0.1:…` 打开管理页时可用；局域网访问须手输 LWA 机器上的绝对路径。
+* 识别失败（pending）时管理页会报错并保持对话框打开，不会冒充「导入成功」。
+* 纯中文显示名时，实例 ID 优先取文件夹名（避免多次撞成 `instance`）。
+* 导入进行中不要立刻 `lwa update`：升级会先等待导入空闲（约 180s），超时则跳过重启 manager/daemon。
 
 ## 容器类问题
 

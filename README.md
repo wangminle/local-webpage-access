@@ -24,7 +24,7 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 - **访问地址新鲜度（IMP-038/040）**：管理页读时合成 `lanUrl`；`lwa access refresh` / `doctor --access` / update 收尾 review；LAN 漂移节流自愈。`access review` 检测 SPA 别名资源错位（空 200 / 404 / 错误 MIME，IMP-023）。
 - **Full Profile 能力新鲜度**：`lwa gateway on` / 前台监管写 `capability-gateway.json`；manager / gateway / daemon 均周期刷新能力缓存；角色快照 overall 按本角色职责计算（避免 peer `unknown` 假红）；内部健康/access/Caddy admin 探针直连（不受 `http_proxy` 影响）；`lwa update` 默认重启原本在跑的 gateway，Full 收尾验收合并后的能力缓存。
 - **SQLite Registry**：七张表（instances / containers / static_sites / ports / events / builds / resources），外键级联、WAL 模式。
-- **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权（**V0.7.0 / IMP-046**：默认每 168h 自动轮换，本机 loopback 免 token，LAN 须有效 token；`lwa manager token` 查询），覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计；**显示名优先 `--name`，其次主页 HTML `<title>`**（含 `dist/`/`build/` 等托管入口；IMP-043）；**文件夹源**实例可标注来源并「从源更新」（IMP-047）。
+- **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权（**V0.7.0 / IMP-046**：默认每 168h 自动轮换，本机 loopback 免 token，LAN 须有效 token；`lwa manager token` 查询），覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计；**显示名优先 `--name`，其次主页 HTML `<title>`**（含 `dist/`/`build/` 等托管入口；IMP-043）；**文件夹源**实例可标注来源并「从源更新」（IMP-047）；**V0.7.1 / IMP-051** 本机 loopback 下可用「选择文件夹」原生对话框（局域网须手输绝对路径）。
 - **自动导入守护进程（WBS-21）**：`lwa daemon on` 后监听 `inbox/`，自动导入并启动可确定的轻量实例。
 - **安全审计（WBS-25）**：对生成的 Compose / Dockerfile / zip 成员做 critical/warn/info 分级审计；Compose 与 Dockerfile 均在写出前拦截 critical（Dockerfile 的 `ADD <url>`、`curl\|sh` 为 critical），zip 路径穿越/符号链接/炸弹拒绝导入；管理页绑定校验（LAN 绑定 + token）。
 - **排障辅助（WBS-26 / IMP-033/034）**：`lwa doctor` 检查 Python / Docker / Compose / 端口池 / registry / 磁盘 / 内存；`--profile full` / `lwa capabilities` 输出统一 CapabilityReport；人类可读与 `--json` 均含平台矩阵报告（`--json` 未 init 亦可）；CLI / manager / daemon / gateway 分文件落盘（`logs/lwa.log` 等），FAQ 提供症状→日志对照。**V0.6.12** 起另含 `workspace_path_consistency`：核对活跃 manifest/registry 派生路径、Caddy 引用是否落在当前工作区、SQLite data bind mount 是否漂移；**V0.6.13** 起 registry 不可用/挂载观测失败时对应子项 SKIP（不报假绿 OK），容器查询失败禁止当作「无容器」绕过挂载 fail-safe。
@@ -133,7 +133,7 @@ lwa pageviews my-site         # 单实例浏览量详情
 | 命令 | 说明 |
 | --- | --- |
 | `lwa init [-w DIR] [--force] [--default\|--full] [--yes]` | 初始化工作区（目录 / 配置 / registry / skills），幂等；`--full` 装齐依赖并在能力闭环 **ready 后**写入 `profile: full` |
-| `lwa update` | 升级 lwa 包并热重载：同步 skills、补齐配置、重启 manager/daemon、**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）、刷新访问地址（可选 review）、可选 doctor / restart 实例；Full 收尾验收能力缓存 |
+| `lwa update` | 升级 lwa 包并热重载：同步 skills、补齐配置、重启 manager/daemon（**导入进行中会先等待，最多约 180s**）、**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）、刷新访问地址（可选 review）、可选 doctor / restart 实例；Full 收尾验收能力缓存 |
 | `lwa workspace relocate <NEW> [--dry-run] [--yes] [--resume\|--verify\|--rollback]` | 同卷原子迁移工作区根（IMP-042）；见 docs/workspace-rename.md / Skill `lwa-relocate-workspace` |
 | `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名；`--update` 原地升级（容器自动 rebuild，静态/前端 restart；`--no-restart` 仅换源码） |
 | `lwa import --from-dir <ABS> [-n NAME] [--path-alias SLUG] [--update ID]` | 本机文件夹源导入/更新（IMP-047；只读复制进工作区；`--update` 时路径须与关联目录一致） |

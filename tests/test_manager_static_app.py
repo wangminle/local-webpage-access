@@ -191,6 +191,42 @@ assert.ok(btn(stopped, "start").indexOf("disabled") === -1, "识别成功后的 
     )
 
 
+def test_helpers_opshtml_allows_update_from_dir_when_pending() -> None:
+    """BUG-445：folder 源 pending 时「从源更新」须可用，启动仍禁用。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const opsHtml = context.window.__LWA_TEST_HOOKS__.opsHtml;
+
+function btn(html, op) {{
+  var i = html.indexOf('data-op="' + op + '"');
+  assert.ok(i !== -1, "missing op=" + op);
+  return html.slice(i, html.indexOf(">", i) + 1);
+}}
+
+var pendingFolder = opsHtml({{
+  id: "pf", name: "pf", status: "pending",
+  runtime: "shared-static", servingMode: "shared-static", stack: [],
+  redundant: false, sourceKind: "folder"
+}});
+assert.ok(btn(pendingFolder, "update-from-dir").indexOf("disabled") === -1,
+  "folder+pending 须允许从源更新以自愈");
+assert.ok(btn(pendingFolder, "start").indexOf("disabled") !== -1,
+  "pending 启动仍须禁用");
+
+var buildingFolder = opsHtml({{
+  id: "bf", name: "bf", status: "building",
+  runtime: "docker-compose", servingMode: "container", stack: [],
+  redundant: false, sourceKind: "folder"
+}});
+assert.ok(btn(buildingFolder, "update-from-dir").indexOf("disabled") !== -1,
+  "building 时仍须禁用从源更新");
+"""
+    )
+
+
 def test_helpers_rowhtml_includes_pageview_cell() -> None:
     """DEV-061：整行 HTML 应包含浏览量单元格，且点击按钮带 data-op=pageview。"""
     _run(
@@ -331,7 +367,7 @@ assert.ok(capturedRoot.template.indexOf("v-html=\\"tbodyHtml\\"") !== -1, "模�
 assert.ok(capturedRoot.template.indexOf("importmap") === -1);
 
 // 方法挂接
-["refresh", "onTableClick", "openDetail", "openLogs", "openPathAlias", "openPageview", "removeRedundant", "submitToken"].forEach(function (m) {{
+["refresh", "onTableClick", "openDetail", "openLogs", "openPathAlias", "openPageview", "removeRedundant", "submitToken", "openFolderImport", "pickFolder", "canPickFolder"].forEach(function (m) {{
   assert.strictEqual(typeof capturedRoot.methods[m], "function", "缺方法 " + m);
 }});
 
@@ -340,6 +376,14 @@ const state = capturedRoot.data();
 assert.ok(Array.isArray(state.instances));
 assert.strictEqual(state.filters.search, "");
 assert.strictEqual(state.pageview.open, false);
+assert.strictEqual(state.folderImport.picking, false);
+
+// IMP-051：模板含选择文件夹与 path-with-browse
+assert.ok(capturedRoot.template.indexOf("选择文件夹") !== -1, "模板应含选择文件夹按钮");
+assert.ok(capturedRoot.template.indexOf("path-with-browse") !== -1);
+assert.ok(capturedRoot.template.indexOf("pickFolder") !== -1);
+// loopback location → canPickFolder true（闭包读 deps.location）
+assert.strictEqual(capturedRoot.methods.canPickFolder.call({{}}), true);
 
 // computed.filteredInstances 走 helpers.applyFilters
 const ctx = {{ instances: [
@@ -775,5 +819,147 @@ setTimeout(function () {{
     "加载失败时表格不应显示「暂无实例」，实际：" + html
   );
 }}, 60);
+"""
+    )
+
+
+def test_folder_import_pick_disabled_on_lan_hostname() -> None:
+    """IMP-051：非 loopback hostname 时 canPickFolder 为 false。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: function () {{ throw new Error("no fetch"); }},
+  location: {{ hostname: "192.168.1.10", search: "", pathname: "/" }},
+  sessionStorage: {{ getItem: function () {{ return null; }}, setItem: function () {{}}, removeItem: function () {{}} }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let capturedRoot = null;
+const stubApp = {{ mount: function () {{ return {{}}; }} }};
+context.window.LWA.createManagerApp(
+  {{ createApp: function (root) {{ capturedRoot = root; return stubApp; }} }},
+  {{
+    document: null,
+    fetch: function () {{ throw new Error("no fetch"); }},
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+assert.strictEqual(capturedRoot.methods.canPickFolder.call({{}}), false);
+assert.ok(capturedRoot.template.indexOf("选择文件夹") !== -1);
+assert.ok(capturedRoot.template.indexOf("path-browse-note") !== -1);
+assert.ok(
+  capturedRoot.template.indexOf("不要只选 src/") !== -1,
+  "导入对话框应提前提示勿只选 src/"
+);
+"""
+    )
+
+
+def test_friendly_api_message_strips_error_code_prefix() -> None:
+    """管理页展示错误时剥掉 [ZIP_IMPORT_ERROR] 等前缀。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const friendly = context.window.__LWA_TEST_HOOKS__.friendlyApiMessage;
+assert.strictEqual(
+  friendly("[ZIP_IMPORT_ERROR] 实例 demo 已存在"),
+  "实例 demo 已存在"
+);
+assert.strictEqual(
+  friendly("[FOLDER_SOURCE_ERROR] 目录不存在"),
+  "目录不存在"
+);
+assert.strictEqual(friendly("普通错误"), "普通错误");
+assert.strictEqual(friendly(""), "");
+assert.strictEqual(friendly(null), "");
+"""
+    )
+
+
+def test_style_has_path_with_browse() -> None:
+    """IMP-051：样式含路径+浏览同一行布局。"""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    assert ".path-with-browse" in css
+    assert ".path-browse-note" in css
+
+
+def test_describe_folder_import_outcome_pending_is_failure() -> None:
+    """识别失败（pending）不得冒充导入成功。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const describe = context.window.__LWA_TEST_HOOKS__.describeFolderImportOutcome;
+
+var pending = describe({{
+  instanceId: "instance",
+  autoStart: {{ action: "pending", note: "未识别（无法识别项目类型）" }},
+  instance: {{ id: "instance", status: "pending" }},
+}});
+assert.strictEqual(pending.ok, false);
+assert.strictEqual(pending.keepOpen, true);
+assert.strictEqual(pending.toastKind, "error");
+assert.ok(pending.toast.indexOf("未能识别") !== -1, pending.toast);
+assert.ok(pending.error.indexOf("src") !== -1, pending.error);
+
+var ok = describe({{
+  instanceId: "demo",
+  autoStart: {{ action: "started", note: "ok" }},
+  instance: {{ id: "demo", status: "running" }},
+}});
+assert.strictEqual(ok.ok, true);
+assert.strictEqual(ok.keepOpen, false);
+assert.strictEqual(ok.toastKind, "success");
+assert.ok(ok.toast.indexOf("demo") !== -1, ok.toast);
+"""
+    )
+
+
+def test_describe_folder_import_outcome_medium_profile_is_success() -> None:
+    """BUG-449：识别成功但档位 medium（action=pending、status=stopped）不得报「未能识别」。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const describe = context.window.__LWA_TEST_HOOKS__.describeFolderImportOutcome;
+
+var medium = describe({{
+  instanceId: "my-next-app",
+  autoStart: {{ action: "pending", note: "资源档位 medium，不自动启动，请人工确认后 lwa start" }},
+  instance: {{ id: "my-next-app", status: "stopped" }},
+}});
+assert.strictEqual(medium.ok, true);
+assert.strictEqual(medium.toastKind, "success");
+assert.strictEqual(medium.keepOpen, false);
+assert.ok(medium.toast.indexOf("my-next-app") !== -1, medium.toast);
+assert.ok(medium.toast.indexOf("未能识别") === -1, medium.toast);
+assert.ok(medium.toast.indexOf("medium") !== -1, medium.toast);
+
+// status 缺失但 action=pending：同样不得冒充未识别
+var noStatus = describe({{
+  instanceId: "x",
+  autoStart: {{ action: "pending", note: "资源档位 heavy" }},
+}});
+assert.strictEqual(noStatus.ok, true);
+assert.ok(noStatus.toast.indexOf("未能识别") === -1, noStatus.toast);
 """
     )

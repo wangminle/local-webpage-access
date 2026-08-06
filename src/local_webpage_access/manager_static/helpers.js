@@ -306,13 +306,19 @@
     html += LWA.opBtn(id, "restart", "重启", inProgress);
     html += LWA.opBtn(id, "rebuild", "重建", inProgress);
     // IMP-047：文件夹源实例显示「从源更新」按钮
+    // BUG-445：pending 不算更新忙态——允许修好源码后从源更新自愈；
+    // 启动仍由上方 inProgress 禁用。
     if (i.sourceKind === "folder") {
+      var updateBusy =
+        i.status === "building" ||
+        i.status === "cancelling" ||
+        i.status === "queued";
       html += LWA.opBtn(
         id,
         "update-from-dir",
         "从源更新",
-        inProgress,
-        inProgress ? "实例正在构建/流转，暂时不能更新" : "从关联文件夹源同步更新"
+        updateBusy,
+        updateBusy ? "实例正在构建/流转，暂时不能更新" : "从关联文件夹源同步更新"
       );
     }
     if (canCancelBuild || i.status === "cancelling") {
@@ -413,6 +419,63 @@
     });
   };
 
+  // 管理页展示：剥掉 [ZIP_IMPORT_ERROR] 等 LwaError 前缀（code 已在 JSON 里）
+  LWA.friendlyApiMessage = function (msg) {
+    if (msg == null) return "";
+    var text = String(msg);
+    return text.replace(/^\[[A-Z][A-Z0-9_]*\]\s*/, "");
+  };
+
+  // IMP-051.b：文件夹导入结果文案（识别失败勿冒充成功）
+  LWA.describeFolderImportOutcome = function (data) {
+    data = data || {};
+    var id =
+      data.instanceId ||
+      (data.instance && (data.instance.id || data.instance.name)) ||
+      "";
+    var auto = data.autoStart || {};
+    var status = (data.instance && data.instance.status) || "";
+    // 只有 status=pending 才是真·未识别。autoStart.action="pending" 还覆盖
+    // 「识别成功但档位 medium/heavy 不自动启动」——那种实例是 stopped 可启动的，
+    // 绝不能报成「未能识别/请删除重试」（BUG-449）。
+    if (status === "pending") {
+      var note = auto.note || "未能识别项目类型";
+      return {
+        ok: false,
+        toastKind: "error",
+        toast:
+          "未能识别为可部署项目：" +
+          note +
+          "（实例 " +
+          id +
+          " 为待识别，无法启动）。常见原因：只选了 src/ 源码子目录——请改选项目根或 dist/，并删除待识别实例后重试。",
+        keepOpen: true,
+        error:
+          "未能识别该目录。请选择含 index.html / package.json / dist 的目录（不要只选 src/）。已创建的待识别实例可在列表中删除。",
+      };
+    }
+    if (auto.action === "pending") {
+      // 识别成功但资源档位较高，未自动启动：如实告知，可手动启动
+      return {
+        ok: true,
+        toastKind: "success",
+        toast:
+          "已从文件夹导入：" + id + "（" +
+          (auto.note || "未自动启动，可在列表中手动启动") +
+          "）",
+        keepOpen: false,
+        error: "",
+      };
+    }
+    return {
+      ok: true,
+      toastKind: "success",
+      toast: "已从文件夹导入：" + id,
+      keepOpen: false,
+      error: "",
+    };
+  };
+
   // ---- 导出 ----
 
   if (typeof window !== "undefined") {
@@ -430,6 +493,9 @@
       window.__LWA_TEST_HOOKS__.canSubmitRemove = LWA.canSubmitRemove;
       window.__LWA_TEST_HOOKS__.shouldElevateRemoveForce = LWA.shouldElevateRemoveForce;
       window.__LWA_TEST_HOOKS__.buildRemoveQuery = LWA.buildRemoveQuery;
+      window.__LWA_TEST_HOOKS__.describeFolderImportOutcome =
+        LWA.describeFolderImportOutcome;
+      window.__LWA_TEST_HOOKS__.friendlyApiMessage = LWA.friendlyApiMessage;
     }
   }
   if (typeof module !== "undefined" && module.exports) {

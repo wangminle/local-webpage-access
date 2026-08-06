@@ -193,7 +193,7 @@ lwa alias clear <id>
 
 ## 开发期：lwa 源码更新后如何重载
 
-V0.4.0 起优先运行 `lwa update`。当前实现已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon；**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）；**若开机自启单元在管，会走 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`），保证单一进程**，勿再手搓 `off && on` 与 KeepAlive 抢锁。Full Profile 收尾会验收合并后的能力缓存。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon、gateway 等后台子进程仍跑旧代码。
+V0.4.0 起优先运行 `lwa update`。当前实现已包含管理页路径别名在线修改（IMP-006 WBS 006.07~006.10）。`lwa update` 会刷新安装、同步 skills、补齐配置并重启 manager/daemon；**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）；**若开机自启单元在管，会走 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`），保证单一进程**，勿再手搓 `off && on` 与 KeepAlive 抢锁。**V0.7.1** 起：若正在导入（zip / 文件夹），重启前会等待 `run/import.lock` 释放（约 180s），超时则跳过重启以免打断导入。Full Profile 收尾会验收合并后的能力缓存。**改仓库代码后仅 `pip install -e .` 不够**——管理页、daemon、gateway 等后台子进程仍跑旧代码。
 
 升级收尾（IMP-038）：后台重启后会 **access refresh**，并默认跑一次轻量 **access review**（可用 `--no-review-access` 跳过）。DHCP 换网后的 LAN 漂移另见 [运维手册 §7.2](operations-playbook.md)；AI 协作流程见 Skill **`lwa-review-access-urls`**。
 

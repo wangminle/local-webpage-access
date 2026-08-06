@@ -442,6 +442,60 @@ def test_pip_failure_does_not_block_other_steps(
 # ---- run_update: manager/daemon/gateway restart ---------------------------
 
 
+def test_run_update_waits_for_import_before_restart_manager(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """导入进行中时，重启 manager 前须等待导入空闲。"""
+    calls: list[float] = []
+
+    def fake_wait(ws, *, timeout=180.0, poll=0.25):  # noqa: ARG001
+        calls.append(timeout)
+        return 0.1
+
+    monkeypatch.setattr(
+        "local_webpage_access.updater.wait_until_import_idle", fake_wait
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_running", lambda ws, cfg: False
+    )
+
+    report = run_update(
+        workspace, config, registry, options=_opts(restart_manager=True)
+    )
+    assert calls == [180.0]
+    assert report.step("restartManager").status == "skipped"
+
+
+def test_run_update_marks_restart_failed_when_import_still_busy(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """等待导入超时后，restartManager 记 failed，不中断后续步骤。"""
+    from local_webpage_access.errors import LwaError
+
+    monkeypatch.setattr(
+        "local_webpage_access.updater.wait_until_import_idle",
+        lambda *a, **k: (_ for _ in ()).throw(
+            LwaError("仍有导入进行中，请稍后再执行 lwa update", code="IMPORT_BUSY")
+        ),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
+    )
+    started = {"n": 0}
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.stop_manager",
+        lambda ws: started.__setitem__("n", started["n"] + 1) or True,
+    )
+
+    report = run_update(
+        workspace, config, registry, options=_opts(restart_manager=True)
+    )
+    step = report.step("restartManager")
+    assert step is not None and step.status == "failed"
+    assert "导入" in step.message
+    assert started["n"] == 0
+
+
 def test_manager_restart_skipped_when_not_running(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:

@@ -60,6 +60,7 @@ python3 -m pytest tests/test_docker_integration.py
 | 28.06 端口分配 | `test_ports.py` | 分配、释放、并发（BUG-017） |
 | 28.07 zip 导入 | `test_importer.py` | 解压、zip slip、slug 冲突 |
 | — 文件夹源（IMP-047） | `test_folder_source.py` | 绝对路径校验、打包/指纹、import/update、scan 保元数据、CLI 路径一致性、隔离红线 |
+| — 选择文件夹 / 导入护栏（IMP-051） | `test_directory_picker.py`、`test_import_activity.py`、`test_manager_static_app.py` | 原生选目录、导入活动锁、`lwa update` 等空闲、管理页提示与错误前缀 |
 | 28.08 项目识别 | `test_scanner.py` | static / node / python / pending |
 | 28.09 静态配置 | `test_static_gateway.py` | 网关路由、端口 |
 | 28.10 Dockerfile | `test_dockerfile_templates.py`、`test_security.py`（生成门禁） | 模板渲染；`audit_dockerfile` critical 拒绝写出 |

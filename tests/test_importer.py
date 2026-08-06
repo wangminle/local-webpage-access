@@ -79,6 +79,24 @@ def test_slugify_empty_fallback() -> None:
     assert slugify("!!!") == "instance"
 
 
+def test_slugify_cjk_only_falls_back_to_instance() -> None:
+    """纯中文无法产生 ASCII slug，slugify 仍回退 instance。"""
+    assert slugify("分布式唤醒示意图") == "instance"
+
+
+def test_slug_basis_prefers_path_when_name_is_cjk() -> None:
+    """BUG：纯中文 --name 不应把所有导入都抢成 id=instance。"""
+    from local_webpage_access.importer import slug_basis_for_id
+
+    assert slug_basis_for_id(name="分布式唤醒示意图", path_stem="multidevices-arbitration-simulator") == (
+        "multidevices-arbitration-simulator"
+    )
+    assert slugify(slug_basis_for_id(name="分布式唤醒示意图", path_stem="src")) == "src"
+    # 名称本身含 ASCII 时仍用名称
+    assert slug_basis_for_id(name="Demo 演示", path_stem="src") == "Demo 演示"
+    assert slugify(slug_basis_for_id(name="Demo 演示", path_stem="src")) == "demo"
+
+
 def test_slugify_truncates() -> None:
     assert len(slugify("x" * 100)) <= 40
 

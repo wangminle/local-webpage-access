@@ -174,7 +174,7 @@ lwa remove --redundant --purge  # 确认后连磁盘一起清
 
 管理页也可：实例列表「仅冗余」勾选 → 行内删除单条，或顶部「批量删除冗余」。
 
-### 文件夹源导入与更新（IMP-047）
+### 文件夹源导入与更新（IMP-047；选目录 IMP-051）
 
 除 zip 外，LWA 也支持从本机文件夹直接导入。**关联目录是只读复制源**，LWA 会将内容复制进 `apps/<id>/current/`，不会就地运行。
 
@@ -193,13 +193,15 @@ lwa import --from-dir /home/user/my-site --update my-app --no-restart
 lwa import --from-dir /home/user/my-site --update my-app --dry-run
 ```
 
-管理页也可：实例列表顶部「导入文件夹」按钮；`sourceKind=folder` 实例行内「从源更新」按钮。
+管理页也可：实例列表顶部「导入文件夹」按钮；`sourceKind=folder` 实例行内「从源更新」按钮。本机（loopback）打开管理页时可用「选择文件夹」（IMP-051）；局域网须手输绝对路径。
 
 注意事项：
+- 请选**项目根或 dist/**，不要只选 `src/`。
 - 源目录必须为绝对路径；`node_modules/`、`.git/`、`__pycache__/` 等会被自动剥离。
 - `--update` 时传入的 `--from-dir` 路径须与实例关联目录一致，否则 Exit 2（不会静默用错目录）；更换关联目录请删实例后重新导入。
 - 源目录被删除 / 移动后 update 会**报错**（不会回退到 mount 模式）；需确认路径或改用 zip 更新。
 - `sourceKind=zip` 的实例不能用 `--from-dir --update`（会报错）。
+- 导入进行中勿立刻 `lwa update`（会等待或跳过重启，避免打断导入）。
 - Agent 协作见 Skill `lwa-import-folder`。
 
 ---

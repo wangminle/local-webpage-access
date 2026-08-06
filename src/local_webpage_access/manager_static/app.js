@@ -89,9 +89,9 @@
         if (!resp.ok) {
           return resp.json().then(
             function (body) {
-              var err = new Error(
-                (body && body.error && body.error.message) || resp.statusText
-              );
+              var raw =
+                (body && body.error && body.error.message) || resp.statusText;
+              var err = new Error(LWA.friendlyApiMessage(raw));
               err.code = (body && body.error && body.error.code) || "";
               err.status = resp.status;
               throw err;
@@ -388,7 +388,8 @@
           logs: { open: false, title: "", category: "run", content: "", instanceId: null },
           pathAlias: { open: false, title: "", value: "", error: "", instanceId: null },
           // IMP-047：文件夹源导入弹窗
-          folderImport: { open: false, sourceDir: "", name: "", pathAlias: "", error: "", submitting: false },
+          // IMP-051：picking 防连点；canPickFolder 仅 loopback
+          folderImport: { open: false, sourceDir: "", name: "", pathAlias: "", error: "", submitting: false, picking: false },
           pageview: { open: false, title: "", body: "", instanceId: null },
           // IMP-035：双阶段删除模态（step 1 选范围 → step 2 输 ID；needForce 再确认）
           removeDialog: {
@@ -948,11 +949,48 @@
           this.folderImport.pathAlias = "";
           this.folderImport.error = "";
           this.folderImport.submitting = false;
+          this.folderImport.picking = false;
           this.folderImport.open = true;
         },
         closeFolderImport: function () {
           this.folderImport.open = false;
           this.folderImport.error = "";
+          this.folderImport.picking = false;
+        },
+        // IMP-051：仅 loopback 可点；与后端 /api/pick-directory 门禁一致
+        canPickFolder: function () {
+          return isLocalhostAccess();
+        },
+        pickFolder: function () {
+          if (!isLocalhostAccess()) {
+            this.toast(
+              "目录选择器仅在本机（127.0.0.1）打开管理页时可用，请粘贴 LWA 机器上的绝对路径",
+              "error"
+            );
+            return;
+          }
+          if (this.folderImport.picking || this.folderImport.submitting) return;
+          var self = this;
+          this.folderImport.error = "";
+          this.folderImport.picking = true;
+          apiFetch(this, "/api/pick-directory", { method: "POST" })
+            .then(function (data) {
+              self.folderImport.picking = false;
+              if (data && data.path) {
+                self.folderImport.sourceDir = data.path;
+              }
+            })
+            .catch(function (e) {
+              self.folderImport.picking = false;
+              if (e && e.code === "cancelled") {
+                // 用户取消：不改输入、不报错
+                return;
+              }
+              var msg =
+                (e && e.message) ||
+                "无法打开目录选择器，请手动粘贴绝对路径";
+              self.toast(msg, "error");
+            });
         },
         doFolderImport: function () {
           var dir = this.folderImport.sourceDir.trim();
@@ -978,10 +1016,16 @@
             body: JSON.stringify(body),
           })
             .then(function (data) {
-              self.folderImport.open = false;
               self.folderImport.submitting = false;
-              self.toast("已从文件夹导入：" + (data.instanceId || (data.instance && data.instance.name) || ""), "success");
+              var outcome = LWA.describeFolderImportOutcome(data);
+              self.toast(outcome.toast, outcome.toastKind);
               self.refresh();
+              if (outcome.keepOpen) {
+                self.folderImport.error = outcome.error;
+                return;
+              }
+              self.folderImport.open = false;
+              self.folderImport.error = "";
             })
             .catch(function (e) {
               self.folderImport.submitting = false;
@@ -1211,9 +1255,14 @@
     '  <div class="modal-inner path-alias-box"><div class="modal-head">',
     '    <h2>从文件夹导入</h2>',
     '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭" @click="closeFolderImport">✕</button></div>',
-    '    <p class="path-alias-hint">输入本机文件夹的<strong>绝对路径</strong>，LWA 会将其复制进工作区（非就地运行）。</p>',
+    '    <p class="path-alias-hint">填写 <strong>LWA 所在机器</strong>上的文件夹绝对路径；内容会<strong>复制</strong>进工作区（非就地运行）。请选<strong>项目根或 dist/</strong>（含 index.html / package.json），不要只选 src/。本机访问时可点「选择文件夹」用系统对话框挑选。</p>',
     '    <label class="path-alias-field"><span>源目录路径</span>',
-    '      <input type="text" placeholder="/home/user/my-site" autocomplete="off" spellcheck="false" v-model="folderImport.sourceDir" @keydown.enter="doFolderImport" /></label>',
+    '      <div class="path-with-browse">',
+    '        <input type="text" placeholder="/home/user/my-site" autocomplete="off" spellcheck="false" v-model="folderImport.sourceDir" @keydown.enter="doFolderImport" />',
+    '        <button class="btn btn-sm" type="button" title="在 LWA 本机打开目录选择器（仅 loopback）" :disabled="!canPickFolder() || folderImport.picking || folderImport.submitting" @click="pickFolder">{{ folderImport.picking ? "选择中…" : "选择文件夹" }}</button>',
+    "      </div>",
+    '      <p class="path-browse-note" v-if="!canPickFolder()">当前非本机地址访问：选择器已禁用，请粘贴 LWA 机器上的绝对路径（或改用 http://127.0.0.1 打开管理页）。</p>',
+    "    </label>",
     '    <label class="path-alias-field"><span>实例名称（可选）</span>',
     '      <input type="text" placeholder="留空则用目录名" autocomplete="off" spellcheck="false" v-model="folderImport.name" @keydown.enter="doFolderImport" /></label>',
     '    <label class="path-alias-field"><span>路径别名（可选）</span>',
@@ -1222,7 +1271,7 @@
     '    <div class="path-alias-actions">',
     '      <div class="path-alias-actions-main">',
     '        <button class="btn btn-ghost" type="button" @click="closeFolderImport">取消</button>',
-    '        <button class="btn btn-primary" type="button" :disabled="folderImport.submitting" @click="doFolderImport">{{ folderImport.submitting ? "导入中…" : "导入" }}</button>',
+    '        <button class="btn btn-primary" type="button" :disabled="folderImport.submitting || folderImport.picking" @click="doFolderImport">{{ folderImport.submitting ? "导入中…" : "导入" }}</button>',
     "      </div></div></div></div>",
     '<div class="modal" :hidden="!pageview.open">',
     '  <div class="modal-inner pageview-box"><div class="modal-head">',

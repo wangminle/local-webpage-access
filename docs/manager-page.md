@@ -85,6 +85,7 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
 | POST | `/api/instances/{id}/update-from-dir` | 从关联文件夹源同步更新实例（IMP-047；仅 sourceKind=folder） |
 | POST | `/api/import-from-dir` | 从本机文件夹导入新实例（IMP-047） |
+| POST | `/api/pick-directory` | 在 **LWA 宿主机**打开原生目录选择器（IMP-051）；**仅 loopback** 客户端可用，成功返回 `{path}`；局域网即使有 token 也 403 `loopback_required` |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
 | GET | `/api/instances/{id}/pageviews?limit=` | 单实例浏览量详情：按天分布 + 最近命中 + `uniqueIpList`（IMP-024/026；page 级过滤见 IMP-025）；CLI：`lwa pageviews <id>` |
@@ -166,6 +167,17 @@ Content-Type: application/json
 * LWA 将文件夹内容**复制**进工作区 `apps/<id>/current/`（非就地运行）。
 * 导入后实例 `sourceKind=folder`，`sourceDirPath` 记录关联目录路径。
 * 与 CLI `lwa import --from-dir <path>` 共用 `importer.import_from_dir` 代码路径。
+
+#### 选择文件夹（IMP-051）
+
+```http
+POST /api/pick-directory
+Authorization: Bearer <token>
+```
+
+* 由 **manager 进程在 LWA 宿主机**调起系统目录对话框（macOS 访达 / Linux zenity|kdialog），返回 `{"path":"/abs/..."}`。
+* **仅 loopback**（`127.0.0.1` / `::1`）可调用；局域网访问即使持有 token 也返回 **403 `loopback_required`**（避免对话框弹在服务器屏幕上、或误用访问机路径）。
+* 用户取消 → 400 `cancelled`；无 GUI/缺工具 → 400 `unavailable`；超时 → 400 `timeout`。管理页在非本机地址时禁用「选择文件夹」按钮，仍可手输绝对路径。
 
 #### 从源目录更新
 
@@ -323,6 +335,7 @@ Authorization: Bearer <token>
 * **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，规则不变）。
 * **删除确认（IMP-035）**：受控双阶段模态——① 选择「仅移除」（默认，`purge=false`）或「彻底删除」（`purge=true`）；② 输入完整项目 ID；彻底删除须勾选「理解数据不可恢复」。非空 `data/` 首次 purge 得 409 `data_nonempty` 后，再勾选强制确认才发 `force=true`（不自动重试）。打开时焦点进入对话框，Tab 限制在模态内，Esc/关闭后恢复触发按钮焦点。
 * **路径别名对话框**：`shared-static` 与 `docker-compose` 实例操作区「路径别名」按钮可用（pending/building/queued 态禁用）；输入 slug 保存或清除；校验错误在对话框内展示。builtin 后端下设置会失败并展示后端错误信息（IMP-022）。
+* **从文件夹导入（IMP-047 / IMP-051）**：顶栏「导入文件夹」打开对话框；请选**项目根或 dist/**（含 `index.html` / `package.json`），不要只选 `src/`。源路径右侧「选择文件夹」仅在 **loopback** 可用（宿主机原生选目录）；局域网访问时按钮禁用，请粘贴 LWA 机器绝对路径。导入仍复制进工作区，非就地运行。API 错误文案不含 `[ZIP_IMPORT_ERROR]` 等前缀。
 * **浏览量**：列表列展示累计访问；点击打开按天分布、最近命中与独立 IP 列表（IMP-024/026；page 级过滤 IMP-025）。
 
 > **状态说明（DEV-043 / BUG-071 / IMP-033）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。Docker 观测失败时显示 unknown / 权限提示，不误写 stopped。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例（容器路径仍受能力门禁）。

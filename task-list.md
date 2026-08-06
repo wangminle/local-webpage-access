@@ -455,6 +455,12 @@
 | BUG-441 | 修复 | IMP-047：lwa scan / apply_detection_to_manifest 抹除 sourceKind/sourceDirPath/sourceSyncHash，folder 实例身份丢失 | 2026-08-06 15:50 | 2026-08-06 15:50 | 已修复 | apply_detection_to_manifest 透传三字段；补 TestScanPreservesFolderSource。update_from_dir 写回 sourceKind 此前已修；Toast 已用 instanceId；FolderSourceError 已映射 bad_request。 |
 | BUG-442 | 修复 | folder_source.validate_source_dir 相对路径被放行：resolve() 恒返回绝对路径，先 resolve 再判 is_absolute() 为死代码，'./x'、'.' 等被解析到服务端 cwd（CHK-166 minor） | 2026-08-06 15:57 | 2026-08-06 15:57 | 已修复 | 改为 resolve() 前判 p.is_absolute()；新增 test_rejects_relative_path 覆盖相对路径/./my-site/. 三例；test_folder_source 全绿 |
 | BUG-443 | 修复 | 文件夹导入：识别成功仍写 pending+禁用启动；任意 HTML 不识别；import-from-dir 不自动部署 | 2026-08-06 17:56 | 2026-08-06 17:56 | 已修复 | B: build_manifest 识别成功→stopped；apply_detection 保留生命周期。C: try_auto_start_after_import 供 daemon+import-from-dir。A: scanner/hosting 任意 .html。已救活 3-scripts:18005、v1:18006；3d:18002 保持。回归 test_detect_arbitrary_html / import_non_index / host_static_arbitrary / import_from_dir_auto_starts 等。 |
+| BUG-444 | 修复 | update_zip 在 apply_detection 后强制 status=old_manifest.status，pending 实例源码修复后更新仍卡 pending，启动按钮保持禁用 | 2026-08-06 18:26 | 2026-08-06 18:37 | 已修复 | importer.py:735-736；apply_detection 已有 pending→stopped 逻辑却被覆盖。文件夹从源更新与 zip --update 同路径。建议：旧 pending 且新检测成功时保留 stopped。；已修：移除 update_zip 对 old status/desiredState 的强制覆盖，保留 apply_detection pending→stopped。回归 test_pending_heals_to_stopped_after_source_fix。 |
+| BUG-445 | 修复 | 管理页 pending 时禁用「从源更新」，与 update_zip 卡 pending 叠加后 UI 无法自愈 | 2026-08-06 18:26 | 2026-08-06 18:37 | 已修复 | helpers.js inProgress 含 pending；folder 更新按钮被禁用。应允许 sourceKind=folder 且 pending 时更新。；已修：helpers.js 从源更新按钮改用 updateBusy（不含 pending）；启动仍禁用。回归 test_helpers_opshtml_allows_update_from_dir_when_pending。 |
+| BUG-446 | 修复 | manager on/start 打印 token 早于 lifespan 后台 maybe_rotate，过期冷启动可打印已失效 token | 2026-08-06 18:26 | 2026-08-06 18:37 | 已修复 | cli/manager.py ensure_token 后打印；rotate 在 bg thread 且 yield 前未同步。建议 lifespan yield 前同步 rotate；CLI health 后 read_token。；已修：lifespan yield 前主线程同步 maybe_rotate；manager on/start 打印前 rotate+read_token。回归 test_lifespan_sync_rotates_expired_token_before_ready / test_cli_manager_start_prints_rotated_token。 |
+| BUG-447 | 修复 | _write_token 使用 O_TRUNC 非原子写，轮换窗口并发 read_token 可读空/残缺导致瞬时 401 | 2026-08-06 18:26 | 2026-08-06 18:37 | 已修复 | manager_api.py:139-146；应用 temp+os.replace。；已修：_write_token 改为 temp(0o600)+os.replace 原子写。回归 test_write_token_creates_file_with_mode_600_via_os_open。 |
+| BUG-448 | 修复 | 纯中文实例名 slugify 全落到 instance，管理页重导冲突；文件夹导入应用目录名作 id_basis | 2026-08-06 20:10 | 2026-08-06 20:10 | 已修复 | slug_basis_for_id + import_zip(id_basis)；冲突文案去纯 CLI 腔。已删 runtime 卡住的 instance。回归 test_slug_basis / test_chinese_name_uses_folder_basename_as_id。 |
+| BUG-449 | 修复 | 文件夹导入结果文案把「识别成功但档位 medium/heavy 未自动启动」误报为「未能识别/待识别，无法启动、请删除重试」，误导用户删除可用实例 | 2026-08-06 20:41 | 2026-08-06 20:41 | 已修复 | helpers.js describeFolderImportOutcome 原以 auto.action==="pending" 判未识别；daemon try_auto_start_after_import 对 medium/heavy 也返回 action=pending（note=不自动启动），此时 status=stopped 可启动。已改：仅 status==="pending" 才报未识别；action=pending 且非 pending 状态如实提示「已导入+档位说明」。回归 test_describe_folder_import_outcome_medium_profile_is_success。 |
 
 ## 调整事项
 
@@ -501,6 +507,8 @@
 | ADJ-039 | 调整 | task-list 标准化整理：CHK-078 迁回检查事项；关闭 DOC-093/DEV-093 重复登记 | 2026-08-03 19:20 | 2026-08-03 19:20 | 已完成 | 来源 standardize 报告：CHK-078 误放测试数据分区（期望 TST-）；DOC-093=DOC-092、DEV-093=DEV-092 同内容双记。ID 均不复用。历史约 15 条发现时间晚于完成时间（多差 1～2 分钟）暂不改写。未启用 extended/优化事项分区。 |
 | ADJ-040 | 优化 | 清理证据充分的重复/过时测试与死代码：phase57 迁删、函数级去重、setup.generate_launchd_plists、合并 _is_lwa_repo | 2026-08-04 12:54 | 2026-08-04 12:54 | 已完成 | 核实后执行：删 test_integration_phase57（独有 daemon→manager 迁入 test_daemon；compose 审计已在 test_security）；删 hosting 两 Phase3 / compose env_local / build_queue timeout 子集 / static_gateway 恒真+health 重复；gateway_service 两 writes_main 合并参数化；删 health_status.status_counts 透传测。src：删除无生产调用方的 generate_launchd_plists+format_autostart_report；updater 复用 version_info._is_lwa_repo。docs/testing.md 同步。疑似 8 处未动。全量 pytest exit 0（4 Docker skip）。 |
 | ADJ-041 | 优化 | 勾选并处理测试审查疑似 8 处中的 5 处：删 pageviews_summary/dry_run 子集/fixtures 三个 kind 断言，status_to_dict 与 default_status_pending 并入更强用例 | 2026-08-04 13:07 | 2026-08-04 13:07 | 已完成 | 核实 ADJ-040 属实后执行。删：test_pageviews_summary_returns_dict、test_dry_run_makes_no_changes、fixtures 的 node_express/fastapi/vite_react 三条 kind 断言（参数化用例已覆盖）；并：status_to_dict 的 desiredState 断言并入 test_port_mapping_label_in_to_dict、default_status_pending 的 desiredState STOPPED 并入 test_static_manifest_valid。保留 3 处：is_running BUG-065 公开入口、build_queue 两条并发序列化（不同修复层）、e2e skills==18 双保险。验证：受影响 5 套件 197 passed、ruff 全绿、全量 1572 passed, 4 skipped（Docker opt-in），与 1579-7 自洽。 |
+| ADJ-042 | 调整 | 文件夹导入识别失败（pending）时管理页勿冒充成功：错误 toast + 对话框保持打开并提示改选项目根/dist | 2026-08-06 20:02 | 2026-08-06 20:02 | 已完成 | describeFolderImportOutcome；doFolderImport 按 autoStart/status 分支。回归 test_describe_folder_import_outcome_pending_is_failure。 |
+| ADJ-043 | 调整 | 导入对话框提前提示选项目根/dist 勿只选 src/；管理页剥掉 [ZIP_IMPORT_ERROR] 等错误码前缀；lwa update 重启前等待导入空闲（最多约 180s） | 2026-08-06 20:27 | 2026-08-06 20:27 | 已完成 | ADJ-043；import_activity 锁；friendlyApiMessage；docs/manager-page + lwa-update-runtime skill；pytest import_activity/updater/manager_static 通过；runtime lwa update 已刷新 |
 
 ## 检查事项
 
@@ -678,6 +686,8 @@
 | CHK-170 | 检查 | 复核当前未提交代码（IMP-046 token 轮换 / IMP-047 文件夹源）：确认 CHK-164~168 所列 4 项已修复（sourceKind 恢复、FolderSourceError→400、toast 字段、相对路径），全量回归 | 2026-08-06 15:57 | 2026-08-06 15:57 | 已完成 | 逐项核实：1) sourceKind 写回；2) FolderSourceError→400；3) toast instanceId；4) 相对路径 BUG-442。另：CHK-170 原文写「--from-dir X --update 忽略 X 为文档化语义」已过时——BUG-440 P2 / TST-002 已改为路径不一致则 Exit(2)，见 TestCliFromDirUpdatePathGuard。更新源仍固定取 manifest；传入 X 仅作一致性校验，不用于切换关联目录。 |
 | CHK-171 | 检查 | 复核他方审查结论：BUG-442/相对路径属实；纠正「--from-dir 更新忽略路径」过时说法 | 2026-08-06 15:59 | 2026-08-06 15:59 | 已完成 | 相对路径 resolve 前 is_absolute 已落地。忽略 X≠现行行为：不一致拒绝，一致才继续；更换关联目录仍须删实例重导。已改 CHK-170 备注。 |
 | CHK-172 | 检查 | 审查未提交改动：导入识别、静态托管与管理端自动启动 | 2026-08-06 18:12 | 2026-08-06 18:12 | 已完成 | 相关 pytest 测试集通过；未发现可证实的功能性 Bug。git diff --check 仍报告两份设计文档共 17 处行尾空白，建议提交前清理。 |
+| CHK-173 | 检查 | 审查 commit 0d2328d（V0.7.0 IMP-046/047）：Token 轮换 + 文件夹源导入逻辑漏洞与自动执行能力 | 2026-08-06 18:26 | 2026-08-06 18:26 | 已完成 | 结论：核心路径可用；相关测例套件全绿。仍有：P0 update_zip 强制保留 old status 使 pending 识别成功后卡死；UI pending 禁用从源更新；CLI 启动打印 token 与后台轮换竞态；_write_token 非原子 O_TRUNC。业务非全自动：LAN token 刷新/CLI 导入启动/中重档/pending 修复需人工。 |
+| CHK-174 | 检查 | 审查未提交改动：IMP-051 / import_activity / updater 等导入互斥 / BUG-444～449 相关前端与 token 原子写；全量 pytest 绿、ruff/mypy 核心文件通过 | 2026-08-06 21:21 | 2026-08-06 21:21 | 已完成 | CHK：结论无新增缺陷。重点确认 import_activity 可重入与 from_dir→_zip_locked 无死锁、update 超时重建 UpdateOptions 正确、describeFolderImportOutcome 区分 status=pending vs auto.action=pending（BUG-449）、directory_picker 无注入面、版本 0.7.1 一致。可提交。 |
 
 ## 测试数据
 
@@ -805,6 +815,10 @@
 | DOC-113 | 文档 | 合集与 2608 IMP-047：补记 BUG-443 文件夹导入闭环方案与 3-src/4-output 验收 | 2026-08-06 18:01 | 2026-08-06 18:01 | 已完成 | 合集文首速查+文末新块；2608 §5.2 047.i/j/k、§5.5/§5.7、变更日志；runtime：v1:18006、3d:18002+别名、仅非index HTML 时 API autoStart 200 |
 | DOC-114 | 文档 | 2608 入账 IMP-051：管理页文件夹导入「选择文件夹」按钮需求与方案 | 2026-08-06 18:05 | 2026-08-06 18:05 | 已完成 | §6 全文；文首状态/范围；047.h 交叉引用；章节顺延 048→§7、049/050→§8；PLN-035 |
 | DOC-115 | 文档 | 清理合集与 2608 设计文档行尾空白（git diff --check） | 2026-08-06 18:14 | 2026-08-06 18:14 | 已完成 | CHK-172 指出 17 处 trailing whitespace；已 rstrip 两文件，git diff --check 干净 |
+| DOC-116 | 文档 | IMP-051：manager-page API/UI 说明；2608 §6 标已落地；实现计划 docs/plans/2026-08-06-imp-051-pick-directory.md | 2026-08-06 19:41 | 2026-08-06 19:41 | 已完成 | 与 DEV-097 同步 |
+| DOC-117 | 文档 | 同步 V0.7.1 用户文档与 Skill：README/faq/operations/known-limitations/testing/runtime-workspace/security-boundary/release-checklist + import-folder/update-runtime | 2026-08-06 20:32 | 2026-08-06 20:32 | 已完成 | DOC-117；覆盖 IMP-051 选择文件夹、导入 UX/pending、update 等导入空闲；manager-page 既有 051 章节保留；2608 文首补 V0.7.1 收口；skills 仍为 19。 |
+| DOC-118 | 文档 | 2608 §6 补全 IMP-051 落地实现与 §6.8 V0.7.1 收口方案（BUG-444～448 / ADJ-042～043）；修正 §7 小节编号 | 2026-08-06 21:15 | 2026-08-06 21:15 | 已完成 | DOC-118；交叉引用 §5.8；变更日志已追加；task-list 相关 ID 齐全已核对。 |
+| DOC-119 | 文档 | 2608 §6.8 补记 BUG-449：medium/heavy 不自动启动勿误报未识别 | 2026-08-06 21:20 | 2026-08-06 21:20 | 已完成 | 与并行审查结论对齐；验收要点与台账映射改为 BUG-444～449。 |
 
 ## 功能开发
 
@@ -906,6 +920,7 @@
 | DEV-094 | 开发 | P1：doctor 新增 workspace 路径一致性与容器挂载漂移检查，主动发现裸 mv 后的持久化残留 | 2026-08-03 16:16 | 2026-08-03 17:51 | 已完成 | 【已完成】`check_workspace_path_consistency`：复用 `expected_workspace_derived_paths` 与 `bind_mounts`；检查活跃派生字段、Caddy 本地引用、SQLite data mount；外部 sourceZipPath/builds/events 不告警；Docker 不可用时挂载 SKIP。接入 `run_doctor`。回归 `workspace_consistency*`；test_doctor 全绿。 |
 | DEV-095 | 开发 | IMP-046：管理页 API Token 每 168h（7×24）自动轮换——库内核（read_token_metadata/should_rotate_token/maybe_rotate_token）+ manager lifespan 启动检查+30min tick 守护线程 + config managerTokenRotateHours + CLI lwa manager token（含 --json）+ 前端 401 文案 + docs/manager-page.md 文档 + 17 条新增测试 | 2026-08-06 13:28 | 2026-08-06 13:28 | 已完成 | WBS 046.01～12 全部完成。阶段 A：read_token_metadata/should_rotate_token/maybe_rotate_token 纯函数；阶段 B：lifespan 启动即 maybe_rotate + daemon 线程 30min tick；阶段 C：config.py managerTokenRotateHours(1~8760, 默认 168) + lwa manager token/--json CLI；阶段 D：app.js 401 文案更新 + docs/manager-page.md 新增 Token 自动轮换章节；阶段 E：17 条新测试全绿。回归 1589 passed/4 skipped/0 failed。真机验证：过期 token（createdAt 2026-07-14）重启后立即轮换，旧 token 401、新 token 200、loopback 免 token 不变。设计计划 2608 §4 状态已改「已落地」。ruff/mypy/compileall 全部通过。 |
 | DEV-096 | 开发 | IMP-047 本机文件夹源导入与一键更新：folder_source.py（validate/pack/hash）+ importer.import_from_dir/update_from_dir + CLI --from-dir + manager API（/api/import-from-dir, /api/instances/{id}/update-from-dir）+ 前端导入/更新/详情面板 + status.py sourceKind/sourceDirPath + lwa-import-folder Skill + 文档（manager-page/operations-playbook/known-limitations）+ 隔离红线硬断言测试 42 用例 | 2026-08-06 14:45 | 2026-08-06 14:45 | 已完成 | DEV-096；全量 1631 passed, 4 skipped (Docker)；compileall OK；设计计划 §5 已标已落地 |
+| DEV-097 | 开发 | IMP-051 管理页「选择文件夹」：directory_picker（osascript/zenity/kdialog）+ POST /api/pick-directory（仅 loopback）+ 前端路径行浏览按钮与禁用提示 | 2026-08-06 19:41 | 2026-08-06 19:41 | 已完成 | DEV-097；仅 loopback 启用；LAN 403 loopback_required；取消/无GUI/超时业务错误。测：test_directory_picker 9 + pick_directory API 4 + 前端静态 3。计划 docs/plans/2026-08-06-imp-051-pick-directory.md |
 
 ## 配置运维
 
@@ -1010,6 +1025,7 @@
 | OPS-098 | 运维 | 服务重启后复核三实例部署一致性：3-scripts 端口漂移 18006→18007 后 registry/ports/static_sites/caddy conf 全对齐，三站点与 3d 别名路由复验 200 | 2026-08-06 18:05 | 2026-08-06 18:05 | 已完成 | 承接 BUG-443/OPS-097。18:03 manager+daemon off/on 加载新代码后 lwa scan 3-scripts→static(high)、start 3-scripts:18007、start v1:18005（npm ci+vite build 成功）；18006 已释放且无 conf 残留；GET /、/kakeya-3d-chapters.html、/vendor/three.module.js、v1 /assets/* 及 /3d-kakeya-animation/ 均 200；顺带清理 scanner.py 冗余 html_files 字段。 |
 | OPS-099 | 运维 | 4-output 去掉 index.html 后 update 3d：任意 HTML 识别并托管验证 | 2026-08-06 18:10 | 2026-08-06 18:10 | 已完成 | 仅 kakeya-3d-chapters.html；detect static high；public 自动补 index.html；:18002 与 /3d-kakeya-animation/ 均 200 |
 | OPS-100 | 运维 | 4-output 无 index：从源更新 + 删除后 API 重导入双路径验收 | 2026-08-06 18:12 | 2026-08-06 18:12 | 已完成 | 步骤1 update 跳过未变但仍 200；步骤2 purge 后 import-from-dir autoStart=started，current 仅 kakeya html、public 自动补 index，:18002 与别名均 200 |
+| OPS-101 | 运维 | 应用版本号提升至 V0.7.1：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/pack-release-zip 同步 | 2026-08-06 20:32 | 2026-08-06 20:32 | 已完成 | OPS-095；活跃 0.7.0→0.7.1；历史「V0.7.0 起」功能引入标记保留。lwa version 在提交 V0.7.1-Build… 主题前仍可能读 git HEAD 显示 0.7.0，fallback/pyproject 已是 0.7.1。含 IMP-051 与导入/update 护栏。 |
 
 ## 规划事项
 
@@ -1049,18 +1065,18 @@
 | PLN-032 | 规划 | IMP-049：工作区派生路径相对化写入（合集 Task 11 移植），减少 relocate/裸 mv 后的 rebind 面 | 2026-08-06 12:51 | - | 待办 | 入账 2608 §7.1。优先级：中 · 不着急；先做 046/047，本项不抢档。真痛（绝对路径残留频繁）再开。 |
 | PLN-033 | 规划 | IMP-050：生产 CLI 与工作区解耦安装（合集 Task 11 移植），避免工具安装钉死工作区路径 | 2026-08-06 12:51 | - | 待办 | 入账 2608 §7.2。优先级：中 · 不着急；先做 046/047。多工作区/正式部署时再优先考虑。 |
 | PLN-034 | 规划 | 核对实施计划合集七计划完成度：主路径已落地；Task 11 三项移植至 2608（042.b/049/050） | 2026-08-06 12:51 | 2026-08-06 13:00 | 已完成 | 主路径已落地。Task 11：049/050 迁 2608；042.b 按用户要求不迁入 2608、暂不开发（DOC-107）。 |
-| PLN-035 | 规划 | IMP-051 管理页文件夹导入增加「选择文件夹」原生选目录按钮 | 2026-08-06 18:02 | - | 待办 | 入账 2608；源路径输入框右侧按钮；macOS Finder / Ubuntu 文件管理器；须填 LWA 宿主机绝对路径 |
+| PLN-035 | 规划 | IMP-051 管理页文件夹导入增加「选择文件夹」原生选目录按钮 | 2026-08-06 18:02 | 2026-08-06 19:41 | 已完成 | 入账 2608；源路径输入框右侧按钮；macOS Finder / Ubuntu 文件管理器；须填 LWA 宿主机绝对路径；已落地 DEV-097：仅 loopback 启用宿主机原生选目录；LAN 禁用按钮+手输。 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 443 | 443 | 0 | 100% |
-| 调整事项 | 41 | 41 | 0 | 100% |
-| 检查事项 | 171 | 171 | 0 | 100% |
+| 代码 Bug | 449 | 449 | 0 | 100% |
+| 调整事项 | 43 | 43 | 0 | 100% |
+| 检查事项 | 173 | 173 | 0 | 100% |
 | 测试数据 | 2 | 2 | 0 | 100% |
-| 文档维护 | 115 | 115 | 0 | 100% |
-| 功能开发 | 96 | 96 | 0 | 100% |
-| 配置运维 | 99 | 99 | 0 | 100% |
-| 规划事项 | 35 | 31 | 4 | 89% |
-| **总计** | 1002 | 998 | 4 | 100% |
+| 文档维护 | 119 | 119 | 0 | 100% |
+| 功能开发 | 97 | 97 | 0 | 100% |
+| 配置运维 | 100 | 100 | 0 | 100% |
+| 规划事项 | 35 | 32 | 3 | 91% |
+| **总计** | 1018 | 1015 | 3 | 100% |

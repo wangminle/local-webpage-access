@@ -28,6 +28,10 @@ from typing import Any
 import yaml
 
 from local_webpage_access.config import Config
+from local_webpage_access.import_activity import (
+    DEFAULT_IDLE_WAIT,
+    wait_until_import_idle,
+)
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
@@ -740,7 +744,53 @@ def run_update(
     except Exception as exc:  # noqa: BLE001
         report.steps.append(StepResult("migrateConfig", "failed", str(exc)))
 
-    # ---- 6. 重启 manager ----
+    # ---- 6. 重启 manager（先等导入空闲，避免打断进行中的导入）----
+    if options.restart_manager or options.restart_daemon:
+        try:
+            waited = wait_until_import_idle(
+                workspace, timeout=DEFAULT_IDLE_WAIT
+            )
+            if waited >= 0.05:
+                report.steps.append(
+                    StepResult(
+                        "waitImportIdle",
+                        "ok",
+                        f"等待导入完成 {waited:.1f}s",
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            # 超时则跳过重启，避免强杀导入中的 manager/daemon
+            msg = str(exc)
+            if options.restart_manager:
+                report.steps.append(
+                    StepResult(
+                        "restartManager",
+                        "failed",
+                        f"{msg}（已跳过重启管理页；pip 可能已更新）",
+                    )
+                )
+            if options.restart_daemon:
+                report.steps.append(
+                    StepResult(
+                        "restartDaemon",
+                        "failed",
+                        f"{msg}（已跳过重启 daemon；pip 可能已更新）",
+                    )
+                )
+            options = UpdateOptions(
+                dry_run=options.dry_run,
+                skip_pip=options.skip_pip,
+                sync_skills=options.sync_skills,
+                sync_templates=options.sync_templates,
+                restart_manager=False,
+                restart_daemon=False,
+                restart_gateway=options.restart_gateway,
+                restart_instances=options.restart_instances,
+                run_doctor=options.run_doctor,
+                review_access=options.review_access,
+                repo=options.repo,
+            )
+
     if options.restart_manager:
         try:
             info = restart_manager(workspace, config)
@@ -909,4 +959,5 @@ __all__ = [
     "run_doctor_check",
     "run_update",
     "format_report",
+    "wait_until_import_idle",
 ]

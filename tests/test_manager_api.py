@@ -137,31 +137,41 @@ def test_rotate_token_replaces_existing(workspace: Workspace) -> None:
 def test_write_token_creates_file_with_mode_600_via_os_open(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """BUG-334：token 应用 os.open(..., 0o600) 一步创建，避免 write_text→chmod 窗口。"""
+    """BUG-334 / BUG-447：token 以 0o600 写临时文件后 os.replace 原子替换。"""
     import os
 
     from local_webpage_access.manager_api import rotate_token
 
     ensure_token(workspace)
     opens: list[dict[str, object]] = []
+    replaces: list[tuple[str, str]] = []
     real_open = os.open
+    real_replace = os.replace
 
     def tracking_open(path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777, *args: object, **kwargs: object) -> int:
         opens.append({"path": str(path), "flags": flags, "mode": mode})
         return real_open(path, flags, mode, *args, **kwargs)
 
+    def tracking_replace(src: str | bytes | os.PathLike[str], dst: str | bytes | os.PathLike[str]) -> None:
+        replaces.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
     monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "replace", tracking_replace)
     rotate_token(workspace)
-    token_opens = [
-        c for c in opens if Path(str(c["path"])).name == token_path(workspace).name
+    final = token_path(workspace)
+    # 临时文件以 0o600 创建（不再直接 O_TRUNC 目标文件）
+    tmp_opens = [
+        c for c in opens
+        if Path(str(c["path"])).parent == final.parent
+        and Path(str(c["path"])).name != final.name
+        and ".manager-token." in Path(str(c["path"])).name
     ]
-    assert token_opens, "token 写入应走 os.open"
-    assert token_opens[0]["mode"] == 0o600
-    flags = int(token_opens[0]["flags"])  # type: ignore[arg-type]
-    assert flags & os.O_CREAT
-    assert flags & os.O_WRONLY or flags & os.O_RDWR
-    assert flags & os.O_TRUNC
-    assert token_path(workspace).stat().st_mode & 0o777 == 0o600
+    assert tmp_opens, "token 应先写到临时文件"
+    assert tmp_opens[0]["mode"] == 0o600
+    assert any(Path(dst) == final for _src, dst in replaces), "须 os.replace 到最终路径"
+    assert final.stat().st_mode & 0o777 == 0o600
+    assert read_token(workspace)  # 内容完整可读
 
 
 def test_run_manager_does_not_log_full_token(
@@ -448,6 +458,109 @@ def test_token_rotation_in_lifespan_starts_and_stops_cleanly(
         assert not app.state.token_rotate_thread.is_alive()
     finally:
         reg.close()
+
+
+def test_lifespan_sync_rotates_expired_token_before_ready(
+    workspace: Workspace, config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-446：lifespan yield 前须在主线程同步 maybe_rotate。"""
+    import json
+    import threading
+    from datetime import datetime, timedelta
+
+    import local_webpage_access.manager_api as ma
+    from local_webpage_access.manager_api import (
+        create_app,
+        ensure_token,
+        read_token,
+        token_path,
+    )
+    from local_webpage_access.registry import Registry
+
+    ws = workspace
+    ws.ensure_workspace_dirs()
+    _write_config(ws)
+    old_token = ensure_token(ws)
+    expired_at = (datetime.now().astimezone() - timedelta(days=8)).isoformat(
+        timespec="seconds"
+    )
+    token_path(ws).write_text(
+        json.dumps({"token": old_token, "createdAt": expired_at}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    rotate_threads: list[str] = []
+    real_maybe = ma.maybe_rotate_token
+
+    def tracking_maybe(*args: object, **kwargs: object) -> dict:
+        rotate_threads.append(threading.current_thread().name)
+        return real_maybe(*args, **kwargs)
+
+    monkeypatch.setattr(ma, "maybe_rotate_token", tracking_maybe)
+
+    reg = Registry(ws.db_path)
+    reg.open()
+    try:
+        app = create_app(ws, config, reg, token="test")
+        with TestClient(app) as client:
+            assert client.get("/api/health").status_code == 200
+            assert rotate_threads, "须调用 maybe_rotate_token"
+            # 首次轮换必须在 lifespan 同步路径（TestClient 可能在 portal 线程），
+            # 不能只靠后台 lwa-token-rotate 竞态。
+            assert rotate_threads[0] != "lwa-token-rotate", (
+                f"首次轮换不得落在后台线程，实际={rotate_threads[0]!r}"
+            )
+            current = read_token(ws)
+            assert current is not None
+            assert current != old_token
+    finally:
+        reg.close()
+
+
+def test_cli_manager_start_prints_rotated_token(
+    workspace: Workspace, config, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """BUG-446：manager start 打印前须先轮换，避免打印已失效 token。"""
+    import json
+    from datetime import datetime, timedelta
+
+    from local_webpage_access.cli import manager as manager_cli
+    from local_webpage_access.manager_api import ensure_token, read_token, token_path
+
+    ws = workspace
+    ws.ensure_workspace_dirs()
+    old_token = ensure_token(ws)
+    expired_at = (datetime.now().astimezone() - timedelta(days=8)).isoformat(
+        timespec="seconds"
+    )
+    token_path(ws).write_text(
+        json.dumps({"token": old_token, "createdAt": expired_at}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    class _FakeReg:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        manager_cli, "open_workspace_registry", lambda: (ws, config, _FakeReg())
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_api.run_manager",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.security.validate_manager_binding",
+        lambda *a, **k: [],
+    )
+
+    manager_cli.manager_start()
+    out = capsys.readouterr().out
+    current = read_token(ws)
+    assert current is not None
+    assert current != old_token
+    assert current in out
+    assert old_token not in out
 
 
 def test_old_token_fails_after_rotation(manager_env: EnvBundle) -> None:
@@ -2808,3 +2921,73 @@ def test_import_from_dir_skips_autostart_when_unrecognized(
     row = manager_env.registry.get_instance(body["instanceId"])
     assert row is not None
     assert row["status"] == "pending"
+
+
+# ---- IMP-051：宿主机目录选择器 -------------------------------------------------
+
+
+def test_pick_directory_loopback_returns_path(
+    manager_env: EnvBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """loopback 客户端可调 pick-directory，返回绝对路径。"""
+    monkeypatch.setattr(
+        "local_webpage_access.directory_picker.pick_directory",
+        lambda **kwargs: "/Users/me/demo-site",
+    )
+    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local:
+        resp = local.post(
+            "/api/pick-directory",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["path"] == "/Users/me/demo-site"
+
+
+def test_pick_directory_lan_rejected_even_with_token(
+    manager_env: EnvBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非 loopback（局域网）即使有 token 也不得调起宿主机对话框。"""
+    called: list[str] = []
+
+    def boom(**kwargs):  # noqa: ANN003
+        called.append("pick")
+        return "/should-not-run"
+
+    monkeypatch.setattr(
+        "local_webpage_access.directory_picker.pick_directory", boom
+    )
+    with TestClient(manager_env.app, client=("10.0.0.8", 50000)) as lan:
+        resp = lan.post(
+            "/api/pick-directory",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "loopback_required"
+    assert called == []
+
+
+def test_pick_directory_cancelled_returns_400(
+    manager_env: EnvBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_webpage_access.errors import DirectoryPickerError
+
+    def cancel(**kwargs):  # noqa: ANN003
+        raise DirectoryPickerError("已取消选择", code="cancelled")
+
+    monkeypatch.setattr(
+        "local_webpage_access.directory_picker.pick_directory", cancel
+    )
+    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local:
+        resp = local.post(
+            "/api/pick-directory",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "cancelled"
+
+
+def test_pick_directory_lan_without_token_401(manager_env: EnvBundle) -> None:
+    with TestClient(manager_env.app, client=("10.0.0.8", 50000)) as lan:
+        resp = lan.post("/api/pick-directory")
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "unauthorized"
