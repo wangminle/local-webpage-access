@@ -58,7 +58,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.7.1-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.7.2-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -145,6 +145,13 @@ def init(
                 msg = exc.code if isinstance(exc.code, str) else str(exc)
                 typer.secho(msg or "Full 写路径已阻断", fg=typer.colors.RED, err=True)
                 raise typer.Exit(code=1) from exc
+
+        # IMP-053：默认端口上已有其他工作区管理页时软提示，避免 Agent 再建 ~/lwa-workspace。
+        from local_webpage_access.manager_service import existing_foreign_manager_hint
+
+        reuse_tip = existing_foreign_manager_hint(ws)
+        if reuse_tip:
+            typer.secho(reuse_tip, fg=typer.colors.YELLOW, err=True)
 
         summary = init_workspace(ws, force=force, static_gateway=gateway)
         typer.secho(f"已初始化工作区：{ws}", fg=typer.colors.GREEN)

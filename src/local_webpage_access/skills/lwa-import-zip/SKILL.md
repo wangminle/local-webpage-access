@@ -14,6 +14,11 @@ description: >-
 - 用户说"这是 xx 项目的新版本 / v2 / 更新一下"，但历史上已导入过同名实例。
 - `lwa import <zip>` 报错"实例 xxx 已存在……请使用 --update"。
 
+## 工作区前置（IMP-053）
+
+导入前确认本机是否已有 Runtime：`curl -s http://127.0.0.1:17800/api/health`。
+有 `workspaceRoot` 则在该目录操作；**不要**另 `lwa init` 第二套工作区。
+
 ## 核心决策：import 还是 update？
 
 **先查 registry 是否已有同 slug 的实例**（`lwa list` 或读 `apps/`）：
@@ -31,7 +36,7 @@ description: >-
 
 ```bash
 lwa import inbox/foo.zip
-# 可选：给静态站点起一个路径别名（IMP-006），通过 http://<LAN-IP>:<gatewayPort>/<alias>/ 访问
+# 可选：起一个路径别名（IMP-006 / IMP-014，静态与容器均可），通过 http://<LAN-IP>:<gatewayPort>/<alias>/ 访问
 lwa import inbox/foo.zip --path-alias myapp
 # 可选：自定义显示名称（优先于主页 <title>；影响 instance id slug）
 lwa import inbox/foo.zip --name "My App"
@@ -44,9 +49,11 @@ lwa import inbox/foo.zip --name "My App"
 # 静态 / 前端：import 时可 --path-alias；之后也可改
 lwa alias set <static-id> demo-slug
 
-# 容器（docker-compose，IMP-014）：须先 lwa start 拿到 hostPort，再设别名
-# import 时对非 static 传 --path-alias 会被拒绝
-lwa start <container-id>
+# 容器（docker-compose，IMP-014）：import 时可直接 --path-alias 预写别名
+# （routeMode=name；首次 lwa start 拿到 hostPort 后才生成 Caddy 反代片段生效）
+lwa import inbox/foo.zip --path-alias myapp   # 容器同样适用
+lwa start <container-id>                       # start 后别名片段才写入
+# 也可先 start 再 alias set（补救/修改既有别名）
 lwa alias set <container-id> demo-slug
 
 lwa alias clear <id>

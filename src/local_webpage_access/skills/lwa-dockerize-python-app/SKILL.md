@@ -52,17 +52,20 @@ description: >-
    - `pyproject.toml`（无 lock）→ `pip install .`
    - `requirements.txt` → `pip install -r requirements.txt`（模板使用 BuildKit
      `--mount=type=cache,target=/root/.cache/pip` 加速重复构建）
-3. 推断启动命令：
-   - FastAPI：`uvicorn app:app --host 0.0.0.0 --port <internalPort>`
-   - Flask：`gunicorn app:app -b 0.0.0.0:<internalPort>`（或 `flask run`）
-   - Django：`gunicorn project.wsgi -b 0.0.0.0:<internalPort>`
+3. 推断启动命令（与 `scanner._python_start_command` 对齐）：
+   - FastAPI / uvicorn / starlette：按布局选目标——`app/main.py` → `app.main:app`；
+     `src/main.py` → `main:app`（Dockerfile 注 `PYTHONPATH=src`）；根 `main.py` →
+     `main:app`；否则回退 `main:app`。
+   - 顶层有 `alembic.ini` 时前置：`sh -c "alembic upgrade head && exec uvicorn …"`。
+   - Flask：`flask --app app run --host 0.0.0.0 --port 5000`
+   - Django：`python manage.py runserver 0.0.0.0:8000`
 4. 生成 Dockerfile：依赖层（含可选 Node 工具链）在完整 `COPY current/` **之前**，
    避免源码改动打掉 pip/npm 缓存。
 5. 写回 `local-web.json`。
 
 ## 示例
 
-FastAPI + `requirements.txt`：
+FastAPI + `requirements.txt`（根目录 `main.py`，回退 `main:app`）：
 
 ```dockerfile
 FROM python:3.13-slim
@@ -73,5 +76,8 @@ COPY . .
 RUN useradd -m appuser && chown -R appuser /app
 USER appuser
 EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
+
+> 若项目布局为 `app/main.py`，CMD 目标应改为 `app.main:app`；`src/main.py` 则 `main:app`
+> 并在 Dockerfile 注 `ENV PYTHONPATH=src`（与 `scanner._python_start_command` 推断一致）。

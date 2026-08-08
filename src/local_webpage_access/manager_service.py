@@ -109,16 +109,25 @@ def write_state(workspace: Workspace, state: ManagerState) -> None:
 
 
 def _health_check_host(bind_host: str) -> str:
-    if bind_host in {"0.0.0.0", "::", ""}:
+    """把监听地址映射为可探测的客户端主机。
+
+    - IPv4 通配 ``0.0.0.0`` / 空串 → ``127.0.0.1``
+    - IPv6 通配 ``::`` → ``::1``（同族回环；勿改写成 IPv4）
+    - 具体地址（含 ``::1``、LAN IPv6）原样保留
+    """
+    if bind_host in {"0.0.0.0", ""}:
         return "127.0.0.1"
-    if bind_host.startswith("::"):
-        return "127.0.0.1"
+    if bind_host == "::":
+        return "::1"
     return bind_host
 
 
 def _fetch_health(host: str, port: int, *, timeout: float = 1.0) -> dict[str, Any] | None:
     """``GET /api/health`` 解析 JSON；失败或非 200 时返回 ``None``。"""
-    url = f"http://{_health_check_host(host)}:{port}/api/health"
+    from local_webpage_access.ports import format_http_host
+
+    probe = format_http_host(_health_check_host(host))
+    url = f"http://{probe}:{port}/api/health"
     try:
         with urlopen_direct(url, timeout=timeout) as resp:  # noqa: S310
             if resp.status != 200:
@@ -502,6 +511,58 @@ def stop_manager(workspace: Workspace) -> bool:
     return stopped
 
 
+def foreign_manager_hint(workspace: Workspace, config: Config) -> str | None:
+    """BUG-456：本工作区管理页未运行，但配置端口仍有健康响应时返回跨工作区提示。
+
+    用于 ``lwa manager off`` 成功清理本工作区状态后，避免绿字「已停止」掩盖
+    另一工作区仍占用同一 ``managerPort`` 的情况。
+    """
+    if is_running(workspace, config):
+        return None
+    if not health_ok(config.managerHost, config.managerPort):
+        return None
+    return (
+        f"本工作区管理页未在运行，但端口 {config.managerPort} 仍有健康响应"
+        f"（可能是其他工作区的管理页）。请到对应工作区执行 lwa manager off，"
+        f"或修改 local-web.yml 的 managerPort"
+    )
+
+
+def existing_foreign_manager_hint(
+    candidate_root: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+) -> str | None:
+    """IMP-053：拟 ``lwa init`` 的目录若与本机已运行管理页不属于同一工作区，返回复用提示。
+
+    家庭服务器默认一机一工作区；Agent 常另开 ``~/lwa-workspace`` 导致抢 17800、
+    实例列表分裂。软提示不阻断——确需多工作区时可改端口后继续。
+    """
+    from local_webpage_access.config import MANAGER_PORT_DEFAULT
+
+    bind_port = MANAGER_PORT_DEFAULT if port is None else port
+    data = _fetch_health(host, bind_port, timeout=0.5)
+    if not data or not data.get("ok"):
+        return None
+    remote = data.get("workspaceRoot")
+    if not remote:
+        return None
+    try:
+        remote_path = Path(str(remote)).resolve()
+        candidate = Path(candidate_root).resolve()
+    except (OSError, ValueError):
+        return None
+    if remote_path == candidate:
+        return None
+    return (
+        f"本机管理页 :{bind_port} 已在运行，工作区为 {remote_path}。"
+        f"通常只需一个工作区：请 cd 到该目录执行 lwa import / lwa start，"
+        f"不要再 lwa init 新建第二套（默认会抢同一 managerPort）。"
+        f"确需多工作区时，请为新区改 managerPort / staticGatewayPort / portPool。"
+    )
+
+
 def manager_status(workspace: Workspace, config: Config) -> dict[str, Any]:
     """``lwa manager status``：返回状态摘要。"""
     state = read_state(workspace)
@@ -634,6 +695,8 @@ __all__ = [
     "find_listening_pid",
     "start_manager",
     "stop_manager",
+    "foreign_manager_hint",
+    "existing_foreign_manager_hint",
     "manager_status",
     "maybe_start_manager",
     "run_service_main",

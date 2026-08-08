@@ -14,6 +14,13 @@ description: >-
 - `lwa doctor` 或 `lwa setup` 报告 Docker / Compose / Python / Caddy / Node 缺失或版本过低。
 - 用户询问「怎么装环境」「需要什么依赖」「初始化流程是什么」。
 
+## 已有 Runtime 时（IMP-053）
+
+**先探测再 init**：`curl -s http://127.0.0.1:17800/api/health`。若返回
+`ok` 与 `workspaceRoot`，说明本机已有工作区与管理页——**直接使用该路径**，
+不要再 `lwa init` 到 `~/lwa` / `~/lwa-workspace` 等新目录。仅在确认无管理页、
+且用户明确要求新工作区时才 init；多工作区必须改默认端口。
+
 ## 输入
 
 1. `lwa setup` 或 `lwa setup --json` 的输出（当前平台、各组件状态、安装指引）。

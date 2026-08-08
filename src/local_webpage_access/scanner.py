@@ -81,6 +81,7 @@ class FileSummary:
     has_pipfile: bool = False
     has_uv_lock: bool = False
     has_manage_py: bool = False
+    has_alembic_ini: bool = False  # IMP-052：顶层 alembic.ini
     has_runtime_paths: bool = False  # BUG-198：src/app/runtime_paths.py 等
     node_deps: dict[str, str] = field(default_factory=dict)  # 包名 -> 版本（含 devDependencies，BUG-019）
     node_runtime_deps: dict[str, str] = field(default_factory=dict)
@@ -119,6 +120,8 @@ def summarize(root: Path) -> FileSummary:
                 summary.has_uv_lock = True
             elif name == "manage.py":
                 summary.has_manage_py = True
+            elif name == "alembic.ini":
+                summary.has_alembic_ini = True
             if name.endswith(SQLITE_FILE_EXT):
                 summary.sqlite_files.append(entry.name)
 
@@ -504,6 +507,10 @@ class Scanner:
                 )
             else:
                 result.confidence = "high"
+                if summary.has_alembic_ini and start and "alembic upgrade head" in start:
+                    result.notes.append(
+                        "检测到 alembic.ini，已在启动命令前自动执行 alembic upgrade head"
+                    )
         else:
             result.pending = True
             result.confidence = "low"
@@ -611,11 +618,16 @@ def _python_install_command(summary: FileSummary) -> str:
     return "pip install -r requirements.txt"
 
 
-def _python_start_command(matched: list[str], summary: FileSummary) -> str | None:
+def _python_start_command(matched: list[str], summary: FileSummary | None) -> str | None:
     fw = _select_python_framework(matched)
     if fw in ("fastapi", "uvicorn", "starlette"):
-        # starlette 应用通常经 uvicorn 托管
-        return 'uvicorn main:app --host 0.0.0.0 --port 8000'
+        # BUG-455 / IMP-052：按磁盘布局推断 ASGI 模块，勿硬编码 main:app。
+        target = _infer_uvicorn_app_target(summary)
+        cmd = f"uvicorn {target} --host 0.0.0.0 --port 8000"
+        if summary is not None and summary.has_alembic_ini:
+            # 容器 CMD 用 sh -c，保证迁移失败时不启动 uvicorn。
+            cmd = f'sh -c "alembic upgrade head && exec {cmd}"'
+        return cmd
     if fw == "flask":
         return 'flask --app app run --host 0.0.0.0 --port 5000'
     if fw == "django":
@@ -631,6 +643,27 @@ def _python_start_command(matched: list[str], summary: FileSummary) -> str | Non
     if fw == "tornado":
         return "python app.py"
     return None
+
+
+def _infer_uvicorn_app_target(summary: FileSummary | None) -> str:
+    """推断 uvicorn 的 ``module:attr`` 目标（BUG-455）。
+
+    优先级：``app/main.py`` → ``app.main:app``；``src/main.py`` → ``main:app``
+    （Dockerfile 已对 src 布局注入 ``PYTHONPATH=src``）；根 ``main.py`` →
+    ``main:app``；根 ``app.py`` → ``app:app``；未知则回退 ``main:app``。
+    """
+    if summary is None:
+        return "main:app"
+    root = summary.root
+    if (root / "app" / "main.py").is_file():
+        return "app.main:app"
+    if (root / "src" / "main.py").is_file():
+        return "main:app"
+    if (root / "main.py").is_file():
+        return "main:app"
+    if (root / "app.py").is_file():
+        return "app:app"
+    return "main:app"
 
 
 def _has_index_anywhere(root: Path, *, max_depth: int = 2) -> bool:

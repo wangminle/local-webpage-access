@@ -109,6 +109,12 @@ def test_build_lan_url_none_ip() -> None:
     assert build_lan_url(None, 18023) is None
 
 
+def test_build_lan_url_brackets_ipv6() -> None:
+    """manualLanIp 为 IPv6 时须加方括号，否则 URL 非法。"""
+    assert build_lan_url("2001:db8::1", 18023) == "http://[2001:db8::1]:18023"
+    assert build_lan_url("::1", 17800) == "http://[::1]:17800"
+
+
 def test_build_health_url() -> None:
     assert build_health_url(18023) == "http://127.0.0.1:18023"
 
@@ -281,6 +287,27 @@ def test_build_route_url_none_when_no_ip_or_port() -> None:
     assert build_route_url("10.0.0.5", None, "demo") is None
 
 
+def test_build_route_url_brackets_ipv6() -> None:
+    """IPv6 lan_ip 的 routeUrl 须加方括号。"""
+    from local_webpage_access.ports import build_route_url
+
+    assert (
+        build_route_url("2001:db8::a", 8080, "demo")
+        == "http://[2001:db8::a]:8080/demo/"
+    )
+    assert build_route_url("::1", 80, "demo") == "http://[::1]/demo/"
+
+
+def test_format_http_host_brackets_ipv6_only() -> None:
+    from local_webpage_access.ports import format_http_host
+
+    assert format_http_host("10.0.0.5") == "10.0.0.5"
+    assert format_http_host("::1") == "[::1]"
+    assert format_http_host("[::1]") == "[::1]"
+    assert format_http_host("2001:db8::1") == "[2001:db8::1]"
+    assert format_http_host("localhost") == "localhost"
+
+
 def test_build_network_entry_with_alias() -> None:
     from local_webpage_access.config import Config
     from local_webpage_access.ports import build_network_entry
@@ -292,6 +319,20 @@ def test_build_network_entry_with_alias() -> None:
     assert entry["routeUrl"] == "http://10.0.0.5:8080/demo/"
     assert entry["hostPort"] == 18001
     assert entry["lanUrl"] == "http://10.0.0.5:18001"
+
+
+def test_build_network_entry_brackets_ipv6_manual_lan() -> None:
+    from local_webpage_access.config import Config
+    from local_webpage_access.ports import build_network_entry
+
+    cfg = Config(
+        lanIpStrategy="manual",
+        manualLanIp="2001:db8::1",
+        staticGatewayPort=8080,
+    )
+    entry = build_network_entry(cfg, 18001, path_alias="demo")
+    assert entry["lanUrl"] == "http://[2001:db8::1]:18001"
+    assert entry["routeUrl"] == "http://[2001:db8::1]:8080/demo/"
 
 
 def test_build_network_entry_without_alias_is_port_mode() -> None:

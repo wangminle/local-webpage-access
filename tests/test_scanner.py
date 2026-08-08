@@ -245,6 +245,45 @@ def test_detect_python_fastapi(tmp_path: Path) -> None:
     assert result.confidence == "high"
 
 
+def test_detect_python_fastapi_app_main_module(tmp_path: Path) -> None:
+    """BUG-455：仅有 app/main.py 时应推断 app.main:app，不得硬编码 main:app。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+    result = Scanner().detect(tmp_path)
+    assert result.entry is not None
+    assert result.entry.start is not None
+    assert "app.main:app" in result.entry.start
+    assert "uvicorn main:app" not in result.entry.start
+
+
+def test_detect_python_fastapi_alembic_prepend(tmp_path: Path) -> None:
+    """IMP-052：存在 alembic.ini 时自动前置 alembic upgrade head。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\nalembic\n")
+    (tmp_path / "alembic.ini").write_text("[alembic]\nscript_location = alembic\n")
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+    result = Scanner().detect(tmp_path)
+    assert result.entry is not None
+    start = result.entry.start or ""
+    assert "alembic upgrade head" in start
+    assert "app.main:app" in start
+    assert any("alembic" in n.lower() for n in result.notes)
+
+
+def test_detect_python_fastapi_root_main_without_alembic(tmp_path: Path) -> None:
+    """根 main.py 且无 alembic.ini：保持 uvicorn main:app，不包 sh -c。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (tmp_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+    result = Scanner().detect(tmp_path)
+    assert result.entry is not None
+    start = result.entry.start or ""
+    assert start.startswith("uvicorn main:app")
+    assert "alembic" not in start
+
+
 def test_detect_python_flask_port(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("flask\n")
     result = Scanner().detect(tmp_path)

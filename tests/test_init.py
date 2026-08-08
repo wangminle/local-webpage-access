@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from local_webpage_access.config import load_config
 from local_webpage_access.init_workspace import init_workspace
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
+
+
+@pytest.fixture(autouse=True)
+def _stub_maybe_start_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BUG-450：init 单元测试不拉起真实 manager（避免 :17801 等端口孤儿）。
+
+    ``init_workspace`` 默认 ``maybe_start_manager``；本模块只断言布局/配置/skills，
+    会话级泄漏网是第二道兜底，这里从根上禁止 spawn。
+    """
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.maybe_start_manager",
+        lambda *a, **k: None,
+    )
 
 
 def test_init_creates_full_layout(tmp_path: Path) -> None:
@@ -161,6 +176,10 @@ def test_bundled_skills_have_discoverable_frontmatter() -> None:
         assert body.lstrip().startswith(f"# {skill_doc.parent.name}\n")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="IMP-036：CLI init 正式支持不含 Windows 原生",
+)
 def test_cli_init_e2e(tmp_path: Path) -> None:
     """通过 CLI 直接调用 init 子命令做端到端验证。"""
     from typer.testing import CliRunner
@@ -175,6 +194,10 @@ def test_cli_init_e2e(tmp_path: Path) -> None:
     assert (tmp_path / "cli-ws" / "registry" / "local-web.db").is_file()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="IMP-036：CLI init 正式支持不含 Windows 原生",
+)
 def test_cli_init_full_passes_workspace_root(tmp_path: Path, monkeypatch) -> None:
     """BUG-251：init --full 必须把新工作区传给 run_full_bootstrap（含 -w 异于 cwd）。"""
     from typer.testing import CliRunner

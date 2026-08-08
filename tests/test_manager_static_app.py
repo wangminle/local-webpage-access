@@ -963,3 +963,77 @@ assert.strictEqual(noStatus.ok, true);
 assert.ok(noStatus.toast.indexOf("未能识别") === -1, noStatus.toast);
 """
     )
+
+
+def test_update_from_dir_sets_json_content_type() -> None:
+    """BUG-457：从源更新须带 Content-Type: application/json，否则 FastAPI 422。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+let captured = null;
+const fetchMock = function (path, opts) {{
+  captured = {{ path: path, opts: opts || {{}} }};
+  return Promise.resolve({{
+    status: 200,
+    ok: true,
+    json: function () {{
+      return Promise.resolve({{ skipped: true, instanceId: "backend" }});
+    }},
+  }});
+}};
+const context = {{
+  window: {{ __LWA_TEST_HOOKS__: {{}}, LWA: undefined }},
+  document: null,
+  fetch: fetchMock,
+  location: {{ hostname: "127.0.0.1", search: "", pathname: "/" }},
+  sessionStorage: {{
+    getItem: function () {{ return "tok"; }},
+    setItem: function () {{}},
+    removeItem: function () {{}},
+  }},
+  history: {{ replaceState: function () {{}} }},
+  setInterval: function () {{ return 0; }},
+  setTimeout: setTimeout,
+  clearTimeout: clearTimeout,
+  URLSearchParams: URLSearchParams,
+  console: console,
+}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let capturedRoot = null;
+context.window.LWA.createManagerApp(
+  {{ createApp: function (root) {{ capturedRoot = root; return {{ mount: function () {{}} }}; }} }},
+  {{
+    document: null,
+    fetch: fetchMock,
+    location: context.location,
+    sessionStorage: context.sessionStorage,
+    history: context.history,
+    setInterval: function () {{ return 0; }},
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    URLSearchParams: URLSearchParams,
+  }}
+);
+const self = Object.assign(capturedRoot.data(), {{
+  toast: function () {{}},
+  refresh: function () {{}},
+  requireToken: function () {{}},
+}});
+// doUpdateFromDir 不返回 Promise，但 fetch 调用是同步发起的
+capturedRoot.methods.doUpdateFromDir.call(self, "backend");
+assert.ok(captured, "应发起 fetch");
+assert.ok(
+  captured.path.indexOf("/api/instances/backend/update-from-dir") !== -1,
+  captured.path
+);
+const headers = captured.opts.headers || {{}};
+const ct = headers["Content-Type"] || headers["content-type"] || "";
+assert.strictEqual(
+  ct,
+  "application/json",
+  "从源更新必须声明 JSON Content-Type，否则会 422 Unprocessable Content"
+);
+assert.ok(captured.opts.body && captured.opts.body.indexOf("keepData") !== -1);
+"""
+    )

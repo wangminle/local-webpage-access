@@ -31,12 +31,39 @@ def test_resolve_version_uses_metadata_when_git_missing(
 def test_resolve_version_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(version_info, "_version_from_git", lambda root: None)
     monkeypatch.setattr(version_info, "_version_from_metadata", lambda: None)
-    assert version_info.resolve_version() == "0.7.1"
+    assert version_info.resolve_version() == "0.7.2"
 
 
 def test_display_version_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.5.3")
     assert version_info.display_version() == "V0.5.3"
+
+
+def test_bind_process_version_clears_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BUG-451：bind_process_version 清缓存后再解析，避免沿用旧值。"""
+    calls = {"n": 0}
+    original_clear = version_info.resolve_version.cache_clear
+
+    def tracking_clear() -> None:
+        calls["n"] += 1
+        original_clear()
+
+    monkeypatch.setattr(version_info.resolve_version, "cache_clear", tracking_clear)
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.7.1")
+    monkeypatch.setattr(version_info, "_version_from_metadata", lambda: "0.0.0")
+    # 先污染缓存
+    assert version_info.resolve_version() == "0.7.1"
+    monkeypatch.setattr(version_info, "_version_from_git", lambda root: "0.8.0")
+    assert version_info.bind_process_version() == "V0.8.0"
+    assert calls["n"] >= 1
+
+
+def test_normalize_version_label() -> None:
+    assert version_info.normalize_version_label("V0.7.1") == "0.7.1"
+    assert version_info.normalize_version_label("0.7.1") == "0.7.1"
+    assert version_info.normalize_version_label("  v0.7.1 ") == "0.7.1"
+    assert version_info.normalize_version_label("") is None
+    assert version_info.normalize_version_label(None) is None
 
 
 def test_version_from_git_subject() -> None:

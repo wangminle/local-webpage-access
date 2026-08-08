@@ -20,6 +20,9 @@ description: >-
 
 ## 红线（必须遵守）
 
+0. **先确认工作区（IMP-053）**：导入前 `curl -s http://127.0.0.1:17800/api/health`。
+   若已有 `workspaceRoot`，在该目录下执行本 skill 的命令；**不要**另开
+   `~/lwa-workspace` 再 `lwa init`（会与现网管理页抢端口、实例列表分裂）。
 1. **关联 ≠ 运行根**：Caddy root、compose bind、builtin 静态根、构建 cwd **不得**指向用户目录。
 2. 只读复制源；LWA **不**往关联目录写运行产物。
 3. 路径必须是**绝对路径**（拒绝 `./x`、`.` 等相对路径）。

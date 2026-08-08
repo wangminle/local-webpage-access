@@ -37,9 +37,11 @@ def manager_on() -> None:
         pid = start_manager(ws, config)
         token = read_token(ws) or ""
         lan_ip = resolve_lan_ip(config) or "127.0.0.1"
+        from local_webpage_access.ports import format_http_host
+
         typer.secho(f"管理页已启动（pid={pid}）", fg=typer.colors.GREEN)
         typer.echo(f"  本机：http://127.0.0.1:{config.managerPort}/")
-        typer.echo(f"  局域网：http://{lan_ip}:{config.managerPort}/")
+        typer.echo(f"  局域网：http://{format_http_host(lan_ip)}:{config.managerPort}/")
         typer.echo(f"  token：{token}")
         typer.echo("  停止：lwa manager off")
     except LwaError as exc:
@@ -51,10 +53,10 @@ def manager_on() -> None:
 @app.command("off")
 def manager_off() -> None:
     """停止后台管理页。"""
-    from local_webpage_access.manager_service import stop_manager
+    from local_webpage_access.manager_service import foreign_manager_hint, stop_manager
 
     try:
-        ws, _config, _reg = open_workspace_registry()
+        ws, config, _reg = open_workspace_registry()
         _reg.close()
         # IMP-030/030.b：若 manager 自启动单元已加载/启用，先停用，避免 KeepAlive 立刻拉回。
         note, ok = coordinated_autostart_disable(ws, "manager")
@@ -70,7 +72,12 @@ def manager_off() -> None:
                 err=True,
             )
             raise typer.Exit(code=1)
-        typer.secho("管理页已停止", fg=typer.colors.GREEN)
+        # BUG-456：本工作区已停，但端口上仍可能是其他工作区的管理页。
+        tip = foreign_manager_hint(ws, config)
+        if tip:
+            typer.secho(tip, fg=typer.colors.YELLOW, err=True)
+        else:
+            typer.secho("管理页已停止", fg=typer.colors.GREEN)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -95,7 +102,9 @@ def manager_status_cmd() -> None:
         typer.echo(f"  状态启用：{st['enabled']}")
         if st.get("pid"):
             typer.echo(f"  pid：{st['pid']}")
-        typer.echo(f"  地址：http://{lan_ip}:{st['port']}/")
+        from local_webpage_access.ports import format_http_host
+
+        typer.echo(f"  地址：http://{format_http_host(lan_ip)}:{st['port']}/")
         token = read_token(ws)
         if token:
             typer.echo(f"  token：{token}")
@@ -197,6 +206,7 @@ def manager_start(
         read_token,
         run_manager,
     )
+    from local_webpage_access.ports import format_http_host
     from local_webpage_access.security import assert_no_critical, validate_manager_binding
 
     try:
@@ -209,13 +219,15 @@ def manager_start(
         )
         maybe_rotate_token(ws, hours=rotate_hours)
         token = read_token(ws) or ""
-        bind_host = host or config.managerHost
-        bind_port = port if port is not None else config.managerPort
+        # 直接调用（非经 typer 解析）时 host/port 为 OptionInfo，按未提供处理。
+        bind_host = host if isinstance(host, str) else config.managerHost
+        bind_port = port if isinstance(port, int) else config.managerPort
         assert_no_critical(
             validate_manager_binding(bind_host, has_token=bool(token), port=bind_port)
         )
         typer.secho(
-            f"管理页启动中：http://{bind_host}:{bind_port}", fg=typer.colors.GREEN
+            f"管理页启动中：http://{format_http_host(bind_host)}:{bind_port}",
+            fg=typer.colors.GREEN,
         )
         typer.echo(f"  API token：{token}")
         typer.echo("  未带 token 的 /api/* 请求将被拒绝（401）。")

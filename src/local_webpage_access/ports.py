@@ -186,16 +186,35 @@ def resolve_lan_ip(config: Config) -> str | None:
     return detect_lan_ip()
 
 
+def format_http_host(host: str) -> str:
+    """把主机名格式化为 URL 权威部分可用的形式。
+
+    IPv6 字面量必须加方括号（``[::1]``），否则 ``host:port`` 会因冒号歧义
+    变成非法 URL。已带方括号或非 IPv6（IPv4 / 主机名）原样返回。
+    """
+    raw = host.strip()
+    if not raw:
+        return raw
+    if raw.startswith("[") and raw.endswith("]"):
+        return raw
+    try:
+        if ipaddress.ip_address(raw).version == 6:
+            return f"[{raw}]"
+    except ValueError:
+        pass
+    return raw
+
+
 def build_lan_url(lan_ip: str | None, port: int) -> str | None:
     """生成局域网访问 URL。无法确定 IP 时返回 ``None``。"""
     if not lan_ip:
         return None
-    return f"http://{lan_ip}:{port}"
+    return f"http://{format_http_host(lan_ip)}:{port}"
 
 
 def build_health_url(port: int, *, host: str = _HEALTH_HOST) -> str:
     """生成健康检查 URL（本机回环）。"""
-    return f"http://{host}:{port}"
+    return f"http://{format_http_host(host)}:{port}"
 
 
 def build_route_url(
@@ -211,8 +230,9 @@ def build_route_url(
     """
     if not lan_ip or gateway_port is None:
         return None
+    host = format_http_host(lan_ip)
     port_part = "" if gateway_port == 80 else f":{gateway_port}"
-    return f"http://{lan_ip}{port_part}/{alias}/"
+    return f"http://{host}{port_part}/{alias}/"
 
 
 class PortAllocator:
@@ -334,6 +354,7 @@ __all__ = [
     "is_port_listening",
     "detect_lan_ip",
     "resolve_lan_ip",
+    "format_http_host",
     "build_lan_url",
     "build_health_url",
     "build_route_url",

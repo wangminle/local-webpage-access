@@ -91,7 +91,11 @@ def gateway_on(
             typer.echo("  admin：http://127.0.0.1:2019/")
             port = config.staticGatewayPort
             if port:
-                typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
+                from local_webpage_access.ports import format_http_host
+
+                typer.echo(
+                    f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/"
+                )
             typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
             typer.echo("  刷新地址：lwa access refresh")
             # G6：交接收尾后默认复核访问；可选自动 rebuild。
@@ -205,7 +209,11 @@ def gateway_status_cmd() -> None:
         port = st["port"]
         if port:
             lan_ip = resolve_lan_ip(config) or "127.0.0.1"
-            typer.echo(f"  别名入口：http://{lan_ip}:{port}/<alias>/")
+            from local_webpage_access.ports import format_http_host
+
+            typer.echo(
+                f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/"
+            )
         if not st["running"] and st["backend"] == "caddy":
             typer.echo("  启动：lwa gateway on")
     except LwaError as exc:

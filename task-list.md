@@ -461,6 +461,15 @@
 | BUG-447 | 修复 | _write_token 使用 O_TRUNC 非原子写，轮换窗口并发 read_token 可读空/残缺导致瞬时 401 | 2026-08-06 18:26 | 2026-08-06 18:37 | 已修复 | manager_api.py:139-146；应用 temp+os.replace。；已修：_write_token 改为 temp(0o600)+os.replace 原子写。回归 test_write_token_creates_file_with_mode_600_via_os_open。 |
 | BUG-448 | 修复 | 纯中文实例名 slugify 全落到 instance，管理页重导冲突；文件夹导入应用目录名作 id_basis | 2026-08-06 20:10 | 2026-08-06 20:10 | 已修复 | slug_basis_for_id + import_zip(id_basis)；冲突文案去纯 CLI 腔。已删 runtime 卡住的 instance。回归 test_slug_basis / test_chinese_name_uses_folder_basename_as_id。 |
 | BUG-449 | 修复 | 文件夹导入结果文案把「识别成功但档位 medium/heavy 未自动启动」误报为「未能识别/待识别，无法启动、请删除重试」，误导用户删除可用实例 | 2026-08-06 20:41 | 2026-08-06 20:41 | 已修复 | helpers.js describeFolderImportOutcome 原以 auto.action==="pending" 判未识别；daemon try_auto_start_after_import 对 medium/heavy 也返回 action=pending（note=不自动启动），此时 status=stopped 可启动。已改：仅 status==="pending" 才报未识别；action=pending 且非 pending 状态如实提示「已导入+档位说明」。回归 test_describe_folder_import_outcome_medium_profile_is_success。 |
+| BUG-450 | 修复 | 测试泄漏网不覆盖 manager_service，pytest 临时工作区可在非端口池端口残留数天 | 2026-08-07 00:49 | 2026-08-07 01:04 | 已修复 | conftest 泄漏网扩到 manager_service/daemon（仅 pytest 工作区路径）；test_init autouse stub maybe_start_manager；新增 test_conftest_leak_net |
+| BUG-451 | 修复 | lwa update 重启 manager 后不比对 /api/health.version，可能静默报告升级成功而管理页仍旧版 | 2026-08-07 00:49 | 2026-08-07 01:04 | 已修复 | updater.verify_manager_version + restart 不一致再启一次；create_app bind_process_version 固定 /api/health.version；回归 test_updater/test_version_info |
+| BUG-452 | 修复 | managerHost 为 IPv6（::/::1/具体地址）时健康探测改写为 127.0.0.1 且 URL 缺方括号，导致 start/is_running/update 误判失败 | 2026-08-08 22:42 | 2026-08-09 00:33 | 已修复 | CHK-175/176/177；_health_check_host 按地址族映射通配（::→::1），_fetch_health 经 format_http_host 加 []。回归 test_health_check_host_* / test_fetch_health_brackets_ipv6_in_url。 |
+| BUG-453 | 修复 | 导入器仍禁止 docker-compose 实例在 import 阶段设置 --path-alias，与 IMP-014/管理页/CLI 能力冲突 | 2026-08-08 22:42 | 2026-08-09 00:33 | 已修复 | CHK-175/176/177；放开 SHARED_STATIC\|DOCKER_COMPOSE；build_manifest 预写 container.routeHost；CLI 打印容器别名。回归 test_import_path_alias_accepts_container。 |
+| BUG-454 | 修复 | manualLanIp 允许 IPv6 但 build_lan_url/build_route_url 未加方括号，生成非法 URL，管理页链接与 access review 失效 | 2026-08-08 22:42 | 2026-08-09 00:33 | 已修复 | CHK-175/176/177；新增 format_http_host；lanUrl/routeUrl/healthUrl 与 manager/gateway CLI 输出统一套用。回归 test_build_*_brackets_ipv6 / test_build_network_entry_brackets_ipv6_manual_lan。 |
+| BUG-455 | 修复 | FastAPI 启动命令硬编码 uvicorn main:app，有 app/main.py 时容器入口错误 | 2026-08-09 05:00 | 2026-08-09 05:00 | 已修复 | BUG-455：scanner._python_start_command 改为按 app/main.py→app.main:app、src/main.py、根 main.py 推断；回归 test_detect_python_fastapi_app_main_module；家庭图书 backend 实测通过 |
+| BUG-456 | 修复 | lwa manager off 在本工作区无进程时仍绿字「已停止」，掩盖其他工作区占用同一 managerPort | 2026-08-09 05:00 | 2026-08-09 05:00 | 已修复 | BUG-456：新增 foreign_manager_hint；CLI manager off 成功后若端口仍健康则黄字提示；回归 test_foreign_manager_hint_* |
+| BUG-457 | 修复 | 管理页「从源更新」缺 Content-Type: application/json，浏览器以 text/plain 提交导致 FastAPI 422 Unprocessable Content | 2026-08-09 05:20 | 2026-08-09 05:20 | 已修复 | BUG-457：apiFetch 对带 body 请求默认补 Content-Type；兼容 FastAPI detail 错误文案；回归 test_update_from_dir_sets_json_content_type；影响全部 folder 源实例 |
+| BUG-458 | 修复 | manager_start 把未解析的 typer OptionInfo（host/port 默认值）传入 format_http_host，直接调用 CLI 函数时崩溃 AttributeError | 2026-08-09 05:31 | 2026-08-09 05:31 | 已修复 | BUG-458：BUG-454 引入 format_http_host 的回归；直接调 manager_start()（测试/内部调用，未经 typer 解析）时 host 为 OptionInfo；改用 isinstance(str)/isinstance(int) 判定，与 None 语义对齐。回归 test_cli_manager_start_prints_rotated_token。 |
 
 ## 调整事项
 
@@ -688,6 +697,9 @@
 | CHK-172 | 检查 | 审查未提交改动：导入识别、静态托管与管理端自动启动 | 2026-08-06 18:12 | 2026-08-06 18:12 | 已完成 | 相关 pytest 测试集通过；未发现可证实的功能性 Bug。git diff --check 仍报告两份设计文档共 17 处行尾空白，建议提交前清理。 |
 | CHK-173 | 检查 | 审查 commit 0d2328d（V0.7.0 IMP-046/047）：Token 轮换 + 文件夹源导入逻辑漏洞与自动执行能力 | 2026-08-06 18:26 | 2026-08-06 18:26 | 已完成 | 结论：核心路径可用；相关测例套件全绿。仍有：P0 update_zip 强制保留 old status 使 pending 识别成功后卡死；UI pending 禁用从源更新；CLI 启动打印 token 与后台轮换竞态；_write_token 非原子 O_TRUNC。业务非全自动：LAN token 刷新/CLI 导入启动/中重档/pending 修复需人工。 |
 | CHK-174 | 检查 | 审查未提交改动：IMP-051 / import_activity / updater 等导入互斥 / BUG-444～449 相关前端与 token 原子写；全量 pytest 绿、ruff/mypy 核心文件通过 | 2026-08-06 21:21 | 2026-08-06 21:21 | 已完成 | CHK：结论无新增缺陷。重点确认 import_activity 可重入与 from_dir→_zip_locked 无死锁、update 超时重建 UpdateOptions 正确、describeFolderImportOutcome 区分 status=pending vs auto.action=pending（BUG-449）、directory_picker 无注入面、版本 0.7.1 一致。可提交。 |
+| CHK-175 | 检查 | 独立验证 3 个候选问题真伪（容器导入别名、manager IPv6 探活、IPv6 LAN/route URL） | 2026-08-08 22:38 | 2026-08-08 22:38 | 已完成 | 静态读码 + 定向 pytest + 最小运行时复核；结论：问题1属实且为文案/能力不一致，问题2属实且会让 IPv6 managerHost 探活失效，问题3属实且 IPv6 URL 构造缺方括号。 |
+| CHK-176 | 检查 | 独立复核 3 个候选代码问题（importer 容器别名、manager IPv6 健康检查、manualLanIp IPv6 URL） | 2026-08-08 22:40 | 2026-08-08 22:40 | 已完成 | 基于源码调用链、现有测试与最小复现核查：issue1/2/3 均属真实问题；其中 importer 仅阻断容器导入时一次性设别名流程，managerHost 为 IPv6（尤其 ::1）会导致 start/is_running/verify_manager_version 失效，manualLanIp 为 IPv6 会生成未加方括号的非法 LAN/route URL 并影响管理页链接与 access review。 |
+| CHK-177 | 检查 | 整仓代码审查：逐模块核查 repo 剩余 bug 与业务逻辑问题 | 2026-08-08 22:42 | 2026-08-08 22:42 | 已完成 | 静态审查 + pytest 全量通过（4 项真实 Docker 集成按门控跳过）+ ruff/mypy 交叉核对 + 2 个独立验证线程复核；确认 3 项真实问题：1) importer 仍拒绝容器实例导入时设置 path_alias，与现有容器别名能力链路不一致；2) manager_service 对 IPv6 managerHost 的健康探测/版本校验错误，影响 start/is_running/update；3) manualLanIp 允许 IPv6 但 lanUrl/routeUrl 生成未加方括号，管理页链接与 access review 会失效。 |
 
 ## 测试数据
 
@@ -819,6 +831,8 @@
 | DOC-117 | 文档 | 同步 V0.7.1 用户文档与 Skill：README/faq/operations/known-limitations/testing/runtime-workspace/security-boundary/release-checklist + import-folder/update-runtime | 2026-08-06 20:32 | 2026-08-06 20:32 | 已完成 | DOC-117；覆盖 IMP-051 选择文件夹、导入 UX/pending、update 等导入空闲；manager-page 既有 051 章节保留；2608 文首补 V0.7.1 收口；skills 仍为 19。 |
 | DOC-118 | 文档 | 2608 §6 补全 IMP-051 落地实现与 §6.8 V0.7.1 收口方案（BUG-444～448 / ADJ-042～043）；修正 §7 小节编号 | 2026-08-06 21:15 | 2026-08-06 21:15 | 已完成 | DOC-118；交叉引用 §5.8；变更日志已追加；task-list 相关 ID 齐全已核对。 |
 | DOC-119 | 文档 | 2608 §6.8 补记 BUG-449：medium/heavy 不自动启动勿误报未识别 | 2026-08-06 21:20 | 2026-08-06 21:20 | 已完成 | 与并行审查结论对齐；验收要点与台账映射改为 BUG-444～449。 |
+| DOC-120 | 文档 | release-checklist 写 pyproject 为版本主源，实际 resolve_version 优先最新提交主题 | 2026-08-07 00:49 | - | 待办 | docs/release-checklist.md vs version_info.py；正常运维已走 git，优先级中 |
+| DOC-121 | 文档 | 审查全部文档与未提交代码一致性：修 lwa-import-zip IMP-014 容器别名过时表述（'import 时非 static 会被拒绝'）；dockerize-python 示例 CMD 对齐推断规则；README/known-limitations/faq 补 IMP-053 多工作区复用；faq 补 BUG-456 跨工作区提示与 BUG-457 422 排障 | 2026-08-09 05:36 | 2026-08-09 05:36 | 已完成 | DOC-121；三路并行只读审查（IMP-014/BUG-455-457/IMP-053）。硬性过时仅 lwa-import-zip 第52-53行（已修）。manager-page/operations-playbook/runtime-workspace 别名描述本就最新无需改。BUG-455 scanner 推断已在 dockerize-python SKILL 第55-61行反映（仅示例 CMD 微调）。imp053 用户文档此前缺失，现 README/known-limitations/faq 已补，与 skill 侧对齐。 |
 
 ## 功能开发
 
@@ -921,6 +935,8 @@
 | DEV-095 | 开发 | IMP-046：管理页 API Token 每 168h（7×24）自动轮换——库内核（read_token_metadata/should_rotate_token/maybe_rotate_token）+ manager lifespan 启动检查+30min tick 守护线程 + config managerTokenRotateHours + CLI lwa manager token（含 --json）+ 前端 401 文案 + docs/manager-page.md 文档 + 17 条新增测试 | 2026-08-06 13:28 | 2026-08-06 13:28 | 已完成 | WBS 046.01～12 全部完成。阶段 A：read_token_metadata/should_rotate_token/maybe_rotate_token 纯函数；阶段 B：lifespan 启动即 maybe_rotate + daemon 线程 30min tick；阶段 C：config.py managerTokenRotateHours(1~8760, 默认 168) + lwa manager token/--json CLI；阶段 D：app.js 401 文案更新 + docs/manager-page.md 新增 Token 自动轮换章节；阶段 E：17 条新测试全绿。回归 1589 passed/4 skipped/0 failed。真机验证：过期 token（createdAt 2026-07-14）重启后立即轮换，旧 token 401、新 token 200、loopback 免 token 不变。设计计划 2608 §4 状态已改「已落地」。ruff/mypy/compileall 全部通过。 |
 | DEV-096 | 开发 | IMP-047 本机文件夹源导入与一键更新：folder_source.py（validate/pack/hash）+ importer.import_from_dir/update_from_dir + CLI --from-dir + manager API（/api/import-from-dir, /api/instances/{id}/update-from-dir）+ 前端导入/更新/详情面板 + status.py sourceKind/sourceDirPath + lwa-import-folder Skill + 文档（manager-page/operations-playbook/known-limitations）+ 隔离红线硬断言测试 42 用例 | 2026-08-06 14:45 | 2026-08-06 14:45 | 已完成 | DEV-096；全量 1631 passed, 4 skipped (Docker)；compileall OK；设计计划 §5 已标已落地 |
 | DEV-097 | 开发 | IMP-051 管理页「选择文件夹」：directory_picker（osascript/zenity/kdialog）+ POST /api/pick-directory（仅 loopback）+ 前端路径行浏览按钮与禁用提示 | 2026-08-06 19:41 | 2026-08-06 19:41 | 已完成 | DEV-097；仅 loopback 启用；LAN 403 loopback_required；取消/无GUI/超时业务错误。测：test_directory_picker 9 + pick_directory API 4 + 前端静态 3。计划 docs/plans/2026-08-06-imp-051-pick-directory.md |
+| DEV-098 | 开发 | IMP-052：Python 启动推断增强——uvicorn 模块路径探测 + alembic.ini 自动前置迁移 | 2026-08-09 05:00 | 2026-08-09 05:00 | 已完成 | DEV-098：FileSummary.has_alembic_ini；start 包成 sh -c alembic upgrade head && exec uvicorn…；notes 提示；skill lwa-dockerize-python-app 对齐；scanner/manager/dockerfile 相关测例全绿；见 design/plans §11 |
+| DEV-099 | 开发 | IMP-053：已有 Runtime 时提示复用——init 软警告 + skills 先探测 workspaceRoot | 2026-08-09 05:04 | 2026-08-09 05:04 | 已完成 | DEV-099：existing_foreign_manager_hint；lwa init 黄字；skills README/import-folder/setup-host；不硬拦多工作区；见 2608 §11.5 |
 
 ## 配置运维
 
@@ -1026,6 +1042,9 @@
 | OPS-099 | 运维 | 4-output 去掉 index.html 后 update 3d：任意 HTML 识别并托管验证 | 2026-08-06 18:10 | 2026-08-06 18:10 | 已完成 | 仅 kakeya-3d-chapters.html；detect static high；public 自动补 index.html；:18002 与 /3d-kakeya-animation/ 均 200 |
 | OPS-100 | 运维 | 4-output 无 index：从源更新 + 删除后 API 重导入双路径验收 | 2026-08-06 18:12 | 2026-08-06 18:12 | 已完成 | 步骤1 update 跳过未变但仍 200；步骤2 purge 后 import-from-dir autoStart=started，current 仅 kakeya html、public 自动补 index，:18002 与别名均 200 |
 | OPS-101 | 运维 | 应用版本号提升至 V0.7.1：pyproject/version_info/cli/test_version_info/skills·lwa-update-runtime/pack-release-zip 同步 | 2026-08-06 20:32 | 2026-08-06 20:32 | 已完成 | OPS-095；活跃 0.7.0→0.7.1；历史「V0.7.0 起」功能引入标记保留。lwa version 在提交 V0.7.1-Build… 主题前仍可能读 git HEAD 显示 0.7.0，fallback/pyproject 已是 0.7.1。含 IMP-051 与导入/update 护栏。 |
+| OPS-102 | 运维 | Ubuntu 主机对齐 origin/main（丢弃冗余 fb1dc69）并 lwa update 至 V0.7.1 | 2026-08-07 00:49 | 2026-08-07 00:49 | 已完成 | reset --hard origin/main → HEAD=f56fa17；proxy_on 后 fetch 成功；lwa update 8/8 全绿；/api/health 与 CLI 均为 V0.7.1；印证正常 pull→update 流程下版本缓存正确 |
+| OPS-103 | 运维 | Ubuntu 配置 mihomo proxy_on/proxy_off 函数并记入 memory | 2026-08-07 00:49 | 2026-08-07 00:49 | 已完成 | mihomo :7890 可用；.bashrc 增加手动切换函数（默认不开）；google 仅代理可达；避免全局常开干扰本机服务 |
+| OPS-104 | 运维 | 应用版本号提升至 V0.7.2：pyproject/version_info fallback+docstring/cli version docstring/skills·lwa-update-runtime 当前版本/test_version_info fallback 断言同步 | 2026-08-09 05:31 | 2026-08-09 05:31 | 已完成 | OPS-104；承接 OPS-101。活跃 0.7.1→0.7.2。文档中 V0.7.0/V0.7.1 历史功能引入标记保留（同 OPS-101 先例）；test_updater.py 与 test_version_info.py 中的 0.7.1 为自洽 mock 输入保留。fallback 路径实测返回 0.7.2；lwa version 在提交 V0.7.2-Build… 主题前仍读 git HEAD 显示 0.7.1（设计预期）。顺带修 BUG-458。全量 pytest 绿、mypy 0；setup.py 既有 ruff F401（HEAD 已存在，与本任务无关）未处理。 |
 
 ## 规划事项
 
@@ -1066,17 +1085,19 @@
 | PLN-033 | 规划 | IMP-050：生产 CLI 与工作区解耦安装（合集 Task 11 移植），避免工具安装钉死工作区路径 | 2026-08-06 12:51 | - | 待办 | 入账 2608 §7.2。优先级：中 · 不着急；先做 046/047。多工作区/正式部署时再优先考虑。 |
 | PLN-034 | 规划 | 核对实施计划合集七计划完成度：主路径已落地；Task 11 三项移植至 2608（042.b/049/050） | 2026-08-06 12:51 | 2026-08-06 13:00 | 已完成 | 主路径已落地。Task 11：049/050 迁 2608；042.b 按用户要求不迁入 2608、暂不开发（DOC-107）。 |
 | PLN-035 | 规划 | IMP-051 管理页文件夹导入增加「选择文件夹」原生选目录按钮 | 2026-08-06 18:02 | 2026-08-06 19:41 | 已完成 | 入账 2608；源路径输入框右侧按钮；macOS Finder / Ubuntu 文件管理器；须填 LWA 宿主机绝对路径；已落地 DEV-097：仅 loopback 启用宿主机原生选目录；LAN 禁用按钮+手输。 |
+| PLN-036 | 规划 | IMP-052 / BUG-455 / BUG-456：家庭图书 Agent 部署复盘后入账 2608 §11 并即时修复 | 2026-08-09 05:00 | 2026-08-09 05:00 | 已完成 | PLN-036：区分设计缺陷与 Agent 误解（多工作区、列表刷新、实例 ID、多重 start）；不修合并多工作区列表/复用源 Dockerfile/--id |
+| PLN-037 | 规划 | IMP-053：防 Agent 另开第二套 lwa 工作区（复用已有 Runtime） | 2026-08-09 05:04 | 2026-08-09 05:04 | 已完成 | PLN-037：承接家庭图书部署复盘 Agent 误用；与 BUG-456 互补 |
 
 ## 统计摘要
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 449 | 449 | 0 | 100% |
+| 代码 Bug | 458 | 458 | 0 | 100% |
 | 调整事项 | 43 | 43 | 0 | 100% |
-| 检查事项 | 173 | 173 | 0 | 100% |
+| 检查事项 | 176 | 176 | 0 | 100% |
 | 测试数据 | 2 | 2 | 0 | 100% |
-| 文档维护 | 119 | 119 | 0 | 100% |
-| 功能开发 | 97 | 97 | 0 | 100% |
-| 配置运维 | 100 | 100 | 0 | 100% |
-| 规划事项 | 35 | 32 | 3 | 91% |
-| **总计** | 1018 | 1015 | 3 | 100% |
+| 文档维护 | 121 | 120 | 1 | 99% |
+| 功能开发 | 99 | 99 | 0 | 100% |
+| 配置运维 | 103 | 103 | 0 | 100% |
+| 规划事项 | 37 | 34 | 3 | 92% |
+| **总计** | 1039 | 1035 | 4 | 100% |

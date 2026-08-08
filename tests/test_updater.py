@@ -554,6 +554,11 @@ def test_manager_restart_runs_for_legacy_health_without_workspace_root(
         "local_webpage_access.manager_service.start_manager",
         lambda ws, cfg: calls.__setitem__("start", calls["start"] + 1) or 888,
     )
+    # BUG-451：无 version 字段的旧 health 视为通过
+    monkeypatch.setattr(
+        "local_webpage_access.updater.verify_manager_version",
+        lambda *a, **k: (True, None),
+    )
 
     report = run_update(workspace, config, registry, options=_opts(restart_manager=True))
 
@@ -591,6 +596,96 @@ def test_manager_restart_failure_captured(
     mgr = report.step("restartManager")
     assert mgr.status == "failed"
     assert "pip 已更新" in mgr.message or "start boom" in mgr.message
+    assert report.step("doctor").status == "ok"
+
+
+def test_verify_manager_version_matches(monkeypatch) -> None:
+    """BUG-451：health.version 与期望一致时通过。"""
+    from local_webpage_access.config import Config
+    from local_webpage_access.updater import verify_manager_version
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._fetch_health",
+        lambda *a, **k: {"ok": True, "version": "V0.7.1"},
+    )
+    ok, actual = verify_manager_version(
+        Config(), expected="V0.7.1", timeout=0.5
+    )
+    assert ok is True
+    assert actual == "V0.7.1"
+
+
+def test_verify_manager_version_mismatch(monkeypatch) -> None:
+    """BUG-451：health.version 落后时期望失败。"""
+    from local_webpage_access.config import Config
+    from local_webpage_access.updater import verify_manager_version
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._fetch_health",
+        lambda *a, **k: {"ok": True, "version": "V0.6.13"},
+    )
+    ok, actual = verify_manager_version(
+        Config(), expected="V0.7.1", timeout=0.3
+    )
+    assert ok is False
+    assert actual == "V0.6.13"
+
+
+def test_verify_manager_version_legacy_without_field(monkeypatch) -> None:
+    """BUG-451：旧版 health 无 version 字段时不阻断。"""
+    from local_webpage_access.config import Config
+    from local_webpage_access.updater import verify_manager_version
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._fetch_health",
+        lambda *a, **k: {"ok": True},
+    )
+    ok, actual = verify_manager_version(Config(), expected="V0.7.1", timeout=0.5)
+    assert ok is True
+    assert actual is None
+
+
+def test_manager_restart_retries_then_fails_on_version_mismatch(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-451：版本不一致时再重启一次，仍不一致则 restartManager=failed。"""
+    starts = {"n": 0}
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.stop_manager", lambda ws: True
+    )
+
+    def fake_start(ws, cfg):
+        starts["n"] += 1
+        return 1000 + starts["n"]
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.start_manager", fake_start
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.updater.verify_manager_version",
+        lambda *a, **k: (False, "V0.6.13"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok"
+    )
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=_opts(restart_manager=True, run_doctor=True),
+    )
+    step = report.step("restartManager")
+    assert step is not None and step.status == "failed"
+    assert "版本不一致" in step.message
+    assert starts["n"] == 2  # 首次 + 重试
     assert report.step("doctor").status == "ok"
 
 
@@ -933,6 +1028,10 @@ def test_access_refresh_runs_after_background_restarts(
 
     monkeypatch.setattr(
         "local_webpage_access.manager_service.start_manager", fake_start_mgr
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.updater.verify_manager_version",
+        lambda *a, **k: (True, "V0.7.1"),
     )
 
     import local_webpage_access.daemon as dmod

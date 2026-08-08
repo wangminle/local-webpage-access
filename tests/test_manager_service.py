@@ -154,6 +154,90 @@ def test_stop_manager_clears_enabled(workspace: Workspace) -> None:
     assert state.enabled is False
 
 
+def test_foreign_manager_hint_when_port_healthy_but_local_stopped(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-456：本工作区未运行但端口仍健康 → 提示可能是其他工作区占用。"""
+    from local_webpage_access.manager_service import foreign_manager_hint
+
+    workspace.ensure_workspace_dirs()
+    config = Config(managerHost="127.0.0.1", managerPort=17800)
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.health_ok",
+        lambda host, port: True,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_running",
+        lambda ws, cfg: False,
+    )
+    tip = foreign_manager_hint(workspace, config)
+    assert tip is not None
+    assert "其他工作区" in tip or "managerPort" in tip
+
+
+def test_foreign_manager_hint_none_when_port_free(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_webpage_access.manager_service import foreign_manager_hint
+
+    workspace.ensure_workspace_dirs()
+    config = Config(managerHost="127.0.0.1", managerPort=17800)
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.health_ok",
+        lambda host, port: False,
+    )
+    assert foreign_manager_hint(workspace, config) is None
+
+
+def test_existing_foreign_manager_hint_when_other_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IMP-053：init 新目录前，若 :17800 已是另一工作区，须提示复用而非再建一套。"""
+    from local_webpage_access.manager_service import existing_foreign_manager_hint
+
+    other = (tmp_path / "existing-runtime").resolve()
+    candidate = (tmp_path / "new-lwa-workspace").resolve()
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._fetch_health",
+        lambda host, port, timeout=1.0: {
+            "ok": True,
+            "workspaceRoot": str(other),
+        },
+    )
+    tip = existing_foreign_manager_hint(candidate)
+    assert tip is not None
+    assert str(other) in tip
+    assert "一个工作区" in tip or "不要再" in tip
+
+
+def test_existing_foreign_manager_hint_none_for_same_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_webpage_access.manager_service import existing_foreign_manager_hint
+
+    root = (tmp_path / "runtime").resolve()
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._fetch_health",
+        lambda host, port, timeout=1.0: {
+            "ok": True,
+            "workspaceRoot": str(root),
+        },
+    )
+    assert existing_foreign_manager_hint(root) is None
+
+
+def test_existing_foreign_manager_hint_none_when_no_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_webpage_access.manager_service import existing_foreign_manager_hint
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._fetch_health",
+        lambda host, port, timeout=1.0: None,
+    )
+    assert existing_foreign_manager_hint(tmp_path / "anywhere") is None
+
+
 def test_stop_manager_keeps_enabled_when_terminate_fails(workspace: Workspace) -> None:
     workspace.ensure_workspace_dirs()
     write_state(
@@ -506,3 +590,55 @@ def test_run_service_main_passes_log_dir(
             reg_cls.return_value.close.return_value = None
             assert manager_service.run_service_main() == 0
     assert seen.get("log_dir") == workspace.logs
+
+
+# ---- IPv6 managerHost 健康探测（CHK-175/176/177）---------------------------
+
+
+def test_health_check_host_maps_wildcards_by_family() -> None:
+    """通配绑定按地址族映射到对应回环；不得把 ::1/:: 一律改成 127.0.0.1。"""
+    from local_webpage_access.manager_service import _health_check_host
+
+    assert _health_check_host("0.0.0.0") == "127.0.0.1"
+    assert _health_check_host("") == "127.0.0.1"
+    assert _health_check_host("::") == "::1"
+    assert _health_check_host("::1") == "::1"
+    assert _health_check_host("127.0.0.1") == "127.0.0.1"
+    assert _health_check_host("2001:db8::1") == "2001:db8::1"
+
+
+def test_fetch_health_brackets_ipv6_in_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """探测 URL 对 IPv6 主机加 []，避免 host:port 歧义导致探活失真。"""
+    from local_webpage_access import manager_service
+
+    seen: dict[str, str] = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(url: str, timeout: float = 1.0):  # noqa: ARG001
+        seen["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr(manager_service, "urlopen_direct", fake_urlopen)
+
+    assert manager_service._fetch_health("::1", 17800) == {"ok": True}
+    assert seen["url"] == "http://[::1]:17800/api/health"
+
+    assert manager_service._fetch_health("::", 17800) == {"ok": True}
+    assert seen["url"] == "http://[::1]:17800/api/health"
+
+    assert manager_service._fetch_health("2001:db8::a", 17800) == {"ok": True}
+    assert seen["url"] == "http://[2001:db8::a]:17800/api/health"
+
+    assert manager_service._fetch_health("0.0.0.0", 17800) == {"ok": True}
+    assert seen["url"] == "http://127.0.0.1:17800/api/health"

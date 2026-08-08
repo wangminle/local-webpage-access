@@ -159,14 +159,23 @@ def _print_import_result(result, config) -> None:
     typer.echo(f"  类型：{result.manifest.kind} / {result.manifest.runtime}")
     typer.echo(f"  目录：{result.app_dir}")
     typer.echo(f"  sha256：{result.zip_hash}")
-    # IMP-006：导入时登记了路径别名则提示（实际 URL 在 start 后生成）
+    # IMP-006 / IMP-014：导入时登记了路径别名则提示（实际 URL 在 start 后生成）
+    alias = None
     if (
         result.manifest.static is not None
         and result.manifest.static.routeMode == "name"
         and result.manifest.static.routeHost
     ):
+        alias = result.manifest.static.routeHost
+    elif (
+        result.manifest.container is not None
+        and result.manifest.container.routeMode == "name"
+        and result.manifest.container.routeHost
+    ):
+        alias = result.manifest.container.routeHost
+    if alias:
         typer.secho(
-            f"  路径别名：/{result.manifest.static.routeHost}/"
+            f"  路径别名：/{alias}/"
             f"（lwa start 后生效，入口端口 {config.staticGatewayPort}）",
             fg=typer.colors.CYAN,
         )

@@ -369,9 +369,10 @@ class Importer:
         Args:
             zip_path: zip 文件路径。
             name: 可选的显示名称；不提供时从 zip 文件名推导。
-            path_alias: 可选的路径别名 slug（IMP-006）。提供时校验格式、
-                保留字与全局唯一性；仅对识别为 ``shared-static`` 的实例生效，
-                容器实例会拒绝并报错。未提供时默认行为与 V1 完全一致。
+            path_alias: 可选的路径别名 slug（IMP-006 / IMP-014）。提供时校验格式、
+                保留字与全局唯一性；对 ``shared-static`` 与 ``docker-compose``
+                实例生效（容器在 import 预写 ``routeHost``，首次 start 生成别名
+                片段）。其它 runtime 会拒绝。未提供时默认行为与 V1 完全一致。
             on_conflict: slug 冲突策略。``"rename"``（默认，daemon 友好）按
                 ``-2`` / ``-3`` 自动改名新建；``"error"``（IMP-009 CLI）直接报错
                 并建议改用 ``--update``，避免无脑新建历史误导入实例。
@@ -456,12 +457,17 @@ class Importer:
                     display_name = titleize(slug)
                     name_source = "slug"
 
-            # IMP-006：路径别名当前仅支持静态实例；容器实例的别名路由需要容器
-            # 托管路径额外生成 reverse_proxy 片段，V1 暂不支持，明确拒绝而非静默忽略。
-            if path_alias is not None and detection.runtime != Runtime.SHARED_STATIC:
+            # IMP-006 / IMP-014：路径别名支持 shared-static 与 docker-compose。
+            # 其它 runtime（若将来出现）仍明确拒绝，避免静默忽略。
+            # 容器侧在 import 预写 container.routeHost，首次 start 时生成别名片段。
+            if path_alias is not None and detection.runtime not in (
+                Runtime.SHARED_STATIC,
+                Runtime.DOCKER_COMPOSE,
+            ):
                 raise ZipImportError(
-                    f"路径别名仅支持静态站点，该实例被识别为 {detection.form}（"
-                    f"{detection.runtime}）；请去掉 --path-alias 或仅对静态站点使用",
+                    f"路径别名仅支持静态站点或 docker-compose 容器实例，"
+                    f"该实例被识别为 {detection.form}（{detection.runtime}）；"
+                    f"请去掉 --path-alias",
                     instance_id=instance_id,
                 )
 
@@ -1459,8 +1465,9 @@ def build_manifest_from_detection(
     被 :class:`Importer` 导入流程与 ``lwa scan`` 重扫流程共用，
     确保 static ↔ container 配置始终与 runtime 匹配。
 
-    ``path_alias`` 非 ``None`` 时（IMP-006）写入静态配置的 ``routeMode="name"``
-    + ``routeHost=<alias>``；仅对 ``shared-static`` runtime 有意义。
+    ``path_alias`` 非 ``None`` 时（IMP-006 / IMP-014）写入对应配置的
+    ``routeMode="name"`` + ``routeHost=<alias>``：静态进 ``static``，
+    docker-compose 进 ``container``；其它 runtime 忽略该参数。
     """
     if detection.pending or detection.kind is None:
         # 未识别：以 static 草稿落盘，标记 pending
@@ -1513,13 +1520,18 @@ def build_manifest_from_detection(
         # 不再恒为默认 512m（runtime §4.2-P8）。
         from local_webpage_access.resource_profiles import profile_to_limits
 
-        kwargs["container"] = ContainerConfig(
-            projectName=f"lwa-{instance_id}",
-            internalPort=detection.internalPort or 8000,
-            composePath=str(workspace.app_compose_path(instance_id)),
-            dockerfilePath=str(workspace.app_dockerfile_path(instance_id)),
-            resourceLimits=profile_to_limits(resource_profile),
-        )
+        container_kwargs: dict = {
+            "projectName": f"lwa-{instance_id}",
+            "internalPort": detection.internalPort or 8000,
+            "composePath": str(workspace.app_compose_path(instance_id)),
+            "dockerfilePath": str(workspace.app_dockerfile_path(instance_id)),
+            "resourceLimits": profile_to_limits(resource_profile),
+        }
+        if path_alias is not None:
+            # IMP-014：导入期预写容器别名；首次 start 时生成 Caddy 片段。
+            container_kwargs["routeMode"] = "name"
+            container_kwargs["routeHost"] = path_alias
+        kwargs["container"] = ContainerConfig(**container_kwargs)
 
     manifest = InstanceManifest(**kwargs)
     if zip_hash:

@@ -1,7 +1,7 @@
 # 新增功能点计划（202608）— 编号续接 IMP-043
 
-> **状态（2026-08-06）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。 **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
-> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
+> **状态（2026-08-09）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。 **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
+> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
 
 ---
 
@@ -594,10 +594,74 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 ---
 
+## 11. Agent 部署复盘（家庭图书 / 2026-08-09）→ IMP-052 / BUG-455 / BUG-456
+
+> **触发**：Agent 将 `home-bookshelf` 的 `backend/` 导入 lwa，出现多重启停、管理页看不到实例、`uvicorn main:app` 误判、缺 alembic 迁移致 API 500、两工作区抢 17800。
+> **依据**：`~/lwa-workspace/logs/lwa.log`（04:42～04:48 三次 `host_start` + 17800 占用错误）与原工作区 `runtime/logs/lwa.log`（04:49 导入 `backend`）；`Scanner().detect(backend)` 实测 `entry.start = uvicorn main:app ...`（源仅有 `app/main.py` + `alembic.ini`）。
+
+### 11.1 结论矩阵（缺陷 vs Agent）
+
+| Claim | 判定 | 说明 |
+| --- | --- | --- |
+| FastAPI 启动猜成 `uvicorn main:app` | **设计缺陷 BUG-455** | `_python_start_command` 硬编码，不探测 `app/main.py` / 根 `main.py`；`src/main.py` 仅靠 Dockerfile `PYTHONPATH` 半修 |
+| 不自动跑 `alembic upgrade head` | **产品缺口 → IMP-052** | V1 未承诺 ORM 迁移；但对 fullstack-sqlite + `alembic.ini` 会静默 500（表不存在），应自动前置迁移 |
+| 管理页导入后需重启才见实例 | **Agent 误解** | `GET /api/instances` 每次读 registry；根因是 CLI 导入进了另一工作区 |
+| 实例 ID = 文件夹名 `backend` | **设计行为** | `id_basis=目录名`；无 `--id`；ASCII `--name` 可驱动 ID；纯中文名回退 basename |
+| 多重 `host_start` / 反复 recreate | **Agent 误用** | 改 start/alembic 后多次 `lwa start`；另有一次 `running→stopped` 后重拉 |
+| 两工作区抢 17800；`manager off` 假停 | **部分缺陷 BUG-456** | 同工作区 stop 已加固；`state is None` 时直接成功，CLI 打「已停止」，而端口上仍是**另一工作区**管理页——易诱使 Agent 去 `kill` |
+| 忽略项目自带 Dockerfile/entrypoint | **有意设计** | `docker/` 由模板统一生成；不复用源码 ENTRYPOINT（安全审计边界） |
+
+### 11.2 IMP-052 — Python 启动命令推断增强（含 Alembic）
+
+> **状态**：已落地（2026-08-09，DEV-098；BUG-455）。
+
+**需求**
+
+1. 探测入口优先级：`app/main.py` → `app.main:app`；`src/main.py` → `main:app`（保留现有 PYTHONPATH=src）；根 `main.py` → `main:app`；否则回退 `main:app`。
+2. 顶层存在 `alembic.ini` 时，将 start 包成 `sh -c "alembic upgrade head && exec <uvicorn…>"`，并在 `notes` 提示已自动前置迁移。
+3. 不自动复用源码 Dockerfile；用户仍可用手工 `entry.start` 覆盖。
+
+**验收**：对仅有 `app/main.py`+`alembic.ini` 的 FastAPI 夹具，`Scanner.detect` 产出含 `app.main:app` 与 `alembic upgrade head`；回归 `test_scanner` / 相关 Dockerfile 用例全绿。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-052` / `BUG-455` / `DEV-098` | 本项 / 入口硬编码缺陷 / 实现 |
+| `PLN-036` | 规划入账 |
+
+### 11.3 BUG-456 — `manager off` 跨工作区假停提示
+
+> **状态**：已落地（2026-08-09，DEV-098）。
+
+**需求**：`stop_manager` / `lwa manager off` 在本工作区已停（或无 state）时，若配置 `managerPort` 上仍有健康响应，CLI 不得仅绿字「管理页已停止」；须黄字提示可能为其他工作区占用，指引到对应工作区 `off` 或改 `managerPort`。
+
+| ID | 关系 |
+| --- | --- |
+| `BUG-456` / `DEV-098` | 本项 / 与 IMP-052 同批 |
+
+### 11.4 明确不修（本轮）
+
+- 自动「合并」多工作区实例列表（与一工作区一心智冲突；见 IMP-050 解耦后再议）
+- 新增 `--id`（体验增强，非本次故障根因；`--name` ASCII 已够）
+- 复用源码 Dockerfile / ENTRYPOINT
+
+### 11.5 IMP-053 — 已有 Runtime 时提示复用（防 Agent 另开第二套）
+
+> **状态**：已落地（2026-08-09，DEV-099）。
+
+**需求**：探测本机默认管理页（`:17800` `/api/health` → `workspaceRoot`）；`lwa init` 到**不同**目录时黄字软提示「请复用已有工作区」；skills（README / import-folder / setup-host）写明先 curl 再操作，禁止默认再 `mkdir ~/lwa-workspace && lwa init`。不硬拦多工作区。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-053` / `DEV-099` / `PLN-037` | 本项 / 实现 / 规划 |
+
+---
+
 ## 变更日志
 
 | 日期 | 变更 |
 | --- | --- |
+| 2026-08-09 | **§11.5 IMP-053**：已有 Runtime 复用提示（init 软警告 + skills）；DEV-099。 |
+| 2026-08-09 | **§11 Agent 部署复盘**：入账 IMP-052 / BUG-455 / BUG-456 / PLN-036；区分缺陷与 Agent 误解；**已落地 DEV-098**（入口推断 + alembic 前置 + manager off 跨工作区黄字提示）。 |
 | 2026-08-06 | 建档。核对 2607；补记 IMP-044 / IMP-045；承接 IMP-042.b 与 IMP-029 候选。 |
 | 2026-08-06 | **入账本月待办 IMP-046（Token 7×24h 自动轮换）、IMP-047（本机文件夹源导入+更新）；后续待办 IMP-048（zip↔文件夹转换）。** |
 | 2026-08-06 | **IMP-047 补强**：关联目录仅作只读复制源；运行必须在 LWA `apps/<id>/` 内，与 zip 同管线；禁止就地运行关联文件夹；更新无变更（内容指纹 / 可选 git diff）提示「无需更新」。 |

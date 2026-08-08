@@ -424,11 +424,51 @@ def run_migrate_config_defaults(ws: Workspace) -> tuple[list[str], bool]:
     return [str(x) for x in missing], bool(payload.get("written"))
 
 
+def verify_manager_version(
+    config: Config,
+    *,
+    expected: str | None = None,
+    timeout: float = 15.0,
+) -> tuple[bool, str | None]:
+    """轮询 ``/api/health``，确认 ``version`` 与期望一致（BUG-451）。
+
+    * health 不可达 / ``ok`` 不为真 → ``(False, None)``
+    * 响应无 ``version`` 字段（旧版管理页）→ 视为通过，返回 ``(True, None)``
+    * ``version`` 与期望不一致 → ``(False, actual)``
+    * 一致 → ``(True, actual)``
+    """
+    import time
+
+    from local_webpage_access.manager_service import _fetch_health
+    from local_webpage_access.version_info import (
+        display_version,
+        normalize_version_label,
+    )
+
+    want = normalize_version_label(expected if expected is not None else display_version())
+    deadline = time.monotonic() + timeout
+    last_actual: str | None = None
+    while time.monotonic() <= deadline:
+        data = _fetch_health(config.managerHost, config.managerPort, timeout=0.5)
+        if data and data.get("ok"):
+            raw = data.get("version")
+            if raw is None or str(raw).strip() == "":
+                return True, None
+            last_actual = str(raw).strip()
+            if normalize_version_label(last_actual) == want:
+                return True, last_actual
+        time.sleep(0.1)
+    return False, last_actual
+
+
 def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
     """幂等重启管理页：仅当原本 running 时 stop→start。
 
     原本 stopped 不自动开启（避免意外拉起用户故意关闭的服务）。
-    返回 ``{"wasRunning": bool, "pid": int|None, "message": str}``。
+    返回 ``{"wasRunning": bool, "pid": int|None, "message": str, ...}``。
+
+    BUG-451：重启成功后比对 ``/api/health.version`` 与当前 ``display_version()``；
+    不一致时再重启一次，仍不一致则抛错（避免 CLI 报告升级成功而管理页仍旧版）。
     """
     from local_webpage_access.cli._common import coordinated_autostart_restart
     from local_webpage_access.manager_service import (
@@ -436,6 +476,7 @@ def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
         start_manager,
         stop_manager,
     )
+    from local_webpage_access.version_info import display_version
 
     was_running = is_running(ws, config)
     if not was_running:
@@ -444,10 +485,24 @@ def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
     # KeepAlive/Restart 立即拉回、再与 start_manager 的 detached spawn 抢状态。
     note, _ok, managed = coordinated_autostart_restart(ws, "manager")
     if managed:
+        ok, actual = verify_manager_version(config)
+        if not ok:
+            # 监督器已拉起一次仍不对：再协调重启一次
+            coordinated_autostart_restart(ws, "manager")
+            ok, actual = verify_manager_version(config)
+        if not ok:
+            raise RuntimeError(
+                f"管理页自启动重启后版本不一致：期望 {display_version()}，"
+                f"实际 {actual or '未知'}；可 `lwa manager off` 后 `lwa manager on`"
+            )
+        msg = note or "管理页已通过自启动重启"
+        if actual:
+            msg = f"{msg}（version={actual}）"
         return {
             "wasRunning": True,
             "pid": None,
-            "message": note or "管理页已通过自启动重启",
+            "version": actual,
+            "message": msg,
         }
     # BUG-192：stop 失败不得报成重启成功（旧进程仍在跑）；抛错由 run_update 标 failed。
     if not stop_manager(ws):
@@ -456,7 +511,27 @@ def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
             "可 `lwa manager off` 后重试 `lwa manager on`"
         )
     pid = start_manager(ws, config)
-    return {"wasRunning": True, "pid": pid, "message": f"管理页已重启（pid={pid}）"}
+    ok, actual = verify_manager_version(config)
+    if not ok:
+        if not stop_manager(ws):
+            raise RuntimeError(
+                f"管理页版本不一致（实际 {actual or '未知'}）且二次停止失败；"
+                f"期望 {display_version()}"
+            )
+        pid = start_manager(ws, config)
+        ok, actual = verify_manager_version(config)
+    if not ok:
+        raise RuntimeError(
+            f"管理页重启后版本不一致：期望 {display_version()}，"
+            f"实际 {actual or '未知'}；可 `lwa manager off` 后重试 `lwa manager on`"
+        )
+    ver_note = f", version={actual}" if actual else ""
+    return {
+        "wasRunning": True,
+        "pid": pid,
+        "version": actual,
+        "message": f"管理页已重启（pid={pid}{ver_note}）",
+    }
 
 
 def restart_daemon(ws: Workspace, config: Config) -> dict[str, Any]:
@@ -953,6 +1028,7 @@ __all__ = [
     "migrate_config_defaults",
     "run_migrate_config_defaults",
     "restart_manager",
+    "verify_manager_version",
     "restart_daemon",
     "restart_gateway",
     "restart_instances",

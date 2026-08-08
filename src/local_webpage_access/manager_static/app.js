@@ -75,6 +75,16 @@
       opts.headers = opts.headers || {};
       var token = getToken();
       if (token) opts.headers["Authorization"] = "Bearer " + token;
+      // BUG-457：带 JSON body 的 POST 须声明 Content-Type，否则浏览器默认
+      // text/plain，FastAPI 校验失败返回 422 Unprocessable Content（「从源更新」等）。
+      if (
+        opts.body != null &&
+        opts.body !== "" &&
+        !opts.headers["Content-Type"] &&
+        !opts.headers["content-type"]
+      ) {
+        opts.headers["Content-Type"] = "application/json";
+      }
       return fetchFn(path, opts).then(function (resp) {
         if (resp.status === 401) {
           if (isLocalhostAccess()) throw new Error("unauthorized");
@@ -89,8 +99,7 @@
         if (!resp.ok) {
           return resp.json().then(
             function (body) {
-              var raw =
-                (body && body.error && body.error.message) || resp.statusText;
+              var raw = extractApiErrorMessage(body, resp.statusText);
               var err = new Error(LWA.friendlyApiMessage(raw));
               err.code = (body && body.error && body.error.code) || "";
               err.status = resp.status;
@@ -106,6 +115,20 @@
         }
         return resp.json();
       });
+    }
+
+    // BUG-457：兼容 LWA {error.message} 与 FastAPI {detail:[…]} / {detail:"…"}
+    function extractApiErrorMessage(body, statusText) {
+      if (body && body.error && body.error.message) return body.error.message;
+      if (body && body.detail != null) {
+        if (typeof body.detail === "string") return body.detail;
+        if (Array.isArray(body.detail) && body.detail.length) {
+          var first = body.detail[0];
+          if (typeof first === "string") return first;
+          if (first && first.msg) return String(first.msg);
+        }
+      }
+      return statusText || "请求失败";
     }
 
     // BUG-289：把 apiFetch 抛出的错误转成一句用户能看懂的中文。

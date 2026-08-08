@@ -58,6 +58,12 @@ skill 的输出**只**落到以下位置（设计 §18）：
 
 适用于所有 skill：
 
+- **先复用已有工作区，勿另开第二套 Runtime（IMP-053）**：操作前先
+  `curl -s http://127.0.0.1:17800/api/health`（或本机 `managerPort`）。若
+  `ok` 且带 `workspaceRoot`，**cd 到该目录**再 `lwa import` / `start` /
+  `update`；**禁止**再 `mkdir ~/lwa-workspace && lwa init`（默认抢同一
+  17800/8080，管理页只看见一半实例）。确需第二工作区时须改
+  `managerPort` / `staticGatewayPort` / `portPool`。
 - **不直接运行长期服务**（`docker run -d`、`npm start` 守护进程等由 `lwa` 决定）。
 - **不修改 `data/` 内容**（用户数据，只读）。
 - **不引入 privileged、Docker socket 挂载、宿主敏感目录**（安全边界，§17）。

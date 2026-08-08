@@ -842,18 +842,25 @@ def test_import_path_alias_rejects_duplicate(
         importer.import_zip(z2, path_alias="shared-alias")
 
 
-def test_import_path_alias_rejects_container(
+def test_import_path_alias_accepts_container(
     importer: Importer, workspace: Workspace, tmp_path: Path
 ) -> None:
-    """路径别名当前仅支持静态站点；容器实例明确拒绝并清理半成品。"""
+    """IMP-014：容器实例 import 时可预写 container.routeHost（首启时生成别名片段）。"""
     zip_path = _make_zip(
         tmp_path / "api.zip",
         {"requirements.txt": "fastapi\nuvicorn\n"},
     )
-    with pytest.raises(ZipImportError):
-        importer.import_zip(zip_path, path_alias="api-alias")
-    # 容器+别名被拒后，半成品目录应已清理
-    assert not workspace.app_dir("api").exists()
+    result = importer.import_zip(zip_path, path_alias="api-alias")
+    assert result.manifest.runtime == Runtime.DOCKER_COMPOSE
+    container = result.manifest.container
+    assert container is not None
+    assert container.routeMode == "name"
+    assert container.routeHost == "api-alias"
+    row = importer.registry.get_container(result.instance_id)
+    assert row is not None
+    assert row["route_mode"] == "name"
+    assert row["route_host"] == "api-alias"
+    assert workspace.app_dir(result.instance_id).exists()
 
 
 def test_import_path_alias_validates_before_write(

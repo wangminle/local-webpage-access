@@ -476,8 +476,12 @@ def create_app(
         write_capability_cache,
     )
     from local_webpage_access.logging import setup_logging
+    from local_webpage_access.version_info import bind_process_version
 
     setup_logging(level=config.logLevel)  # type: ignore[arg-type]
+    # BUG-451：应用构建时固定版本；/api/health 与 OpenAPI version 共用，不随
+    # 长驻进程内后续 git/元数据变化「静默变版」。
+    app_version = bind_process_version()
 
     # create_app 内共享状态：供 lifespan / refresh 闭包使用（单飞锁等）。
     import threading as _threading
@@ -627,7 +631,7 @@ def create_app(
 
     app = FastAPI(
         title="Local Webpage Access Manager",
-        version=_app_version(),
+        version=app_version,
         lifespan=_lifespan,
         # 统一错误响应由下方异常处理器实现
     )
@@ -635,6 +639,7 @@ def create_app(
     app.state.config = config
     app.state.registry = registry
     app.state.token = token
+    app.state.app_version = app_version  # BUG-451：供 /api/health 闭包外读取
     app.state.pageview_store = None  # IMP-024：懒加载的 PageviewStore 单例
     # BUG-254：health 只读缓存；优先已有 capability-manager.json，否则 unknown 占位
     app.state.capability_fragment = read_capability_health_fragment(workspace.root) or {
@@ -690,7 +695,7 @@ def _register_routes(app: FastAPI) -> None:
         ws: Workspace = app.state.workspace
         body: dict[str, Any] = {
             "ok": True,
-            "version": _app_version(),
+            "version": getattr(app.state, "app_version", None) or _app_version(),
         }
         # BUG-169：workspaceRoot 仅回环可见；局域网免鉴权客户端不得窥探绝对路径。
         # BUG-194：manager 从本机探活需拿 workspaceRoot 做归属校验。除回环外，
@@ -1746,6 +1751,7 @@ def _lwa_error_code(exc: LwaError) -> str:
 
 
 def _app_version() -> str:
+    """遗留辅助：返回当前展示版本（新代码路径用 create_app 闭包固定值）。"""
     from local_webpage_access.version_info import display_version
 
     return display_version()

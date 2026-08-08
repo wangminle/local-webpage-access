@@ -110,6 +110,18 @@ systemctl --user restart lwa-gateway.service
 
 ## 环境类问题
 
+### `lwa init` 提示「管理页 :17800 已在运行」怎么办？（IMP-053）
+
+`lwa init` 会探测默认端口 `127.0.0.1:17800`；若已有其它工作区的管理页在跑，会输出**黄色软提示**（不阻断），建议复用而非另建：
+
+```bash
+curl -s http://127.0.0.1:17800/api/health   # 看返回的 workspaceRoot
+```
+
+* 有 `workspaceRoot` → **cd 到该目录**再 `lwa import` / `lwa start` / `lwa update`，不要新建第二套。
+* 默认端口（`managerPort=17800` / `staticGatewayPort` / `portPool`）按**一机一工作区**设计；两套工作区抢同一端口会让管理页只看到一半实例。
+* 确需第二工作区：在新区 `local-web.yml` 改全三段端口（`managerPort` / `staticGatewayPort` / `portPool`）后再 `lwa init`。
+
 ### Python 版本不满足
 
 ```
@@ -327,6 +339,31 @@ token 存在工作区 `run/manager-token.json`。删除该文件后 `lwa manager
 
 管理页每次 `GET /api/instances` 都会先观测回写状态，理论上始终一致。
 若仍不一致，运行 `lwa status` 强制刷新，或 `lwa doctor <id>` 诊断该实例。
+
+### `lwa manager off` 后提示「端口仍有健康响应」（BUG-456）
+
+本工作区管理页已正常停止，但 `managerPort`（默认 17800）仍被**另一工作区**的管理页占用时，会输出黄色提示而非绿字「已停止」：
+
+```
+本工作区管理页未在运行，但端口 17800 仍有健康响应（可能是其他工作区的管理页）。
+请到对应工作区执行 lwa manager off，或修改 local-web.yml 的 managerPort
+```
+
+这是正常保护——避免绿字「已停止」掩盖端口实际仍被占用。要到占用方工作区执行 `lwa manager off`，或改本工作区的 `managerPort`。
+
+### 管理页操作返回 422 Unprocessable Content（BUG-457）
+
+带请求体的 POST（如「从源更新」「从文件夹导入」）若缺少 `Content-Type: application/json`，浏览器会以 `text/plain` 提交，FastAPI 返回 422。**V0.7.2** 起前端 `apiFetch` 对带 body 的请求自动补 `Content-Type: application/json`，此问题已修复。
+
+若仍遇到 422（多为手动 curl 或第三方调用）：
+
+```bash
+# 手动调用 API 时务必显式声明：
+curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"restart": true, "keepData": true}'
+```
 
 ### 浏览量数字对不上 / 「直连端口不算」？
 

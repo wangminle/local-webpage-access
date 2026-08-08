@@ -66,6 +66,8 @@ lwa setup
 # 可选：lwa setup --script          # 打印内置 Docker/Caddy 安装脚本路径
 
 # 1. 在目标工作区目录初始化（生成 local-web.yml、目录结构、SQLite registry）
+#    先探测是否已有工作区（IMP-053）：默认端口 17800 一机一工作区
+#    curl -s http://127.0.0.1:17800/api/health   # 有 workspaceRoot 就 cd 过去复用，别再 init
 lwa init
 # 可选 Full：lwa init --full --yes          # 初始化并装齐依赖 + 能力闭环
 # 或：先 init，再在工作区内 lwa setup --full --yes
