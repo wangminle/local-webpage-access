@@ -618,3 +618,137 @@ def test_dockerfile_strips_pytest_extras_and_leading_space(workspace: Workspace)
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     # 扩展正则须覆盖 extras 的 ``[`` 与前导空白
     assert r"/^\s*pytest([-_]|[<>=!~\[]|$)/d" in content
+
+
+# ---- IMP-054：Python 包 -> apt 系统库自动探测 --------------------------------
+
+
+def test_pyzbar_in_requirements_triggers_apt_install(workspace: Workspace) -> None:
+    """IMP-054：requirements.txt 含 pyzbar 时自动追加 apt-get install libzbar0。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "fastapi>=0.115.0\nuvicorn[standard]>=0.32.0\npyzbar>=0.1.9\n",
+        encoding="utf-8",
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "apt-get install -y --no-install-recommends libzbar0" in content
+    # apt 块在 WORKDIR 之后、pip install 之前（用 RUN 行定位，跳过注释头）
+    idx_workdir = content.index("WORKDIR /app")
+    idx_apt = content.index("apt-get install", idx_workdir)
+    idx_pip = content.index("RUN", idx_apt)
+    assert "pip install" in content[idx_pip:]
+    assert idx_workdir < idx_apt < idx_pip
+
+
+def test_no_apt_deps_when_requirements_clean(workspace: Workspace) -> None:
+    """IMP-054：无系统库依赖的 requirements 不生成 apt 块。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "fastapi>=0.115.0\nuvicorn[standard]>=0.32.0\n",
+        encoding="utf-8",
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "apt-get install" not in content
+
+
+def test_multiple_apt_deps_dedup_and_merge(workspace: Workspace) -> None:
+    """IMP-054：多个需要系统库的包合并去重 apt 包列表。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "opencv-python>=4.8.0\npyzbar>=0.1.9\n",
+        encoding="utf-8",
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    # opencv -> libgl1 libglib2.0-0; pyzbar -> libzbar0
+    assert "libgl1" in content
+    assert "libglib2.0-0" in content
+    assert "libzbar0" in content
+    # 只有一个 apt-get update（去重后单条 RUN）
+    assert content.count("apt-get update") == 1
+
+
+def test_apt_deps_with_extras_and_version_constraints(workspace: Workspace) -> None:
+    """IMP-054：带 extras 与版本约束的包名也能正确匹配。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "pyzbar[scripts]==0.1.9\nopencv-python-headless>=4.8.0,<5.0\n",
+        encoding="utf-8",
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "libzbar0" in content
+    assert "libgl1" in content
+
+
+@pytest.mark.parametrize(
+    ("requirement", "expected_apt_dep"),
+    [
+        ("opencv_python==4.10.0", "libgl1"),
+        ("python.magic>=0.4.27", "libmagic1"),
+    ],
+)
+def test_apt_deps_normalize_equivalent_distribution_names(
+    workspace: Workspace, requirement: str, expected_apt_dep: str
+) -> None:
+    """PEP 503 等价包名写法同样应命中系统依赖映射。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        f"{requirement}\n", encoding="utf-8"
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+
+    assert expected_apt_dep in content
+
+
+def test_apt_deps_strips_comments_and_environment_markers(workspace: Workspace) -> None:
+    """IMP-054：注释行与环境标记不影响包名解析。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "# barcode scanning\n"
+        "pyzbar>=0.1.9 ; python_version >= '3.10'\n"
+        "pillow>=11.0.0  # imaging\n",
+        encoding="utf-8",
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "libzbar0" in content
+
+
+def test_apt_deps_block_cleans_lists(workspace: Workspace) -> None:
+    """IMP-054：apt 块末尾 rm -rf /var/lib/apt/lists/* 保持镜像精简。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "pyzbar>=0.1.9\n", encoding="utf-8"
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "rm -rf /var/lib/apt/lists/*" in content
+
+
+def test_apt_deps_respect_apt_mirror(workspace: Workspace) -> None:
+    """IMP-054：启用 aptMirror 时 apt 块也走镜像。"""
+    from local_webpage_access.config import BuildMirrors, Config
+
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "pyzbar>=0.1.9\n", encoding="utf-8"
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    cfg = Config()
+    cfg.buildMirrors = BuildMirrors(enabled=True, aptMirror="mirrors.aliyun.com")
+    content = generate_dockerfile(m, workspace, config=cfg).read_text(encoding="utf-8")
+    assert "mirrors.aliyun.com" in content
+    assert "libzbar0" in content
+
+
+def test_apt_deps_no_requirements_file(workspace: Workspace) -> None:
+    """IMP-054：无 requirements 文件时不报错，不生成 apt 块。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install .", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "apt-get install -y --no-install-recommends libzbar0" not in content

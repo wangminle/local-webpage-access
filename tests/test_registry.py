@@ -42,7 +42,7 @@ def _static_manifest(mid: str = "demo") -> InstanceManifest:
         runtime=Runtime.SHARED_STATIC,
         servingMode=ServingMode.SHARED_STATIC,
         resourceProfile=ResourceProfile.TINY,
-        static=StaticConfig(hostPort=18001),
+        static=StaticConfig(hostPort=21001),
         desiredState=DesiredState.STOPPED,
         status=Status.PENDING,
     )
@@ -266,12 +266,12 @@ def test_record_started_and_health(registry: Registry) -> None:
 def test_delete_instance_cascades(registry: Registry) -> None:
     m = _static_manifest()
     registry.upsert_from_manifest(m)
-    registry.allocate_port("demo", 18001)
+    registry.allocate_port("demo", 21001)
     registry.add_event("demo", "info", "created")
     registry.delete_instance("demo")
     assert registry.get_instance("demo") is None
     assert registry.get_static_site("demo") is None
-    assert 18001 not in registry.allocated_ports()
+    assert 21001 not in registry.allocated_ports()
     assert registry.list_events("demo") == []
 
 

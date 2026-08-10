@@ -414,7 +414,15 @@ class StaticGateway:
 
     # ---- IMP-006：路径别名路由片段 -----------------------------------------
 
-    def generate_alias_config(self, instance_id: str, alias: str, host_port: int) -> Path:
+    def generate_alias_config(
+        self,
+        instance_id: str,
+        alias: str,
+        host_port: int,
+        *,
+        runtime: str | None = None,
+        spa_fallback: bool = False,
+    ) -> Path:
         """渲染路径别名路由片段，写入 ``aliases/<id>.conf``（IMP-006）。
 
         片段被主 Caddyfile 的统一入口块 ``import`` 进 ``:{staticGatewayPort}`` 站点。
@@ -425,20 +433,23 @@ class StaticGateway:
         alias slug 已由 :func:`paths.validate_path_alias` 校验为
         ``[a-z0-9-]+``，host_port 为 int，均可安全内插 Caddyfile。
 
-        .. note:: SPA 绝对资源路径限制（IMP-006 验收项）
+     .. note:: SPA 绝对资源路径限制（IMP-006 / IMP-023 / IMP-055）
 
             ``handle_path`` 去掉 ``/<alias>`` 前缀后转发给 upstream，因此
             **相对路径资源**（``./assets/app.js``、``assets/logo.png``）能正确
             解析为 ``/<alias>/assets/...``。但**绝对路径资源**
             （``/assets/app.js``、以 ``/`` 开头的 ``src``/``href``）会绕过别名，
-            直接打到统一入口根 ``/assets/...`` → 404。
+            直接打到统一入口根 ``/assets/...`` -> 空 200 / 404。
 
-            这意味着：纯静态 HTML 站点（相对路径或无外部资源）开箱即用；
-            Vue/React 等 SPA 的构建产物若使用绝对 ``base: '/'``，资源会 404。
-            受影响的项目应在构建时设置 ``base: './'``（Vite）或等价的相对基址，
-            或继续使用 hostPort 端口直达（资源路径不受别名前缀影响）。
-            ``import_zip`` 已把别名限制为 ``shared-static`` 纯静态形态，前端
-            SPA 构建形态（``build_and_host_frontend``）当前不强制注入别名。
+            受影响的项目应在构建时设显式 base path（Vite ``--base=/<alias>/``）
+            并让 Router/API 跟 ``BASE_URL``，或继续使用 hostPort 端口直达。
+            设别名时若检出绝对路径资源会硬失败（IMP-023 / IMP-055）。
+
+            .. deprecated:: IMP-055
+
+                ``spa_fallback=True`` 保留 BUG-465 全局 ``/assets`` 回退作为
+                **逃生舱**（多实例争抢 ``/assets``、管不住 ``/api`` 与 Router），
+                **默认关闭**，不作为长期通用方案。应用侧应按方案 B 改造。
         """
         from local_webpage_access.paths import validate_path_alias
 
@@ -454,6 +465,18 @@ class StaticGateway:
             f"\tredir /{alias}/ permanent\n"
             f"}}\n"
         )
+
+        # IMP-055：默认关闭 BUG-465 SPA 资源回退（多实例争抢 /assets、管不住 /api）。
+        # spa_fallback=True 保留逃生舱，需调用方显式传入。
+        if spa_fallback:
+            matcher = f"@{alias.replace('-', '_')}_spa_assets"
+            content += (
+                f"# BUG-465 SPA 绝对路径资源回退（逃生舱）：/assets/* /favicon.* -> {host_port}\n"
+                f"{matcher} path /assets/* /favicon.ico /favicon.svg\n"
+                f"handle {matcher} {{\n"
+                f"\treverse_proxy 127.0.0.1:{host_port}\n"
+                f"}}\n"
+            )
         path = self.ws.app_alias_config(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")

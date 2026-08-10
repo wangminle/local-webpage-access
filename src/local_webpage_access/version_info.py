@@ -1,4 +1,4 @@
-"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.7.2-Build...`` 前缀。"""
+"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.7.3-Build...`` 前缀。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 _VERSION_PREFIX = re.compile(r"^V(\d+\.\d+\.\d+)", re.IGNORECASE)
 _PACKAGE_NAME = "local-webpage-access"
-_FALLBACK_VERSION = "0.7.2"
+_FALLBACK_VERSION = "0.7.3"
 
 
 def _is_lwa_repo(path: Path) -> bool:
@@ -78,7 +78,7 @@ def _version_from_metadata() -> str | None:
 
 @lru_cache(maxsize=1)
 def resolve_version() -> str:
-    """返回 semver 字符串（如 ``0.7.2``），不含 ``V`` 前缀。"""
+    """返回 semver 字符串（如 ``0.7.3``），不含 ``V`` 前缀。"""
     git_ver = _version_from_git(_repo_root())
     if git_ver:
         return git_ver
@@ -89,7 +89,7 @@ def resolve_version() -> str:
 
 
 def display_version() -> str:
-    """UI/CLI 展示用（如 ``V0.7.2``）。"""
+    """UI/CLI 展示用（如 ``V0.7.3``）。"""
     return f"V{resolve_version()}"
 
 

@@ -117,8 +117,30 @@ swap=4GB
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
 * **数据持久化**：仅自动 bind mount `data/` 目录。其他路径（如日志、上传目录）需用户在项目内处理。
 * **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。
-* **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。
-* **别名下 SPA 绝对资源路径（IMP-023）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 → **空 200、404 或错误 MIME（如 JS 请求得到 text/html）**，页面白屏。受影响项目应构建时设相对 base（Vite `base: './'`）或 `--base=/<alias>/`，或继续用 hostPort 直达。`lwa access review` 会对照「无前缀 vs 带前缀」子资源并告警（入口 HTML 200 ≠ 别名下可渲染）；瞬时连接失败（TIMEOUT/REFUSED）不计 IMP-023。
+* **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。路径别名的前提是应用侧显式、可配置的 base path（方案 B）；LWA 做门禁与探测，不代改应用源码（IMP-055）。无源码时优先 hostPort 或未来主机名别名。
+* **别名下 SPA 绝对资源路径（IMP-023 / IMP-055）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 -> **空 200、404 或错误 MIME（如 JS 请求得到 text/html）**，页面白屏。
+
+  **正解为方案 B（应用侧显式、可配置的 base path）**：
+  - Vite 构建：`vite build --base=/<alias>/`（或等价可配置基址）
+  - Vue Router：`createWebHistory(import.meta.env.BASE_URL)`
+  - 前端 API 客户端：从 `BASE_URL` 派生请求路径（如 `/<alias>/api/v1`）
+  - 后端 HTTP 路由在 Caddy `handle_path` 去前缀模型下通常保持 `/api`、`/assets`，不必改成相对路径
+  - `base: './'` 可消除绝对资源路径但**不推荐作为最终方案**（Router/API 仍需跟 `BASE_URL`）
+
+  **三类结果（IMP-055）**：
+
+  | 类 | 含义 | 例 | LWA 动作 |
+  | --- | --- | --- | --- |
+  | **A** | 开箱可别名（资源已相对或已带正确 base） | prd-review 页面壳（`./js`…） | 允许设别名；仍可提示 API 若仍为绝对根路径 |
+  | **B** | 现不可用，**显式 base path** 后可成功 | home-bookshelf（Vite `/assets` + `/api/v1`） | 设别名时**硬失败**并指向改造步骤；作者改完后可通过 |
+  | **C** | 路径别名模型下无解（无源码/硬编码/要双入口全完整等） | 无法重建的绝对根 SPA | 硬失败；建议 hostPort 或未来主机名别名 |
+
+  **设别名时**（`lwa alias set` / 管理页）：对 **shared-static 与 docker-compose** 实例均跑守卫；若能拉到入口 HTML 且检出绝对路径资源，会**硬失败**并提示 `--base=/<alias>/`、Router `BASE_URL`、API 派生、同步构建产物、hostPort 兜底等改造步骤（IMP-023 / IMP-055）；探不到入口时不拦截但提示「未验证入口 HTML」。
+
+  **IMP-055 收敛 BUG-465 回退**：此前曾为 docker-compose 实例追加全局 `/assets`/`favicon` 回退路由作为临时方案，现**默认关闭**（多实例争抢 `/assets`、管不住 `/api` 与 Router）。旧回退片段在下次 `alias set`/rebuild 别名时自动消失。逃生舱可通过 config 显式开启，但不作为长期方案。
+
+  `lwa access review` 除静态子资源外，还抽样绝对 `/api/...` 与「带别名前缀 API」对照（IMP-055）；绝对 API 根空 200 且前缀成功时降 overall，不再假绿。瞬时连接失败（TIMEOUT/REFUSED）不计 IMP-023。**深层路由抽样未覆盖**（055.12）：`access review` 不对 `/<alias>/` 下每条子路由逐一刷新验证 SPA fallback 行为，仅检测入口 HTML 与已知 API 模式；深层路由问题需人工浏览确认。
+
 * **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。**V0.6.13** 起 Caddy `-size.log.gz` 多轮转/旧游标迁移/归档暂时不可读时的补读逻辑已加固（避免双计或永久漏计）。
 * **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），**V0.6.13** 起容器查询失败禁止绕过挂载 fail-safe、registry 不可读时一致性检查 SKIP，但仍不能替代正式 relocate 事务。
 * **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>` 或管理页「从源更新」同步。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。`sourceKind=zip` 的实例不能用 `--from-dir --update`。请选项目根或 `dist/`，不要只选 `src/`。

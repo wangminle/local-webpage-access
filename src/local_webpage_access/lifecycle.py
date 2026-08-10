@@ -889,7 +889,7 @@ def _sync_alias_port(
         if m and int(m.group(1)) == host_port:
             return False  # 端口未漂移，别名片段仍有效
     try:
-        gateway.generate_alias_config(instance_id, alias, host_port)
+        gateway.generate_alias_config(instance_id, alias, host_port, runtime=manifest.runtime.value)
         gateway.reload_all()
         log.info(
             "实例 %s 别名片段已按新端口 %d 重写并 reload（IMP-021）",

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import PathError, ZipImportError
+from local_webpage_access.errors import PathError, RecognitionError, ZipImportError
 from local_webpage_access.importer import (
     Importer,
     extract_html_title,
@@ -1713,3 +1713,153 @@ def test_import_env_example_records_event(
     events = importer.registry.list_events(result.instance_id)
     types = [e.get("event_type") for e in events]
     assert "env_example_detected" in types
+
+
+# ---- CHK-178：路径别名与 builtin 后端 / 重扫保留 --------------------------
+
+
+@pytest.fixture()
+def builtin_importer(
+    workspace: Workspace, registry: Registry
+) -> Importer:
+    """强制 builtin 后端的导入器（模拟 Caddy 不可用降级）。"""
+    return Importer(workspace, Config(staticGateway="builtin"), registry)
+
+
+def test_import_path_alias_rejected_on_builtin_backend(
+    builtin_importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """CHK-178/P2：builtin 后端无统一别名入口，导入期应拒绝 --path-alias。
+
+    否则写出 routeMode=name/routeHost 但实际访问不到（CLI 还会展示假 URL）。
+    与运行时 set_instance_path_alias 的 builtin 拦截（path_alias.py）对称。
+    """
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    with pytest.raises(RecognitionError, match="Caddy"):
+        builtin_importer.import_zip(zip_path, path_alias="voiceprint")
+    # 拒绝在写盘前 → 不应留下半成品实例目录
+    assert not workspace.app_dir("demo").exists()
+
+
+def test_import_path_alias_rejected_on_builtin_container(
+    builtin_importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """CHK-178/P2：容器实例在 builtin 后端同样拒绝 --path-alias。"""
+    zip_path = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n"},
+    )
+    with pytest.raises(RecognitionError, match="Caddy"):
+        builtin_importer.import_zip(zip_path, path_alias="api-alias")
+    assert not workspace.app_dir("api").exists()
+
+
+def test_rescan_preserves_static_path_alias(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """CHK-178/P2：``lwa scan`` 重扫静态实例不得清空已配置的路径别名。
+
+    复现：import --path-alias → apply_detection_to_manifest 重建 manifest 时
+    未透传 path_alias，routeMode/name + routeHost 被重置为 port/None。
+    """
+    from local_webpage_access.importer import apply_detection_to_manifest
+    from local_webpage_access.scanner import Scanner
+
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    r1 = importer.import_zip(zip_path, path_alias="voiceprint")
+    iid = r1.instance_id
+    assert r1.manifest.static.routeMode == "name"
+    assert r1.manifest.static.routeHost == "voiceprint"
+
+    # 模拟 lwa scan：重新扫描并应用
+    scanner = Scanner()
+    current_dir = workspace.app_current(iid)
+    detection = scanner.detect(current_dir)
+    manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+    fresh = apply_detection_to_manifest(manifest, detection, workspace)
+    assert fresh.static is not None
+    assert fresh.static.routeMode == "name"
+    assert fresh.static.routeHost == "voiceprint"
+
+
+def test_rescan_preserves_container_path_alias(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """CHK-178/P2：``lwa scan`` 重扫容器实例同样保留路径别名（IMP-014）。"""
+    from local_webpage_access.importer import apply_detection_to_manifest
+    from local_webpage_access.scanner import Scanner
+
+    zip_path = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(zip_path, path_alias="prd-review")
+    iid = r1.instance_id
+    assert r1.manifest.runtime == Runtime.DOCKER_COMPOSE
+    assert r1.manifest.container.routeMode == "name"
+    assert r1.manifest.container.routeHost == "prd-review"
+
+    scanner = Scanner()
+    current_dir = workspace.app_current(iid)
+    detection = scanner.detect(current_dir)
+    manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+    fresh = apply_detection_to_manifest(manifest, detection, workspace)
+    assert fresh.container is not None
+    assert fresh.container.routeMode == "name"
+    assert fresh.container.routeHost == "prd-review"
+
+
+# ---- BUG-469：import --path-alias 不得绕过绝对 SPA 资源硬守卫 --------------
+
+
+def test_import_path_alias_rejects_absolute_spa_assets(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-469：import --path-alias 须执行与 set_instance_path_alias 同等的硬守卫。
+
+    入口 HTML 含 ``/assets/...`` 时不得写出 routeMode=name/routeHost，
+    否则用户可绕过设别名门禁，首次启动仍生成不可用别名路由。
+    """
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway.detect_backend",
+        lambda self: "caddy",
+    )
+    zip_path = _make_zip(
+        tmp_path / "spa.zip",
+        {
+            "index.html": (
+                "<!doctype html><html><head>"
+                '<script type="module" src="/assets/app.js"></script>'
+                "</head><body>spa</body></html>"
+            ),
+            "assets/app.js": "console.log(1);",
+        },
+    )
+    with pytest.raises(RecognitionError, match="绝对路径资源|白屏|IMP-023"):
+        importer.import_zip(zip_path, path_alias="broken-spa")
+    assert not workspace.app_dir("spa").exists()
+
+
+def test_import_path_alias_allows_relative_spa_assets(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    """相对资源路径的 SPA 仍允许 import --path-alias。"""
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway.detect_backend",
+        lambda self: "caddy",
+    )
+    zip_path = _make_zip(
+        tmp_path / "ok-spa.zip",
+        {
+            "index.html": (
+                "<!doctype html><html><head>"
+                '<script type="module" src="./assets/app.js"></script>'
+                "</head><body>spa</body></html>"
+            ),
+            "assets/app.js": "console.log(1);",
+        },
+    )
+    result = importer.import_zip(zip_path, path_alias="ok-spa")
+    assert result.manifest.static is not None
+    assert result.manifest.static.routeMode == "name"
+    assert result.manifest.static.routeHost == "ok-spa"

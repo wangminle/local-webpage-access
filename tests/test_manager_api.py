@@ -1912,7 +1912,7 @@ def caddy_alias_gateway(monkeypatch):
         def is_enabled(self, iid):
             return False
 
-        def generate_alias_config(self, iid, alias, hp):
+        def generate_alias_config(self, iid, alias, hp, **kwargs):
             p = self.ws.app_alias_config(iid)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
@@ -2069,7 +2069,7 @@ def test_path_alias_running_triggers_gateway_reload(
     )
     monkeypatch.setattr(
         "local_webpage_access.path_alias.StaticGateway.generate_alias_config",
-        lambda self, instance_id, alias, host_port: generated.append(
+        lambda self, instance_id, alias, host_port, **kw: generated.append(
             (instance_id, alias, host_port)
         ),
     )
@@ -2129,7 +2129,7 @@ def test_path_alias_reload_failure_does_not_persist(
     )
     monkeypatch.setattr(
         "local_webpage_access.path_alias.StaticGateway.generate_alias_config",
-        lambda self, instance_id, alias, host_port: None,
+        lambda self, instance_id, alias, host_port, **kw: None,
     )
     monkeypatch.setattr(
         "local_webpage_access.path_alias.StaticGateway.reload_all",

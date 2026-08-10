@@ -34,16 +34,15 @@ def alias_set(
         typer.secho(f"已设置路径别名：/{slug}/", fg=typer.colors.GREEN)
         if result.route_url:
             typer.echo(f"  入口：{result.route_url}")
-        # IMP-023（WBS-20260708 阶段4.2）：SPA 子路径资源加载提示。
-        # 路径别名 reverse_proxy 去 /<alias>/ 前缀转发，相对路径资源（./assets/…）正常；
-        # 但绝对路径资源（/assets/…，Vue/React 默认 base: '/'）会绕过别名打到入口根 → 404。
-        # 提示构建时用相对 base 或显式 --base=/<alias>/。纯静态 HTML（相对路径）不受影响。
-        typer.secho(
-            f"  SPA 提示：Vue/React 等若用绝对资源路径（/assets/…），/{slug}/ 下会 404；"
-            f"构建时设 base 为相对路径（Vite: base: './'）或 --base=/{slug}/，"
-            f"相对路径资源不受影响。",
-            fg=typer.colors.CYAN,
-        )
+        # IMP-023 / IMP-055：设别名时已对入口 HTML 绝对路径资源硬拦截。
+        # html_verified=False 表示探不到入口（实例未监听 / HTML 拉不到），守卫跳过。
+        if not result.html_verified:
+            typer.secho(
+                f"  提示：未验证入口 HTML（实例可能未监听或 HTML 拉不到），守卫已跳过。"
+                f"若 SPA 使用绝对 base（/assets/…），别名下仍会白屏。"
+                f"请确认构建时设 --base=/{slug}/（Vite）或等价配置后重新设置别名。",
+                fg=typer.colors.CYAN,
+            )
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

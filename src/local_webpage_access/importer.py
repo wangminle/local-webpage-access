@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import LwaError, ZipImportError
+from local_webpage_access.errors import LwaError, RecognitionError, ZipImportError
 from local_webpage_access.import_activity import import_activity_lock
 from local_webpage_access.logging import get_logger
 from local_webpage_access.security import ZipSanitizeResult
@@ -415,6 +415,11 @@ class Importer:
         if path_alias is not None:
             existing = set(self.registry.list_route_hosts().keys())
             validate_path_alias(path_alias, existing_aliases=existing)
+            # CHK-178/P2：别名统一入口仅在 Caddy 后端可用；builtin 多端口模式
+            # 无 :staticGatewayPort 入口，导入了也访问不到。与 set_instance_path_alias
+            # 的 builtin 拦截（path_alias.py）保持一致，导入期直接拒绝，避免写出
+            # routeMode=name/routeHost 但实际不可用的入口（CLI 还会展示假 URL）。
+            self._assert_alias_backend_supported(path_alias)
             log.info("路径别名 %s 已校验通过", path_alias)
 
         # BUG-127 / BUG-313：冲突检查与认领合并为 mkdir 原子 claim。
@@ -469,6 +474,15 @@ class Importer:
                     f"该实例被识别为 {detection.form}（{detection.runtime}）；"
                     f"请去掉 --path-alias",
                     instance_id=instance_id,
+                )
+
+            # BUG-469：导入期别名与运行时 set_instance_path_alias 必须过同一道
+            # IMP-023 / IMP-055 硬守卫，否则用户可在 import 阶段带 --path-alias
+            # 绕过门禁，首次启动后生成不可用别名路由（白屏）。此时实例尚未运行，
+            # 直接从解压后的 current/ 读入口 HTML 做绝对路径资源检测。
+            if path_alias is not None and not detection.pending:
+                self._assert_alias_no_absolute_spa_assets(
+                    current_dir, alias=path_alias, instance_id=instance_id
                 )
 
             # 构建 manifest
@@ -546,7 +560,7 @@ class Importer:
         except Exception as exc:
             log.error("导入 %s 失败，清理半成品：%s", instance_id, exc)
             self._cleanup_failed(instance_id)
-            if isinstance(exc, ZipImportError):
+            if isinstance(exc, (ZipImportError, RecognitionError)):
                 raise
             # BUG-187：瞬时失败（IO/SQLite locked/扫描异常）不得携带 instance_id——
             # daemon process_zip 据 instance_id 是否存在区分"slug 冲突（归档）"与
@@ -806,7 +820,9 @@ class Importer:
                 if old_manifest.static is not None and manifest.static is not None:
                     # BUG-321：更新源码不等于重新启用用户已停止的静态实例。
                     manifest.static.enabled = old_manifest.static.enabled
-                # IMP-006：路径别名是用户/CLI 选择，不从 zip 推导，必须保留
+                # IMP-006：路径别名是用户/CLI 选择，不从 zip 推导，必须保留。
+                # 注意 apply_detection_to_manifest 已在重建时保留别名（CHK-178/P2），
+                # 此处为幂等兜底——若上游实现变动也不至于丢失别名。
                 if (
                     old_manifest.static is not None
                     and old_manifest.static.routeMode == "name"
@@ -819,6 +835,7 @@ class Importer:
                 # 否则容器实例 ``import --update`` 重建 manifest 时
                 # ``container.routeHost`` 被清空，管理页别名消失；而网关 Caddy
                 # 别名片段仍残留，造成 manifest/registry 与网关层不一致。
+                # （apply_detection_to_manifest 已保留，此处为幂等兜底——CHK-178/P2）
                 if (
                     old_manifest.container is not None
                     and old_manifest.container.routeMode == "name"
@@ -1401,6 +1418,48 @@ class Importer:
             return True
         return self.ws.app_dir(instance_id).exists()
 
+    def _assert_alias_backend_supported(self, path_alias: str) -> None:
+        """CHK-178/P2：路径别名需要 Caddy 统一入口。
+
+        builtin 多端口模式无 :staticGatewayPort 别名入口，导入期就应拒绝，
+        避免写出 routeMode=name/routeHost 但实际访问不到的入口。与运行时
+        ``set_instance_path_alias``（path_alias.py）的 builtin 拦截保持一致。
+        """
+        from local_webpage_access.static_gateway import StaticGateway
+
+        backend = StaticGateway(self.ws, self.config).detect_backend()
+        if backend != "caddy":
+            raise RecognitionError(
+                f"路径别名 {path_alias!r} 需要 Caddy 网关统一入口，"
+                f"当前静态后端为 {backend}（无 :{self.config.staticGatewayPort} "
+                f"别名入口）。请先 `lwa gateway on` 启用 Caddy"
+                f"（或安装 caddy 可执行文件），或去掉 --path-alias 改用端口直达。",
+            )
+
+    def _assert_alias_no_absolute_spa_assets(
+        self, current_dir: Path, *, alias: str, instance_id: str
+    ) -> None:
+        """BUG-469：导入期别名落盘前执行 IMP-023 / IMP-055 硬守卫。
+
+        与运行时 :func:`set_instance_path_alias` 走同一道守卫，避免用户在
+        import 阶段带 ``--path-alias`` 绕过门禁、首次启动后生成不可用别名路由。
+        此时实例尚未运行，直接从解压后的 ``current/`` 读入口 HTML 做绝对路径
+        资源检测；读不到入口 HTML（如纯后端无前端）时不拦截——无法证明会白屏。
+        """
+        from local_webpage_access.path_alias import (
+            reject_alias_if_absolute_spa_assets,
+        )
+
+        index = find_homepage_index(current_dir)
+        html: str | None = None
+        if index is not None:
+            with contextlib.suppress(OSError):
+                html = index.read_text(encoding="utf-8", errors="replace")
+        # html 为 None 时守卫函数内部不拦截（与 set_instance_path_alias 一致）
+        reject_alias_if_absolute_spa_assets(
+            html=html, alias=alias, instance_id=instance_id
+        )
+
     # ---- manifest 构建 ------------------------------------------------------
 
     def _build_manifest(
@@ -1553,6 +1612,9 @@ def apply_detection_to_manifest(
     亦保留 IMP-047 文件夹源字段（``sourceKind`` / ``sourceDirPath`` /
     ``sourceSyncHash``）：``build_manifest_from_detection`` 默认
     ``sourceKind="zip"``，若不透传则 ``lwa scan`` 会静默抹掉文件夹源身份。
+    CHK-178/P2：亦保留路径别名（``routeMode=name`` + ``routeHost``）。别名是
+    用户/CLI 选择，不从 zip 推导；``build_manifest_from_detection`` 默认
+    ``path_alias=None``，不在此回填会把别名静默清空。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -1584,6 +1646,27 @@ def apply_detection_to_manifest(
     fresh.sourceKind = getattr(manifest, "sourceKind", "zip") or "zip"
     fresh.sourceDirPath = getattr(manifest, "sourceDirPath", None)
     fresh.sourceSyncHash = getattr(manifest, "sourceSyncHash", None)
+    # CHK-178/P2：路径别名是用户/CLI 选择，不从 zip 推导，重扫不得清空。
+    # ``build_manifest_from_detection`` 默认 ``path_alias=None``，不透传会把
+    # static/container 的 routeMode=name、routeHost 重置为 port/None，导致
+    # ``lwa scan`` 后管理页 routeUrl 变空、注册表别名丢失、后续启动无法还原。
+    # 仅当重扫仍落在同一 runtime 时复制（跨形态切换时旧别名无对应子表，丢弃）。
+    if (
+        manifest.static is not None
+        and manifest.static.routeMode == "name"
+        and manifest.static.routeHost
+        and fresh.static is not None
+    ):
+        fresh.static.routeMode = "name"
+        fresh.static.routeHost = manifest.static.routeHost
+    if (
+        manifest.container is not None
+        and manifest.container.routeMode == "name"
+        and manifest.container.routeHost
+        and fresh.container is not None
+    ):
+        fresh.container.routeMode = "name"
+        fresh.container.routeHost = manifest.container.routeHost
     return fresh
 
 

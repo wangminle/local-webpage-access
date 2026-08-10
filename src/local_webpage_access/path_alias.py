@@ -46,6 +46,7 @@ class PathAliasResult:
     alias_entry_enabled: bool
     gateway_reloaded: bool
     unchanged: bool
+    html_verified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +56,7 @@ class PathAliasResult:
             "aliasEntryEnabled": self.alias_entry_enabled,
             "gatewayReloaded": self.gateway_reloaded,
             "unchanged": self.unchanged,
+            "htmlVerified": self.html_verified,
         }
 
 
@@ -70,6 +72,78 @@ def _current_alias(manifest: InstanceManifest) -> str | None:
         and container.routeHost
     ):
         return container.routeHost
+    return None
+
+
+def reject_alias_if_absolute_spa_assets(
+    *,
+    html: str | None,
+    alias: str,
+    instance_id: str,
+) -> None:
+    """入口 HTML 含绝对路径资源时拒绝设别名（IMP-023 / IMP-055 硬拦截）。
+
+    路径别名 ``handle_path`` 会去前缀；浏览器仍按 ``/assets/...`` 打到统一入口根，
+    常见结果是空 200 / 白屏。能证明会挂时明确失败，避免「设置成功但打不开」。
+    ``html`` 为空（探不到入口）时不拦截——无法证明不可用。
+    .. note:: IMP-055 撤销 docker-compose 豁免
+
+        此前 BUG-465 曾为 docker-compose 追加全局 ``/assets`` 回退路由并跳过本守卫。
+        IMP-055 收敛该回退（多实例争抢 ``/assets`` 且管不住 ``/api`` 与 Router），
+        恢复对所有 runtime 的硬拦截。应用侧须按显式 base path 方案改造（方案 B）。
+    """
+    if not html:
+        return
+    from local_webpage_access.access import _extract_absolute_resources
+
+    paths = _extract_absolute_resources(html)
+    if not paths:
+        return
+    sample = ", ".join(paths[:3])
+    more = "…" if len(paths) > 3 else ""
+    raise RecognitionError(
+        f"入口 HTML 含绝对路径资源（{sample}{more}），"
+        f"设置路径别名 /{alias}/ 后浏览器会绕过别名加载这些资源，页面会白屏（IMP-023 / IMP-055）。\n"
+        f"解决方法（方案 B - 显式、可配置的 base path，选一）：\n"
+        f"  1. 构建时设 --base=/{alias}/（Vite: vite build --base=/{alias}/），"
+        f"同步重建静态产物后重新设置别名；\n"
+        f"  2. Vue Router 用 createWebHistory(import.meta.env.BASE_URL)，"
+        f"前端 API 客户端从 BASE_URL 派生请求路径（如 /{alias}/api/v1）；\n"
+        f"  3. 若无源码或无法重建（C 类），路径别名模型下无解，"
+        f"请继续用 hostPort 端口直达。\n"
+        f"注意：base: './' 可消除绝对资源路径但不推荐作为最终方案"
+        f"（Router/API 仍需跟 BASE_URL）。",
+        instance_id=instance_id,
+    )
+
+
+def _fetch_entrypoint_html_for_alias_guard(
+    *,
+    workspace: Workspace,
+    manifest: InstanceManifest,
+    host_port: int | None,
+) -> str | None:
+    """best-effort 取入口 HTML，供设别名前的 IMP-023 守卫。
+
+    优先 GET ``http://127.0.0.1:{hostPort}/``；静态站再尝试磁盘 ``index.html``。
+    失败返回 ``None``（调用方不拦截）。
+    """
+    from local_webpage_access.access import _fetch_text
+
+    if host_port is not None:
+        html = _fetch_text(f"http://127.0.0.1:{host_port}/")
+        if html:
+            return html
+
+    if manifest.runtime == Runtime.SHARED_STATIC:
+        root = workspace.app_current(manifest.id)
+        for candidate in (root / "index.html", root / "public" / "index.html"):
+            if not candidate.is_file():
+                continue
+            try:
+                return candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
     return None
 
 
@@ -148,6 +222,7 @@ def _rollback_alias_config(
     host_port: int | None,
     had_fragment: bool,
     previous_fragment: str | None,
+    runtime: str | None = None,
 ) -> None:
     """Caddy reload 失败后恢复别名片段文件到变更前状态。"""
     path = gateway.ws.app_alias_config(instance_id)
@@ -157,7 +232,7 @@ def _rollback_alias_config(
     elif path.exists():
         path.unlink()
     elif previous_alias and host_port is not None:
-        gateway.generate_alias_config(instance_id, previous_alias, host_port)
+        gateway.generate_alias_config(instance_id, previous_alias, host_port, runtime=runtime)
 
 
 def _apply_gateway_alias(
@@ -195,7 +270,7 @@ def _apply_gateway_alias(
         )
         try:
             if alias:
-                gateway.generate_alias_config(instance_id, alias, host_port)
+                gateway.generate_alias_config(instance_id, alias, host_port, runtime=runtime)
             else:
                 gateway.remove_alias_config(instance_id)
             gateway.reload_all()
@@ -207,6 +282,7 @@ def _apply_gateway_alias(
                 host_port=host_port,
                 had_fragment=had_fragment,
                 previous_fragment=previous_fragment,
+                runtime=runtime,
             )
             raise
         return bool(alias), True
@@ -328,6 +404,7 @@ def _set_instance_path_alias_locked(
             alias_entry_enabled=False,
             gateway_reloaded=False,
             unchanged=True,
+            html_verified=True,
         )
 
     if alias is not None:
@@ -348,6 +425,20 @@ def _set_instance_path_alias_locked(
             )
 
     host_port, _ = _resolve_host_port(manifest)
+
+    # IMP-023 / IMP-055：设别名前检测入口 HTML 绝对路径资源；
+    # 能证明会白屏则硬失败（对齐 IMP-022）。清除别名（alias=None）恒安全，跳过。
+    # 探不到 HTML 时不拦截（无法证明），但成功路径提示「未验证入口 HTML」。
+    html_verified = False
+    if alias is not None:
+        html = _fetch_entrypoint_html_for_alias_guard(
+            workspace=workspace, manifest=manifest, host_port=host_port
+        )
+        if html is not None:
+            html_verified = True
+            reject_alias_if_absolute_spa_assets(
+                html=html, alias=alias, instance_id=instance_id
+            )
 
     # 运行中 + Caddy：先网关重载，成功后再落盘，避免「manifest 已改但入口未生效」
     alias_entry_enabled, gateway_reloaded = _apply_gateway_alias(
@@ -384,7 +475,13 @@ def _set_instance_path_alias_locked(
         alias_entry_enabled=alias_entry_enabled,
         gateway_reloaded=gateway_reloaded,
         unchanged=False,
+        html_verified=html_verified,
     )
 
 
-__all__ = ["PathAliasResult", "path_alias_lock", "set_instance_path_alias"]
+__all__ = [
+    "PathAliasResult",
+    "path_alias_lock",
+    "reject_alias_if_absolute_spa_assets",
+    "set_instance_path_alias",
+]

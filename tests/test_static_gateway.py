@@ -354,7 +354,7 @@ def test_apply_gateway_alias_reloads_when_caddy_site_enabled(
     monkeypatch.setattr(
         StaticGateway,
         "generate_alias_config",
-        lambda self, iid, alias, hp: calls.__setitem__("gen_alias", calls["gen_alias"] + 1),
+        lambda self, iid, alias, hp, **kw: calls.__setitem__("gen_alias", calls["gen_alias"] + 1),
     )
 
     alias_enabled, reloaded = _apply_gateway_alias(
@@ -881,6 +881,93 @@ def test_generate_alias_config_writes_strip_prefix_route(
     # 无尾斜杠 → 301 到 /voiceprint-app-demo/
     assert "handle /voiceprint-app-demo {" in content
     assert "redir /voiceprint-app-demo/ permanent" in content
+
+
+def test_generate_alias_config_no_spa_fallback_by_default(
+    gateway: StaticGateway,
+) -> None:
+    """IMP-055：默认不追加 SPA 资源回退路由（无论 runtime）。"""
+    # shared-static（runtime=None）
+    path = gateway.generate_alias_config("demo", "blog", 18001)
+    content = path.read_text(encoding="utf-8")
+    assert "handle_path /blog/* {" in content
+    assert "spa_assets" not in content
+    assert "/assets/*" not in content
+
+    # docker-compose 也默认不追加（撤销 BUG-465 豁免）
+    path = gateway.generate_alias_config(
+        "backend", "home-bookshelf", 18009, runtime="docker-compose"
+    )
+    content = path.read_text(encoding="utf-8")
+    assert "handle_path /home-bookshelf/* {" in content
+    assert "spa_assets" not in content
+    assert "/assets/*" not in content
+
+
+def test_generate_alias_config_spa_fallback_when_explicitly_enabled(
+    gateway: StaticGateway,
+) -> None:
+    """IMP-055：spa_fallback=True 逃生舱追加 SPA 绝对路径资源回退 handle。"""
+    path = gateway.generate_alias_config(
+        "backend", "home-bookshelf", 18009, runtime="docker-compose", spa_fallback=True
+    )
+    content = path.read_text(encoding="utf-8")
+    # 基本别名路由仍然存在
+    assert "handle_path /home-bookshelf/* {" in content
+    assert "reverse_proxy 127.0.0.1:18009" in content
+    # SPA 资源回退路由存在
+    assert "@home_bookshelf_spa_assets" in content
+    assert "path /assets/* /favicon.ico /favicon.svg" in content
+    assert "handle @home_bookshelf_spa_assets {" in content
+    # 回退路由代理到同一后端
+    # 验证 reverse_proxy 出现至少两次（别名路由 + SPA 回退）
+    assert content.count("reverse_proxy 127.0.0.1:18009") >= 2
+
+
+def test_generate_alias_config_spa_fallback_alias_with_hyphens(
+    gateway: StaticGateway,
+) -> None:
+    """别名含连字符时，matcher 名用下划线替换（Caddy 标识符安全）。"""
+    path = gateway.generate_alias_config(
+        "app", "my-cool-app", 18010, runtime="docker-compose", spa_fallback=True
+    )
+    content = path.read_text(encoding="utf-8")
+    assert "@my_cool_app_spa_assets" in content
+    # 原别名路由仍用原名
+    assert "handle_path /my-cool-app/* {" in content
+
+
+def test_generate_alias_config_spa_fallback_off_for_all_runtimes(
+    gateway: StaticGateway,
+) -> None:
+    """IMP-055：spa_fallback 未传时，shared-static 和 docker-compose 均不追加回退。"""
+    path = gateway.generate_alias_config(
+        "demo", "blog", 18001, runtime="shared-static"
+    )
+    content = path.read_text(encoding="utf-8")
+    assert "spa_assets" not in content
+
+    path = gateway.generate_alias_config(
+        "demo", "blog", 18001, runtime="docker-compose"
+    )
+    content = path.read_text(encoding="utf-8")
+    assert "spa_assets" not in content
+
+
+def test_generate_alias_config_spa_fallback_after_alias_handle(
+    gateway: StaticGateway,
+) -> None:
+    """SPA 回退路由在别名 handle_path / handle 之后（Caddy 互斥组顺序）。"""
+    path = gateway.generate_alias_config(
+        "backend", "home-bookshelf", 18009, runtime="docker-compose", spa_fallback=True
+    )
+    content = path.read_text(encoding="utf-8")
+    idx_handle_path = content.index("handle_path")
+    idx_handle_redir = content.index("handle /home-bookshelf")
+    idx_spa = content.index("@home_bookshelf_spa_assets")
+    # SPA 回退在别名路由之后
+    assert idx_spa > idx_handle_path
+    assert idx_spa > idx_handle_redir
 
 
 def test_remove_alias_config_idempotent(gateway: StaticGateway) -> None:

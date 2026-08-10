@@ -24,7 +24,7 @@ def make_static_manifest(mid: str = "demo", **overrides) -> InstanceManifest:
         runtime=Runtime.SHARED_STATIC,
         servingMode=ServingMode.SHARED_STATIC,
         resourceProfile=ResourceProfile.TINY,
-        static=StaticConfig(hostPort=18001),
+        static=StaticConfig(hostPort=21001),
         desiredState=DesiredState.STOPPED,
         status=Status.PENDING,
     )

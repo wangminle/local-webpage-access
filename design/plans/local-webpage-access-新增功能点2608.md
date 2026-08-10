@@ -1,7 +1,7 @@
 # 新增功能点计划（202608）— 编号续接 IMP-043
 
-> **状态（2026-08-09）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。 **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
-> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
+> **状态（2026-08-10）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。**IMP-055**：路径别名兼容性门禁与文档口径见 §12；完整发现—修复—多轮复核过程见 [`路径别名兼容性问题发现与修复完整复盘-20260810.md`](./路径别名兼容性问题发现与修复完整复盘-20260810.md)。 **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
+> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**；**§12 路径别名 × 方案 B（IMP-055，含详细 WBS）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
 
 ---
 
@@ -656,10 +656,141 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 ---
 
+## 12. IMP-055 — 路径别名兼容性门禁（承接方案 B / 应用显式 base path）
+
+> **状态**：主体于 2026-08-09 落地；2026-08-10 经 CHK-182～186 多轮复核补齐 BUG-467～469、别名感知 bundle URL、MIME 校验和负向样本。详细时间线与最终测试矩阵见 [`路径别名兼容性问题发现与修复完整复盘-20260810.md`](./路径别名兼容性问题发现与修复完整复盘-20260810.md)。
+> **关联**：CHK-180（别名链路诊断）、CHK-181（home-bookshelf 子路径方案评审）、BUG-465（容器 `/assets` 回退）、BUG-466 / DEV-101（设别名硬拦绝对资源）、BUG-467～469、prd-review vs home-bookshelf 对比。
+
+### 12.1 结论：方案 B 谁改什么
+
+**方案 B（应用侧显式、可配置的 base path）** 是让路径别名「完整可用」的正解：
+
+- Vite / 构建：`vite build --base=/<alias>/`（或等价可配置基址）
+- Vue Router：`createWebHistory(import.meta.env.BASE_URL)`
+- 前端 API 客户端：从 `import.meta.env.BASE_URL` 派生（如 `/home-bookshelf/api/v1`）
+- **后端 HTTP 路由**在 Caddy `handle_path` 去前缀模型下**通常保持** `/api`、`/assets`，不必改成「相对路径」
+- CLI / skills：可配置服务根 / API 前缀，而非笼统「相对地址」
+
+| 责任方 | 是否立即改 | 做什么 |
+| --- | --- | --- |
+| **应用作者**（prd-review / home-bookshelf 等） | **是（已沟通）** | 按上表改前端资源/路由/API 基址；固定别名后明确「别名 URL 为正式 Web 入口，hostPort 直连前端可能不完整」 |
+| **LWA 本仓** | **是，立即着手（本 IMP）** | **不改**业务应用源码；做平台门禁、探测增强、文档/skill 口径、收敛 BUG-465 假成功 |
+| **LWA** | **否** | 不在网关长期用全局 `/assets` 回退冒充「别名已兼容」；不替无源码应用自动改包 |
+
+对照三类结果（会话共识）：
+
+| 类 | 含义 | 例 | LWA 动作 |
+| --- | --- | --- | --- |
+| **A** | 开箱可别名（资源等已相对或已带正确 base） | prd-review **页面壳**（`./js`…） | 允许设别名；仍可提示 API 若仍为绝对根路径 |
+| **B** | 现不可用，**显式 base path** 后可成功 | home-bookshelf（Vite `/assets` + `/api/v1`） | 设别名时**硬失败**并指向改造步骤；作者改完后可通过 |
+| **C** | 路径别名模型下无解（无源码/硬编码/要双入口全完整等） | 无法重建的绝对根 SPA | 硬失败；建议 hostPort 或未来主机名别名 |
+
+**prd-review vs home-bookshelf（已核实）**：二者皆为 docker-compose；差别在 HTML——前者资源相对（A·壳），后者绝对（B）。二者 API 目前都偏绝对根路径；prd「能用别名」主要指不白屏，不等于 API 层已完美。
+
+### 12.2 关键决策（已拍板）
+
+| # | 决策 |
+| --- | --- |
+| **055.a** | 文案统一为「**显式、可配置的 base path**」，禁止把方案 B 泛称为「改成相对地址」；文档中 `base: './'` 仅作次优/补充说明，**最终推荐** `--base=/<alias>/` + Router/API 跟 `BASE_URL` |
+| **055.b** | **恢复** docker-compose 的 IMP-023/BUG-466 硬拦截：能证明入口 HTML 含绝对资源则设别名失败；**撤销**「因 BUG-465 回退而对 docker-compose 跳过守卫」 |
+| **055.c** | BUG-465 全局 `/assets`/`favicon` 回退：**降级为遗留/可选或默认关闭**，不得作为长期通用方案（多实例争抢 `/assets`；且管不住 `/api` 与 Router） |
+| **055.d** | 设别名失败提示须含：改 `--base=/<alias>/`、Router/API 跟 `BASE_URL`、同步构建产物、或继续用 hostPort；对无源码点明属 C |
+| **055.e** | `lwa access review` 增强：除静态子资源外，抽样绝对 `/api` 与「带别名前缀 API」对照；overall 不得在 API 根空 200 时假绿 |
+| **055.f** | 本 IMP **不包含** 主机名别名实现（可另开候选）；文档可写「无源码时优先 hostPort / 未来主机名」 |
+| **055.g** | **不**在本仓直接改 home-bookshelf / prd-review 源码（已交作者）；LWA 只改平台与文档 |
+
+### 12.3 现状触点
+
+| 模块 | 路径 | 现状 |
+| --- | --- | --- |
+| 设别名守卫 | `path_alias.py` `reject_alias_if_absolute_spa_assets` / `_fetch_entrypoint_html_for_alias_guard` | 有硬拦，但 **`runtime != DOCKER_COMPOSE` 才执行**（被 BUG-465 豁免） |
+| 别名片段 | `static_gateway.py` `generate_alias_config` | docker-compose 追加 `@*_spa_assets` → `/assets/*` 等 |
+| CLI 提示 | `cli/alias.py` | 成功后残余风险 cyan 提示；失败走 `RecognitionError` |
+| 访问复核 | `access.py` `_check_subresources` / `review_access` | 主查绝对静态资源；**未**系统对照 `/api` |
+| 文档 | `docs/known-limitations.md` / `docs/faq.md` | 已有 IMP-023；口径仍偏「相对 base / `./`」；与 055.a 未完全对齐 |
+| Skills | `lwa-import-zip` 等 | 有 SPA 白屏提示；需改为显式 base path |
+
+### 12.4 WBS（可执行）
+
+> 规模：S≤0.5d · M≈0.5–1.5d · L≈1.5–3d。建议顺序：**A → B → C → D → E**（A/B 可同一 PR；D 可与 C 后期并行）。
+> **立即着手**指阶段 A–B；C–E 同迭代收口，不拖到「不着急」队列。
+
+#### 阶段 A — 口径与失败文案（文档先行、与代码同批）
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **055.01** | 三类结果写入计划/限制说明 | S | 本 §12；`docs/known-limitations.md` | A/B/C 表 + 「显式 base path」定义；标明方案 B 属应用、LWA 做门禁 | — | 读者能区分 prd（A·壳）与 bookshelf（B） |
+| **055.02** | FAQ / 别名白屏条修订 | S | `docs/faq.md` | 推荐 `--base=/<alias>/` + Router/API；`./` 降为不推荐最终方案；固定 base 与 hostPort 取舍 | 055.01 | 无「只改相对地址即可」误导句 |
+| **055.03** | Skill 提示对齐 | S | `skills/lwa-import-zip`、`lwa-build-frontend-static`、相关 README | 白屏规避改为显式 base path；勿写「前后端都改相对」 | 055.01 | skill 与 FAQ 同口径 |
+
+#### 阶段 B — 设别名硬门禁（撤销 docker-compose 豁免）
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **055.04** | 恢复容器绝对资源硬拦 | M | `path_alias.py` | 设别名（`alias is not None`）对 **SHARED_STATIC 与 DOCKER_COMPOSE** 均跑守卫；删除「BUG-465 故跳过」分支 | — | `test_path_alias_spa_guard`：容器含 `/assets` HTML → `RecognitionError`；不写 conf、不 reload |
+| **055.05** | 失败文案升级 | S | `reject_alias_if_absolute_spa_assets` | 文案含：`--base=/<alias>/`、Router `BASE_URL`、API 派生、同步 static、hostPort 兜底；避免只提 `base: './'` | 055.04 | 单测 `match` 关键短语；CLI/管理页透出同一 `RecognitionError` |
+| **055.06** | 探不到 HTML 时的行为 | S | `_fetch_entrypoint_html_for_alias_guard` + CLI | 仍不硬拦（无法证明）；成功路径 cyan/管理页提示「未验证入口 HTML」 | 055.04 | 既有 FakeGW/无监听测例仍绿 |
+
+#### 阶段 C — 收敛 BUG-465 回退
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **055.07** | 默认关闭 SPA 根路径回退 | M | `static_gateway.generate_alias_config` | 默认**不再**为 docker-compose 追加 `/assets/*` handle；可选：`config` 显式 `aliasSpaAssetFallback: true` 才开启（若保留逃生舱） | 055.04 | 新生成 conf 无 `@*_spa_assets`（默认）；单测锁片段内容 |
+| **055.08** | 既有 aliases 片段迁移说明 | S | docs / `lwa gateway on` 或 alias set 重写路径 | 文档：旧回退片段在下次 `alias set`/rebuild 别名时消失；多实例争抢风险说明 | 055.07 | known-limitations 记「回退非长期方案」 |
+| **055.09** | 回归测试调整 | S | `tests/test_static_gateway.py`、`test_path_alias_spa_guard.py`、lifecycle mocks | 删除/改写「容器因回退而允许绝对资源」断言；保留 handle_path 去前缀基线测 | 055.04–07 | 定向 pytest 全绿 |
+
+#### 阶段 D — access review 增强（防假绿）
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **055.10** | 绝对 API 对照探测 | M | `access.py` | 从入口 HTML/已知模式抽取或探测 `/api...`：根路径 vs `/<alias>/api...`；根空 200/失败且前缀成功 → finding + 降 overall | 055.01 | 单测：模拟 bookshelf 形态 → 非 overall=ok |
+| **055.11** | 报告文案与 CLI | S | `access` 格式化 / `cli/access.py` | 提示属方案 B：改 API base；与静态 IMP-023 finding 区分 | 055.10 | `--json` 含稳定字段；人工可读一句原因 |
+| **055.12** | （可选）深层路由抽样 | S | `access.py` | best-effort：`/<alias>/` 与一假路径刷新是否仍 HTML；做不到则文档标明未覆盖 | 055.10 | 有测或明确「未做」写在 known-limitations |
+
+#### 阶段 E — 收口与台账
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **055.13** | 管理页设别名错误展示 | S | `manager_static` / path-alias API | 硬拦错误完整展示（含改造建议），无「已保存」假成功 | 055.05 | API 测或前端静态断言 |
+| **055.14** | 全量回归 + task-list | M | pytest / `task-list.md` | DEV/BUG/DOC 状态同步；§12 状态改「已落地」 | A–D | 全量或约定子集绿；摘要无漂移 |
+| **055.15** | 对外说明（可选） | S | README 摘句 / operations-playbook | 一小节：路径别名前提 = 应用显式 base path；LWA 只门禁不代改包 | 055.01–03 | 与 FAQ 无矛盾 |
+
+### 12.5 验收标准
+
+1. 对运行中的 **docker-compose** 实例，入口 HTML 含 `/assets/...` 时，`lwa alias set` / 管理页设别名 **失败**，且文案指向显式 `--base=/<alias>/`（不再因 BUG-465 豁免而成功）。
+2. 默认新生成的别名 conf **不含** 全局 `/assets` 回退（除非显式开启逃生舱）。
+3. `lwa access review` 对「静态 OK、绝对 API 打到入口根空 200」类实例 **不得 overall=ok**。
+4. 文档/skill 口径为「显式可配置 base path」，不再主推「整仓改相对地址」。
+5. **不**修改 home-bookshelf / prd-review 业务仓；作者侧改造不在本 IMP 完成定义内。
+
+### 12.6 task-list 映射
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-055` | 本功能点 |
+| `PLN-038` | 本规划入账 |
+| `CHK-180` / `CHK-181` | 诊断与方案评审来源 |
+| `BUG-466` / `DEV-101` | 硬拦已有基础；本 IMP 撤销容器豁免并升级文案 |
+| `BUG-465` / `DEV-102` | 回退实现；本 IMP 阶段 C 收敛 |
+| `BUG-467`～`BUG-469` | 首轮落地后的 API 漏报、聚合/建议错误、导入门禁绕过；多轮复核与最终修复见完整复盘 |
+| `CHK-182`～`CHK-186` / `TST-003` | 代码复核、实机正向 E2E、负向样本与最终 URL/MIME 回归矩阵 |
+| `DEV-103` | 编码落地跟踪 |
+
+### 12.7 明确不做（本 IMP）
+
+- 在 LWA 内自动重写第三方前端构建 base
+- 主机名别名产品化（另开 IMP）
+- 强制应用同时支持「别名完整 + hostPort 根路径前端完整」
+- 代 home-bookshelf / prd-review 合入业务 PR
+
+---
+
 ## 变更日志
 
 | 日期 | 变更 |
 | --- | --- |
+| 2026-08-10 | **§12 IMP-055 复盘补链**：补充 BUG-467～469、多轮复核、真实 prd-review/home-bookshelf E2E、重复别名前缀与最终 URL/MIME/JSON 404 修复；详细过程迁入独立复盘文档。 |
+| 2026-08-09 | **§12 IMP-055**：路径别名兼容性门禁（承接方案 B）；职责边界（应用改 base path / LWA 做门禁）；详细 WBS 055.01～15；撤销 docker-compose 对 BUG-466 豁免、收敛 BUG-465；`PLN-038`。 |
 | 2026-08-09 | **§11.5 IMP-053**：已有 Runtime 复用提示（init 软警告 + skills）；DEV-099。 |
 | 2026-08-09 | **§11 Agent 部署复盘**：入账 IMP-052 / BUG-455 / BUG-456 / PLN-036；区分缺陷与 Agent 误解；**已落地 DEV-098**（入口推断 + alembic 前置 + manager off 跨工作区黄字提示）。 |
 | 2026-08-06 | 建档。核对 2607；补记 IMP-044 / IMP-045；承接 IMP-042.b 与 IMP-029 候选。 |

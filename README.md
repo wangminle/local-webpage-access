@@ -14,14 +14,14 @@ V1 已完成全部功能（Phase 0~7），提供 CLI、管理页（HTTP API + �
 
 - **一键导入**：`lwa import xxx.zip` 或 `lwa import --from-dir /abs/path`（IMP-047）完成解压/复制、zip-slip 防护、sha256/内容指纹校验、单层根目录拍平、实例登记；放入 `inbox/` 由 daemon 自动导入 zip 亦可。文件夹源为只读复制进工作区，禁止就地运行关联目录。
 - **运行形态自动识别**：扫描 `package.json` / `requirements.txt` / `pyproject.toml` / `Pipfile` / `manage.py` 等，判定 `static` / `node` / `python` 与是否含数据库；识别失败标记 `pending` 并写入风险提示事件。
-- **端口池管理**：从配置端口池中分配，跳过 registry 已登记端口与宿主机实际监听端口，生成 `lanUrl` / `healthUrl`；静态与容器实例均可选**路径别名**（`/<slug>/` 统一入口，**需 Caddy**；builtin 下设置会被拦截）。
+- **端口池管理**：从配置端口池中分配，跳过 registry 已登记端口与宿主机实际监听端口，生成 `lanUrl` / `healthUrl`；静态与容器实例均可选**路径别名**（`/<slug>/` 统一入口，**需 Caddy**；builtin 下设置会被拦截）。**V0.7.3 / IMP-055**：设置别名时自动检测 SPA 绝对路径资源与 JS bundle 内 API 路径错位，不兼容则拒绝设置并输出重建建议。
 - **静态托管**：default 档在 Caddy 可用时用 Caddy，否则降级内置 `http.server`；Full 档要求 Caddy 严格可用（不静默降级）。支持嵌套 `index.html` 与同级资源。
 - **容器托管**：按技术栈生成 Dockerfile（非 root、`EXPOSE` 内部端口）与 Compose（端口/资源限额/`restart: unless-stopped`/SQLite `data/` 持久化 bind mount）。
 - **生命周期编排**：`start` / `stop` / `restart` / `recover` / `rebuild` / `cancel-build` / `remove`，实例级双层锁（进程内 `RLock` + 跨进程文件锁 + 陈旧锁回收）串行化同一实例操作；容器复用已登记端口保证 `lanUrl` 稳定。
 - **可观测性**：分类日志（build / run / gateway / import / scan）与按大小滚动、HTTP 健康检查、状态聚合、整机与实例级资源统计；管理页**浏览量统计**（Caddy 别名入口 JSON access log / builtin gateway.log / 容器日志尽力解析）。
 - **构建队列**：跨进程闸门限流（默认并发 1，`registry/build-locks.db`），拿不到槽位即标记 `queued`，排队超时可控；`cancel-build` 可取消排队/进行中构建（不删缓存/镜像/用户数据，IMP-039）。
 - **网关原子切换（IMP-037）**：`lwa gateway switch <caddy|builtin>` 事务切换后端（预检/停旧启新/回滚/`degraded`）；结果区分 `accessOk` / `fullyOk`。
-- **访问地址新鲜度（IMP-038/040）**：管理页读时合成 `lanUrl`；`lwa access refresh` / `doctor --access` / update 收尾 review；LAN 漂移节流自愈。`access review` 检测 SPA 别名资源错位（空 200 / 404 / 错误 MIME，IMP-023）。
+- **访问地址新鲜度（IMP-038/040）**：管理页读时合成 `lanUrl`；`lwa access refresh` / `doctor --access` / update 收尾 review；LAN 漂移节流自愈。`access review` 检测 SPA 别名资源错位（空 200 / 404 / 错误 MIME，IMP-023）与 **API 路径错位**（JS bundle 内 `/api/...` 在别名下不可达，IMP-055）。
 - **Full Profile 能力新鲜度**：`lwa gateway on` / 前台监管写 `capability-gateway.json`；manager / gateway / daemon 均周期刷新能力缓存；角色快照 overall 按本角色职责计算（避免 peer `unknown` 假红）；内部健康/access/Caddy admin 探针直连（不受 `http_proxy` 影响）；`lwa update` 默认重启原本在跑的 gateway，Full 收尾验收合并后的能力缓存。
 - **SQLite Registry**：七张表（instances / containers / static_sites / ports / events / builds / resources），外键级联、WAL 模式。
 - **管理页（WBS-22/23）**：内置 HTTP API + Vue 单页前端，token 鉴权（**V0.7.0 / IMP-046**：默认每 168h 自动轮换，本机 loopback 免 token，LAN 须有效 token；`lwa manager token` 查询），覆盖实例列表 / 详情 / 日志 / 资源 / 生命周期 / **取消构建** / 路径别名 / **浏览量** / **冗余清理** / **安全删除（IMP-035 双阶段确认）** / LAN stale 横幅 / pending 队列 / 端口池 / 统计；**显示名优先 `--name`，其次主页 HTML `<title>`**（含 `dist/`/`build/` 等托管入口；IMP-043）；**文件夹源**实例可标注来源并「从源更新」（IMP-047）；**V0.7.1 / IMP-051** 本机 loopback 下可用「选择文件夹」原生对话框（局域网须手输绝对路径）。
@@ -123,7 +123,7 @@ lwa doctor                    # 全部环境检查
 lwa doctor --profile full     # Full Profile 能力契约（CapabilityReport）
 lwa capabilities --json       # 输出能力报告 JSON
 lwa doctor my-site            # 对单个实例深度诊断
-lwa access review             # 复核访问地址（别名白屏 / IMP-023 空200·404·错误MIME）
+lwa access review             # 复核访问地址（别名白屏 / IMP-023 空200·404·错误MIME / IMP-055 API路径错位）
 lwa pageviews                 # 浏览量汇总（对齐管理页）
 lwa pageviews my-site         # 单实例浏览量详情
 ```
@@ -137,9 +137,9 @@ lwa pageviews my-site         # 单实例浏览量详情
 | `lwa init [-w DIR] [--force] [--default\|--full] [--yes]` | 初始化工作区（目录 / 配置 / registry / skills），幂等；`--full` 装齐依赖并在能力闭环 **ready 后**写入 `profile: full` |
 | `lwa update` | 升级 lwa 包并热重载：同步 skills、补齐配置、重启 manager/daemon（**导入进行中会先等待，最多约 180s**）、**默认重启原本在跑的 gateway**（`--no-restart-gateway` 可跳过）、刷新访问地址（可选 review）、可选 doctor / restart 实例；Full 收尾验收能力缓存 |
 | `lwa workspace relocate <NEW> [--dry-run] [--yes] [--resume\|--verify\|--rollback]` | 同卷原子迁移工作区根（IMP-042）；见 docs/workspace-rename.md / Skill `lwa-relocate-workspace` |
-| `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名；`--update` 原地升级（容器自动 rebuild，静态/前端 restart；`--no-restart` 仅换源码） |
+| `lwa import <zip> [-n NAME] [--path-alias SLUG] [--update ID]` | 导入 zip；可选路径别名（IMP-055 别名兼容性门禁：不兼容时拒绝导入并输出重建建议）；`--update` 原地升级（容器自动 rebuild，静态/前端 restart；`--no-restart` 仅换源码） |
 | `lwa import --from-dir <ABS> [-n NAME] [--path-alias SLUG] [--update ID]` | 本机文件夹源导入/更新（IMP-047；只读复制进工作区；`--update` 时路径须与关联目录一致） |
-| `lwa alias set <ID> <slug>` / `lwa alias clear <ID>` | 为静态或容器实例设置/清除路径别名（需 Caddy；与管理页/API 共用逻辑） |
+| `lwa alias set <ID> <slug>` / `lwa alias clear <ID>` | 为静态或容器实例设置/清除路径别名（需 Caddy；与管理页/API 共用逻辑；IMP-055 设置时自动检测兼容性，不兼容则拒绝） |
 | `lwa scan [ID]` | 重新扫描实例（省略 ID 则扫所有 `pending`） |
 | `lwa start <ID>` | 启动实例（容器已部署走轻量 `compose start`，否则全量部署） |
 | `lwa stop <ID>` | 停止实例（静态禁用网关+释放端口；容器 `compose stop`，不删数据） |
@@ -165,7 +165,7 @@ lwa pageviews my-site         # 单实例浏览量详情
 | `lwa gateway on / off / status` | 控制 Caddy 网关 master（admin :2019 探活；切 builtin 后仍可关残留 master，BUG-077）；`on` 默认复核访问地址，`--rebuild-if-needed` 对 IMP-023 命中实例自动 rebuild（G6） |
 | `lwa gateway switch <caddy\|builtin> [--dry-run] [--json] [--no-review]` | 原子切换网关后端（IMP-037）：预检 → 停旧启新 → 同步 manifest/registry → access 收尾；失败回滚，回滚失败标 `degraded`；`--json` 含 `accessOk` / `fullyOk` |
 | `lwa access refresh` | 用当前 LAN IP 重算所有实例 lanUrl/routeUrl（DHCP 换网、重启网关后地址漂移自愈，G1） |
-| `lwa access review [--json] [--rebuild-if-needed]` | 复核各实例声明 URL 的真实可用性（回环 / lanUrl / routeUrl + SPA 别名资源错位检测 IMP-023：空 200 / 404 / 错误 MIME）；默认仅提示需 rebuild 的实例 |
+| `lwa access review [--json] [--rebuild-if-needed]` | 复核各实例声明 URL 的真实可用性（回环 / lanUrl / routeUrl + SPA 别名资源错位检测 IMP-023：空 200 / 404 / 错误 MIME + API 路径错位 IMP-055：JS bundle 内 `/api/...` 在别名下不可达）；默认仅提示需 rebuild 的实例 |
 | `lwa autostart install [--with-caddy] [--no-enable] [--linger]` | 生成开机/登录自启单元（默认启用；`--no-enable` 只生成、不改 daemon 运行意图；macOS launchd / Linux·WSL systemd 前台监管，IMP-030） |
 | `lwa autostart enable / disable / status` | 加载 / 停用（持久 disable）/ 查看自启动单元与对应前台进程；迁移失败不会强行 enable |
 | `lwa autostart check [--json]` | 完备性深检（解释器 / PATH 可用性 / 工作区 / 单元形态 / 启用态 / MainPID 身份 / 进程 / Caddy·:2019 / linger / WSL / Docker），fail 退出码 1 |

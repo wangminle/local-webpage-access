@@ -60,17 +60,17 @@ lwa alias clear <id>
 # 或在管理页实例列表操作区点击「路径别名」（容器按钮已可用）
 ```
 
-> **IMP-022 / IMP-023 路径别名约束（V0.4.4 起）**
+> **IMP-022 / IMP-023 / IMP-055 路径别名约束**
 >
 > - **需要 Caddy 网关**：别名统一入口依赖 Caddy 的 `:<gatewayPort>` 站点块。
 >   `lwa alias set` 在 `staticGateway=builtin`（或 caddy 未安装）时会**明确报错**，
 >   不再静默写元数据造成"设置成功但访问失败"。若当前是 `builtin`，先
 >   **`lwa gateway switch caddy`**；master 未起再 `lwa gateway on`。
-> - **SPA 子路径资源（IMP-023）**：别名 `reverse_proxy` 会去掉 `/<alias>/` 前缀，
+> - **SPA 子路径资源（IMP-023 / IMP-055）**：别名 `handle_path` 会去掉 `/<alias>/` 前缀，
 >   **相对路径资源**（`./assets/...`）正常；但 **绝对路径资源**（`/assets/...`，
 >   Vue/React 默认 `base: '/'`）会绕过别名打到入口根 → 空 200 / 404 / 错误 MIME 白屏。
->   受影响项目应在构建时设相对 base（Vite `base: './'`）或显式 `--base=/<alias>/`。
->   `lwa access review` 会检出 `aliasResourceMismatch`。纯静态 HTML
+>   受影响项目应在构建时设显式 base path（Vite `--base=/<alias>/`），并让 Router/API 跟 `BASE_URL`。`base: './'` 可消除绝对路径但不推荐作为最终方案。设别名时若检出绝对路径资源会硬失败（IMP-055）。
+>   `lwa access review` 会检出 `aliasResourceMismatch` 及绝对 API 路径错位。纯静态 HTML
 >   （相对路径或无外部资源）不受影响。详见 `lwa-build-frontend-static`。
 
 ## 误重复导入与冗余清理（IMP-012 / IMP-019）

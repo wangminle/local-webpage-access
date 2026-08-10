@@ -1394,7 +1394,7 @@ def test_container_path_alias(workspace, registry, config, monkeypatch) -> None:
         def is_enabled(self, iid):
             return False  # 容器无 static site conf；验证容器路径不依赖此守卫
 
-        def generate_alias_config(self, iid, alias, hp):
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
             calls["gen"] += 1
             p = self.ws.app_alias_config(iid)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -1455,7 +1455,7 @@ def test_sync_alias_port_rewrites_when_drifted(
         def detect_backend(self):
             return "caddy"
 
-        def generate_alias_config(self, iid, alias, hp):
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
             calls["gen"] += 1
             p = self.ws.app_alias_config(iid)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -1531,7 +1531,7 @@ def test_rebuild_syncs_drifted_alias_port(
         def detect_backend(self):
             return "caddy"
 
-        def generate_alias_config(self, iid, alias, hp):
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
             p = self.ws.app_alias_config(iid)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
@@ -1566,7 +1566,7 @@ def _caddy_gateway_fake(monkeypatch, record):
         def detect_backend(self):
             return "caddy"
 
-        def generate_alias_config(self, iid, alias, hp):
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
             record["gen"].append((alias, hp))
             p = self.ws.app_alias_config(iid)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -1708,7 +1708,7 @@ def test_concurrent_path_alias_rejects_duplicate(
         def is_enabled(self, iid):
             return True
 
-        def generate_alias_config(self, iid, alias, hp):
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
             p = self.ws.app_alias_config(iid)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")

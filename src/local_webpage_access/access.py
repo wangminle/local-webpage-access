@@ -100,6 +100,28 @@ class SubresourceFinding:
 
 
 @dataclass
+class ApiPathFinding:
+    """绝对 API 路径在别名入口根 vs 带前缀的探测对照（IMP-055）。
+
+    SPA 的前端 API 客户端若用绝对 ``/api/...``，在别名入口根会打到空 200
+    或 404；带 ``/<alias>/api/...`` 前缀时 handle_path 去前缀后可达后端。
+    """
+
+    path: str
+    absolute: UrlProbe
+    prefixed: UrlProbe
+    mismatch: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "absolute": self.absolute.to_dict(),
+            "prefixed": self.prefixed.to_dict(),
+            "mismatch": self.mismatch,
+        }
+
+
+@dataclass
 class PortListener:
     """端口监听者（lsof best-effort 探测）。"""
 
@@ -131,6 +153,7 @@ class InstanceAccessReport:
     lan_probe: UrlProbe | None = None
     route_probe: UrlProbe | None = None
     subresources: list[SubresourceFinding] = field(default_factory=list)
+    api_findings: list[ApiPathFinding] = field(default_factory=list)
     lan_url_stale: bool = False
     port_listener: PortListener | None = None
     status: str = "ok"  # ok / warn / fail / skip
@@ -140,6 +163,16 @@ class InstanceAccessReport:
     def needs_rebuild(self) -> bool:
         """G6：IMP-023 别名资源不匹配触发「建议 / 可选自动 rebuild」。"""
         return any(s.alias_resource_mismatch for s in self.subresources)
+
+    @property
+    def has_api_mismatch(self) -> bool:
+        """IMP-055：绝对 API 路径在别名入口根空 200/失败，带前缀有内容。
+
+        BUG-468：必须看 ``finding.mismatch``，而不是 ``bool(api_findings)``。
+        只要执行过 API 探测就会产生 finding（即便对照后判定不 mismatch），
+        用前者会把正常实例误判为 mismatch。
+        """
+        return any(f.mismatch for f in self.api_findings)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -162,6 +195,8 @@ class InstanceAccessReport:
             d["routeProbe"] = self.route_probe.to_dict()
         if self.subresources:
             d["subresources"] = [s.to_dict() for s in self.subresources]
+        if self.api_findings:
+            d["apiFindings"] = [f.to_dict() for f in self.api_findings]
         if self.port_listener:
             d["portListener"] = self.port_listener.to_dict()
         return d
@@ -514,10 +549,16 @@ def _http_get(url: str, *, timeout: float = _PROBE_TIMEOUT) -> UrlProbe:
             probe.ok = 200 <= resp.status < 300
             return probe
     except urllib.error.HTTPError as exc:
-        # 4xx/5xx 仍拿到响应头
+        # 4xx/5xx 仍拿到响应头；尽量读 body 以补全 Content-Length（IMP-055 JSON 404）
         probe.status_code = exc.code
-        probe.content_length = _content_length(exc.headers)
         probe.content_type = _content_type(exc.headers)
+        body_len: int | None = None
+        try:
+            body = exc.read()
+            body_len = len(body) if body is not None else None
+        except Exception:  # noqa: BLE001
+            body_len = None
+        probe.content_length = _content_length(exc.headers) or body_len
         probe.note = f"HTTP {exc.code}"
         probe.ok = 200 <= exc.code < 300
         return probe
@@ -600,6 +641,295 @@ def _extract_absolute_resources(html: str, *, limit: int = _MAX_SUBRESOURCES) ->
         if len(out) >= limit:
             break
     return out
+
+
+# 匹配 HTML / JS 中出现的绝对 API 路径模式（/api/、/api/v1/、/api/v1/members 等）。
+_API_PATH_RE = re.compile(
+    r"""["\'](/api(?:/[^"\'\s]+)?)["\']""", re.IGNORECASE
+)
+# 匹配 HTML 中 <script src=...> 引用的脚本路径（绝对或相对），用于 fetch bundle
+# 后再抽取其中的 API 路径（BUG-467：home-bookshelf 的 /api/v1/members 在 JS bundle 内）。
+_JS_SRC_RE = re.compile(
+    r"""<script\b[^>]*\bsrc\s*=\s*["']([^"']+\.js)["']""", re.IGNORECASE
+)
+# 常见 API 根路径（即使 HTML 中未直接出现也值得探测）。
+_DEFAULT_API_PATHS = ["/api/", "/api/v1/"]
+
+
+def _extract_api_paths(html: str, *, limit: int = 6) -> list[str]:
+    """从文本（入口 HTML 或 JS bundle）抽取绝对 API 路径（``/api/...``）。
+
+    返回去重后的路径列表，最多 ``limit`` 条。**保留原始路径形式**：
+    目录形（``/api/v1/``）保留尾部 ``/``；具体端点（``/api/v1/members``）
+    不强制加尾部 ``/``——BUG-467 前把 ``/api/v1/members`` 探成
+    ``/api/v1/members/`` 会因尾斜杠不匹配返回 404，漏报真实 mismatch。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _API_PATH_RE.finditer(html):
+        path = match.group(1)
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _extract_js_bundle_paths(html: str, *, limit: int = 4) -> list[str]:
+    """从入口 HTML 抽取 ``<script src>`` 引用的 JS bundle 路径。
+
+    返回去重后的路径列表（HTML 中书写的原样：绝对 ``/assets/x.js``、
+    相对 ``./assets/x.js`` 或 ``assets/x.js``），最多 ``limit`` 条。
+    调用方据此拼装 URL fetch bundle 正文，再抽取其中的 ``/api/...``。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _JS_SRC_RE.finditer(html):
+        src = match.group(1).strip()
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        out.append(src)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _normalize_script_src(src: str) -> str:
+    """把 script src 规范为以 ``/`` 开头的路径（去掉 ``./``）。"""
+    clean = src.strip()
+    if clean.startswith("./"):
+        clean = clean[2:]
+    if not clean.startswith("/"):
+        clean = "/" + clean
+    return clean
+
+
+def _resolve_alias_aware_script_urls(
+    src: str, *, path_alias: str | None
+) -> tuple[str, str | None]:
+    """别名感知的 script URL 解析（BUG-467 / CHK-186）。
+
+    覆盖三种 HTML 写法，生成去重后的后端直连路径与带单前缀网关路径：
+
+    | script src              | backend_path     | gateway_path              |
+    |-------------------------|------------------|---------------------------|
+    | ``/assets/app.js``      | ``/assets/...``  | ``/<alias>/assets/...``   |
+    | ``./assets/app.js``     | ``/assets/...``  | ``/<alias>/assets/...``   |
+    | ``/<alias>/assets/...`` | ``/assets/...``  | ``/<alias>/assets/...``   |
+
+    已带别名前缀时先剥离再拼接，**永远不会**产生 ``/<alias>/<alias>/...``。
+    """
+    clean = _normalize_script_src(src)
+    if not path_alias:
+        return clean, None
+    alias = path_alias.strip("/")
+    if not alias:
+        return clean, None
+    prefix = f"/{alias}"
+    if clean == prefix or clean.startswith(prefix + "/"):
+        backend = clean[len(prefix) :] or "/"
+        if not backend.startswith("/"):
+            backend = "/" + backend
+    else:
+        backend = clean
+    gateway = f"{prefix}{backend}"
+    return backend, gateway
+
+
+def _is_javascript_content_type(content_type: str | None) -> bool:
+    """仅把明确的 JavaScript MIME 当作 bundle（HTML SPA fallback 不算）。"""
+    if not content_type:
+        return False
+    base = content_type.split(";", 1)[0].strip().lower()
+    if base in {
+        "application/javascript",
+        "text/javascript",
+        "application/x-javascript",
+        "application/ecmascript",
+        "text/ecmascript",
+    }:
+        return True
+    return "javascript" in base
+
+
+def _fetch_javascript(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | None:
+    """GET url，仅当 Content-Type 为 JavaScript 时返回正文；否则 None。
+
+    FastAPI/SPA fallback 常对错误路径返回 ``text/html`` 200，若当 bundle
+    解析会抽到入口页里的误导性 ``/api/...`` 或静默失败。
+    """
+    req = urllib.request.Request(
+        mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
+    )
+    try:
+        with urlopen_direct(req, timeout=timeout) as resp:
+            if not (200 <= resp.status < 300):
+                return None
+            if not _is_javascript_content_type(_content_type(resp.headers)):
+                return None
+            return resp.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _collect_api_paths(
+    entry_html: str | None,
+    *,
+    host_port: int | None = None,
+    entry_port: int | None = None,
+    path_alias: str | None = None,
+    fetch_text=None,
+) -> list[str]:
+    """汇总入口 HTML 及其引用 JS bundle 中的绝对 API 路径（BUG-467）。
+
+    顺序：入口 HTML 中直接出现的 ``/api/...`` → 引用 JS bundle 正文中的
+    ``/api/...``。HTML 为空时返回空列表（调用方用默认路径兜底）。
+
+    bundle fetch 为 best-effort，候选经 :func:`_resolve_alias_aware_script_urls`
+    生成并去重：
+
+    1. 后端 ``host_port`` + backend_path（去别名前缀的真实资源路径）
+    2. 别名入口 ``entry_port`` + gateway_path（单前缀，无双拼）
+
+    仅 Content-Type 为 JavaScript 的响应才抽取 API（见 ``_fetch_javascript``）。
+    """
+    if not entry_html:
+        return []
+    # 延迟解析：默认走 JS Content-Type 校验；测试可注入 fetch_text 覆盖。
+    if fetch_text is None:
+        fetch_text = _fetch_javascript
+    api_paths = _extract_api_paths(entry_html)
+    for src in _extract_js_bundle_paths(entry_html):
+        backend_path, gateway_path = _resolve_alias_aware_script_urls(
+            src, path_alias=path_alias
+        )
+        candidates: list[str] = []
+        seen_urls: set[str] = set()
+        if host_port is not None:
+            url = f"http://127.0.0.1:{host_port}{backend_path}"
+            if url not in seen_urls:
+                seen_urls.add(url)
+                candidates.append(url)
+        if entry_port is not None and gateway_path:
+            url = f"http://127.0.0.1:{entry_port}{gateway_path}"
+            if url not in seen_urls:
+                seen_urls.add(url)
+                candidates.append(url)
+        for url in candidates:
+            bundle_text = fetch_text(url)
+            if not bundle_text:
+                continue
+            for p in _extract_api_paths(bundle_text):
+                if p not in api_paths:
+                    api_paths.append(p)
+    return api_paths
+
+
+def _is_json_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    base = content_type.split(";", 1)[0].strip().lower()
+    return base == "application/json" or base.endswith("+json") or "json" in base
+
+
+def _check_api_paths(
+    rep: InstanceAccessReport,
+    config: Config,
+    path_alias: str,
+    html: str | None,
+    *,
+    host_port: int | None = None,
+) -> None:
+    """IMP-055：对照绝对 API 路径在别名入口根 vs 带前缀的可用性。
+
+    从入口 HTML **及其引用的 JS bundle**（BUG-467）抽取 ``/api/...`` 路径；
+    仍无命中时用默认 ``/api/`` ``/api/v1/`` 兜底。分别探测无前缀（入口根）
+    与带 ``/<alias>/api/...`` 前缀。
+
+    mismatch 判定：
+
+    * **经典**：根空 200/失败，且带前缀 2xx 有实体。
+    * **疑似（仅 bundle/HTML 明确发现的路径）**：根空 200/失败，且带前缀
+      返回非空 JSON 404——说明绝对请求落到错误网关，带前缀到达应用后端。
+      默认兜底探针**不得**据此告警（无 API 项目会误报）。
+    """
+    entry_port = config.staticGatewayPort
+    if entry_port is None:
+        return
+
+    # BUG-467：先从入口 HTML + JS bundle 汇总 API 路径；都没有才用默认兜底。
+    discovered = _collect_api_paths(
+        html,
+        host_port=host_port,
+        entry_port=entry_port,
+        path_alias=path_alias,
+    )
+    from_default = not discovered
+    api_paths = discovered if discovered else _DEFAULT_API_PATHS[:]
+
+    for api_path in api_paths[:5]:  # 最多探测 5 条（含具体端点）
+        absolute = _http_get(f"http://127.0.0.1:{entry_port}{api_path}")
+        prefixed = _http_get(
+            f"http://127.0.0.1:{entry_port}/{path_alias}{api_path}"
+        )
+        # 判定 mismatch：绝对路径空 200 或失败，且带前缀有内容
+        abs_empty_200 = absolute.ok and (absolute.content_length == 0)
+        abs_failed = absolute.status_code is not None and not absolute.ok
+        prefixed_ok = prefixed.ok and (prefixed.content_length or 0) > 0
+        mismatch = prefixed_ok and (abs_empty_200 or abs_failed)
+        probable = False
+        if not mismatch and not from_default:
+            # 高置信疑似：根空/失败 + 前缀非空 JSON 404（BASE="/api/v1" 拼接形态）
+            prefixed_json_404 = (
+                prefixed.status_code == 404
+                and (prefixed.content_length or 0) > 0
+                and _is_json_content_type(prefixed.content_type)
+            )
+            if (abs_empty_200 or abs_failed) and prefixed_json_404:
+                mismatch = True
+                probable = True
+
+        finding = ApiPathFinding(
+            path=api_path,
+            absolute=absolute,
+            prefixed=prefixed,
+            mismatch=mismatch,
+        )
+        rep.api_findings.append(finding)
+        if mismatch:
+            if probable:
+                if abs_empty_200:
+                    abs_desc = "返回 200 但 0 字节"
+                else:
+                    abs_desc = f"返回 {absolute.status_code or absolute.note or '失败'}"
+                detail = (
+                    f"绝对 API 基址 {api_path} 在别名入口根{abs_desc}，"
+                    f"带前缀 /{path_alias}{api_path} 返回非空 JSON 404"
+                    f"（{prefixed.content_length} 字节）——疑似绝对路径错位"
+                )
+            elif abs_empty_200:
+                detail = (
+                    f"绝对 API 路径 {api_path} 在别名入口根返回 200 但 0 字节，"
+                    f"带前缀 /{path_alias}{api_path} 有响应"
+                    f"（{prefixed.content_length} 字节）"
+                )
+            else:
+                code = absolute.status_code or absolute.note or "失败"
+                detail = (
+                    f"绝对 API 路径 {api_path} 返回 {code}，"
+                    f"带前缀 /{path_alias}{api_path} 有响应"
+                    f"（{prefixed.content_length} 字节）"
+                )
+            rep.findings.append(
+                f"IMP-055 API 路径错位：{detail}"
+                "--前端 API 客户端需从 BASE_URL 派生请求路径"
+                f"（如 /{path_alias}/api/v1），而非绝对 /api/v1"
+            )
+            if rep.status == "ok":
+                rep.status = "warn"
 
 
 def _detect_backend(gateway) -> str:
@@ -776,6 +1106,14 @@ def _review_instance(
             )
         elif route_probe.content_length and route_probe.content_length > 0:
             _check_subresources(rep, config, path_alias, route_probe)
+            # IMP-055：对照绝对 API 路径在别名入口根 vs 带前缀
+            entry_html = _fetch_text(
+                f"http://127.0.0.1:{config.staticGatewayPort}/{path_alias}/"
+            )
+            # BUG-467：内部从别名入口前缀 fetch JS bundle 抽取 API 路径
+            _check_api_paths(
+                rep, config, path_alias, entry_html, host_port=host_port
+            )
 
     _fill_port_listener(rep, host_port)
 
@@ -984,7 +1322,13 @@ def format_rebuild_advice(
     """渲染 G6「建议重建 / 自动重建结果」段。"""
     lines: list[str] = []
     candidates = instances_needing_rebuild(report)
-    if not candidates and not (rebuild_report and rebuild_report.results):
+    api_mismatch_ids = [
+        r.instance_id for r in report.instances if r.has_api_mismatch
+    ]
+    # BUG-468：提前返回必须同时排除 API 路径错位，否则 API-only mismatch
+    # （无静态资源重建候选）会被吞掉、不输出建议。
+    has_rebuild_results = bool(rebuild_report and rebuild_report.results)
+    if not candidates and not has_rebuild_results and not api_mismatch_ids:
         return ""
     lines.append("── 构建兼容（G6 / IMP-023）──")
     if rebuild_report is not None and not rebuild_report.skipped:
@@ -1006,16 +1350,32 @@ def format_rebuild_advice(
                 lines.append(
                     f"  [OK  ] 已自动 rebuild {r.instance_id}，复检通过"
                 )
-        return "\n".join(lines)
-    lines.append(
-        f"  建议 rebuild {len(candidates)} 个实例（别名下 SPA 绝对路径资源错位）："
-    )
-    for iid in candidates:
-        lines.append(f"    · {iid}  →  lwa rebuild {iid}")
-    lines.append(
-        "  仅检查不重建；需要自动重建时加 --rebuild-if-needed"
-        "（请先固化 Vite base: './' 等构建配置，否则 rebuild 后可能仍命中 IMP-023）"
-    )
+    elif candidates:
+        lines.append(
+            f"  建议 rebuild {len(candidates)} 个实例（别名下 SPA 绝对路径资源错位）："
+        )
+        for iid in candidates:
+            lines.append(f"    · {iid}  →  lwa rebuild {iid}")
+        lines.append(
+            "  仅检查不重建；需要自动重建时加 --rebuild-if-needed"
+            "（请先固化 Vite --base=/<alias>/ 等构建配置，否则 rebuild 后可能仍命中 IMP-023）"
+        )
+    else:
+        # 无静态资源重建候选，但有 API 路径错位：仍需本段标题承载 API 建议
+        lines.append("  无静态资源重建候选（未检出 IMP-023 绝对路径资源错位）")
+    # IMP-055：API 路径错位提示
+    if api_mismatch_ids:
+        lines.append("")
+        lines.append("── API 路径错位（IMP-055）──")
+        lines.append(
+            "  以下实例的绝对 API 路径（/api/...）在别名入口根返回空 200 或失败，"
+            "带别名前缀时有响应。前端 API 客户端需从 BASE_URL 派生请求路径："
+        )
+        for iid in api_mismatch_ids:
+            lines.append(f"    · {iid}")
+        lines.append(
+            "  方案 B：构建时设 --base=/<alias>/，API 客户端从 import.meta.env.BASE_URL 派生"
+        )
     return "\n".join(lines)
 
 
@@ -1074,6 +1434,20 @@ def format_review_report(
                         f"带前缀 {sub.prefixed.content_length} 字节"
                     )
                 lines.append(f"           ⚠ {sub.path}：{detail}（IMP-023）")
+        for apif in rep.api_findings:
+            if apif.mismatch:
+                if apif.absolute.ok and apif.absolute.content_length == 0:
+                    detail = (
+                        f"根路径空 200，带前缀 {apif.prefixed.content_length} 字节"
+                    )
+                else:
+                    code = apif.absolute.status_code or apif.absolute.note or "失败"
+                    detail = (
+                        f"根路径 {code}，带前缀 {apif.prefixed.content_length} 字节"
+                    )
+                lines.append(
+                    f"           ⚠ {apif.path}：{detail}（IMP-055 API 错位）"
+                )
         if rep.port_listener and rep.port_listener.names:
             lines.append(
                 f"           监听进程：{', '.join(sorted(set(rep.port_listener.names)))}"
@@ -1103,6 +1477,7 @@ def _probe_brief(probe: UrlProbe | None) -> str:
 __all__ = [
     "UrlProbe",
     "SubresourceFinding",
+    "ApiPathFinding",
     "PortListener",
     "InstanceAccessReport",
     "AccessReviewReport",

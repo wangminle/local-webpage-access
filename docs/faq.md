@@ -396,13 +396,21 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
 
 经路径别名访问 `http://<LAN-IP>:8080/<alias>/` 白屏，但端口直连 `http://<LAN-IP>:<hostPort>/` 正常：
 
-* **根因 A — SPA 绝对路径（IMP-023）**：Vite/Vue/React 等构建产物若用默认 `base: '/'`，HTML 里是 `/assets/app.js`（绝对）。别名 `/<alias>/` 是子路径，绝对路径会绕过别名打到入口根，常见结果是**空 200**、**404**，或被 SPA/回落页吃成 **200 + text/html** → JS 无法执行 → 白屏。
+* **根因 A — SPA 绝对路径（IMP-023 / IMP-055）**：Vite/Vue/React 等构建产物若用默认 `base: '/'`，HTML 里是 `/assets/app.js`（绝对）。别名 `/<alias>/` 是子路径，绝对路径会绕过别名打到入口根，常见结果是**空 200**、**404**，或被 SPA/回落页吃成 **200 + text/html** -> JS 无法执行 -> 白屏。同样地，前端 API 客户端若用绝对 `/api/v1`，也会打到入口根而非后端。
+  * **设别名时拦截**：`lwa alias set` / 管理页设别名时，对 **shared-static 与 docker-compose** 实例均跑守卫；若检出绝对 `src`/`href`，会直接失败并提示改造步骤（探不到入口时不拦但提示「未验证入口 HTML」）。
   * 自查：`curl -i http://127.0.0.1:8080/<alias>/`，看 HTML 里 `src=` 是 `/assets/...`（绝对＝有问题）还是 `./assets/...`（相对＝正常）；再分别 `curl -i` 无前缀与带 `/<alias>` 前缀的资源 URL，对照状态码 / Content-Length / Content-Type。
-  * 修复：构建时设相对 base（Vite `base: './'`）后 `lwa rebuild <id>`；或 `lwa access review --rebuild-if-needed` 自动检出并重建命中实例。
+  * **修复（方案 B - 显式、可配置的 base path）**：
+    - Vite 构建：`vite build --base=/<alias>/`，同步重建静态产物后重新设置别名
+    - Vue Router：`createWebHistory(import.meta.env.BASE_URL)`
+    - 前端 API 客户端：从 `import.meta.env.BASE_URL` 派生请求路径（如 `/<alias>/api/v1`）
+    - `base: './'` 可消除绝对资源路径但**不推荐作为最终方案**（Router/API 仍需跟 `BASE_URL`）
+    - 若无源码或无法重建（C 类），请继续用 hostPort 端口直达
+  * `lwa access review --rebuild-if-needed` 可自动检出静态资源错位并重建命中实例（但 API 路径错位需应用侧改造，rebuild 无法自动修复）。
+
 * **根因 B — 浏览器缓存了旧 HTML**：产物已重建为相对路径，但浏览器仍用重建前的旧 HTML（绝对路径 + 旧 hash）→ 同样白屏。重启 lwa / 网关无效（服务端已正确，问题在客户端缓存）。
   * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
   * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
-* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME），直接指出哪些实例需要 rebuild；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。瞬时连接失败（TIMEOUT / REFUSED）**不**算 IMP-023，避免误触发 `--rebuild-if-needed`。
+* **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME）+ 绝对 API 路径对照（IMP-055），直接指出哪些实例需要 rebuild 或 API 改造；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。瞬时连接失败（TIMEOUT / REFUSED）**不**算 IMP-023，避免误触发 `--rebuild-if-needed`。
 
 ### 如何在 Caddy 与 builtin 之间切换网关后端
 

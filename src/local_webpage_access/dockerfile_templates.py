@@ -41,6 +41,24 @@ _OFFICIAL_NODE_DIST = "https://nodejs.org/dist"
 _NODE_DEFAULT_START = "node server.js"
 _PYTHON_DEFAULT_START = "python app.py"
 
+# IMP-054：Python 包 → 所需 apt 系统库映射。
+# 这些包的 wheel 不含系统共享库，运行时 import 会 ImportError；LWA 在
+# 生成 Dockerfile 时自动追加 apt-get install，避免 rebuild 后丢失手动装的包。
+# 键为 PyPI 包名（小写，去 extras）；值为 apt 包名列表。
+_PYTHON_APT_DEPS: dict[str, list[str]] = {
+    "pyzbar": ["libzbar0"],
+    "opencv-python": ["libgl1", "libglib2.0-0"],
+    "opencv-contrib-python": ["libgl1", "libglib2.0-0"],
+    "opencv-python-headless": ["libgl1", "libglib2.0-0"],
+    "python-magic": ["libmagic1"],
+    "weasyprint": ["libpango-1.0-0", "libpangoft2-1.0-0"],
+    "pycairo": ["libcairo2"],
+    "mysqlclient": ["default-libmysqlclient-dev", "pkg-config"],
+    "psycopg2": ["libpq-dev", "pkg-config"],
+    "python-ldap": ["libldap2-dev", "libsasl2-dev"],
+    "xmlsec": ["libxml2", "libxmlsec1-dev", "libxmlsec1-openssl", "pkg-config"],
+}
+
 _HEADER = """\
 # 由 lwa 自动生成，请勿手动编辑（如需修改请交给 dockerize skill）。
 # 模板：dockerfile_templates.py（{kind}）
@@ -303,6 +321,80 @@ def _node_dist_base(mirrors: BuildMirrors | None) -> str:
     return _OFFICIAL_NODE_DIST
 
 
+def _parse_requirements_packages(req_text: str) -> set[str]:
+    """从 requirements.txt 文本提取包名集合（小写、去 extras / 版本约束）。
+
+    仅取每行第一个 token，忽略注释 / ``-r`` / ``-e`` / URL 行。
+    """
+    names: set[str] = set()
+    for line in req_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        # 去掉环境标记与注释
+        for sep in (";", "#"):
+            idx = line.find(sep)
+            if idx != -1:
+                line = line[:idx].strip()
+        if not line:
+            continue
+        # 取 ``package[extras]==1.0`` 的 package 部分
+        pkg = re.split(r"[\[<>=!~\[\] ]", line, maxsplit=1)[0].strip().lower()
+        # PEP 503：发行包名中的连字符、下划线、点号等价，映射键统一用 ``-``。
+        pkg = re.sub(r"[-_.]+", "-", pkg)
+        if pkg and not pkg.startswith(("http://", "https://", "git+", "file:")):
+            names.add(pkg)
+    return names
+
+
+def _detect_apt_deps(source_dir: Path | None, install: str) -> list[str]:
+    """扫描 requirements 文件，返回需要 apt-get install 的系统包列表（IMP-054）。
+
+    读取 install 命令中指定的 requirements 文件（默认 requirements.txt），
+    对照 ``_PYTHON_APT_DEPS`` 映射，合并去重后返回。
+    """
+    if source_dir is None:
+        return []
+    req_file = _extract_requirements_file(install)
+    req_path = source_dir / req_file
+    if not req_path.is_file():
+        return []
+    try:
+        text = req_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    packages = _parse_requirements_packages(text)
+    apt_deps: list[str] = []
+    seen: set[str] = set()
+    for pkg in sorted(packages):
+        for apt in _PYTHON_APT_DEPS.get(pkg, ()):
+            if apt not in seen:
+                seen.add(apt)
+                apt_deps.append(apt)
+    return apt_deps
+
+
+def _render_apt_deps_block(
+    apt_deps: list[str], mirrors: BuildMirrors | None
+) -> str:
+    """渲染 apt-get install 系统依赖的 RUN 指令（IMP-054）。
+
+    与 node_toolchain 的 apt 块对称：使用 ``_apt_mirror_prefix``，
+    ``--no-install-recommends``，结束后 ``rm -rf /var/lib/apt/lists/*``。
+    """
+    if not apt_deps:
+        return ""
+    apt_prefix = _apt_mirror_prefix(mirrors)
+    pkgs = " ".join(apt_deps)
+    return (
+        "RUN set -eux; \\\n"
+        f"  {apt_prefix}"
+        "apt-get update; \\\n"
+        f"  apt-get install -y --no-install-recommends {pkgs}; \\\n"
+        "  rm -rf /var/lib/apt/lists/*\n"
+    )
+
+
 def _render_python(
     manifest: InstanceManifest,
     internal_port: int,
@@ -451,13 +543,20 @@ def _render_python(
     if source_dir is not None and (source_dir / "src" / "main.py").is_file():
         pythonpath_env = "ENV PYTHONPATH=src\n"
 
-    # 分层顺序：Node 工具链（最稳）→ Python 依赖 → npm 依赖 → 完整源码。
+    # IMP-054：探测 requirements.txt 中需要系统库的 Python 包，自动追加 apt-get install。
+    # 放在 WORKDIR 之后、pip 依赖层之前，确保系统库先于 Python 包安装。
+    apt_deps_block = _render_apt_deps_block(
+        _detect_apt_deps(source_dir, install), mirrors
+    )
+
+    # 分层顺序：系统库 -> Node 工具链（最稳）-> Python 依赖 -> npm 依赖 -> 完整源码。
     final_copy = "" if needs_early_full_copy else "COPY current/ ./\n"
 
     lines = [
         header,
         f"FROM {_PYTHON_IMAGE}",
         "WORKDIR /app",
+        apt_deps_block,
         node_toolchain,
         deps_block,
         npm_block,

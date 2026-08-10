@@ -64,10 +64,10 @@ Vite + React 项目：
 }
 ```
 
-## IMP-023：路径别名下的 SPA 资源 base（V0.4.4 起）
+## IMP-023 / IMP-055：路径别名下的 SPA 资源 base
 
 若该前端实例会配置**路径别名**（`http://<LAN-IP>:<gatewayPort>/<alias>/`），
-**必须在构建时设置正确的 base**，否则子路径下绝对资源路径会 404 白屏：
+**必须在构建时设置显式、可配置的 base path**（方案 B），否则子路径下绝对资源路径会白屏：
 
 - 别名 `reverse_proxy` 会去掉 `/<alias>/` 前缀转发到 upstream，因此
   **相对路径资源**（`./assets/...`、`assets/...`）能正确解析为 `/<alias>/assets/...`；
@@ -77,11 +77,11 @@ Vite + React 项目：
 
 按框架设置（构建产物里资源引用变为相对路径或带 `/<alias>/` 前缀）：
 
-- **Vite**：`vite.config.js` 设 `base: './'`（相对，推荐，别名无关），或
-  `base: '/<alias>/'`（绑定特定别名）。
+- **Vite**：`vite build --base=/<alias>/`（显式绑定别名，推荐），或
+  `base: './'`（相对，可消除绝对路径但不推荐作为最终方案，Router/API 仍需跟 `BASE_URL`）。
 - **CRA**：不支持相对 base，需 `PUBLIC_URL=/<alias>` 构建。
 - **Next 静态导出**：`next.config.js` 设 `assetPrefix: '/<alias>/'` +
   `trailingSlash: true`。
 
 纯静态 HTML（相对路径或无外部资源）不受影响，无需调整。
-`lwa alias set` 成功后会输出此提示；如已用绝对 base 托管，改用 hostPort 端口直达可绕过该限制。
+`lwa alias set` 设别名时会硬拦截绝对路径资源（IMP-023 / IMP-055）；如已用绝对 base 托管，改用 hostPort 端口直达可绕过该限制。无源码或无法重建属 C 类，建议 hostPort。

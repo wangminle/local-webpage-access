@@ -19,7 +19,11 @@ from pathlib import Path
 import pytest
 
 from local_webpage_access.access import (
+    _collect_api_paths,
+    _extract_api_paths,
+    _extract_js_bundle_paths,
     _fetch_text,
+    format_rebuild_advice,
     format_review_report,
     instance_still_has_imp023,
     instances_needing_rebuild,
@@ -27,6 +31,7 @@ from local_webpage_access.access import (
     refresh_network_entries,
     review_access,
 )
+from local_webpage_access import access as access_mod
 from local_webpage_access.models import DesiredState, InstanceManifest, Status
 
 
@@ -1099,3 +1104,572 @@ def test_fetch_text_marks_probe_param(monkeypatch) -> None:
     assert text == "<html>alias entry</html>"
     assert "__lwa_probe=" in captured["url"]
     assert "/my-app/" in captured["url"]
+
+
+# ---- IMP-055 / BUG-467 / BUG-468：API 对照探测与报告聚合 -------------------
+
+
+class _BookshelfApiHandler(http.server.BaseHTTPRequestHandler):
+    """模拟 home-bookshelf：API 仅出现在 JS bundle，HTML 无 /api 字面量。
+
+    - 入口 HTML 引用绝对 ``/assets/index-abc.js``（无 API 字面）
+    - 绝对 ``/assets/...`` 空 200（无 spa_fallback）；带别名前缀才有真实 bundle
+    - bundle 内含 ``"/api/v1/members"``
+    - 默认兜底 ``/api/`` ``/api/v1/`` 带前缀端返回 404 JSON（非 2xx）→ 旧逻辑漏报
+    - ``/api/v1/members``：根空 200，带前缀有 JSON → 应判 mismatch
+    """
+
+    HTML = (
+        b"<!doctype html><html><head>"
+        b'<script type="module" src="/assets/index-abc.js"></script>'
+        b"</head><body>bookshelf</body></html>"
+    )
+    BUNDLE = (
+        b'const u="/api/v1/members";'
+        b'const b="/api/v1/books";'
+        b"fetch(u);"
+    )
+    MEMBERS_JSON = b'[{"id":1,"name":"a"}]'
+    NOT_FOUND_JSON = b'{"detail":"Not Found"}'
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path in {"/", "/home-bookshelf", "/home-bookshelf/"}:
+            body = self.HTML if "home-bookshelf" in path else b"root"
+            self._send(200, body, "text/html")
+        elif path == "/home-bookshelf/assets/index-abc.js":
+            self._send(200, self.BUNDLE, "application/javascript")
+        elif path == "/assets/index-abc.js":
+            self._send(200, b"", "application/javascript")  # 空 200
+        elif path == "/home-bookshelf/api/v1/members":
+            self._send(200, self.MEMBERS_JSON, "application/json")
+        elif path == "/api/v1/members":
+            self._send(200, b"", "application/json")  # 根空 200
+        elif path in {
+            "/api/",
+            "/api/v1/",
+            "/api/v1",
+            "/home-bookshelf/api/",
+            "/home-bookshelf/api/v1/",
+            "/home-bookshelf/api/v1",
+        }:
+            self._send(404, self.NOT_FOUND_JSON, "application/json")
+        else:
+            self._send(404, b"nf", "text/plain")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # noqa: ARG002
+        pass
+
+
+@pytest.fixture()
+def bookshelf_api_server():
+    """home-bookshelf 形态的真实 HTTP 服务（API 在 bundle 内）。"""
+    port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", port), _BookshelfApiHandler)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_extract_api_paths_preserves_concrete_endpoint() -> None:
+    """BUG-467：具体端点路径不强制加尾斜杠（否则探成 /members/ → 404 漏报）。"""
+    paths = _extract_api_paths('const API="/api/v1/members";')
+    assert "/api/v1/members" in paths
+    assert "/api/v1/members/" not in paths
+    paths2 = _extract_api_paths('fetch("/api/v1/")')
+    assert "/api/v1/" in paths2
+
+
+def test_extract_js_bundle_paths_finds_script_srcs() -> None:
+    html = (
+        '<script src="./assets/index.js"></script>'
+        '<script src="/vendor/runtime.js"></script>'
+    )
+    srcs = _extract_js_bundle_paths(html)
+    assert "./assets/index.js" in srcs
+    assert "/vendor/runtime.js" in srcs
+
+
+def test_collect_api_paths_fetches_bundle_via_alias(bookshelf_api_server) -> None:
+    """BUG-467：绝对 script 在入口根为空时，须经别名前缀拉取真实 bundle。"""
+    port = bookshelf_api_server
+    html = (
+        "<!doctype html>"
+        '<script type="module" src="/assets/index-abc.js"></script>'
+    )
+    # 不带别名：入口根空 bundle → 抽不到 API
+    assert "/api/v1/members" not in _collect_api_paths(html, entry_port=port)
+    # 带别名：从 /home-bookshelf/assets/... 取到真实 bundle
+    paths = _collect_api_paths(
+        html, entry_port=port, path_alias="home-bookshelf"
+    )
+    assert "/api/v1/members" in paths
+    assert "/api/v1/books" in paths
+
+
+def test_collect_api_paths_empty_html_returns_empty() -> None:
+    assert _collect_api_paths(None, entry_port=8000, path_alias="x") == []
+    assert _collect_api_paths("", entry_port=8000, path_alias="x") == []
+
+
+def test_review_detects_api_mismatch_from_js_bundle(
+    workspace, registry, config, bookshelf_api_server, monkeypatch
+):
+    """BUG-467 / WBS 055.10：API 仅在外链 bundle 时仍须检出 mismatch，不得 overall=ok。"""
+    port = bookshelf_api_server
+    config.staticGatewayPort = port
+    _seed_static(
+        workspace,
+        registry,
+        "home-bookshelf",
+        host_port=port,
+        lan_url=f"http://127.0.0.1:{port}",
+        route_host="home-bookshelf",
+        route_url=f"http://127.0.0.1:{port}/home-bookshelf/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+
+    report = review_access(workspace, config, registry)
+    rep = report.instances[0]
+    assert rep.has_api_mismatch is True
+    mismatched = [f for f in rep.api_findings if f.mismatch]
+    assert mismatched, "应从 JS bundle 抽出 /api/v1/members 并判 mismatch"
+    assert any(f.path == "/api/v1/members" for f in mismatched)
+    assert rep.status != "ok"
+    assert any("IMP-055" in f and "API" in f for f in rep.findings)
+    text = format_review_report(report)
+    assert "API 错位" in text or "IMP-055" in text
+    advice = format_rebuild_advice(report)
+    assert "API 路径错位" in advice
+    assert "home-bookshelf" in advice
+
+
+def test_has_api_mismatch_ignores_non_mismatch_findings() -> None:
+    """BUG-468：只要执行过 API 探测就会有 finding；聚合必须看 mismatch 标志。"""
+    from local_webpage_access.access import (
+        ApiPathFinding,
+        InstanceAccessReport,
+        UrlProbe,
+    )
+
+    rep = InstanceAccessReport(instance_id="x")
+    rep.api_findings.append(
+        ApiPathFinding(
+            path="/api/",
+            absolute=UrlProbe(url="a", status_code=404, ok=False, note="HTTP 404"),
+            prefixed=UrlProbe(url="b", status_code=404, ok=False, note="HTTP 404"),
+            mismatch=False,
+        )
+    )
+    assert rep.has_api_mismatch is False
+    rep.api_findings.append(
+        ApiPathFinding(
+            path="/api/v1/members",
+            absolute=UrlProbe(
+                url="c", status_code=200, ok=True, content_length=0
+            ),
+            prefixed=UrlProbe(
+                url="d", status_code=200, ok=True, content_length=42
+            ),
+            mismatch=True,
+        )
+    )
+    assert rep.has_api_mismatch is True
+
+
+def test_format_rebuild_advice_api_only_mismatch() -> None:
+    """BUG-468：无静态 rebuild 候选时，API-only mismatch 仍须输出建议段。"""
+    from local_webpage_access.access import (
+        AccessReviewReport,
+        ApiPathFinding,
+        InstanceAccessReport,
+        UrlProbe,
+    )
+
+    rep = InstanceAccessReport(
+        instance_id="api-only",
+        status="warn",
+        path_alias="demo",
+    )
+    rep.api_findings.append(
+        ApiPathFinding(
+            path="/api/v1/members",
+            absolute=UrlProbe(
+                url="a", status_code=200, ok=True, content_length=0
+            ),
+            prefixed=UrlProbe(
+                url="b", status_code=200, ok=True, content_length=10
+            ),
+            mismatch=True,
+        )
+    )
+    report = AccessReviewReport(
+        lan_ip="10.0.0.1",
+        backend="caddy",
+        static_gateway_port=8080,
+        instances=[rep],
+    )
+    text = format_rebuild_advice(report)
+    assert text, "API-only mismatch 不得返回空建议"
+    assert "API 路径错位" in text
+    assert "api-only" in text
+    assert "BASE_URL" in text
+
+
+# ---- BUG-467 续：别名感知 script URL + JSON 404 高置信判定 ---------------
+
+
+@pytest.mark.parametrize(
+    "src,alias,backend,gateway",
+    [
+        ("/assets/app.js", "home-bookshelf", "/assets/app.js", "/home-bookshelf/assets/app.js"),
+        ("./assets/app.js", "home-bookshelf", "/assets/app.js", "/home-bookshelf/assets/app.js"),
+        (
+            "/home-bookshelf/assets/app.js",
+            "home-bookshelf",
+            "/assets/app.js",
+            "/home-bookshelf/assets/app.js",
+        ),
+    ],
+)
+def test_resolve_alias_aware_script_urls_matrix(src, alias, backend, gateway) -> None:
+    """CHK-186：根绝对 / 相对 / 已带别名前缀三种 script src 解析矩阵。"""
+    be, gw = access_mod._resolve_alias_aware_script_urls(src, path_alias=alias)
+    assert be == backend
+    assert gw == gateway
+
+
+def test_resolve_alias_aware_script_urls_never_double_prefix() -> None:
+    """防双前缀：已带别名的 src 不得再生成 /alias/alias/...。"""
+    be, gw = access_mod._resolve_alias_aware_script_urls(
+        "/home-bookshelf/assets/index.js", path_alias="home-bookshelf"
+    )
+    assert be == "/assets/index.js"
+    assert gw == "/home-bookshelf/assets/index.js"
+    assert "/home-bookshelf/home-bookshelf/" not in (gw or "")
+
+
+class _PrefixedScriptBundleHandler(http.server.BaseHTTPRequestHandler):
+    """script src 已带别名前缀；后端真实路径无前缀；错误双前缀返回 HTML SPA fallback。"""
+
+    HTML = (
+        b"<!doctype html><html><head>"
+        b'<script type="module" src="/home-bookshelf/assets/index.js"></script>'
+        b"</head><body>app</body></html>"
+    )
+    BUNDLE = b'const BASE="/api/v1";fetch(`${BASE}${"/members"}`);'
+    SPA_HTML = b"<!doctype html><html><body>spa-fallback</body></html>"
+    MEMBERS = b'[{"id":1}]'
+    NOT_FOUND = b'{"detail":"Not Found"}'
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path in {"/", "/home-bookshelf", "/home-bookshelf/"}:
+            body = self.HTML if "home-bookshelf" in path else b"root"
+            self._send(200, body, "text/html")
+        elif path == "/assets/index.js":
+            self._send(200, self.BUNDLE, "application/javascript")
+        elif path == "/home-bookshelf/assets/index.js":
+            self._send(200, self.BUNDLE, "application/javascript")
+        elif path == "/home-bookshelf/home-bookshelf/assets/index.js":
+            # 双前缀：SPA fallback 返回 HTML 200（掩盖探测失败）
+            self._send(200, self.SPA_HTML, "text/html")
+        elif path == "/api/v1":
+            self._send(200, b"", "application/json")
+        elif path == "/home-bookshelf/api/v1":
+            self._send(404, self.NOT_FOUND, "application/json")
+        elif path == "/home-bookshelf/api/v1/members":
+            self._send(200, self.MEMBERS, "application/json")
+        elif path == "/api/v1/members":
+            self._send(200, b"", "application/json")
+        elif path in {
+            "/api/",
+            "/api/v1/",
+            "/home-bookshelf/api/",
+            "/home-bookshelf/api/v1/",
+        }:
+            self._send(404, self.NOT_FOUND, "application/json")
+        else:
+            self._send(404, b"nf", "text/plain")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # noqa: ARG002
+        pass
+
+
+@pytest.fixture()
+def prefixed_script_bundle_server():
+    port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", port), _PrefixedScriptBundleHandler)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_collect_api_paths_strips_alias_for_host_port(prefixed_script_bundle_server) -> None:
+    """已带别名前缀的 script src：hostPort 须请求 /assets/...，不得双前缀。"""
+    port = prefixed_script_bundle_server
+    html = (
+        "<!doctype html>"
+        '<script type="module" src="/home-bookshelf/assets/index.js"></script>'
+    )
+    fetched: list[str] = []
+
+    def tracking_fetch(url: str, **_kw):
+        fetched.append(url)
+        return access_mod._fetch_javascript(url)
+
+    paths = _collect_api_paths(
+        html,
+        host_port=port,
+        entry_port=port,
+        path_alias="home-bookshelf",
+        fetch_text=tracking_fetch,
+    )
+    assert "/api/v1" in paths
+    assert f"http://127.0.0.1:{port}/assets/index.js" in fetched
+    assert not any("/home-bookshelf/home-bookshelf/" in u for u in fetched)
+    # 仅 hostPort 也能抽到（去前缀后命中真实 bundle）
+    assert "/api/v1" in _collect_api_paths(
+        html, host_port=port, path_alias="home-bookshelf"
+    )
+
+
+def test_collect_api_paths_ignores_html_spa_fallback_as_bundle() -> None:
+    """Content-Type 为 text/html 的 SPA fallback 不得当 JS bundle 解析。"""
+    html = '<script src="/assets/missing.js"></script>'
+
+    # 模拟：错误路径返回 HTML 200（含误导性 /api 字面量）
+    class _HtmlTrap(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b'<!doctype html><script>const x="/api/v1/trap";</script>'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # noqa: ARG002
+            pass
+
+    trap_port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", trap_port), _HtmlTrap)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        paths = _collect_api_paths(
+            html, host_port=trap_port, entry_port=trap_port, path_alias="x"
+        )
+        assert "/api/v1/trap" not in paths
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_review_detects_probable_api_mismatch_from_base_and_json_404(
+    workspace, registry, config, prefixed_script_bundle_server, monkeypatch
+):
+    """旧版负向：bundle 仅有 BASE=/api/v1；根空 200 + 前缀 JSON 404 → 疑似错位。"""
+    port = prefixed_script_bundle_server
+    config.staticGatewayPort = port
+    _seed_static(
+        workspace,
+        registry,
+        "backend",
+        host_port=port,
+        lan_url=f"http://127.0.0.1:{port}",
+        route_host="home-bookshelf",
+        route_url=f"http://127.0.0.1:{port}/home-bookshelf/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+
+    report = review_access(workspace, config, registry)
+    rep = report.instances[0]
+    assert rep.has_api_mismatch is True
+    mismatched = [f for f in rep.api_findings if f.mismatch]
+    assert any(f.path == "/api/v1" for f in mismatched)
+    assert rep.status == "warn"
+    assert any("IMP-055" in f for f in rep.findings)
+
+
+class _CompatiblePrefixedHandler(http.server.BaseHTTPRequestHandler):
+    """新版正向：HTML / 静态 / API 均带别名前缀；无绝对 /api 字面量。"""
+
+    HTML = (
+        b"<!doctype html><html><head>"
+        b'<script type="module" src="/home-bookshelf/assets/app.js"></script>'
+        b"</head><body>ok</body></html>"
+    )
+    BUNDLE = b'const BASE="/home-bookshelf/api/v1";fetch(BASE+"/members");'
+    MEMBERS = b'[{"id":1}]'
+    NOT_FOUND = b'{"detail":"Not Found"}'
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path in {"/", "/home-bookshelf", "/home-bookshelf/"}:
+            body = self.HTML if "home-bookshelf" in path else b"root"
+            self._send(200, body, "text/html")
+        elif path in {"/assets/app.js", "/home-bookshelf/assets/app.js"}:
+            self._send(200, self.BUNDLE, "application/javascript")
+        elif path == "/home-bookshelf/api/v1/members":
+            self._send(200, self.MEMBERS, "application/json")
+        elif path in {
+            "/api/",
+            "/api/v1/",
+            "/api/v1",
+            "/home-bookshelf/api/",
+            "/home-bookshelf/api/v1/",
+            "/home-bookshelf/api/v1",
+        }:
+            self._send(404, self.NOT_FOUND, "application/json")
+        else:
+            self._send(404, b"nf", "text/plain")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # noqa: ARG002
+        pass
+
+
+@pytest.fixture()
+def compatible_prefixed_server():
+    port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", port), _CompatiblePrefixedHandler)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_review_compatible_prefixed_app_overall_ok(
+    workspace, registry, config, compatible_prefixed_server, monkeypatch
+):
+    """新版正向：资源与 API 均带别名前缀时 overall=ok，不得误报。"""
+    port = compatible_prefixed_server
+    config.staticGatewayPort = port
+    _seed_static(
+        workspace,
+        registry,
+        "backend",
+        host_port=port,
+        lan_url=f"http://127.0.0.1:{port}",
+        route_host="home-bookshelf",
+        route_url=f"http://127.0.0.1:{port}/home-bookshelf/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+
+    report = review_access(workspace, config, registry)
+    rep = report.instances[0]
+    assert rep.has_api_mismatch is False
+    assert rep.status == "ok"
+    assert report.overall == "ok"
+
+
+class _NoApiHandler(http.server.BaseHTTPRequestHandler):
+    """无 API 项目：默认 /api/ 探针 JSON 404，不得误报。"""
+
+    HTML = b"<!doctype html><html><body><h1>static</h1></body></html>"
+    NOT_FOUND = b'{"detail":"Not Found"}'
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path in {"/", "/demo", "/demo/"}:
+            body = self.HTML
+            self._send(200, body, "text/html")
+        elif path in {
+            "/api/",
+            "/api/v1/",
+            "/demo/api/",
+            "/demo/api/v1/",
+        }:
+            self._send(404, self.NOT_FOUND, "application/json")
+        else:
+            self._send(404, b"nf", "text/plain")
+
+    def _send(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # noqa: ARG002
+        pass
+
+
+@pytest.fixture()
+def no_api_server():
+    port = _free_port()
+    httpd = socketserver.TCPServer(("127.0.0.1", port), _NoApiHandler)
+    httpd.allow_reuse_address = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_review_no_api_project_default_probes_no_false_positive(
+    workspace, registry, config, no_api_server, monkeypatch
+):
+    """无 API 项目：默认 /api/、/api/v1/ 返回 JSON 404 仍不得告警。"""
+    port = no_api_server
+    config.staticGatewayPort = port
+    _seed_static(
+        workspace,
+        registry,
+        "static-only",
+        host_port=port,
+        lan_url=f"http://127.0.0.1:{port}",
+        route_host="demo",
+        route_url=f"http://127.0.0.1:{port}/demo/",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
+    )
+
+    report = review_access(workspace, config, registry)
+    rep = report.instances[0]
+    assert rep.has_api_mismatch is False
+    assert rep.status == "ok"
