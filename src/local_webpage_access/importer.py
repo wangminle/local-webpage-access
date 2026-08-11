@@ -494,6 +494,24 @@ class Importer:
                 path_alias=path_alias,
                 name_source=name_source,
             )
+            # IMP-056 Gate-2：兼容性预检（CHK-P03/P04），不阻断导入
+            try:
+                from local_webpage_access.compatibility_checker import (
+                    check_compatibility,
+                )
+                findings = check_compatibility(
+                    current_dir,
+                    primary_subdir=detection.source_subdir,
+                )
+                if findings:
+                    manifest.compatibilityFindings = findings
+                    log.info(
+                        "实例 %s 兼容性预检发现 %d 项（不阻断）",
+                        instance_id,
+                        len(findings),
+                    )
+            except Exception:  # noqa: BLE001 - 预检失败不阻断导入
+                log.warning("实例 %s 兼容性预检执行失败，跳过", instance_id)
             manifest.save(self.ws.app_manifest_path(instance_id))
 
             # 登记 registry
@@ -517,6 +535,25 @@ class Importer:
                 else f"导入完成，sha256={zip_hash[:12]}，未识别（pending）"
             )
             self.registry.add_event(instance_id, "import", event_msg)
+            # IMP-058 Gate-A：预检修正/警告记为 registry 事件（A.08）。
+            for note in detection.notes:
+                if note.startswith("[预检修正]"):
+                    self.registry.add_event(
+                        instance_id, "preflight", note,
+                    )
+                elif note.startswith("[预检警告]"):
+                    self.registry.add_event(
+                        instance_id, "preflight", note,
+                    )
+            # IMP-056 Gate-2：兼容性预检发现登记为 registry 事件（B.04）。
+            for f in manifest.compatibilityFindings:
+                sev = f.severity
+                loc = f" ({f.file}:{f.line})" if f.file else ""
+                self.registry.add_event(
+                    instance_id,
+                    "compatibility",
+                    f"[{f.checkId}/{sev}] {f.title}{loc}",
+                )
             # IMP-015：检测到业务 .env.example 时登记事件，提示用户在部署后填写密钥。
             if (current_dir / ".env.example").is_file():
                 self.registry.add_event(
@@ -1596,6 +1633,29 @@ def build_manifest_from_detection(
     if zip_hash:
         manifest.sourceZipHash = zip_hash  # type: ignore[attr-defined]
     manifest.network.internalPort = detection.internalPort
+    # Gate-B：存储子目录与候选列表
+    if detection.source_subdir:
+        manifest.sourceSubdir = detection.source_subdir
+    if detection.candidates and len(detection.candidates) > 1:
+        manifest.deploymentCandidates = [
+            c.model_dump() for c in detection.candidates[1:]
+        ]
+    preflight_notes = [n for n in detection.notes if n.startswith("[预检修正]") or n.startswith("[预检警告]")]
+    if preflight_notes:
+        manifest.preflightSummary = "; ".join(preflight_notes)
+    # Gate-C C.01/C.06：生成部署计划并存储到 manifest
+    if detection.evidence is not None:
+        try:
+            from local_webpage_access.candidate_generator import generate_plans
+            plans = generate_plans(detection.evidence)
+            if plans:
+                manifest.deploymentPlans = [p.model_dump() for p in plans]
+                # 选中 top-1 计划
+                top_plan = plans[0]
+                manifest.selectedPlanId = top_plan.planId
+                manifest.capabilityContract = top_plan.capabilityContract.model_dump()
+        except Exception:  # noqa: BLE001
+            pass  # 计划生成失败不阻塞导入
     manifest.touch()
     return manifest
 

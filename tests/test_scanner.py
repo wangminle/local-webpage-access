@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from local_webpage_access.models import Kind, ResourceProfile, Runtime, ServingMode
-from local_webpage_access.scanner import Scanner, summarize
+from local_webpage_access.models import EntryConfig, Kind, ResourceProfile, Runtime, ServingMode
+from local_webpage_access.paths import Workspace
+from local_webpage_access.scanner import DetectionResult, Scanner, summarize
 
 
 # ---- FileSummary -----------------------------------------------------------
@@ -729,3 +730,500 @@ def test_detect_tornado_infers_port_8888(tmp_path: Path) -> None:
     assert result.pending is False
     assert result.internalPort == 8888
     assert "tornado" in result.stack
+
+
+# ---- IMP-058 Gate-A 回归测试 ------------------------------------------------
+#
+# A.10：现有项目类型经预检后不产生非预期修正或警告。
+
+
+def test_preflight_static_project_no_issues(tmp_path: Path) -> None:
+    """纯静态项目预检不修正、不警告。"""
+    (tmp_path / "index.html").write_text("<html></html>")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    # 预检不应产生修正/警告 notes
+    preflight_notes = [n for n in result.notes if n.startswith("[预检")]
+    assert len(preflight_notes) == 0
+
+
+def test_preflight_root_flask_no_issues(tmp_path: Path) -> None:
+    """根目录 Flask 项目预检不修正、不警告。"""
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    preflight_notes = [n for n in result.notes if n.startswith("[预检")]
+    assert len(preflight_notes) == 0
+
+
+def test_preflight_root_fastapi_no_issues(tmp_path: Path) -> None:
+    """根目录 FastAPI 项目（无 alembic、无 Dockerfile）预检不修正、不警告。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (tmp_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    preflight_notes = [n for n in result.notes if n.startswith("[预检")]
+    assert len(preflight_notes) == 0
+
+
+def test_preflight_root_vite_no_issues(tmp_path: Path) -> None:
+    """根目录 Vite 前端项目预检不修正、不警告。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
+                "scripts": {"build": "vite build"},
+            }
+        )
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    preflight_notes = [n for n in result.notes if n.startswith("[预检")]
+    assert len(preflight_notes) == 0
+
+
+def test_preflight_fastapi_alembic_autofix_note(tmp_path: Path) -> None:
+    """FastAPI + alembic 项目：scanner 已包 sh -c，预检不重复修正。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\nalembic\n")
+    (tmp_path / "alembic.ini").write_text("[alembic]\nscript_location = alembic\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    # scanner 已用 sh -c 包裹，预检不应重复包裹（无 CHK-V02 修正）
+    v02_notes = [n for n in result.notes if "[预检修正] CHK-V02" in n]
+    assert len(v02_notes) == 0
+
+
+def test_preflight_sqlite_autofix_note(tmp_path: Path) -> None:
+    """SQLite 项目：预检标记 DATABASE_URL 修正。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nsqlalchemy\n")
+    (tmp_path / "app.db").write_bytes(b"")
+    result = Scanner().detect(tmp_path)
+    assert result.hasDatabase is True
+    # CHK-V03 应标记修正（A.02 预防性注入）
+    v03_notes = [n for n in result.notes if "[预检修正] CHK-V03" in n]
+    assert len(v03_notes) == 1
+
+
+def test_preflight_project_dockerfile_warning(tmp_path: Path) -> None:
+    """项目自带 Dockerfile：预检标记警告。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+    result = Scanner().detect(tmp_path)
+    warning_notes = [n for n in result.notes if "[预检警告]" in n]
+    assert len(warning_notes) == 1
+    assert "Dockerfile" in warning_notes[0]
+
+
+# ---- IMP-057 Gate-1：Monorepo 包分类测试 -----------------------------------
+
+
+def test_monorepo_npm_workspaces_web_server(tmp_path: Path) -> None:
+    """npm workspaces monorepo：单 web_server -> 自动识别为主包。"""
+    # 根 package.json with workspaces
+    (tmp_path / "package.json").write_text(
+        json.dumps({
+            "name": "monorepo-root",
+            "private": True,
+            "workspaces": ["packages/*"],
+        })
+    )
+    (tmp_path / "package-lock.json").write_text("{}")
+
+    # webpage 包（web_server）
+    webpage = tmp_path / "packages" / "webpage"
+    webpage.mkdir(parents=True)
+    (webpage / "package.json").write_text(
+        json.dumps({
+            "name": "@app/webpage",
+            "dependencies": {"express": "^4.18.0"},
+            "scripts": {"start": "node server.js"},
+        })
+    )
+
+    # core 包（library）
+    core = tmp_path / "packages" / "core"
+    core.mkdir(parents=True)
+    (core / "package.json").write_text(
+        json.dumps({
+            "name": "@app/core",
+            "main": "index.js",
+        })
+    )
+
+    # desktop 包（electron_desktop）
+    desktop = tmp_path / "packages" / "desktop"
+    desktop.mkdir(parents=True)
+    (desktop / "package.json").write_text(
+        json.dumps({
+            "name": "@app/desktop",
+            "devDependencies": {"electron": "^30.0.0"},
+        })
+    )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.NODE
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+    assert result.primary_package == "packages/webpage"
+    assert len(result.classifications) == 3
+    # entry uses -w
+    assert result.entry.start is not None
+    assert "-w @app/webpage" in result.entry.start
+    assert result.entry.install == "npm ci"  # root lockfile
+
+
+def test_monorepo_no_deployable_packages(tmp_path: Path) -> None:
+    """monorepo 无可部署子包 -> pending。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps({
+            "name": "mono",
+            "workspaces": ["packages/*"],
+        })
+    )
+    # 仅 library 和 electron
+    core = tmp_path / "packages" / "core"
+    core.mkdir(parents=True)
+    (core / "package.json").write_text(
+        json.dumps({"name": "@app/core", "main": "index.js"})
+    )
+    desktop = tmp_path / "packages" / "desktop"
+    desktop.mkdir(parents=True)
+    (desktop / "package.json").write_text(
+        json.dumps({"name": "@app/desktop", "devDependencies": {"electron": "^30"}})
+    )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+    assert result.primary_package is None
+
+
+def test_monorepo_two_web_servers_pending(tmp_path: Path) -> None:
+    """两个 web_server -> pending。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "mono", "workspaces": ["packages/*"]})
+    )
+    for name in ("api1", "api2"):
+        pkg = tmp_path / "packages" / name
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text(
+            json.dumps({
+                "name": f"@app/{name}",
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "node server.js"},
+            })
+        )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+    assert any("2 个 web_server" in n for n in result.notes)
+
+
+def test_monorepo_frontend_build_only(tmp_path: Path) -> None:
+    """单 frontend_build（无 web_server）-> 选为 primary。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "mono", "workspaces": ["packages/*"]})
+    )
+    web = tmp_path / "packages" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text(
+        json.dumps({
+            "name": "@app/web",
+            "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
+            "scripts": {"build": "vite build"},
+        })
+    )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.primary_package == "packages/web"
+    assert result.form == "frontend-static"
+    assert result.entry.build is not None
+    assert "-w @app/web" in result.entry.build
+    assert result.entry.buildOutputDir == "packages/web/dist"
+
+
+def test_monorepo_vite_not_web_server(tmp_path: Path) -> None:
+    """Vite 包不应因 scripts.dev 被误判为 web_server。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "mono", "workspaces": ["packages/*"]})
+    )
+    vite_pkg = tmp_path / "packages" / "frontend"
+    vite_pkg.mkdir(parents=True)
+    (vite_pkg / "package.json").write_text(
+        json.dumps({
+            "name": "@app/frontend",
+            "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
+            "devDependencies": {"vite": "^5.0.0"},
+            "scripts": {"dev": "vite", "build": "vite build"},
+        })
+    )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    # 应为 frontend_build，不是 web_server
+    cls = next(c for c in result.classifications if c.path == "packages/frontend")
+    assert cls.packageType == "frontend_build"
+
+
+def test_monorepo_non_monorepo_no_change(tmp_path: Path) -> None:
+    """非 monorepo 项目不受影响。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps({
+            "dependencies": {"express": "^4.18.0"},
+            "scripts": {"start": "node server.js"},
+        })
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.primary_package is None
+    assert len(result.classifications) == 0
+    assert result.entry.start == "npm run start"
+
+
+def test_monorepo_pure_electron_pending(tmp_path: Path) -> None:
+    """纯 electron monorepo -> pending（无可部署包）。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "mono", "workspaces": ["packages/*"]})
+    )
+    desktop = tmp_path / "packages" / "desktop"
+    desktop.mkdir(parents=True)
+    (desktop / "package.json").write_text(
+        json.dumps({
+            "name": "@app/desktop",
+            "devDependencies": {"electron": "^30.0.0"},
+        })
+    )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+    assert any("未发现 Web 可部署" in n for n in result.notes)
+
+
+def test_monorepo_web_server_and_frontend_selects_web_server(tmp_path: Path) -> None:
+    """web_server + frontend_build 共存时选 web_server。"""
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "mono", "workspaces": ["packages/*"]})
+    )
+    # web_server 包
+    api = tmp_path / "packages" / "api"
+    api.mkdir(parents=True)
+    (api / "package.json").write_text(
+        json.dumps({
+            "name": "@app/api",
+            "dependencies": {"express": "^4.18.0"},
+            "scripts": {"start": "node server.js"},
+        })
+    )
+    # frontend_build 包
+    web = tmp_path / "packages" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text(
+        json.dumps({
+            "name": "@app/web",
+            "dependencies": {"react": "^18.0.0"},
+            "scripts": {"build": "vite build"},
+        })
+    )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.primary_package == "packages/api"
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+
+
+# ---- IMP-058 Gate-B：子目录布局识别 + 多候选测试 ----------------------------
+
+
+def test_subdir_backend_frontend_layout(tmp_path: Path) -> None:
+    """backend/+frontend/ 布局自动识别为 python 候选（DEV-105 / home-bookshelf 场景）。"""
+    # backend 子目录：FastAPI + SQLite + alembic
+    backend = tmp_path / "backend"
+    backend.mkdir(parents=True)
+    (backend / "requirements.txt").write_text(
+        "fastapi\nuvicorn\nsqlalchemy\nalembic\n"
+    )
+    (backend / "app").mkdir()
+    (backend / "app" / "__init__.py").write_text("")
+    (backend / "app" / "main.py").write_text("app = None  # FastAPI app")
+
+    # frontend 子目录：Vue + Vite
+    frontend = tmp_path / "frontend"
+    frontend.mkdir(parents=True)
+    (frontend / "package.json").write_text(
+        json.dumps({
+            "name": "frontend",
+            "dependencies": {"vue": "^3.0.0"},
+            "devDependencies": {"vite": "^5.0.0"},
+            "scripts": {"build": "vite build", "dev": "vite"},
+        })
+    )
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.PYTHON
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+    assert result.source_subdir == "backend"
+    assert result.form == "fullstack-sqlite"
+    assert result.hasDatabase is True
+    # 预检应检测到子目录
+    assert any("[子目录识别]" in n for n in result.notes)
+    # 候选列表应有 python primary + frontend alternate + static fallback
+    assert len(result.candidates) >= 2
+
+
+def test_subdir_backend_only_python(tmp_path: Path) -> None:
+    """仅 backend/ 子目录有 Python 项目 -> 识别为 python 候选。"""
+    backend = tmp_path / "backend"
+    backend.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("flask\n")
+    (backend / "app.py").write_text("app = None")
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.PYTHON
+    assert result.source_subdir == "backend"
+
+
+def test_subdir_server_python(tmp_path: Path) -> None:
+    """server/ 子目录有 Python Web 框架 -> 识别为 python 候选。"""
+    server = tmp_path / "server"
+    server.mkdir(parents=True)
+    (server / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (server / "app").mkdir()
+    (server / "app" / "__init__.py").write_text("")
+    (server / "app" / "main.py").write_text("app = None")
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.PYTHON
+    assert result.source_subdir == "server"
+
+
+def test_subdir_non_web_python_not_selected(tmp_path: Path) -> None:
+    """子目录有 Python 依赖但无 Web 框架 -> 不作为子目录候选，回退根目录。"""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "requirements.txt").write_text("requests\nbeautifulsoup4\n")
+
+    # 根目录有 index.html -> static
+    (tmp_path / "index.html").write_text("<html></html>")
+
+    result = Scanner().detect(tmp_path)
+    # 无 Web 框架，不触发子目录识别 -> 回退 static
+    assert result.kind == Kind.STATIC
+
+
+def test_subdir_root_python_still_works(tmp_path: Path) -> None:
+    """根目录有 requirements.txt + FastAPI -> 不触发子目录识别（根目录优先）。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "main.py").write_text("app = None")
+
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.PYTHON
+    assert result.source_subdir is None  # 根目录，无子目录
+
+
+def test_subdir_evidence_collected(tmp_path: Path) -> None:
+    """detect() 结果包含 ProjectEvidence。"""
+    (tmp_path / "index.html").write_text("<html></html>")
+
+    result = Scanner().detect(tmp_path)
+    assert result.evidence is not None
+    assert "index.html" in result.evidence.rootFiles
+
+
+def test_subdir_candidates_generated(tmp_path: Path) -> None:
+    """detect() 结果包含候选列表。"""
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / "app.py").write_text("app = None")
+
+    result = Scanner().detect(tmp_path)
+    assert len(result.candidates) >= 1
+    # top-1 候选应为 python primary
+    top = result.candidates[0]
+    assert top.kind == "python"
+    assert top.confidenceTier == "primary"
+
+
+def test_subdir_dockerfile_copy_prefix(tmp_path: Path, workspace: Workspace) -> None:
+    """sourceSubdir 设置时 Dockerfile COPY 路径含子目录前缀。"""
+    from local_webpage_access.importer import build_manifest_from_detection
+    from local_webpage_access.dockerfile_templates import generate_dockerfile
+
+    # 构造子目录检测结果
+    detection = DetectionResult()
+    detection.kind = Kind.PYTHON
+    detection.runtime = Runtime.DOCKER_COMPOSE
+    detection.servingMode = ServingMode.CONTAINER
+    detection.form = "backend-container"
+    detection.resourceProfile = ResourceProfile.SMALL
+    detection.entry = EntryConfig(
+        install="pip install -r requirements.txt",
+        start="uvicorn app.main:app --host 0.0.0.0 --port 8000",
+    )
+    detection.internalPort = 8000
+    detection.source_subdir = "backend"
+    detection.confidence = "high"
+
+    manifest = build_manifest_from_detection(
+        instance_id="test-subdir",
+        display_name="test-subdir",
+        detection=detection,
+        workspace=workspace,
+    )
+
+    # 创建源码目录
+    src_dir = workspace.app_current("test-subdir")
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "backend").mkdir(exist_ok=True)
+    (src_dir / "backend" / "requirements.txt").write_text("flask\n")
+    (src_dir / "backend" / "app.py").write_text("app = None")
+
+    path = generate_dockerfile(manifest, workspace)
+    content = path.read_text("utf-8")
+
+    # COPY 路径应含 backend/ 前缀
+    assert "COPY current/backend/requirements.txt requirements.txt" in content
+    assert "COPY current/backend/ ./" in content
+
+
+def test_subdir_no_subdir_uses_root_copy(tmp_path: Path, workspace: Workspace) -> None:
+    """sourceSubdir 为 None 时 COPY 路径不含子目录前缀。"""
+    from local_webpage_access.importer import build_manifest_from_detection
+    from local_webpage_access.dockerfile_templates import generate_dockerfile
+
+    detection = DetectionResult()
+    detection.kind = Kind.PYTHON
+    detection.runtime = Runtime.DOCKER_COMPOSE
+    detection.servingMode = ServingMode.CONTAINER
+    detection.form = "backend-container"
+    detection.resourceProfile = ResourceProfile.SMALL
+    detection.entry = EntryConfig(
+        install="pip install -r requirements.txt",
+        start="uvicorn app.main:app --host 0.0.0.0 --port 8000",
+    )
+    detection.internalPort = 8000
+    detection.confidence = "high"
+
+    manifest = build_manifest_from_detection(
+        instance_id="test-nosubdir",
+        display_name="test-nosubdir",
+        detection=detection,
+        workspace=workspace,
+    )
+
+    src_dir = workspace.app_current("test-nosubdir")
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "requirements.txt").write_text("flask\n")
+    (src_dir / "app.py").write_text("app = None")
+
+    path = generate_dockerfile(manifest, workspace)
+    content = path.read_text("utf-8")
+
+    # COPY 路径不含子目录前缀
+    assert "COPY current/requirements.txt requirements.txt" in content
+    assert "COPY current/ ./" in content
+    assert "current/backend/" not in content

@@ -1535,6 +1535,41 @@ def diagnose_instance(
             )
         )
 
+    # 7. 兼容性预检发现（IMP-056 Gate-2，B.06）
+    try:
+        manifest = InstanceManifest.load(manifest_path)
+        findings = getattr(manifest, "compatibilityFindings", [])
+        if findings:
+            critical = [f for f in findings if f.severity == "critical"]
+            warning = [f for f in findings if f.severity == "warning"]
+            parts = []
+            if critical:
+                parts.append(f"{len(critical)} critical")
+            if warning:
+                parts.append(f"{len(warning)} warning")
+            info_count = len(findings) - len(critical) - len(warning)
+            if info_count > 0:
+                parts.append(f"{info_count} info")
+            summary = "、".join(parts)
+            detail_lines = []
+            for f in findings[:10]:
+                loc = f" ({f.file}:{f.line})" if f.file else ""
+                detail_lines.append(
+                    f"[{f.checkId}/{f.severity}] {f.title}{loc}"
+                )
+            results.append(
+                CheckResult(
+                    f"instance:{instance_id}:compatibility",
+                    STATUS_WARN if critical else STATUS_OK,
+                    f"兼容性预检：{summary}（不阻断 / 以 IMP-055 为准）",
+                    detail="\n".join(detail_lines) if detail_lines else None,
+                    suggestion="参考各 finding 的 fix 建议；"
+                    "设别名时仍以 IMP-055 运行时探测为准",
+                )
+            )
+    except Exception:  # noqa: BLE001 - 兼容性检查不阻断诊断
+        pass
+
     return results
 
 

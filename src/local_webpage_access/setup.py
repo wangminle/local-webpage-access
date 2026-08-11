@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from local_webpage_access import PRODUCT_NAME, __version__
@@ -167,8 +166,6 @@ def run_setup(
     """检测宿主机环境并生成安装指引（不需要已初始化工作区）。"""
     plat = detect_platform()
     hint_plat = _hint_platform(plat)  # WSL 复用 Linux 安装指引
-    from local_webpage_access.config import Config
-
     config = Config(staticGateway=static_gateway)
     items: list[SetupItem] = [
         _from_doctor_check(

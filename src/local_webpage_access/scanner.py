@@ -15,10 +15,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from local_webpage_access.logging import get_logger
+from local_webpage_access.package_classifier import classify_and_select as _classify_monorepo
+from local_webpage_access.preflight import check_and_fix as _preflight_check
+from local_webpage_access.evidence_collector import collect as _collect_evidence
+from local_webpage_access.candidate_generator import generate_candidates as _generate_candidates
 from local_webpage_access.models import (
     DatabaseConfig,
     EntryConfig,
     Kind,
+    ProjectEvidence,
     ResourceProfile,
     Runtime,
     ServingMode,
@@ -159,6 +164,53 @@ def summarize(root: Path) -> FileSummary:
     return summary
 
 
+def summarize_package(root: Path, package_path: str) -> FileSummary:
+    """为主包子目录构造 FileSummary（IMP-057 §4.5）。
+
+    deps/scripts 来自子包 ``package.json``；锁文件/包管理器仍看仓库根
+    （install 在根执行）。
+    """
+    pkg_dir = root / package_path
+    summary = FileSummary(root=pkg_dir)
+
+    # 子包 package.json 的 deps/scripts
+    pkg = _read_package_json(pkg_dir / "package.json")
+    if pkg:
+        summary.has_package_json = True
+        node_deps: dict[str, str] = {}
+        node_deps.update(pkg.get("devDependencies", {}) or {})
+        node_deps.update(pkg.get("dependencies", {}) or {})
+        summary.node_deps = node_deps
+        summary.node_runtime_deps = dict(pkg.get("dependencies", {}) or {})
+        summary.node_scripts = pkg.get("scripts", {}) or {}
+
+    # 锁文件仍看仓库根（install 在根执行）
+    root_files: set[str] = set()
+    try:
+        for entry in root.iterdir():
+            if entry.is_file():
+                root_files.add(entry.name.lower())
+    except (PermissionError, OSError):
+        pass
+    summary.top_files = root_files  # _node_install_command 直接检查 top_files 中的锁文件名
+
+    # SQLite 文件在子包目录中查找
+    for path in _walk(pkg_dir, max_depth=3):
+        if path.is_file() and path.name.lower().endswith(SQLITE_FILE_EXT):
+            rel = path.relative_to(pkg_dir)
+            summary.sqlite_files.append(str(rel).replace("\\", "/"))
+            summary.total_files += 1
+
+    # runtime_paths 检查（在子包目录中）
+    if (
+        (pkg_dir / "src" / "app" / "runtime_paths.py").is_file()
+        or (pkg_dir / "app" / "runtime_paths.py").is_file()
+    ):
+        summary.has_runtime_paths = True
+
+    return summary
+
+
 def _walk(root: Path, *, max_depth: int):
     """受限深度遍历，跳过常见大目录。"""
     skip = {"node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build", ".next"}
@@ -270,6 +322,13 @@ class DetectionResult:
     confidence: str = "low"  # high / medium / low
     pending: bool = False
     notes: list[str] = field(default_factory=list)
+    # IMP-057 Gate-1：Monorepo 包分类结果
+    classifications: list = field(default_factory=list)  # list[PackageClassification]
+    primary_package: str | None = None  # 主包相对路径（如 "packages/webpage"）
+    # IMP-058 Gate-B：多候选识别
+    source_subdir: str | None = None  # 源码子目录（如 "backend"），None = 根目录
+    evidence: ProjectEvidence | None = None  # Layer 0 输出
+    candidates: list = field(default_factory=list)  # list[DeploymentCandidate]（Layer 1 输出）
 
 
 # ---- 扫描器 -----------------------------------------------------------------
@@ -284,6 +343,83 @@ class Scanner:
 
         summary = summarize(project_dir)
         result = DetectionResult()
+
+        # IMP-057 Gate-1：Monorepo 包分类。
+        # 在常规识别前检测 npm workspaces monorepo，若存在则按主包摘要识别。
+        mono = _classify_monorepo(project_dir)
+        if mono.is_monorepo:
+            result.classifications = mono.classifications
+            result.notes.extend(mono.notes)
+            if mono.primary is None:
+                # 0 或 >=2 个可部署子包：pending
+                result.pending = True
+                result.confidence = "low"
+                result.kind = Kind.NODE
+                # 仍执行预检（无害）
+                preflight = _preflight_check(result, project_dir)
+                if preflight.notes:
+                    result.notes.extend(preflight.notes)
+                if preflight.warnings:
+                    result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+                return result
+            # 有主包：用主包摘要替代根摘要
+            result.primary_package = mono.primary.path
+            summary = summarize_package(project_dir, mono.primary.path)
+            # 检测 SQLite（基于主包摘要）
+            self._detect_sqlite(summary, result)
+            # 用主包摘要识别 Node 项目
+            self._detect_node(summary, result)
+            # IMP-057 §4.5：entry 使用 -w <name> 语义
+            self._apply_workspace_entry(result, mono.primary, summary)
+            # 预检
+            preflight = _preflight_check(result, project_dir)
+            if preflight.notes:
+                result.notes.extend(preflight.notes)
+            if preflight.warnings:
+                result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+            return result
+
+
+        # IMP-058 Gate-B：Layer 0+1 多候选识别。
+        # 收集证据并生成候选列表，检测子目录布局（如 backend/+frontend/）。
+        evidence = _collect_evidence(project_dir)
+        result.evidence = evidence
+        candidates = _generate_candidates(evidence)
+        result.candidates = candidates
+
+        # 子目录布局检测（DEV-105）：若候选含 sourceSubdir，使用子目录摘要识别。
+        subdir_candidate = next(
+            (c for c in candidates if c.sourceSubdir and c.confidenceTier == "primary"),
+            None,
+        )
+        if (
+            subdir_candidate
+            and subdir_candidate.kind == "python"
+            and subdir_candidate.sourceSubdir
+        ):
+            # 用子目录作为工程根进行识别
+            subdir = project_dir / subdir_candidate.sourceSubdir
+            subdir_summary = summarize(subdir)
+            result.source_subdir = subdir_candidate.sourceSubdir
+            # 仍检测 SQLite（基于子目录摘要）
+            self._detect_sqlite(subdir_summary, result)
+            # 检测 Python 项目
+            self._detect_python(subdir_summary, result)
+            # 修正 install 命令中的 requirements 路径（若子目录有 requirements.txt）
+            if subdir_summary.has_requirements_txt and result.entry.install:
+                result.entry.install = "pip install -r requirements.txt"
+            elif subdir_summary.has_requirements_prod and result.entry.install:
+                result.entry.install = "pip install -r requirements-prod.txt"
+            # 预检
+            preflight = _preflight_check(result, project_dir)
+            if preflight.notes:
+                result.notes.extend(preflight.notes)
+            if preflight.warnings:
+                result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+            result.notes.append(
+                f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录"
+            )
+            return result
 
         # 1. 重型数据库优先判断（不自动启动）
         heavy = self._detect_heavy_db(summary)
@@ -327,7 +463,55 @@ class Scanner:
                 result.confidence = "low"
                 result.notes.append("无法识别项目类型，标记 pending")
 
+        # IMP-058 Gate-A：Layer 2 静态预检（不 build，毫秒级检查配置可行性）。
+        # 自动修正 shell 操作符、alembic cwd 等，修正事件写入 notes。
+        preflight = _preflight_check(result, project_dir)
+        if preflight.notes:
+            result.notes.extend(preflight.notes)
+        if preflight.warnings:
+            result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+
         return result
+
+    # ---- Monorepo entry 编排（IMP-057 §4.5）---------------------------------
+
+    def _apply_workspace_entry(
+        self,
+        result: DetectionResult,
+        primary,
+        summary: FileSummary,
+    ) -> None:
+        """将 entry.build/start 改为 ``npm run <script> -w <name>`` 语义。
+
+        install 仍在仓库根执行（由 ``_node_install_command`` 决定）。
+        若主包无 ``name`` 字段，使用路径作为 ``-w`` 参数。
+        """
+        pkg_name = primary.name
+        scripts = summary.node_scripts
+
+        # build：若主包有 build 脚本 -> npm run build -w <name>
+        if "build" in scripts:
+            result.entry.build = f"npm run build -w {pkg_name}"
+        else:
+            result.entry.build = None
+
+        # start：web_server -> npm run start -w <name>（或 server）
+        if result.form == "frontend-static":
+            # 前端构建型：start 为 None（静态托管）
+            result.entry.start = None
+        elif "start" in scripts:
+            result.entry.start = f"npm run start -w {pkg_name}"
+        elif "server" in scripts:
+            result.entry.start = f"npm run server -w {pkg_name}"
+        # 否则保持 _detect_node 已设置的 start
+
+        # install 保持根目录（_node_install_command 已正确）
+
+        # A.07: frontend_build 主包产物路径策略
+        # 构建产物在子包目录下（packages/<name>/dist），需告诉 hosting 去哪找
+        if result.form == "frontend-static" and primary.path:
+            result.entry.buildOutputDir = f"{primary.path}/dist"
+        result.notes.append(f"entry: install@root, build/start -w {pkg_name}")
 
     # ---- 语言族填充 --------------------------------------------------------
 
@@ -394,9 +578,14 @@ class Scanner:
             result.hasDatabase = True
             # BUG-198：RUNTIME_ROOT 应用写 runtime/data，compose 据此挂载
             data_dir = "runtime/data" if summary.has_runtime_paths else "data"
+            # IMP-058 Gate-A CHK-V03：记录源 SQLite 文件名，供 compose.generate_env
+            # 注入保留原文件名的 DATABASE_URL（避免 BUG-474 硬编码 app.sqlite 把
+            # 应用指向全新空库）。取第一个文件名；多个时用首个作为主库。
+            db_filename = summary.sqlite_files[0] if summary.sqlite_files else None
             result.database = DatabaseConfig(
                 type="sqlite",
                 dataDir=data_dir,
+                dbFilename=db_filename,
             )
             if summary.sqlite_files:
                 result.notes.append(f"发现 SQLite 文件：{', '.join(summary.sqlite_files[:3])}")

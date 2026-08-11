@@ -198,11 +198,34 @@ def _print_import_result(result, config) -> None:
             f"（含 symlink {san.stripped_symlink_count}）：{parts}",
             fg=typer.colors.CYAN,
         )
+    # IMP-056 Gate-2：兼容性预检发现（B.05）
+    _print_compatibility_findings(result.manifest.compatibilityFindings)
     if result.detection.pending:
         typer.secho(
             f"  注意：{result.manifest.lastError}（已标记 pending，需人工或 skill 介入）",
             fg=typer.colors.YELLOW,
         )
+
+
+def _print_compatibility_findings(findings) -> None:
+    """IMP-056 Gate-2：打印兼容性预检结果（B.05）。
+
+    仅展示分级，不阻断 import/start/alias。
+    """
+    if not findings:
+        return
+    typer.secho(
+        f"  兼容性预检：{len(findings)} 项（不阻断 / 仍以 IMP-055 为准）",
+        fg=typer.colors.YELLOW,
+    )
+    for f in findings:
+        icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(f.severity, "⚪")
+        loc = f" @ {f.file}:{f.line}" if f.file else ""
+        typer.echo(f"    {icon} [{f.checkId}/{f.severity}] {f.title}{loc}")
+        if f.code:
+            typer.echo(f"       代码：{f.code}")
+        typer.echo(f"       影响：{f.impact}")
+        typer.echo(f"       建议：{f.fix}")
 
 
 def _print_folder_source_note(result, importer) -> None:

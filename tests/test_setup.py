@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from typing import Sequence
 
-import pytest
 from typer.testing import CliRunner
 
 from local_webpage_access.cli import app

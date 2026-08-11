@@ -46,6 +46,15 @@ _STALE_LOCK_SECONDS = 1800.0
 # 期间锁不会被误判陈旧（BUG-046）。取 staleness 的 1/3 且上限 300s。
 _LOCK_HEARTBEAT_INTERVAL = min(_STALE_LOCK_SECONDS / 3.0, 300.0)
 
+# Gate-C 成本控制（IMP-058 §6.5）
+_MAX_FALLBACK_CANDIDATES = 3  # 最多尝试的 fallback 候选数（不含 top-1）
+_CANDIDATE_TIMEOUT_SECONDS = 300.0  # 单候选 Layer 3 超时（5 分钟）
+
+# Gate-C C.07 fallback 策略
+_FALLBACK_CONFIRM = "confirm"        # 默认：需用户确认才降级
+_FALLBACK_AUTO_EQUIVALENT = "auto-equivalent"  # 自动降级（仅能力等价）
+_FALLBACK_DISABLED = "disabled"      # 禁止降级
+
 # 进程内每个实例一把可重入锁；与文件锁叠加，使同一进程的线程也互斥，
 # 避免文件锁的 PID 检查在同进程多线程下失效（PID 相同）。
 _thread_locks: dict[str, threading.RLock] = {}
@@ -253,12 +262,29 @@ def start_instance(
     config: Config,
     registry: Registry,
     instance_id: str,
+    *,
+    fallback_policy: str = _FALLBACK_CONFIRM,
 ) -> InstanceManifest:
     """启动实例（WBS-17.01）。
 
     * 容器实例已部署过 → :func:`start_container`（容器仍在则 ``compose start``；
       外部 down 后若 compose/镜像仍在则 ``up -d`` 自愈；否则回退完整重建）；
     * 否则（首次启动 / 静态 / 前端）→ 全量 :func:`host_instance`。
+
+    Gate-C（IMP-058 §6.5 / §6.1.1 / C.06-C.07）：首次部署的 docker-compose 实例
+    若 top-1 候选 build/start 失败：
+
+    1. 记录失败诊断并**回滚本次 attempt**（容器、端口、生成文件、manifest 选中状态）；
+    2. 仅当回滚成功且 ``automatic_fallback_safe=True`` 时，才尝试下一个候选；
+    3. 降级策略由 ``fallback_policy`` 控制：
+       - ``"confirm"``（默认）：交互式 CLI 由上层展示等价计划并等待确认；
+         非交互调用返回 :class:`FallbackConfirmationRequired`。
+       - ``"auto-equivalent"``：自动降级到能力契约等价的候选。
+       - ``"disabled"``：不降级，直接失败。
+    4. 能力守恒（§6.1.1）：后端候选不得降级到静态/前端候选。
+    5. 最多尝试 ``_MAX_FALLBACK_CANDIDATES`` 个等价候选。
+    6. 全部失败时输出 Layer 4 诊断报告。
+
     最终 ``desiredState=running``。
     """
     from local_webpage_access.hosting import host_instance, start_container
@@ -269,12 +295,617 @@ def start_instance(
             log.info("实例 %s 已部署，使用轻量 start", instance_id)
             manifest = start_container(workspace, config, registry, instance_id)
         else:
-            manifest = host_instance(workspace, config, registry, instance_id)
+            # Gate-C：尝试 top-1 候选，失败时降级到 fallback
+            manifest = _try_host_with_fallback(
+                workspace, config, registry, instance_id, manifest,
+                host_instance,
+                fallback_policy=fallback_policy,
+            )
         # BUG-084 / IMP-021：首次启动前设置的容器别名此时才拿到 hostPort，
         # 同步生成别名片段（端口漂移时也会重写）；静态别名由 _enable_static 处理，
         # 此处对其为 no-op（conf 已是正确端口）。
         _sync_alias_port(workspace, config, instance_id, manifest)
         return manifest
+
+
+def _try_host_with_fallback(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    host_fn: Any,
+    *,
+    fallback_policy: str = _FALLBACK_CONFIRM,
+) -> InstanceManifest:
+    """Gate-C C.06/C.07/C.08：尝试 top-1 候选，失败时按策略降级到 fallback。
+
+    仅对 docker-compose 实例的首次部署生效（已部署容器走轻量 start，不进此路径）。
+    静态/前端实例通常无 fallback 候选，直接走原逻辑。
+
+    IMP-058 §6.1.1 硬性约束（能力守恒）：不得把后端容器降级为前端静态站并
+    仍声明部署成功。降级前必须验证 fallback 候选与 top-1 候选能力等价——
+    后端候选（kind=python/node, form=backend-container/fullstack-sqlite）
+    只能降级到同族后端候选，不得降级到 static / frontend-static。
+
+    事务模型（§6.5 候选切换事务）：
+    1. Prepare：快照 manifest 选中状态
+    2. Execute：尝试 host（独立 attempt ID）
+    3. Verify：评估成功谓词（由 host_fn 内部完成）
+    4. Commit：验证成功 → 写入选中计划、容器 ID、网络入口、RUNNING
+    5. Rollback：验证失败 → 回滚容器、端口、生成文件、manifest 选中状态
+
+    回滚边界：``rollback_succeeded`` 只表示已声明的回滚步骤全部成功。
+    若 attempt 可能执行了数据库迁移、队列发布或外部 API 写入，
+    则只有满足下列任一条件才允许 ``automatic_fallback_safe=True``：
+    1. 副作用运行在可丢弃的隔离环境；
+    2. 已有可验证的事务回滚；
+    3. 已从本次快照恢复，并通过恢复后探针。
+
+    降级策略（``fallback_policy``）：
+    - ``"confirm"``（默认）：非交互调用 → :class:`FallbackConfirmationRequired`。
+    - ``"auto-equivalent"``：自动降级到等价候选。
+    - ``"disabled"``：不降级。
+    """
+    from local_webpage_access.errors import DockerError, HostingError
+    from local_webpage_access.models import (
+        CandidateDiagnosis,
+        DiagnosisReport,
+        VerificationResult,
+    )
+
+    # 尝试 top-1
+    attempt_id = f"attempt-{instance_id}-0"
+    try:
+        return host_fn(workspace, config, registry, instance_id)
+    except (HostingError, DockerError) as exc:
+        # CHK-192/P1：DockerError（build/start 最常见失败）也需进入 fallback 流程，
+        # 不能只捕获 HostingError 而让 DockerError 绕过降级。
+        # C.06：回滚本次 attempt（容器、端口、生成文件、manifest 选中状态）
+        rollback = _rollback_attempt(
+            workspace, config, registry, instance_id, manifest,
+            attempt_id=attempt_id,
+        )
+
+        # 构建 top-1 失败诊断
+        top1_diagnosis = CandidateDiagnosis(
+            candidateIndex=0,
+            candidateTier="primary",
+            attemptId=attempt_id,
+            failureLayer=_infer_failure_layer(exc),
+            failureReason=str(exc)[:500],
+            fixSuggestion=_suggest_fix(exc),
+            verification=VerificationResult(
+                attemptId=attempt_id,
+                candidateIndex=0,
+                candidateTier="primary",
+                buildSucceeded=False,
+                overallStatus="failed",
+                error=str(exc)[:500],
+            ),
+            rollback=rollback,
+        )
+
+        fallbacks = getattr(manifest, "deploymentCandidates", []) or []
+        if not fallbacks:
+            # 无 fallback → 直接输出诊断
+            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
+                instanceId=instance_id,
+                overallStatus="failed",
+                candidatesTried=[top1_diagnosis],
+                recommendedAction="无 fallback 候选；请检查 Dockerfile 与源码兼容性",
+            ))
+            raise
+
+        # fallback_policy="disabled" → 不降级
+        if fallback_policy == _FALLBACK_DISABLED:
+            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
+                instanceId=instance_id,
+                overallStatus="failed",
+                candidatesTried=[top1_diagnosis],
+                recommendedAction="fallback_policy=disabled，未尝试降级",
+            ))
+            raise
+
+        # 静态实例不参与降级
+        if manifest.runtime.value == "shared-static":
+            raise
+
+        # 能力守恒（§6.1.1）：过滤等价候选
+        primary_capability = _candidate_capability_family(manifest)
+        equivalent_fallbacks = []
+        skipped_inequivalent = []
+        for i, candidate_dict in enumerate(fallbacks):
+            cand_capability = _dict_capability_family(candidate_dict)
+            if _capabilities_equivalent(primary_capability, cand_capability):
+                equivalent_fallbacks.append((i, candidate_dict))
+            else:
+                skipped_inequivalent.append((i, candidate_dict))
+
+        if skipped_inequivalent:
+            log.warning(
+                "实例 %s 能力守恒：top-1 候选能力族=%s，跳过 %d 个不等价 fallback 候选"
+                "（能力族: %s）",
+                instance_id,
+                primary_capability,
+                len(skipped_inequivalent),
+                ", ".join(
+                    _dict_capability_family(d) for _, d in skipped_inequivalent
+                ),
+            )
+            registry.add_event(
+                instance_id,
+                "lifecycle_stage",
+                f"Gate-C 能力守恒：跳过 {len(skipped_inequivalent)} 个不等价 fallback 候选"
+                f"（后端不得降级为静态）",
+            )
+
+        if not equivalent_fallbacks:
+            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
+                instanceId=instance_id,
+                overallStatus="failed",
+                candidatesTried=[top1_diagnosis],
+                recommendedAction="所有 fallback 候选能力不等价，未降级",
+            ))
+            raise
+
+        # C.06：回滚不成功 → 不允许自动降级
+        if not rollback.rollbackSucceeded:
+            log.warning(
+                "实例 %s top-1 回滚失败（%s），不允许自动降级",
+                instance_id,
+                ", ".join(rollback.rolledBackItems) or "无",
+            )
+            top1_diagnosis.rollback = rollback
+            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
+                instanceId=instance_id,
+                overallStatus="failed",
+                candidatesTried=[top1_diagnosis],
+                recommendedAction="回滚未完成，不允许自动降级；请手动检查残留容器/端口",
+            ))
+            raise
+
+        # C.07：confirm 策略 → 需用户确认（非交互调用抛 FallbackConfirmationRequired）
+        if fallback_policy == _FALLBACK_CONFIRM:
+            raise FallbackConfirmationRequired(
+                instance_id,
+                primary_failure=str(exc)[:500],
+                equivalent_candidates=[
+                    {"index": i + 1, **c}
+                    for i, c in equivalent_fallbacks[:_MAX_FALLBACK_CANDIDATES]
+                ],
+            )
+
+        # CHK-192/P1：auto-equivalent 策略需检查 automaticFallbackSafe。
+        # confirm 策略已在上方处理（用户可手动确认覆盖不安全状态）。
+        # 若回滚标记为不安全（容器已启动且项目需要迁移），禁止自动降级。
+        if not rollback.automaticFallbackSafe:
+            log.warning(
+                "实例 %s top-1 回滚标记 automaticFallbackSafe=False（可能已执行不可逆操作），"
+                "禁止自动降级",
+                instance_id,
+            )
+            top1_diagnosis.rollback = rollback
+            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
+                instanceId=instance_id,
+                overallStatus="failed",
+                candidatesTried=[top1_diagnosis],
+                recommendedAction="回滚不安全（可能已执行迁移等不可逆操作），"
+                                  "禁止自动降级；请手动检查数据一致性后重试",
+            ))
+            raise
+
+        # C.07：auto-equivalent → 自动降级
+        log.warning(
+            "实例 %s top-1 候选失败（%s），开始尝试 %d 个等价 fallback 候选",
+            instance_id,
+            str(exc)[:200],
+            min(len(equivalent_fallbacks), _MAX_FALLBACK_CANDIDATES),
+        )
+
+        diagnoses: list[CandidateDiagnosis] = [top1_diagnosis]
+
+        # 尝试等价 fallback 候选
+        for attempt, (orig_index, candidate_dict) in enumerate(
+            equivalent_fallbacks[:_MAX_FALLBACK_CANDIDATES]
+        ):
+            tier = candidate_dict.get("confidenceTier", "fallback")
+            fb_attempt_id = f"attempt-{instance_id}-{attempt + 1}"
+            log.info(
+                "实例 %s 尝试 fallback 候选 %d/%d（tier=%s）",
+                instance_id,
+                attempt + 1,
+                min(len(equivalent_fallbacks), _MAX_FALLBACK_CANDIDATES),
+                tier,
+            )
+            registry.add_event(
+                instance_id,
+                "lifecycle_stage",
+                f"Gate-C 降级：尝试 fallback 候选 {attempt + 1}（tier={tier}）",
+            )
+            try:
+                return _apply_candidate_and_host(
+                    workspace, config, registry, instance_id, manifest,
+                    candidate_dict, host_fn,
+                )
+            except (HostingError, DockerError) as fallback_exc:
+                # CHK-192/P1：fallback 候选的 DockerError 同样需要捕获
+                log.warning(
+                    "实例 %s fallback 候选 %d 失败：%s",
+                    instance_id,
+                    attempt + 1,
+                    str(fallback_exc)[:200],
+                )
+                fb_rollback = _rollback_attempt(
+                    workspace, config, registry, instance_id, manifest,
+                    attempt_id=fb_attempt_id,
+                )
+                diagnoses.append(CandidateDiagnosis(
+                    candidateIndex=orig_index + 1,
+                    candidateTier=tier,
+                    failureLayer=_infer_failure_layer(fallback_exc),
+                    failureReason=str(fallback_exc)[:500],
+                    fixSuggestion=_suggest_fix(fallback_exc),
+                    verification=VerificationResult(
+                        attemptId=fb_attempt_id,
+                        candidateIndex=orig_index + 1,
+                        candidateTier=tier,
+                        buildSucceeded=False,
+                        overallStatus="failed",
+                        error=str(fallback_exc)[:500],
+                    ),
+                    rollback=fb_rollback,
+                ))
+                continue
+
+        # 全部失败 → Layer 4 诊断报告
+        report = DiagnosisReport(
+            instanceId=instance_id,
+            overallStatus="failed",
+            candidatesTried=diagnoses,
+            recommendedAction="所有候选均部署失败；请检查源码、Dockerfile 或手动配置",
+            notes=[d.failureReason for d in diagnoses if d.failureReason],
+        )
+        _write_diagnosis(workspace, registry, instance_id, report)
+        raise HostingError(
+            f"实例 {instance_id} 所有候选均部署失败（{len(diagnoses)} 个尝试）；"
+            f"诊断报告已写入 lastError",
+            instance_id=instance_id,
+        )
+
+
+def _candidate_capability_family(manifest: InstanceManifest) -> str:
+    """推断 manifest（top-1 候选）的能力族。
+
+    IMP-058 §6.1.1：用于能力守恒校验。返回 ``"backend"`` / ``"static"`` /
+    ``"frontend"``。后端候选含 API/DB 能力，不得降级到 static/frontend。
+
+    InstanceManifest 没有 ``form`` 字段（那是 DetectionResult / DeploymentCandidate
+    的），用 ``kind`` + ``servingMode`` + ``hasDatabase`` 做代理判断：
+    - 容器化 python/node → backend（含 API 能力，可能含 DB）
+    - shared-static + node kind → frontend（构建型静态站）
+    - shared-static + static kind → static（纯静态）
+    """
+    kind = _enum_value(manifest.kind).lower()
+    serving_mode = _enum_value(manifest.servingMode).lower()
+    if serving_mode == "container" and kind in ("python", "node"):
+        return "backend"
+    if kind == "node" and serving_mode == "shared_static":
+        return "frontend"
+    return "static"
+
+
+# ---- Gate-C C.06/C.07/C.08 辅助 ---------------------------------------------
+
+
+def _rollback_attempt(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    *,
+    attempt_id: str,
+) -> Any:
+    """Gate-C C.06：回滚单次 attempt 的基础设施状态。
+
+    回滚范围（§6.5 候选切换事务 Rollback 阶段）：
+    - 容器（``docker compose down``）
+    - 端口（释放本次 attempt 新分配的端口）
+    - manifest 选中状态（恢复到失败前的快照）
+
+    **回滚边界**（§6.5）：
+    ``rollback_succeeded`` 只表示已声明的回滚步骤全部成功，不得解释为
+    "系统没有任何副作用"。数据库 schema/data、外部服务写入不因容器 down 自动恢复。
+    ``automatic_fallback_safe`` 仅当确认本次 attempt 未执行不可逆操作时才为 True。
+
+    CHK-192/P1：``automaticFallbackSafe`` 不再恒为 False。当回滚成功且
+    容器从未启动（build 阶段失败）或项目不需要迁移时，标记为 True，
+    允许 auto-equivalent 降级。容器已启动且项目需要迁移时保守标记 False。
+    """
+    from local_webpage_access.models import RollbackResult
+
+    rolled_back: list[str] = []
+    container_was_running = False
+
+    # 1. 回滚容器
+    try:
+        from local_webpage_access.docker_runtime import DockerRuntime
+        runtime = DockerRuntime(workspace, registry)
+        if runtime.is_running(instance_id):
+            container_was_running = True
+            runtime.down(instance_id)
+            rolled_back.append("container")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("实例 %s 回滚容器失败：%s", instance_id, exc)
+
+    # 2. 回滚端口（仅释放本次 attempt 新分配的）
+    try:
+        from local_webpage_access.ports import PortAllocator
+        allocator = PortAllocator(config, registry)
+        # 只释放没有成功部署登记的端口
+        if not manifest.container or not manifest.container.containerId:
+            allocator.release_instance(instance_id)
+            rolled_back.append("port")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("实例 %s 回滚端口跳过：%s", instance_id, exc)
+
+    # 3. manifest 不恢复原值--失败诊断需要写入 manifest.lastError
+    #    上层 _write_diagnosis 会设置 status=FAILED
+
+    rollback_ok = len(rolled_back) > 0 or not _has_active_resources(
+        workspace, registry, instance_id
+    )
+
+    # CHK-192/P1：判断 automaticFallbackSafe
+    # - 容器从未启动（build 阶段失败）-> 不可能执行迁移 -> safe
+    # - 容器已启动但项目不需要迁移 -> safe
+    # - 容器已启动且项目需要迁移 -> 可能已执行不可逆操作 -> unsafe
+    contract = getattr(manifest, "capabilityContract", None)
+    requires_migrations = False
+    if isinstance(contract, dict):
+        requires_migrations = contract.get("requiresMigrations", False)
+    automatic_fallback_safe = rollback_ok and (
+        not container_was_running or not requires_migrations
+    )
+
+    return RollbackResult(
+        attemptId=attempt_id,
+        rollbackSucceeded=rollback_ok,
+        rolledBackItems=rolled_back,
+        externalSideEffects=[],  # 由 host_fn 在 migration 执行时填充
+        automaticFallbackSafe=automatic_fallback_safe,
+    )
+
+
+def _has_active_resources(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+) -> bool:
+    """检查实例是否有活跃的容器或端口登记。"""
+    try:
+        from local_webpage_access.docker_runtime import DockerRuntime
+        runtime = DockerRuntime(workspace, registry)
+        if runtime.is_running(instance_id):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _infer_failure_layer(exc: Exception) -> str:
+    """Gate-C C.08：从异常推断失败层。"""
+    exc_str = str(exc).lower()
+    if "build" in exc_str or "dockerfile" in exc_str:
+        return "build"
+    if "health" in exc_str or "probe" in exc_str or "wait" in exc_str:
+        return "health"
+    if "up" in exc_str and "compose" in exc_str:
+        return "start"
+    if "port" in exc_str:
+        return "start"
+    return "build"
+
+
+def _suggest_fix(exc: Exception) -> str:
+    """Gate-C C.08：从异常推断修复建议。"""
+    exc_str = str(exc).lower()
+    if "dockerfile" in exc_str:
+        return "检查 Dockerfile 语法与源码兼容性"
+    if "port" in exc_str:
+        return "检查端口占用或手动指定端口"
+    if "build" in exc_str:
+        return "检查构建依赖、源码与 Dockerfile 兼容性"
+    if "health" in exc_str:
+        return "检查应用启动逻辑与健康探针配置"
+    return "检查源码、Dockerfile 或手动配置"
+
+
+class FallbackConfirmationRequired(LwaError):
+    """Gate-C C.07：需要用户确认才能降级到等价候选。
+
+    非交互调用收到此异常后，由调用方决定是否携带明确的计划选择重试
+    （``fallback_policy="auto-equivalent"``）。
+
+    该结果**不是**部署成功，也不应被折叠为普通诊断失败。
+    """
+
+    def __init__(
+        self,
+        instance_id: str,
+        *,
+        primary_failure: str = "",
+        equivalent_candidates: list[dict] | None = None,
+    ) -> None:
+        self.instance_id = instance_id
+        self.primary_failure = primary_failure
+        self.equivalent_candidates = equivalent_candidates or []
+        candidate_desc = ", ".join(
+            f"#{c.get('index', '?')}({c.get('kind', '?')})"
+            for c in (equivalent_candidates or [])
+        )
+        msg = (
+            f"实例 {instance_id} top-1 候选部署失败（{primary_failure[:100]}），"
+            f"存在 {len(self.equivalent_candidates)} 个等价 fallback 候选"
+            f"（{candidate_desc}）。需用户确认后降级。"
+        )
+        super().__init__(msg, instance_id=instance_id)
+
+
+def _enum_value(val: Any) -> str:
+    """从枚举或字符串获取小写字符串值（兼容 Kind/ServingMode/Runtime 枚举）。"""
+    if val is None:
+        return ""
+    # 枚举成员：优先 .value；字符串直接返回
+    value = getattr(val, "value", val)
+    return str(value)
+
+
+def _dict_capability_family(candidate: dict) -> str:
+    """推断候选字典的能力族（与 ``_candidate_capability_family`` 对齐）。
+
+    候选字典来自 ``DeploymentCandidate.model_dump()``，可能有 ``form`` 字段
+    （candidate_generator 设置）也可能没有（旧版/手写）。优先用 ``form``，
+    缺失时用 ``kind`` + ``servingMode`` 做代理判断。
+    """
+    kind = str(candidate.get("kind", "")).lower()
+    form = str(candidate.get("form", "")).lower()
+    serving_mode = str(candidate.get("servingMode", "")).lower()
+    # 优先用 form（candidate_generator 会设置）
+    if kind in ("python", "node") and form in ("backend-container", "fullstack-sqlite"):
+        return "backend"
+    if form == "frontend-static":
+        return "frontend"
+    # form 缺失时用 kind + servingMode（与 _candidate_capability_family 一致）
+    if serving_mode == "container" and kind in ("python", "node"):
+        return "backend"
+    if kind == "node" and serving_mode == "shared_static":
+        return "frontend"
+    return "static"
+
+
+def _capabilities_equivalent(primary: str, candidate: str) -> bool:
+    """两个能力族是否等价（可互相降级）。
+
+    IMP-058 §6.1.1 硬性约束：backend 不得降级到 static/frontend。
+    backend 只与 backend 等价；static/frontend 之间互相等价。
+    """
+    if primary == "backend":
+        return candidate == "backend"
+    # static / frontend 之间允许互相降级（纯静态站点族）
+    return candidate in ("static", "frontend")
+
+
+def _apply_candidate_and_host(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    candidate_dict: dict,
+    host_fn: Any,
+) -> InstanceManifest:
+    """Gate-C C.03：将 fallback 候选应用到 manifest 并重新尝试 host。
+
+    只覆盖与部署相关的字段（kind/runtime/entry/sourceSubdir），保留
+    id/name/data/路径别名等用户数据。
+    """
+    # 应用候选配置到 manifest
+    from local_webpage_access.models import EntryConfig, Kind, Runtime, ServingMode
+
+    candidate_kind = candidate_dict.get("kind")
+    candidate_runtime = candidate_dict.get("runtime", "").replace("-", "_")
+    candidate_entry = candidate_dict.get("entry", {})
+    candidate_subdir = candidate_dict.get("sourceSubdir")
+
+    if candidate_kind:
+        try:
+            manifest.kind = Kind(candidate_kind)
+        except ValueError:
+            pass
+    if candidate_runtime:
+        try:
+            rt = Runtime(candidate_runtime.replace("_", "-"))
+            manifest.runtime = rt
+            manifest.servingMode = (
+                ServingMode.SHARED_STATIC
+                if rt == Runtime.SHARED_STATIC
+                else ServingMode.CONTAINER
+            )
+        except ValueError:
+            pass
+    if candidate_entry:
+        manifest.entry = EntryConfig(**candidate_entry)
+    if candidate_subdir:
+        manifest.sourceSubdir = candidate_subdir
+
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+
+    return host_fn(workspace, config, registry, instance_id)
+
+
+def _write_diagnosis(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    report: Any,
+) -> None:
+    """Gate-C C.08：将诊断报告写入 manifest.lastError + registry 事件。
+
+    Layer 4 诊断包含每个 attempt 的：
+    - 失败层（preflight / build / start / health / api）
+    - 失败原因
+    - 回滚结果（C.06）
+    - 能力差异（C.01/C.07）
+    - 修复建议
+    """
+    lines = []
+    lines.append(f"部署诊断（{report.overallStatus}）：")
+    lines.append(f"  尝试了 {len(report.candidatesTried)} 个候选")
+    for d in report.candidatesTried:
+        tier_label = f"[{d.candidateTier}]" if d.candidateTier else ""
+        lines.append(
+            f"  候选 {d.candidateIndex} {tier_label}: "
+            f"{d.failureLayer} 阶段失败 — {d.failureReason[:120]}"
+        )
+        # C.06：回滚结果
+        if d.rollback:
+            rb = d.rollback
+            lines.append(
+                f"    回滚: {'成功' if rb.rollbackSucceeded else '失败'}"
+                f"（{', '.join(rb.rolledBackItems) or '无'}）"
+            )
+            if rb.externalSideEffects:
+                lines.append(
+                    f"    ⚠️ 残余副作用: {', '.join(rb.externalSideEffects)}"
+                )
+        # C.01/C.07：能力差异
+        if d.capabilityDiff:
+            lines.append(f"    能力差异: {d.capabilityDiff}")
+    if report.recommendedAction:
+        lines.append(f"  建议：{report.recommendedAction}")
+
+    diagnosis_text = "\n".join(lines)[:2000]
+
+    try:
+        manifest = _load(workspace, instance_id)
+        manifest.lastError = diagnosis_text
+        manifest.status = Status.FAILED
+        manifest.touch()
+        manifest.save(workspace.app_manifest_path(instance_id))
+    except Exception:  # noqa: BLE001
+        log.warning("实例 %s 写入诊断 manifest 失败", instance_id)
+
+    registry.update_status(
+        instance_id, Status.FAILED.value, last_error=diagnosis_text[:500]
+    )
+    registry.add_event(
+        instance_id,
+        "diagnosis",
+        f"Gate-C 诊断：{len(report.candidatesTried)} 个候选全部失败",
+    )
 
 
 def stop_instance_op(

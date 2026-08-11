@@ -315,12 +315,19 @@ def test_host_container_health_check_recorded(
 def test_host_container_health_check_failure_does_not_block(
     workspace, registry, config, fake_runtime, monkeypatch
 ) -> None:
-    """健康检查失败不阻塞 RUNNING 标记（best-effort）。"""
+    """Gate-C C.04：必选探针（存活）失败 → 实例标记 FAILED（不假报 RUNNING）。
+
+    IMP-058 §6.5 评审决议第 3 点：必选探针失败不得假报 running。
+    旧行为（健康检查 best-effort，不阻塞 RUNNING）已被 Gate-C 替代——
+    首次部署的容器，存活探针超时 = 部署失败。
+    """
     monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: False)
     _seed_container_instance(workspace, registry, "api")
-    manifest = host_container(workspace, config, registry, "api")
-    assert manifest.status == Status.RUNNING
+    with pytest.raises(HostingError, match="必选探针未通过"):
+        host_container(workspace, config, registry, "api")
+    # 实例标记 FAILED（非 RUNNING）
     row = registry.get_instance("api")
+    assert row["status"] == "failed"
     assert row["last_health_check_at"] is None  # 未记录健康
 
 

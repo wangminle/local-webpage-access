@@ -102,7 +102,13 @@ swap=4GB
   需用户手动配置或扩展扫描器）。
 * **数据库**：仅自动识别 SQLite（文件型）。MySQL / PostgreSQL / Redis 等网络数据库
   **不自动起容器**，需用户在项目内自行编排。
-* **monorepo**：多项目工作区不自动拆分，按 zip 根目录整体识别一个实例。
+* **monorepo（IMP-057 Gate-1）**：支持 **npm workspaces** 格式的 monorepo 自动识别与主包选择。扫描根 package.json 的 workspaces 字段或 packages/*/package.json 目录结构，对每个子包按 6 值类型（electron_desktop / library / web_server / frontend_build / runtime_data / unknown）分类，并根据优先级规则自动选择主部署包。入口命令使用 -w <pkg-name> 语义（install 在根目录执行）。
+  * **已知限制**：
+    * 仅支持 **npm workspaces**；**pnpm workspaces**、**yarn workspaces**、**Nx**、**Turborepo** 等其他 monorepo 工具**不自动识别**，按普通项目处理（可能标记 pending）。
+    * 多 web_server 子包时标记 pending（需用户手动选择）。
+    * 无可部署子包（纯 electron_desktop / library / runtime_data）时标记 pending。
+    * frontend_build 子包的构建产物路径（packages/<name>/dist）通过 buildOutputDir 传递给托管流程；若构建工具输出到非标准目录（如 .output），需用户手动修正。
+    * 不自动识别 lerna.json / pnpm-workspace.yaml 等替代配置文件。
 
 ## 托管与容器
 
@@ -147,6 +153,7 @@ swap=4GB
 * **选择文件夹（IMP-051 / V0.7.1）**：管理页原生目录对话框仅 **loopback** 可用；局域网即使持有 token 也不能远程弹窗，须手输宿主机绝对路径。
 * **升级与导入互斥（V0.7.1）**：`lwa update` 重启 manager/daemon 前会等待导入空闲（约 180s）；超时跳过重启，避免打断进行中的导入。
 * **多工作区（IMP-053）**：默认端口（`managerPort=17800` / `staticGatewayPort` / `portPool`）按**一机一工作区**设计。`lwa init` 在默认端口已有其它工作区管理页运行时，会输出黄色软提示建议复用既有工作区（不阻断）。确需第二工作区，须改全三段端口，否则会抢同一端口、实例列表分裂。
+* **实证校验降级（IMP-058 Gate-C）**：`lwa start` 对首次部署的 docker-compose 实例执行实证校验状态机（VERIFYING → RUNNING / DEGRADED / FAILED）。必选存活探针超时 → FAILED（不假报 running）；可选探针失败 → DEGRADED。**证据驱动探针语义**（§6.5）：只有 `source="declared"` 或 `source="discovered"` 的探针可设为必选门槛；`source="guessed"` 的通用探针（如猜测的 `/health`、`/`）仅产生诊断，不通过不判失败。**能力推断**：后端容器存活（HTTP 200）即视为 API / 数据库 / 迁移能力已就绪——大多数 Web 框架在启动时连接数据库并执行迁移，连接失败会 crash 而非返回 200。top-1 候选 build/start 失败时按 ``fallback_policy`` 策略降级：默认 ``confirm`` 需用户确认（非交互调用返回 ``FallbackConfirmationRequired``）；``auto-equivalent`` 仅在能力契约等价且回滚成功时自动降级（最多 3 个等价候选）；``disabled`` 不降级。**能力守恒**（§6.1.1）：后端候选不得降级到静态/前端候选。**回滚边界**（§6.5）：``rollback_succeeded`` 只表示基础设施已回滚；若 attempt 执行了数据库迁移或外部写入，``automatic_fallback_safe`` 保持 False，不自动降级。全部失败时输出 Layer 4 诊断报告（每个候选失败在哪一步、回滚结果、能力差异）写入 lastError + registry 事件。健康检查增强 API 路径探测（`/health`、`/api/`、`/api/v1/`、`/api/health`、`/healthz`），用于 Gate-C 实证校验的 API 可用性判定——通用猜测探针仅产生诊断，不单独判定部署失败。
 
 ## 管理页与 API
 
@@ -180,7 +187,7 @@ swap=4GB
 
 ## 大模型 Skills
 
-* 当前内置的 **18** 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
+* 当前内置的 **19** 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
   Skills 是提示工程资产，效果取决于模型与上下文窗口。
 * Skills 不会自动执行带副作用的操作，所有变更需人工确认。
 * Full Profile / 宿主机装配排障优先走 [`lwa-setup-host-environment`](../src/local_webpage_access/skills/lwa-setup-host-environment/SKILL.md) 与 FAQ。

@@ -41,6 +41,17 @@ _OFFICIAL_NODE_DIST = "https://nodejs.org/dist"
 _NODE_DEFAULT_START = "node server.js"
 _PYTHON_DEFAULT_START = "python app.py"
 
+
+def _copy_prefix(manifest: InstanceManifest) -> str:
+    """Dockerfile COPY 源路径前缀（Gate-B：子目录布局支持）。
+
+    根目录 -> ``current/``；子目录 -> ``current/<subdir>/``。
+    """
+    subdir = getattr(manifest, "sourceSubdir", None)
+    if subdir:
+        return f"current/{subdir}/"
+    return "current/"
+
 # IMP-054：Python 包 → 所需 apt 系统库映射。
 # 这些包的 wheel 不含系统共享库，运行时 import 会 ImportError；LWA 在
 # 生成 Dockerfile 时自动追加 apt-get install，避免 rebuild 后丢失手动装的包。
@@ -95,7 +106,7 @@ def generate_dockerfile(
     mirrors = (config or default_config()).buildMirrors.resolved()
 
     if manifest.kind == Kind.NODE:
-        content = _render_node(manifest, internal_port, mirrors=mirrors)
+        content = _render_node(manifest, internal_port, mirrors=mirrors, source_dir=source_dir)
     elif manifest.kind == Kind.PYTHON:
         content = _render_python(manifest, internal_port, source_dir, mirrors=mirrors)
     else:
@@ -176,6 +187,7 @@ def _render_node(
     internal_port: int,
     *,
     mirrors: BuildMirrors | None = None,
+    source_dir: Path | None = None,
 ) -> str:
     install = (manifest.entry.install or "npm install").strip()
     start = (manifest.entry.start or _NODE_DEFAULT_START).strip()
@@ -189,7 +201,8 @@ def _render_node(
     build_step = ""
     if manifest.entry.build:
         build_step = f"RUN {manifest.entry.build}\n"
-    dependency_copy = _node_dependency_copy_block(install)
+    cpfx = _copy_prefix(manifest)
+    dependency_copy = _node_dependency_copy_block(install, source_dir=source_dir, copy_prefix=cpfx)
     install_run = _with_npm_registry(install, mirrors)
 
     # BUG-122：安装/构建阶段不可设 NODE_ENV=production，否则 npm 会 omit
@@ -200,7 +213,7 @@ def _render_node(
         "WORKDIR /app",
         dependency_copy,
         f"RUN {install_run}",
-        "COPY current/ ./",
+        f"COPY {cpfx} ./",
         build_step,
         "ENV NODE_ENV=production",
         "ENV HOST=0.0.0.0",
@@ -412,6 +425,7 @@ def _render_python(
         database=_database_label(manifest),
     )
 
+    cpfx = _copy_prefix(manifest)
     uses_uv = install.startswith("uv sync") or "uv sync" in install
     # ``pip install .`` 需要完整源码，无法把依赖层与源码层完全拆开。
     needs_early_full_copy = False
@@ -422,7 +436,7 @@ def _render_python(
         # --no-install-project 只装依赖、不构建项目本体，源码在后续 final_copy 拷入，
         # 运行时 uv run 直接从工作目录导入（main:app 等模块无需作为包安装）。
         deps_block = (
-            "COPY current/uv.lock current/pyproject.toml ./\n"
+            f"COPY {cpfx}uv.lock {cpfx}pyproject.toml ./\n"
             + _pip_run(
                 "pip install uv && uv sync --frozen --no-dev --no-install-project",
                 mirrors=mirrors,
@@ -435,7 +449,7 @@ def _render_python(
     elif install.startswith("pip install ."):
         needs_early_full_copy = True
         deps_block = (
-            "COPY current/ ./\n"
+            f"COPY {cpfx} ./\n"
             + _pip_run(install, mirrors=mirrors)
             + "\n"
         )
@@ -445,7 +459,7 @@ def _render_python(
             install_cmd = f"pip install pipenv && {install_cmd}"
         install_cmd = install_cmd.replace("pip install --no-cache-dir", "pip install")
         deps_block = (
-            "COPY current/Pipfile* ./\n"
+            f"COPY {cpfx}Pipfile* ./\n"
             + _pip_run(install_cmd, mirrors=mirrors)
             + "\n"
         )
@@ -459,7 +473,7 @@ def _render_python(
         # 对 dest 父目录的隐式创建行为，跨版本可预期）。
         req_dir = posixpath.dirname(req_file)
         copy_lines = [f"RUN mkdir -p {req_dir}"] if req_dir else []
-        copy_lines.append(f"COPY current/{req_file} {req_file}")
+        copy_lines.append(f"COPY {cpfx}{req_file} {req_file}")
         req_copy = "\n".join(copy_lines)
         if req_file == "requirements.txt":
             # IMP-017：无独立生产清单时，构建期就地剔除 pytest*（pytest/pytest-cov/
@@ -482,7 +496,7 @@ def _render_python(
         if "pip install" in fallback and "--no-cache-dir" not in fallback:
             pass
         deps_block = (
-            "COPY current/requirements.txt ./\n"
+            f"COPY {cpfx}requirements.txt ./\n"
             + _pip_run(fallback, mirrors=mirrors)
             + "\n"
         )
@@ -525,7 +539,7 @@ def _render_python(
             npm_block = f"RUN {npm_install}\n"
         else:
             npm_block = (
-                "COPY current/package*.json ./\n"
+                f"COPY {cpfx}package*.json ./\n"
                 f"RUN {npm_install}\n"
             )
 
@@ -550,7 +564,7 @@ def _render_python(
     )
 
     # 分层顺序：系统库 -> Node 工具链（最稳）-> Python 依赖 -> npm 依赖 -> 完整源码。
-    final_copy = "" if needs_early_full_copy else "COPY current/ ./\n"
+    final_copy = "" if needs_early_full_copy else f"COPY {cpfx} ./\n"
 
     lines = [
         header,
@@ -611,7 +625,7 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
         header,
         f"FROM {_PYTHON_IMAGE}",
         "WORKDIR /app",
-        "COPY current/ ./",
+        f"COPY {_copy_prefix(manifest)} ./",
         f"EXPOSE {internal_port}",
         f"CMD {_to_exec_form(start)}",
     ]
@@ -619,6 +633,19 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
 
 
 # ---- 辅助 --------------------------------------------------------------------
+
+
+# BUG-471：CMD/启动命令含 shell 操作符（&&、||、;、$()、``、裸 ()）时，
+# shlex.split 会拆出无意义 token，生成的 exec 数组无法执行。
+# 此类命令必须通过 ``sh -c`` 执行。
+# IMP-058 Gate-A CHK-V02：文档 §6.4 明确要求检测裸 ``(`` ``)``（非 $() 形式），
+# 如 ``docker-entrypoint.sh (alembic...)`` 会被 shlex 拆碎。
+_SHELL_OPERATOR_RE = re.compile(r"&&|\|\||;|\$\(|`|\(|\)")
+
+
+def _has_shell_operators(cmd: str) -> bool:
+    """命令是否含 shell 操作符（需要通过 ``sh -c`` 执行）。"""
+    return bool(_SHELL_OPERATOR_RE.search(cmd))
 
 
 def _to_exec_form(shell_cmd: str) -> str:
@@ -631,6 +658,17 @@ def _to_exec_form(shell_cmd: str) -> str:
     形式不会像 shell 那样设置环境变量；这类变量应通过 ``ENV`` / compose
     ``environment`` 注入（见 ``_render_python`` / ``compose.generate_compose``）。
     """
+    if _has_shell_operators(shell_cmd):
+        # BUG-471：含 shell 操作符的命令必须用 sh -c 执行。
+        # 但若命令已经是 ``sh -c "..."`` 形式（scanner 的 alembic 路径），
+        # shlex.split 能正确拆出 ``["sh", "-c", "..."]``，无需再包一层。
+        try:
+            parts = shlex.split(shell_cmd)
+            if len(parts) >= 2 and parts[0] == "sh" and parts[1] == "-c":
+                return "[" + ", ".join(json.dumps(p) for p in parts) + "]"
+        except ValueError:
+            pass
+        return json.dumps(["sh", "-c", shell_cmd])
     # BUG-359：未闭合引号等无法解析时回退 shell 形式（与空 parts 路径一致）。
     try:
         parts = shlex.split(shell_cmd)
@@ -662,13 +700,44 @@ def _database_label(manifest: InstanceManifest) -> str:
     return manifest.database.type
 
 
-def _node_dependency_copy_block(install: str) -> str:
-    """复制与包管理器匹配的依赖声明文件。"""
+def _node_dependency_copy_block(
+    install: str, *, source_dir: Path | None = None, copy_prefix: str = "current/"
+) -> str:
+    """复制与包管理器匹配的依赖声明文件。
+
+    对于 npm workspaces monorepo（root package.json 含 ``"workspaces"``），
+    ``npm ci --workspace=...`` 需要所有子包的 package.json 在场，否则 lock
+    解析失败。检测到 workspaces 时追加 ``COPY current/packages/*/package.json``
+    行（glob 在 Docker COPY 中逐条写出，保证仅复制声明文件而非源码）。
+    """
     if "pnpm install" in install:
-        return "COPY current/package.json current/pnpm-lock.yaml ./"
+        return f"COPY {copy_prefix}package.json current/pnpm-lock.yaml ./"
     if "yarn install" in install:
-        return "COPY current/package.json current/yarn.lock ./"
-    return "COPY current/package*.json ./"
+        return f"COPY {copy_prefix}package.json current/yarn.lock ./"
+
+    lines = [f"COPY {copy_prefix}package*.json ./"]
+
+    # 检测 npm workspaces monorepo，追加子包 package.json
+    if source_dir is not None:
+        root_pkg = source_dir / "package.json"
+        if root_pkg.is_file():
+            try:
+                pkg = json.loads(root_pkg.read_text(encoding="utf-8"))
+                workspaces = pkg.get("workspaces")
+                if workspaces:
+                    patterns = workspaces if isinstance(workspaces, list) else workspaces.get("packages", [])
+                    for pattern in patterns:
+                        # 将 glob（如 "packages/*"）展开为实际目录
+                        for pkg_dir in sorted(source_dir.glob(pattern)):
+                            if (pkg_dir / "package.json").is_file():
+                                rel = pkg_dir.relative_to(source_dir)
+                                lines.append(
+                                    f"COPY current/{posixpath.join(str(rel), 'package.json')} {posixpath.join(str(rel), 'package.json')}"
+                                )
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    return "\n".join(lines)
 
 
 __all__ = ["generate_dockerfile", "generate_dockerignore"]

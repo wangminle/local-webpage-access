@@ -70,6 +70,11 @@ class Status(str, Enum):
     # * config_invalid：master 在线但站点 hostPort 不通（路由/配置问题，BUG-069 类）。
     GATEWAY_DOWN = "gateway_down"
     CONFIG_INVALID = "config_invalid"
+    # IMP-058 Gate-C §6.5：实证校验状态机。
+    # * VERIFYING：build/up 成功但尚未通过必选探针——不允许被折叠为 running。
+    # * DEGRADED：必选探针通过、可选探针失败——进程存活但能力不完整。
+    VERIFYING = "verifying"
+    DEGRADED = "degraded"
 
 
 class RouteMode(str, Enum):
@@ -88,6 +93,10 @@ class DatabaseConfig(BaseModel):
     type: str  # sqlite / postgres / mysql / redis / unknown
     connectionString: str | None = None
     dataDir: str | None = None
+    # IMP-058 Gate-A CHK-V03：SQLite 源文件名（如 "bookshelf.db"）。
+    # scanner 从项目目录扫描到的 SQLite 文件名；compose.generate_env 据此注入
+    # 保留原文件名的 DATABASE_URL，避免把应用指向全新空库（BUG-474 数据丢失风险）。
+    dbFilename: str | None = None
 
 
 class ResourceLimits(BaseModel):
@@ -154,6 +163,337 @@ class EntryConfig(BaseModel):
     install: str | None = None
     build: str | None = None
     start: str | None = None
+    buildOutputDir: str | None = None  # 构建产物目录（相对项目根），monorepo 子包为 packages/<name>/dist
+
+
+# ---- Monorepo 包分类（IMP-057 Gate-1）---------------------------------------
+
+
+class PackageType(str, Enum):
+    """Monorepo 子包类型（6 值枚举，IMP-057 §4.2）。
+
+    - ``electron_desktop``：含 ``electron`` 依赖，不可部署
+    - ``library``：有 ``main``/``exports``，无后端框架，不可部署
+    - ``web_server``：Node HTTP 服务 / SSR，可部署
+    - ``frontend_build``：纯前端构建后静态托管，可部署
+    - ``runtime_data``：无有效 package.json，不可部署
+    - ``unknown``：无法归类
+    """
+
+    ELECTRON_DESKTOP = "electron_desktop"
+    LIBRARY = "library"
+    WEB_SERVER = "web_server"
+    FRONTEND_BUILD = "frontend_build"
+    RUNTIME_DATA = "runtime_data"
+    UNKNOWN = "unknown"
+
+
+class PackageClassification(BaseModel):
+    """Monorepo 子包分类结果（IMP-057 §7.3）。
+
+    Gate-1 运行期使用；持久化到 manifest 为可选（非 MVP 验收项）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    path: str  # "packages/webpage"
+    packageType: str  # PackageType 枚举值
+    isDeployable: bool
+
+
+# ---- Gate-2：兼容性预检（IMP-056）-----------------------------------------
+
+
+class CompatibilityFinding(BaseModel):
+    """兼容性预检结果（IMP-056 Gate-2）。
+
+    仅展示分级，不阻断 import/start/alias。IMP-055 仍是唯一 enforce 真源。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    checkId: str  # "CHK-P03" / "CHK-P04"
+    severity: str  # "critical" / "warning" / "info"（仅展示分级）
+    title: str
+    file: str | None = None  # 相对 current/
+    line: int | None = None
+    code: str | None = None
+    impact: str
+    fix: str
+
+
+# ---- Gate-B：多候选识别数据模型（IMP-058）-----------------------------------
+
+
+class SubdirSignal(BaseModel):
+    """子目录的工程文件信号（Layer 0 采集）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    path: str  # 相对项目根的路径（如 "backend"）
+    name: str  # "backend" / "frontend" / "server" ...
+    hasRequirements: bool = False
+    hasPyproject: bool = False
+    hasPackageJson: bool = False
+    hasManagePy: bool = False
+    hasAlembicIni: bool = False
+    hasIndexHtml: bool = False
+    pythonDeps: list[str] = Field(default_factory=list)
+    nodeDeps: dict[str, str] = Field(default_factory=dict)
+    nodeScripts: dict[str, str] = Field(default_factory=dict)
+
+
+class ProjectEvidence(BaseModel):
+    """Layer 0 输出：项目的客观事实摘要（零解释）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    root: str  # 项目根路径
+    rootFiles: list[str] = Field(default_factory=list)
+    rootDirs: list[str] = Field(default_factory=list)
+    subdirSignals: list[SubdirSignal] = Field(default_factory=list)
+    pythonDeps: list[str] = Field(default_factory=list)
+    nodeDeps: dict[str, str] = Field(default_factory=dict)
+    nodeScripts: dict[str, str] = Field(default_factory=dict)
+    workspaces: list[str] | None = None
+    hasManagePy: bool = False
+    hasAlembicIni: bool = False
+    hasRuntimePaths: bool = False
+    projectDockerfile: str | None = None
+    projectCompose: str | None = None
+    hasEnvExample: bool = False
+    hasIndexHtml: bool = False
+    hasHtml: bool = False
+    buildOutputs: list[str] = Field(default_factory=list)
+    hasPackageJson: bool = False
+    sqliteFiles: list[str] = Field(default_factory=list)
+
+
+class DeploymentCandidate(BaseModel):
+    """一个部署候选配置（Layer 1 输出）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: str  # "static" / "node" / "python"
+    runtime: str  # "shared_static" / "docker_compose"
+    servingMode: str  # "shared_static" / "container"
+    form: str  # static / frontend-static / backend-container / fullstack-sqlite
+    resourceProfile: str = "small"
+    entry: EntryConfig = Field(default_factory=EntryConfig)
+    internalPort: int | None = None
+    sourceSubdir: str | None = None  # 源码子目录（如 "backend"），None = 根目录
+    confidenceTier: str = "primary"  # primary / alternate / fallback
+    reasoning: list[str] = Field(default_factory=list)
+
+
+# ---- Gate-C：部署拓扑模型（IMP-058-C C.01）---------------------------------
+
+# 能力标识（IMP-058 §6.5 成功谓词中 capabilities_observed 的取值）
+CAPABILITY_UI = "ui"
+CAPABILITY_API = "api"
+CAPABILITY_DATABASE = "database"
+CAPABILITY_MIGRATIONS = "migrations"
+
+
+class ProbeSpec(BaseModel):
+    """证据驱动的健康探针规格（IMP-058-C C.05）。
+
+    区分两类探针：
+    - ``is_mandatory=True``：项目声明或证据发现的可作门槛探针（如 ``/health`` 预期 2xx）。
+      失败时判定部署失败（不写 RUNNING）。
+    - ``is_mandatory=False``：通用猜测探针（如默认 ``/api/`` 路径）。404/401 不单独判失败，
+      仅产生诊断信息。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    path: str  # "/health" / "/api/v1/status"
+    method: str = "GET"
+    expectedStatus: int = 200  # 预期状态码（2xx 视为通过）
+    isMandatory: bool = False  # True = 可作成功门槛；False = 仅诊断
+    source: str = "guessed"  # "declared" / "discovered" / "guessed"
+    description: str = ""  # 人类可读说明
+
+
+class CapabilityContract(BaseModel):
+    """部署成功必须保留的业务能力契约（IMP-058 §6.5）。
+
+    ``required_capabilities`` 由结构化标志派生，避免维护第二份能力真相源。
+
+    能力守恒（§6.1.1 硬性约束）：``serves_api=True`` 的计划不得降级到
+    ``serves_api=False`` 的计划。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    servesUi: bool = False
+    servesApi: bool = False
+    requiresDatabase: bool = False
+    requiresMigrations: bool = False
+    requiredProbes: list[ProbeSpec] = Field(default_factory=list)
+
+    @property
+    def required_capabilities(self) -> set[str]:
+        """由结构化标志派生的能力集合。"""
+        pairs = {
+            CAPABILITY_UI: self.servesUi,
+            CAPABILITY_API: self.servesApi,
+            CAPABILITY_DATABASE: self.requiresDatabase,
+            CAPABILITY_MIGRATIONS: self.requiresMigrations,
+        }
+        return {name for name, required in pairs.items() if required}
+
+
+class CommandSpec(BaseModel):
+    """结构化命令规格（IMP-058-C C.03）。
+
+    替代 Gate-A 的字符串命令模型（``entry.start`` 字符串 + ``sh -c`` 包裹）。
+    每个 CommandSpec 显式表达 argv/shell/workdir/env，不再用正则改写 shell。
+
+    - ``argv`` 模式：``["uvicorn", "app.main:app", "--host", "0.0.0.0"]``
+    - ``shell`` 模式：``"alembic upgrade head && exec uvicorn ..."``（不自动改写）
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    argv: list[str] | None = None  # exec 形式
+    shell: str | None = None  # shell 形式（当 argv 无法无损表达时使用）
+    workdir: str = "/app"  # 容器内工作目录
+    environment: dict[str, str] = Field(default_factory=dict)
+
+    def is_effective(self) -> bool:
+        """是否有有效命令。"""
+        return bool(self.argv or self.shell)
+
+
+class DeploymentComponent(BaseModel):
+    """部署计划内的协作组件（IMP-058-C C.01）。
+
+    组件之间是**合作关系**（如 frontend-build + python-container），不是 fallback 关系。
+    全栈项目的前端构建组件和后端运行组件共同构成一个 :class:`DeploymentPlan`。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    componentId: str  # "frontend-build" / "python-container"
+    role: str  # "build" / "runtime" / "build-and-runtime"
+    sourceSubdir: str | None = None
+    buildCommand: CommandSpec | None = None
+    startCommand: CommandSpec | None = None
+    preStart: list[CommandSpec] = Field(default_factory=list)  # 如 alembic migrate
+    buildOutputDir: str | None = None  # 构建产物目录（如 "dist"）
+    artifactTarget: str | None = None  # 产物传递目标（如 "backend/static"）
+    internalPort: int | None = None
+
+
+class DeploymentPlan(BaseModel):
+    """一套完整部署拓扑（IMP-058-C C.01）。
+
+    内部组件是合作关系，不是 fallback 关系。只有能力契约完全等价的多个计划，
+    才可以互相降级（§6.1.1）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    planId: str
+    components: list[DeploymentComponent] = Field(default_factory=list)
+    capabilityContract: CapabilityContract = Field(default_factory=CapabilityContract)
+    confidenceTier: str = "primary"  # primary / alternate / fallback
+    reasoning: list[str] = Field(default_factory=list)
+    evidenceRefs: list[str] = Field(default_factory=list)
+
+
+class RollbackResult(BaseModel):
+    """Gate-C C.06：单次 attempt 的回滚结果。
+
+    ``rollback_succeeded`` 只表示已声明的回滚步骤全部成功，不得笼统解释为
+    "系统没有任何副作用"。若 attempt 执行了数据库迁移或外部写入，
+    必须通过 ``externalSideEffects`` 单独记录。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    attemptId: str = ""
+    rollbackSucceeded: bool = False
+    rolledBackItems: list[str] = Field(default_factory=list)  # ["container", "port", "manifest"]
+    externalSideEffects: list[str] = Field(default_factory=list)  # ["migration:alembic_head_xxx"]
+    automaticFallbackSafe: bool = False  # 仅当副作用可丢弃/已回滚/已快照恢复
+
+
+# ---- Gate-C：实证校验模型（IMP-058）---------------------------------------
+
+
+class VerificationResult(BaseModel):
+    """Layer 3 输出：单个候选的实证校验结果（IMP-058 §6.5）。
+
+    由 start_instance 降级流程在尝试每个候选后产出。
+
+    成功谓词（§6.5）::
+
+        plan_succeeded =
+            build_succeeded
+            AND start_succeeded
+            AND all(required_probe.passed)
+            AND capabilities_observed >= capability_contract.required_capabilities
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    attemptId: str = ""
+    planId: str | None = None
+    candidateIndex: int = 0  # 候选在列表中的位置（0=top-1），兼容 Gate-B
+    candidateTier: str = "primary"  # primary / alternate / fallback
+    buildSucceeded: bool = False
+    startSucceeded: bool = False
+    healthCheckPassed: bool = False
+    requiredProbesPassed: bool = False
+    optionalProbeWarnings: list[str] = Field(default_factory=list)
+    observedCapabilities: list[str] = Field(default_factory=list)
+    externalSideEffects: list[str] = Field(default_factory=list)
+    automaticFallbackSafe: bool = False
+    overallStatus: str = "failed"  # "passed" / "degraded" / "failed"
+    # 兼容字段（旧代码读取）
+    apiProbePassed: bool | None = None  # None = 未探测
+    error: str | None = None
+    buildLogPath: str | None = None
+    durationSeconds: float = 0.0
+
+    def is_success(self) -> bool:
+        """是否通过成功谓词（passed 或 degraded 都算成功部署）。"""
+        return self.overallStatus in ("passed", "degraded")
+
+
+class CandidateDiagnosis(BaseModel):
+    """单个候选的诊断信息（IMP-058 §6.6）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    attemptId: str = ""
+    candidateIndex: int
+    candidateTier: str = "primary"
+    planId: str | None = None
+    failureLayer: str  # "preflight" / "build" / "start" / "health" / "api" / "none"
+    failureReason: str = ""
+    fixSuggestion: str = ""
+    verification: VerificationResult | None = None
+    rollback: RollbackResult | None = None
+    capabilityDiff: str = ""  # 能力差异描述（如 "fallback 缺少 api 能力")
+
+
+class DiagnosisReport(BaseModel):
+    """Layer 4 输出：收敛诊断（IMP-058 §6.6）。
+
+    全部候选失败（或 Layer 2 后零可行候选）时产出。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    instanceId: str
+    overallStatus: str = "failed"  # "pending" / "failed"
+    candidatesTried: list[CandidateDiagnosis] = Field(default_factory=list)
+    recommendedAction: str = ""
+    notes: list[str] = Field(default_factory=list)
 
 
 # ---- 主模型 -----------------------------------------------------------------
@@ -200,6 +540,22 @@ class InstanceManifest(BaseModel):
     lastStartedAt: str | None = None
     lastHealthCheckAt: str | None = None
     lastError: str | None = None
+
+    # ---- Gate-B 新字段（IMP-058）----
+    deploymentCandidates: list[dict] = Field(default_factory=list)
+    preflightSummary: str | None = None
+    sourceSubdir: str | None = None  # 源码子目录（如 "backend"），None = 根目录
+    # ---- Gate-C 新字段（IMP-058-C）----
+    # 部署计划列表与选中计划（C.01/C.06/C.07）
+    deploymentPlans: list[dict] = Field(default_factory=list)
+    selectedPlanId: str | None = None
+    selectedPlanHash: str | None = None
+    # 验证摘要（C.04/C.08）：必选/可选探针结果、观测到的能力与 attempt ID
+    verificationSummary: dict | None = None
+    # 能力契约快照（C.01/C.07）：该实例声明的能力集合，用于降级时等价性校验
+    capabilityContract: dict | None = None
+    # ---- Gate-2 新字段（IMP-056）----
+    compatibilityFindings: list[CompatibilityFinding] = Field(default_factory=list)
 
     @field_validator("kind", "runtime", "servingMode", "resourceProfile", "desiredState", "status")
     @classmethod
@@ -319,4 +675,18 @@ __all__ = [
     "EntryConfig",
     "InstanceManifest",
     "migrate_manifest",
+    # IMP-058-C Gate-C
+    "CAPABILITY_UI",
+    "CAPABILITY_API",
+    "CAPABILITY_DATABASE",
+    "CAPABILITY_MIGRATIONS",
+    "ProbeSpec",
+    "CapabilityContract",
+    "CommandSpec",
+    "DeploymentComponent",
+    "DeploymentPlan",
+    "RollbackResult",
+    "VerificationResult",
+    "CandidateDiagnosis",
+    "DiagnosisReport",
 ]

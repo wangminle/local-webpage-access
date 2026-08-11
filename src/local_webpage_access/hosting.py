@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
 from local_webpage_access.compose import generate_compose, generate_env
@@ -26,6 +28,7 @@ from local_webpage_access.dockerfile_templates import generate_dockerfile
 from local_webpage_access.errors import BuildCancelled, BuildError, DockerError, HostingError
 from local_webpage_access.logging import get_logger, write_instance_log
 from local_webpage_access.models import (
+    CapabilityContract,
     DesiredState,
     InstanceManifest,
     NetworkConfig,
@@ -35,6 +38,7 @@ from local_webpage_access.models import (
 )
 from local_webpage_access.paths import Workspace
 from local_webpage_access.probe import mark_probe_url, urlopen_direct
+from local_webpage_access.health import api_probe
 from local_webpage_access.ports import PortAllocator, build_network_entry, is_port_listening
 from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
@@ -236,7 +240,7 @@ def build_and_host_frontend(
             )
 
         # 6-8. 识别产物 + 复制到 public/（WBS-11.07/08）
-        dist = find_build_output(current_dir)
+        dist = find_build_output(current_dir, hint=manifest.entry.buildOutputDir)
         if dist is None:
             raise BuildError(
                 f"构建完成但未找到产物目录（dist/build/out）：{current_dir}",
@@ -589,7 +593,10 @@ def host_container(
         path_alias=_container_path_alias(manifest),
     )
     manifest.network = NetworkConfig(**entry)
-    manifest.status = Status.RUNNING
+
+    # Gate-C C.04：状态机 VERIFYING → RUNNING/DEGRADED/FAILED。
+    # build/up 成功后不立即写 RUNNING，先进入 VERIFYING 评估成功谓词。
+    manifest.status = Status.VERIFYING
     manifest.desiredState = DesiredState.RUNNING
     manifest.lastError = None
     # BUG-422：成功落盘前刷新可确定派生路径（裸 mv 后陈旧绝对路径）
@@ -599,21 +606,69 @@ def host_container(
     registry.upsert_from_manifest(manifest)
     registry.update_status(
         instance_id,
-        Status.RUNNING.value,
+        Status.VERIFYING.value,
+        desired_state=DesiredState.RUNNING.value,
+    )
+
+    # 9. Gate-C C.04/C.05：实证校验——评估成功谓词。
+    #    必选探针失败 → FAILED（不写 RUNNING）。
+    #    可选探针失败 → DEGRADED。
+    #    首页 200 不代替 API/DB 验证（§6.5）。
+    verification = _evaluate_container_verification(
+        host_port, manifest, workspace, registry, instance_id,
+    )
+
+    if verification["overall_status"] == "failed":
+        # 必选探针失败 → 回滚到 FAILED
+        _liveness_failed_rollback(
+            workspace, config, registry, instance_id, manifest, host_port, fresh_port,
+            verification.get("error", "必选探针未通过"),
+        )
+        raise HostingError(
+            f"实例 {instance_id} 必选探针未通过（host_port={host_port}）："
+            f"{verification.get('error', 'liveness timeout')}",
+            instance_id=instance_id,
+        )
+
+    # 确定最终状态
+    if verification["overall_status"] == "degraded":
+        final_status = Status.DEGRADED
+        status_detail = "DEGRADED（可选探针失败）"
+    else:
+        final_status = Status.RUNNING
+        status_detail = "RUNNING"
+
+    # CHK-192/P2：verificationSummary 必须在 manifest.save() 之前赋值，
+    # 否则不会被持久化（原代码在 save 之后赋值，reload 后丢失）。
+    manifest.verificationSummary = {
+        "overallStatus": verification["overall_status"],
+        "livenessPassed": verification.get("liveness_passed", False),
+        "mandatoryAllPassed": verification.get("mandatory_all_passed", False),
+        "optionalWarnings": verification.get("optional_warnings", []),
+        "observedCapabilities": verification.get("observed_capabilities", []),
+    }
+
+    manifest.status = final_status
+    manifest.lastError = None
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+    registry.update_status(
+        instance_id,
+        final_status.value,
         desired_state=DesiredState.RUNNING.value,
     )
     registry.record_started(instance_id)
 
-    # 9. 健康检查（best-effort，不阻塞 RUNNING 标记；放在 registry 写回之后，
-    #    避免被 upsert_from_manifest 覆盖）
-    if _wait_for_http(host_port):
+    # 健康检查通过 → 记录（必选探针包含基础存活）
+    if verification.get("liveness_passed"):
         registry.record_health_check(instance_id)
+
     registry.add_event(
         instance_id,
         "start",
-        f"容器实例已启动（host_port={host_port}）",
+        f"容器实例已启动（{status_detail}，host_port={host_port}）",
     )
-    log.info("容器实例 %s 已启动，端口 %d", instance_id, host_port)
+    log.info("容器实例 %s 已启动（%s），端口 %d", instance_id, status_detail, host_port)
     return manifest
 
 
@@ -737,30 +792,54 @@ def start_container(
         path_alias=_container_path_alias(manifest),
     )
     manifest.network = NetworkConfig(**entry)
-    manifest.status = Status.RUNNING
+
+    # Gate-C C.04：轻量 start 也至少执行必选存活探针（§6.5 触发条件表）。
+    # 先进入 VERIFYING，再根据存活探针结果定状态。
+    manifest.status = Status.VERIFYING
     manifest.desiredState = DesiredState.RUNNING
     manifest.lastError = None
-    # BUG-422：成功落盘前刷新可确定派生路径（裸 mv 后陈旧绝对路径）
     _refresh_manifest_workspace_paths(workspace, manifest)
     manifest.touch()
     manifest.save(workspace.app_manifest_path(instance_id))
     registry.upsert_from_manifest(manifest)
     registry.update_status(
         instance_id,
-        Status.RUNNING.value,
+        Status.VERIFYING.value,
         desired_state=DesiredState.RUNNING.value,
     )
     registry.record_started(instance_id)
 
-    # 健康检查（best-effort，放在 registry 写回之后避免被覆盖）
-    if _wait_for_http(host_port):
+    # 必选存活探针（轻量路径：不重新执行全量验证，但至少验证端口可达）
+    liveness_ok = _wait_for_http(host_port)
+    if liveness_ok:
+        manifest.status = Status.RUNNING
         registry.record_health_check(instance_id)
+        status_detail = "RUNNING"
+    else:
+        # 轻量 start 存活探针失败 → DEGRADED（容器在但端口不通，
+        # 可能进程仍在预热；不直接 FAILED 因为轻量 start 是已部署实例）
+        manifest.status = Status.DEGRADED
+        status_detail = "DEGRADED（存活探针超时）"
+        registry.add_event(
+            instance_id,
+            "lifecycle_stage",
+            f"Gate-C 轻量 start 存活探针超时（host_port={host_port}）",
+        )
+
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+    registry.update_status(
+        instance_id,
+        manifest.status.value,
+        desired_state=DesiredState.RUNNING.value,
+    )
+
     registry.add_event(
         instance_id,
         "start",
-        f"容器实例已启动（{action}，host_port={host_port}）",
+        f"容器实例已启动（{action}，{status_detail}，host_port={host_port}）",
     )
-    log.info("容器实例 %s 已 %s，端口 %d", instance_id, action, host_port)
+    log.info("容器实例 %s 已 %s（%s），端口 %d", instance_id, action, status_detail, host_port)
     return manifest
 
 
@@ -936,6 +1015,255 @@ def _wait_for_http(
     return False
 
 
+# ---- Gate-C C.04/C.05：实证校验辅助 -----------------------------------------
+
+
+def _verify_sqlite_database(
+    manifest: InstanceManifest,
+    workspace: Workspace,
+) -> bool:
+    """只读打开容器挂载的 SQLite 文件，作为数据库能力证据。"""
+    database = manifest.database
+    if not manifest.hasDatabase or database is None or database.type != "sqlite":
+        return False
+    db_filename = Path(database.dbFilename or "app.sqlite").name
+    db_path = workspace.app_data(manifest.id) / db_filename
+    if not db_path.is_file():
+        return False
+    try:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as connection:
+            connection.execute("PRAGMA schema_version").fetchone()
+    except (OSError, sqlite3.Error):
+        return False
+    return True
+
+
+def _migration_command_succeeded(
+    manifest: InstanceManifest,
+    *,
+    liveness_ok: bool,
+) -> bool:
+    """判定 Alembic 是否作为服务启动的受控前置命令已成功。"""
+    if not liveness_ok:
+        return False
+    command = (manifest.entry.start or "").strip()
+    lowered = command.lower()
+    alembic_pos = lowered.find("alembic upgrade")
+    if alembic_pos < 0:
+        return False
+    guard_pos = lowered.find("&&", alembic_pos)
+    if guard_pos < 0:
+        return False
+    return bool(command[guard_pos + 2:].strip(" '\""))
+
+
+def _evaluate_container_verification(
+    host_port: int,
+    manifest: InstanceManifest,
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+) -> dict:
+    """Gate-C C.04/C.05：评估容器的成功谓词（§6.5）。
+
+    先等待基础存活，再执行证据驱动的探针评估。
+
+    返回字典包含：
+    - ``overall_status``: ``"passed"`` / ``"degraded"`` / ``"failed"``
+    - ``liveness_passed``: bool
+    - ``mandatory_all_passed``: bool
+    - ``optional_warnings``: list[str]
+    - ``observed_capabilities``: list[str]
+    - ``error``: str | None
+    """
+    # 先等待 HTTP 就绪（复用 hosting 模块的 _wait_for_http，
+    # 与测试中 monkeypatch _http_ok 对齐）
+    liveness_ok = _wait_for_http(host_port)
+    if not liveness_ok:
+        return {
+            "overall_status": "failed",
+            "liveness_passed": False,
+            "mandatory_all_passed": False,
+            "optional_warnings": [],
+            "observed_capabilities": [],
+            "error": f"基础存活探针超时（host_port={host_port}，{_CONTAINER_HEALTH_ATTEMPTS} 次未响应）",
+        }
+
+    # 基础存活通过 -> 收集能力
+    observed: set[str] = set()
+    observed.add("ui")  # 存活即服务可达
+
+    # CHK-192/P1：从 manifest 加载持久化的能力契约（含 requiredProbes），
+    # 不再临时推断（原 _infer_capability_contract 丢失 requiredProbes 且无探针执行）。
+    contract = _load_capability_contract(manifest)
+    required = contract.required_capabilities
+
+    # 执行 mandatory 探针（如 /health），结果作成功门槛
+    mandatory_all_passed = True
+    optional_warnings: list[str] = []
+    successful_business_probe = False
+    for spec in contract.requiredProbes:
+        passed, code = _probe_path(
+            host_port, spec.path, expected_status=spec.expectedStatus,
+        )
+        if passed:
+            successful_business_probe = True
+        if spec.isMandatory:
+            if not passed:
+                mandatory_all_passed = False
+        else:
+            if not passed:
+                optional_warnings.append(
+                    f"可选探针 {spec.path} 未通过（code={code}）"
+                )
+
+    # BUG-481：契约是要求，不是证据。首页存活不再自动补齐 API/DB/迁移。
+    if contract.servesApi and not successful_business_probe:
+        api_guess_ok, _api_guess_path = api_probe(host_port)
+        successful_business_probe = api_guess_ok is True
+    if successful_business_probe:
+        observed.add("api")
+    if contract.requiresDatabase and _verify_sqlite_database(manifest, workspace):
+        observed.add("database")
+    if contract.requiresMigrations and _migration_command_succeeded(
+        manifest, liveness_ok=liveness_ok,
+    ):
+        observed.add("migrations")
+
+    capabilities_covered = required.issubset(observed)
+
+    # 总体判定（CHK-192/P1：能力未覆盖 -> failed，不再假报 passed）
+    if not liveness_ok or not mandatory_all_passed:
+        overall = "failed"
+    elif not capabilities_covered:
+        overall = "failed"
+    elif optional_warnings:
+        overall = "degraded"
+    else:
+        overall = "passed"
+
+    return {
+        "overall_status": overall,
+        "liveness_passed": liveness_ok,
+        "mandatory_all_passed": mandatory_all_passed,
+        "optional_warnings": optional_warnings,
+        "observed_capabilities": sorted(observed),
+        "error": (
+            None
+            if overall != "failed"
+            else (
+                "必选探针未通过"
+                if not mandatory_all_passed
+                else f"未观测到所需能力：{', '.join(sorted(required - observed))}"
+            )
+        ),
+    }
+
+
+def _load_capability_contract(
+    manifest: InstanceManifest,
+) -> "CapabilityContract":
+    """Gate-C C.04：从 manifest 加载持久化的能力契约。
+
+    CHK-192/P1：优先使用导入时由 candidate_generator 生成并持久化到
+    ``manifest.capabilityContract``（dict）的契约，其中包含 ``requiredProbes``。
+    若 manifest 未存储契约（旧实例或测试用例），返回最小契约
+    ``CapabilityContract(servesUi=True)``--仅要求存活可达，
+    避免在无探针信息时假报能力未覆盖为失败。
+    """
+    from local_webpage_access.models import ProbeSpec
+
+    raw = getattr(manifest, "capabilityContract", None)
+    if isinstance(raw, dict) and raw:
+        probes = [
+            ProbeSpec(**p) if isinstance(p, dict) else p
+            for p in raw.get("requiredProbes", [])
+        ]
+        return CapabilityContract(
+            servesUi=raw.get("servesUi", False),
+            servesApi=raw.get("servesApi", False),
+            requiresDatabase=raw.get("requiresDatabase", False),
+            requiresMigrations=raw.get("requiresMigrations", False),
+            requiredProbes=probes,
+        )
+    # 兜底：无持久化契约时仅要求存活可达
+    return CapabilityContract(servesUi=True)
+
+
+def _probe_path(
+    host_port: int,
+    path: str,
+    *,
+    expected_status: int = 200,
+    timeout: float = 2.0,
+) -> tuple[bool, int | None]:
+    """Gate-C C.05：对指定路径执行 HTTP GET 探针。
+
+    CHK-192/P1：区别于 :func:`_http_ok`（固定命中 ``/``），本函数命中
+    :class:`ProbeSpec` 声明的路径（如 ``/health``），作为 mandatory 探针门槛。
+
+    返回 ``(passed, status_code)``：
+    - 状态码等于 ``expected_status`` 或同为 2xx/3xx -> ``passed=True``
+    - 其它 -> ``passed=False``
+    """
+    url = mark_probe_url(f"http://127.0.0.1:{host_port}{path}")
+    try:
+        resp = urlopen_direct(url, timeout=timeout)
+        code = getattr(resp, "status", None) or resp.getcode()
+        code_int = int(code)
+        if expected_status and code_int == expected_status:
+            return (True, code_int)
+        if not expected_status and 200 <= code_int < 400:
+            return (True, code_int)
+        if 200 <= code_int < 400:
+            return (True, code_int)
+        return (False, code_int)
+    except urllib.error.HTTPError as exc:
+        return (False, exc.code)
+    except Exception:  # noqa: BLE001
+        return (False, None)
+
+
+def _liveness_failed_rollback(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    host_port: int,
+    fresh_port: bool,
+    error: str,
+) -> None:
+    """Gate-C C.04：必选探针失败时回滚容器与端口。"""
+    import contextlib
+
+    # 停止容器
+    with contextlib.suppress(Exception):
+        runtime = DockerRuntime(workspace, registry)
+        if runtime.is_running(instance_id):
+            runtime.down(instance_id)
+
+    # 释放端口
+    if fresh_port:
+        with contextlib.suppress(Exception):
+            PortAllocator(config=config, registry=registry).release_instance(instance_id)
+
+    manifest.status = Status.FAILED
+    manifest.lastError = error[:500]
+    manifest.touch()
+    with contextlib.suppress(Exception):
+        manifest.save(workspace.app_manifest_path(instance_id))
+    registry.update_status(
+        instance_id, Status.FAILED.value, last_error=error[:500]
+    )
+    registry.add_event(
+        instance_id,
+        "lifecycle_stage",
+        f"Gate-C 必选探针失败：{error[:200]}",
+    )
+
+
 def _http_ok(host_port: int, *, timeout: float = 2.0) -> bool:
     """单次 HTTP GET 健康探测（2xx/3xx 视为成功）。"""
     url = mark_probe_url(f"http://127.0.0.1:{host_port}/")
@@ -1079,8 +1407,20 @@ def _ensure_public_index(public_dir: Path, entry: Path, current_dir: Path) -> No
         shutil.copy2(src, dest)
 
 
-def find_build_output(project_dir: Path) -> Path | None:
-    """识别构建产物目录（dist/、build/、out/ 等）。"""
+def find_build_output(project_dir: Path, hint: str | None = None) -> Path | None:
+    """识别构建产物目录（dist/、build/、out/ 等）。
+
+    若 *hint* 非空（monorepo 子包的产物相对路径，如 packages/web/dist），
+    优先检查该路径，再回退到常规扫描。
+    """
+    if hint:
+        candidate = project_dir / hint
+        if candidate.is_dir():
+            try:
+                if any(candidate.iterdir()):
+                    return candidate
+            except (PermissionError, OSError):
+                pass
     for name in _BUILD_OUTPUT_DIRS:
         candidate = project_dir / name
         if candidate.is_dir():

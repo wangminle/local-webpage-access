@@ -171,6 +171,15 @@ def test_env_sqlite_includes_database_url(workspace: Workspace) -> None:
     assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in text
 
 
+def test_env_sqlite_preserves_source_db_filename(workspace: Workspace) -> None:
+    """IMP-058 Gate-A CHK-V03：DATABASE_URL 保留 scanner 扫描到的源文件名。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.database.dbFilename = "bookshelf.db"
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/bookshelf.db" in text
+    assert "app.sqlite" not in text
+
+
 def test_compose_runtime_root_volume_and_env(workspace: Workspace) -> None:
     """BUG-198：runtime_paths 应用挂载 ../data:/app/runtime/data 并注入 RUNTIME_ROOT。"""
     workspace.ensure_app_dirs("api")
@@ -185,7 +194,8 @@ def test_compose_runtime_root_volume_and_env(workspace: Workspace) -> None:
     assert "RUNTIME_ROOT=/app/runtime" in content
     assert "PYTHONPATH=src" in content
     env = generate_env(m, workspace, host_port=18004).read_text(encoding="utf-8")
-    assert "DATABASE_URL" not in env
+    # BUG-474: 所有 SQLite 项目都注入绝对路径 DATABASE_URL，包括 RUNTIME_ROOT 布局。
+    assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in env
 
 
 def test_env_local_jwt_secret_auto_generated(workspace: Workspace) -> None:
@@ -353,3 +363,67 @@ def test_env_example_not_overwritten_if_exists(workspace: Workspace) -> None:
 
     assert target.read_text(encoding="utf-8") == "USER_EDITED=keep\n"
 
+
+
+# ---- CHK-193/P1：sourceSubdir SQLite 源库复制 --------------------------------
+
+
+def test_env_sqlite_subdir_source_db_copied(workspace: Workspace) -> None:
+    """CHK-193/P1：sourceSubdir 设定时，SQLite 源文件从子目录复制。"""
+    workspace.ensure_app_dirs("api")
+    current = workspace.app_current("api")
+    # 模拟 backend/ 子目录布局
+    backend_dir = current / "backend"
+    backend_dir.mkdir(parents=True)
+    (backend_dir / "requirements.txt").write_text("flask\n")
+    # 源 SQLite 文件在 backend/ 子目录
+    (backend_dir / "bookshelf.db").write_bytes(b"SQLite dummy")
+
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.database.dbFilename = "bookshelf.db"
+    m.sourceSubdir = "backend"
+
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/bookshelf.db" in text
+
+    # 源文件应被复制到宿主 data 目录
+    target = workspace.app_data("api") / "bookshelf.db"
+    assert target.is_file(), f"源 SQLite 未复制到 {target}"
+
+
+def test_env_sqlite_subdir_relative_path_source_db_copied(workspace: Workspace) -> None:
+    """CHK-193/P1：sourceSubdir + 相对路径 dbFilename 组合。"""
+    workspace.ensure_app_dirs("api")
+    current = workspace.app_current("api")
+    backend_dir = current / "backend"
+    backend_dir.mkdir(parents=True)
+    (backend_dir / "data").mkdir()
+    # 源文件在 backend/data/app.sqlite
+    (backend_dir / "data" / "app.sqlite").write_bytes(b"SQLite dummy")
+
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.database.dbFilename = "data/app.sqlite"
+    m.sourceSubdir = "backend"
+
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    # basename 提取后 DATABASE_URL 指向 app.sqlite
+    assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in text
+
+    target = workspace.app_data("api") / "app.sqlite"
+    assert target.is_file(), f"源 SQLite 未复制到 {target}"
+
+
+def test_env_sqlite_no_subdir_uses_root_path(workspace: Workspace) -> None:
+    """CHK-193/P1：无 sourceSubdir 时，源文件从根目录查找（向后兼容）。"""
+    workspace.ensure_app_dirs("api")
+    current = workspace.app_current("api")
+    (current / "requirements.txt").write_text("flask\n")
+    (current / "bookshelf.db").write_bytes(b"SQLite dummy")
+
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.database.dbFilename = "bookshelf.db"
+    # sourceSubdir 未设置
+
+    generate_env(m, workspace, host_port=18000)
+    target = workspace.app_data("api") / "bookshelf.db"
+    assert target.is_file(), f"源 SQLite 未复制到 {target}"
