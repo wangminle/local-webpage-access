@@ -1656,6 +1656,9 @@ def build_manifest_from_detection(
                 manifest.capabilityContract = top_plan.capabilityContract.model_dump()
         except Exception:  # noqa: BLE001
             pass  # 计划生成失败不阻塞导入
+        # A.R01：传递数据库配置消费信号给 manifest，供 compose.generate_env 使用
+        if detection.evidence.databaseConfig is not None:
+            manifest.databaseConfig = detection.evidence.databaseConfig.model_dump()
     manifest.touch()
     return manifest
 

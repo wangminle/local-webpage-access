@@ -1571,7 +1571,7 @@ def test_start_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
     with pytest.MonkeyPatch.context() as mp:
         called: list[str] = []
 
-        def fake_start(ws, cfg, reg, iid):
+        def fake_start(ws, cfg, reg, iid, **kwargs):
             called.append(iid)
             from local_webpage_access.models import InstanceManifest
 
@@ -1585,6 +1585,90 @@ def test_start_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
     assert resp.status_code == 200, resp.text
     assert called == [manager_env.instance_id]
     assert resp.json()["action"] == "start"
+
+
+# ---- C.R03：降级确认交互 ------------------------------------------------------
+
+
+def test_start_returns_pending_confirmation(manager_env: EnvBundle) -> None:
+    """C.R03：confirm 策略下 top-1 失败 -> 返回 pendingConfirmation 结构。"""
+
+    def fake_start_confirm(ws, cfg, reg, iid, **kwargs):
+        if kwargs.get("fallback_policy", "confirm") == "confirm":
+            from local_webpage_access.lifecycle import FallbackConfirmationRequired
+
+            raise FallbackConfirmationRequired(
+                iid,
+                primary_failure="build failed",
+                equivalent_candidates=[
+                    {"index": 2, "kind": "python", "confidenceTier": "fallback"},
+                ],
+            )
+        from local_webpage_access.models import InstanceManifest
+
+        return InstanceManifest.load(ws.app_manifest_path(iid))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("local_webpage_access.lifecycle.start_instance", fake_start_confirm)
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/start",
+            headers=manager_env.auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pendingConfirmation"] is True
+    assert body["instanceId"] == manager_env.instance_id
+    assert "build failed" in body["primaryFailure"]
+    assert len(body["equivalentCandidates"]) == 1
+
+
+def test_confirm_fallback_endpoint_uses_auto_equivalent(
+    manager_env: EnvBundle,
+) -> None:
+    """C.R03：confirm-fallback 端点以 auto-equivalent 策略重试。"""
+    policy_used: list[str] = []
+
+    def fake_start_track(ws, cfg, reg, iid, **kwargs):
+        policy_used.append(kwargs.get("fallback_policy", "confirm"))
+        from local_webpage_access.models import InstanceManifest
+
+        return InstanceManifest.load(ws.app_manifest_path(iid))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("local_webpage_access.lifecycle.start_instance", fake_start_track)
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/confirm-fallback",
+            headers=manager_env.auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["action"] == "start"
+    assert policy_used == ["auto-equivalent"]
+
+
+def test_start_accepts_fallback_policy_query_param(
+    manager_env: EnvBundle,
+) -> None:
+    """C.R03：start API 接受 fallback_policy 查询参数并透传给 lifecycle。"""
+    policy_used: list[str] = []
+
+    def fake_start_track(ws, cfg, reg, iid, **kwargs):
+        policy_used.append(kwargs.get("fallback_policy", "confirm"))
+        from local_webpage_access.models import InstanceManifest
+
+        return InstanceManifest.load(ws.app_manifest_path(iid))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("local_webpage_access.lifecycle.start_instance", fake_start_track)
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/start"
+            "?fallback_policy=auto-equivalent",
+            headers=manager_env.auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    assert policy_used == ["auto-equivalent"]
 
 
 def test_stop_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
@@ -2862,7 +2946,7 @@ def test_import_from_dir_auto_starts_static(manager_env: EnvBundle, tmp_path: Pa
 
     started: list[str] = []
 
-    def fake_start(ws, cfg, reg, iid):
+    def fake_start(ws, cfg, reg, iid, **kwargs):
         started.append(iid)
         from local_webpage_access.models import DesiredState, InstanceManifest, Status
 
@@ -2901,7 +2985,7 @@ def test_import_from_dir_skips_autostart_when_unrecognized(
 
     started: list[str] = []
 
-    def fake_start(ws, cfg, reg, iid):
+    def fake_start(ws, cfg, reg, iid, **kwargs):
         started.append(iid)
         from local_webpage_access.models import InstanceManifest
 

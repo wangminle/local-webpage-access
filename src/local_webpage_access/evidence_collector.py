@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from local_webpage_access.logging import get_logger
-from local_webpage_access.models import ProjectEvidence, SubdirSignal
+from local_webpage_access.models import DatabaseSignal, ProjectEvidence, SubdirSignal
 
 log = get_logger("evidence_collector")
 
@@ -90,6 +90,9 @@ def collect(root: Path) -> ProjectEvidence:
         if path.is_file() and path.name.lower().endswith((".sqlite", ".sqlite3", ".db")):
             rel = path.relative_to(root)
             evidence.sqliteFiles.append(str(rel).replace("\\", "/"))
+
+    # 5.5 A.R01：数据库配置消费证据
+    evidence.databaseConfig = _collect_database_config(root)
 
     # 6. 项目自带 Dockerfile/compose
     evidence.projectDockerfile = _find_dockerfile(root)
@@ -251,3 +254,143 @@ def _find_compose(root: Path) -> str | None:
         if candidate.is_file():
             return candidate.name
     return None
+
+
+# ---- A.R01：数据库配置消费证据 -------------------------------------------------
+
+# 匹配应用读取 DATABASE_URL 环境变量的常见模式
+_DATABASE_URL_ENV_PATTERNS = [
+    re.compile(r'os\.environ\.get\s*\(\s*["\']DATABASE_URL["\']'),
+    re.compile(r'os\.getenv\s*\(\s*["\']DATABASE_URL["\']'),
+    re.compile(r'os\.environ\s*\[\s*["\']DATABASE_URL["\']\s*\]'),
+    re.compile(r'environ\.get\s*\(\s*["\']DATABASE_URL["\']'),
+    re.compile(r'getenv\s*\(\s*["\']DATABASE_URL["\']'),
+]
+
+# 匹配 SQLAlchemy / Starlette 配置中引用 DATABASE_URL
+_SQLALCHEMY_URL_PATTERNS = [
+    re.compile(r'SQLALCHEMY_DATABASE_URI\s*=.*DATABASE_URL', re.IGNORECASE),
+    re.compile(r'SQLALCHEMY_DATABASE_URL\s*=.*DATABASE_URL', re.IGNORECASE),
+]
+
+# 匹配 pydantic Settings 中的 database_url 字段
+_PYDANTIC_DB_FIELD_RE = re.compile(
+    r'database_url\s*[:=]\s*(?:str|Optional\[str\]|str\s*\|\s*None)', re.IGNORECASE
+)
+
+# 匹配 SQLite 默认连接串，提取文件名
+_SQLITE_URL_RE = re.compile(
+    r'sqlite:///(/?\.{0,2}/?[\w./-]+\.(?:sqlite|sqlite3|db))',
+    re.IGNORECASE,
+)
+
+# 常见配置文件名（相对项目根或一级子目录）
+_CONFIG_FILE_NAMES = (
+    "config.py",
+    "settings.py",
+    "database.py",
+    "db.py",
+    "app/config.py",
+    "app/settings.py",
+    "app/database.py",
+    "app/db.py",
+    "core/config.py",
+    "core/settings.py",
+)
+
+
+def _collect_database_config(root: Path) -> DatabaseSignal | None:
+    """A.R01：扫描项目源码，采集数据库配置消费证据。
+
+    判断应用是否读取 ``DATABASE_URL`` 环境变量，并尝试解析默认连接串
+    的路径形态（相对/绝对）和文件名。仅做纯文件扫描，不执行代码。
+    """
+    signal = DatabaseSignal()
+
+    # 收集候选配置文件：预设文件名 + 含 DATABASE_URL 字符串的 .py 文件
+    candidate_files: list[Path] = []
+    for name in _CONFIG_FILE_NAMES:
+        p = root / name
+        if p.is_file():
+            candidate_files.append(p)
+
+    # 也扫描一级子目录中的配置文件（如 backend/config.py）
+    for subdir_name in COMMON_SUBDIRS:
+        subdir = root / subdir_name
+        if subdir.is_dir():
+            for name in _CONFIG_FILE_NAMES:
+                basename = Path(name).name
+                p = subdir / basename
+                if p.is_file() and p not in candidate_files:
+                    candidate_files.append(p)
+
+    # 扫描所有 .py 文件（受限深度），查找含 DATABASE_URL 的文件
+    for path in _walk(root, max_depth=3):
+        if not path.suffix == ".py":
+            continue
+        if path in candidate_files:
+            continue
+        try:
+            text = path.read_text("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "DATABASE_URL" in text:
+            candidate_files.append(path)
+
+    found_consumption = False
+    default_url: str | None = None
+    source_path: str | None = None
+
+    for config_file in candidate_files:
+        try:
+            text = config_file.read_text("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        # 检查是否消费 DATABASE_URL
+        if not found_consumption:
+            for pattern in _DATABASE_URL_ENV_PATTERNS + _SQLALCHEMY_URL_PATTERNS:
+                if pattern.search(text):
+                    found_consumption = True
+                    try:
+                        source_path = str(config_file.relative_to(root)).replace("\\", "/")
+                    except ValueError:
+                        source_path = str(config_file)
+                    break
+
+            # pydantic Settings 的 database_url 字段也算消费
+            if not found_consumption and _PYDANTIC_DB_FIELD_RE.search(text):
+                found_consumption = True
+                try:
+                    source_path = str(config_file.relative_to(root)).replace("\\", "/")
+                except ValueError:
+                    source_path = str(config_file)
+
+        # 尝试提取默认 SQLite 连接串
+        if default_url is None:
+            match = _SQLITE_URL_RE.search(text)
+            if match:
+                default_url = match.group(1)
+                if source_path is None:
+                    try:
+                        source_path = str(config_file.relative_to(root)).replace("\\", "/")
+                    except ValueError:
+                        source_path = str(config_file)
+
+    signal.consumesDatabaseUrl = found_consumption
+    signal.defaultUrl = default_url
+    signal.sourcePath = source_path
+
+    if default_url:
+        signal.isRelative = not default_url.startswith("/")
+        # 提取文件名：取 basename
+        # 形如 "./data/bookshelf.db" -> "bookshelf.db"
+        # 形如 "/app/data/bookshelf.db" -> "bookshelf.db"
+        filename = Path(default_url).name
+        if filename and filename.lower().endswith((".sqlite", ".sqlite3", ".db")):
+            signal.dbFilename = filename
+
+    if not found_consumption and default_url is None:
+        return None  # 无任何数据库配置信号
+
+    return signal

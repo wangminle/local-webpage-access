@@ -360,13 +360,15 @@ def _check_cmd_safety(result: DetectionResult) -> CheckResult:
 
 
 def _check_db_path(result: DetectionResult) -> CheckResult:
-    """CHK-V03：数据库路径与 volume 一致性。
+    """CHK-V03：数据库路径与 volume 一致性（A.R01 安全自动修正）。
 
     SQLite 项目使用相对 DB 路径时标记风险。修正已由 ``compose.generate_env``
     的绝对路径 ``DATABASE_URL`` 注入完成（A.02），此处仅记录修正事件。
 
-    IMP-058 Gate-A CHK-V03：注入的 DATABASE_URL 保留 scanner 扫描到的源文件名
-    （``DatabaseConfig.dbFilename``），避免原硬编码 ``app.sqlite`` 把应用指向全新空库。
+    A.R01 修订：只有当证据表明应用消费 ``DATABASE_URL`` 环境变量时，
+    才标记为 autofixed；否则降级为 warned，compose 不自动注入。
+    保留 scanner 扫描到的源文件名（``DatabaseConfig.dbFilename``），
+    避免原硬编码 ``app.sqlite`` 把应用指向全新空库。
     """
     if not result.hasDatabase or not result.database or result.database.type != "sqlite":
         return CheckResult(
@@ -384,25 +386,51 @@ def _check_db_path(result: DetectionResult) -> CheckResult:
         else "app.sqlite"
     )
 
-    # 检查 connectionString 是否为相对路径
+    # A.R01：检查应用是否消费 DATABASE_URL
+    db_signal = None
+    if result.evidence and result.evidence.databaseConfig:
+        db_signal = result.evidence.databaseConfig
+
     conn = result.database.connectionString
-    if conn and _is_relative_sqlite_path(conn):
+    is_relative = conn and _is_relative_sqlite_path(conn)
+
+    if db_signal and db_signal.consumesDatabaseUrl:
+        # 应用确认消费 DATABASE_URL，安全自动注入
+        detail_parts = [
+            f"应用在 {db_signal.sourcePath or '源码'} 中读取 DATABASE_URL",
+            f"注入绝对路径 DATABASE_URL=sqlite:////app/data/{db_filename}",
+        ]
+        if is_relative:
+            detail_parts.append(f"检测到相对路径 SQLite 连接串（{conn}）")
+        if db_signal.defaultUrl:
+            detail_parts.append(f"默认连接串：{db_signal.defaultUrl}")
+
         return CheckResult(
             check_id="CHK-V03",
             passed=True,
             autofixed=True,
             action=f"compose.generate_env 已注入绝对路径 DATABASE_URL=sqlite:////app/data/{db_filename}",
-            detail=f"检测到相对路径 SQLite 连接串（{conn}），已通过 compose .env 注入绝对路径 DATABASE_URL 修正（保留源文件名 {db_filename}）",
+            detail="；".join(detail_parts),
         )
+    else:
+        # A.R01：无消费证据，不自动注入，降级为 warning
+        reason = "未在源码中找到读取 DATABASE_URL 的证据"
+        if db_signal is None:
+            reason = "未采集到数据库配置信号"
+        elif not db_signal.consumesDatabaseUrl:
+            reason = f"应用在 {db_signal.sourcePath or '已扫描文件'} 中未读取 DATABASE_URL 环境变量"
 
-    # 没有 connectionString 或为绝对路径：compose 仍会注入 DATABASE_URL（A.02）
-    return CheckResult(
-        check_id="CHK-V03",
-        passed=True,
-        autofixed=True,
-        action=f"compose.generate_env 注入绝对路径 DATABASE_URL=sqlite:////app/data/{db_filename}",
-        detail=f"SQLite 项目已通过 compose .env 注入绝对路径 DATABASE_URL（BUG-474 预防性修正，文件名 {db_filename}）",
-    )
+        return CheckResult(
+            check_id="CHK-V03",
+            passed=True,
+            autofixed=False,
+            action=None,
+            detail=(
+                f"⚠️ A.R01 安全检查：{reason}。"
+                f"compose 将不自动注入 DATABASE_URL，保留应用原配置。"
+                f"如需注入，请确认应用 config 中使用 os.getenv('DATABASE_URL')。"
+            ),
+        )
 
 
 def _is_relative_sqlite_path(conn: str) -> bool:
@@ -724,6 +752,12 @@ def check_and_fix(result: DetectionResult, source_dir: Path) -> PreflightResult:
     # CHK-V06 的 warning 始终收集
     if r_v06.detail.startswith("检测到项目自带 Dockerfile"):
         preflight.warnings.append(r_v06.detail)
+
+    # CHK-V03 的 A.R01 安全警告（无消费证据时不自动注入）
+    if r_v03.detail.startswith("⚠️"):
+        preflight.warnings.append(r_v03.detail)
+        if preflight.status == PASSED:
+            preflight.status = WARNED
 
     # CHK-V04 的 script_location 风险也收集为 warning（含 ⚠️ 前缀的 detail）
     for check in preflight.checks:

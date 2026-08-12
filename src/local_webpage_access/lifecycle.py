@@ -292,8 +292,29 @@ def start_instance(
     with instance_lock(workspace, instance_id):
         manifest = _load(workspace, instance_id)
         if _is_deployed_container(manifest):
-            log.info("实例 %s 已部署，使用轻量 start", instance_id)
-            manifest = start_container(workspace, config, registry, instance_id)
+            # C.R06：四类指纹检查--任一变化禁止轻量 start，强制重建
+            current_fps = _compute_deployment_fingerprints(workspace, manifest)
+            stored_fps = getattr(manifest, "deploymentFingerprints", None)
+            changed, changed_fields = _fingerprints_changed(stored_fps, current_fps)
+            if changed:
+                log.info(
+                    "实例 %s 指纹变化（%s），禁止轻量 start，强制重建",
+                    instance_id,
+                    ", ".join(changed_fields),
+                )
+                registry.add_event(
+                    instance_id,
+                    "lifecycle_stage",
+                    f"Gate-C C.R06 指纹变化（{', '.join(changed_fields)}），强制重建",
+                )
+                manifest = _try_host_with_fallback(
+                    workspace, config, registry, instance_id, manifest,
+                    host_instance,
+                    fallback_policy=fallback_policy,
+                )
+            else:
+                log.info("实例 %s 已部署且指纹未变，使用轻量 start", instance_id)
+                manifest = start_container(workspace, config, registry, instance_id)
         else:
             # Gate-C：尝试 top-1 候选，失败时降级到 fallback
             manifest = _try_host_with_fallback(
@@ -354,17 +375,30 @@ def _try_host_with_fallback(
         VerificationResult,
     )
 
+    # C.R04：Prepare 阶段快照--在 attempt 前捕获可恢复状态
+    snapshot = _snapshot_attempt(workspace, registry, instance_id, manifest)
+
     # 尝试 top-1
     attempt_id = f"attempt-{instance_id}-0"
     try:
         return host_fn(workspace, config, registry, instance_id)
     except (HostingError, DockerError) as exc:
+        # C.R05：从异常 context 提取副作用记录
+        exc_context = getattr(exc, "context", {}) or {}
+        side_effect_records = exc_context.get("side_effect_records", [])
+        side_effects_auto_recoverable = exc_context.get(
+            "side_effects_auto_recoverable", True
+        )
+
         # CHK-192/P1：DockerError（build/start 最常见失败）也需进入 fallback 流程，
         # 不能只捕获 HostingError 而让 DockerError 绕过降级。
-        # C.06：回滚本次 attempt（容器、端口、生成文件、manifest 选中状态）
+        # C.06/C.R04/C.R05：回滚本次 attempt（容器、端口、生成文件、manifest 选中状态）
         rollback = _rollback_attempt(
             workspace, config, registry, instance_id, manifest,
             attempt_id=attempt_id,
+            snapshot=snapshot,
+            side_effect_records=side_effect_records,
+            side_effects_auto_recoverable=side_effects_auto_recoverable,
         )
 
         # 构建 top-1 失败诊断
@@ -386,7 +420,8 @@ def _try_host_with_fallback(
             rollback=rollback,
         )
 
-        fallbacks = getattr(manifest, "deploymentCandidates", []) or []
+        # C.R01：优先从 deploymentPlans 读取 fallback，回退到 deploymentCandidates
+        fallbacks = _get_fallback_plans(manifest)
         if not fallbacks:
             # 无 fallback → 直接输出诊断
             _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
@@ -411,33 +446,52 @@ def _try_host_with_fallback(
         if manifest.runtime.value == "shared-static":
             raise
 
-        # 能力守恒（§6.1.1）：过滤等价候选
-        primary_capability = _candidate_capability_family(manifest)
+        # C.R02：能力守恒（§6.1.1）-- 优先用完整 CapabilityContract 对比
+        primary_contract = _manifest_capability_contract(manifest)
         equivalent_fallbacks = []
         skipped_inequivalent = []
-        for i, candidate_dict in enumerate(fallbacks):
-            cand_capability = _dict_capability_family(candidate_dict)
-            if _capabilities_equivalent(primary_capability, cand_capability):
-                equivalent_fallbacks.append((i, candidate_dict))
-            else:
-                skipped_inequivalent.append((i, candidate_dict))
+
+        if primary_contract:
+            # C.R02：完整契约对比
+            for i, plan_dict in enumerate(fallbacks):
+                cand_contract = _plan_capability_contract(plan_dict)
+                if _contracts_equivalent(primary_contract, cand_contract):
+                    equivalent_fallbacks.append((i, plan_dict))
+                else:
+                    diff = _contract_diff(primary_contract, cand_contract) or "无契约信息"
+                    skipped_inequivalent.append((i, plan_dict))
+                    log.info(
+                        "实例 %s C.R02 契约不等价：fallback #%d 差异=%s",
+                        instance_id, i + 1, diff,
+                    )
+        else:
+            # 向后兼容：无 contract 时回退到 3-value family 比较
+            primary_capability = _candidate_capability_family(manifest)
+            for i, plan_dict in enumerate(fallbacks):
+                # plan_dict 可能是 DeploymentPlan 或扁平候选
+                if "components" in plan_dict:
+                    cand_dict = _plan_to_candidate_dict(plan_dict)
+                else:
+                    cand_dict = plan_dict
+                cand_capability = _dict_capability_family(cand_dict)
+                if _capabilities_equivalent(primary_capability, cand_capability):
+                    equivalent_fallbacks.append((i, plan_dict))
+                else:
+                    skipped_inequivalent.append((i, plan_dict))
 
         if skipped_inequivalent:
+            contract_desc = "完整契约对比" if primary_contract else "3-value family"
             log.warning(
-                "实例 %s 能力守恒：top-1 候选能力族=%s，跳过 %d 个不等价 fallback 候选"
-                "（能力族: %s）",
+                "实例 %s 能力守恒（%s）：跳过 %d 个不等价 fallback 候选",
                 instance_id,
-                primary_capability,
+                contract_desc,
                 len(skipped_inequivalent),
-                ", ".join(
-                    _dict_capability_family(d) for _, d in skipped_inequivalent
-                ),
             )
             registry.add_event(
                 instance_id,
                 "lifecycle_stage",
-                f"Gate-C 能力守恒：跳过 {len(skipped_inequivalent)} 个不等价 fallback 候选"
-                f"（后端不得降级为静态）",
+                f"Gate-C 能力守恒（{contract_desc}）：跳过 {len(skipped_inequivalent)} 个"
+                f"不等价 fallback 候选（后端不得降级为静态）",
             )
 
         if not equivalent_fallbacks:
@@ -505,11 +559,11 @@ def _try_host_with_fallback(
 
         diagnoses: list[CandidateDiagnosis] = [top1_diagnosis]
 
-        # 尝试等价 fallback 候选
-        for attempt, (orig_index, candidate_dict) in enumerate(
+        # 尝试等价 fallback 候选/计划
+        for attempt, (orig_index, plan_dict) in enumerate(
             equivalent_fallbacks[:_MAX_FALLBACK_CANDIDATES]
         ):
-            tier = candidate_dict.get("confidenceTier", "fallback")
+            tier = plan_dict.get("confidenceTier", "fallback")
             fb_attempt_id = f"attempt-{instance_id}-{attempt + 1}"
             log.info(
                 "实例 %s 尝试 fallback 候选 %d/%d（tier=%s）",
@@ -523,10 +577,12 @@ def _try_host_with_fallback(
                 "lifecycle_stage",
                 f"Gate-C 降级：尝试 fallback 候选 {attempt + 1}（tier={tier}）",
             )
+            # C.R04：fallback attempt 前也做快照
+            fb_snapshot = _snapshot_attempt(workspace, registry, instance_id, manifest)
             try:
-                return _apply_candidate_and_host(
+                return _apply_plan_and_host(
                     workspace, config, registry, instance_id, manifest,
-                    candidate_dict, host_fn,
+                    plan_dict, host_fn,
                 )
             except (HostingError, DockerError) as fallback_exc:
                 # CHK-192/P1：fallback 候选的 DockerError 同样需要捕获
@@ -536,9 +592,18 @@ def _try_host_with_fallback(
                     attempt + 1,
                     str(fallback_exc)[:200],
                 )
+                # C.R05：从异常 context 提取副作用记录
+                fb_exc_context = getattr(fallback_exc, "context", {}) or {}
+                fb_se_records = fb_exc_context.get("side_effect_records", [])
+                fb_se_auto = fb_exc_context.get(
+                    "side_effects_auto_recoverable", True
+                )
                 fb_rollback = _rollback_attempt(
                     workspace, config, registry, instance_id, manifest,
                     attempt_id=fb_attempt_id,
+                    snapshot=fb_snapshot,
+                    side_effect_records=fb_se_records,
+                    side_effects_auto_recoverable=fb_se_auto,
                 )
                 diagnoses.append(CandidateDiagnosis(
                     candidateIndex=orig_index + 1,
@@ -598,6 +663,299 @@ def _candidate_capability_family(manifest: InstanceManifest) -> str:
 # ---- Gate-C C.06/C.07/C.08 辅助 ---------------------------------------------
 
 
+# ---- C.R06：四类部署指纹 -----------------------------------------------------
+
+
+def _compute_source_fingerprint(app_path: str | None) -> str:
+    """C.R06：计算源码目录指纹（SHA256）。
+
+    基于源码文件的相对路径 + 内容做有序哈希。
+    与 ``folder_source.compute_source_hash`` 语义对齐但独立实现，
+    因为此处可能面对 zip 解压目录而非文件夹源。
+    """
+    if not app_path:
+        return ""
+    src_dir = Path(app_path)
+    if not src_dir.is_dir():
+        return ""
+    h = hashlib.sha256()
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache"}
+    skip_files = {".DS_Store", "Thumbs.db"}
+    for root, dirs, files in os.walk(src_dir, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in skip_dirs)
+        root_path = Path(root)
+        for fname in sorted(files):
+            if fname in skip_files:
+                continue
+            fpath = root_path / fname
+            if fpath.is_symlink() or not fpath.is_file():
+                continue
+            arcname = str(fpath.relative_to(src_dir))
+            h.update(arcname.encode("utf-8"))
+            h.update(b"\0")
+            try:
+                with fpath.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(65536)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+            except OSError:
+                continue
+    return h.hexdigest()
+
+
+def _compute_plan_fingerprint(plan_dict: dict | None) -> str:
+    """C.R06：计算部署计划指纹（SHA256）。
+
+    对计划字典做规范化 JSON 序列化后取 SHA256。
+    """
+    if not plan_dict:
+        return ""
+    import json
+    canonical = json.dumps(plan_dict, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _compute_config_fingerprint(
+    compose_path: Path | None,
+    dockerfile_path: Path | None,
+    env_path: Path | None,
+) -> str:
+    """C.R06：计算生成配置指纹（SHA256）。
+
+    对 compose.yaml + Dockerfile + .env 的内容做有序拼接哈希。
+    任一文件缺失则跳过（空内容参与哈希以区分「文件不存在」和「文件为空」）。
+    """
+    h = hashlib.sha256()
+    for label, path in [
+        ("compose", compose_path),
+        ("dockerfile", dockerfile_path),
+        ("env", env_path),
+    ]:
+        h.update(label.encode("utf-8"))
+        h.update(b"\0")
+        if path and isinstance(path, Path) and path.is_file():
+            try:
+                content = path.read_bytes()
+                h.update(content)
+            except OSError:
+                h.update(b"<read-error>")
+        else:
+            h.update(b"<missing>")
+    return h.hexdigest()
+
+
+def _compute_deployment_fingerprints(
+    workspace: Workspace,
+    manifest: InstanceManifest,
+) -> dict:
+    """C.R06：计算四类部署指纹。
+
+    Returns:
+        ``{"sourceHash": str, "planHash": str, "configHash": str, "imageId": str}``
+    """
+    # source fingerprint
+    source_hash = _compute_source_fingerprint(manifest.appPath)
+
+    # plan fingerprint：优先从 deploymentPlans 找选中的计划
+    plan_dict = None
+    selected_id = getattr(manifest, "selectedPlanId", None)
+    plans = getattr(manifest, "deploymentPlans", []) or []
+    if selected_id:
+        plan_dict = next((p for p in plans if p.get("planId") == selected_id), None)
+    if not plan_dict and plans:
+        plan_dict = plans[0]
+    plan_hash = _compute_plan_fingerprint(plan_dict)
+
+    # generated-config fingerprint
+    compose_path = None
+    dockerfile_path = None
+    env_path = None
+    if manifest.container:
+        if manifest.container.composePath:
+            compose_path = Path(manifest.container.composePath)
+        if manifest.container.dockerfilePath:
+            dockerfile_path = Path(manifest.container.dockerfilePath)
+        env_path = workspace.app_env_path(manifest.id)
+    config_hash = _compute_config_fingerprint(compose_path, dockerfile_path, env_path)
+
+    # image fingerprint
+    image_id = ""
+    if manifest.container:
+        image_id = manifest.container.imageId or ""
+
+    return {
+        "sourceHash": source_hash,
+        "planHash": plan_hash,
+        "configHash": config_hash,
+        "imageId": image_id,
+    }
+
+
+def _fingerprints_changed(
+    stored: dict | None,
+    current: dict,
+) -> tuple[bool, list[str]]:
+    """C.R06：比较存储的指纹与当前指纹。
+
+    Returns:
+        ``(changed, changed_fields)`` -- 是否有变化，以及变化的字段名列表。
+
+    向后兼容：无存储指纹（旧实例 / 首次部署）时不强制重建，
+    指纹将在下次 ``host_container`` 成功后写入。
+    """
+    if not stored:
+        return False, []
+    changed_fields = []
+    for key in ("sourceHash", "planHash", "configHash", "imageId"):
+        stored_val = stored.get(key, "")
+        current_val = current.get(key, "")
+        if stored_val != current_val:
+            changed_fields.append(key)
+    return bool(changed_fields), changed_fields
+
+
+def _snapshot_attempt(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+) -> dict:
+    """C.R04：Prepare 阶段快照--在 attempt 执行前捕获可恢复状态。
+
+    快照内容：
+    - manifest 关键字段（selectedPlanId, kind, runtime, servingMode, entry,
+      sourceSubdir, container, capabilityContract）
+    - 生成文件内容（compose.yaml, Dockerfile, .env）--若文件存在
+    - 端口分配（hostPort from manifest.container）
+
+    返回 dict 可直接序列化。
+    """
+    snapshot: dict = {
+        "manifestFields": {
+            "selectedPlanId": getattr(manifest, "selectedPlanId", None),
+            "kind": _enum_value(manifest.kind),
+            "runtime": _enum_value(manifest.runtime),
+            "servingMode": _enum_value(manifest.servingMode),
+            "entry": manifest.entry.model_dump() if manifest.entry else None,
+            "sourceSubdir": manifest.sourceSubdir,
+            "container": manifest.container.model_dump() if manifest.container else None,
+            "capabilityContract": getattr(manifest, "capabilityContract", None),
+        },
+        "files": {},
+    }
+
+    # 快照生成文件内容
+    for name, path in [
+        ("compose.yaml", workspace.app_compose_path(instance_id)),
+        ("Dockerfile", workspace.app_dockerfile_path(instance_id)),
+        (".env", workspace.app_env_path(instance_id)),
+    ]:
+        # 防御 MagicMock 测试环境：只处理真实 Path
+        if not isinstance(path, Path):
+            continue
+        if path.is_file():
+            try:
+                snapshot["files"][name] = path.read_text(encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("实例 %s 快照文件 %s 失败：%s", instance_id, name, exc)
+
+    return snapshot
+
+
+def _restore_from_snapshot(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    snapshot: dict,
+) -> tuple[list[str], list[str]]:
+    """C.R04：从快照恢复--按逆序恢复生成文件和 manifest 字段。
+
+    返回 (restored_items, residual_items)。
+    任一步失败后记录残留项但继续尝试后续步骤（best-effort 恢复）。
+    """
+    from local_webpage_access.models import (
+        ContainerConfig,
+        EntryConfig,
+        Kind,
+        Runtime,
+        ServingMode,
+    )
+
+    restored: list[str] = []
+    residuals: list[str] = []
+
+    # 逆序恢复：先恢复生成文件，再恢复 manifest 字段
+
+    # 1. 恢复生成文件（覆盖或删除本次 attempt 生成的文件）
+    files = snapshot.get("files", {})
+    for name in ("Dockerfile", "compose.yaml", ".env"):
+        path = {
+            "Dockerfile": workspace.app_dockerfile_path(instance_id),
+            "compose.yaml": workspace.app_compose_path(instance_id),
+            ".env": workspace.app_env_path(instance_id),
+        }[name]
+        # 防御 MagicMock 测试环境：只处理真实 Path
+        if not isinstance(path, Path):
+            continue
+        if name in files:
+            try:
+                path.write_text(files[name], encoding="utf-8")
+                restored.append(f"file:{name}")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("实例 %s 恢复文件 %s 失败：%s", instance_id, name, exc)
+                residuals.append(f"file:{name}（恢复失败：{exc}）")
+        else:
+            # 原始无此文件，若本次 attempt 创建了则删除
+            if path.is_file():
+                try:
+                    path.unlink()
+                    restored.append(f"file:{name}:removed")
+                except Exception as exc:  # noqa: BLE001
+                    residuals.append(f"file:{name}（删除失败：{exc}）")
+
+    # 2. 恢复 manifest 关键字段
+    mf = snapshot.get("manifestFields", {})
+    try:
+        if mf.get("selectedPlanId"):
+            manifest.selectedPlanId = mf["selectedPlanId"]
+        if mf.get("kind"):
+            try:
+                manifest.kind = Kind(mf["kind"])
+            except ValueError:
+                pass
+        if mf.get("runtime"):
+            try:
+                manifest.runtime = Runtime(mf["runtime"])
+            except ValueError:
+                pass
+        if mf.get("servingMode"):
+            try:
+                manifest.servingMode = ServingMode(mf["servingMode"])
+            except ValueError:
+                pass
+        if mf.get("entry"):
+            manifest.entry = EntryConfig(**mf["entry"])
+        if mf.get("sourceSubdir") is not None:
+            manifest.sourceSubdir = mf["sourceSubdir"]
+        if mf.get("container"):
+            manifest.container = ContainerConfig(**mf["container"])
+        if mf.get("capabilityContract"):
+            manifest.capabilityContract = mf["capabilityContract"]
+        manifest.touch()
+        manifest_path = workspace.app_manifest_path(instance_id)
+        if isinstance(manifest_path, Path):
+            manifest.save(manifest_path)
+        restored.append("manifest")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("实例 %s 恢复 manifest 失败：%s", instance_id, exc)
+        residuals.append(f"manifest（恢复失败：{exc}）")
+
+    return restored, residuals
+
+
 def _rollback_attempt(
     workspace: Workspace,
     config: Config,
@@ -606,13 +964,19 @@ def _rollback_attempt(
     manifest: InstanceManifest,
     *,
     attempt_id: str,
+    snapshot: dict | None = None,
+    side_effect_records: list | None = None,
+    side_effects_auto_recoverable: bool = True,
 ) -> Any:
-    """Gate-C C.06：回滚单次 attempt 的基础设施状态。
+    """Gate-C C.06/C.R04/C.R05：回滚单次 attempt 的基础设施状态。
 
-    回滚范围（§6.5 候选切换事务 Rollback 阶段）：
+    回滚范围（§6.5 候选切换事务 Rollback 阶段）+ C.R04 扩展：
     - 容器（``docker compose down``）
     - 端口（释放本次 attempt 新分配的端口）
-    - manifest 选中状态（恢复到失败前的快照）
+    - 生成文件（compose.yaml / Dockerfile / .env -- 从快照恢复或删除）
+    - manifest 选中状态（selectedPlanId / kind / runtime / entry 等-- 从快照恢复）
+
+    逆序恢复：manifest -> 文件 -> 端口 -> 容器。
 
     **回滚边界**（§6.5）：
     ``rollback_succeeded`` 只表示已声明的回滚步骤全部成功，不得解释为
@@ -622,13 +986,17 @@ def _rollback_attempt(
     CHK-192/P1：``automaticFallbackSafe`` 不再恒为 False。当回滚成功且
     容器从未启动（build 阶段失败）或项目不需要迁移时，标记为 True，
     允许 auto-equivalent 降级。容器已启动且项目需要迁移时保守标记 False。
+
+    C.R04：``residualItems`` 记录未能恢复的残留项，``snapshotData`` 存储 Prepare 快照。
+    若任一步失败，停止自动 fallback 并在 residuals 中列出。
     """
-    from local_webpage_access.models import RollbackResult
+    from local_webpage_access.models import RollbackResult, SideEffectRecord
 
     rolled_back: list[str] = []
+    residuals: list[str] = []
     container_was_running = False
 
-    # 1. 回滚容器
+    # 1. 回滚容器（最先执行--停止可能正在运行的副作用）
     try:
         from local_webpage_access.docker_runtime import DockerRuntime
         runtime = DockerRuntime(workspace, registry)
@@ -637,7 +1005,13 @@ def _rollback_attempt(
             runtime.down(instance_id)
             rolled_back.append("container")
     except Exception as exc:  # noqa: BLE001
-        log.warning("实例 %s 回滚容器失败：%s", instance_id, exc)
+        # 容器 down 失败：只有容器确实在运行但无法停止时才算残留。
+        # Docker 不可用或容器不存在 -> 不影响回滚完整性。
+        if container_was_running:
+            log.warning("实例 %s 回滚容器失败（容器在运行但无法停止）：%s", instance_id, exc)
+            residuals.append(f"container（down 失败：{exc}）")
+        else:
+            log.debug("实例 %s 回滚容器跳过（Docker 不可用或容器未运行）：%s", instance_id, exc)
 
     # 2. 回滚端口（仅释放本次 attempt 新分配的）
     try:
@@ -649,18 +1023,33 @@ def _rollback_attempt(
             rolled_back.append("port")
     except Exception as exc:  # noqa: BLE001
         log.debug("实例 %s 回滚端口跳过：%s", instance_id, exc)
+        # 端口释放失败不算严重残留（可能是首次部署无端口）
 
-    # 3. manifest 不恢复原值--失败诊断需要写入 manifest.lastError
-    #    上层 _write_diagnosis 会设置 status=FAILED
+    # 3. C.R04：从快照恢复生成文件和 manifest 字段
+    if snapshot is not None:
+        restored, file_residuals = _restore_from_snapshot(
+            workspace, registry, instance_id, manifest, snapshot,
+        )
+        rolled_back.extend(restored)
+        residuals.extend(file_residuals)
+    else:
+        # 无快照（旧路径或兼容模式）-- manifest 不恢复原值
+        # 失败诊断需要写入 manifest.lastError
+        pass
 
     rollback_ok = len(rolled_back) > 0 or not _has_active_resources(
         workspace, registry, instance_id
     )
+    # C.R04：有残留项时回滚不算完全成功
+    if residuals:
+        rollback_ok = False
 
     # CHK-192/P1：判断 automaticFallbackSafe
     # - 容器从未启动（build 阶段失败）-> 不可能执行迁移 -> safe
     # - 容器已启动但项目不需要迁移 -> safe
     # - 容器已启动且项目需要迁移 -> 可能已执行不可逆操作 -> unsafe
+    # C.R04：有残留项时也不 safe
+    # C.R05：有不可自动恢复的副作用时也不 safe
     contract = getattr(manifest, "capabilityContract", None)
     requires_migrations = False
     if isinstance(contract, dict):
@@ -668,13 +1057,34 @@ def _rollback_attempt(
     automatic_fallback_safe = rollback_ok and (
         not container_was_running or not requires_migrations
     )
+    # C.R05：副作用不可自动恢复时覆盖为 False
+    if not side_effects_auto_recoverable:
+        automatic_fallback_safe = False
+
+    # C.R05：构建副作用摘要
+    se_summaries: list[str] = []
+    if side_effect_records:
+        for r in side_effect_records:
+            if isinstance(r, dict):
+                kind = r.get("kind", "unknown")
+                desc = r.get("description", "")
+                auto = r.get("autoRecoverable", False)
+                se_summaries.append(f"{kind}:{desc[:80]}（autoRecoverable={auto}）")
+            else:
+                se_summaries.append(str(r))
 
     return RollbackResult(
         attemptId=attempt_id,
         rollbackSucceeded=rollback_ok,
         rolledBackItems=rolled_back,
-        externalSideEffects=[],  # 由 host_fn 在 migration 执行时填充
+        externalSideEffects=se_summaries,
         automaticFallbackSafe=automatic_fallback_safe,
+        residualItems=residuals,
+        snapshotData=snapshot,
+        sideEffectRecords=[
+            SideEffectRecord(**r) if isinstance(r, dict) else r
+            for r in (side_effect_records or [])
+        ],
     )
 
 
@@ -795,6 +1205,199 @@ def _capabilities_equivalent(primary: str, candidate: str) -> bool:
         return candidate == "backend"
     # static / frontend 之间允许互相降级（纯静态站点族）
     return candidate in ("static", "frontend")
+
+
+# ---- C.R01/C.R02：部署计划执行与能力契约等价 -----------------------------------
+
+
+def _get_fallback_plans(manifest: InstanceManifest) -> list[dict]:
+    """C.R01：从 manifest 读取可降级的部署计划列表。
+
+    优先读取 ``deploymentPlans``（Gate-C C.02 产物），过滤掉 primary 和 diagnostic。
+    若 ``deploymentPlans`` 为空，回退到 ``deploymentCandidates``（向后兼容）。
+
+    返回的每个 dict 是一个 ``DeploymentPlan.model_dump()`` 或扁平候选 dict。
+    """
+    plans = getattr(manifest, "deploymentPlans", None) or []
+    if plans:
+        # 过滤：只保留 alternate/fallback tier，排除 primary（已尝试）和 diagnostic
+        fallback_plans = [
+            p for p in plans
+            if p.get("confidenceTier") in ("alternate", "fallback")
+        ]
+        if fallback_plans:
+            return fallback_plans
+        return []  # 有 plans 但无可用 fallback
+
+    # 向后兼容：回退到扁平候选
+    return list(getattr(manifest, "deploymentCandidates", []) or [])
+
+
+def _plan_to_candidate_dict(plan_dict: dict) -> dict:
+    """C.R01：从 DeploymentPlan 提取主运行组件的关键字段，转为候选 dict。
+
+    用于 ``_apply_candidate_and_host`` -- 该函数期望 kind/runtime/entry/sourceSubdir
+    等扁平字段。从计划的 primary runtime component 提取这些字段。
+    """
+    components = plan_dict.get("components", [])
+    # 找到 runtime 或 build-and-runtime 组件
+    runtime_comp = next(
+        (c for c in components if c.get("role") in ("runtime", "build-and-runtime")),
+        None,
+    )
+    if runtime_comp is None:
+        # 兜底：取第一个组件
+        runtime_comp = components[0] if components else {}
+
+    # 从 componentId 推断 kind
+    comp_id = str(runtime_comp.get("componentId", ""))
+    if comp_id.startswith("python"):
+        kind = "python"
+    elif comp_id.startswith("node"):
+        kind = "node"
+    elif comp_id.startswith("static"):
+        kind = "static"
+    else:
+        kind = "python"
+
+    # 从 startCommand 推断 entry
+    start_cmd = runtime_comp.get("startCommand") or {}
+    entry: dict = {}
+    if start_cmd.get("shell"):
+        entry["start"] = start_cmd["shell"]
+    elif start_cmd.get("argv"):
+        entry["start"] = " ".join(start_cmd["argv"])
+    build_cmd = runtime_comp.get("buildCommand") or {}
+    if build_cmd.get("shell"):
+        entry["build"] = build_cmd["shell"]
+    elif build_cmd.get("argv"):
+        entry["build"] = " ".join(build_cmd["argv"])
+    if runtime_comp.get("buildOutputDir"):
+        entry["buildOutputDir"] = runtime_comp["buildOutputDir"]
+
+    # runtime/servingMode 推断
+    if kind == "static":
+        runtime = "shared-static"
+        serving_mode = "shared-static"
+    else:
+        runtime = "docker-compose"
+        serving_mode = "container"
+
+    return {
+        "kind": kind,
+        "runtime": runtime,
+        "servingMode": serving_mode,
+        "entry": entry,
+        "sourceSubdir": runtime_comp.get("sourceSubdir"),
+        "internalPort": runtime_comp.get("internalPort"),
+        "confidenceTier": plan_dict.get("confidenceTier", "fallback"),
+        "form": plan_dict.get("planId", "").replace("plan-", ""),
+    }
+
+
+def _plan_capability_contract(plan_dict: dict) -> dict:
+    """C.R02：从 DeploymentPlan 提取 CapabilityContract dict。"""
+    return plan_dict.get("capabilityContract") or {}
+
+
+def _manifest_capability_contract(manifest: InstanceManifest) -> dict:
+    """C.R02：从 manifest 获取 top-1 计划的 CapabilityContract。
+
+    优先使用 manifest.capabilityContract（导入期存储），
+    否则从 deploymentPlans[0] 提取。
+    """
+    contract = getattr(manifest, "capabilityContract", None)
+    if contract and isinstance(contract, dict):
+        return contract
+    plans = getattr(manifest, "deploymentPlans", None) or []
+    if plans:
+        return _plan_capability_contract(plans[0])
+    return {}
+
+
+def _contracts_equivalent(contract_a: dict, contract_b: dict) -> bool:
+    """C.R02：比较两个 CapabilityContract 是否完全等价。
+
+    两个计划只有 required capabilities 完全相同时才可互相降级。
+    - servesApi 不同 -> 不等价（API 能力不可丢失）
+    - requiresDatabase 不同 -> 不等价（数据库能力不可丢失）
+    - requiresMigrations 不同 -> 不等价（迁移能力不可丢失）
+    - servesUi 不同但其他三个相同 -> 不等价（UI 能力不可丢失）
+
+    对于无 contract 的旧候选（向后兼容），回退到 3-value family 比较。
+    """
+    if not contract_a or not contract_b:
+        # 无 contract 信息 -> 无法精确比较，返回 False（保守策略）
+        # 调用方应回退到 _capabilities_equivalent
+        return False
+
+    return (
+        contract_a.get("servesApi", False) == contract_b.get("servesApi", False)
+        and contract_a.get("requiresDatabase", False) == contract_b.get("requiresDatabase", False)
+        and contract_a.get("requiresMigrations", False) == contract_b.get("requiresMigrations", False)
+        and contract_a.get("servesUi", False) == contract_b.get("servesUi", False)
+    )
+
+
+def _contract_diff(contract_a: dict, contract_b: dict) -> str:
+    """C.R02：生成两个 CapabilityContract 之间的差异描述。"""
+    diffs = []
+    for key in ("servesApi", "requiresDatabase", "requiresMigrations", "servesUi"):
+        a_val = contract_a.get(key, False)
+        b_val = contract_b.get(key, False)
+        if a_val != b_val:
+            diffs.append(f"{key}: {a_val} -> {b_val}")
+    return "; ".join(diffs)
+
+
+def _apply_plan_and_host(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    plan_dict: dict,
+    host_fn: Any,
+) -> InstanceManifest:
+    """C.R01：将 fallback 部署计划应用到 manifest 并重新尝试 host。
+
+    如果 plan_dict 是 DeploymentPlan（有 ``components``），提取 primary runtime
+    组件并转为候选 dict，再委托 ``_apply_candidate_and_host``。
+    如果 plan_dict 已经是扁平候选（无 ``components``），直接委托。
+
+    同时更新 manifest.selectedPlanId 以反映当前选中的计划。
+    """
+    # 如果已经是扁平候选（向后兼容），直接走旧路径
+    if "components" not in plan_dict:
+        return _apply_candidate_and_host(
+            workspace, config, registry, instance_id, manifest,
+            plan_dict, host_fn,
+        )
+
+    # C.R01：DeploymentPlan -> 提取 primary runtime component -> 候选 dict
+    candidate_dict = _plan_to_candidate_dict(plan_dict)
+
+    # 更新 selectedPlanId
+    plan_id = plan_dict.get("planId")
+    if plan_id:
+        manifest.selectedPlanId = plan_id
+        # C.R06：同步更新 selectedPlanHash
+        manifest.selectedPlanHash = _compute_plan_fingerprint(plan_dict)
+        registry.add_event(
+            instance_id,
+            "lifecycle_stage",
+            f"C.R01 选中部署计划：{plan_id}（tier={plan_dict.get('confidenceTier', 'fallback')}）",
+        )
+
+    # 更新 capabilityContract（如果计划携带了新的契约）
+    new_contract = _plan_capability_contract(plan_dict)
+    if new_contract:
+        manifest.capabilityContract = new_contract
+
+    return _apply_candidate_and_host(
+        workspace, config, registry, instance_id, manifest,
+        candidate_dict, host_fn,
+    )
 
 
 def _apply_candidate_and_host(

@@ -29,8 +29,17 @@ def _mk_manifest(
     cpus: str = "0.75",
     has_database: bool = False,
     database_type: str | None = None,
+    consumes_db_url: bool = True,
 ) -> InstanceManifest:
-    return InstanceManifest(
+    """构造测试 manifest。
+
+    Parameters
+    ----------
+    consumes_db_url
+        A.R01：是否模拟应用消费 DATABASE_URL 的证据。
+        默认 True（向后兼容已有测试）；设 False 测试无消费证据场景。
+    """
+    m = InstanceManifest(
         id=mid,
         name=mid,
         version="1",
@@ -50,6 +59,11 @@ def _mk_manifest(
         hasDatabase=has_database,
         database=DatabaseConfig(type=database_type) if has_database and database_type else None,
     )
+    if has_database and consumes_db_url:
+        m.databaseConfig = {"consumesDatabaseUrl": True, "sourcePath": "config.py"}
+    elif has_database and not consumes_db_url:
+        m.databaseConfig = {"consumesDatabaseUrl": False, "sourcePath": None}
+    return m
 
 
 # ---- compose.yaml 渲染 ------------------------------------------------------
@@ -178,6 +192,24 @@ def test_env_sqlite_preserves_source_db_filename(workspace: Workspace) -> None:
     text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
     assert "DATABASE_URL=sqlite:////app/data/bookshelf.db" in text
     assert "app.sqlite" not in text
+
+
+def test_env_sqlite_no_consumption_skips_injection(workspace: Workspace) -> None:
+    """A.R01 反例：应用不消费 DATABASE_URL 时不注入，添加注释提示。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite", consumes_db_url=False)
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:" not in text
+    assert "A.R01" in text
+    assert "未检测到应用消费 DATABASE_URL" in text
+
+
+def test_env_sqlite_no_config_skips_injection(workspace: Workspace) -> None:
+    """A.R01：manifest 无 databaseConfig 字段时不注入。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.databaseConfig = None
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:" not in text
+    assert "A.R01" in text
 
 
 def test_compose_runtime_root_volume_and_env(workspace: Workspace) -> None:

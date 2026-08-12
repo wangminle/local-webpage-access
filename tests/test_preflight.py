@@ -1,17 +1,26 @@
-"""preflight 模块测试（IMP-058 Gate-A A.09）。
+"""preflight 模块测试（IMP-058 Gate-A A.09 / A.R01）。
 
-每项预检（CHK-V02/V03/V04/V06）含正例 + 反例。
+每项预检（CHK-V02/V03/V04/V05/V06）含正例 + 反例。
+A.R01：CHK-V03 测试区分"有消费证据"（autofixed）和"无消费证据"（warned）。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from local_webpage_access.models import DatabaseConfig, EntryConfig, Kind, Runtime
+from local_webpage_access.models import (
+    DatabaseConfig,
+    DatabaseSignal,
+    EntryConfig,
+    Kind,
+    ProjectEvidence,
+    Runtime,
+)
 from local_webpage_access.preflight import (
     AUTOFIXED,
     PASSED,
     REJECTED,
+    WARNED,
     check_and_fix,
 )
 from local_webpage_access.scanner import DetectionResult
@@ -24,8 +33,16 @@ def _mk_python_result(
     db_conn: str | None = None,
     db_filename: str | None = None,
     pending: bool = False,
+    consumes_db_url: bool = False,
 ) -> DetectionResult:
-    """构造一个 Python 项目的 DetectionResult。"""
+    """构造一个 Python 项目的 DetectionResult。
+
+    Parameters
+    ----------
+    consumes_db_url
+        A.R01：是否模拟应用消费 DATABASE_URL 的证据。
+        True 时设置 evidence.databaseConfig.consumesDatabaseUrl=True。
+    """
     result = DetectionResult()
     result.kind = Kind.PYTHON
     result.runtime = Runtime.DOCKER_COMPOSE
@@ -46,6 +63,18 @@ def _mk_python_result(
     if pending:
         result.pending = True
         result.confidence = "low"
+    # A.R01：模拟消费证据
+    if consumes_db_url:
+        result.evidence = ProjectEvidence(
+            root=".",
+            databaseConfig=DatabaseSignal(
+                consumesDatabaseUrl=True,
+                defaultUrl=db_conn,
+                isRelative=db_conn is not None and not db_conn.startswith("sqlite:////"),
+                dbFilename=db_filename,
+                sourcePath="config.py",
+            ),
+        )
     return result
 
 
@@ -128,7 +157,7 @@ def test_chk_v02_bare_parentheses_operator(tmp_path: Path) -> None:
     assert result.entry.start.startswith("sh -c '")
 
 
-# ---- CHK-V03：数据库路径与 volume 一致性 -------------------------------------
+# ---- CHK-V03：数据库路径与 volume 一致性（A.R01）-----------------------------
 
 
 def test_chk_v03_no_database(tmp_path: Path) -> None:
@@ -141,12 +170,13 @@ def test_chk_v03_no_database(tmp_path: Path) -> None:
     assert v03.autofixed is False
 
 
-def test_chk_v03_relative_db_path(tmp_path: Path) -> None:
-    """SQLite 使用相对路径时标记修正。"""
+def test_chk_v03_relative_db_with_consumption(tmp_path: Path) -> None:
+    """A.R01 正例：SQLite 相对路径 + 应用消费 DATABASE_URL -> 自动注入。"""
     _ensure_requirements(tmp_path)
     result = _mk_python_result(
         has_db=True,
         db_conn="sqlite:///./data/bookshelf.db",
+        consumes_db_url=True,
     )
     pre = check_and_fix(result, tmp_path)
     v03 = next(c for c in pre.checks if c.check_id == "CHK-V03")
@@ -155,23 +185,61 @@ def test_chk_v03_relative_db_path(tmp_path: Path) -> None:
     assert "DATABASE_URL" in v03.action
 
 
-def test_chk_v03_absolute_db_path(tmp_path: Path) -> None:
-    """SQLite 使用绝对路径时仍预防性注入（A.02 对所有 SQLite 注入）。"""
+def test_chk_v03_relative_db_no_consumption(tmp_path: Path) -> None:
+    """A.R01 反例：SQLite 相对路径但应用不消费 DATABASE_URL -> warning，不注入。"""
     _ensure_requirements(tmp_path)
     result = _mk_python_result(
         has_db=True,
-        db_conn="sqlite:////app/data/bookshelf.db",
+        db_conn="sqlite:///./data/bookshelf.db",
+        consumes_db_url=False,
     )
     pre = check_and_fix(result, tmp_path)
     v03 = next(c for c in pre.checks if c.check_id == "CHK-V03")
     assert v03.passed is True
-    assert v03.autofixed is True  # A.02 预防性注入
+    assert v03.autofixed is False
+    assert "⚠️" in v03.detail
+    assert "DATABASE_URL" not in (v03.action or "")
+    # 应收集为 warning
+    assert any("A.R01" in w for w in pre.warnings)
 
 
-def test_chk_v03_sqlite_no_connection_string(tmp_path: Path) -> None:
-    """SQLite 无 connectionString 时仍预防性注入。"""
+def test_chk_v03_absolute_db_with_consumption(tmp_path: Path) -> None:
+    """A.R01 正例：SQLite 绝对路径 + 应用消费 DATABASE_URL -> 预防性注入。"""
     _ensure_requirements(tmp_path)
-    result = _mk_python_result(has_db=True, db_conn=None)
+    result = _mk_python_result(
+        has_db=True,
+        db_conn="sqlite:////app/data/bookshelf.db",
+        consumes_db_url=True,
+    )
+    pre = check_and_fix(result, tmp_path)
+    v03 = next(c for c in pre.checks if c.check_id == "CHK-V03")
+    assert v03.passed is True
+    assert v03.autofixed is True
+
+
+def test_chk_v03_absolute_db_no_consumption(tmp_path: Path) -> None:
+    """A.R01 反例：SQLite 绝对路径但无消费证据 -> warning。"""
+    _ensure_requirements(tmp_path)
+    result = _mk_python_result(
+        has_db=True,
+        db_conn="sqlite:////app/data/bookshelf.db",
+        consumes_db_url=False,
+    )
+    pre = check_and_fix(result, tmp_path)
+    v03 = next(c for c in pre.checks if c.check_id == "CHK-V03")
+    assert v03.passed is True
+    assert v03.autofixed is False
+    assert "⚠️" in v03.detail
+
+
+def test_chk_v03_sqlite_no_conn_with_consumption(tmp_path: Path) -> None:
+    """A.R01 正例：SQLite 无 connectionString 但应用消费 DATABASE_URL -> 注入。"""
+    _ensure_requirements(tmp_path)
+    result = _mk_python_result(
+        has_db=True,
+        db_conn=None,
+        consumes_db_url=True,
+    )
     pre = check_and_fix(result, tmp_path)
     v03 = next(c for c in pre.checks if c.check_id == "CHK-V03")
     assert v03.passed is True
@@ -179,12 +247,13 @@ def test_chk_v03_sqlite_no_connection_string(tmp_path: Path) -> None:
 
 
 def test_chk_v03_preserves_source_db_filename(tmp_path: Path) -> None:
-    """IMP-058 Gate-A CHK-V03：注入的 DATABASE_URL 保留源 SQLite 文件名。"""
+    """A.R01：注入的 DATABASE_URL 保留源 SQLite 文件名。"""
     _ensure_requirements(tmp_path)
     result = _mk_python_result(
         has_db=True,
         db_conn="sqlite:///./data/bookshelf.db",
         db_filename="bookshelf.db",
+        consumes_db_url=True,
     )
     pre = check_and_fix(result, tmp_path)
     v03 = next(c for c in pre.checks if c.check_id == "CHK-V03")
@@ -429,6 +498,7 @@ def test_combined_autofix_and_warning(tmp_path: Path) -> None:
     result = _mk_python_result(
         start="alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000",
         has_db=True,
+        consumes_db_url=True,
     )
     pre = check_and_fix(result, tmp_path)
     # 有修正 -> status=autofixed

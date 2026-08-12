@@ -5,20 +5,62 @@ DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 
 from __future__ import annotations
 
+from typing import Any
+
 import typer
 
 from local_webpage_access.cli._common import log, open_workspace_registry
 from local_webpage_access.errors import LwaError
 
 
-def start(instance_id: str = typer.Argument(..., help="要启动的实例 ID")) -> None:
-    """启动实例（静态 / 前端 / 容器统一入口）。"""
-    from local_webpage_access.lifecycle import start_instance
+def start(
+    instance_id: str = typer.Argument(..., help="要启动的实例 ID"),
+    auto_fallback: bool = typer.Option(
+        False, "--auto-fallback",
+        help="top-1 候选失败时自动降级到等价计划（跳过确认）",
+    ),
+    no_fallback: bool = typer.Option(
+        False, "--no-fallback",
+        help="top-1 候选失败时不降级（直接失败）",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="非交互确认（CI / 脚本调用，等价于 --auto-fallback）",
+    ),
+) -> None:
+    """启动实例（静态 / 前端 / 容器统一入口）。
+
+    C.R03：当 top-1 候选部署失败且存在等价 fallback 计划时：
+    - 默认（交互式）：展示等价计划并等待用户确认后降级
+    - ``--auto-fallback`` / ``--yes``：自动降级，不等待确认
+    - ``--no-fallback``：不降级，直接失败
+    """
+    from local_webpage_access.lifecycle import (
+        FallbackConfirmationRequired,
+        start_instance,
+    )
+
+    # 确定降级策略
+    if no_fallback:
+        fallback_policy = "disabled"
+    elif auto_fallback or yes:
+        fallback_policy = "auto-equivalent"
+    else:
+        fallback_policy = "confirm"
 
     try:
         ws, config, reg = open_workspace_registry()
         try:
-            manifest = start_instance(ws, config, reg, instance_id)
+            try:
+                manifest = start_instance(
+                    ws, config, reg, instance_id,
+                    fallback_policy=fallback_policy,
+                )
+            except FallbackConfirmationRequired as fcr:
+                # C.R03：交互式确认--展示等价计划并等待用户选择
+                manifest = _handle_fallback_confirmation(
+                    ws, config, reg, instance_id, fcr,
+                )
         finally:
             reg.close()
         typer.secho(f"已启动实例：{instance_id}", fg=typer.colors.GREEN)
@@ -46,6 +88,69 @@ def start(instance_id: str = typer.Argument(..., help="要启动的实例 ID")) 
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _handle_fallback_confirmation(
+    ws: Any,
+    config: Any,
+    reg: Any,
+    instance_id: str,
+    fcr: Any,
+) -> Any:
+    """C.R03：处理 FallbackConfirmationRequired--展示等价计划并等待用户确认。
+
+    在交互式终端中列出等价 fallback 计划，用户确认后以 auto-equivalent 重试。
+    非交互式环境（无 TTY）直接失败（fail-closed）。
+    """
+    import sys
+
+    from local_webpage_access.lifecycle import start_instance
+
+    typer.secho(
+        f"\n实例 {instance_id} top-1 候选部署失败：{fcr.primary_failure[:200]}",
+        fg=typer.colors.RED,
+    )
+    typer.echo(f"\n存在 {len(fcr.equivalent_candidates)} 个等价 fallback 候选：\n")
+
+    for i, cand in enumerate(fcr.equivalent_candidates):
+        idx = cand.get("index", i + 1)
+        kind = cand.get("kind", "?")
+        tier = cand.get("confidenceTier", "fallback")
+        # 显示能力信息（如果有）
+        contract = cand.get("capabilityContract") or {}
+        caps = []
+        if contract.get("servesApi"):
+            caps.append("API")
+        if contract.get("requiresDatabase"):
+            caps.append("DB")
+        if contract.get("requiresMigrations"):
+            caps.append("迁移")
+        if contract.get("servesUi"):
+            caps.append("UI")
+        cap_str = f" [{', '.join(caps)}]" if caps else ""
+        typer.echo(f"  #{idx} {kind}（tier={tier}）{cap_str}")
+
+    # 非交互式环境 -> fail-closed
+    if not sys.stdin.isatty():
+        typer.secho(
+            "\n非交互式环境：无法确认降级。"
+            "使用 --auto-fallback 或 --yes 自动降级。",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # 交互式确认
+    if not typer.confirm("\n是否降级到等价候选？", default=False):
+        typer.echo("已取消降级")
+        raise typer.Exit(code=1)
+
+    # 确认后以 auto-equivalent 重试
+    typer.secho("正在降级到等价候选...", fg=typer.colors.YELLOW)
+    return start_instance(
+        ws, config, reg, instance_id,
+        fallback_policy="auto-equivalent",
+    )
 
 
 def stop(instance_id: str = typer.Argument(..., help="要停止的实例 ID")) -> None:

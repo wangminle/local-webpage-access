@@ -191,44 +191,63 @@ def generate_env(
         f"CPU_LIMIT={limits.cpus}",
     ]
     if _is_sqlite(manifest):
-        # BUG-474: 所有 SQLite 项目都注入绝对路径 DATABASE_URL，避免相对路径在不同 cwd 下解析到不同库文件。
-        # IMP-058 Gate-A CHK-V03：保留 scanner 扫描到的源 SQLite 文件名，避免把应用
-        # 指向全新空库（原硬编码 app.sqlite 的数据丢失风险）。无源文件名时用默认兜底。
-        raw_db_filename = (
-            manifest.database.dbFilename
-            if manifest.database and manifest.database.dbFilename
-            else _SQLITE_DEFAULT_DB_FILENAME
+        # A.R01：只有当证据表明应用消费 DATABASE_URL 时才自动注入。
+        # 无消费证据时保留原配置，避免把不读取 DATABASE_URL 的应用指向新空库。
+        db_config = getattr(manifest, "databaseConfig", None)
+        consumes_db_url = (
+            db_config is not None
+            and db_config.get("consumesDatabaseUrl", False)
+            if isinstance(db_config, dict)
+            else False
         )
-        # CHK-192/P1：scanner 可能保存相对路径（如 "data/app.sqlite"），
-        # 直接拼接到 /app/data/ 会导致路径重复（/app/data/data/app.sqlite）。
-        # 只取 basename 作为容器内文件名。
-        db_filename = Path(raw_db_filename).name
-        lines.append(f"DATABASE_URL=sqlite:////app/data/{db_filename}")
 
-        # CHK-192/P1：把源 SQLite 文件复制到宿主 data 目录（apps/<id>/data/），
-        # 该目录通过 compose 挂载为 /app/data。若不复制，容器启动时指向空库，
-        # 既有数据丢失。仅在源文件存在且目标不存在时复制（避免覆盖用户修改）。
-        host_data_dir = workspace.app_data(manifest.id)
-        host_data_dir.mkdir(parents=True, exist_ok=True)
-        # CHK-193/P1：构造源 SQLite 文件路径时需包含 sourceSubdir。
-        # 当 sourceSubdir="backend" 时，dbFilename 相对于 backend/，
-        # 源文件在 current/backend/<dbFilename>，而非 current/<dbFilename>。
-        source_subdir = getattr(manifest, "sourceSubdir", None)
-        if source_subdir:
-            source_db_path = source_dir / source_subdir / raw_db_filename
+        if consumes_db_url:
+            # BUG-474: 所有 SQLite 项目都注入绝对路径 DATABASE_URL，避免相对路径在不同 cwd 下解析到不同库文件。
+            # IMP-058 Gate-A CHK-V03：保留 scanner 扫描到的源 SQLite 文件名，避免把应用
+            # 指向全新空库（原硬编码 app.sqlite 的数据丢失风险）。无源文件名时用默认兜底。
+            raw_db_filename = (
+                manifest.database.dbFilename
+                if manifest.database and manifest.database.dbFilename
+                else _SQLITE_DEFAULT_DB_FILENAME
+            )
+            # CHK-192/P1：scanner 可能保存相对路径（如 "data/app.sqlite"），
+            # 直接拼接到 /app/data/ 会导致路径重复（/app/data/data/app.sqlite）。
+            # 只取 basename 作为容器内文件名。
+            db_filename = Path(raw_db_filename).name
+            lines.append(f"DATABASE_URL=sqlite:////app/data/{db_filename}")
+
+            # CHK-192/P1：把源 SQLite 文件复制到宿主 data 目录（apps/<id>/data/），
+            # 该目录通过 compose 挂载为 /app/data。若不复制，容器启动时指向空库，
+            # 既有数据丢失。仅在源文件存在且目标不存在时复制（避免覆盖用户修改）。
+            host_data_dir = workspace.app_data(manifest.id)
+            host_data_dir.mkdir(parents=True, exist_ok=True)
+            # CHK-193/P1：构造源 SQLite 文件路径时需包含 sourceSubdir。
+            # 当 sourceSubdir="backend" 时，dbFilename 相对于 backend/，
+            # 源文件在 current/backend/<dbFilename>，而非 current/<dbFilename>。
+            source_subdir = getattr(manifest, "sourceSubdir", None)
+            if source_subdir:
+                source_db_path = source_dir / source_subdir / raw_db_filename
+            else:
+                source_db_path = source_dir / raw_db_filename
+            target_db_path = host_data_dir / db_filename
+            if source_db_path.is_file() and not target_db_path.exists():
+                import shutil
+                try:
+                    shutil.copy2(source_db_path, target_db_path)
+                    log.info(
+                        "已复制源 SQLite 文件 %s -> %s",
+                        source_db_path, target_db_path,
+                    )
+                except OSError as exc:
+                    log.warning("复制源 SQLite 文件失败（忽略）：%s", exc)
         else:
-            source_db_path = source_dir / raw_db_filename
-        target_db_path = host_data_dir / db_filename
-        if source_db_path.is_file() and not target_db_path.exists():
-            import shutil
-            try:
-                shutil.copy2(source_db_path, target_db_path)
-                log.info(
-                    "已复制源 SQLite 文件 %s -> %s",
-                    source_db_path, target_db_path,
-                )
-            except OSError as exc:
-                log.warning("复制源 SQLite 文件失败（忽略）：%s", exc)
+            # A.R01：无消费证据，不自动注入 DATABASE_URL
+            log.warning(
+                "A.R01：未确认应用消费 DATABASE_URL，跳过自动注入（实例 %s）",
+                manifest.id,
+            )
+            lines.append("# A.R01: 未检测到应用消费 DATABASE_URL，未自动注入。")
+            lines.append("# 如需注入，请在应用 config 中使用 os.getenv('DATABASE_URL')。")
 
     out_path = workspace.app_env_path(manifest.id)
     out_path.parent.mkdir(parents=True, exist_ok=True)

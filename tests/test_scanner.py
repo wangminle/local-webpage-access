@@ -794,14 +794,35 @@ def test_preflight_fastapi_alembic_autofix_note(tmp_path: Path) -> None:
 
 
 def test_preflight_sqlite_autofix_note(tmp_path: Path) -> None:
-    """SQLite 项目：预检标记 DATABASE_URL 修正。"""
+    """A.R01：SQLite 项目有 DATABASE_URL 消费证据时预检标记修正。"""
     (tmp_path / "requirements.txt").write_text("fastapi\nsqlalchemy\n")
     (tmp_path / "app.db").write_bytes(b"")
+    # A.R01：应用源码中读取 DATABASE_URL 环境变量
+    (tmp_path / "config.py").write_text(
+        "import os\n"
+        "DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./app.db')\n",
+        encoding="utf-8",
+    )
     result = Scanner().detect(tmp_path)
     assert result.hasDatabase is True
-    # CHK-V03 应标记修正（A.02 预防性注入）
+    # CHK-V03 应标记修正（A.R01 确认消费后注入）
     v03_notes = [n for n in result.notes if "[预检修正] CHK-V03" in n]
     assert len(v03_notes) == 1
+
+
+def test_preflight_sqlite_no_consumption_warning(tmp_path: Path) -> None:
+    """A.R01：SQLite 项目无 DATABASE_URL 消费证据时预检标记警告，不注入。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nsqlalchemy\n")
+    (tmp_path / "app.db").write_bytes(b"")
+    # 不写 config.py / 不读取 DATABASE_URL
+    result = Scanner().detect(tmp_path)
+    assert result.hasDatabase is True
+    # CHK-V03 不应标记修正（A.R01 无消费证据）
+    v03_notes = [n for n in result.notes if "[预检修正] CHK-V03" in n]
+    assert len(v03_notes) == 0
+    # 应标记警告
+    v03_warnings = [n for n in result.notes if "[预检警告]" in n and "A.R01" in n]
+    assert len(v03_warnings) == 1
 
 
 def test_preflight_project_dockerfile_warning(tmp_path: Path) -> None:

@@ -99,6 +99,25 @@ class DatabaseConfig(BaseModel):
     dbFilename: str | None = None
 
 
+class DatabaseSignal(BaseModel):
+    """应用数据库配置消费信号（A.R01 尽力解析）。
+
+    采集自项目源码（config.py / settings.py 等），判断应用是否读取
+    ``DATABASE_URL`` 环境变量，以及默认连接串的路径形态。
+
+    A.R01 安全自动修正前提：只有 ``consumesDatabaseUrl=True`` 时，
+    compose 才自动注入 ``DATABASE_URL``；否则保留原配置，标记 warning。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    consumesDatabaseUrl: bool = False  # 应用是否读取 DATABASE_URL 环境变量
+    defaultUrl: str | None = None  # config 中的默认 DATABASE_URL（如 "sqlite:///./data/bookshelf.db"）
+    isRelative: bool = False  # 默认 URL 是否相对路径
+    dbFilename: str | None = None  # 从默认 URL 解析的数据库文件名
+    sourcePath: str | None = None  # 解析来源文件相对路径（如 "config.py"）
+
+
 class ResourceLimits(BaseModel):
     memory: str = "512m"
     cpus: str = "0.75"
@@ -268,6 +287,8 @@ class ProjectEvidence(BaseModel):
     buildOutputs: list[str] = Field(default_factory=list)
     hasPackageJson: bool = False
     sqliteFiles: list[str] = Field(default_factory=list)
+    # A.R01：应用数据库配置消费信号（是否读取 DATABASE_URL、默认连接串形态）
+    databaseConfig: DatabaseSignal | None = None
 
 
 class DeploymentCandidate(BaseModel):
@@ -405,20 +426,49 @@ class DeploymentPlan(BaseModel):
 
 
 class RollbackResult(BaseModel):
-    """Gate-C C.06：单次 attempt 的回滚结果。
+    """Gate-C C.06/C.R04：单次 attempt 的回滚结果。
 
     ``rollback_succeeded`` 只表示已声明的回滚步骤全部成功，不得笼统解释为
     "系统没有任何副作用"。若 attempt 执行了数据库迁移或外部写入，
     必须通过 ``externalSideEffects`` 单独记录。
+
+    C.R04 扩展：
+    - ``residualItems`` 记录未能恢复的残留项（供人工处置）
+    - ``snapshotData`` 存储 Prepare 阶段的快照内容（manifest 字段 + 文件 hash）
     """
 
     model_config = ConfigDict(extra="allow")
 
     attemptId: str = ""
     rollbackSucceeded: bool = False
-    rolledBackItems: list[str] = Field(default_factory=list)  # ["container", "port", "manifest"]
+    rolledBackItems: list[str] = Field(default_factory=list)  # ["container", "port", "files", "manifest"]
     externalSideEffects: list[str] = Field(default_factory=list)  # ["migration:alembic_head_xxx"]
     automaticFallbackSafe: bool = False  # 仅当副作用可丢弃/已回滚/已快照恢复
+    # C.R04：残留项（未能恢复，需人工处置）
+    residualItems: list[str] = Field(default_factory=list)
+    # C.R04：Prepare 阶段快照数据（manifest 关键字段 + 生成文件内容/hash）
+    snapshotData: dict | None = None
+    # C.R05：结构化副作用记录
+    sideEffectRecords: list["SideEffectRecord"] = Field(default_factory=list)
+
+
+class SideEffectRecord(BaseModel):
+    """C.R05：外部副作用记录（pre_start/migration/hooks）。
+
+    执行前记录意图，执行后记录结果、补偿方式和恢复证据。
+    未知写入默认不可自动恢复（``autoRecoverable=False``）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: str  # "migration" / "pre_start" / "hook" / "unknown"
+    description: str  # 人可读描述
+    intent: str  # 执行前的意图声明
+    executedAt: str = ""  # ISO timestamp
+    result: str = "unknown"  # "succeeded" / "failed" / "unknown"
+    compensationMethod: str | None = None  # 补偿方式描述
+    recoveryEvidence: str | None = None  # 恢复证据
+    autoRecoverable: bool = False  # 是否可自动恢复
 
 
 # ---- Gate-C：实证校验模型（IMP-058）---------------------------------------
@@ -554,8 +604,13 @@ class InstanceManifest(BaseModel):
     verificationSummary: dict | None = None
     # 能力契约快照（C.01/C.07）：该实例声明的能力集合，用于降级时等价性校验
     capabilityContract: dict | None = None
+    # C.R06：四类部署指纹（source/plan/generated-config/image）
+    # 任一变化时禁止轻量 start，强制重建；全未变时允许轻量 start 且仍执行存活探针
+    deploymentFingerprints: dict | None = None
     # ---- Gate-2 新字段（IMP-056）----
     compatibilityFindings: list[CompatibilityFinding] = Field(default_factory=list)
+    # A.R01：数据库配置消费信号（从 evidence 传递，compose 据此决定是否注入 DATABASE_URL）
+    databaseConfig: dict | None = None
 
     @field_validator("kind", "runtime", "servingMode", "resourceProfile", "desiredState", "status")
     @classmethod
@@ -668,6 +723,7 @@ __all__ = [
     "Status",
     "RouteMode",
     "DatabaseConfig",
+    "DatabaseSignal",
     "ResourceLimits",
     "StaticConfig",
     "ContainerConfig",
@@ -686,6 +742,7 @@ __all__ = [
     "DeploymentComponent",
     "DeploymentPlan",
     "RollbackResult",
+    "SideEffectRecord",
     "VerificationResult",
     "CandidateDiagnosis",
     "DiagnosisReport",

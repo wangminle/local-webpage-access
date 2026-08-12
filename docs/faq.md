@@ -311,7 +311,7 @@ status: failed, lastError: 容器退出码 1
 
 ### 实例状态为 VERIFYING / DEGRADED / FAILED（IMP-058 Gate-C）
 
-**V0.7.6** 起 `lwa start` 对首次部署的容器实例执行实证校验状态机：
+**V0.7.7** 起 `lwa start` 对首次部署的容器实例执行实证校验状态机：
 
 * **VERIFYING**：容器已 `compose up` 但存活探针尚未通过（等待 HTTP 响应）。正常情况下几秒内自动转为 RUNNING。
 * **FAILED**：必选存活探针超时（容器进程已启动但端口不响应，或容器在超时窗口内退出）。不假报 running。查看 `lwa logs <id> --category run` 排查根因（常见：应用启动 crash、端口不对、启动脚本被 shell 操作符拆碎）。

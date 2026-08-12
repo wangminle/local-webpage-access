@@ -20,6 +20,7 @@ import sys
 import time
 import urllib.error
 from pathlib import Path
+from typing import Any
 
 from local_webpage_access.compose import generate_compose, generate_env
 from local_webpage_access.config import Config
@@ -618,16 +619,35 @@ def host_container(
         host_port, manifest, workspace, registry, instance_id,
     )
 
+    # C.R05：收集本次 attempt 的外部副作用记录
+    side_effects = _collect_side_effect_records(
+        manifest,
+        liveness_ok=verification.get("liveness_passed", False),
+        verification_status=verification["overall_status"],
+    )
+    verification["side_effect_records"] = side_effects
+    verification["side_effects_auto_recoverable"] = _side_effects_auto_recoverable(side_effects)
+
     if verification["overall_status"] == "failed":
         # 必选探针失败 → 回滚到 FAILED
         _liveness_failed_rollback(
             workspace, config, registry, instance_id, manifest, host_port, fresh_port,
             verification.get("error", "必选探针未通过"),
         )
+        # C.R05：将副作用记录附加到异常 context，供 lifecycle 回滚判断使用
+        se_context: dict[str, Any] = {}
+        if side_effects:
+            se_context["side_effect_records"] = [
+                r.model_dump() for r in side_effects
+            ]
+            se_context["side_effects_auto_recoverable"] = (
+                _side_effects_auto_recoverable(side_effects)
+            )
         raise HostingError(
             f"实例 {instance_id} 必选探针未通过（host_port={host_port}）："
             f"{verification.get('error', 'liveness timeout')}",
             instance_id=instance_id,
+            **se_context,
         )
 
     # 确定最终状态
@@ -647,6 +667,15 @@ def host_container(
         "optionalWarnings": verification.get("optional_warnings", []),
         "observedCapabilities": verification.get("observed_capabilities", []),
     }
+
+    # C.R06：成功部署后持久化四类指纹，供下次 start 时判断是否可走轻量路径
+    try:
+        from local_webpage_access.lifecycle import _compute_deployment_fingerprints
+        manifest.deploymentFingerprints = _compute_deployment_fingerprints(
+            workspace, manifest,
+        )
+    except Exception:  # noqa: BLE001 - 指纹计算失败不阻塞部署成功
+        log.debug("实例 %s 指纹计算失败（不阻塞部署）", instance_id)
 
     manifest.status = final_status
     manifest.lastError = None
@@ -1056,6 +1085,68 @@ def _migration_command_succeeded(
     if guard_pos < 0:
         return False
     return bool(command[guard_pos + 2:].strip(" '\""))
+
+
+def _collect_side_effect_records(
+    manifest: InstanceManifest,
+    *,
+    liveness_ok: bool,
+    verification_status: str,
+) -> list[Any]:
+    """C.R05：收集本次 attempt 产生的外部副作用记录。
+
+    目前检测的副作用类型：
+    - migration：Alembic 迁移作为容器启动前置命令执行
+    - pre_start：未来扩展（manifest.entry.preStart）
+
+    返回 ``SideEffectRecord`` 列表。未知写入默认 ``autoRecoverable=False``。
+    """
+    from local_webpage_access.models import SideEffectRecord
+    from datetime import datetime, timezone
+
+    records: list[SideEffectRecord] = []
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 检测 Alembic 迁移
+    start_cmd = (manifest.entry.start or "").strip() if manifest.entry else ""
+    if "alembic upgrade" in start_cmd.lower():
+        migration_succeeded = _migration_command_succeeded(
+            manifest, liveness_ok=liveness_ok,
+        )
+        # 如果存活探针未通过，迁移可能已执行但应用未启动
+        # 如果存活探针通过且 guard 后有命令，迁移已成功
+        result = "succeeded" if migration_succeeded else (
+            "unknown" if liveness_ok else "unknown"
+        )
+        records.append(SideEffectRecord(
+            kind="migration",
+            description=f"Alembic 迁移作为启动前置命令执行（{start_cmd[:100]}）",
+            intent="容器启动时执行 alembic upgrade head 以更新数据库 schema",
+            executedAt=now,
+            result=result,
+            compensationMethod="alembic downgrade（需人工执行，无法自动确定回退目标版本）",
+            recoveryEvidence=None,
+            # 迁移不可自动恢复--schema 变更可能影响数据完整性
+            autoRecoverable=False,
+        ))
+
+    # 未来扩展：检测 pre_start 钩子
+    # if manifest.entry and manifest.entry.preStart:
+    #     records.append(SideEffectRecord(...))
+
+    return records
+
+
+def _side_effects_auto_recoverable(records: list[Any]) -> bool:
+    """C.R05：判断所有副作用是否可自动恢复。
+
+    只要有任一副作用 ``autoRecoverable=False``，整体不可自动恢复。
+    """
+    if not records:
+        return True
+    return all(
+        getattr(r, "autoRecoverable", False) for r in records
+    )
 
 
 def _evaluate_container_verification(

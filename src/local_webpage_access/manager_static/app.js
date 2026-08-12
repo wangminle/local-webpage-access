@@ -430,6 +430,14 @@
             error: "",
           },
           toastState: { show: false, msg: "", kind: "" },
+          // C.R03：降级确认弹窗
+          fallbackDialog: {
+            open: false,
+            instanceId: null,
+            primaryFailure: "",
+            candidates: [],
+            submitting: false,
+          },
           capability: null,
           accessRefreshing: false,
           _detailReq: 0, // 详情请求竞态令牌（旧响应到达时丢弃）
@@ -680,6 +688,21 @@
           this.toast("正在" + opLabel(op) + "…");
           apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/" + op, { method: "POST" })
             .then(function (data) {
+              // C.R03：start 可能返回 pendingConfirmation（top-1 失败，需用户确认降级）
+              if (op === "start" && data && data.pendingConfirmation) {
+                self.fallbackDialog.open = true;
+                self.fallbackDialog.instanceId = id;
+                self.fallbackDialog.primaryFailure = data.primaryFailure || "";
+                self.fallbackDialog.candidates = data.equivalentCandidates || [];
+                self.fallbackDialog.submitting = false;
+                self.toast(
+                  "top-1 候选失败，存在 " +
+                    (data.equivalentCandidates || []).length +
+                    " 个等价候选，请确认是否降级",
+                  "info"
+                );
+                return;
+              }
               if (op === "cancel-build") {
                 var outcome = (data && data.outcome) || "";
                 if (outcome === "cancelled") {
@@ -697,6 +720,45 @@
               self.refresh();
             })
             .catch(function (e) { self.toast(opLabel(op) + "失败：" + e.message, "error"); });
+        },
+
+        // C.R03：确认降级到等价 fallback 候选
+        confirmFallback: function () {
+          var self = this;
+          var id = this.fallbackDialog.instanceId;
+          if (!id) return;
+          this.fallbackDialog.submitting = true;
+          apiFetch(
+            this,
+            "/api/instances/" + encodeURIComponent(id) + "/confirm-fallback",
+            { method: "POST" }
+          )
+            .then(function (data) {
+              self.fallbackDialog.open = false;
+              self.fallbackDialog.submitting = false;
+              // confirm-fallback 也可能返回 pendingConfirmation（再次失败）
+              if (data && data.pendingConfirmation) {
+                self.fallbackDialog.open = true;
+                self.fallbackDialog.primaryFailure = data.primaryFailure || "";
+                self.fallbackDialog.candidates = data.equivalentCandidates || [];
+                self.toast("降级后仍失败，还有更多等价候选", "info");
+              } else {
+                self.toast("降级启动完成", "success");
+                self.refresh();
+              }
+            })
+            .catch(function (e) {
+              self.fallbackDialog.submitting = false;
+              self.toast("降级失败：" + e.message, "error");
+            });
+        },
+
+        // C.R03：取消降级确认
+        cancelFallback: function () {
+          this.fallbackDialog.open = false;
+          this.fallbackDialog.submitting = false;
+          this.toast("已取消降级", "info");
+          this.refresh();
         },
 
         // IMP-047：从关联文件夹源更新
@@ -1346,6 +1408,30 @@
     "        </button>",
     "      </div></div>",
     "  </div></div>",
+    // C.R03：降级确认弹窗
+    '<div class="modal" :hidden="!fallbackDialog.open" role="dialog" aria-modal="true" aria-labelledby="fallback-dialog-title">',
+    '  <div class="modal-card">',
+    '    <div class="modal-header"><h2 id="fallback-dialog-title">部署降级确认</h2>',
+    '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭降级确认" @click="cancelFallback" :disabled="fallbackDialog.submitting">✕</button></div>',
+    '    <div class="modal-body">',
+    '      <p>实例 <code>{{ fallbackDialog.instanceId }}</code> 的 top-1 候选部署失败：</p>',
+    '      <p class="remove-dialog-warn" role="alert" style="white-space: pre-wrap; word-break: break-all;">{{ fallbackDialog.primaryFailure }}</p>',
+    '      <p v-if="fallbackDialog.candidates.length">存在 {{ fallbackDialog.candidates.length }} 个等价 fallback 候选：</p>',
+    '      <ul v-if="fallbackDialog.candidates.length" class="instance-meta-list" style="margin: 0.5rem 0; padding-left: 1.5rem;">',
+    '        <li v-for="c in fallbackDialog.candidates" :key="c.index">',
+    '          <strong>#{{ c.index }}</strong> {{ c.kind }}（tier={{ c.confidenceTier }}）',
+    '        </li>',
+    '      </ul>',
+    '      <p class="remove-dialog-hint">确认后将自动降级到等价候选并重试启动。取消则保持当前状态。</p>',
+    '    </div>',
+    '    <div class="modal-footer" style="display:flex; justify-content:flex-end; gap:0.5rem;">',
+    '      <button class="btn btn-ghost" type="button" @click="cancelFallback" :disabled="fallbackDialog.submitting">取消</button>',
+    '      <button class="btn btn-primary" type="button" @click="confirmFallback" :disabled="fallbackDialog.submitting">',
+    '        {{ fallbackDialog.submitting ? "降级中…" : "确认降级" }}',
+    '      </button>',
+    '    </div>',
+    '  </div>',
+    '</div>',
     // toast
     '<div class="toast" role="status" aria-live="polite" aria-atomic="true" :hidden="!toastState.show" :class="toastState.kind ? \'toast toast-\' + toastState.kind : \'toast\'">{{ toastState.msg }}</div>',
   ].join("\n");

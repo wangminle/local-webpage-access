@@ -965,9 +965,10 @@ def _register_routes(app: FastAPI) -> None:
 
     def _lifecycle_op(
         instance_id: str,
-        op: Callable[[Workspace, Config, Registry, str], Any],
+        op: Callable[..., Any],
         *,
         label: str,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         ctx = _Ctx(app)
         _require_instance(ctx, instance_id)
@@ -994,16 +995,69 @@ def _register_routes(app: FastAPI) -> None:
                     }
                 },
             )
-        op(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        op(ctx.workspace, ctx.config, ctx.registry, instance_id, **kwargs)
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
         snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
         return {"instanceId": instance_id, "action": label, "instance": snap.to_dict()}
 
     @app.post("/api/instances/{instance_id}/start", dependencies=[api], tags=["instances"])
-    def start_op(instance_id: str) -> dict[str, Any]:
+    def start_op(
+        instance_id: str,
+        fallback_policy: str = Query(
+            "confirm",
+            description="降级策略：confirm（默认）/ auto-equivalent / disabled",
+        ),
+    ) -> dict[str, Any]:
+        """启动实例。
+
+        C.R03：当 top-1 候选失败且存在等价 fallback 时：
+
+        - ``fallback_policy=confirm``（默认）：返回 ``pendingConfirmation`` 响应，
+          前端展示后用户选择降级则调用 ``/confirm-fallback`` 重试。
+        - ``fallback_policy=auto-equivalent``：自动降级（需显式指定）。
+        - ``fallback_policy=disabled``：不降级，直接返回失败。
+        """
+        from local_webpage_access.lifecycle import (
+            FallbackConfirmationRequired,
+            start_instance,
+        )
+
+        try:
+            return _lifecycle_op(
+                instance_id, start_instance, label="start",
+                fallback_policy=fallback_policy,
+            )
+        except FallbackConfirmationRequired as fcr:
+            # C.R03：返回结构化待确认响应（非错误，而是需要用户决策）
+            return {
+                "instanceId": instance_id,
+                "action": "start",
+                "pendingConfirmation": True,
+                "primaryFailure": fcr.primary_failure,
+                "equivalentCandidates": fcr.equivalent_candidates,
+                "hint": (
+                    "调用 /api/instances/{instance_id}/confirm-fallback"
+                    " 以确认降级到等价候选"
+                ),
+            }
+
+    @app.post(
+        "/api/instances/{instance_id}/confirm-fallback",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def confirm_fallback_op(instance_id: str) -> dict[str, Any]:
+        """C.R03：确认降级到等价 fallback 候选。
+
+        用户在管理页确认后调用此端点，以 ``auto-equivalent`` 策略重试启动。
+        幂等性：若实例已在 fallback 后运行，直接返回当前状态。
+        """
         from local_webpage_access.lifecycle import start_instance
 
-        return _lifecycle_op(instance_id, start_instance, label="start")
+        return _lifecycle_op(
+            instance_id, start_instance, label="start",
+            fallback_policy="auto-equivalent",
+        )
 
     @app.post("/api/instances/{instance_id}/stop", dependencies=[api], tags=["instances"])
     def stop_op(instance_id: str) -> dict[str, Any]:

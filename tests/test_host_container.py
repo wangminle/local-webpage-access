@@ -98,6 +98,9 @@ def _seed_container_instance(
         hasDatabase=has_database,
         database={"type": database_type} if has_database and database_type else None,
     )
+    # A.R01：SQLite 项目默认模拟消费 DATABASE_URL（向后兼容已有测试）
+    if has_database and database_type == "sqlite":
+        manifest.databaseConfig = {"consumesDatabaseUrl": True, "sourcePath": "config.py"}
     manifest.save(workspace.app_manifest_path(iid))
     registry.upsert_from_manifest(manifest)
     return manifest
