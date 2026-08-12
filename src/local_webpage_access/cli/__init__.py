@@ -14,6 +14,7 @@
 * :mod:`local_webpage_access.cli.access`      —— ``lwa access refresh/review`` 子命令组
 * :mod:`local_webpage_access.cli.autostart`   —— ``lwa autostart install/enable/.../check`` 子命令组（IMP-030）
 * :mod:`local_webpage_access.cli.workspace`   —— ``lwa workspace relocate`` 工作区迁移（IMP-042）
+* :mod:`local_webpage_access.cli.registry`    —— ``lwa registry check/repair`` 孤儿数据维护（BUG-473）
 
 命令语义见 V1 设计说明第 10 节。拆分前后 CLI 行为完全一致（验收：全量 pytest）。
 """
@@ -58,7 +59,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.7.7-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.7.8-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -213,6 +214,7 @@ def _register_all() -> None:
         daemon,
         gateway,
         manager,
+        registry,
         workspace,
     )
 
@@ -222,6 +224,7 @@ def _register_all() -> None:
     app.add_typer(daemon.app, name="daemon")
     app.add_typer(manager.app, name="manager")
     app.add_typer(gateway.app, name="gateway")
+    app.add_typer(registry.app, name="registry")
     app.add_typer(workspace.app, name="workspace")
 
 

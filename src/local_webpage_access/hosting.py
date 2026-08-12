@@ -1047,25 +1047,54 @@ def _wait_for_http(
 # ---- Gate-C C.04/C.05：实证校验辅助 -----------------------------------------
 
 
-def _verify_sqlite_database(
-    manifest: InstanceManifest,
-    workspace: Workspace,
-) -> bool:
-    """只读打开容器挂载的 SQLite 文件，作为数据库能力证据。"""
-    database = manifest.database
-    if not manifest.hasDatabase or database is None or database.type != "sqlite":
-        return False
-    db_filename = Path(database.dbFilename or "app.sqlite").name
-    db_path = workspace.app_data(manifest.id) / db_filename
-    if not db_path.is_file():
-        return False
+def _is_valid_sqlite_file(path: Path) -> bool:
+    """只读打开 SQLite 文件并执行 PRAGMA schema_version，验证它是有效数据库。"""
     try:
-        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        uri = f"{path.resolve().as_uri()}?mode=ro"
         with sqlite3.connect(uri, uri=True) as connection:
             connection.execute("PRAGMA schema_version").fetchone()
     except (OSError, sqlite3.Error):
         return False
     return True
+
+
+def _verify_sqlite_database(
+    manifest: InstanceManifest,
+    workspace: Workspace,
+) -> bool:
+    """只读打开容器挂载的 SQLite 文件，作为数据库能力证据。
+
+    BUG-492：当 manifest 的 dbFilename 为 null 或指向不存在的占位文件时，
+    回退扫描 data 目录下所有 .db/.sqlite/.sqlite3 文件，只要存在一个有效
+    SQLite 数据库即视为能力满足。避免 Gate-C 对文件型数据库误判为 FAILED。
+    """
+    database = manifest.database
+    if not manifest.hasDatabase or database is None or database.type != "sqlite":
+        return False
+
+    data_dir = workspace.app_data(manifest.id)
+
+    # 优先检查 manifest 声明的文件
+    db_filename = Path(database.dbFilename or "app.sqlite").name
+    db_path = data_dir / db_filename
+    if db_path.is_file() and _is_valid_sqlite_file(db_path):
+        return True
+
+    # BUG-492 回退：扫描 data 目录寻找任意有效 SQLite 文件
+    if data_dir.is_dir():
+        for candidate in sorted(data_dir.iterdir()):
+            if candidate.is_file() and candidate.suffix.lower() in (
+                ".db", ".sqlite", ".sqlite3",
+            ):
+                if _is_valid_sqlite_file(candidate):
+                    log.info(
+                        "Gate-C SQLite 回退检测：manifest 声明 %s 未命中，"
+                        "在 data 目录找到有效数据库 %s（实例 %s）",
+                        db_filename, candidate.name, manifest.id,
+                    )
+                    return True
+
+    return False
 
 
 def _migration_command_succeeded(

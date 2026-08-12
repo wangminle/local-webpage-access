@@ -212,6 +212,33 @@ def test_env_sqlite_no_config_skips_injection(workspace: Workspace) -> None:
     assert "A.R01" in text
 
 
+def test_env_sqlite_preserves_existing_database_url_on_regen(workspace: Workspace) -> None:
+    """BUG-491：重新生成 .env 时保留已有 DATABASE_URL，避免被源目录占位文件覆盖。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.database.dbFilename = "_empty_check.db"
+
+    # 首次生成：指向 scanner 检测到的占位文件
+    first_path = generate_env(m, workspace, host_port=18000)
+    first_text = first_path.read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/_empty_check.db" in first_text
+
+    # 模拟用户手动修正 DATABASE_URL 指向真实数据库
+    corrected_url = "sqlite:////app/data/app.sqlite"
+    first_path.write_text(
+        first_text.replace(
+            "DATABASE_URL=sqlite:////app/data/_empty_check.db",
+            f"DATABASE_URL={corrected_url}",
+        ),
+        encoding="utf-8",
+    )
+
+    # 重新生成（模拟更新实例）：应保留已修正的 DATABASE_URL
+    second_path = generate_env(m, workspace, host_port=18000)
+    second_text = second_path.read_text(encoding="utf-8")
+    assert f"DATABASE_URL={corrected_url}" in second_text
+    assert "_empty_check.db" not in second_text
+
+
 def test_compose_runtime_root_volume_and_env(workspace: Workspace) -> None:
     """BUG-198：runtime_paths 应用挂载 ../data:/app/runtime/data 并注入 RUNTIME_ROOT。"""
     workspace.ensure_app_dirs("api")

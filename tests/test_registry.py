@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -273,6 +274,75 @@ def test_delete_instance_cascades(registry: Registry) -> None:
     assert registry.get_static_site("demo") is None
     assert 21001 not in registry.allocated_ports()
     assert registry.list_events("demo") == []
+
+
+def _run_fk_off(db_path: Path, sql: str, params: tuple = ()) -> None:
+    """用关闭外键的裸连接执行 SQL，模拟历史残留孤儿写入（BUG-473）。"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_delete_instance_cleans_children_without_fk(registry: Registry) -> None:
+    """delete_instance 显式删全部子表，不依赖外键级联（BUG-473 硬化）。
+
+    关闭连接外键后删除：旧实现靠级联会留下孤儿，新实现逐表 DELETE 仍清空。
+    """
+    registry.upsert_from_manifest(_static_manifest())
+    registry.allocate_port("demo", 21001)
+    registry.add_event("demo", "info", "created")
+    # 模拟历史场景：连接未开外键，级联失效。
+    registry.conn.execute("PRAGMA foreign_keys=OFF")
+    registry.delete_instance("demo")
+    assert registry.get_instance("demo") is None
+    assert registry.get_static_site("demo") is None
+    assert 21001 not in registry.allocated_ports()
+    assert registry.list_events("demo") == []
+
+
+def test_find_and_purge_orphan_rows(registry: Registry) -> None:
+    """find_orphan_rows 发现、purge_orphan_rows 清除历史孤儿子表行（BUG-473）。"""
+    registry.upsert_from_manifest(_static_manifest("real"))
+    _run_fk_off(
+        registry.db_path,
+        "INSERT INTO static_sites(instance_id, route_mode, route_host) "
+        "VALUES (?, 'name', ?)",
+        ("ghost-static", "ghost-alias"),
+    )
+    _run_fk_off(
+        registry.db_path,
+        "INSERT INTO containers(instance_id, compose_project) VALUES (?, ?)",
+        ("ghost-container", "lwa-ghost"),
+    )
+
+    orphans = registry.find_orphan_rows()
+    pairs = {(o["table"], o["instance_id"]) for o in orphans}
+    assert ("static_sites", "ghost-static") in pairs
+    assert ("containers", "ghost-container") in pairs
+    # 真实实例不算孤儿
+    assert all(o["instance_id"] != "real" for o in orphans)
+
+    deleted = registry.purge_orphan_rows()
+    assert deleted >= 2
+    assert registry.find_orphan_rows() == []
+    # 真实实例不受影响
+    assert registry.get_instance("real") is not None
+
+
+def test_list_route_hosts_ignores_orphans(registry: Registry) -> None:
+    """孤儿占用的 route_host 不进入别名命名空间（BUG-473），不再挡住重新导入。"""
+    registry.upsert_from_manifest(_static_manifest("real"))
+    _run_fk_off(
+        registry.db_path,
+        "INSERT INTO static_sites(instance_id, route_mode, route_host) "
+        "VALUES (?, 'name', ?)",
+        ("ghost", "ghost-alias"),
+    )
+    assert "ghost-alias" not in registry.list_route_hosts()
 
 
 # ---- 端口 -------------------------------------------------------------------

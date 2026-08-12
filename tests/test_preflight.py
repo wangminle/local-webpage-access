@@ -20,7 +20,6 @@ from local_webpage_access.preflight import (
     AUTOFIXED,
     PASSED,
     REJECTED,
-    WARNED,
     check_and_fix,
 )
 from local_webpage_access.scanner import DetectionResult

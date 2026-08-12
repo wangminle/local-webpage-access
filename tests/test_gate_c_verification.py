@@ -800,6 +800,46 @@ class TestContainerRuntimeEvidence:
         (workspace.app_data("api") / "broken.db").write_bytes(b"not sqlite")
         assert _verify_sqlite_database(manifest, workspace) is False
 
+    def test_sqlite_evidence_fallback_scans_data_dir_when_file_missing(self, workspace) -> None:
+        """BUG-492：manifest 声明的文件不存在时，回退扫描 data 目录中其他 SQLite 文件。"""
+        import sqlite3
+
+        from local_webpage_access.hosting import _verify_sqlite_database
+
+        # manifest 指向占位文件 _empty_check.db，但 data 目录中只有 app.sqlite
+        manifest = self._sqlite_manifest("_empty_check.db")
+        workspace.ensure_app_dirs("api")
+        db_path = workspace.app_data("api") / "app.sqlite"
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE books (id INTEGER PRIMARY KEY)")
+
+        assert _verify_sqlite_database(manifest, workspace) is True
+
+    def test_sqlite_evidence_fallback_when_dbfilename_is_null(self, workspace) -> None:
+        """BUG-492：dbFilename 为 null 时也应回退扫描 data 目录。"""
+        import sqlite3
+
+        from local_webpage_access.hosting import _verify_sqlite_database
+
+        manifest = self._sqlite_manifest(None)
+        workspace.ensure_app_dirs("api")
+        db_path = workspace.app_data("api") / "prd_review.db"
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE reviews (id INTEGER PRIMARY KEY)")
+
+        assert _verify_sqlite_database(manifest, workspace) is True
+
+    def test_sqlite_evidence_fallback_returns_false_when_no_valid_db(self, workspace) -> None:
+        """BUG-492：data 目录中没有任何有效 SQLite 文件时应返回 False。"""
+        from local_webpage_access.hosting import _verify_sqlite_database
+
+        manifest = self._sqlite_manifest("_empty_check.db")
+        workspace.ensure_app_dirs("api")
+        # 写入一个无效文件，扩展名是 .db
+        (workspace.app_data("api") / "junk.db").write_bytes(b"not a database")
+
+        assert _verify_sqlite_database(manifest, workspace) is False
+
     def test_migration_evidence_requires_guarded_start_command(self) -> None:
         from local_webpage_access.hosting import _migration_command_succeeded
 

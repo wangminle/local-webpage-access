@@ -618,6 +618,9 @@ def rewrite_registry_paths(db_path: Path, old: str, new: str) -> None:
         return
     conn = sqlite3.connect(db_path)
     try:
+        # BUG-473：可写 registry 连接统一开外键不变量（与 connect() 对齐），
+        # 防止任何写入意外留下破坏引用完整性的行。
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN IMMEDIATE")
         updates = (
             ("instances", ("app_path", "source_zip_path")),

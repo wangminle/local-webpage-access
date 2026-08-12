@@ -25,6 +25,18 @@ from local_webpage_access.registry.connection import (
 
 log = get_logger("registry.dao")
 
+# BUG-473：instance 子表（列 instance_id 引用 instances.id）。
+# delete_instance 显式清理这些表，不再依赖外键级联；find/purge_orphan_rows
+# 也按此清单扫描存量孤儿。
+_CHILD_TABLES: tuple[str, ...] = (
+    "containers",
+    "static_sites",
+    "ports",
+    "events",
+    "builds",
+    "resources",
+)
+
 
 class Registry:
     """SQLite registry 的高层访问接口。
@@ -299,9 +311,57 @@ class Registry:
             )
 
     def delete_instance(self, instance_id: str) -> None:
-        """删除实例（级联删除关联行，WBS-05.10）。"""
+        """删除实例（显式清理全部子表，WBS-05.10 / BUG-473）。
+
+        不依赖外键 ``ON DELETE CASCADE``：级联只在执行删除的连接开了
+        ``PRAGMA foreign_keys=ON`` 时生效，历史上子表行因连接绕过 ``connect()``
+        而静默残留成孤儿（BUG-473）。此处同事务内逐表 DELETE 兜底，行为不再
+        依赖 FK 开关。
+        """
         with self.txn() as tx:
+            for table in _CHILD_TABLES:
+                tx.execute(
+                    f"DELETE FROM {table} WHERE instance_id = ?", (instance_id,)
+                )
             tx.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
+
+    # ---- 孤儿数据（BUG-473）-------------------------------------------------
+
+    def find_orphan_rows(self) -> list[dict[str, Any]]:
+        """扫描子表，返回引用了不存在 ``instances.id`` 的孤儿行（BUG-473）。
+
+        孤儿 = 子表行的 ``instance_id`` 不在 ``instances`` 主表中（多为历史版本
+        删除未级联残留，或备份/迁移拷入的脏数据）。返回
+        ``[{"table": <表名>, "instance_id": <孤儿 id>}, ...]``。
+        """
+        orphans: list[dict[str, Any]] = []
+        for table in _CHILD_TABLES:
+            rows = self._fetchall(
+                f"SELECT instance_id AS iid FROM {table} "
+                "WHERE instance_id IS NOT NULL "
+                "AND instance_id NOT IN (SELECT id FROM instances)"
+            )
+            for row in rows:
+                orphans.append({"table": table, "instance_id": row["iid"]})
+        return orphans
+
+    def purge_orphan_rows(self) -> int:
+        """删除全部孤儿子表行（无对应主表行），返回删除条数（BUG-473）。
+
+        单事务内逐表 DELETE，不依赖外键级联。**破坏性操作**，调用方须先取得
+        用户确认（见 ``lwa registry repair``）。
+        """
+        total = 0
+        with self.txn() as tx:
+            for table in _CHILD_TABLES:
+                cur = tx.execute(
+                    f"DELETE FROM {table} "
+                    "WHERE instance_id IS NOT NULL "
+                    "AND instance_id NOT IN (SELECT id FROM instances)"
+                )
+                if cur.rowcount > 0:
+                    total += cur.rowcount
+        return total
 
     # ---- 容器 ---------------------------------------------------------------
 
@@ -377,12 +437,16 @@ class Registry:
         用于路径别名全局唯一性校验，**跨静态站点与容器实例**（IMP-014 放开容器别名后，
         两类实例共用同一别名命名空间，避免重名）。``exclude_instance`` 指定的实例被跳过，
         便于实例更新自身别名时不与自身冲突。
+
+        BUG-473：过滤孤儿子表行（``instance_id`` 不在 ``instances`` 主表），避免
+        历史残留孤儿占用别名却 ``lwa list`` 查不到、挡住重新导入。
         """
         result: dict[str, str] = {}
         for table in ("static_sites", "containers"):
             rows = self._fetchall(
                 f"SELECT instance_id, route_host FROM {table} "
-                "WHERE route_mode = 'name' AND route_host IS NOT NULL"
+                "WHERE route_mode = 'name' AND route_host IS NOT NULL "
+                "AND instance_id IN (SELECT id FROM instances)"
             )
             for row in rows:
                 iid = row["instance_id"]

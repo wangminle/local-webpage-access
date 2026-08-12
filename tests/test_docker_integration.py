@@ -21,8 +21,10 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import textwrap
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,13 @@ _docker_guard = pytest.mark.skipif(
 
 def _run(args: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def _free_port() -> int:
+    """让内核分配当前可用的 loopback TCP 端口，避免与宿主固定端口冲突。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 @_docker_guard
@@ -112,6 +121,14 @@ class TestGateCRequiredProbe:
             def root():
                 return {"message": "hello"}
         """), encoding="utf-8")
+        (project / "Dockerfile").write_text(textwrap.dedent("""\
+            FROM python:3.13-slim
+            WORKDIR /app
+            COPY requirements.txt .
+            RUN pip install --no-cache-dir -r requirements.txt
+            COPY app.py .
+            CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+        """), encoding="utf-8")
         return project
 
     def test_healthy_container_passes_required_probe(
@@ -119,8 +136,11 @@ class TestGateCRequiredProbe:
     ) -> None:
         """健康容器 -> required probe 通过 -> RUNNING。"""
         from local_webpage_access.docker_runtime import DockerRuntime
+        from local_webpage_access.hosting import _evaluate_container_verification
+        from local_webpage_access.models import CapabilityContract, ProbeSpec
         from local_webpage_access.paths import Workspace
         from local_webpage_access.registry import Registry
+        from tests._helpers import make_container_manifest
 
         ws_root = tmp_path / "ws"
         ws = Workspace(ws_root)
@@ -128,36 +148,48 @@ class TestGateCRequiredProbe:
         reg = Registry(ws.db_path)
         reg.open()
         try:
-            runtime = DockerRuntime(ws, reg)
+            runtime = DockerRuntime(ws)
             instance_id = "test-cr07-healthy"
+            host_port = _free_port()
 
-            compose_dir = ws.apps_dir / instance_id / "docker"
+            compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
             (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
                 services:
                   app:
                     build: {fastapi_project}
                     ports:
-                      - "22000:8000"
+                      - "{host_port}:8000"
                     environment:
                       - FAIL_HEALTH=0
             """), encoding="utf-8")
 
-            compose_path = compose_dir / "compose.yaml"
-            runtime.build(instance_id, compose_path)
-            runtime.up(instance_id, compose_path)
+            runtime.build(instance_id)
+            runtime.up(instance_id)
 
             import time
             time.sleep(3)
 
             assert runtime.is_running(instance_id)
-
-            import urllib.request
-            resp = urllib.request.urlopen("http://127.0.0.1:22000/health", timeout=10)
-            assert resp.status == 200
-
-            runtime.down(instance_id)
+            manifest = make_container_manifest(instance_id)
+            manifest.capabilityContract = CapabilityContract(
+                servesUi=True,
+                servesApi=True,
+                requiredProbes=[
+                    ProbeSpec(
+                        path="/health", isMandatory=True, source="declared"
+                    )
+                ],
+            ).model_dump()
+            verification = _evaluate_container_verification(
+                host_port, manifest, ws, reg, instance_id
+            )
+            assert verification["overall_status"] == "passed", verification
+            assert verification["mandatory_all_passed"] is True
         finally:
+            if "runtime" in locals() and "instance_id" in locals():
+                with suppress(Exception):
+                    runtime.down(instance_id)
             reg.close()
 
     def test_unhealthy_container_fails_required_probe(
@@ -165,8 +197,11 @@ class TestGateCRequiredProbe:
     ) -> None:
         """不健康容器 -> required probe 失败 -> 不写 RUNNING。"""
         from local_webpage_access.docker_runtime import DockerRuntime
+        from local_webpage_access.hosting import _evaluate_container_verification
+        from local_webpage_access.models import CapabilityContract, ProbeSpec
         from local_webpage_access.paths import Workspace
         from local_webpage_access.registry import Registry
+        from tests._helpers import make_container_manifest
 
         ws_root = tmp_path / "ws"
         ws = Workspace(ws_root)
@@ -174,37 +209,48 @@ class TestGateCRequiredProbe:
         reg = Registry(ws.db_path)
         reg.open()
         try:
-            runtime = DockerRuntime(ws, reg)
+            runtime = DockerRuntime(ws)
             instance_id = "test-cr07-unhealthy"
+            host_port = _free_port()
 
-            compose_dir = ws.apps_dir / instance_id / "docker"
+            compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
             (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
                 services:
                   app:
                     build: {fastapi_project}
                     ports:
-                      - "22020:8000"
+                      - "{host_port}:8000"
                     environment:
                       - FAIL_HEALTH=1
             """), encoding="utf-8")
 
-            compose_path = compose_dir / "compose.yaml"
-            runtime.build(instance_id, compose_path)
-            runtime.up(instance_id, compose_path)
+            runtime.build(instance_id)
+            runtime.up(instance_id)
 
             import time
             time.sleep(3)
 
             assert runtime.is_running(instance_id)
-
-            import urllib.request
-            from urllib.error import HTTPError
-            with pytest.raises(HTTPError):
-                urllib.request.urlopen("http://127.0.0.1:22020/health", timeout=10)
-
-            runtime.down(instance_id)
+            manifest = make_container_manifest(instance_id)
+            manifest.capabilityContract = CapabilityContract(
+                servesUi=True,
+                servesApi=True,
+                requiredProbes=[
+                    ProbeSpec(
+                        path="/health", isMandatory=True, source="declared"
+                    )
+                ],
+            ).model_dump()
+            verification = _evaluate_container_verification(
+                host_port, manifest, ws, reg, instance_id
+            )
+            assert verification["overall_status"] == "failed"
+            assert verification["mandatory_all_passed"] is False
         finally:
+            if "runtime" in locals() and "instance_id" in locals():
+                with suppress(Exception):
+                    runtime.down(instance_id)
             reg.close()
 
 
@@ -281,22 +327,21 @@ class TestGateCComposeLifecycle:
         reg = Registry(ws.db_path)
         reg.open()
         try:
-            runtime = DockerRuntime(ws, reg)
+            runtime = DockerRuntime(ws)
             instance_id = "test-cr07-lifecycle"
+            host_port = _free_port()
 
-            compose_dir = ws.apps_dir / instance_id / "docker"
+            compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
-            (compose_dir / "compose.yaml").write_text(textwrap.dedent("""\
+            (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
                 services:
                   app:
                     image: nginx:alpine
                     ports:
-                      - "22040:80"
+                      - "{host_port}:80"
             """), encoding="utf-8")
 
-            compose_path = compose_dir / "compose.yaml"
-
-            runtime.up(instance_id, compose_path)
+            runtime.up(instance_id)
             import time
             time.sleep(2)
             assert runtime.is_running(instance_id)
@@ -316,6 +361,9 @@ class TestGateCComposeLifecycle:
             runtime.down(instance_id)
             assert not runtime.is_running(instance_id)
         finally:
+            if "runtime" in locals() and "instance_id" in locals():
+                with suppress(Exception):
+                    runtime.down(instance_id)
             reg.close()
 
 
@@ -390,26 +438,25 @@ class TestGateCFailureScenePreservation:
         reg = Registry(ws.db_path)
         reg.open()
         try:
-            runtime = DockerRuntime(ws, reg)
+            runtime = DockerRuntime(ws)
             instance_id = "test-cr07-buildfail"
+            host_port = _free_port()
 
-            compose_dir = ws.apps_dir / instance_id / "docker"
+            compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
-            (compose_dir / "compose.yaml").write_text(textwrap.dedent("""\
+            (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
                 services:
                   app:
                     build: .
                     ports:
-                      - "22050:80"
+                      - "{host_port}:80"
             """), encoding="utf-8")
             (compose_dir / "Dockerfile").write_text(
                 "FROM non-existent-image-12345:latest\n", encoding="utf-8",
             )
 
-            compose_path = compose_dir / "compose.yaml"
-
             with pytest.raises(DockerError):
-                runtime.build(instance_id, compose_path)
+                runtime.build(instance_id)
 
             assert not runtime.is_running(instance_id)
         finally:

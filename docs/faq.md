@@ -250,6 +250,8 @@ status: pending
 * **daemon 自动导入（IMP-011）**：slug 冲突时记 `import_conflict` 事件并提示 `--update`，**不再**自动追加 `-2/-3`；导入成功后 zip 会移入 `inbox/processed/`。
 * **连续失败死信（BUG-297）**：同一 zip 指纹连续失败默认 5 次后移入 `inbox/failed/`；修好后移回 `inbox/` 根目录即可再试。
 * **`--update` 后容器仍是旧版？**：容器实例必须 **rebuild 镜像** 才会跑新源码。V0.5.2 起，running 容器的 `--update` 默认走 `lwa rebuild`（不再轻量 `restart`）。若用了 `--no-restart`，请手动 `lwa rebuild <id>`。
+* **更新后数据库指向空库？**：**V0.7.8** 起 `generate_env` 重新生成 `.env` 时会保留已有 `DATABASE_URL`，不再被源目录占位 SQLite 文件（如 `_empty_check.db`）覆盖。若需手动修改 `DATABASE_URL`，直接编辑 `docker/.env` 后 `lwa rebuild <id>`。
+* **Gate-C 报 database 能力未通过？**：**V0.7.8** 起 `_verify_sqlite_database` 在 manifest 声明的文件未命中时，回退扫描 `data/` 目录下所有 `.db`/`.sqlite`/`.sqlite3` 文件，只要存在一个有效 SQLite 数据库即视为能力满足。
 * **同包重复导入**：同一 zip 指纹（`sourceZipHash`）会产生冗余实例。清理：
 
   ```bash
