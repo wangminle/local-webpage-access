@@ -203,6 +203,23 @@ def _collect_python_deps(directory: Path) -> set[str]:
                     name = re.split(r"[<>=!\[ ]", str(item), maxsplit=1)[0].strip().lower()
                     if name:
                         deps.add(name)
+            # BUG-502：Poetry 依赖声明在 [tool.poetry.dependencies]，
+            # 仅读 PEP 621 会漏掉 Poetry-only 的 FastAPI 等（与 scanner 对齐）。
+            poetry = data.get("tool", {}).get("poetry", {})
+            if isinstance(poetry, dict):
+                sections = [poetry.get("dependencies"), poetry.get("dev-dependencies")]
+                groups = poetry.get("group", {})
+                if isinstance(groups, dict):
+                    for group in groups.values():
+                        if isinstance(group, dict):
+                            sections.append(group.get("dependencies"))
+                for section in sections:
+                    if not isinstance(section, dict):
+                        continue
+                    for key in section:
+                        name = key.strip().lower()
+                        if name and name != "python":
+                            deps.add(name)
         except (OSError, Exception):
             pass
 

@@ -1248,3 +1248,98 @@ def test_subdir_no_subdir_uses_root_copy(tmp_path: Path, workspace: Workspace) -
     assert "COPY current/requirements.txt requirements.txt" in content
     assert "COPY current/ ./" in content
     assert "current/backend/" not in content
+
+
+# ---- IMP-058 五层流水线咬合回归（BUG-495/496/497/498/499/500/501/502）-------
+
+
+def test_subdir_frontend_vite_recognized_as_frontend_static(tmp_path: Path) -> None:
+    """BUG-495：仅 frontend/ 子目录的 Vite/Vue 不得误判为 static（此前缺 npm build）。"""
+    frontend = tmp_path / "frontend"
+    frontend.mkdir(parents=True)
+    (frontend / "package.json").write_text(
+        json.dumps({
+            "dependencies": {"vue": "^3.0.0"},
+            "devDependencies": {"vite": "^5.0.0"},
+            "scripts": {"build": "vite build"},
+        })
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.NODE
+    assert result.runtime == Runtime.SHARED_STATIC
+    assert result.form == "frontend-static"
+    assert result.source_subdir == "frontend"
+    assert result.entry.build == "npm run build"
+    assert result.entry.buildOutputDir == "frontend/dist"
+
+
+def test_subdir_node_backend_recognized(tmp_path: Path) -> None:
+    """BUG-496：server/ Express 子目录有 node primary 候选，detect() 不得判 pending。"""
+    server = tmp_path / "server"
+    server.mkdir(parents=True)
+    (server / "package.json").write_text(
+        json.dumps({
+            "dependencies": {"express": "^4.0.0"},
+            "scripts": {"start": "node server.js"},
+        })
+    )
+    (server / "server.js").write_text("// Express app")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.NODE
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+    assert result.form == "backend-container"
+    assert result.source_subdir == "server"
+
+
+def test_subdir_python_heavy_db_pending(tmp_path: Path) -> None:
+    """BUG-497：子目录 Python 含重型数据库依赖（psycopg2）也要标记 pending。"""
+    backend = tmp_path / "backend"
+    backend.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi\nuvicorn\npsycopg2\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+    assert result.confidence == "medium"
+    assert any("psycopg2" in n for n in result.notes)
+    assert result.kind == Kind.PYTHON
+    assert result.source_subdir == "backend"
+
+
+def test_detect_python_poetry_dependencies(tmp_path: Path) -> None:
+    """BUG-502：仅 [tool.poetry.dependencies] 声明 FastAPI 应识别（不 pending）。"""
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry]\n'
+        'name = "demo"\n'
+        'version = "0.1.0"\n'
+        '[tool.poetry.dependencies]\n'
+        'python = "^3.11"\n'
+        'fastapi = "^0.100"\n'
+        'uvicorn = "^0.30"\n'
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.PYTHON
+    assert "fastapi" in result.stack
+    assert result.pending is False
+    assert result.confidence == "high"
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+
+
+def test_preflight_rejected_marks_pending(tmp_path: Path, monkeypatch) -> None:
+    """BUG-498：预检 REJECTED（如缺失 COPY 源）应置 pending 阻断导入，不得静默放行。"""
+    from local_webpage_access import scanner as scanner_mod
+    from local_webpage_access.preflight import REJECTED, PreflightResult
+
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (tmp_path / "main.py").write_text("app = None")
+
+    def fake_preflight(result, source_dir):
+        return PreflightResult(
+            status=REJECTED,
+            rejections=["COPY 源路径 requirements.txt 不存在，build 将失败"],
+        )
+
+    monkeypatch.setattr(scanner_mod, "_preflight_check", fake_preflight)
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+    assert any("[预检拒绝]" in n for n in result.notes)

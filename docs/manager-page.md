@@ -338,7 +338,7 @@ Authorization: Bearer <token>
 * **从文件夹导入（IMP-047 / IMP-051）**：顶栏「导入文件夹」打开对话框；请选**项目根或 dist/**（含 `index.html` / `package.json`），不要只选 `src/`。源路径右侧「选择文件夹」仅在 **loopback** 可用（宿主机原生选目录）；局域网访问时按钮禁用，请粘贴 LWA 机器绝对路径。导入仍复制进工作区，非就地运行。API 错误文案不含 `[ZIP_IMPORT_ERROR]` 等前缀。
 * **浏览量**：列表列展示累计访问；点击打开按天分布、最近命中与独立 IP 列表（IMP-024/026；page 级过滤 IMP-025）。
 
-> **状态说明（DEV-043 / BUG-071 / IMP-033 / IMP-058）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。Docker 观测失败时显示 unknown / 权限提示，不误写 stopped。**V0.7.7** 起容器实例新增 `verifying`（Gate-C 存活探针等待中）、`degraded`（必选探针通过但可选探针失败）状态，参见 [FAQ](faq.md#实例状态为-verifying--degraded--failedimp-058-gate-c)。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例（容器路径仍受能力门禁）。
+> **状态说明（DEV-043 / BUG-071 / IMP-033 / IMP-058）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。Docker 观测失败时显示 unknown / 权限提示，不误写 stopped。**V0.7.7** 起容器实例新增 `verifying`（Gate-C 存活探针等待中）、`degraded`（必选探针通过但可选探针失败）状态，参见 [FAQ](faq.md#实例状态为-verifying--degraded--failedimp-058-gate-c)。**V0.7.9**：无源码声明/发现的健康端点时，API 能力无法实证会显示降级而非失败。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例（容器路径仍受能力门禁）。
 * **实例详情**：manifest、构建记录、事件流、资源占用、分类日志查看器；含路径别名说明与 CLI 等价命令提示。
 * **待处理区**：pending 实例（可重扫 `lwa scan`）与 failed 实例（显示 `lastError`）。
 

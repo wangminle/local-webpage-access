@@ -26,9 +26,10 @@ import re
 import secrets
 from pathlib import Path
 
+from local_webpage_access.errors import PathError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest
-from local_webpage_access.paths import Workspace
+from local_webpage_access.paths import Workspace, resolve_source_workdir
 
 log = get_logger("compose")
 
@@ -245,10 +246,13 @@ def generate_env(
                 # 当 sourceSubdir="backend" 时，dbFilename 相对于 backend/，
                 # 源文件在 current/backend/<dbFilename>，而非 current/<dbFilename>。
                 source_subdir = getattr(manifest, "sourceSubdir", None)
+                source_root = source_dir
                 if source_subdir:
-                    source_db_path = source_dir / source_subdir / raw_db_filename
-                else:
-                    source_db_path = source_dir / raw_db_filename
+                    try:
+                        source_root = resolve_source_workdir(source_dir, source_subdir)
+                    except PathError:
+                        source_root = source_dir
+                source_db_path = source_root / raw_db_filename
                 target_db_path = host_data_dir / db_filename
                 if source_db_path.is_file() and not target_db_path.exists():
                     import shutil

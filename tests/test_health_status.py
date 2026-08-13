@@ -152,6 +152,25 @@ def test_http_ok_true_on_200(http_server) -> None:
     assert code == 200
 
 
+def test_run_probe_spec_treats_204_as_success_when_expected_200(monkeypatch) -> None:
+    """BUG-506：discovered 探针默认 expectedStatus=200 时，真实 204 仍应按 2xx 通过。"""
+    from types import SimpleNamespace
+
+    from local_webpage_access.health import run_probe_spec
+    from local_webpage_access.models import ProbeSpec
+
+    def fake_urlopen(url, timeout=2.0):
+        return SimpleNamespace(status=204, getcode=lambda: 204)
+
+    monkeypatch.setattr("local_webpage_access.health.urlopen_direct", fake_urlopen)
+    passed, code = run_probe_spec(
+        18080,
+        ProbeSpec(path="/health", expectedStatus=200, isMandatory=True, source="discovered"),
+    )
+    assert passed is True
+    assert code == 204
+
+
 def test_http_ok_false_on_closed_port() -> None:
     port = _free_port()  # 立刻关闭，没人监听
     ok, code = http_ok(port, timeout=1.0)

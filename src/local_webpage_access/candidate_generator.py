@@ -24,6 +24,9 @@ Gate-C C.02 关键变化：当后端候选存在时，前端不再作为 fallbac
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import (
     CapabilityContract,
@@ -32,6 +35,7 @@ from local_webpage_access.models import (
     DeploymentComponent,
     DeploymentPlan,
     EntryConfig,
+    ProbeSpec,
     ProjectEvidence,
     SubdirSignal,
 )
@@ -530,16 +534,26 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
                 )
                 evidence_refs.append("frontend_candidate")
 
-            # CHK-193/P1：source="guessed" 的探针保持可选（isMandatory=False）。
-            # Flask/Django/Express 等普通后端不保证提供 /health 端点，
-            # 404 不应导致部署失败。只有源码声明或发现的端点才能作为门槛。
-            from local_webpage_access.models import ProbeSpec
-            contract.requiredProbes.append(ProbeSpec(
-                path="/health",
-                isMandatory=False,
-                source="guessed",
-                description="诊断探针（HTTP GET /health，可选；不通过仅产生告警）",
-            ))
+            # BUG-504：为后端生成可满足的 API 能力证据。
+            # 优先从源码发现业务端点（source="discovered"，可作门槛）；未发现时
+            # 保留 guessed /health 仅诊断（不得作 API 证据，由验证器降级处理）。
+            discovered_probes = _discover_health_probes(evidence, backend)
+            if discovered_probes:
+                for probe in discovered_probes:
+                    contract.requiredProbes.append(probe)
+                reasoning.append(
+                    f"从源码发现 {len(discovered_probes)} 个健康端点探针"
+                )
+            else:
+                # CHK-193/P1：source="guessed" 的探针保持可选（isMandatory=False）。
+                # Flask/Django/Express 等普通后端不保证提供 /health 端点，
+                # 404 不应导致部署失败。只有源码声明或发现的端点才能作为门槛。
+                contract.requiredProbes.append(ProbeSpec(
+                    path="/health",
+                    isMandatory=False,
+                    source="guessed",
+                    description="诊断探针（HTTP GET /health，可选；不通过仅产生告警）",
+                ))
 
             plan = DeploymentPlan(
                 planId=f"plan-{'fullstack' if contract.servesUi else 'backend'}-"
@@ -572,7 +586,6 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
             if frontend.confidenceTier == "primary":
                 components = [_candidate_to_component(frontend, role="build-and-runtime")]
                 contract = CapabilityContract(servesUi=True)
-                from local_webpage_access.models import ProbeSpec
                 contract.requiredProbes.append(ProbeSpec(
                     path="/",
                     isMandatory=False,
@@ -593,7 +606,6 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
             if static.confidenceTier == "primary":
                 components = [_candidate_to_component(static, role="runtime")]
                 contract = CapabilityContract(servesUi=True)
-                from local_webpage_access.models import ProbeSpec
                 contract.requiredProbes.append(ProbeSpec(
                     path="/",
                     isMandatory=False,
@@ -658,3 +670,123 @@ def _candidate_to_component(
         component.buildOutputDir = candidate.entry.buildOutputDir
 
     return component
+
+
+# ---- BUG-504：业务探针源码发现 ------------------------------------------------
+
+# 仅采纳可确认的 GET/HEAD。post/put/delete/patch/use/route 可能不可 GET，
+# 生成 mandatory GET 探针会让正常后端 Gate-C 假红（BUG-506）。
+_PY_ROUTE_DECORATOR_RE = re.compile(
+    r"""(?<![\"'])@\s*\w+\.(get|head)\s*\(\s*["']([^"']+)["']""",
+    re.IGNORECASE,
+)
+# Node 路由声明：app.get('/health') / router.head('/x')
+_NODE_ROUTE_RE = re.compile(
+    r"""(?<![\"'])\b(?:app|router|server|api|rest)\s*\.\s*(get|head)\s*\(\s*["']([^"']+)["']""",
+    re.IGNORECASE,
+)
+# 仅把健康类路径当作可安全 GET 的门槛探针；其余路由可能需鉴权/仅 POST，探测会假红
+_HEALTH_PATH_RE = re.compile(
+    r"(?:^|/)(?:health|healthz|ping|ready|readiness|livez|liveness)(?:$|/)",
+    re.IGNORECASE,
+)
+_SKIP_DISCOVERY_DIRS = {
+    "node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", ".next",
+}
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_TRIPLE_DOUBLE_RE = re.compile(r'"""[\s\S]*?"""')
+_TRIPLE_SINGLE_RE = re.compile(r"'''[\s\S]*?'''")
+
+
+def _strip_code_comments(text: str) -> str:
+    """去掉块注释、文档字符串与整行/行尾注释，避免注释文本被当成路由。"""
+    text = _BLOCK_COMMENT_RE.sub("\n", text)
+    text = _TRIPLE_DOUBLE_RE.sub("\n", text)
+    text = _TRIPLE_SINGLE_RE.sub("\n", text)
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        if "//" in line:
+            line = line[: line.index("//")]
+        hash_m = re.search(r"\s#", line)
+        if hash_m:
+            line = line[: hash_m.start()]
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _discover_health_probes(
+    evidence: ProjectEvidence,
+    backend: DeploymentCandidate,
+) -> list[ProbeSpec]:
+    """从后端源码发现健康类业务端点（BUG-504 / BUG-506）。
+
+    扫描后端源码（根或 sourceSubdir 子目录，受限深度）中的路由声明：
+    仅 Python ``@app.get`` / ``@app.head`` 与 Node ``app.get`` / ``app.head``。
+    命中的健康类路径（/health、/healthz、/ping、/ready 等）生成
+    ``source="discovered"`` 的 mandatory 探针。
+
+    带路径参数的声明（含 ``{``/``<``）无法静态探测，跳过。
+    """
+    scan_root = Path(evidence.root)
+    if backend.sourceSubdir:
+        scan_root = scan_root / backend.sourceSubdir
+    if not scan_root.is_dir():
+        return []
+
+    extensions = (".py",) if backend.kind == "python" else (".js", ".ts", ".mjs", ".cjs")
+    found: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for file_path in _walk_source_files(scan_root, extensions, max_depth=3):
+        try:
+            text = _strip_code_comments(file_path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if backend.kind == "python":
+            matches = _PY_ROUTE_DECORATOR_RE.findall(text)
+        else:
+            matches = _NODE_ROUTE_RE.findall(text)
+        for method, route in matches:
+            route = route.strip()
+            if not route.startswith("/") or "{" in route or "<" in route:
+                continue
+            if not _HEALTH_PATH_RE.search(route):
+                continue
+            key = (method.upper(), route)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(key)
+
+    return [
+        ProbeSpec(
+            path=route,
+            method=method,
+            expectedStatus=200,
+            isMandatory=True,
+            source="discovered",
+            description=f"源码声明的健康端点（HTTP {method} {route}，来自路由声明扫描）",
+        )
+        for method, route in sorted(found)
+    ]
+
+
+def _walk_source_files(root: Path, extensions: tuple[str, ...], *, max_depth: int):
+    """受限深度遍历源码文件，跳过噪音目录。"""
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth >= max_depth:
+            continue
+        try:
+            for entry in current.iterdir():
+                if entry.is_dir():
+                    if entry.name.lower() in _SKIP_DISCOVERY_DIRS:
+                        continue
+                    stack.append((entry, depth + 1))
+                elif entry.is_file() and entry.name.lower().endswith(extensions):
+                    yield entry
+        except (PermissionError, OSError):
+            continue

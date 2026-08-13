@@ -193,6 +193,51 @@ def test_validate_path_alias_allows_when_excluded() -> None:
     assert validate_path_alias("demo", existing_aliases=None) == "demo"
 
 
+def test_resolve_source_workdir_uses_safe_subdir(tmp_path: Path) -> None:
+    """BUG-507：合法相对子目录解析到 base 之内；缺失则回退 base。"""
+    from local_webpage_access.paths import resolve_source_workdir
+
+    current = tmp_path / "current"
+    frontend = current / "frontend"
+    frontend.mkdir(parents=True)
+    nested = current / "packages" / "web"
+    nested.mkdir(parents=True)
+    assert resolve_source_workdir(current, "frontend") == frontend.resolve()
+    assert resolve_source_workdir(current, "packages/web") == nested.resolve()
+    assert resolve_source_workdir(current, None) == current.resolve()
+    assert resolve_source_workdir(current, "") == current.resolve()
+    assert resolve_source_workdir(current, "missing") == current.resolve()
+
+
+@pytest.mark.parametrize(
+    "subdir",
+    ["../outside", "/tmp", "..", "/", "frontend/../../outside", "frontend/../..", "\\tmp"],
+)
+def test_resolve_source_workdir_rejects_escape(tmp_path: Path, subdir: str) -> None:
+    """BUG-507：绝对路径与 .. 不得成为构建 cwd。"""
+    from local_webpage_access.paths import resolve_source_workdir
+
+    current = tmp_path / "apps" / "demo" / "current"
+    current.mkdir(parents=True)
+    (tmp_path / "apps" / "demo" / "outside").mkdir()
+    with pytest.raises(PathError):
+        resolve_source_workdir(current, subdir)
+
+
+def test_resolve_source_workdir_rejects_symlink_escape(tmp_path: Path) -> None:
+    """BUG-507：指向 current 之外的符号链接必须拒绝。"""
+    from local_webpage_access.paths import resolve_source_workdir
+
+    current = tmp_path / "current"
+    current.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = current / "frontend"
+    link.symlink_to(outside)
+    with pytest.raises(PathError):
+        resolve_source_workdir(current, "frontend")
+
+
 def test_app_alias_config_under_gateway(workspace: Workspace) -> None:
     """别名片段落在 static-gateway/aliases/ 下。"""
     assert workspace.app_alias_config("demo") == workspace.static_aliases / "demo.conf"

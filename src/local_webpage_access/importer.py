@@ -1565,6 +1565,37 @@ def build_manifest_from_detection(
     ``routeMode="name"`` + ``routeHost=<alias>``：静态进 ``static``，
     docker-compose 进 ``container``；其它 runtime 忽略该参数。
     """
+    # Gate-C C.01/C.06：先生成部署计划与能力契约。
+    # BUG-501/BUG-505：计划生成失败或为空时，容器后端按失败封闭处理——
+    # 标记 pending，避免 capabilityContract 缺失时回退 servesUi-only 假绿。
+    plans: list = []
+    plan_error: Exception | None = None
+    if detection.evidence is not None:
+        try:
+            from local_webpage_access.candidate_generator import generate_plans
+            plans = generate_plans(detection.evidence)
+        except Exception as exc:  # noqa: BLE001
+            plan_error = exc
+            log.exception("实例 %s 部署计划生成失败", instance_id)
+
+    if (
+        not detection.pending
+        and detection.kind is not None
+        and detection.runtime == Runtime.DOCKER_COMPOSE
+        and detection.evidence is not None
+        and (plan_error is not None or not plans)
+    ):
+        detection.pending = True
+        detection.confidence = "low"
+        if plan_error is not None:
+            detection.notes.append(
+                f"部署计划生成失败，标记 pending：{plan_error}"
+            )
+        else:
+            detection.notes.append(
+                "部署计划为空（候选层与识别结果不一致），标记 pending"
+            )
+
     if detection.pending or detection.kind is None:
         # 未识别：以 static 草稿落盘，标记 pending
         kind = Kind.STATIC
@@ -1643,19 +1674,14 @@ def build_manifest_from_detection(
     preflight_notes = [n for n in detection.notes if n.startswith("[预检修正]") or n.startswith("[预检警告]")]
     if preflight_notes:
         manifest.preflightSummary = "; ".join(preflight_notes)
-    # Gate-C C.01/C.06：生成部署计划并存储到 manifest
+    # Gate-C C.01/C.06：附加已生成的部署计划与能力契约。
+    if plans:
+        manifest.deploymentPlans = [p.model_dump() for p in plans]
+        # 选中 top-1 计划
+        top_plan = plans[0]
+        manifest.selectedPlanId = top_plan.planId
+        manifest.capabilityContract = top_plan.capabilityContract.model_dump()
     if detection.evidence is not None:
-        try:
-            from local_webpage_access.candidate_generator import generate_plans
-            plans = generate_plans(detection.evidence)
-            if plans:
-                manifest.deploymentPlans = [p.model_dump() for p in plans]
-                # 选中 top-1 计划
-                top_plan = plans[0]
-                manifest.selectedPlanId = top_plan.planId
-                manifest.capabilityContract = top_plan.capabilityContract.model_dump()
-        except Exception:  # noqa: BLE001
-            pass  # 计划生成失败不阻塞导入
         # A.R01：传递数据库配置消费信号给 manifest，供 compose.generate_env 使用
         if detection.evidence.databaseConfig is not None:
             manifest.databaseConfig = detection.evidence.databaseConfig.model_dump()

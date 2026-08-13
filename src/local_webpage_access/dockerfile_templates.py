@@ -46,10 +46,20 @@ def _copy_prefix(manifest: InstanceManifest) -> str:
     """Dockerfile COPY 源路径前缀（Gate-B：子目录布局支持）。
 
     根目录 -> ``current/``；子目录 -> ``current/<subdir>/``。
+    非法 ``sourceSubdir``（绝对路径 / ``..``）回退根目录，避免 COPY 越界（BUG-507）。
     """
+    from local_webpage_access.errors import PathError
+    from local_webpage_access.paths import validate_source_subdir
+
     subdir = getattr(manifest, "sourceSubdir", None)
-    if subdir:
-        return f"current/{subdir}/"
+    if not subdir:
+        return "current/"
+    try:
+        sanitized = validate_source_subdir(subdir)
+    except PathError:
+        return "current/"
+    if sanitized:
+        return f"current/{sanitized}/"
     return "current/"
 
 # IMP-054：Python 包 → 所需 apt 系统库映射。

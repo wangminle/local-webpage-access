@@ -240,6 +240,7 @@ status: pending
 * 项目根目录缺少 `package.json` / `requirements.txt` / `pyproject.toml` 等特征文件。
 * zip 内有多层嵌套目录且特征文件不在拍平后的根。
 * 项目结构特殊（自定义构建）。
+* **V0.7.9 已覆盖的误判**：仅 `frontend/` 的 Vite 不再被当成纯静态；`server/` Express 不再 pending；仅 Poetry 声明的 FastAPI 会解析 `[tool.poetry.dependencies]`；预检 REJECTED（如 COPY 源缺失）会置 pending 而不静默放行。子目录含 psycopg2 等重型库仍会 pending。
 
 处理：`lwa scan <id>` 重新识别；仍 pending 时检查 `local-web.json` 的 `lastError`，
 或手工补特征文件后重扫。pending 实例会写入「未知 zip 来源」风险提示事件。
@@ -319,7 +320,7 @@ status: failed, lastError: 容器退出码 1
 * **FAILED**：必选存活探针超时（容器进程已启动但端口不响应，或容器在超时窗口内退出）。不假报 running。查看 `lwa logs <id> --category run` 排查根因（常见：应用启动 crash、端口不对、启动脚本被 shell 操作符拆碎）。
 * **DEGRADED**：必选探针通过但可选探针未通过（如猜测的 `/health` 端点返回 404）。实例可用但管理页显示降级横幅。
 
-**关于猜测探针**：Flask/Django/Express 不保证提供 `/health` 端点。`source="guessed"` 的探针（如 `/health`、`/`）仅产生诊断，不通过不判失败。只有 `source="declared"` 或 `source="discovered"` 的探针可作成功门槛。
+**关于猜测探针**：Flask/Django/Express 不保证提供 `/health` 端点。`source="guessed"` 的探针（如 `/health`、`/`）仅产生诊断，不通过不判失败。只有 `source="declared"` 或 `source="discovered"` 的探针可作成功门槛。**V0.7.9**：源码扫描只采纳可确认的 GET/HEAD 健康路径（`/health`、`/healthz`、`/ping`、`/ready` 等），忽略 POST 与注释文本；探针对 2xx/3xx（含 204）一律通过。无声明/发现探针时 `servesApi` 降为 DEGRADED（「API 无法实证」），不再因 guessed `/health` 假红或假绿。`frontend/` 子目录的 npm 构建在 `current/<subdir>` 执行；`sourceSubdir` 不得越出 `current/`。
 
 **关于降级**：top-1 候选 build/start 失败时，按 `fallback_policy` 策略处理（默认 `confirm` 需用户确认；`auto-equivalent` 在能力等价时可自动降级；`disabled` 不降级）。后端候选不会自动降级为静态/前端候选（能力守恒）。
 

@@ -26,7 +26,13 @@ from local_webpage_access.compose import generate_compose, generate_env
 from local_webpage_access.config import Config
 from local_webpage_access.docker_runtime import DockerRuntime
 from local_webpage_access.dockerfile_templates import generate_dockerfile
-from local_webpage_access.errors import BuildCancelled, BuildError, DockerError, HostingError
+from local_webpage_access.errors import (
+    BuildCancelled,
+    BuildError,
+    DockerError,
+    HostingError,
+    PathError,
+)
 from local_webpage_access.logging import get_logger, write_instance_log
 from local_webpage_access.models import (
     CapabilityContract,
@@ -37,9 +43,8 @@ from local_webpage_access.models import (
     StaticConfig,
     Status,
 )
-from local_webpage_access.paths import Workspace
+from local_webpage_access.paths import Workspace, resolve_source_workdir
 from local_webpage_access.probe import mark_probe_url, urlopen_direct
-from local_webpage_access.health import api_probe
 from local_webpage_access.ports import PortAllocator, build_network_entry, is_port_listening
 from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
@@ -215,6 +220,17 @@ def build_and_host_frontend(
     build_log = workspace.app_logs(instance_id) / "build.log"
     build_log.parent.mkdir(parents=True, exist_ok=True)
 
+    # BUG-503：sourceSubdir 识别为 frontend/ 等子目录时，install/build
+    # 必须在子目录执行，否则 npm ci / npm run build 找不到子包 package.json。
+    # BUG-507：拒绝绝对路径、.. 与符号链接逃逸，禁止 npm 在 current 外执行。
+    work_dir = current_dir
+    source_subdir = getattr(manifest, "sourceSubdir", None)
+    if source_subdir:
+        try:
+            work_dir = resolve_source_workdir(current_dir, source_subdir)
+        except PathError as exc:
+            raise BuildError(str(exc), instance_id=instance_id) from exc
+
     registry.update_status(instance_id, Status.BUILDING.value)
     build_id = registry.add_build(
         instance_id,
@@ -228,12 +244,12 @@ def build_and_host_frontend(
             write_instance_log(
                 workspace.apps, instance_id, "build", f"安装：{manifest.entry.install}"
             )
-            run_command(manifest.entry.install, cwd=current_dir, log_path=build_log)
+            run_command(manifest.entry.install, cwd=work_dir, log_path=build_log)
         if manifest.entry.build:
             write_instance_log(
                 workspace.apps, instance_id, "build", f"构建：{manifest.entry.build}"
             )
-            run_command(manifest.entry.build, cwd=current_dir, log_path=build_log)
+            run_command(manifest.entry.build, cwd=work_dir, log_path=build_log)
         else:
             raise BuildError(
                 "缺少 build 脚本，无法构建前端项目",
@@ -838,22 +854,42 @@ def start_container(
     )
     registry.record_started(instance_id)
 
-    # 必选存活探针（轻量路径：不重新执行全量验证，但至少验证端口可达）
-    liveness_ok = _wait_for_http(host_port)
-    if liveness_ok:
+    # BUG-500：轻量 start 也要重跑必选能力校验（API/DB/迁移），不能只探 GET /。
+    # 否则已部署容器只要首页 200 就假绿，API/DB/迁移失败被掩盖为 RUNNING。
+    verification = _evaluate_container_verification(
+        host_port, manifest, workspace, registry, instance_id,
+    )
+    overall = verification["overall_status"]
+    if overall == "passed":
         manifest.status = Status.RUNNING
         registry.record_health_check(instance_id)
         status_detail = "RUNNING"
-    else:
-        # 轻量 start 存活探针失败 → DEGRADED（容器在但端口不通，
-        # 可能进程仍在预热；不直接 FAILED 因为轻量 start 是已部署实例）
+    elif overall == "degraded":
         manifest.status = Status.DEGRADED
-        status_detail = "DEGRADED（存活探针超时）"
+        status_detail = "DEGRADED（可选探针失败）"
         registry.add_event(
             instance_id,
             "lifecycle_stage",
-            f"Gate-C 轻量 start 存活探针超时（host_port={host_port}）",
+            f"Gate-C 轻量 start 可选探针失败（host_port={host_port}）",
         )
+    else:
+        manifest.status = Status.FAILED
+        manifest.lastError = verification.get("error", "必选探针未通过")[:500]
+        status_detail = "FAILED（必选探针未通过）"
+        registry.add_event(
+            instance_id,
+            "lifecycle_stage",
+            f"Gate-C 轻量 start 必选探针失败（host_port={host_port}）",
+        )
+
+    # CHK-192/P2：verificationSummary 必须在 save 前赋值，否则 reload 后丢失。
+    manifest.verificationSummary = {
+        "overallStatus": overall,
+        "livenessPassed": verification.get("liveness_passed", False),
+        "mandatoryAllPassed": verification.get("mandatory_all_passed", False),
+        "optionalWarnings": verification.get("optional_warnings", []),
+        "observedCapabilities": verification.get("observed_capabilities", []),
+    }
 
     manifest.touch()
     manifest.save(workspace.app_manifest_path(instance_id))
@@ -861,6 +897,7 @@ def start_container(
         instance_id,
         manifest.status.value,
         desired_state=DesiredState.RUNNING.value,
+        last_error=manifest.lastError,
     )
 
     registry.add_event(
@@ -1219,7 +1256,10 @@ def _evaluate_container_verification(
     contract = _load_capability_contract(manifest)
     required = contract.required_capabilities
 
-    # 执行 mandatory 探针（如 /health），结果作成功门槛
+    # 执行 mandatory 探针（如 /health），结果作成功门槛。
+    # BUG-499：只有 source in ("declared", "discovered") 的探针通过才可作为
+    # API 能力证据；guessed 探针（如通用 /health、api_probe）仅诊断，
+    # 不得满足 servesApi（否则偶然 /health 200 假绿、无标准路径 API 假红）。
     mandatory_all_passed = True
     optional_warnings: list[str] = []
     successful_business_probe = False
@@ -1227,7 +1267,7 @@ def _evaluate_container_verification(
         passed, code = _probe_path(
             host_port, spec.path, expected_status=spec.expectedStatus,
         )
-        if passed:
+        if passed and spec.source in ("declared", "discovered"):
             successful_business_probe = True
         if spec.isMandatory:
             if not passed:
@@ -1239,9 +1279,6 @@ def _evaluate_container_verification(
                 )
 
     # BUG-481：契约是要求，不是证据。首页存活不再自动补齐 API/DB/迁移。
-    if contract.servesApi and not successful_business_probe:
-        api_guess_ok, _api_guess_path = api_probe(host_port)
-        successful_business_probe = api_guess_ok is True
     if successful_business_probe:
         observed.add("api")
     if contract.requiresDatabase and _verify_sqlite_database(manifest, workspace):
@@ -1251,7 +1288,25 @@ def _evaluate_container_verification(
     ):
         observed.add("migrations")
 
-    capabilities_covered = required.issubset(observed)
+    # BUG-504：api 能力唯一证据来源是 declared/discovered 探针。契约要求
+    # servesApi 但无此类探针时，该能力无法实证——不得构成不可满足的成功谓词
+    # （正常后端会稳定 failed 假红），降级为告警 + DEGRADED，保持诚实可见。
+    has_api_evidence_source = any(
+        probe.source in ("declared", "discovered")
+        for probe in contract.requiredProbes
+    )
+    if contract.servesApi and not has_api_evidence_source:
+        optional_warnings.append(
+            "API 能力无法实证：契约要求 servesApi 但无声明/发现探针，"
+            "仅以存活探针作为容器健康证据（如有 /health 端点，请在源码中声明）"
+        )
+
+    verifiable_required = {
+        capability
+        for capability in required
+        if capability != "api" or has_api_evidence_source
+    }
+    capabilities_covered = verifiable_required.issubset(observed)
 
     # 总体判定（CHK-192/P1：能力未覆盖 -> failed，不再假报 passed）
     if not liveness_ok or not mandatory_all_passed:
@@ -1275,7 +1330,7 @@ def _evaluate_container_verification(
             else (
                 "必选探针未通过"
                 if not mandatory_all_passed
-                else f"未观测到所需能力：{', '.join(sorted(required - observed))}"
+                else f"未观测到所需能力：{', '.join(sorted(verifiable_required - observed))}"
             )
         ),
     }

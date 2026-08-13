@@ -154,6 +154,19 @@ def _check_copy_source(result: DetectionResult, source_dir: Path) -> CheckResult
             detail="非 pip install 候选，跳过 COPY 源路径检查",
         )
 
+    # BUG-498：仅对显式 ``pip install -r <file>`` 检查 COPY 源存在性。
+    # ``pip install .``（pyproject）、``uv sync``、``pip install pipenv ...``
+    # 等无 requirements 文件，此前被 _extract_requirements_file 兜底为
+    # requirements.txt 后误判 rejected（REJECTED→pending 会误阻断导入）。
+    if not re.search(r"-r\s+", install):
+        return CheckResult(
+            check_id="CHK-V01",
+            passed=True,
+            autofixed=False,
+            action=None,
+            detail="安装命令未引用 -r requirements 文件，跳过 COPY 源路径检查",
+        )
+
     req_file = _extract_requirements_file(install)
     source_subdir = result.source_subdir
 

@@ -79,6 +79,8 @@ python3 -m pytest tests/test_docker_integration.py
 | — 构建闸门（DEV-047） | `test_build_queue.py` | `CrossProcessBuildGate` 跨进程互斥与死进程回收 |
 | — zip 处理抽取 | `test_zip_processor.py` | validate / hash / safe_extract |
 | — 管理页前端 | `test_manager_static_app.py` | helpers / Vue 根组件冒烟、冗余徽章、浏览量渲染 |
+| — 实证校验（IMP-058 Gate-C） | `test_gate_c_verification.py`、`test_health_status.py`、`test_hosting.py` | 探针发现（GET/HEAD）、2xx/3xx、sourceSubdir 边界、guessed 不得满足 servesApi |
+| — 子目录识别（BUG-495～503） | `test_scanner.py`、`test_hosting.py`、`test_importer.py`、`test_paths.py` | frontend/server 子目录、Poetry 依赖、预检 REJECTED、npm cwd |
 
 ## 常见问题
 

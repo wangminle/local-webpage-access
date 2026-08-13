@@ -172,3 +172,25 @@ def test_extra_fields_allowed() -> None:
     # 额外字段保留在 model_dump 中
     dumped = m.to_dict()
     assert "futureField" in dumped
+
+
+def test_source_subdir_accepts_relative_child() -> None:
+    """BUG-507：合法相对子目录仍可写入。"""
+    data = _static_manifest_dict()
+    data["sourceSubdir"] = "frontend"
+    m = InstanceManifest.from_dict(data)
+    assert m.sourceSubdir == "frontend"
+    data["sourceSubdir"] = "packages/web"
+    assert InstanceManifest.from_dict(data).sourceSubdir == "packages/web"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["../outside", "/tmp", "..", "/", "frontend/../../x", "frontend/../secret", "C:\\tmp"],
+)
+def test_source_subdir_rejects_escape(bad: str) -> None:
+    """BUG-507：manifest 入口拒绝越出 current 的 sourceSubdir。"""
+    data = _static_manifest_dict()
+    data["sourceSubdir"] = bad
+    with pytest.raises(SchemaError):
+        InstanceManifest.from_dict(data)

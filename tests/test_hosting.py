@@ -490,6 +490,135 @@ def test_build_and_host_frontend_no_artifact(
     assert builds[0]["status"] == "failed"
 
 
+def test_build_and_host_frontend_subdir_uses_subdir_cwd(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-503：frontend/ 子目录实例的 install/build 必须在子目录执行，
+    否则 npm ci / npm run build 在 current/ 根找不到子包 package.json。"""
+    from local_webpage_access.models import EntryConfig
+
+    workspace.ensure_app_dirs("spa-sub")
+    current = workspace.app_current("spa-sub")
+    fe = current / "frontend"
+    fe.mkdir()
+    (fe / "package.json").write_text(
+        '{"dependencies":{"vue":"^3"},"scripts":{"build":"vite build"}}'
+    )
+
+    detection = DetectionResult(
+        kind=Kind.NODE,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.TINY,
+        form="frontend-static",
+        confidence="high",
+        stack=["vue", "vite"],
+        source_subdir="frontend",
+    )
+    detection.entry = EntryConfig(
+        install="npm ci",
+        build="npm run build",
+        buildOutputDir="frontend/dist",
+    )
+    manifest = build_manifest_from_detection(
+        instance_id="spa-sub",
+        display_name="SpaSub",
+        detection=detection,
+        workspace=workspace,
+    )
+    manifest.save(workspace.app_manifest_path("spa-sub"))
+    registry.upsert_from_manifest(manifest)
+
+    cwds: list[Path] = []
+
+    def fake_run(cmd, *, cwd, log_path, **kw):
+        cwds.append(Path(cwd))
+        if "build" in cmd:
+            dist = Path(cwd) / "dist"
+            dist.mkdir(exist_ok=True)
+            (dist / "index.html").write_text("<html>built</html>")
+        return _subprocess_completed(0)
+
+    monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
+
+    built = build_and_host_frontend(workspace, config, registry, "spa-sub")
+    assert built.status == Status.RUNNING
+    # install 与 build 都在 frontend/ 子目录执行
+    assert cwds and all(cwd == fe for cwd in cwds)
+    # 产物来自 frontend/dist，被同步到 public/
+    assert (workspace.app_public("spa-sub") / "index.html").is_file()
+
+    stop_instance(workspace, config, registry, "spa-sub")
+
+
+def test_build_and_host_frontend_rejects_source_subdir_escape(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-507：被污染的 sourceSubdir=../outside 不得成为 npm cwd。"""
+    from local_webpage_access.models import EntryConfig
+
+    workspace.ensure_app_dirs("spa-escape")
+    current = workspace.app_current("spa-escape")
+    outside = current.parent / "outside"
+    outside.mkdir()
+    (outside / "package.json").write_text(
+        '{"scripts":{"build":"vite build"}}'
+    )
+    fe = current / "frontend"
+    fe.mkdir()
+    (fe / "package.json").write_text(
+        '{"dependencies":{"vue":"^3"},"scripts":{"build":"vite build"}}'
+    )
+
+    detection = DetectionResult(
+        kind=Kind.NODE,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.TINY,
+        form="frontend-static",
+        confidence="high",
+        stack=["vue", "vite"],
+        source_subdir="frontend",
+    )
+    detection.entry = EntryConfig(
+        install="npm ci",
+        build="npm run build",
+        buildOutputDir="frontend/dist",
+    )
+    manifest = build_manifest_from_detection(
+        instance_id="spa-escape",
+        display_name="SpaEscape",
+        detection=detection,
+        workspace=workspace,
+    )
+    manifest.save(workspace.app_manifest_path("spa-escape"))
+    registry.upsert_from_manifest(manifest)
+
+    import local_webpage_access.hosting as hosting_mod
+
+    real_load = hosting_mod._load_manifest
+
+    def poisoned_load(ws, iid):
+        loaded = real_load(ws, iid)
+        loaded.sourceSubdir = "../outside"
+        return loaded
+
+    monkeypatch.setattr(hosting_mod, "_load_manifest", poisoned_load)
+
+    cwds: list[Path] = []
+
+    def fake_run(cmd, *, cwd, log_path, **kw):
+        cwds.append(Path(cwd))
+        return _subprocess_completed(0)
+
+    monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
+
+    with pytest.raises(BuildError):
+        build_and_host_frontend(workspace, config, registry, "spa-escape")
+    assert cwds == []
+    assert not any(cwd.resolve() == outside.resolve() for cwd in cwds)
+
+
 # ---- 辅助 ------------------------------------------------------------------
 
 

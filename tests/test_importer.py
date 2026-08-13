@@ -1695,6 +1695,70 @@ def test_build_manifest_small_profile_uses_small_limits(workspace: Workspace) ->
     assert manifest.container.resourceLimits.memory == "256m"
 
 
+def test_build_manifest_plan_failure_fails_closed(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-501：generate_plans 失败时容器后端应标记 pending（失败封闭），
+    不得退回 servesUi-only 契约导致首页 200 假绿。"""
+    from local_webpage_access import candidate_generator
+    from local_webpage_access.importer import build_manifest_from_detection
+    from local_webpage_access.models import EntryConfig, ProjectEvidence, ResourceProfile
+    from local_webpage_access.scanner import DetectionResult
+
+    detection = DetectionResult(
+        kind=Kind.PYTHON,
+        runtime=Runtime.DOCKER_COMPOSE,
+        servingMode=ServingMode.CONTAINER,
+        resourceProfile=ResourceProfile.SMALL,
+        internalPort=8000,
+        entry=EntryConfig(
+            install="pip install -r requirements.txt",
+            start="uvicorn main:app",
+        ),
+        confidence="high",
+        evidence=ProjectEvidence(root="."),
+    )
+
+    def boom(evidence):
+        raise RuntimeError("plan generation boom")
+
+    monkeypatch.setattr(candidate_generator, "generate_plans", boom)
+    manifest = build_manifest_from_detection(
+        instance_id="api",
+        display_name="api",
+        detection=detection,
+        workspace=workspace,
+    )
+    assert manifest.status == Status.PENDING
+    assert manifest.capabilityContract is None
+
+
+def test_build_manifest_empty_plans_fails_closed(workspace: Workspace, tmp_path: Path) -> None:
+    """BUG-505：scanner 识别为容器（如 manage.py 无 Django 依赖）但候选层
+    计划为空时，manifest 应 pending（失败封闭），不得 STOPPED + servesUi-only 假绿。"""
+    from local_webpage_access.importer import build_manifest_from_detection
+    from local_webpage_access.scanner import Scanner
+
+    (tmp_path / "manage.py").write_text("#!/usr/bin/env python\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname="x"\nversion="0.1"\ndependencies=[]\n'
+    )
+    detection = Scanner().detect(tmp_path)
+    assert detection.runtime == Runtime.DOCKER_COMPOSE
+    assert detection.pending is False  # 扫描层识别成功
+
+    manifest = build_manifest_from_detection(
+        instance_id="dj",
+        display_name="dj",
+        detection=detection,
+        workspace=workspace,
+    )
+    assert manifest.status == Status.PENDING
+    assert manifest.capabilityContract is None
+    assert detection.pending is True
+    assert any("计划为空" in n for n in detection.notes)
+
+
 # ---- IMP-015：导入检测 .env.example 登记事件 ------------------------------
 
 

@@ -278,6 +278,34 @@ def _read_pipfile(path: Path) -> set[str]:
     return deps
 
 
+def _read_poetry_deps(data: dict) -> set[str]:
+    """读取 Poetry 依赖（BUG-502）。
+
+    Poetry 项目把依赖声明在 ``[tool.poetry.dependencies]``、``[tool.poetry.dev-dependencies]``
+    以及 ``[tool.poetry.group.<name>.dependencies]``，而非 PEP 621 的
+    ``[project.dependencies]``。仅解析 PEP 621 会把 Poetry-only 声明的
+    FastAPI 等项目误判 pending。忽略 ``python`` 这一版本约束键。
+    """
+    deps: set[str] = set()
+    poetry = data.get("tool", {}).get("poetry", {})
+    if not isinstance(poetry, dict):
+        return deps
+    sections: list[object] = [poetry.get("dependencies"), poetry.get("dev-dependencies")]
+    groups = poetry.get("group", {})
+    if isinstance(groups, dict):
+        for group in groups.values():
+            if isinstance(group, dict):
+                sections.append(group.get("dependencies"))
+    for items in sections:
+        if not isinstance(items, dict):
+            continue
+        for key in items:
+            name = key.strip().lower()
+            if name and name != "python":
+                deps.add(name)
+    return deps
+
+
 def _collect_python_deps(root: Path, summary: FileSummary) -> set[str]:
     deps: set[str] = set()
     if summary.has_requirements_txt:
@@ -297,6 +325,9 @@ def _collect_python_deps(root: Path, summary: FileSummary) -> set[str]:
                 if isinstance(items, list):
                     for item in items:
                         deps.add(re.split(r"[<>=!\[ ]", str(item), maxsplit=1)[0].strip().lower())
+            # BUG-502：Poetry 项目把依赖声明在 [tool.poetry.dependencies]，
+            # 仅读 PEP 621 project.dependencies 会漏掉 Poetry-only 的 FastAPI 等。
+            deps |= _read_poetry_deps(data)
         except (OSError, tomllib.TOMLDecodeError):
             pass
     return deps
@@ -334,6 +365,22 @@ class DetectionResult:
 # ---- 扫描器 -----------------------------------------------------------------
 
 
+def _apply_preflight(result: DetectionResult, preflight) -> None:
+    """把预检结果合并进 :class:`DetectionResult`，REJECTED 时置 pending（BUG-498）。
+
+    预检拒绝意味着配置不可部署（如 COPY 源缺失、entrypoint 脚本缺失），
+    必须让失败出声：置 pending 阻断导入，而非仅记录 notes 继续假装识别成功。
+    """
+    if preflight.notes:
+        result.notes.extend(preflight.notes)
+    if preflight.warnings:
+        result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+    if preflight.rejections:
+        result.notes.extend(f"[预检拒绝] {r}" for r in preflight.rejections)
+        result.pending = True
+        result.confidence = "low"
+
+
 class Scanner:
     """项目类型识别器（确定性规则）。"""
 
@@ -357,10 +404,7 @@ class Scanner:
                 result.kind = Kind.NODE
                 # 仍执行预检（无害）
                 preflight = _preflight_check(result, project_dir)
-                if preflight.notes:
-                    result.notes.extend(preflight.notes)
-                if preflight.warnings:
-                    result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+                _apply_preflight(result, preflight)
                 return result
             # 有主包：用主包摘要替代根摘要
             result.primary_package = mono.primary.path
@@ -373,10 +417,7 @@ class Scanner:
             self._apply_workspace_entry(result, mono.primary, summary)
             # 预检
             preflight = _preflight_check(result, project_dir)
-            if preflight.notes:
-                result.notes.extend(preflight.notes)
-            if preflight.warnings:
-                result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+            _apply_preflight(result, preflight)
             return result
 
 
@@ -387,35 +428,58 @@ class Scanner:
         candidates = _generate_candidates(evidence)
         result.candidates = candidates
 
-        # 子目录布局检测（DEV-105）：若候选含 sourceSubdir，使用子目录摘要识别。
+        # 子目录布局检测（DEV-105 / BUG-495 / BUG-496）：消费 top primary 候选。
+        # 此前仅对 kind=="python" 的子目录候选提前返回，导致 frontend/ Vite 子目录
+        # 被误判 static、server/ Express 子目录被判 pending。改为按候选 kind 路由。
         subdir_candidate = next(
             (c for c in candidates if c.sourceSubdir and c.confidenceTier == "primary"),
             None,
         )
-        if (
-            subdir_candidate
-            and subdir_candidate.kind == "python"
-            and subdir_candidate.sourceSubdir
-        ):
+        if subdir_candidate and subdir_candidate.sourceSubdir:
             # 用子目录作为工程根进行识别
             subdir = project_dir / subdir_candidate.sourceSubdir
             subdir_summary = summarize(subdir)
             result.source_subdir = subdir_candidate.sourceSubdir
-            # 仍检测 SQLite（基于子目录摘要）
+
+            # BUG-497：子目录重型数据库依赖也要标记 pending（此前只在根目录检查）。
+            heavy = self._detect_heavy_db(subdir_summary)
+            if heavy:
+                result.pending = True
+                result.confidence = "medium"
+                result.notes.append(
+                    f"检测到重型数据库依赖：{', '.join(sorted(heavy))}，标记 pending"
+                )
+                self._fill_language(subdir_summary, result)
+                result.notes.append(
+                    f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录"
+                )
+                return result
+
             self._detect_sqlite(subdir_summary, result)
-            # 检测 Python 项目
-            self._detect_python(subdir_summary, result)
-            # 修正 install 命令中的 requirements 路径（若子目录有 requirements.txt）
-            if subdir_summary.has_requirements_txt and result.entry.install:
-                result.entry.install = "pip install -r requirements.txt"
-            elif subdir_summary.has_requirements_prod and result.entry.install:
-                result.entry.install = "pip install -r requirements-prod.txt"
+            if subdir_candidate.kind == "python":
+                # 检测 Python 项目
+                self._detect_python(subdir_summary, result)
+                # 修正 install 命令中的 requirements 路径（若子目录有 requirements.txt）
+                if subdir_summary.has_requirements_txt and result.entry.install:
+                    result.entry.install = "pip install -r requirements.txt"
+                elif subdir_summary.has_requirements_prod and result.entry.install:
+                    result.entry.install = "pip install -r requirements-prod.txt"
+            elif subdir_candidate.kind == "node":
+                # BUG-495/BUG-496：Node 子目录（frontend 或 backend）也走子目录识别。
+                self._detect_node(subdir_summary, result)
+                if subdir_candidate.form == "frontend-static":
+                    # 纯前端子目录：构建产物在 <subdir>/dist，供 hosting 定位
+                    result.entry.buildOutputDir = f"{subdir_candidate.sourceSubdir}/dist"
+            else:
+                result.pending = True
+                result.confidence = "low"
+                result.notes.append(
+                    f"子目录候选 kind={subdir_candidate.kind} 无法识别，标记 pending"
+                )
+
             # 预检
             preflight = _preflight_check(result, project_dir)
-            if preflight.notes:
-                result.notes.extend(preflight.notes)
-            if preflight.warnings:
-                result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+            _apply_preflight(result, preflight)
             result.notes.append(
                 f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录"
             )
@@ -465,11 +529,9 @@ class Scanner:
 
         # IMP-058 Gate-A：Layer 2 静态预检（不 build，毫秒级检查配置可行性）。
         # 自动修正 shell 操作符、alembic cwd 等，修正事件写入 notes。
+        # REJECTED 时置 pending（BUG-498：破损门禁不再静默放行）。
         preflight = _preflight_check(result, project_dir)
-        if preflight.notes:
-            result.notes.extend(preflight.notes)
-        if preflight.warnings:
-            result.notes.extend(f"[预检警告] {w}" for w in preflight.warnings)
+        _apply_preflight(result, preflight)
 
         return result
 

@@ -18,7 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from local_webpage_access.errors import SchemaError
+from local_webpage_access.errors import PathError, SchemaError
 from local_webpage_access.logging import now_iso
 
 SCHEMA_VERSION = 1
@@ -616,6 +616,19 @@ class InstanceManifest(BaseModel):
     @classmethod
     def _coerce_enum(cls, v: Any) -> Any:
         return v
+
+    @field_validator("sourceSubdir")
+    @classmethod
+    def _check_source_subdir(cls, v: Any) -> Any:
+        """BUG-507：写入/加载入口拒绝绝对路径与 ``..`` 穿越。"""
+        from local_webpage_access.paths import validate_source_subdir
+
+        if v is None:
+            return None
+        try:
+            return validate_source_subdir(v)
+        except PathError as exc:
+            raise ValueError(str(exc)) from exc
 
     @model_validator(mode="after")
     def _check_runtime_serving_consistency(self) -> InstanceManifest:

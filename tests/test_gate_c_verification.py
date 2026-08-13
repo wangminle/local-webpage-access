@@ -754,6 +754,148 @@ class TestBackendCapabilityObservation:
                         f"guessed 探针 {probe.path} 不应是 mandatory"
                     )
 
+    def test_backend_plan_discovers_health_probe_from_source(self, tmp_path: Path) -> None:
+        """BUG-504：源码声明的 /health 路由生成 discovered mandatory 探针，
+        使 servesApi 契约有可满足的证据来源。"""
+        from local_webpage_access.evidence_collector import collect
+        from local_webpage_access.candidate_generator import generate_plans
+
+        (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n\n"
+            '@app.get("/health")\n'
+            "def health():\n"
+            '    return {"ok": True}\n'
+        )
+
+        plans = generate_plans(collect(tmp_path))
+        primary = [p for p in plans if p.confidenceTier == "primary"]
+        assert len(primary) >= 1
+        probes = primary[0].capabilityContract.requiredProbes
+        discovered = [p for p in probes if p.source == "discovered"]
+        assert len(discovered) == 1
+        assert discovered[0].path == "/health"
+        assert discovered[0].isMandatory is True
+
+    def test_node_backend_plan_discovers_health_probe(self, tmp_path: Path) -> None:
+        """BUG-504：Node 后端 app.get('/health') 同样生成 discovered 探针。"""
+        import json
+
+        from local_webpage_access.evidence_collector import collect
+        from local_webpage_access.candidate_generator import generate_plans
+
+        server = tmp_path / "server"
+        server.mkdir()
+        (server / "package.json").write_text(json.dumps({
+            "dependencies": {"express": "^4"},
+            "scripts": {"start": "node server.js"},
+        }))
+        (server / "server.js").write_text(
+            "const app = require('express')();\n"
+            "app.get('/health', (req, res) => res.json({ok: true}));\n"
+        )
+
+        plans = generate_plans(collect(tmp_path))
+        primary = [p for p in plans if p.confidenceTier == "primary"]
+        assert len(primary) >= 1
+        probes = primary[0].capabilityContract.requiredProbes
+        discovered = [p for p in probes if p.source == "discovered"]
+        assert len(discovered) == 1
+        assert discovered[0].path == "/health"
+        assert discovered[0].isMandatory is True
+
+    def test_post_health_route_is_not_discovered_as_get_probe(self, tmp_path: Path) -> None:
+        """BUG-506：@app.post("/health") 不得生成 mandatory GET /health 探针。"""
+        from local_webpage_access.evidence_collector import collect
+        from local_webpage_access.candidate_generator import generate_plans
+
+        (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n\n"
+            '@app.post("/health")\n'
+            "def health():\n"
+            '    return {"ok": True}\n'
+        )
+
+        plans = generate_plans(collect(tmp_path))
+        primary = [p for p in plans if p.confidenceTier == "primary"]
+        assert len(primary) >= 1
+        discovered = [
+            p for p in primary[0].capabilityContract.requiredProbes
+            if p.source == "discovered"
+        ]
+        assert discovered == []
+
+    def test_express_post_health_is_not_discovered(self, tmp_path: Path) -> None:
+        """BUG-506：Express app.post('/health') 不得生成 mandatory GET 探针。"""
+        import json
+
+        from local_webpage_access.evidence_collector import collect
+        from local_webpage_access.candidate_generator import generate_plans
+
+        server = tmp_path / "server"
+        server.mkdir()
+        (server / "package.json").write_text(json.dumps({
+            "dependencies": {"express": "^4"},
+            "scripts": {"start": "node server.js"},
+        }))
+        (server / "server.js").write_text(
+            "const app = require('express')();\n"
+            "app.post('/health', (req, res) => res.json({ok: true}));\n"
+        )
+
+        plans = generate_plans(collect(tmp_path))
+        primary = [p for p in plans if p.confidenceTier == "primary"]
+        assert len(primary) >= 1
+        discovered = [
+            p for p in primary[0].capabilityContract.requiredProbes
+            if p.source == "discovered"
+        ]
+        assert discovered == []
+
+    def test_commented_get_health_is_not_discovered(self, tmp_path: Path) -> None:
+        """BUG-506：注释中的 @app.get(\"/health\") 不得生成 mandatory 探针。"""
+        from local_webpage_access.evidence_collector import collect
+        from local_webpage_access.candidate_generator import generate_plans
+
+        (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+        (tmp_path / "main.py").write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n\n"
+            '# @app.get("/health")\n'
+            "def unused():\n"
+            "    pass\n"
+        )
+
+        plans = generate_plans(collect(tmp_path))
+        primary = [p for p in plans if p.confidenceTier == "primary"]
+        assert len(primary) >= 1
+        discovered = [
+            p for p in primary[0].capabilityContract.requiredProbes
+            if p.source == "discovered"
+        ]
+        assert discovered == []
+
+    def test_backend_plan_without_health_route_stays_guessed(self, tmp_path: Path) -> None:
+        """BUG-504：无健康路由的后端不产生 mandatory 探针（guessed 仅诊断），
+        由验证器按「API 无法实证 → DEGRADED」降级，不构成不可满足谓词。"""
+        from local_webpage_access.evidence_collector import collect
+        from local_webpage_access.candidate_generator import generate_plans
+
+        (tmp_path / "requirements.txt").write_text("flask\n")
+        (tmp_path / "app.py").write_text(
+            "from flask import Flask\napp = Flask(__name__)\n"
+        )
+
+        plans = generate_plans(collect(tmp_path))
+        primary = [p for p in plans if p.confidenceTier == "primary"]
+        assert len(primary) >= 1
+        probes = primary[0].capabilityContract.requiredProbes
+        assert not [p for p in probes if p.source == "discovered"]
+        assert all(not p.isMandatory for p in probes)
+
 
 class TestContainerRuntimeEvidence:
     """BUG-481：容器能力必须由运行时结果证明。"""
@@ -862,10 +1004,13 @@ class TestContainerRuntimeEvidence:
             servesApi=True,
             requiresDatabase=True,
             requiresMigrations=True,
+            requiredProbes=[
+                ProbeSpec(path="/health", isMandatory=True, source="declared"),
+            ],
         ).model_dump()
         with (
             patch("local_webpage_access.hosting._wait_for_http", return_value=True),
-            patch("local_webpage_access.hosting.api_probe", return_value=(True, "/api/")),
+            patch("local_webpage_access.hosting._probe_path", return_value=(True, 200)),
             patch("local_webpage_access.hosting._verify_sqlite_database", return_value=True),
             patch("local_webpage_access.hosting._migration_command_succeeded", return_value=True),
         ):
@@ -876,6 +1021,36 @@ class TestContainerRuntimeEvidence:
         assert result["observed_capabilities"] == [
             "api", "database", "migrations", "ui",
         ]
+
+    def test_hosting_guessed_probe_does_not_satisfy_serves_api(self, workspace) -> None:
+        """BUG-499：guessed 探针（如通用 /health）不得满足 servesApi。
+
+        只有 declared/discovered 探针通过才可写入 observed 'api'；
+        偶然 /health 200（guessed）不得当作 API 能力证据（避免假绿）。
+        同时不得构成不可满足的成功谓词（BUG-504）：无声明/发现探针时
+        API 能力无法实证 → 降级为 DEGRADED 告警，而非 failed 假红。
+        """
+        from local_webpage_access.hosting import _evaluate_container_verification
+
+        manifest = self._sqlite_manifest()
+        manifest.capabilityContract = CapabilityContract(
+            servesUi=True,
+            servesApi=True,
+            requiredProbes=[
+                ProbeSpec(path="/health", isMandatory=False, source="guessed"),
+            ],
+        ).model_dump()
+        with (
+            patch("local_webpage_access.hosting._wait_for_http", return_value=True),
+            patch("local_webpage_access.hosting._probe_path", return_value=(True, 200)),
+        ):
+            result = _evaluate_container_verification(
+                18000, manifest, workspace, MagicMock(), "api",
+            )
+        # guessed /health 200 不得观察为 api；无证据来源 → degraded（非 failed 假红）
+        assert result["overall_status"] == "degraded"
+        assert "api" not in result["observed_capabilities"]
+        assert any("无法实证" in w for w in result["optional_warnings"])
 
     def test_hosting_optional_probe_failure_is_degraded(self, workspace) -> None:
         from local_webpage_access.hosting import _evaluate_container_verification

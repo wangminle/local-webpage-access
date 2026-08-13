@@ -107,6 +107,16 @@ def api_probe(
 # ---- Gate-C C.05：证据驱动探针 ----------------------------------------------
 
 
+def _probe_status_passed(status: int, expected_status: int | None) -> bool:
+    """ProbeSpec 通过语义：2xx/3xx 视为成功；否则需精确匹配 expectedStatus。
+
+    ``expectedStatus=200`` 是「健康 OK」哨兵，真实端点返回 204 不得假红（BUG-506）。
+    """
+    if 200 <= status < 400:
+        return True
+    return expected_status is not None and status == expected_status
+
+
 def run_probe_spec(
     host_port: int,
     spec: "ProbeSpec",
@@ -129,13 +139,10 @@ def run_probe_spec(
         resp = urlopen_direct(url, timeout=timeout)
         code = getattr(resp, "status", None) or resp.getcode()
         code_int = int(code)
-        if spec.expectedStatus and code_int == spec.expectedStatus:
-            return (True, code_int)
-        if not spec.expectedStatus and 200 <= code_int < 400:
-            return (True, code_int)
-        return (False, code_int)
+        return (_probe_status_passed(code_int, spec.expectedStatus), code_int)
     except urllib.error.HTTPError as exc:
-        return (False, exc.code)
+        code_int = int(exc.code)
+        return (_probe_status_passed(code_int, spec.expectedStatus), code_int)
     except Exception:  # noqa: BLE001
         return (False, None)
 

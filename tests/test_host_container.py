@@ -510,6 +510,58 @@ def test_start_container_keeps_ids_when_observe_returns_none(
     assert "build" not in fake_runtime.calls
 
 
+def test_start_container_reruns_required_capabilities(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-500：轻量 start 也要重跑必选能力，mandatory 探针失败 → FAILED。"""
+    from local_webpage_access.models import CapabilityContract, ProbeSpec
+
+    m = _seed_container_instance(workspace, registry, "api")
+    m.container.containerId = "cid-keep"
+    m.container.imageId = "sha256:keep"
+    m.container.hostPort = 21000
+    m.capabilityContract = CapabilityContract(
+        servesUi=True,
+        servesApi=True,
+        requiredProbes=[
+            ProbeSpec(path="/health", isMandatory=True, source="declared"),
+        ],
+    ).model_dump()
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+    registry.upsert_container(
+        "api",
+        {
+            "projectName": "lwa-api",
+            "internalPort": 8000,
+            "composePath": "x",
+            "dockerfilePath": "y",
+            "hostPort": 21000,
+        },
+    )
+
+    monkeypatch.setattr(
+        fake_runtime,
+        "container_id",
+        lambda self, iid, *, all_containers=False: (
+            "cid-keep" if all_containers else None
+        ),
+    )
+    monkeypatch.setattr(
+        fake_runtime,
+        "image_id",
+        lambda self, iid: None,
+    )
+    # 必选探针失败（存活仍通过，但 /health 404）
+    monkeypatch.setattr(
+        "local_webpage_access.hosting._probe_path",
+        lambda *a, **kw: (False, 404),
+    )
+
+    started = start_container(workspace, config, registry, "api")
+    assert started.status == Status.FAILED
+
+
 def test_host_container_rejects_non_container_manifest(
     workspace, registry, config, fake_runtime
 ) -> None:

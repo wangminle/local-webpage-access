@@ -94,6 +94,64 @@ def validate_path_alias(
     return alias
 
 
+def validate_source_subdir(source_subdir: str | None) -> str | None:
+    """校验 ``sourceSubdir`` 是 ``current/`` 内的相对路径（BUG-507）。
+
+    ``None`` / 空白视为根目录（返回 ``None``）。拒绝绝对路径、盘符、
+    NUL、以及任何 ``..`` 段。通过则返回规范化的 POSIX 相对路径。
+    """
+    from local_webpage_access.errors import PathError
+
+    if source_subdir is None:
+        return None
+    if not isinstance(source_subdir, str):
+        raise PathError(f"非法 sourceSubdir：{source_subdir!r}")
+    raw = source_subdir.strip()
+    if not raw:
+        return None
+    if "\x00" in raw:
+        raise PathError(f"非法 sourceSubdir：{source_subdir!r}")
+    normalized = raw.replace("\\", "/")
+    if Path(raw).is_absolute() or Path(normalized).is_absolute() or normalized.startswith("/"):
+        raise PathError(
+            f"sourceSubdir 必须是 current 内的相对路径，收到 {source_subdir!r}",
+        )
+    if len(normalized) >= 2 and normalized[1] == ":":
+        raise PathError(
+            f"sourceSubdir 必须是 current 内的相对路径，收到 {source_subdir!r}",
+        )
+    parts = [p for p in normalized.split("/") if p not in ("", ".")]
+    if not parts:
+        return None
+    if any(p == ".." for p in parts):
+        raise PathError(
+            f"sourceSubdir 不得包含 '..'，收到 {source_subdir!r}",
+        )
+    return "/".join(parts)
+
+
+def resolve_source_workdir(base: Path, source_subdir: str | None) -> Path:
+    """把 ``sourceSubdir`` 解析为 ``base`` 内的工作目录（BUG-507）。
+
+    安全但目录不存在时回退 ``base``（与历史 hosting 行为一致）。
+    绝对路径、``..``、符号链接逃逸抛 :class:`PathError`。
+    """
+    from local_webpage_access.errors import PathError
+
+    base_resolved = Path(base).resolve()
+    sanitized = validate_source_subdir(source_subdir)
+    if sanitized is None:
+        return base_resolved
+    candidate = (base_resolved / sanitized).resolve()
+    if not candidate.is_relative_to(base_resolved):
+        raise PathError(
+            f"sourceSubdir {source_subdir!r} 越出源码目录 {base_resolved}",
+        )
+    if candidate.is_dir():
+        return candidate
+    return base_resolved
+
+
 class Workspace:
     """Local Webpage Access 工作区路径解析器。
 
@@ -293,6 +351,8 @@ __all__ = [
     "REGISTRY_DB_FILENAME",
     "validate_instance_id",
     "validate_path_alias",
+    "validate_source_subdir",
+    "resolve_source_workdir",
     "find_workspace_root",
     "require_workspace",
 ]
