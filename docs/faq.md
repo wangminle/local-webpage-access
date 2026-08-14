@@ -437,9 +437,10 @@ lwa gateway switch builtin               # 降级 builtin（Caddy 坏掉时也�
 lwa gateway switch builtin --dry-run     # 只看将影响的实例
 ```
 
-- 切到 **builtin**：保留路径别名元数据（`routeHost`），但统一入口不可用；站点仍走各 hostPort。
-- 切回 **caddy**：按 manifest 重建别名片段并 reload。
-- 失败会回滚；若回滚也失败，结果带 `degraded` + `repairHint`，**不会**假报成功。
+- 切到 **builtin**：保留路径别名元数据（`routeHost`），但统一入口不可用；站点仍走各 hostPort。若存在**运行中**但 manifest 损坏/无法加载的静态实例，切换会 fail-closed 拒绝执行（`GATEWAY_MANIFEST_UNLOADABLE`，BUG-516）——这些实例切过去无进程承接会静默下线，请先修复或删除。
+- 切回 **caddy**：按 manifest 重建别名片段并 reload。若 Caddy master 启动失败，会把切换前停掉的 builtin 静态服务尽力原样拉回（`http.server`，BUG-517/523），不留下站点下线。
+- 切换事务全程持有跨进程锁 `run/gateway-switch.lock`（BUG-514）：CLI 与管理页并发切换时，后到者在锁上等待约 15s 后快速失败并提示稍后重试（`GATEWAY_SWITCH_LOCKED`），不会交错写 YAML/manifest。
+- 失败会回滚（含 manifest 与 registry `static_sites` 行，BUG-515）；若回滚也失败，结果带 `degraded` + `repairHint`，**不会**假报成功。
 - `--json` / `POST /api/gateway/switch` 返回中：`ok=true` 表示切换事务本身成功，但 **`ok` ≠ `fullyOk`**；`accessOk=false` 表示后端已切成功、访问复核仍有风险（不假绿）。`fullyOk` 需切换与访问复核均通过。
 - **主动停止的实例**（`desiredState=stopped`）在 access review 中标 `[SKIP]`，不会因回环 REFUSED 拖垮 switch/review 的 overall（BUG-301）。
 - 管理页等价：`POST /api/gateway/switch`（body `{"backend":"caddy"|"builtin"}`）。

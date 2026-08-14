@@ -752,3 +752,18 @@ def test_apt_deps_no_requirements_file(workspace: Workspace) -> None:
     m = _mk_manifest(install="pip install .", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "apt-get install -y --no-install-recommends libzbar0" not in content
+
+
+def test_extract_requirements_file_glued_dash_r() -> None:
+    """BUG-526：pip install -rrequirements.txt 无空格也能解析文件名。"""
+    from local_webpage_access.dockerfile_templates import _extract_requirements_file
+
+    assert _extract_requirements_file("pip install -rrequirements-prod.txt") == (
+        "requirements-prod.txt"
+    )
+    assert _extract_requirements_file("pip install -r requirements.txt") == (
+        "requirements.txt"
+    )
+    assert _extract_requirements_file("pip install --registry https://example.com/simple .") == (
+        "requirements.txt"
+    )

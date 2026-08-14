@@ -340,6 +340,43 @@ def test_rewrite_registry_paths_boundary_and_idempotent(ws_root: Path) -> None:
     assert a_app2 == f"{new}/apps/a/current"
 
 
+def test_rewrite_registry_paths_does_not_select_like_underscore_siblings(
+    ws_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-527：路径中的 _ 不得当 LIKE 通配符，把兄弟路径选进改写集合。"""
+    ws = Workspace(ws_root)
+    old = "/tmp/user_name/lwa"
+    new = "/tmp/relocated/lwa"
+    real = f"{old}/apps/a/current"
+    like_sibling = "/tmp/userXname/lwa/apps/b/current"
+    conn = sqlite3.connect(ws.db_path)
+    try:
+        for iid, app_path in (("a", real), ("b", like_sibling)):
+            conn.execute(
+                "INSERT INTO instances (id, name, version, kind, runtime, serving_mode, "
+                "status, desired_state, app_path, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (iid, iid, "1", "static", "docker", "container", "stopped",
+                 "stopped", app_path, "t", "t"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        wm, "_rewrite_text_paths", lambda text, _old, _new: f"HIT:{text}"
+    )
+    wm.rewrite_registry_paths(ws.db_path, old, new)
+    conn = sqlite3.connect(ws.db_path)
+    try:
+        a_app = conn.execute("SELECT app_path FROM instances WHERE id='a'").fetchone()[0]
+        b_app = conn.execute("SELECT app_path FROM instances WHERE id='b'").fetchone()[0]
+    finally:
+        conn.close()
+    assert a_app == f"HIT:{real}"
+    assert b_app == like_sibling
+
+
 def test_contains_old_path_prefix_boundary() -> None:
     """BUG-519：old 为 new 前缀或兄弟目录时，_contains_old_path 不得误报。"""
     old = "/home/u/lwa"

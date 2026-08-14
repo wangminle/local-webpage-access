@@ -263,6 +263,9 @@ Content-Type: application/json
 与 `lwa gateway switch` 同源原子事务。成功返回 `GatewaySwitchResult`（含 `ok` /
 `fullyOk` / `accessOk` / `stages`）；后端切换失败时 HTTP 409 + detail 为同一结构。
 `ok=true` 但 `accessOk=false` 表示后端已切成功、访问复核有风险（不假绿）。
+并发护栏（V0.7.10）：切换全程持跨进程锁，与 CLI 或另一个管理页切换并发时，
+后到者约 15s 后失败并提示稍后重试（BUG-514）；切 builtin 遇运行中但 manifest
+损坏的静态实例时拒绝执行（BUG-516），详情见切换结果 `error`。
 
 ### 浏览量统计（IMP-024 / 025 / 026 / 027 / 028）
 

@@ -533,6 +533,11 @@
 | BUG-520 | 修复 | sync_status 变化判定用 registry 值而 observe 回写判定用 manifest 值，分叉时永远报告变化、永不落库 | 2026-08-14 01:11 | 2026-08-14 12:57 | 已修复 | status.py:262-313 + lifecycle.py:2177-2181；触发源 build_queue.py:753-777 cancel 与 status.py:410 stale-building 只写 registry；子代理脚本复现；修复：观测变化判定统一用 registry 基准，registry≠manifest 分叉可收敛 |
 | BUG-521 | 修复 | check_health 用 manifest 陈旧 status 覆盖 registry 运行态，与 docstring 矛盾且刷新 updated_at 使 stale-building 兜底永不触发（src 内无调用方，潜在） | 2026-08-14 01:11 | 2026-08-14 12:57 | 已修复 | health.py:308-322；接线前先修；建议只写 last_health_check_at/last_error；修复：check_health 只写 last_error，不再用 manifest 旧状态覆盖 registry status |
 | BUG-522 | 修复 | gateway_switch 将锁内快照或 YAML 备份异常误标为 switch_lock 锁获取失败 | 2026-08-14 17:03 | 2026-08-14 17:03 | 已修复 | 修复：_switch_gateway_locked 在状态变更前分别收敛 snapshot/backup_yml 异常并记录准确阶段，不触发无意义回滚；新增参数化回归测试覆盖两条路径。关联 [[CHK-213]]。 |
+| BUG-523 | 修复 | BUG-517 的 _restore_stopped_builtin 在 caddy 二进制存在但启动失败时调用 gateway.enable，detect_backend 仍返回 caddy，只写站点配置并 reload，不会启动 http.server，被停掉的 builtin 站点实际恢复不回来 | 2026-08-14 19:11 | 2026-08-14 19:20 | 已修复 | CHK-215 复审发现。gateway_service.py:_restore_stopped_builtin 复用 caddy 后端的 StaticGateway；对照 gateway_switch._rollback 应切到 builtin 配置或直接调 _start_builtin。现有 test_start_gateway_restores_builtin_when_caddy_start_fails 用 fake_gateway 整体 mock enable，掩盖真实分支。关联 [[BUG-517]] [[CHK-215]]。；已修复：_restore_stopped_builtin 改为 gateway._start_builtin，避开 detect_backend 的 caddy 分支。回归 test_start_gateway_restore_builtin_starts_http_server_when_caddy_present；gateway_service 42 passed；ruff 通过。 |
+| BUG-524 | 修复 | switch_gateway 外层 except Exception 包住整个 with _switch_lock 块，注释写锁获取失败，但锁内 _rollback/_record_event 再抛异常会被误标为 switch_lock 阶段并重复记失败审计事件 | 2026-08-14 19:11 | 2026-08-14 19:27 | 已修复 | CHK-215 低危。gateway_switch.py:610。建议只捕获 LwaError code=GATEWAY_SWITCH_LOCKED，或把锁获取单独放小 try。关联 [[BUG-514]] [[BUG-522]] [[CHK-213]] [[CHK-215]]。；已修复：外层 except 仅把 LwaError code=GATEWAY_SWITCH_LOCKED 标为 switch_lock，其余事务内未兜底异常标为 failed。回归 test_switch_unexpected_exception_is_not_mislabelled_as_lock；锁占用原用例仍通过。 |
+| BUG-525 | 修复 | start_container 成功分支不清 manifest.lastError，且 update_status 对 last_error=None 跳过不写，曾失败过的实例重启成功后 lwa status 仍显示旧错误 | 2026-08-14 19:11 | 2026-08-14 19:27 | 已修复 | CHK-215 低危。仅展示层面误导。dao.py:254 last_error is not None 才写入。关联 [[CHK-215]]。；已修复：update_status 增加 clear_last_error；start_container 成功/降级路径与 host_container 成功落盘显式清空 registry last_error。回归 test_update_status_clear_last_error / test_start_container_clears_stale_last_error。 |
+| BUG-526 | 修复 | preflight BUG-498 跳过正则 -r\\s+ 要求 -r 后必须有空白，pip 合法的 pip install -rrequirements.txt 无空格写法会漏检查 | 2026-08-14 19:11 | 2026-08-14 19:27 | 已修复 | CHK-215 低危。方向安全（漏查比误拒好），但与修复意图不符。preflight.py:161。关联 [[BUG-498]] [[CHK-215]]。；已修复：预检跳过正则与 _extract_requirements_file 改为 (?:^\|\s)-r\s* 以识别无空格 -rfile，且不误匹配 --registry。回归 test_chk_v01_tight_dash_r_* / test_extract_requirements_file_glued_dash_r。 |
+| BUG-527 | 修复 | workspace_migrate.rewrite_registry_paths 的 LIKE 模式未转义路径中的 _/%，用户名含下划线时会多选出兄弟路径行 | 2026-08-14 19:11 | 2026-08-14 19:27 | 已修复 | CHK-215 低危。_rewrite_text_paths 会做精确过滤，结果仍正确，只是多扫描。关联 [[BUG-518]] [[CHK-215]]。；已修复：rewrite_registry_paths 改用 substr 精确匹配 old 或 old/、old\ 前缀，不再用 LIKE（避免 _/% 通配）。回归 test_rewrite_registry_paths_does_not_select_like_underscore_siblings；边界/幂等原用例仍通过。 |
 
 ## 调整事项
 
@@ -802,6 +807,9 @@
 | CHK-212 | 检查 | 按 CHK-208 复核意见校正全量审阅报告分级与措辞 | 2026-08-14 13:40 | 2026-08-14 13:40 | 已完成 | 校正 design/plans/全量代码审阅报告-20260814.md 共 7 处：①顶部结论由「确认 major 14 条」改为「14 个候选、约 8～10 达 major」；②新增 CHK-208 复核校正块并注明 12 已修复/2 已关闭；③§一 基线表把 mypy 9/pytest 退出码 1 标为 Windows 快照，补支持平台基线（macOS：mypy 0 issues/74 文件、pytest 2033 passed/10 skipped）；④§二 Major 表加分级列并逐条收窄影响（#1/#14 降级、#4/#6 移出产品队列、#9/#10 收窄、#5 删疑似）；⑤§三 minor 改为「约 90 个候选疑点」；⑥§四 优先级按 CHK-208 重排（P0:#3/7/8/9/11/12/13、P1:#2/5/10、P2:#1/14、移出:#4/6）；⑦§五 测试现状降格为 Windows 快照。仅改报告，不动业务代码/测试。关联 [[CHK-208]] [[CHK-211]] [[BUG-508]]~[[BUG-521]]。 |
 | CHK-213 | 检查 | V0.7.9 后未提交改动（BUG-508~521 共 12 项修复）全量代码审查 | 2026-08-14 16:34 | 2026-08-14 16:34 | 已完成 | ruff/mypy 门禁通过；pytest 2033 passed/0 failed/10 skipped（Docker 集成需环境变量）。逐项核对 12 个修复点未发现功能性 bug；记录 3 处轻微问题：switch_gateway 外层 except 会把 _take_snapshot 阶段异常误标为 switch_lock 阶段（仅诊断误导、行为仍 fail-safe）；_restore_stopped_builtin 的 config 参数未使用；static_gateway._list_builtin_http_server docstring 仍写'必须 -l'与 BUG-512 平台分旗实现矛盾 |
 | CHK-214 | 检查 | 复核全部未提交变更并撰写 commit message（≤280字） | 2026-08-14 17:10 | 2026-08-14 17:10 | 已完成 | 对照 git status/diff/log：21 文件 +988/-56；含 BUG-508～522（511/513 关闭）、回归测试、全量审阅报告/_review_reports、竞品调研。建议主题 V0.7.10-Build2045-20260814（Build=pytest collect 2045）；pyproject/_FALLBACK 仍为 0.7.9，提交前宜先同步版本。建议不纳入 .zcode/plans。正文 218 字。未执行 git commit。 |
+| CHK-215 | 检查 | 复审 V0.7.9/V0.7.10 两次 commit 源码变更（BUG-495～522 修复） | 2026-08-14 19:11 | 2026-08-14 19:11 | 已完成 | 发现 1 个真实缺陷：gateway_service._restore_stopped_builtin（BUG-517）在 caddy 二进制存在但启动失败的场景下，gateway.enable 走 caddy 分支（写站点配置+reload），不会重启 http.server 进程，builtin 站点实际无法恢复；测试用 fake_gateway 掩盖了该路径。另有 4 个低危项：switch_gateway 外层 except 把事务内异常误标为 switch_lock 阶段、start_container 成功后不清 stale lastError、preflight -r 正则不匹配 pip install -rrequirements.txt 无空格形式、rewrite_registry_paths LIKE 未转义 _/%（仅多扫描行，结果仍正确）。其余变更核查无缺陷。 |
+| CHK-216 | 检查 | 逐项核实 BUG-523～527（CHK-215 复审缺陷）工作区修复的正确性与回归覆盖 | 2026-08-14 19:48 | 2026-08-14 19:48 | 已完成 | 5 项全部核实为已正确修复：BUG-523 _restore_stopped_builtin 改调 _start_builtin 并有真实分支回归（backend=caddy 时断言 start_builtin_calls、无 caddy enable 调用）；BUG-524 仅 GATEWAY_SWITCH_LOCKED 标 switch_lock，其余标 failed；BUG-525 update_status 增 clear_last_error，start_container 前段统一清 manifest.lastError、failed 分支重设，host_container 成功落盘清空；BUG-526 预检与 _extract_requirements_file 改 (?:^\|\s)-r\s*，不误匹配 --registry；BUG-527 rewrite_registry_paths 改 substr 精确前缀匹配。全量 pytest 通过（约 2100+ passed / 10 Docker 门控 skipped，exit 0）、ruff 通过、mypy 74 文件无问题。task-list 代码 Bug 527/527 已修复、0 待修复。 |
+| CHK-217 | 检查 | 复核全部未提交变更并撰写 V0.7.11 commit message（≤300字） | 2026-08-14 19:52 | 2026-08-14 19:51 | 已完成 | 对照 git status/diff/log：27 文件 +316/-47；含 BUG-523～527、版本 0.7.11、文档同步（网关切换护栏/workspace-rename SQL）。建议主题 V0.7.11-Build2055-20260814（Build=pytest collect 2055）；正文 209 字。未执行 git commit。 |
 
 ## 测试数据
 
@@ -1190,6 +1198,8 @@
 | OPS-107 | 运维 | 重新部署 patent-disclosure-workflow-v1：导入含 BASE_PATH 支持的最新源码，配置 BASE_PATH=/patent-disclosure，别名下页面和 API 均正常 | 2026-08-10 17:46 | 2026-08-10 17:46 | 已完成 | 访问 http://10.180.106.12:8080/patent-disclosure/；HTML 中 const API='/patent-disclosure'；4 个 API 端点全部 200 |
 | OPS-108 | 运维 | LWA 版本提升至 0.7.8，更新所有版本引用及文档 | 2026-08-12 22:30 | 2026-08-12 23:09 | 已完成 | pyproject.toml/version_info.py/cli/__init__.py/test_version_info.py；docs FAQ+release-checklist；pip install -e . 安装；manager off/on 重启 |
 | OPS-109 | 运维 | 应用版本号提升至 V0.7.9：同步 pyproject/version_info/cli/test_version_info/lwa-update-runtime，并按 BUG-495～507 更新 README/faq/known-limitations/manager-page/testing/release-checklist | 2026-08-13 20:22 | 2026-08-13 20:22 | 已完成 | 活跃引用 0.7.8→0.7.9。FAQ V0.7.8「起」历史标记保留。lwa version 取 git HEAD 主题，提交 V0.7.9-Build2026 后即显示。验证：pytest 2016 passed / 10 skipped；ruff check src tests 通过；mypy 74 文件通过。未执行 git commit。 |
+| OPS-110 | 运维 | 版本号提升至 V0.7.10（pyproject/version_info fallback/CLI docstring/测试断言/lwa-update-runtime skill 当前版本声明） | 2026-08-14 17:21 | 2026-08-14 17:21 | 已完成 | 同步检查全部文档与未提交代码（BUG-508~521）的一致性：README/faq/known-limitations/manager-page 现有描述无矛盾；发现 2 处待办不一致——workspace-rename.md §7.4 手工 SQL 兜底仍用裸 REPLACE+LIKE（BUG-518 已在代码改为边界安全改写，文档未跟进）；faq/manager-page/operations-playbook 的 gateway switch 章节未记载 BUG-514 切换锁（GATEWAY_SWITCH_LOCKED）、BUG-516 fail-closed（GATEWAY_MANIFEST_UNLOADABLE）、BUG-517 启动失败恢复 builtin 三个新行为；release-checklist 第 9 行特性清单停在 V0.7.9，发布时需补 V0.7.10 条目。验证：ruff 通过，pytest 2035 passed/10 skipped |
+| OPS-111 | 运维 | 版本号提升至 V0.7.11 并同步全部文档（BUG-523~527、OPS-110 遗留文档债） | 2026-08-14 19:48 | 2026-08-14 19:48 | 已完成 | 版本：pyproject/version_info fallback+docstring/cli docstring/test_version_info 断言/lwa-update-runtime SKILL 当前版本声明，0.7.10→0.7.11；lwa version 读 git HEAD 主题，提交 V0.7.11-Build... 后生效。文档：README 特性行补 V0.7.10/V0.7.11；release-checklist 示例版本与特性清单补两版本条目；faq/operations-playbook/manager-page 网关切换章节补 BUG-514 切换锁/BUG-516 fail-closed/BUG-517+523 启动失败恢复 builtin（OPS-110 遗留）；workspace-rename §7.4 手工 SQL 兜底改为边界安全 substr+CASE 写法（对齐 BUG-518/527）；known-limitations 补 V0.7.10/11 状态边界。验证：test_version_info 通过、ruff 通过、无残留陈旧版本引用（历史标记 V0.7.8 起/V0.7.9 已覆盖等按惯例保留）。未执行 git commit。 |
 
 ## 规划事项
 
@@ -1239,12 +1249,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 522 | 522 | 0 | 100% |
+| 代码 Bug | 527 | 527 | 0 | 100% |
 | 调整事项 | 46 | 46 | 0 | 100% |
-| 检查事项 | 213 | 213 | 0 | 100% |
+| 检查事项 | 216 | 216 | 0 | 100% |
 | 测试数据 | 6 | 5 | 1 | 83.3% |
 | 文档维护 | 137 | 136 | 1 | 99.3% |
 | 功能开发 | 117 | 116 | 1 | 99.1% |
-| 配置运维 | 108 | 108 | 0 | 100% |
+| 配置运维 | 110 | 110 | 0 | 100% |
 | 规划事项 | 39 | 36 | 3 | 92.3% |
-| **总计** | 1188 | 1182 | 6 | 99.5% |
+| **总计** | 1198 | 1192 | 6 | 99.5% |

@@ -612,10 +612,12 @@ def _extract_requirements_file(install: str) -> str:
 
     返回 ``requirements.txt`` / ``requirements-prod.txt`` 等；解析失败回退
     ``requirements.txt``。文件名仅含字母数字与连字符/点，直接内插 Dockerfile 安全。
+    支持 ``-r file`` 与无空格的 ``-rfile``（BUG-526）；不以 ``--registry`` 中的
+    ``-r`` 子串误匹配。
     """
     import re
 
-    m = re.search(r"-r\s+([A-Za-z0-9_./-]+)", install)
+    m = re.search(r"(?:^|\s)-r\s*([A-Za-z0-9_./-]+)", install)
     return m.group(1) if m else "requirements.txt"
 
 

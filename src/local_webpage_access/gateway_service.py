@@ -185,10 +185,12 @@ def _restore_stopped_builtin(
     gateway: StaticGateway,
     stopped_iids: list[str],
 ) -> None:
-    """Caddy 启动失败时把 start 前停掉的 builtin 静态服务尽力拉回（BUG-517）。
+    """Caddy 启动失败时把 start 前停掉的 builtin 静态服务尽力拉回（BUG-517/523）。
 
     ``stop_all_builtin`` 返回的 iid 含两类：正常追踪实例与 pid-less 孤儿。孤儿
     （iid 形如 ``pid-<n>`` 或 manifest/registry 无记录）无法可靠恢复，跳过。
+    必须调用 ``_start_builtin`` 而非 ``enable``：后者按 ``detect_backend()``
+    分支，caddy 二进制仍在时只 reload、不会拉起 http.server（BUG-523）。
     best-effort：任何失败都不掩盖原始 caddy 启动异常。
     """
     for iid in stopped_iids:
@@ -217,7 +219,11 @@ def _restore_stopped_builtin(
             if not public.is_dir():
                 alt = workspace.app_current(iid) / "public"
                 public = alt if alt.is_dir() else public
-            gateway.enable(iid, host_port, public, wait_health=False)
+            # BUG-523：不可调 enable()。此时 config.staticGateway 仍是 caddy，
+            # detect_backend() 只要 PATH 里有 caddy 就走 Caddy 分支（写站点片段
+            # + reload_all → 再次 caddy start），不会拉起 http.server。对照
+            # gateway_switch._rollback 的 builtin 恢复，直接启动内置进程。
+            gateway._start_builtin(iid, host_port, public)
             log.info("已恢复 builtin 静态服务 %s（port=%d）", iid, host_port)
         except Exception as exc:  # noqa: BLE001
             log.warning("恢复 builtin 静态服务 %s 失败（忽略）：%s", iid, exc)

@@ -244,17 +244,23 @@ class Registry:
         last_observed_at: str | None = None,
         runtime_access: str | None = None,
         clear_observation_error: bool = False,
+        clear_last_error: bool = False,
     ) -> None:
         """更新实例状态（WBS-05.11；IMP-033 扩展观测字段）。
 
         ``observation_error`` 默认哨兵 ``...`` 表示不改该列；传 ``None`` 且
         ``clear_observation_error=True`` 时清空。
+        ``last_error=None`` 同样表示不改该列（BUG-525）；要清空须
+        ``clear_last_error=True``。
         """
         sets = ["status = ?", "updated_at = ?"]
         params: list[Any] = [status, now_iso()]
         if last_error is not None:
             sets.append("last_error = ?")
             params.append(last_error)
+        elif clear_last_error:
+            sets.append("last_error = ?")
+            params.append(None)
         if desired_state is not None:
             sets.append("desired_state = ?")
             params.append(desired_state)

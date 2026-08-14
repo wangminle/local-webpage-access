@@ -255,6 +255,22 @@ def test_update_status_with_desired(registry: Registry) -> None:
     assert row["desired_state"] == "stopped"
 
 
+def test_update_status_none_last_error_does_not_clear(registry: Registry) -> None:
+    """update_status(last_error=None) 表示不改该列，与 observation_error 哨兵同口径。"""
+    registry.upsert_from_manifest(_static_manifest())
+    registry.update_status("demo", "failed", last_error="boom")
+    registry.update_status("demo", "running", last_error=None)
+    assert registry.get_instance("demo")["last_error"] == "boom"
+
+
+def test_update_status_clear_last_error(registry: Registry) -> None:
+    """BUG-525：成功路径须能显式清空 last_error。"""
+    registry.upsert_from_manifest(_static_manifest())
+    registry.update_status("demo", "failed", last_error="boom")
+    registry.update_status("demo", "running", clear_last_error=True)
+    assert registry.get_instance("demo")["last_error"] is None
+
+
 def test_record_started_and_health(registry: Registry) -> None:
     registry.upsert_from_manifest(_static_manifest())
     registry.record_started("demo")

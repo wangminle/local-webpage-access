@@ -483,6 +483,33 @@ def test_switch_setup_failure_is_not_misreported_as_lock_failure(
     assert switch_fakes["stop_gateway_calls"] == 0
 
 
+def test_switch_unexpected_exception_is_not_mislabelled_as_lock(
+    workspace: Workspace, registry, switch_fakes, monkeypatch
+) -> None:
+    """BUG-524：锁已持有后事务内未兜底异常不得标为 switch_lock，且不得当锁失败记审计。"""
+    from local_webpage_access import gateway_switch
+
+    cfg = _caddy_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="caddy")
+    switch_fakes["backend"] = "caddy"
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("unexpected boom")
+
+    monkeypatch.setattr(gateway_switch, "_switch_gateway_locked", _boom)
+
+    result = gateway_switch.switch_gateway(workspace, cfg, registry, "builtin")
+
+    assert result.ok is False
+    assert result.error and "unexpected boom" in result.error
+    assert not any(stage.get("stage") == "switch_lock" for stage in result.stages)
+    assert any(
+        stage.get("stage") == "failed" and stage.get("ok") is False
+        for stage in result.stages
+    )
+
+
 def test_switch_fail_after_sync_restores_manifest_and_registry(
     workspace: Workspace, registry, switch_fakes, monkeypatch
 ) -> None:

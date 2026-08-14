@@ -701,6 +701,7 @@ def host_container(
         instance_id,
         final_status.value,
         desired_state=DesiredState.RUNNING.value,
+        clear_last_error=True,
     )
     registry.record_started(instance_id)
 
@@ -898,6 +899,7 @@ def start_container(
         manifest.status.value,
         desired_state=DesiredState.RUNNING.value,
         last_error=manifest.lastError,
+        clear_last_error=manifest.lastError is None,
     )
 
     registry.add_event(

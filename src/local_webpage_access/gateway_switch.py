@@ -614,11 +614,19 @@ def switch_gateway(
             return _switch_gateway_locked(
                 workspace, config, registry, plan, result, stages, review
             )
-    except Exception as exc:  # noqa: BLE001 — 锁获取失败
-        log.exception("网关切换锁获取失败：%s", exc)
+    except Exception as exc:  # noqa: BLE001
+        is_lock = (
+            isinstance(exc, LwaError) and exc.code == "GATEWAY_SWITCH_LOCKED"
+        )
+        stage = "switch_lock" if is_lock else "failed"
+        log.exception(
+            "网关切换%s失败：%s",
+            "锁获取" if is_lock else "",
+            exc,
+        )
         result.ok = False
         result.error = str(exc)
-        stages.append({"stage": "switch_lock", "ok": False, "error": str(exc)})
+        stages.append({"stage": stage, "ok": False, "error": str(exc)})
         _record_event(
             registry,
             from_backend=plan.from_backend,

@@ -510,6 +510,48 @@ def test_start_container_keeps_ids_when_observe_returns_none(
     assert "build" not in fake_runtime.calls
 
 
+def test_start_container_clears_stale_last_error(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-525：曾失败的实例轻量 start 成功后，registry last_error 必须清空。"""
+    m = _seed_container_instance(workspace, registry, "api")
+    m.container.containerId = "cid-keep"
+    m.container.imageId = "sha256:keep"
+    m.container.hostPort = 21000
+    m.lastError = "previous start failed"
+    m.status = Status.FAILED
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+    registry.update_status("api", Status.FAILED.value, last_error="previous start failed")
+    registry.upsert_container(
+        "api",
+        {
+            "projectName": "lwa-api",
+            "internalPort": 8000,
+            "composePath": "x",
+            "dockerfilePath": "y",
+            "hostPort": 21000,
+        },
+    )
+
+    monkeypatch.setattr(
+        fake_runtime,
+        "container_id",
+        lambda self, iid, *, all_containers=False: (
+            "cid-keep" if all_containers else None
+        ),
+    )
+    monkeypatch.setattr(fake_runtime, "image_id", lambda self, iid: None)
+
+    started = start_container(workspace, config, registry, "api")
+    assert started.status == Status.RUNNING
+    assert started.lastError is None
+    assert registry.get_instance("api")["last_error"] is None
+    assert "start" in fake_runtime.calls
+    assert "up" not in fake_runtime.calls
+    assert "build" not in fake_runtime.calls
+
+
 def test_start_container_reruns_required_capabilities(
     workspace, registry, config, fake_runtime, monkeypatch
 ) -> None:

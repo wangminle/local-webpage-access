@@ -427,6 +427,38 @@ def test_chk_v01_non_pip_skipped(tmp_path: Path) -> None:
     assert "跳过" in v01.detail
 
 
+def test_chk_v01_tight_dash_r_without_space_is_checked(tmp_path: Path) -> None:
+    """BUG-526：pip install -rrequirements.txt 无空格写法也须检查 COPY 源。"""
+    result = _mk_python_result()
+    result.entry.install = "pip install -rrequirements.txt"
+    pre = check_and_fix(result, tmp_path)
+    v01 = next(c for c in pre.checks if c.check_id == "CHK-V01")
+    assert v01.passed is False
+    assert pre.status == REJECTED
+
+
+def test_chk_v01_tight_dash_r_file_exists(tmp_path: Path) -> None:
+    """BUG-526：无空格 -r 且文件存在时通过，不得走跳过分支。"""
+    _ensure_requirements(tmp_path)
+    result = _mk_python_result()
+    result.entry.install = "pip install -rrequirements.txt"
+    pre = check_and_fix(result, tmp_path)
+    v01 = next(c for c in pre.checks if c.check_id == "CHK-V01")
+    assert v01.passed is True
+    assert v01.autofixed is False
+    assert "跳过" not in v01.detail
+
+
+def test_chk_v01_pip_install_dot_still_skipped(tmp_path: Path) -> None:
+    """BUG-498/526：pip install . 仍跳过 COPY 源检查。"""
+    result = _mk_python_result()
+    result.entry.install = "pip install ."
+    pre = check_and_fix(result, tmp_path)
+    v01 = next(c for c in pre.checks if c.check_id == "CHK-V01")
+    assert v01.passed is True
+    assert "跳过" in v01.detail
+
+
 # ---- CHK-V05：entrypoint 脚本 COPY 完整性 ------------------------------------
 
 

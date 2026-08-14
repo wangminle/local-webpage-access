@@ -632,15 +632,17 @@ def rewrite_registry_paths(db_path: Path, old: str, new: str) -> None:
         )
         for table, cols in updates:
             for col in cols:
-                # BUG-518：边界安全 + 幂等改写。只匹配 = old 或 old/、old\ 前缀，
-                # 避免兄弟目录（/lwa-backup）被误改；用 _rewrite_text_paths 保证
-                # new 以 old 为前缀（lwa→lwa2）时重跑/resume/rollback 不二次损坏。
+                # BUG-518/527：边界安全 + 幂等改写。用 substr 精确匹配 = old
+                # 或 old/、old\ 前缀，避免 LIKE 把路径中的 _/% 当通配符
+                # （用户名含下划线会多选出兄弟路径）。
                 try:
+                    prefix_len = len(old) + 1
                     rows = conn.execute(
                         f"SELECT rowid, {col} FROM {table} "
                         f"WHERE {col} IS NOT NULL AND "
-                        f"({col} = ? OR {col} LIKE ? OR {col} LIKE ?)",
-                        (old, old + "/%", old + "\\%"),
+                        f"({col} = ? OR substr({col}, 1, ?) = ? "
+                        f"OR substr({col}, 1, ?) = ?)",
+                        (old, prefix_len, old + "/", prefix_len, old + "\\"),
                     ).fetchall()
                 except sqlite3.Error:
                     continue

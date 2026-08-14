@@ -168,7 +168,15 @@ def fake_gateway(monkeypatch, workspace):
                     "id": instance_id,
                     "host_port": host_port,
                     "wait_health": wait_health,
+                    "backend": self.detect_backend(),
+                    "static_gateway": getattr(self.cfg, "staticGateway", None),
                 }
+            )
+
+        def _start_builtin(self, instance_id, host_port, root) -> None:
+            # BUG-523：恢复路径必须走 http.server，不能只调 enable（caddy 分支）。
+            state.setdefault("start_builtin_calls", []).append(
+                {"id": instance_id, "host_port": host_port}
             )
 
         def reload_all(self) -> None:
@@ -407,8 +415,40 @@ def test_start_gateway_restores_builtin_when_caddy_start_fails(
     fake_gateway["stopped_builtin"] = [iid]
     with pytest.raises(LifecycleError):
         start_gateway(workspace, config, registry=registry)
+    start_builtin = fake_gateway.get("start_builtin_calls") or []
+    assert any(c["id"] == iid for c in start_builtin)
+
+
+def test_start_gateway_restore_builtin_starts_http_server_when_caddy_present(
+    workspace: Workspace, config: Config, fake_gateway, registry
+) -> None:
+    """BUG-523：caddy 二进制仍在时 enable() 走 caddy 分支，必须直接 _start_builtin。"""
+    from local_webpage_access.models import DesiredState, StaticConfig, Status
+    from tests._helpers import make_static_manifest
+
+    iid = "demo"
+    workspace.ensure_app_dirs(iid)
+    (workspace.app_public(iid)).mkdir(parents=True, exist_ok=True)
+    manifest = make_static_manifest(
+        iid,
+        static=StaticConfig(hostPort=21001),
+        status=Status.RUNNING,
+        desiredState=DesiredState.RUNNING,
+    )
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+
+    fake_gateway["backend"] = "caddy"
+    fake_gateway["admin_alive"] = False
+    fake_gateway["start_ok"] = False
+    fake_gateway["stopped_builtin"] = [iid]
+    with pytest.raises(LifecycleError):
+        start_gateway(workspace, config, registry=registry)
+
+    start_builtin = fake_gateway.get("start_builtin_calls") or []
+    assert any(c["id"] == iid and c["host_port"] == 21001 for c in start_builtin)
     enable_calls = fake_gateway.get("enable_calls") or []
-    assert any(c["id"] == iid for c in enable_calls)
+    assert not any(c.get("backend") == "caddy" for c in enable_calls)
 
 
 def test_start_gateway_rejects_non_caddy_backend(

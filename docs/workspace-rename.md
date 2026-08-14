@@ -302,27 +302,40 @@ grep -R -F "$OLD" apps/*/local-web.json && echo "仍有旧路径" || echo "manif
 
 与 manifest 同步（在 NEW 上、服务仍停时）：
 
+边界安全改写（与 BUG-518/527 的 `rewrite_registry_paths` 同口径）：不能用裸
+`REPLACE(col, '$OLD', ...)` + `LIKE '$OLD%'`——`LIKE` 会把路径里的 `_`/`%` 当
+通配符，裸 `REPLACE` 会误伤 `$OLD-backup` 这类兄弟目录前缀。统一按
+「列值 = `$OLD` 或以 `$OLD/` 开头」选行，替换时只替换带边界的 `$OLD/` 前缀：
+
 ```bash
 cd "$NEW"
 sqlite3 registry/local-web.db <<SQL
 UPDATE instances
-SET app_path = REPLACE(app_path, '$OLD', '$NEW'),
-    source_zip_path = REPLACE(source_zip_path, '$OLD', '$NEW')
-WHERE app_path LIKE '$OLD%' OR source_zip_path LIKE '$OLD%';
+SET app_path = CASE WHEN app_path = '$OLD' THEN '$NEW'
+                    ELSE REPLACE(app_path, '$OLD/', '$NEW/') END,
+    source_zip_path = CASE WHEN source_zip_path = '$OLD' THEN '$NEW'
+                           ELSE REPLACE(source_zip_path, '$OLD/', '$NEW/') END
+WHERE app_path = '$OLD' OR substr(app_path, 1, LENGTH('$OLD') + 1) = '$OLD/'
+   OR source_zip_path = '$OLD' OR substr(source_zip_path, 1, LENGTH('$OLD') + 1) = '$OLD/';
 
 UPDATE containers
-SET compose_path = REPLACE(compose_path, '$OLD', '$NEW'),
-    dockerfile_path = REPLACE(dockerfile_path, '$OLD', '$NEW')
-WHERE compose_path LIKE '$OLD%' OR dockerfile_path LIKE '$OLD%';
+SET compose_path = CASE WHEN compose_path = '$OLD' THEN '$NEW'
+                        ELSE REPLACE(compose_path, '$OLD/', '$NEW/') END,
+    dockerfile_path = CASE WHEN dockerfile_path = '$OLD' THEN '$NEW'
+                           ELSE REPLACE(dockerfile_path, '$OLD/', '$NEW/') END
+WHERE compose_path = '$OLD' OR substr(compose_path, 1, LENGTH('$OLD') + 1) = '$OLD/'
+   OR dockerfile_path = '$OLD' OR substr(dockerfile_path, 1, LENGTH('$OLD') + 1) = '$OLD/';
 
 UPDATE static_sites
-SET gateway_config_path = REPLACE(gateway_config_path, '$OLD', '$NEW')
-WHERE gateway_config_path LIKE '$OLD%';
+SET gateway_config_path = CASE WHEN gateway_config_path = '$OLD' THEN '$NEW'
+                               ELSE REPLACE(gateway_config_path, '$OLD/', '$NEW/') END
+WHERE gateway_config_path = '$OLD' OR substr(gateway_config_path, 1, LENGTH('$OLD') + 1) = '$OLD/';
 
 -- 可选：构建日志绝对路径（不影响启动，但避免 doctor 指向 OLD）
 UPDATE builds
-SET log_path = REPLACE(log_path, '$OLD', '$NEW')
-WHERE log_path LIKE '$OLD%';
+SET log_path = CASE WHEN log_path = '$OLD' THEN '$NEW'
+                    ELSE REPLACE(log_path, '$OLD/', '$NEW/') END
+WHERE log_path = '$OLD' OR substr(log_path, 1, LENGTH('$OLD') + 1) = '$OLD/';
 SQL
 ```
 

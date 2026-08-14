@@ -134,10 +134,18 @@ lwa gateway switch caddy --json       # 机器可读结果（含 accessOk / full
 事务内会：停旧后端 → 写 `staticGateway` → 启新后端 → 批量回写
 `manifest.static.gateway` / registry → access refresh（默认 review）。切到
 builtin 时**保留** `routeHost` 元数据但别名入口未激活；切回 caddy 按 manifest
-重建别名片段。失败会回滚 YAML/进程；回滚失败标 `degraded` 并给出修复提示（不假绿）。
+重建别名片段。失败会回滚 YAML/进程/manifest/registry；回滚失败标 `degraded`
+并给出修复提示（不假绿）。
 幂等：目标与当前相同则 noop，不重启。`--json` 中 `ok` 表示切换事务成功；
 `accessOk` 表示访问复核通过；`fullyOk` 需二者皆真（`ok=true` 且 `accessOk=false`
 表示后端已切、访问仍有风险）。
+
+护栏（V0.7.10/V0.7.11）：① 切换全程持跨进程锁 `run/gateway-switch.lock`
+（BUG-514），CLI 与管理页并发切换时后者约 15s 后快速失败
+（`GATEWAY_SWITCH_LOCKED`）；② 切 builtin 时存在运行中但 manifest 无法加载的
+静态实例则 fail-closed 拒切（`GATEWAY_MANIFEST_UNLOADABLE`，BUG-516），先修复
+或删除这些实例；③ 切 caddy 启动失败时把切换前停掉的 builtin 静态服务尽力拉回
+（BUG-517/523），站点不留下线。
 
 仍可用手改 `local-web.yml` 的 `staticGateway` 后 `lwa gateway on/off`（旧路径）；
 `lwa gateway off` 不校验版本，即便刚切到 builtin 也能关掉残留 Caddy master。
