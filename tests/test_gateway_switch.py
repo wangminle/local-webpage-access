@@ -396,6 +396,141 @@ def test_switch_mid_fail_rolls_back_yaml(
     assert switch_fakes["start_gateway_calls"] >= 1
 
 
+def test_switch_fails_when_switch_lock_held(
+    workspace: Workspace, registry, switch_fakes, monkeypatch
+) -> None:
+    """BUG-514：切换锁被占用时必须失败并报 GATEWAY_SWITCH_LOCKED，不得进入事务。"""
+    import os
+
+    from local_webpage_access.file_lock import (
+        ensure_lockable,
+        release_exclusive,
+        try_acquire_exclusive,
+    )
+    from local_webpage_access.gateway_switch import SWITCH_LOCK_FILENAME, switch_gateway
+
+    cfg = _caddy_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="caddy")
+    switch_fakes["backend"] = "caddy"
+    yml_before = workspace.config_path.read_text(encoding="utf-8")
+
+    # 用真实 flock 机制模拟另一进程持锁
+    lock_path = workspace.run / SWITCH_LOCK_FILENAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+
+    # 快进单调时钟，避免真实等待 SWITCH_LOCK_TIMEOUT（15s）
+    ticks = iter([0.0, 100.0])
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_switch.time.monotonic",
+        lambda: next(ticks, 100.0),
+    )
+
+    try:
+        result = switch_gateway(workspace, cfg, registry, "builtin")
+    finally:
+        release_exclusive(fd)
+        os.close(fd)
+
+    assert result.ok is False
+    assert result.error and "GATEWAY_SWITCH_LOCKED" in result.error
+    lock_stages = [s for s in result.stages if s.get("stage") == "switch_lock"]
+    assert lock_stages and lock_stages[0]["ok"] is False
+    # 未进入切换事务：未停 gateway、YAML 未改写
+    assert switch_fakes["stop_gateway_calls"] == 0
+    assert workspace.config_path.read_text(encoding="utf-8") == yml_before
+
+
+@pytest.mark.parametrize(
+    ("failing_helper", "expected_stage"),
+    [
+        ("_take_snapshot", "snapshot"),
+        ("_backup_yml", "backup_yml"),
+    ],
+)
+def test_switch_setup_failure_is_not_misreported_as_lock_failure(
+    workspace: Workspace,
+    registry,
+    switch_fakes,
+    monkeypatch,
+    failing_helper: str,
+    expected_stage: str,
+) -> None:
+    """切换锁内的快照/备份失败应归类为事务准备失败，不得误报为锁获取失败。"""
+    from local_webpage_access import gateway_switch
+
+    cfg = _caddy_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="caddy")
+    switch_fakes["backend"] = "caddy"
+
+    def _raise_setup_error(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError(f"{expected_stage} failed")
+
+    monkeypatch.setattr(gateway_switch, failing_helper, _raise_setup_error)
+
+    result = gateway_switch.switch_gateway(workspace, cfg, registry, "builtin")
+
+    assert result.ok is False
+    assert any(
+        stage.get("stage") == expected_stage and stage.get("ok") is False
+        for stage in result.stages
+    )
+    assert not any(stage.get("stage") == "switch_lock" for stage in result.stages)
+    assert switch_fakes["stop_gateway_calls"] == 0
+
+
+def test_switch_fail_after_sync_restores_manifest_and_registry(
+    workspace: Workspace, registry, switch_fakes, monkeypatch
+) -> None:
+    """BUG-515：sync_manifests 之后失败，回滚须一并还原 manifest 文件与 registry static_sites 行。"""
+    from local_webpage_access.access_workflow import AccessPassResult
+    from local_webpage_access.gateway_switch import switch_gateway
+    from local_webpage_access.models import InstanceManifest
+
+    cfg = _caddy_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="caddy")
+    switch_fakes["backend"] = "caddy"
+
+    manifest_path = workspace.app_manifest_path("demo")
+    manifest_before = manifest_path.read_text(encoding="utf-8")
+    row_before = registry.get_static_site("demo")
+    assert row_before is not None and row_before["gateway"] == "caddy"
+
+    # 在 sync_manifests 之后的 access 收尾首次调用注入失败（回滚内复核仍放行）
+    calls = {"n": 0}
+
+    def _boom_then_ok(ws, cfg_, reg, *, review=True, dry_run=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LwaError("access boom", code="ACCESS_FAIL")
+        return AccessPassResult()
+
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_switch.run_access_pass", _boom_then_ok
+    )
+
+    result = switch_gateway(workspace, cfg, registry, "builtin")
+
+    assert result.ok is False
+    assert result.error and "access boom" in result.error
+    # 失败确实发生在 sync_manifests 之后（manifest/registry 已被改写才谈得上还原）
+    sync_stages = [s for s in result.stages if s.get("stage") == "sync_manifests"]
+    assert sync_stages and sync_stages[0]["ok"] is True
+
+    # 回滚后 manifest 文件与 registry static_sites 行均恢复为切换前快照
+    assert manifest_path.read_text(encoding="utf-8") == manifest_before
+    m = InstanceManifest.load(manifest_path)
+    assert m.static is not None and m.static.gateway == "caddy"
+    row_after = registry.get_static_site("demo")
+    assert row_after is not None and row_after["gateway"] == "caddy"
+    assert row_after["route_host"] == row_before["route_host"]
+
+
 def test_dry_run_does_not_write(
     workspace: Workspace, registry, switch_fakes
 ) -> None:
@@ -478,6 +613,24 @@ def test_rollback_review_failure_marks_degraded(
     assert result.repair_hint
     # enable 失败触发回滚；回滚路径仍会跑 access review
     assert switch_fakes["access_calls"] >= 1
+
+
+def test_switch_fails_closed_on_unloadable_manifest(
+    workspace: Workspace, registry, switch_fakes
+) -> None:
+    """BUG-516：损坏 manifest 的静态实例预检 fail-closed，不得静默下线后报 ok。"""
+    from local_webpage_access.gateway_switch import switch_gateway
+
+    cfg = _caddy_config()
+    cfg.save(workspace.config_path)
+    _seed_static(workspace, registry, gateway="caddy")
+    workspace.app_manifest_path("demo").write_text("{ not json", encoding="utf-8")
+
+    result = switch_gateway(workspace, cfg, registry, "builtin")
+
+    assert result.ok is False
+    assert result.error and "demo" in result.error
+    assert switch_fakes["stop_gateway_calls"] == 0  # 预检失败，未进入切换事务
 
 
 def test_plan_switch_rejects_invalid_target(

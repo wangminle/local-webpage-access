@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger, now_iso
-from local_webpage_access.models import InstanceManifest, Status
+from local_webpage_access.models import InstanceManifest
 from local_webpage_access.paths import Workspace
 from local_webpage_access.probe import mark_probe_url, urlopen_direct
 from local_webpage_access.registry import Registry
@@ -308,16 +308,14 @@ def check_health(
     ok, code = http_ok(host_port, timeout=timeout)
     if ok:
         registry.record_health_check(instance_id)
-        registry.update_status(instance_id, _current_status(manifest), last_error="")
+        registry.set_last_error(instance_id, None)
         registry.add_event(
             instance_id, "health_check", f"健康检查通过（port={host_port}, code={code}）"
         )
         log.info("实例 %s 健康检查通过（port=%s）", instance_id, host_port)
     else:
         reason = f"健康检查失败（port={host_port}, code={code}）"
-        registry.update_status(
-            instance_id, _current_status(manifest), last_error=reason
-        )
+        registry.set_last_error(instance_id, reason)
         registry.add_event(instance_id, "health_check", reason)
         log.warning("实例 %s %s", instance_id, reason)
     return HealthResult(ok=ok, host_port=host_port, status_code=code, reason=None if ok else reason)
@@ -345,11 +343,6 @@ def _resolve_host_port(manifest: InstanceManifest, registry: Registry) -> int | 
         if row and row.get("host_port"):
             return int(row["host_port"])
     return None
-
-
-def _current_status(manifest: InstanceManifest) -> str:
-    val = manifest.status.value if isinstance(manifest.status, Status) else manifest.status
-    return val or Status.PENDING.value
 
 
 __all__ = [

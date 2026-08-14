@@ -162,6 +162,15 @@ def fake_gateway(monkeypatch, workspace):
             state["call_order"].append("stop_all_builtin")
             return list(state.get("stopped_builtin") or [])
 
+        def enable(self, instance_id, host_port, root, *, wait_health=True, alias=None):
+            state.setdefault("enable_calls", []).append(
+                {
+                    "id": instance_id,
+                    "host_port": host_port,
+                    "wait_health": wait_health,
+                }
+            )
+
         def reload_all(self) -> None:
             state["reload_calls"] += 1
             state["call_order"].append("reload_all")
@@ -373,6 +382,33 @@ def test_start_gateway_raises_on_caddy_start_failure(
     with pytest.raises(LifecycleError):
         start_gateway(workspace, config)
     assert read_state(workspace) is None  # 失败不写服务态
+
+
+def test_start_gateway_restores_builtin_when_caddy_start_fails(
+    workspace: Workspace, config: Config, fake_gateway, registry
+) -> None:
+    """BUG-517：Caddy 启动失败时把 start 前停掉的 builtin 拉回来。"""
+    from local_webpage_access.models import DesiredState, StaticConfig, Status
+    from tests._helpers import make_static_manifest
+
+    iid = "demo"
+    workspace.ensure_app_dirs(iid)
+    manifest = make_static_manifest(
+        iid,
+        static=StaticConfig(hostPort=21001),
+        status=Status.RUNNING,
+        desiredState=DesiredState.RUNNING,
+    )
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+
+    fake_gateway["admin_alive"] = False
+    fake_gateway["start_ok"] = False
+    fake_gateway["stopped_builtin"] = [iid]
+    with pytest.raises(LifecycleError):
+        start_gateway(workspace, config, registry=registry)
+    enable_calls = fake_gateway.get("enable_calls") or []
+    assert any(c["id"] == iid for c in enable_calls)
 
 
 def test_start_gateway_rejects_non_caddy_backend(

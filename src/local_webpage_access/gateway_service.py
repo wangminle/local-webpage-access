@@ -179,6 +179,50 @@ def gateway_start_lock(
                 os.close(fd)
 
 
+def _restore_stopped_builtin(
+    workspace: Workspace,
+    registry: Registry | None,
+    gateway: StaticGateway,
+    stopped_iids: list[str],
+) -> None:
+    """Caddy 启动失败时把 start 前停掉的 builtin 静态服务尽力拉回（BUG-517）。
+
+    ``stop_all_builtin`` 返回的 iid 含两类：正常追踪实例与 pid-less 孤儿。孤儿
+    （iid 形如 ``pid-<n>`` 或 manifest/registry 无记录）无法可靠恢复，跳过。
+    best-effort：任何失败都不掩盖原始 caddy 启动异常。
+    """
+    for iid in stopped_iids:
+        if iid.startswith("pid-"):
+            continue
+        try:
+            from local_webpage_access.models import InstanceManifest
+
+            host_port: int | None = None
+            path = workspace.app_manifest_path(iid)
+            if path.is_file():
+                try:
+                    m = InstanceManifest.load(path)
+                    if m.static is not None and m.static.hostPort is not None:
+                        host_port = int(m.static.hostPort)
+                except Exception:  # noqa: BLE001
+                    host_port = None
+            if host_port is None and registry is not None:
+                row = registry.get_static_site(iid)
+                if row is not None and row.get("host_port") is not None:
+                    host_port = int(row["host_port"])
+            if host_port is None:
+                log.warning("无法恢复 builtin 静态服务 %s：缺少 hostPort", iid)
+                continue
+            public = workspace.app_public(iid)
+            if not public.is_dir():
+                alt = workspace.app_current(iid) / "public"
+                public = alt if alt.is_dir() else public
+            gateway.enable(iid, host_port, public, wait_health=False)
+            log.info("已恢复 builtin 静态服务 %s（port=%d）", iid, host_port)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("恢复 builtin 静态服务 %s 失败（忽略）：%s", iid, exc)
+
+
 def start_gateway(
     workspace: Workspace,
     config: Config,
@@ -265,6 +309,11 @@ def start_gateway(
         gateway.write_main_config()
 
         if not gateway.caddy_start():
+            # BUG-517：Caddy 启动失败时把 start 前停掉的 builtin 拉回来，否则站点
+            # 会持续下线且难自愈。best-effort，失败不掩盖原始 caddy 启动异常。
+            _restore_stopped_builtin(
+                workspace, registry, gateway, stopped_builtin
+            )
             raise LifecycleError(
                 "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）；"
                 "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019",

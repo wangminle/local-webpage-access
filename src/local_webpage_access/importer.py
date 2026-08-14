@@ -1649,7 +1649,13 @@ def build_manifest_from_detection(
 
         container_kwargs: dict = {
             "projectName": f"lwa-{instance_id}",
-            "internalPort": detection.internalPort or 8000,
+            # BUG-509：非法端口已在 scanner 置 pending，不会走进本分支。
+            # 此处 None 只可能是未声明端口；容器字段需要 int，沿用 8000 兜底。
+            "internalPort": (
+                detection.internalPort
+                if detection.internalPort is not None
+                else 8000
+            ),
             "composePath": str(workspace.app_compose_path(instance_id)),
             "dockerfilePath": str(workspace.app_dockerfile_path(instance_id)),
             "resourceLimits": profile_to_limits(resource_profile),

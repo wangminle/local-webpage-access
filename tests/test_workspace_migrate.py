@@ -297,6 +297,58 @@ def test_rewrite_registry_paths(ws_root: Path) -> None:
     assert cid is None
 
 
+def test_rewrite_registry_paths_boundary_and_idempotent(ws_root: Path) -> None:
+    """BUG-518：兄弟目录不被误改；new 为 old 前缀时重跑不二次损坏。"""
+    ws = Workspace(ws_root)
+    old = str(ws_root.resolve())
+    new = old + "2"  # new 以 old 为前缀（lwa → lwa2）
+    sibling = old + "-backup"
+    conn = sqlite3.connect(ws.db_path)
+    try:
+        for iid, app_path in (
+            ("a", f"{old}/apps/a/current"),
+            ("b", f"{sibling}/apps/b/current"),
+        ):
+            conn.execute(
+                "INSERT INTO instances (id, name, version, kind, runtime, serving_mode, "
+                "status, desired_state, app_path, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (iid, iid, "1", "static", "docker", "container", "stopped",
+                 "stopped", app_path, "t", "t"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    wm.rewrite_registry_paths(ws.db_path, old, new)
+    conn = sqlite3.connect(ws.db_path)
+    try:
+        a_app = conn.execute("SELECT app_path FROM instances WHERE id='a'").fetchone()[0]
+        b_app = conn.execute("SELECT app_path FROM instances WHERE id='b'").fetchone()[0]
+    finally:
+        conn.close()
+    assert a_app == f"{new}/apps/a/current"
+    assert b_app == f"{sibling}/apps/b/current"
+
+    # 幂等：重复执行不再二次改写（不得出现 lwa22）
+    wm.rewrite_registry_paths(ws.db_path, old, new)
+    conn = sqlite3.connect(ws.db_path)
+    try:
+        a_app2 = conn.execute("SELECT app_path FROM instances WHERE id='a'").fetchone()[0]
+    finally:
+        conn.close()
+    assert a_app2 == f"{new}/apps/a/current"
+
+
+def test_contains_old_path_prefix_boundary() -> None:
+    """BUG-519：old 为 new 前缀或兄弟目录时，_contains_old_path 不得误报。"""
+    old = "/home/u/lwa"
+    assert wm._contains_old_path(f"{old}/apps/x", old) is True
+    assert wm._contains_old_path(f"{old}-backup/apps/x", old) is False
+    assert wm._contains_old_path(f"{old}2/apps/x", old) is False
+    assert wm._contains_old_path("/other/path", old) is False
+
+
 # ---- Task 7: regenerate -----------------------------------------------------
 
 
@@ -662,6 +714,89 @@ def test_resume_empty_preflight_snapshot_recaptures(
     assert captures == ["ok"], "空 snapshot 必须重采"
     assert result.snapshot is not None
     assert result.snapshot.restore_instance_ids == ["fresh"]
+
+
+def test_resume_complete_without_verify_ok_reverifies(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-519：journal 已 complete 但 verify_ok 非 True 时，resume 必须重新验收，
+    失败结果不得被吞掉、不得返回假成功。"""
+    # 模拟已 move 到 NEW：journal 在 NEW，phase=complete 且 verify_ok=False
+    new = tmp_path / "new-ws"
+    old = ws_root.resolve()
+    ws_root.rename(new)
+    ws = Workspace(new)
+    wm.write_journal(
+        ws,
+        {
+            "phase": "complete",
+            "old": str(old),
+            "new": str(new.resolve()),
+            "snapshot": wm.MigrateSnapshot(
+                restore_instance_ids=["demo"], captured_at="2026-08-13T00:00:00Z"
+            ).to_dict(),
+            "verify_ok": False,
+            "verify_notes": ["上次验收失败"],
+            "restored_ids": ["demo"],
+        },
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    def _verify(workspace, old_s, new_s, snapshot):
+        calls.append((str(old_s), str(new_s)))
+        return False, ["重新验收仍失败"]
+
+    monkeypatch.setattr(wm, "verify_migrate", _verify)
+
+    result = wm.run_migrate(old, new, resume=True, yes=True)
+    assert calls == [(str(old), str(new.resolve()))], "resume 必须重新执行 verify_migrate"
+    assert not result.ok, "verify 失败不得报假成功"
+    assert result.verify_ok is False
+    assert "重新验收仍失败" in result.verify_notes
+    assert result.started == ["demo"]
+    journal = json.loads((new / "run" / wm.JOURNAL_NAME).read_text())
+    assert journal["phase"] == "complete"
+    assert journal["verify_ok"] is False
+
+
+def test_resume_complete_with_verify_ok_true_skips_reverify(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-519 对照：journal verify_ok=True 时 resume 直接报成功，不重跑 verify。"""
+    new = tmp_path / "new-ws"
+    old = ws_root.resolve()
+    ws_root.rename(new)
+    ws = Workspace(new)
+    wm.write_journal(
+        ws,
+        {
+            "phase": "complete",
+            "old": str(old),
+            "new": str(new.resolve()),
+            "snapshot": wm.MigrateSnapshot(
+                restore_instance_ids=["demo"], captured_at="2026-08-13T00:00:00Z"
+            ).to_dict(),
+            "verify_ok": True,
+            "verify_notes": ["验收通过"],
+            "restored_ids": ["demo"],
+        },
+    )
+
+    calls: list[bool] = []
+
+    def _verify(*a, **k):
+        calls.append(True)
+        return False, ["不应被调用"]
+
+    monkeypatch.setattr(wm, "verify_migrate", _verify)
+
+    result = wm.run_migrate(old, new, resume=True, yes=True)
+    assert result.ok, result.error
+    assert calls == [], "verify_ok=True 不得重跑 verify"
+    assert result.verify_ok is True
+    assert result.verify_notes == ["验收通过"]
+    assert result.started == ["demo"]
 
 
 def test_regenerate_skips_autostart_when_never_installed(

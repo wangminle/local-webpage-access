@@ -88,16 +88,16 @@ def detect_workspaces(root: Path) -> list[str]:
             if parent.is_dir():
                 for entry in sorted(parent.iterdir()):
                     if entry.is_dir() and (entry / "package.json").is_file():
-                        rel = str(entry.relative_to(root)).replace("\\", "/")
-                        if rel not in seen:
+                        rel = _rel_within_root(root, entry)
+                        if rel is not None and rel not in seen:
                             seen.add(rel)
                             pkg_dirs.append(rel)
         else:
             # 直接路径
             target = root / pattern
             if target.is_dir() and (target / "package.json").is_file():
-                rel = str(target.relative_to(root)).replace("\\", "/")
-                if rel not in seen:
+                rel = _rel_within_root(root, target)
+                if rel is not None and rel not in seen:
                     seen.add(rel)
                     pkg_dirs.append(rel)
 
@@ -106,12 +106,27 @@ def detect_workspaces(root: Path) -> list[str]:
     if packages_dir.is_dir():
         for entry in sorted(packages_dir.iterdir()):
             if entry.is_dir() and (entry / "package.json").is_file():
-                rel = str(entry.relative_to(root)).replace("\\", "/")
-                if rel not in seen:
+                rel = _rel_within_root(root, entry)
+                if rel is not None and rel not in seen:
                     seen.add(rel)
                     pkg_dirs.append(rel)
 
     return sorted(pkg_dirs)
+
+
+def _rel_within_root(root: Path, path: Path) -> str | None:
+    """返回 ``path`` 相对 ``root`` 的规范化路径；越界（含 ``..``）返回 ``None``。
+
+    Python 3.13 的 :meth:`Path.relative_to` 对 ``root/../shared`` 这类越界路径会
+    返回 ``../shared`` 而非抛错，直接流入分类会把仓库外目录当子包（BUG-508）。
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return None
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    return rel.as_posix()
 
 
 def _read_pkg_json(path: Path) -> dict:

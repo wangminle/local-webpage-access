@@ -844,6 +844,8 @@ def _snapshot_attempt(
             "capabilityContract": getattr(manifest, "capabilityContract", None),
         },
         "files": {},
+        # BUG-510：捕获 attempt 前实例登记的端口，供回滚精确释放“本轮新分配”端口。
+        "ports": _instance_ports_safe(registry, instance_id),
     }
 
     # 快照生成文件内容
@@ -862,6 +864,29 @@ def _snapshot_attempt(
                 log.debug("实例 %s 快照文件 %s 失败：%s", instance_id, name, exc)
 
     return snapshot
+
+
+def _instance_ports_safe(registry: Registry, instance_id: str) -> list[int]:
+    """读取实例当前登记的端口；registry 不可用/无该方法时返回空列表。
+
+    防御 MagicMock 等测试替身：``instance_ports`` 缺失或返回非列表时按空处理。
+    """
+    method = getattr(registry, "instance_ports", None)
+    if not callable(method):
+        return []
+    try:
+        ports = method(instance_id)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(ports, (list, tuple, set)):
+        return []
+    out: list[int] = []
+    for p in ports:
+        try:
+            out.append(int(p))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _restore_from_snapshot(
@@ -1013,14 +1038,21 @@ def _rollback_attempt(
         else:
             log.debug("实例 %s 回滚容器跳过（Docker 不可用或容器未运行）：%s", instance_id, exc)
 
-    # 2. 回滚端口（仅释放本次 attempt 新分配的）
+    # 2. 回滚端口（仅释放本次 attempt 新分配的，BUG-510）
     try:
         from local_webpage_access.ports import PortAllocator
         allocator = PortAllocator(config, registry)
-        # 只释放没有成功部署登记的端口
-        if not manifest.container or not manifest.container.containerId:
-            allocator.release_instance(instance_id)
-            rolled_back.append("port")
+        # BUG-510：不能再拿 containerId 是否为空当“本轮新分配”的代理——重建会先清
+        # containerId，复用的旧端口会被误释放（破坏 BUG-045/182 复用保留契约）。
+        # 改为与快照前的端口登记做差集，只释放本轮真正新增的端口。
+        snapshot_ports = (snapshot or {}).get("ports")
+        if snapshot_ports is not None:
+            prev_ports = set(snapshot_ports)
+            for port in _instance_ports_safe(registry, instance_id):
+                if port not in prev_ports:
+                    allocator.release(port)
+                    rolled_back.append("port")
+        # snapshot 无端口信息时不释放：host_container 已按 fresh_port 自行回滚。
     except Exception as exc:  # noqa: BLE001
         log.debug("实例 %s 回滚端口跳过：%s", instance_id, exc)
         # 端口释放失败不算严重残留（可能是首次部署无端口）
@@ -2166,6 +2198,13 @@ def _observe_status_locked(
     manifest = _load(workspace, instance_id)
     runtime_value = manifest.runtime.value
 
+    # BUG-520：变化判定基准必须与 sync_status 一致——都用观测前的 registry status，
+    # 而非 manifest。cancel / _recover_stale_building 只写 registry 时 registry≠manifest
+    # 分叉，若比对 manifest 会“永远报告变化、永不落库”。且必须在观测**前**取值：
+    # 容器路径 _observe_container_status 内部会先写 registry，观测后再取恒等于 observed。
+    before_row = registry.get_instance(instance_id)
+    current = before_row["status"] if before_row else None
+
     if runtime_value == "docker-compose":
         observed = _observe_container_status(workspace, registry, instance_id)
     elif runtime_value == "shared-static":
@@ -2173,10 +2212,6 @@ def _observe_status_locked(
     else:
         return Status(manifest.status.value if isinstance(manifest.status, Status) else manifest.status)
 
-    # 仅在状态发生变化时回写，减少无谓写入
-    current = (
-        manifest.status.value if isinstance(manifest.status, Status) else manifest.status
-    )
     if observed.value != current:
         registry.update_status(instance_id, observed.value)
         # BUG-320：只更新 status 相关字段，避免全量 save 覆盖并发生命周期写入。

@@ -7,14 +7,23 @@ access refresh/review → 审计事件收敛为单一事务；失败时回滚 YA
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from local_webpage_access.access_workflow import AccessPassResult, run_access_pass
 from local_webpage_access.config import Config, load_config
 from local_webpage_access.errors import LifecycleError, LwaError
+from local_webpage_access.file_lock import (
+    ensure_lockable,
+    release_exclusive,
+    try_acquire_exclusive,
+    write_lock_payload,
+)
 from local_webpage_access.gateway_service import start_gateway, stop_gateway
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest, RouteMode, Runtime
@@ -25,6 +34,39 @@ from local_webpage_access.static_gateway import StaticGateway
 log = get_logger("gateway_switch")
 
 _ALLOWED_BACKENDS = frozenset({"caddy", "builtin"})
+
+SWITCH_LOCK_FILENAME = "gateway-switch.lock"
+SWITCH_LOCK_TIMEOUT = 15.0
+
+
+@contextlib.contextmanager
+def _switch_lock(
+    workspace: Workspace, *, timeout: float = SWITCH_LOCK_TIMEOUT
+) -> Iterator[None]:
+    """串行化完整 gateway 切换事务（BUG-514：并发切换会交错 YAML/manifest/进程）。"""
+    path = workspace.run / SWITCH_LOCK_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    ensure_lockable(fd)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                try_acquire_exclusive(fd)
+                write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LwaError(
+                        "网关切换锁被占用，可能有另一个切换正在进行，请稍后重试",
+                        code="GATEWAY_SWITCH_LOCKED",
+                    )
+                time.sleep(0.05)
+        yield
+    finally:
+        release_exclusive(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _caddy_available() -> bool:
@@ -54,12 +96,14 @@ class GatewaySwitchPlan:
 
 @dataclass
 class GatewaySwitchSnapshot:
-    """事务快照：YAML / gateway.json / 站点与别名片段。"""
+    """事务快照：YAML / gateway.json / 站点与别名片段 / manifest / registry。"""
 
     yml_text: str | None = None
     gateway_json_text: str | None = None
     site_confs: dict[str, str] = field(default_factory=dict)
     alias_confs: dict[str, str] = field(default_factory=dict)
+    manifests: dict[str, str] = field(default_factory=dict)
+    static_sites: dict[str, dict[str, Any]] = field(default_factory=dict)
     from_backend: str = ""
 
 
@@ -120,6 +164,33 @@ def _normalize_target(target: str) -> str:
             suggestion="使用：lwa gateway switch caddy 或 lwa gateway switch builtin",
         )
     return t
+
+
+def _unloadable_running_static_manifests(
+    workspace: Workspace, registry: Registry
+) -> list[str]:
+    """返回「运行中」但 manifest 无法加载的静态实例 ID（BUG-516）。
+
+    切到 builtin 时这些实例无进程承接，会静默下线。已停止的损坏 manifest
+    不会导致下线，不阻断切换。
+    """
+    ids: list[str] = []
+    for row in registry.list_instances():
+        if row.get("runtime") != Runtime.SHARED_STATIC.value:
+            continue
+        status = row.get("status")
+        desired = row.get("desired_state")
+        if status != "running" and desired != "running":
+            continue
+        iid = row["id"]
+        path = workspace.app_manifest_path(iid)
+        if not path.is_file():
+            continue
+        try:
+            InstanceManifest.load(path)
+        except Exception:  # noqa: BLE001
+            ids.append(iid)
+    return ids
 
 
 def _iter_static_instances(
@@ -187,6 +258,17 @@ def plan_switch(
             suggestion="安装 Caddy 并加入 PATH，或改用 lwa gateway switch builtin",
         )
 
+    # BUG-516：损坏 manifest 的*运行中*静态实例切到 builtin 时无进程承接。
+    # 仅在该场景 fail-closed；切到 caddy 或已停止实例不因此阻断。
+    if to_backend == "builtin":
+        unloadable = _unloadable_running_static_manifests(workspace, registry)
+        if unloadable:
+            raise LwaError(
+                f"以下运行中静态实例 manifest 无法加载，切到 builtin 后可能下线："
+                f"{', '.join(unloadable)}；请先修复或删除这些实例",
+                code="GATEWAY_MANIFEST_UNLOADABLE",
+            )
+
     for iid, manifest in _iter_static_instances(workspace, registry):
         st = manifest.static
         assert st is not None
@@ -220,7 +302,9 @@ def plan_switch(
     return plan
 
 
-def _take_snapshot(workspace: Workspace, from_backend: str) -> GatewaySwitchSnapshot:
+def _take_snapshot(
+    workspace: Workspace, registry: Registry, from_backend: str
+) -> GatewaySwitchSnapshot:
     snap = GatewaySwitchSnapshot(from_backend=from_backend)
     cfg_path = workspace.config_path
     if cfg_path.is_file():
@@ -236,6 +320,15 @@ def _take_snapshot(workspace: Workspace, from_backend: str) -> GatewaySwitchSnap
     if aliases.is_dir():
         for p in aliases.glob("*.conf"):
             snap.alias_confs[p.name] = p.read_text(encoding="utf-8")
+    # BUG-515：快照 manifest 文件与 registry static_sites 行；_sync_manifests_gateway
+    # 会改写它们，回滚时必须一并还原，否则留下 manifest/registry 与 config 后端矛盾。
+    for iid, _manifest in _iter_static_instances(workspace, registry):
+        mpath = workspace.app_manifest_path(iid)
+        if mpath.is_file():
+            snap.manifests[iid] = mpath.read_text(encoding="utf-8")
+        row = registry.get_static_site(iid)
+        if row is not None:
+            snap.static_sites[iid] = dict(row)
     return snap
 
 
@@ -342,7 +435,22 @@ def _rebuild_caddy_aliases(
     return rebuilt
 
 
-def _restore_snapshot_files(workspace: Workspace, snap: GatewaySwitchSnapshot) -> None:
+def _static_row_to_upsert_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """把 static_sites 表行还原为 ``upsert_static_site`` 需要的 manifest.static 形态。"""
+    return {
+        "root": row.get("root_path", "public"),
+        "gateway": row.get("gateway", "caddy"),
+        "routeMode": row.get("route_mode", "port"),
+        "hostPort": row.get("host_port"),
+        "routeHost": row.get("route_host"),
+        "gatewayConfigPath": row.get("gateway_config_path"),
+        "enabled": bool(row.get("enabled", 1)),
+    }
+
+
+def _restore_snapshot(
+    workspace: Workspace, registry: Registry, snap: GatewaySwitchSnapshot
+) -> None:
     if snap.yml_text is not None:
         workspace.config_path.write_text(snap.yml_text, encoding="utf-8")
     gw_path = workspace.run / "gateway.json"
@@ -357,6 +465,13 @@ def _restore_snapshot_files(workspace: Workspace, snap: GatewaySwitchSnapshot) -
     aliases.mkdir(parents=True, exist_ok=True)
     for name, text in snap.alias_confs.items():
         (aliases / name).write_text(text, encoding="utf-8")
+    # BUG-515：还原 manifest 文件与 registry static_sites 行，避免回滚后矛盾状态。
+    for iid, text in snap.manifests.items():
+        path = workspace.app_manifest_path(iid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for iid, row in snap.static_sites.items():
+        registry.upsert_static_site(iid, _static_row_to_upsert_dict(row))
 
 
 def _rollback(
@@ -369,7 +484,7 @@ def _rollback(
 ) -> tuple[bool, str | None]:
     """恢复 YAML/片段并尝试拉起旧后端。返回 (rollback_ok, repair_hint)。"""
     try:
-        _restore_snapshot_files(workspace, snap)
+        _restore_snapshot(workspace, registry, snap)
         stages.append({"stage": "rollback_files", "ok": True})
     except Exception as exc:  # noqa: BLE001
         stages.append({"stage": "rollback_files", "ok": False, "error": str(exc)})
@@ -493,9 +608,75 @@ def switch_gateway(
         stages.append({"stage": "dry_run", "ok": True, "plan": plan.to_dict()})
         return result
 
-    snap = _take_snapshot(workspace, plan.from_backend)
-    stages.append({"stage": "snapshot", "ok": True})
-    _backup_yml(workspace, snap.yml_text)
+    try:
+        # BUG-514：完整切换事务持跨进程锁，防止 CLI 与 API 并发交错。
+        with _switch_lock(workspace):
+            return _switch_gateway_locked(
+                workspace, config, registry, plan, result, stages, review
+            )
+    except Exception as exc:  # noqa: BLE001 — 锁获取失败
+        log.exception("网关切换锁获取失败：%s", exc)
+        result.ok = False
+        result.error = str(exc)
+        stages.append({"stage": "switch_lock", "ok": False, "error": str(exc)})
+        _record_event(
+            registry,
+            from_backend=plan.from_backend,
+            to_backend=plan.to_backend,
+            ok=False,
+            degraded=False,
+            noop=False,
+            error=str(exc),
+        )
+        return result
+
+
+def _switch_gateway_locked(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    plan: GatewaySwitchPlan,
+    result: GatewaySwitchResult,
+    stages: list[dict[str, Any]],
+    review: bool,
+) -> GatewaySwitchResult:
+    """在切换锁内执行事务：快照 → 停旧 → 写 YAML → 启新 → 回写 → 访问复核 → 回滚。"""
+    try:
+        snap = _take_snapshot(workspace, registry, plan.from_backend)
+        stages.append({"stage": "snapshot", "ok": True})
+    except Exception as exc:  # noqa: BLE001
+        log.exception("创建网关切换快照失败：%s", exc)
+        result.ok = False
+        result.error = str(exc)
+        stages.append({"stage": "snapshot", "ok": False, "error": str(exc)})
+        _record_event(
+            registry,
+            from_backend=plan.from_backend,
+            to_backend=plan.to_backend,
+            ok=False,
+            degraded=False,
+            noop=False,
+            error=str(exc),
+        )
+        return result
+
+    try:
+        _backup_yml(workspace, snap.yml_text)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("备份网关配置失败：%s", exc)
+        result.ok = False
+        result.error = str(exc)
+        stages.append({"stage": "backup_yml", "ok": False, "error": str(exc)})
+        _record_event(
+            registry,
+            from_backend=plan.from_backend,
+            to_backend=plan.to_backend,
+            ok=False,
+            degraded=False,
+            noop=False,
+            error=str(exc),
+        )
+        return result
 
     live_config = config
     try:

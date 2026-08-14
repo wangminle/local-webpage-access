@@ -225,6 +225,49 @@ def test_check_health_skips_when_no_port(workspace, registry, config) -> None:
     assert result.host_port is None
 
 
+def test_check_health_failure_keeps_registry_status_despite_stale_manifest(
+    workspace, registry, config
+) -> None:
+    """BUG-521：探测失败不得用 manifest 陈旧 status 覆盖 registry，也不刷新 updated_at。"""
+    port = _free_port()  # 无人监听 → 探测失败
+    m = _seed_container(workspace, registry, "api", host_port=port)
+    # 构造分叉：registry 为 running，manifest 陈旧为 stopped
+    m.status = Status.STOPPED
+    m.save(workspace.app_manifest_path("api"))
+    old_updated_at = "2020-01-01T00:00:00"
+    with registry.conn:
+        registry.conn.execute(
+            "UPDATE instances SET updated_at = ? WHERE id = ?",
+            (old_updated_at, "api"),
+        )
+
+    result = check_health(workspace, config, registry, "api", timeout=1.0)
+
+    assert result.ok is False
+    row = registry.get_instance("api")
+    assert row["status"] == "running"
+    assert row["last_error"]
+    assert row["updated_at"] == old_updated_at
+
+
+def test_check_health_success_keeps_registry_status_despite_stale_manifest(
+    workspace, registry, config, http_server
+) -> None:
+    """BUG-521：探测成功也不得用 manifest 陈旧 status 覆盖 registry。"""
+    m = _seed_container(workspace, registry, "api", host_port=http_server)
+    # 反向分叉：registry 为 failed，manifest 陈旧为 running
+    m.status = Status.RUNNING
+    m.save(workspace.app_manifest_path("api"))
+    registry.update_status("api", Status.FAILED.value, last_error="旧错误")
+
+    result = check_health(workspace, config, registry, "api")
+
+    assert result.ok is True
+    row = registry.get_instance("api")
+    assert row["status"] == "failed"
+    assert row["last_error"] is None
+
+
 # ---- instance_status -------------------------------------------------------
 
 
@@ -404,6 +447,27 @@ def test_sync_status_all_instances(workspace, registry, config, monkeypatch) -> 
     # 静态实例没在跑（无 pid 文件），也应被观测为 stopped
     changed = sync_status(workspace, config, registry)
     assert "api" in changed
+
+
+def test_sync_status_converges_registry_manifest_divergence(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-520：registry≠manifest 分叉时不得永远假报告变化、永不落库。"""
+    m = _seed_static(workspace, registry, "demo")
+    # 构造分叉：manifest 落 stopped，registry 落 failed（cancel/stale-building 只写 registry）
+    m.status = Status.STOPPED
+    m.save(workspace.app_manifest_path("demo"))
+    registry.update_status("demo", Status.FAILED.value)
+
+    # 观测固定返回 stopped
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle._observe_static_status",
+        lambda *a, **k: Status.STOPPED,
+    )
+
+    changed = sync_status(workspace, config, registry, "demo")
+    assert changed == {"demo": "stopped"}
+    assert registry.get_instance("demo")["status"] == "stopped"
 
 
 def test_cli_status_syncs_before_display(

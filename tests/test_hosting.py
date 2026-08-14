@@ -164,6 +164,16 @@ def test_find_build_output_none(tmp_path: Path) -> None:
     assert find_build_output(tmp_path) is None
 
 
+def test_find_build_output_rejects_outside_hint(tmp_path: Path) -> None:
+    """BUG-508：hint 指向仓库外目录时不得当作构建产物。"""
+    project = tmp_path / "proj"
+    outside = tmp_path / "shared" / "dist"
+    project.mkdir()
+    outside.mkdir(parents=True)
+    (outside / "index.html").write_text("x", encoding="utf-8")
+    assert find_build_output(project, hint="../shared/dist") is None
+
+
 # ---- sync_dir / sync_static_to_public -------------------------------------
 
 

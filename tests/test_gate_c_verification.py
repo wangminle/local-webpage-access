@@ -1180,3 +1180,67 @@ class TestNodeSubdirCandidate:
         assert signal.hasAlembicIni is True
         primary = [plan for plan in generate_plans(evidence) if plan.confidenceTier == "primary"]
         assert primary[0].capabilityContract.requiresMigrations is True
+
+
+class TestPoetryDepsCollection:
+    """BUG-502：evidence_collector._collect_python_deps 解析 Poetry 依赖段。"""
+
+    def test_poetry_dependencies_collected(self, tmp_path: Path) -> None:
+        """BUG-502：仅 [tool.poetry.dependencies] 声明 FastAPI 应被收集（python 键忽略）。"""
+        from local_webpage_access.evidence_collector import _collect_python_deps
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.poetry]\n'
+            'name = "demo"\n'
+            'version = "0.1.0"\n'
+            '[tool.poetry.dependencies]\n'
+            'python = "^3.11"\n'
+            'fastapi = "^0.100"\n'
+            'uvicorn = "^0.30"\n'
+        )
+        deps = _collect_python_deps(tmp_path)
+        assert "fastapi" in deps
+        assert "uvicorn" in deps
+        assert "python" not in deps
+
+    def test_poetry_dev_and_group_dependencies_collected(self, tmp_path: Path) -> None:
+        """BUG-502：dev-dependencies 与 group.*.dependencies 也应被收集。"""
+        from local_webpage_access.evidence_collector import _collect_python_deps
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.poetry]\n'
+            'name = "demo"\n'
+            'version = "0.1.0"\n'
+            '[tool.poetry.dependencies]\n'
+            'python = "^3.11"\n'
+            'fastapi = "^0.100"\n'
+            '[tool.poetry.dev-dependencies]\n'
+            'pytest = "^8.0"\n'
+            '[tool.poetry.group.test.dependencies]\n'
+            'httpx = "^0.27"\n'
+        )
+        deps = _collect_python_deps(tmp_path)
+        assert "fastapi" in deps
+        assert "pytest" in deps
+        assert "httpx" in deps
+        assert "python" not in deps
+
+    def test_poetry_deps_flow_into_subdir_signal(self, tmp_path: Path) -> None:
+        """BUG-502：子目录 Poetry 依赖经 collect() 进入 SubdirSignal.pythonDeps。"""
+        from local_webpage_access.evidence_collector import collect
+
+        backend = tmp_path / "backend"
+        backend.mkdir()
+        (backend / "pyproject.toml").write_text(
+            '[tool.poetry]\n'
+            'name = "demo"\n'
+            'version = "0.1.0"\n'
+            '[tool.poetry.dependencies]\n'
+            'python = "^3.11"\n'
+            'fastapi = "^0.100"\n'
+        )
+
+        evidence = collect(tmp_path)
+        signal = next(item for item in evidence.subdirSignals if item.path == "backend")
+        assert "fastapi" in signal.pythonDeps
+        assert "python" not in signal.pythonDeps

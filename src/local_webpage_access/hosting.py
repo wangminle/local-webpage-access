@@ -1592,7 +1592,10 @@ def find_build_output(project_dir: Path, hint: str | None = None) -> Path | None
         candidate = project_dir / hint
         if candidate.is_dir():
             try:
-                if any(candidate.iterdir()):
+                # BUG-508：拒绝越界 hint（如 ../shared/dist），防止把仓库外目录当产物对外服务。
+                if any(candidate.iterdir()) and candidate.resolve().is_relative_to(
+                    project_dir.resolve()
+                ):
                     return candidate
             except (PermissionError, OSError):
                 pass

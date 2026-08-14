@@ -219,6 +219,9 @@ def test_detect_node_invalid_port_left_none(tmp_path: Path) -> None:
     )
     result = Scanner().detect(tmp_path)
     assert result.internalPort is None
+    assert result.pending is True
+    assert result.confidence == "low"
+    assert any("端口非法" in n for n in result.notes)
 
 
 def test_detect_node_unknown_pending(tmp_path: Path) -> None:
@@ -891,6 +894,22 @@ def test_monorepo_npm_workspaces_web_server(tmp_path: Path) -> None:
     assert result.entry.start is not None
     assert "-w @app/webpage" in result.entry.start
     assert result.entry.install == "npm ci"  # root lockfile
+
+
+def test_detect_workspaces_skips_parent_escape(tmp_path: Path) -> None:
+    """BUG-508：workspaces 指向仓库外目录时不得进入分类结果。"""
+    from local_webpage_access.package_classifier import detect_workspaces
+
+    root = tmp_path / "repo"
+    shared = tmp_path / "shared"
+    root.mkdir()
+    shared.mkdir()
+    (shared / "package.json").write_text("{}", encoding="utf-8")
+    (root / "package.json").write_text(
+        json.dumps({"private": True, "workspaces": ["../shared"]}),
+        encoding="utf-8",
+    )
+    assert detect_workspaces(root) == []
 
 
 def test_monorepo_no_deployable_packages(tmp_path: Path) -> None:

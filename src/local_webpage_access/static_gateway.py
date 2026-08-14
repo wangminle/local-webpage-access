@@ -1329,17 +1329,20 @@ class StaticGateway:
     def _enumerate_workspace_builtin_pids(self) -> list[tuple[int, str]]:
         """枚举服务本工作区 ``apps/`` 的 ``http.server`` 进程 (pid, inferred_iid)。
 
-        POSIX 用 ``pgrep -lf http.server``（**必须** ``-l``：Darwin 上 ``pgrep -af``
-        只输出 PID、不含命令行，会导致本方法恒返回空——复盘 §10.2-C1）。
+        Linux 用 ``pgrep -af http.server``，Darwin 用 ``pgrep -lf http.server``；
+        两者均输出 PID 与完整命令行（复盘 §10.2-C1，BUG-512）。
         Windows / 无 pgrep 时返回空列表。
         仅匹配命令行同时含 ``http.server`` 与本工作区 ``apps/`` 路径的进程。
         ``iid`` 从 ``--directory <apps/<iid>/public>`` 推断；推断失败用 ``pid-<n>``。
         """
         apps_prefix = str(self.ws.apps)
         try:
-            # -l：完整命令行；-f：按完整命令行匹配 pattern。勿用 -af（macOS 无 cmdline）。
+            # BUG-512：procps（Linux）的 ``-l`` 只输出进程名（comm，截断 15 字符），
+            # ``-a`` 才输出完整命令行；Darwin 的 ``-lf`` 已含命令行（``-af`` 只输出 PID）。
+            # 按平台选择旗标，否则 Linux 上孤儿 builtin 枚举恒空。
+            pgrep_flags = ["-af", "http.server"] if sys.platform.startswith("linux") else ["-lf", "http.server"]
             result = subprocess.run(
-                ["pgrep", "-lf", "http.server"],
+                ["pgrep", *pgrep_flags],
                 capture_output=True,
                 text=True,
                 timeout=5,

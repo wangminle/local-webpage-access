@@ -693,12 +693,21 @@ class Scanner:
                 "next" in deps_lower or "nuxt" in deps_lower
             ) else ResourceProfile.SMALL
             result.internalPort = _infer_node_port(summary)
+            if result.internalPort is None:
+                # BUG-509：优先脚本声明的端口非法（越出 1..65535）时，不得再按
+                # high 置信度静默兜底 8000；置 pending 交人工确认（与 BUG-322 注释一致）。
+                result.pending = True
+                result.confidence = "low"
+                result.notes.append(
+                    "Node 后端声明的端口非法（越出 1..65535），标记 pending 待人工确认"
+                )
+            else:
+                result.confidence = "high"
             result.entry = EntryConfig(
                 install=_node_install_command(summary),
                 build="npm run build" if has_build else None,
                 start="npm run start" if "start" in summary.node_scripts else "node server.js",
             )
-            result.confidence = "high"
         elif is_frontend and has_build:
             # 纯前端：构建后静态托管
             result.runtime = Runtime.SHARED_STATIC

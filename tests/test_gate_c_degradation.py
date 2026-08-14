@@ -1143,6 +1143,36 @@ def test_rollback_with_snapshot_restores_files(tmp_path: Path) -> None:
     assert "file:Dockerfile" in result.rolledBackItems
 
 
+def test_rollback_releases_only_new_ports(workspace, registry, config, monkeypatch) -> None:
+    """BUG-510：回滚只释放本轮新端口，复用端口必须保留。"""
+    from local_webpage_access.lifecycle import _rollback_attempt
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime.is_running",
+        lambda self, iid: False,
+    )
+    iid = "rb-ports"
+    workspace.ensure_app_dirs(iid)
+    manifest = _mk_container_manifest(instance_id=iid)
+    registry.upsert_from_manifest(manifest)
+    reused, fresh = 21010, 21011
+    assert registry.allocate_port(iid, reused)
+    assert registry.allocate_port(iid, fresh)
+
+    result = _rollback_attempt(
+        workspace,
+        config,
+        registry,
+        iid,
+        manifest,
+        attempt_id="attempt-rb-ports-0",
+        snapshot={"manifestFields": {}, "files": {}, "ports": [reused]},
+    )
+    assert registry.port_owner(reused) == iid
+    assert registry.port_owner(fresh) is None
+    assert "port" in result.rolledBackItems
+
+
 def test_rollback_without_snapshot_no_file_restore(tmp_path: Path) -> None:
     """C.R04：无 snapshot 时不尝试恢复文件（向后兼容）。"""
     from local_webpage_access.lifecycle import _rollback_attempt

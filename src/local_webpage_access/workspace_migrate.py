@@ -616,6 +616,8 @@ def rewrite_manifest_paths(manifest_path: Path, old: str, new: str) -> bool:
 def rewrite_registry_paths(db_path: Path, old: str, new: str) -> None:
     if not db_path.is_file():
         return
+    if not old or old == new:
+        return
     conn = sqlite3.connect(db_path)
     try:
         # BUG-473：可写 registry 连接统一开外键不变量（与 connect() 对齐），
@@ -630,14 +632,28 @@ def rewrite_registry_paths(db_path: Path, old: str, new: str) -> None:
         )
         for table, cols in updates:
             for col in cols:
+                # BUG-518：边界安全 + 幂等改写。只匹配 = old 或 old/、old\ 前缀，
+                # 避免兄弟目录（/lwa-backup）被误改；用 _rewrite_text_paths 保证
+                # new 以 old 为前缀（lwa→lwa2）时重跑/resume/rollback 不二次损坏。
                 try:
-                    conn.execute(
-                        f"UPDATE {table} SET {col}=REPLACE({col}, ?, ?) "
-                        f"WHERE {col} LIKE ?",
-                        (old, new, old + "%"),
-                    )
+                    rows = conn.execute(
+                        f"SELECT rowid, {col} FROM {table} "
+                        f"WHERE {col} IS NOT NULL AND "
+                        f"({col} = ? OR {col} LIKE ? OR {col} LIKE ?)",
+                        (old, old + "/%", old + "\\%"),
+                    ).fetchall()
                 except sqlite3.Error:
                     continue
+                for row in rows:
+                    value = row[1]
+                    if not isinstance(value, str) or not value:
+                        continue
+                    rewritten = _rewrite_text_paths(value, old, new)
+                    if rewritten != value:
+                        conn.execute(
+                            f"UPDATE {table} SET {col}=? WHERE rowid=?",
+                            (rewritten, row[0]),
+                        )
         # 清空陈旧 container_id
         with contextlib.suppress(sqlite3.Error):
             conn.execute("UPDATE containers SET container_id=NULL, image_id=NULL")
@@ -665,6 +681,20 @@ def _rewrite_text_paths(text: str, old: str, new: str) -> str:
         out,
     )
     return out
+
+
+def _contains_old_path(text: str, old: str) -> bool:
+    """边界安全地判断文本是否仍含旧工作区路径（与 :func:`_rewrite_text_paths` 同口径）。
+
+    BUG-519：裸 ``old in text`` 会把 ``old`` 为 ``new`` 前缀（``lwa→lwa2``）或兄弟
+    目录（``/lwa-backup``）的情况误判为“仍含旧路径”，导致 verify 恒报失败。
+    """
+    if not old:
+        return False
+    for sep in ("/", "\\"):
+        if (old + sep) in text:
+            return True
+    return re.search(re.escape(old) + r"(?![A-Za-z0-9_./\\-])", text) is not None
 
 
 def rewrite_gateway_fragment_paths(workspace: Workspace, old: str, new: str) -> list[str]:
@@ -930,7 +960,7 @@ def verify_migrate(
                 text = path.read_text(encoding="utf-8")
             except OSError:
                 continue
-            if old in text:
+            if _contains_old_path(text, old):
                 notes.append(f"仍含旧路径：{path.relative_to(workspace.root)}")
                 ok = False
 
@@ -1175,6 +1205,38 @@ def _run_migrate_locked(
         reg = Registry(ws.db_path)
         reg.open()
 
+        # BUG-519：resume 且 journal 已是 complete 时，禁止把 verify_ok 默认成 True。
+        # 首次 verify 失败仍会把 phase 写成 complete；COMPLETE 写入若丢掉
+        # verify_ok，resume 会直接报成功。缺字段或明确失败时重新验收。
+        if resume and phase == MigratePhase.COMPLETE.value:
+            stored_ok = (journal or {}).get("verify_ok")
+            stored_notes = list((journal or {}).get("verify_notes") or [])
+            resume_started = list((journal or {}).get("restored_ids") or [])
+            if stored_ok is True:
+                resume_verify_ok, resume_verify_notes = True, stored_notes
+            else:
+                resume_verify_ok, resume_verify_notes = verify_migrate(
+                    ws, str(old_r), str(new_r), snapshot
+                )
+            _save(
+                MigratePhase.COMPLETE.value,
+                completed_at=now_iso(),
+                verify_ok=resume_verify_ok,
+                verify_notes=resume_verify_notes,
+                restored_ids=resume_started,
+            )
+            return MigrateResult(
+                ok=resume_verify_ok,
+                old=str(old_r),
+                new=str(new_r),
+                phase=MigratePhase.COMPLETE.value,
+                preflight=preflight,
+                snapshot=snapshot,
+                started=resume_started,
+                verify_ok=resume_verify_ok,
+                verify_notes=resume_verify_notes,
+            )
+
         # BACKUP
         if phase == MigratePhase.BACKUP.value:
             # resume：仅当 journal 已有真正采集过的快照时复用（captured_at 非空），
@@ -1262,8 +1324,14 @@ def _run_migrate_locked(
             )
             phase = MigratePhase.COMPLETE.value
 
-        # COMPLETE
-        _save(MigratePhase.COMPLETE.value, completed_at=now_iso())
+        # COMPLETE（必须带上 verify_ok，避免 resume 丢失验收结果）
+        _save(
+            MigratePhase.COMPLETE.value,
+            completed_at=now_iso(),
+            verify_ok=verify_ok,
+            verify_notes=verify_notes,
+            restored_ids=started,
+        )
         return MigrateResult(
             ok=verify_ok,
             old=str(old_r),

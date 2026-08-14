@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import http.server
+import sys
 import socketserver
 import threading
 from pathlib import Path
@@ -1034,7 +1035,7 @@ def test_stop_all_builtin_kills_pid_less_orphans(workspace, config, monkeypatch)
 def test_enumerate_workspace_builtin_pids_parses_pgrep_lf(
     workspace, config, monkeypatch
 ):
-    """§10.2-C1：解析 ``pgrep -lf`` 完整命令行；拒绝仅 PID 的 -af 形态。"""
+    """§10.2-C1 / BUG-512：Darwin 用 ``pgrep -lf``；Linux 用 ``pgrep -af``。"""
     from local_webpage_access.static_gateway import StaticGateway
 
     gateway = StaticGateway(workspace, config)
@@ -1059,7 +1060,11 @@ def test_enumerate_workspace_builtin_pids_parses_pgrep_lf(
         "local_webpage_access.static_gateway.subprocess.run", fake_run
     )
     found = gateway._enumerate_workspace_builtin_pids()
-    assert captured["cmd"][:2] == ["pgrep", "-lf"]
+    assert captured["cmd"][0] == "pgrep"
+    if sys.platform.startswith("linux"):
+        assert captured["cmd"][1:3] == ["-af", "http.server"]
+    else:
+        assert captured["cmd"][1:3] == ["-lf", "http.server"]
     assert found == [(65599, "demo-static")]
 
     # Darwin -af 形态：只有 PID → 应被过滤（无 cmdline）

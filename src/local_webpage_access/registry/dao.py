@@ -310,6 +310,19 @@ class Registry:
                 (now_iso(), now_iso(), instance_id),
             )
 
+    def set_last_error(self, instance_id: str, error: str | None) -> None:
+        """仅写/清 ``last_error``，不改 ``status``（BUG-521）。
+
+        健康检查只应记录探测结果，状态由 :func:`lifecycle.observe_status`
+        基于进程态判定，避免健康抖动把实例状态打回旧值。
+        """
+        with self.txn() as tx:
+            # 不刷新 updated_at：避免健康检查把 stale-building 兜底计时器重置。
+            tx.execute(
+                "UPDATE instances SET last_error = ? WHERE id = ?",
+                (error, instance_id),
+            )
+
     def delete_instance(self, instance_id: str) -> None:
         """删除实例（显式清理全部子表，WBS-05.10 / BUG-473）。
 
@@ -501,6 +514,14 @@ class Registry:
     def release_instance_ports(self, instance_id: str) -> None:
         with self.txn() as tx:
             tx.execute("DELETE FROM ports WHERE instance_id = ?", (instance_id,))
+
+    def instance_ports(self, instance_id: str) -> list[int]:
+        """返回实例当前登记的所有端口（BUG-510：回滚仅释放本轮新分配端口）。"""
+        rows = self._fetchall(
+            "SELECT port FROM ports WHERE instance_id = ? ORDER BY port",
+            (instance_id,),
+        )
+        return [int(r["port"]) for r in rows]
 
     def allocated_ports(self) -> list[int]:
         rows = self._fetchall("SELECT port FROM ports ORDER BY port")
