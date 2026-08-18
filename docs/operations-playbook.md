@@ -259,18 +259,20 @@ lwa import --from-dir /home/user/my-site --update my-app --dry-run
 跨平台统一入口是 **`lwa autostart`**（前台监管单元，非旧版 detached `on`）：
 
 ```bash
-lwa autostart install                  # 生成并启用 daemon + manager（managerEnabled 时）
-lwa autostart install --with-caddy      # 额外监管 gateway（仅 staticGateway=caddy）
+# V0.8.0 / IMP-061 缺省安全：caddy 在用时 gateway 单元默认纳入、linger 默认尝试
+lwa autostart install                  # daemon + manager（+ gateway 当 staticGateway=caddy）
+lwa autostart install --with-caddy --linger   # 显式等价写法（Linux/WSL 常用）
+lwa autostart install --no-with-caddy  # 显式排除 gateway（旧 --with-caddy 语义仍是"纳入"）
 lwa autostart check                     # 完备性深检（解释器 / 单元 / 进程身份 / Caddy…）
-lwa autostart status
+lwa autostart status [--json]           # 单元 + 进程 + 运行模式（systemd/launchd 监管 vs 裸进程）
 ```
 
-`lwa setup --autostart` 仍可用，但已**委托**给 `lwa autostart install`（行为一致）。完整平台差异、停服协调与验收见 [开机自启](autostart.md)。
+`lwa setup --autostart` 仍可用，但已**委托**给 `lwa autostart install`（行为一致）。`lwa init` / `setup` 收尾在 Linux systemd 环境（TTY）会交互询问是否安装自启（非 TTY 零阻塞）。完整平台差异、停服协调与验收见 [开机自启](autostart.md)。
 
 要点：
 
 - **停服**：先 `lwa autostart disable`，再 `lwa daemon/manager/gateway off`（`off` 已内置 `coordinated_disable`）。
-- **升级重启**：`lwa update` 重启 manager/daemon 时走 `coordinated_restart`——自启在管则交监督器（`kickstart -k` / `systemctl restart`），避免与 KeepAlive 抢锁。
+- **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长；enabled=false 跳过。均不与 KeepAlive 抢锁。
 - **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。
 - **Linux**：systemd user + 建议 `enable-linger`；**WSL** 另需 Windows 登录任务唤醒发行版；**Windows 原生不支持**自启（见 [autostart.md](autostart.md)）。
 
@@ -327,7 +329,7 @@ lwa list                 # 实例清单
 
 ```bash
 lwa access refresh   # 用当前 LAN IP 重算所有实例 lanUrl/routeUrl 并落盘
-lwa update           # 升级收尾：后台重启后再 refresh（+ 默认轻量 review）
+lwa update           # 一键升级（V0.8.0 含源码快进）收尾：后台重启后再 refresh（+ 默认轻量 review）
 lwa doctor --access  # 诊断同时复用 access review
 ```
 

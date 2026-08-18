@@ -88,9 +88,7 @@ def _opts(**kw) -> UpdateOptions:
 def test_locate_repo_explicit_valid(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "pyproject.toml").write_text(
-        "[project]\nname='local-webpage-access'\n"
-    )
+    (repo / "pyproject.toml").write_text("[project]\nname='local-webpage-access'\n")
     assert locate_repo(str(repo)) == repo.resolve()
 
 
@@ -235,9 +233,7 @@ def test_migrate_config_deep_merges_nested_dict(workspace: Workspace) -> None:
 def test_migrate_config_deep_merges_flow_style_nested_dict(workspace: Workspace) -> None:
     """CHK-115：flow-style 嵌套（portPool: {start: …}）缺子键时也须补齐 end。"""
     workspace.config_path.write_text(
-        "managerPort: 17800\n"
-        "portPool: {start: 19000}\n"
-        "# keep-comment\n",
+        "managerPort: 17800\nportPool: {start: 19000}\n# keep-comment\n",
         encoding="utf-8",
     )
     cfg = load_config(workspace)
@@ -281,9 +277,7 @@ def test_run_update_migrates_config_via_subprocess(
         return ["staticGatewayPort"], True
 
     monkeypatch.setattr(upd, "migrate_config_defaults", tracking_in_process)
-    monkeypatch.setattr(
-        upd, "run_migrate_config_defaults", tracking_subproc, raising=False
-    )
+    monkeypatch.setattr(upd, "run_migrate_config_defaults", tracking_subproc, raising=False)
 
     report = run_update(
         workspace,
@@ -452,16 +446,10 @@ def test_run_update_waits_for_import_before_restart_manager(
         calls.append(timeout)
         return 0.1
 
-    monkeypatch.setattr(
-        "local_webpage_access.updater.wait_until_import_idle", fake_wait
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.is_running", lambda ws, cfg: False
-    )
+    monkeypatch.setattr("local_webpage_access.updater.wait_until_import_idle", fake_wait)
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: False)
 
-    report = run_update(
-        workspace, config, registry, options=_opts(restart_manager=True)
-    )
+    report = run_update(workspace, config, registry, options=_opts(restart_manager=True))
     assert calls == [180.0]
     assert report.step("restartManager").status == "skipped"
 
@@ -478,18 +466,14 @@ def test_run_update_marks_restart_failed_when_import_still_busy(
             LwaError("仍有导入进行中，请稍后再执行 lwa update", code="IMPORT_BUSY")
         ),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
     started = {"n": 0}
     monkeypatch.setattr(
         "local_webpage_access.manager_service.stop_manager",
         lambda ws: started.__setitem__("n", started["n"] + 1) or True,
     )
 
-    report = run_update(
-        workspace, config, registry, options=_opts(restart_manager=True)
-    )
+    report = run_update(workspace, config, registry, options=_opts(restart_manager=True))
     step = report.step("restartManager")
     assert step is not None and step.status == "failed"
     assert "导入" in step.message
@@ -506,9 +490,7 @@ def test_manager_restart_skipped_when_not_running(
         started["count"] += 1
         return 999
 
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.is_running", lambda ws, cfg: False
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: False)
     monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
     monkeypatch.setattr("local_webpage_access.manager_service.start_manager", fake_start)
 
@@ -528,9 +510,7 @@ def test_manager_restart_runs_for_legacy_health_without_workspace_root(
 
     write_state(
         workspace,
-        ManagerState(
-            enabled=True, pid=4242, host="0.0.0.0", port=config.managerPort
-        ),
+        ManagerState(enabled=True, pid=4242, host="0.0.0.0", port=config.managerPort),
     )
     calls = {"stop": 0, "start": 0}
 
@@ -543,9 +523,7 @@ def test_manager_restart_runs_for_legacy_health_without_workspace_root(
         "local_webpage_access.manager_service._fetch_health",
         lambda *a, **k: {"ok": True},
     )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.is_pid_alive", lambda pid: True
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.is_pid_alive", lambda pid: True)
     monkeypatch.setattr(
         "local_webpage_access.manager_service.stop_manager",
         lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True,
@@ -577,18 +555,14 @@ def test_manager_restart_failure_captured(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
         lambda ws, name: (None, True, False),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
     monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
     monkeypatch.setattr(
         "local_webpage_access.manager_service.start_manager",
         lambda ws, cfg: (_ for _ in ()).throw(RuntimeError("start boom")),
     )
     # doctor 也开，验证它仍然执行
-    monkeypatch.setattr(
-        "local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok"
-    )
+    monkeypatch.setattr("local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok")
 
     opts = _opts(restart_manager=True, run_doctor=True)
     report = run_update(workspace, config, registry, options=opts)
@@ -608,9 +582,7 @@ def test_verify_manager_version_matches(monkeypatch) -> None:
         "local_webpage_access.manager_service._fetch_health",
         lambda *a, **k: {"ok": True, "version": "V0.7.1"},
     )
-    ok, actual = verify_manager_version(
-        Config(), expected="V0.7.1", timeout=0.5
-    )
+    ok, actual = verify_manager_version(Config(), expected="V0.7.1", timeout=0.5)
     assert ok is True
     assert actual == "V0.7.1"
 
@@ -624,9 +596,7 @@ def test_verify_manager_version_mismatch(monkeypatch) -> None:
         "local_webpage_access.manager_service._fetch_health",
         lambda *a, **k: {"ok": True, "version": "V0.6.13"},
     )
-    ok, actual = verify_manager_version(
-        Config(), expected="V0.7.1", timeout=0.3
-    )
+    ok, actual = verify_manager_version(Config(), expected="V0.7.1", timeout=0.3)
     assert ok is False
     assert actual == "V0.6.13"
 
@@ -654,27 +624,19 @@ def test_manager_restart_retries_then_fails_on_version_mismatch(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
         lambda ws, name: (None, True, False),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager", lambda ws: True
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
 
     def fake_start(ws, cfg):
         starts["n"] += 1
         return 1000 + starts["n"]
 
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.start_manager", fake_start
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.start_manager", fake_start)
     monkeypatch.setattr(
         "local_webpage_access.updater.verify_manager_version",
         lambda *a, **k: (False, "V0.6.13"),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok"
-    )
+    monkeypatch.setattr("local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok")
 
     report = run_update(
         workspace,
@@ -722,8 +684,14 @@ def test_daemon_restart_via_autostart_when_managed(
 
     calls = {"stop": 0, "start": 0}
     monkeypatch.setattr(dmod, "is_running", lambda ws: True)
-    monkeypatch.setattr(dmod, "stop_daemon", lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True)
-    monkeypatch.setattr(dmod, "start_daemon", lambda ws, cfg, **kw: calls.__setitem__("start", calls["start"] + 1) or 555)
+    monkeypatch.setattr(
+        dmod, "stop_daemon", lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True
+    )
+    monkeypatch.setattr(
+        dmod,
+        "start_daemon",
+        lambda ws, cfg, **kw: calls.__setitem__("start", calls["start"] + 1) or 555,
+    )
     # 自启动接管重启 → managed=True
     monkeypatch.setattr(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
@@ -747,7 +715,11 @@ def test_daemon_restart_stop_failure_marks_failed(
     started = {"n": 0}
     monkeypatch.setattr(dmod, "is_running", lambda ws: True)
     monkeypatch.setattr(dmod, "stop_daemon", lambda ws: False)  # 终止失败
-    monkeypatch.setattr(dmod, "start_daemon", lambda ws, cfg, **kw: started.__setitem__("n", started["n"] + 1) or 555)
+    monkeypatch.setattr(
+        dmod,
+        "start_daemon",
+        lambda ws, cfg, **kw: started.__setitem__("n", started["n"] + 1) or 555,
+    )
     monkeypatch.setattr(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
         lambda ws, name: (None, True, False),
@@ -870,28 +842,30 @@ def _seed_instance(registry: Registry, iid: str, status: str) -> None:
     from datetime import datetime
 
     now = datetime.now().isoformat()
-    registry.upsert_instance({
-        "id": iid,
-        "name": iid,
-        "version": "1",
-        "kind": "static",
-        "runtime": "shared-static",
-        "serving_mode": "shared-static",
-        "resource_profile": "tiny",
-        "stack_json": "[]",
-        "has_database": 0,
-        "database_type": None,
-        "database_json": None,
-        "desired_state": "stopped",
-        "status": status,
-        "app_path": None,
-        "source_zip_path": None,
-        "created_at": now,
-        "updated_at": now,
-        "last_started_at": None,
-        "last_health_check_at": None,
-        "last_error": None,
-    })
+    registry.upsert_instance(
+        {
+            "id": iid,
+            "name": iid,
+            "version": "1",
+            "kind": "static",
+            "runtime": "shared-static",
+            "serving_mode": "shared-static",
+            "resource_profile": "tiny",
+            "stack_json": "[]",
+            "has_database": 0,
+            "database_type": None,
+            "database_json": None,
+            "desired_state": "stopped",
+            "status": status,
+            "app_path": None,
+            "source_zip_path": None,
+            "created_at": now,
+            "updated_at": now,
+            "last_started_at": None,
+            "last_health_check_at": None,
+            "last_error": None,
+        }
+    )
 
 
 def test_restart_instances_skips_building(
@@ -904,9 +878,7 @@ def test_restart_instances_skips_building(
         restarted.append(iid)
         return None
 
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.restart_instance", fake_restart
-    )
+    monkeypatch.setattr("local_webpage_access.lifecycle.restart_instance", fake_restart)
 
     _seed_instance(registry, "running-1", "running")
     _seed_instance(registry, "stopped-1", "stopped")
@@ -936,9 +908,7 @@ def test_restart_instances_continues_on_single_failure(
             raise RuntimeError("boom")
         return None
 
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.restart_instance", fake_restart
-    )
+    monkeypatch.setattr("local_webpage_access.lifecycle.restart_instance", fake_restart)
     _seed_instance(registry, "good", "running")
     _seed_instance(registry, "bad", "running")
 
@@ -957,9 +927,7 @@ def test_restart_instances_continues_on_single_failure(
 def test_doctor_step_runs(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:
-    monkeypatch.setattr(
-        "local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "warn"
-    )
+    monkeypatch.setattr("local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "warn")
     opts = _opts(run_doctor=True)
     report = run_update(workspace, config, registry, options=opts)
 
@@ -974,9 +942,7 @@ def test_report_to_dict_structure(
 ) -> None:
     """JSON 输出草案字段齐全。"""
     opts = _opts(sync_skills=True, run_doctor=True)
-    monkeypatch.setattr(
-        "local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok"
-    )
+    monkeypatch.setattr("local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok")
     report = run_update(workspace, config, registry, options=opts)
     d = report.to_dict()
 
@@ -992,9 +958,7 @@ def test_format_report_renders(
 ) -> None:
     from local_webpage_access.updater import format_report
 
-    monkeypatch.setattr(
-        "local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok"
-    )
+    monkeypatch.setattr("local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok")
     opts = _opts(run_doctor=True)
     report = run_update(workspace, config, registry, options=opts)
     text = format_report(report)
@@ -1011,24 +975,18 @@ def test_access_refresh_runs_after_background_restarts(
     """038.01：accessRefresh 必须在 restartManager/Daemon 之后执行。"""
     order: list[str] = []
 
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
     monkeypatch.setattr(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
         lambda ws, name: (None, True, False),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager", lambda ws: True
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
 
     def fake_start_mgr(ws, cfg):
         order.append("restartManager")
         return 4242
 
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.start_manager", fake_start_mgr
-    )
+    monkeypatch.setattr("local_webpage_access.manager_service.start_manager", fake_start_mgr)
     monkeypatch.setattr(
         "local_webpage_access.updater.verify_manager_version",
         lambda *a, **k: (True, "V0.7.1"),
@@ -1131,9 +1089,7 @@ def test_access_refresh_failure_separate_from_pip(
     fake_repo = workspace.root / "repo"
     fake_repo.mkdir()
     (fake_repo / "pyproject.toml").write_text("[project]\nname='x'\n")
-    monkeypatch.setattr(
-        "local_webpage_access.updater.locate_repo", lambda e: fake_repo
-    )
+    monkeypatch.setattr("local_webpage_access.updater.locate_repo", lambda e: fake_repo)
     monkeypatch.setattr(
         "local_webpage_access.updater.run_pip_install",
         lambda repo: "Successfully installed local-webpage-access",
@@ -1142,9 +1098,7 @@ def test_access_refresh_failure_separate_from_pip(
     def boom(*a, **k):
         raise RuntimeError("refresh boom")
 
-    monkeypatch.setattr(
-        "local_webpage_access.access_workflow.refresh_network_entries", boom
-    )
+    monkeypatch.setattr("local_webpage_access.access_workflow.refresh_network_entries", boom)
     monkeypatch.setattr(
         "local_webpage_access.access_workflow.review_access",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("should not run")),
@@ -1178,9 +1132,7 @@ def test_no_review_access_skips_review_step(
         "local_webpage_access.access_workflow.review_access",
         lambda *a, **k: reviewed.__setitem__("n", reviewed["n"] + 1),
     )
-    report = run_update(
-        workspace, config, registry, options=_opts(review_access=False)
-    )
+    report = run_update(workspace, config, registry, options=_opts(review_access=False))
     assert report.step("accessRefresh").status == "ok"
     assert report.step("accessReview").status == "skipped"
     assert reviewed["n"] == 0

@@ -94,7 +94,10 @@ def _seed_container_instance(
             composePath="docker/compose.yaml",
             dockerfilePath="docker/Dockerfile",
         ),
-        entry={"install": "pip install -r requirements.txt", "start": "uvicorn main:app --host 0.0.0.0 --port 8000"},
+        entry={
+            "install": "pip install -r requirements.txt",
+            "start": "uvicorn main:app --host 0.0.0.0 --port 8000",
+        },
         hasDatabase=has_database,
         database={"type": database_type} if has_database and database_type else None,
     )
@@ -294,9 +297,7 @@ def test_host_container_rescues_data_before_down_on_rebuild(
 
     顺序硬约束：rescue 必须在 down 之前——容器删除后数据无法再救出。
     """
-    _seed_container_instance(
-        workspace, registry, "api", has_database=True, database_type="sqlite"
-    )
+    _seed_container_instance(workspace, registry, "api", has_database=True, database_type="sqlite")
     fake_runtime._running_state = True  # 旧容器在跑 → 触发 down 重建
 
     host_container(workspace, config, registry, "api")
@@ -338,9 +339,7 @@ def test_host_container_sqlite_project_injects_database_url(
     workspace, registry, config, fake_runtime
 ) -> None:
     """SQLite 项目：.env 含 DATABASE_URL，Dockerfile 创建 /app/data。"""
-    _seed_container_instance(
-        workspace, registry, "api", has_database=True, database_type="sqlite"
-    )
+    _seed_container_instance(workspace, registry, "api", has_database=True, database_type="sqlite")
     host_container(workspace, config, registry, "api")
     env_text = workspace.app_env_path("api").read_text(encoding="utf-8")
     assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in env_text
@@ -491,9 +490,7 @@ def test_start_container_keeps_ids_when_observe_returns_none(
     monkeypatch.setattr(
         fake_runtime,
         "container_id",
-        lambda self, iid, *, all_containers=False: (
-            "cid-keep" if all_containers else None
-        ),
+        lambda self, iid, *, all_containers=False: "cid-keep" if all_containers else None,
     )
     monkeypatch.setattr(
         fake_runtime,
@@ -537,9 +534,7 @@ def test_start_container_clears_stale_last_error(
     monkeypatch.setattr(
         fake_runtime,
         "container_id",
-        lambda self, iid, *, all_containers=False: (
-            "cid-keep" if all_containers else None
-        ),
+        lambda self, iid, *, all_containers=False: "cid-keep" if all_containers else None,
     )
     monkeypatch.setattr(fake_runtime, "image_id", lambda self, iid: None)
 
@@ -585,9 +580,7 @@ def test_start_container_reruns_required_capabilities(
     monkeypatch.setattr(
         fake_runtime,
         "container_id",
-        lambda self, iid, *, all_containers=False: (
-            "cid-keep" if all_containers else None
-        ),
+        lambda self, iid, *, all_containers=False: "cid-keep" if all_containers else None,
     )
     monkeypatch.setattr(
         fake_runtime,
@@ -631,9 +624,7 @@ def test_host_instance_dispatches_to_host_container(
 # ---- stop_container ---------------------------------------------------------
 
 
-def test_stop_container_calls_compose_stop(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_stop_container_calls_compose_stop(workspace, registry, config, fake_runtime) -> None:
     _seed_container_instance(workspace, registry, "api")
     # 先"启动"
     host_container(workspace, config, registry, "api")
@@ -693,9 +684,16 @@ def test_ensure_container_port_allocates_new(workspace, registry, config) -> Non
 def test_ensure_container_port_reuses_existing(workspace, registry, config) -> None:
     """有历史端口且空闲时复用。"""
     _seed_container_instance(workspace, registry, "api")
-    registry.upsert_container("api", {"projectName": "lwa-api", "internalPort": 8000,
-                                       "composePath": "x", "dockerfilePath": "y",
-                                       "hostPort": 21500})
+    registry.upsert_container(
+        "api",
+        {
+            "projectName": "lwa-api",
+            "internalPort": 8000,
+            "composePath": "x",
+            "dockerfilePath": "y",
+            "hostPort": 21500,
+        },
+    )
     port, fresh = _ensure_container_port(config, registry, "api")
     assert fresh is False
     assert port == 21500
@@ -855,9 +853,7 @@ def test_mount_drift_sqlite_data_triggers_rescue_down_up(
     monkeypatch.setattr(
         fake_runtime,
         "image_id",
-        lambda self, iid: (
-            "sha256:new" if "up" in type(self).calls else "sha256:deadbeef"
-        ),
+        lambda self, iid: "sha256:new" if "up" in type(self).calls else "sha256:deadbeef",
     )
 
     started = start_container(workspace, config, registry, "api")
@@ -899,9 +895,7 @@ def test_mount_drift_down_failure_aborts_before_up(
     fake_runtime._running_state = True
     fake_runtime._bind_mounts = [_drifted_data_mount()]
     fake_runtime._rescue_result = 2
-    fake_runtime._down_error = DockerError(
-        "compose down failed", instance_id="api", action="down"
-    )
+    fake_runtime._down_error = DockerError("compose down failed", instance_id="api", action="down")
 
     with pytest.raises(HostingError, match="down 失败.*已中止"):
         start_container(workspace, config, registry, "api")
@@ -934,9 +928,7 @@ def test_mount_drift_host_data_conflict_aborts_for_manual_check(
     assert "start" not in fake_runtime.calls
 
 
-def test_mount_drift_rescue_empty_aborts(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_mount_drift_rescue_empty_aborts(workspace, registry, config, fake_runtime) -> None:
     """BUG-424：漂移 + 宿主 data/ 为空 + 救援未救出任何文件 → 中止，不得继续。"""
     _seed_deployed_sqlite(workspace, registry, "api")
     fake_runtime._running_state = False
@@ -981,9 +973,7 @@ def test_mount_drift_ps_failure_aborts_without_start(
     """BUG-429：容器查询失败不得当作"无容器"——中止，禁止 compose start 带旧挂载。"""
     _seed_deployed_sqlite(workspace, registry, "api")
     fake_runtime._running_state = False
-    fake_runtime._ps_error = DockerError(
-        "compose ps failed", instance_id="api", action="ps"
-    )
+    fake_runtime._ps_error = DockerError("compose ps failed", instance_id="api", action="ps")
 
     with pytest.raises(HostingError, match="无法查询容器状态"):
         start_container(workspace, config, registry, "api")
@@ -1023,9 +1013,7 @@ def test_mount_drift_sqlite_without_managed_data_mount_keeps_start(
     _seed_deployed_sqlite(workspace, registry, "api")
     fake_runtime._running_state = False
     # 只有非 data 的 bind（如代码目录），不算 LWA 管理 data mount
-    fake_runtime._bind_mounts = [
-        BindMount(source="/old/current", destination="/app", type="bind")
-    ]
+    fake_runtime._bind_mounts = [BindMount(source="/old/current", destination="/app", type="bind")]
 
     started = start_container(workspace, config, registry, "api")
     assert started.status == Status.RUNNING

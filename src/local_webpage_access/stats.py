@@ -189,8 +189,7 @@ def all_instance_resources(
 ) -> list[InstanceResources]:
     """全部实例资源汇总（静态实例不含容器指标）。"""
     return [
-        instance_resources(workspace, config, registry, r["id"])
-        for r in registry.list_instances()
+        instance_resources(workspace, config, registry, r["id"]) for r in registry.list_instances()
     ]
 
 
@@ -269,8 +268,11 @@ def _container_stats(instance_id: str) -> tuple[int | None, float | None]:
     try:
         out = subprocess.run(
             [
-                "docker", "stats", "--no-stream",
-                "--format", "{{json .}}",
+                "docker",
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{json .}}",
             ],
             capture_output=True,
             text=True,
@@ -338,10 +340,14 @@ def _parse_size(text: str) -> int | None:
     text = text.strip()
     units = {
         "b": 1,
-        "kb": 1000, "kib": 1024,
-        "mb": 1_000_000, "mib": 1024 * 1024,
-        "gb": 1_000_000_000, "gib": 1024 * 1024 * 1024,
-        "tb": 1_000_000_000_000, "tib": 1024 ** 4,
+        "kb": 1000,
+        "kib": 1024,
+        "mb": 1_000_000,
+        "mib": 1024 * 1024,
+        "gb": 1_000_000_000,
+        "gib": 1024 * 1024 * 1024,
+        "tb": 1_000_000_000_000,
+        "tib": 1024**4,
     }
     import re
 

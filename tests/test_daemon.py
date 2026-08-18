@@ -30,9 +30,7 @@ def workspace(workspace_root: Path) -> Workspace:
 
     if not ws.config_path.is_file():
         # BUG-121：示例配置默认 caddy；测试工作区改为 builtin
-        text = example_config_text().replace(
-            "staticGateway: caddy", "staticGateway: builtin"
-        )
+        text = example_config_text().replace("staticGateway: caddy", "staticGateway: builtin")
         ws.config_path.write_text(text, encoding="utf-8")
     return ws
 
@@ -258,9 +256,7 @@ def test_is_running_false_when_heartbeat_expired(workspace: Workspace) -> None:
     _write_lock(workspace, os.getpid(), time.time() - 9999)
     daemon_mod.write_state(
         workspace,
-        daemon_mod.DaemonState(
-            enabled=True, pid=os.getpid(), started_at="now", poll_interval=5.0
-        ),
+        daemon_mod.DaemonState(enabled=True, pid=os.getpid(), started_at="now", poll_interval=5.0),
     )
     assert daemon_mod.is_running(workspace) is False
 
@@ -668,9 +664,7 @@ def test_is_running_false_when_no_state(workspace: Workspace) -> None:
 
 
 def test_is_running_false_when_pid_dead(workspace: Workspace) -> None:
-    daemon_mod.write_state(
-        workspace, daemon_mod.DaemonState(enabled=True, pid=999999999)
-    )
+    daemon_mod.write_state(workspace, daemon_mod.DaemonState(enabled=True, pid=999999999))
     assert daemon_mod.is_running(workspace) is False
 
 
@@ -766,9 +760,7 @@ def test_stop_daemon_noop_when_never_started(workspace: Workspace) -> None:
     assert daemon_mod.stop_daemon(workspace) is True
 
 
-def test_stop_daemon_refuses_foreign_reused_pid(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_stop_daemon_refuses_foreign_reused_pid(workspace: Workspace, monkeypatch) -> None:
     """BUG-125：daemon PID 已复用时只清状态，不终止无关进程。"""
     daemon_mod.write_state(
         workspace,
@@ -784,9 +776,7 @@ def test_stop_daemon_refuses_foreign_reused_pid(
     assert daemon_mod.read_state(workspace).enabled is False
 
 
-def test_stop_daemon_keeps_lock_when_termination_fails(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_stop_daemon_keeps_lock_when_termination_fails(workspace: Workspace, monkeypatch) -> None:
     """BUG-192：stop_daemon 终止失败（pid 仍存活）时不得删锁文件，否则其他 watcher
     会误判无主并发启动，叠加 stuck/重复进程产生无锁 watcher。"""
     import os
@@ -1093,10 +1083,21 @@ def _seed_instance(
 def test_reconcile_restarts_desired_running_offline(
     workspace: Workspace, config: Config, registry: Registry
 ) -> None:
-    """DEV-042：desired=running ∧ status≠running 的实例被逐一恢复。"""
+    """DEV-042：desired=running ∧ status≠running 的实例被逐一恢复。
+
+    issue#1：failed 实例的 updated_at 老化为陈旧失败（宿主机重启前遗留），
+    保持立即自愈；刚失败的退避见 test_reconcile_backs_off_just_failed。
+    """
     _seed_instance(registry, workspace, "a", desired="running", status="stopped")
     _seed_instance(registry, workspace, "b", desired="running", status="failed")
     _seed_instance(registry, workspace, "c", desired="stopped", status="stopped")
+    from datetime import datetime, timedelta
+
+    stale = (
+        datetime.now() - timedelta(seconds=daemon_mod.RECONCILE_BACKOFF_BASE_SECONDS * 2)
+    ).isoformat()
+    registry._conn.execute("UPDATE instances SET updated_at = ? WHERE id = 'b'", (stale,))
+    registry._conn.commit()
     restarted: list[str] = []
     daemon_mod.reconcile(
         workspace,
@@ -1107,6 +1108,38 @@ def test_reconcile_restarts_desired_running_offline(
     assert sorted(restarted) == ["a", "b"]
     # 成功恢复写 reconcile 事件
     assert registry.list_events("a", limit=1)[0]["event_type"] == "reconcile"
+
+
+def test_reconcile_backs_off_just_failed(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """issue#1 问题3：刚失败（退避窗口内）的实例本轮不自愈，等一个 backoff 周期。
+
+    避免 daemon 在 Gate-C 探针失败后立即全量重建，长时间持 lifecycle 锁
+    与用户手工 restart 相撞。
+    """
+    _seed_instance(registry, workspace, "x", desired="running", status="failed")
+    restarted: list[str] = []
+    now = [100.0]
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+        monotonic=lambda: now[0],
+    )
+    assert restarted == []  # 本轮退避
+
+    # 一个 backoff 周期后恢复自愈
+    now[0] += daemon_mod.RECONCILE_BACKOFF_BASE_SECONDS
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+        monotonic=lambda: now[0],
+    )
+    assert restarted == ["x"]
 
 
 def test_reconcile_skips_in_progress_and_truly_running(
@@ -1188,9 +1221,7 @@ def test_reconcile_refreshes_stale_container_observation_before_blocking(
     """BUG-243：stopped 容器的陈旧 permission_denied 不得永久阻断自愈。"""
     from local_webpage_access.models import Status
 
-    _seed_instance(
-        registry, workspace, "container", runtime="docker-compose", status="stopped"
-    )
+    _seed_instance(registry, workspace, "container", runtime="docker-compose", status="stopped")
     registry.update_status(
         "container",
         "stopped",
@@ -1225,9 +1256,7 @@ def test_reconcile_full_unready_skips_containers_but_keeps_static(
     from local_webpage_access.capability import CapabilityReport
 
     config.profile = "full"
-    _seed_instance(
-        registry, workspace, "container", runtime="docker-compose", status="stopped"
-    )
+    _seed_instance(registry, workspace, "container", runtime="docker-compose", status="stopped")
     _seed_instance(registry, workspace, "static", status="stopped")
     monkeypatch.setattr(
         "local_webpage_access.capability.collect_capability_report",
@@ -1305,9 +1334,7 @@ def test_reconcile_skips_caddy_static_when_gateway_disabled(
     """Caddy 后端 + gateway.json enabled=false（用户 lwa gateway off）→ 跳过 caddy 静态。"""
     # builtin 实例应仍被恢复；caddy 静态被跳过
     _seed_instance(registry, workspace, "caddy-static", status="stopped")
-    _seed_instance(
-        registry, workspace, "container", runtime="docker-compose", status="stopped"
-    )
+    _seed_instance(registry, workspace, "container", runtime="docker-compose", status="stopped")
 
     class _FakeGW:
         def __init__(self, *a, **kw):
@@ -1316,9 +1343,7 @@ def test_reconcile_skips_caddy_static_when_gateway_disabled(
         def detect_backend(self):
             return "caddy"
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", _FakeGW
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _FakeGW)
     # gateway.json enabled=false
     from local_webpage_access.gateway_service import GatewayState, write_state
 
@@ -1423,9 +1448,7 @@ def test_attach_daemon_log_handler_writes_daemon_log(workspace: Workspace) -> No
             for h in added
         ), "未为 logs/daemon.log 追加 FileHandler"
 
-        logging.getLogger("local_webpage_access.bug189.test").warning(
-            "BUG-189 marker line"
-        )
+        logging.getLogger("local_webpage_access.bug189.test").warning("BUG-189 marker line")
         for h in added:
             h.flush()
         content = (workspace.logs / daemon_mod.LOG_FILENAME).read_text(encoding="utf-8")
@@ -1452,9 +1475,7 @@ def test_attach_daemon_log_handler_preserves_requested_level(
     assert captured["level"] == "DEBUG"
 
 
-def test_main_runtime_oserror_returns_failure(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_main_runtime_oserror_returns_failure(workspace: Workspace, monkeypatch) -> None:
     """BUG-296：拿锁后的运行期 OSError 必须非零退出。"""
     monkeypatch.setattr(
         daemon_mod.sys,
@@ -1499,9 +1520,7 @@ def test_main_lock_busy_still_exits_zero(workspace: Workspace, monkeypatch) -> N
     assert daemon_mod._main() == 0
 
 
-def test_main_probes_capability_only_after_daemon_lock(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_main_probes_capability_only_after_daemon_lock(workspace: Workspace, monkeypatch) -> None:
     """BUG-298：子进程应先抢运行锁，再做可能耗时的 capability 探测。"""
     import contextlib
 
@@ -1579,9 +1598,7 @@ def test_sigint_handler_requests_graceful_stop(monkeypatch) -> None:
         assert stop.is_set()
 
 
-def test_import_zip_keyboardinterrupt_cleans_claimed_dir(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_import_zip_keyboardinterrupt_cleans_claimed_dir(workspace: Workspace, monkeypatch) -> None:
     """BUG-299：导入中途 KeyboardInterrupt 须清理已 claim 的实例目录。"""
     import zipfile
 

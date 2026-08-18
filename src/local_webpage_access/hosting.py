@@ -291,9 +291,7 @@ def build_and_host_frontend(
             status="cancelled",
             error_summary=str(exc)[:500],
         )
-        registry.update_status(
-            instance_id, Status.CANCELLED.value, last_error=str(exc)[:500]
-        )
+        registry.update_status(instance_id, Status.CANCELLED.value, last_error=str(exc)[:500])
         manifest.status = Status.CANCELLED
         manifest.lastError = str(exc)[:500]
         manifest.touch()
@@ -428,9 +426,7 @@ def _managed_sqlite_data_mount_drifted(
         ) from exc
 
     expected = workspace.app_data(instance_id).resolve()
-    destinations = set(
-        container_data_paths(workspace.app_current(instance_id), manifest)
-    )
+    destinations = set(container_data_paths(workspace.app_current(instance_id), manifest))
     managed = [m for m in mounts if m.destination in destinations]
     if not managed:
         return False
@@ -483,9 +479,7 @@ def host_container(
 
     registry.update_status(instance_id, Status.BUILDING.value)
     build_log = workspace.app_logs(instance_id) / "build.log"
-    build_id = registry.add_build(
-        instance_id, status="running", log_path=str(build_log)
-    )
+    build_id = registry.add_build(instance_id, status="running", log_path=str(build_log))
     fresh_port = False
 
     def _stage(name: str) -> None:
@@ -542,14 +536,10 @@ def host_container(
         try:
             latest = registry.list_builds(instance_id, limit=1)
             if latest and latest[0]["id"] == build_id and latest[0]["status"] == "running":
-                registry.finish_build(
-                    build_id, status="cancelled", error_summary=str(exc)[:500]
-                )
+                registry.finish_build(build_id, status="cancelled", error_summary=str(exc)[:500])
         except Exception:  # noqa: BLE001
             log.exception("取消 finish build 失败")
-        registry.update_status(
-            instance_id, Status.CANCELLED.value, last_error=str(exc)[:500]
-        )
+        registry.update_status(instance_id, Status.CANCELLED.value, last_error=str(exc)[:500])
         manifest.status = Status.CANCELLED
         manifest.lastError = str(exc)[:500]
         manifest.touch()
@@ -570,9 +560,7 @@ def host_container(
         try:
             latest = registry.list_builds(instance_id, limit=1)
             if latest and latest[0]["id"] == build_id and latest[0]["status"] == "running":
-                registry.finish_build(
-                    build_id, status="failed", error_summary=str(exc)[:500]
-                )
+                registry.finish_build(build_id, status="failed", error_summary=str(exc)[:500])
         except Exception:  # noqa: BLE001
             log.exception("兜底 finish build 失败")
         _mark_failed(workspace, registry, instance_id, manifest, exc)
@@ -632,7 +620,11 @@ def host_container(
     #    可选探针失败 → DEGRADED。
     #    首页 200 不代替 API/DB 验证（§6.5）。
     verification = _evaluate_container_verification(
-        host_port, manifest, workspace, registry, instance_id,
+        host_port,
+        manifest,
+        workspace,
+        registry,
+        instance_id,
     )
 
     # C.R05：收集本次 attempt 的外部副作用记录
@@ -647,17 +639,21 @@ def host_container(
     if verification["overall_status"] == "failed":
         # 必选探针失败 → 回滚到 FAILED
         _liveness_failed_rollback(
-            workspace, config, registry, instance_id, manifest, host_port, fresh_port,
+            workspace,
+            config,
+            registry,
+            instance_id,
+            manifest,
+            host_port,
+            fresh_port,
             verification.get("error", "必选探针未通过"),
         )
         # C.R05：将副作用记录附加到异常 context，供 lifecycle 回滚判断使用
         se_context: dict[str, Any] = {}
         if side_effects:
-            se_context["side_effect_records"] = [
-                r.model_dump() for r in side_effects
-            ]
-            se_context["side_effects_auto_recoverable"] = (
-                _side_effects_auto_recoverable(side_effects)
+            se_context["side_effect_records"] = [r.model_dump() for r in side_effects]
+            se_context["side_effects_auto_recoverable"] = _side_effects_auto_recoverable(
+                side_effects
             )
         raise HostingError(
             f"实例 {instance_id} 必选探针未通过（host_port={host_port}）："
@@ -687,8 +683,10 @@ def host_container(
     # C.R06：成功部署后持久化四类指纹，供下次 start 时判断是否可走轻量路径
     try:
         from local_webpage_access.lifecycle import _compute_deployment_fingerprints
+
         manifest.deploymentFingerprints = _compute_deployment_fingerprints(
-            workspace, manifest,
+            workspace,
+            manifest,
         )
     except Exception:  # noqa: BLE001 - 指纹计算失败不阻塞部署成功
         log.debug("实例 %s 指纹计算失败（不阻塞部署）", instance_id)
@@ -778,9 +776,7 @@ def start_container(
         log.info("容器实例 %s 已在运行，跳过 start", instance_id)
         action = "start"
     else:
-        existing = _safe(
-            lambda: runtime.container_id(instance_id, all_containers=True)
-        )
+        existing = _safe(lambda: runtime.container_id(instance_id, all_containers=True))
         if existing:
             runtime.start(instance_id)
             action = "start"
@@ -858,7 +854,11 @@ def start_container(
     # BUG-500：轻量 start 也要重跑必选能力校验（API/DB/迁移），不能只探 GET /。
     # 否则已部署容器只要首页 200 就假绿，API/DB/迁移失败被掩盖为 RUNNING。
     verification = _evaluate_container_verification(
-        host_port, manifest, workspace, registry, instance_id,
+        host_port,
+        manifest,
+        workspace,
+        registry,
+        instance_id,
     )
     overall = verification["overall_status"]
     if overall == "passed":
@@ -973,9 +973,7 @@ def expected_workspace_derived_paths(workspace: Workspace, instance_id: str) -> 
     }
 
 
-def _refresh_manifest_workspace_paths(
-    workspace: Workspace, manifest: InstanceManifest
-) -> None:
+def _refresh_manifest_workspace_paths(workspace: Workspace, manifest: InstanceManifest) -> None:
     """就地刷新可确定派生路径；不改写 sourceZipPath。"""
     paths = expected_workspace_derived_paths(workspace, manifest.id)
     manifest.appPath = paths["appPath"]
@@ -1123,13 +1121,17 @@ def _verify_sqlite_database(
     if data_dir.is_dir():
         for candidate in sorted(data_dir.iterdir()):
             if candidate.is_file() and candidate.suffix.lower() in (
-                ".db", ".sqlite", ".sqlite3",
+                ".db",
+                ".sqlite",
+                ".sqlite3",
             ):
                 if _is_valid_sqlite_file(candidate):
                     log.info(
                         "Gate-C SQLite 回退检测：manifest 声明 %s 未命中，"
                         "在 data 目录找到有效数据库 %s（实例 %s）",
-                        db_filename, candidate.name, manifest.id,
+                        db_filename,
+                        candidate.name,
+                        manifest.id,
                     )
                     return True
 
@@ -1152,7 +1154,7 @@ def _migration_command_succeeded(
     guard_pos = lowered.find("&&", alembic_pos)
     if guard_pos < 0:
         return False
-    return bool(command[guard_pos + 2:].strip(" '\""))
+    return bool(command[guard_pos + 2 :].strip(" '\""))
 
 
 def _collect_side_effect_records(
@@ -1179,24 +1181,25 @@ def _collect_side_effect_records(
     start_cmd = (manifest.entry.start or "").strip() if manifest.entry else ""
     if "alembic upgrade" in start_cmd.lower():
         migration_succeeded = _migration_command_succeeded(
-            manifest, liveness_ok=liveness_ok,
+            manifest,
+            liveness_ok=liveness_ok,
         )
         # 如果存活探针未通过，迁移可能已执行但应用未启动
         # 如果存活探针通过且 guard 后有命令，迁移已成功
-        result = "succeeded" if migration_succeeded else (
-            "unknown" if liveness_ok else "unknown"
+        result = "succeeded" if migration_succeeded else ("unknown" if liveness_ok else "unknown")
+        records.append(
+            SideEffectRecord(
+                kind="migration",
+                description=f"Alembic 迁移作为启动前置命令执行（{start_cmd[:100]}）",
+                intent="容器启动时执行 alembic upgrade head 以更新数据库 schema",
+                executedAt=now,
+                result=result,
+                compensationMethod="alembic downgrade（需人工执行，无法自动确定回退目标版本）",
+                recoveryEvidence=None,
+                # 迁移不可自动恢复--schema 变更可能影响数据完整性
+                autoRecoverable=False,
+            )
         )
-        records.append(SideEffectRecord(
-            kind="migration",
-            description=f"Alembic 迁移作为启动前置命令执行（{start_cmd[:100]}）",
-            intent="容器启动时执行 alembic upgrade head 以更新数据库 schema",
-            executedAt=now,
-            result=result,
-            compensationMethod="alembic downgrade（需人工执行，无法自动确定回退目标版本）",
-            recoveryEvidence=None,
-            # 迁移不可自动恢复--schema 变更可能影响数据完整性
-            autoRecoverable=False,
-        ))
 
     # 未来扩展：检测 pre_start 钩子
     # if manifest.entry and manifest.entry.preStart:
@@ -1212,9 +1215,7 @@ def _side_effects_auto_recoverable(records: list[Any]) -> bool:
     """
     if not records:
         return True
-    return all(
-        getattr(r, "autoRecoverable", False) for r in records
-    )
+    return all(getattr(r, "autoRecoverable", False) for r in records)
 
 
 def _evaluate_container_verification(
@@ -1267,7 +1268,9 @@ def _evaluate_container_verification(
     successful_business_probe = False
     for spec in contract.requiredProbes:
         passed, code = _probe_path(
-            host_port, spec.path, expected_status=spec.expectedStatus,
+            host_port,
+            spec.path,
+            expected_status=spec.expectedStatus,
         )
         if passed and spec.source in ("declared", "discovered"):
             successful_business_probe = True
@@ -1276,9 +1279,7 @@ def _evaluate_container_verification(
                 mandatory_all_passed = False
         else:
             if not passed:
-                optional_warnings.append(
-                    f"可选探针 {spec.path} 未通过（code={code}）"
-                )
+                optional_warnings.append(f"可选探针 {spec.path} 未通过（code={code}）")
 
     # BUG-481：契约是要求，不是证据。首页存活不再自动补齐 API/DB/迁移。
     if successful_business_probe:
@@ -1286,7 +1287,8 @@ def _evaluate_container_verification(
     if contract.requiresDatabase and _verify_sqlite_database(manifest, workspace):
         observed.add("database")
     if contract.requiresMigrations and _migration_command_succeeded(
-        manifest, liveness_ok=liveness_ok,
+        manifest,
+        liveness_ok=liveness_ok,
     ):
         observed.add("migrations")
 
@@ -1294,8 +1296,7 @@ def _evaluate_container_verification(
     # servesApi 但无此类探针时，该能力无法实证——不得构成不可满足的成功谓词
     # （正常后端会稳定 failed 假红），降级为告警 + DEGRADED，保持诚实可见。
     has_api_evidence_source = any(
-        probe.source in ("declared", "discovered")
-        for probe in contract.requiredProbes
+        probe.source in ("declared", "discovered") for probe in contract.requiredProbes
     )
     if contract.servesApi and not has_api_evidence_source:
         optional_warnings.append(
@@ -1304,9 +1305,7 @@ def _evaluate_container_verification(
         )
 
     verifiable_required = {
-        capability
-        for capability in required
-        if capability != "api" or has_api_evidence_source
+        capability for capability in required if capability != "api" or has_api_evidence_source
     }
     capabilities_covered = verifiable_required.issubset(observed)
 
@@ -1354,8 +1353,7 @@ def _load_capability_contract(
     raw = getattr(manifest, "capabilityContract", None)
     if isinstance(raw, dict) and raw:
         probes = [
-            ProbeSpec(**p) if isinstance(p, dict) else p
-            for p in raw.get("requiredProbes", [])
+            ProbeSpec(**p) if isinstance(p, dict) else p for p in raw.get("requiredProbes", [])
         ]
         return CapabilityContract(
             servesUi=raw.get("servesUi", False),
@@ -1431,9 +1429,7 @@ def _liveness_failed_rollback(
     manifest.touch()
     with contextlib.suppress(Exception):
         manifest.save(workspace.app_manifest_path(instance_id))
-    registry.update_status(
-        instance_id, Status.FAILED.value, last_error=error[:500]
-    )
+    registry.update_status(instance_id, Status.FAILED.value, last_error=error[:500])
     registry.add_event(
         instance_id,
         "lifecycle_stage",
@@ -1527,9 +1523,7 @@ def find_index_html(directory: Path) -> Path | None:
     # 顶层任意 .html（非 index）：字典序稳定选一个
     try:
         top_html = sorted(
-            p
-            for p in directory.iterdir()
-            if p.is_file() and p.name.lower().endswith(".html")
+            p for p in directory.iterdir() if p.is_file() and p.name.lower().endswith(".html")
         )
     except (PermissionError, OSError):
         top_html = []
@@ -1547,9 +1541,7 @@ def find_index_html(directory: Path) -> Path | None:
                 continue
             try:
                 nested = sorted(
-                    p
-                    for p in sub.iterdir()
-                    if p.is_file() and p.name.lower().endswith(".html")
+                    p for p in sub.iterdir() if p.is_file() and p.name.lower().endswith(".html")
                 )
             except (PermissionError, OSError):
                 continue
@@ -1842,9 +1834,7 @@ def _clear_worker(instance_id: str) -> None:
         if build_token is None:
             return
         for gate in list(_gates.values()):
-            gate.update_build_task(
-                instance_id, build_token=build_token, clear_worker=True
-            )
+            gate.update_build_task(instance_id, build_token=build_token, clear_worker=True)
     except Exception:  # noqa: BLE001
         pass
 
@@ -1864,7 +1854,15 @@ def _infer_form(manifest: InstanceManifest) -> str:
     if manifest.runtime.value != "shared-static":
         return "container"
     stack_lower = {s.lower() for s in manifest.stack}
-    frontend_markers = {"vite", "react", "react-dom", "vue", "svelte", "preact", "@vitejs/plugin-react"}
+    frontend_markers = {
+        "vite",
+        "react",
+        "react-dom",
+        "vue",
+        "svelte",
+        "preact",
+        "@vitejs/plugin-react",
+    }
     if stack_lower & frontend_markers:
         return "frontend-static"
     if manifest.entry.build:

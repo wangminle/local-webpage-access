@@ -18,9 +18,7 @@ from local_webpage_access.scanner import DetectionResult, Scanner, summarize
 def test_summarize_picks_up_key_files(tmp_path: Path) -> None:
     (tmp_path / "index.html").write_text("<html></html>")
     (tmp_path / "package.json").write_text(
-        json.dumps(
-            {"dependencies": {"express": "^4.0.0"}, "scripts": {"start": "node ."}}
-        )
+        json.dumps({"dependencies": {"express": "^4.0.0"}, "scripts": {"start": "node ."}})
     )
     summary = summarize(tmp_path)
     assert summary.has_index_html is True
@@ -349,6 +347,73 @@ def test_detect_python_no_framework_pending(tmp_path: Path) -> None:
     assert result.confidence == "low"
 
 
+# ---- issue#1：零依赖 stdlib HTTP 弱信号识别 ---------------------------------
+
+
+def test_detect_stdlib_http_with_requirements(tmp_path: Path) -> None:
+    """有 requirements.txt 但无框架，顶层 server.py 用 http.server：识别为 backend-container。"""
+    (tmp_path / "requirements.txt").write_text("# 空依赖清单\n")
+    (tmp_path / "server.py").write_text(
+        "import http.server\nfrom socketserver import ThreadingMixIn\n\ndef main():\n    pass\n"
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.runtime == Runtime.DOCKER_COMPOSE
+    assert result.form == "backend-container"
+    assert result.confidence == "medium"
+    assert result.entry.start == "python server.py"
+
+
+def test_detect_stdlib_http_no_python_files(tmp_path: Path) -> None:
+    """完全零工程文件（无 requirements/pyproject）：仅 server.py 也能路由到 Python 分支。"""
+    (tmp_path / "server.py").write_text(
+        "from http.server import HTTPServer, BaseHTTPRequestHandler\n"
+        "\n"
+        "HTTPServer(('0.0.0.0', 8000), BaseHTTPRequestHandler).serve_forever()\n"
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.kind == Kind.PYTHON
+    assert result.form == "backend-container"
+    # 零依赖：install 为 None，避免容器构建 pip install 落空
+    assert result.entry.install is None
+    assert result.entry.start == "python server.py"
+
+
+def test_detect_stdlib_http_prefers_server_py_over_app_py(tmp_path: Path) -> None:
+    """server.py / app.py / main.py 并存时按固定优先级取第一个命中的。"""
+    (tmp_path / "requirements.txt").write_text("")
+    (tmp_path / "app.py").write_text("import http.server\n")
+    (tmp_path / "main.py").write_text("import socketserver\n")
+    (tmp_path / "server.py").write_text("import http.server\n")
+    result = Scanner().detect(tmp_path)
+    assert result.entry.start == "python server.py"
+
+
+def test_detect_stdlib_http_ignores_comment_only_import(tmp_path: Path) -> None:
+    """注释里的 http.server 不算信号；无 import 仍 pending。"""
+    (tmp_path / "requirements.txt").write_text("requests\n")
+    (tmp_path / "server.py").write_text("# import http.server（注释，不算）\nimport os\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+
+
+def test_detect_stdlib_http_no_false_positive_on_foreign_module(tmp_path: Path) -> None:
+    """BUG-534：from mypkg import socketserver 不算 stdlib-http（AST 精确匹配）。"""
+    (tmp_path / "requirements.txt").write_text("requests\n")
+    (tmp_path / "server.py").write_text("from mypkg import socketserver\nimport mysocketserver\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+
+
+def test_detect_stdlib_http_syntax_error_file_not_matched(tmp_path: Path) -> None:
+    """BUG-534：语法错误文件解析失败，保守视为未命中。"""
+    (tmp_path / "requirements.txt").write_text("requests\n")
+    (tmp_path / "server.py").write_text("import http.server\ndef broken(:\n")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is True
+
+
 def test_detect_python_uv_lock_uses_uv_sync(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("fastapi\n")
     (tmp_path / "uv.lock").write_text("")
@@ -383,11 +448,7 @@ def test_detect_heavy_db_marks_pending(tmp_path: Path) -> None:
 
 def test_detect_pipfile_only_heavy_db_fills_python_kind(tmp_path: Path) -> None:
     """Pipfile-only + heavy DB：pending 但仍应填 kind=python（_fill_language 须认 has_pipfile）。"""
-    (tmp_path / "Pipfile").write_text(
-        '[packages]\n'
-        'fastapi = "*"\n'
-        'psycopg2 = "*"\n'
-    )
+    (tmp_path / "Pipfile").write_text('[packages]\nfastapi = "*"\npsycopg2 = "*"\n')
     result = Scanner().detect(tmp_path)
     assert result.pending is True
     assert result.kind == Kind.PYTHON
@@ -466,11 +527,11 @@ def test_summarize_counts_subdir_files_once(tmp_path: Path) -> None:
 def test_summarize_pipfile_parsed_as_toml(tmp_path: Path) -> None:
     """BUG-005：Pipfile 按 TOML 解析 [packages]，[[source]] 的键不当依赖。"""
     (tmp_path / "Pipfile").write_text(
-        '[packages]\n'
+        "[packages]\n"
         'flask = "*"\n\n'
-        '[[source]]\n'
+        "[[source]]\n"
         'url = "https://pypi.org/simple"\n'
-        'verify_ssl = true\n'
+        "verify_ssl = true\n"
         'name = "pypi"\n'
     )
     summary = summarize(tmp_path)
@@ -484,11 +545,7 @@ def test_summarize_pipfile_parsed_as_toml(tmp_path: Path) -> None:
 
 def test_detect_python_pipfile_only_uses_pipenv_install(tmp_path: Path) -> None:
     """BUG-024：仅 Pipfile 的 Python Web 项目不应回退到 requirements.txt。"""
-    (tmp_path / "Pipfile").write_text(
-        '[packages]\n'
-        'fastapi = "*"\n'
-        'uvicorn = "*"\n'
-    )
+    (tmp_path / "Pipfile").write_text('[packages]\nfastapi = "*"\nuvicorn = "*"\n')
     result = Scanner().detect(tmp_path)
     assert result.kind == Kind.PYTHON
     assert result.runtime == Runtime.DOCKER_COMPOSE
@@ -520,9 +577,7 @@ def test_detect_django_via_manage_py_without_dep(tmp_path: Path) -> None:
 def test_detect_python_fastapi_from_pyproject(tmp_path: Path) -> None:
     """BUG-018：仅 pyproject.toml 声明 fastapi 的项目应被识别（3.10 tomli 回退）。"""
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\n'
-        'name = "demo"\n'
-        'dependencies = ["fastapi", "uvicorn"]\n'
+        '[project]\nname = "demo"\ndependencies = ["fastapi", "uvicorn"]\n'
     )
     result = Scanner().detect(tmp_path)
     assert result.kind == Kind.PYTHON
@@ -535,9 +590,7 @@ def test_detect_python_fastapi_from_pyproject(tmp_path: Path) -> None:
 def test_summarize_pyproject_deps_collected(tmp_path: Path) -> None:
     """BUG-018：summarize 应解析 pyproject.toml [project.dependencies]。"""
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\n'
-        'name = "demo"\n'
-        'dependencies = ["fastapi>=0.100", "uvicorn[standard]"]\n'
+        '[project]\nname = "demo"\ndependencies = ["fastapi>=0.100", "uvicorn[standard]"]\n'
     )
     summary = summarize(tmp_path)
     deps = {d.lower() for d in summary.python_deps}
@@ -802,8 +855,7 @@ def test_preflight_sqlite_autofix_note(tmp_path: Path) -> None:
     (tmp_path / "app.db").write_bytes(b"")
     # A.R01：应用源码中读取 DATABASE_URL 环境变量
     (tmp_path / "config.py").write_text(
-        "import os\n"
-        "DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./app.db')\n",
+        "import os\nDATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///./app.db')\n",
         encoding="utf-8",
     )
     result = Scanner().detect(tmp_path)
@@ -845,11 +897,13 @@ def test_monorepo_npm_workspaces_web_server(tmp_path: Path) -> None:
     """npm workspaces monorepo：单 web_server -> 自动识别为主包。"""
     # 根 package.json with workspaces
     (tmp_path / "package.json").write_text(
-        json.dumps({
-            "name": "monorepo-root",
-            "private": True,
-            "workspaces": ["packages/*"],
-        })
+        json.dumps(
+            {
+                "name": "monorepo-root",
+                "private": True,
+                "workspaces": ["packages/*"],
+            }
+        )
     )
     (tmp_path / "package-lock.json").write_text("{}")
 
@@ -857,31 +911,37 @@ def test_monorepo_npm_workspaces_web_server(tmp_path: Path) -> None:
     webpage = tmp_path / "packages" / "webpage"
     webpage.mkdir(parents=True)
     (webpage / "package.json").write_text(
-        json.dumps({
-            "name": "@app/webpage",
-            "dependencies": {"express": "^4.18.0"},
-            "scripts": {"start": "node server.js"},
-        })
+        json.dumps(
+            {
+                "name": "@app/webpage",
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "node server.js"},
+            }
+        )
     )
 
     # core 包（library）
     core = tmp_path / "packages" / "core"
     core.mkdir(parents=True)
     (core / "package.json").write_text(
-        json.dumps({
-            "name": "@app/core",
-            "main": "index.js",
-        })
+        json.dumps(
+            {
+                "name": "@app/core",
+                "main": "index.js",
+            }
+        )
     )
 
     # desktop 包（electron_desktop）
     desktop = tmp_path / "packages" / "desktop"
     desktop.mkdir(parents=True)
     (desktop / "package.json").write_text(
-        json.dumps({
-            "name": "@app/desktop",
-            "devDependencies": {"electron": "^30.0.0"},
-        })
+        json.dumps(
+            {
+                "name": "@app/desktop",
+                "devDependencies": {"electron": "^30.0.0"},
+            }
+        )
     )
 
     result = Scanner().detect(tmp_path)
@@ -915,17 +975,17 @@ def test_detect_workspaces_skips_parent_escape(tmp_path: Path) -> None:
 def test_monorepo_no_deployable_packages(tmp_path: Path) -> None:
     """monorepo 无可部署子包 -> pending。"""
     (tmp_path / "package.json").write_text(
-        json.dumps({
-            "name": "mono",
-            "workspaces": ["packages/*"],
-        })
+        json.dumps(
+            {
+                "name": "mono",
+                "workspaces": ["packages/*"],
+            }
+        )
     )
     # 仅 library 和 electron
     core = tmp_path / "packages" / "core"
     core.mkdir(parents=True)
-    (core / "package.json").write_text(
-        json.dumps({"name": "@app/core", "main": "index.js"})
-    )
+    (core / "package.json").write_text(json.dumps({"name": "@app/core", "main": "index.js"}))
     desktop = tmp_path / "packages" / "desktop"
     desktop.mkdir(parents=True)
     (desktop / "package.json").write_text(
@@ -946,11 +1006,13 @@ def test_monorepo_two_web_servers_pending(tmp_path: Path) -> None:
         pkg = tmp_path / "packages" / name
         pkg.mkdir(parents=True)
         (pkg / "package.json").write_text(
-            json.dumps({
-                "name": f"@app/{name}",
-                "dependencies": {"express": "^4.18.0"},
-                "scripts": {"start": "node server.js"},
-            })
+            json.dumps(
+                {
+                    "name": f"@app/{name}",
+                    "dependencies": {"express": "^4.18.0"},
+                    "scripts": {"start": "node server.js"},
+                }
+            )
         )
 
     result = Scanner().detect(tmp_path)
@@ -966,11 +1028,13 @@ def test_monorepo_frontend_build_only(tmp_path: Path) -> None:
     web = tmp_path / "packages" / "web"
     web.mkdir(parents=True)
     (web / "package.json").write_text(
-        json.dumps({
-            "name": "@app/web",
-            "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
-            "scripts": {"build": "vite build"},
-        })
+        json.dumps(
+            {
+                "name": "@app/web",
+                "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
+                "scripts": {"build": "vite build"},
+            }
+        )
     )
 
     result = Scanner().detect(tmp_path)
@@ -990,12 +1054,14 @@ def test_monorepo_vite_not_web_server(tmp_path: Path) -> None:
     vite_pkg = tmp_path / "packages" / "frontend"
     vite_pkg.mkdir(parents=True)
     (vite_pkg / "package.json").write_text(
-        json.dumps({
-            "name": "@app/frontend",
-            "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
-            "devDependencies": {"vite": "^5.0.0"},
-            "scripts": {"dev": "vite", "build": "vite build"},
-        })
+        json.dumps(
+            {
+                "name": "@app/frontend",
+                "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
+                "devDependencies": {"vite": "^5.0.0"},
+                "scripts": {"dev": "vite", "build": "vite build"},
+            }
+        )
     )
 
     result = Scanner().detect(tmp_path)
@@ -1008,10 +1074,12 @@ def test_monorepo_vite_not_web_server(tmp_path: Path) -> None:
 def test_monorepo_non_monorepo_no_change(tmp_path: Path) -> None:
     """非 monorepo 项目不受影响。"""
     (tmp_path / "package.json").write_text(
-        json.dumps({
-            "dependencies": {"express": "^4.18.0"},
-            "scripts": {"start": "node server.js"},
-        })
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "node server.js"},
+            }
+        )
     )
     result = Scanner().detect(tmp_path)
     assert result.pending is False
@@ -1028,10 +1096,12 @@ def test_monorepo_pure_electron_pending(tmp_path: Path) -> None:
     desktop = tmp_path / "packages" / "desktop"
     desktop.mkdir(parents=True)
     (desktop / "package.json").write_text(
-        json.dumps({
-            "name": "@app/desktop",
-            "devDependencies": {"electron": "^30.0.0"},
-        })
+        json.dumps(
+            {
+                "name": "@app/desktop",
+                "devDependencies": {"electron": "^30.0.0"},
+            }
+        )
     )
 
     result = Scanner().detect(tmp_path)
@@ -1048,21 +1118,25 @@ def test_monorepo_web_server_and_frontend_selects_web_server(tmp_path: Path) -> 
     api = tmp_path / "packages" / "api"
     api.mkdir(parents=True)
     (api / "package.json").write_text(
-        json.dumps({
-            "name": "@app/api",
-            "dependencies": {"express": "^4.18.0"},
-            "scripts": {"start": "node server.js"},
-        })
+        json.dumps(
+            {
+                "name": "@app/api",
+                "dependencies": {"express": "^4.18.0"},
+                "scripts": {"start": "node server.js"},
+            }
+        )
     )
     # frontend_build 包
     web = tmp_path / "packages" / "web"
     web.mkdir(parents=True)
     (web / "package.json").write_text(
-        json.dumps({
-            "name": "@app/web",
-            "dependencies": {"react": "^18.0.0"},
-            "scripts": {"build": "vite build"},
-        })
+        json.dumps(
+            {
+                "name": "@app/web",
+                "dependencies": {"react": "^18.0.0"},
+                "scripts": {"build": "vite build"},
+            }
+        )
     )
 
     result = Scanner().detect(tmp_path)
@@ -1079,9 +1153,7 @@ def test_subdir_backend_frontend_layout(tmp_path: Path) -> None:
     # backend 子目录：FastAPI + SQLite + alembic
     backend = tmp_path / "backend"
     backend.mkdir(parents=True)
-    (backend / "requirements.txt").write_text(
-        "fastapi\nuvicorn\nsqlalchemy\nalembic\n"
-    )
+    (backend / "requirements.txt").write_text("fastapi\nuvicorn\nsqlalchemy\nalembic\n")
     (backend / "app").mkdir()
     (backend / "app" / "__init__.py").write_text("")
     (backend / "app" / "main.py").write_text("app = None  # FastAPI app")
@@ -1090,12 +1162,14 @@ def test_subdir_backend_frontend_layout(tmp_path: Path) -> None:
     frontend = tmp_path / "frontend"
     frontend.mkdir(parents=True)
     (frontend / "package.json").write_text(
-        json.dumps({
-            "name": "frontend",
-            "dependencies": {"vue": "^3.0.0"},
-            "devDependencies": {"vite": "^5.0.0"},
-            "scripts": {"build": "vite build", "dev": "vite"},
-        })
+        json.dumps(
+            {
+                "name": "frontend",
+                "dependencies": {"vue": "^3.0.0"},
+                "devDependencies": {"vite": "^5.0.0"},
+                "scripts": {"build": "vite build", "dev": "vite"},
+            }
+        )
     )
 
     result = Scanner().detect(tmp_path)
@@ -1277,11 +1351,13 @@ def test_subdir_frontend_vite_recognized_as_frontend_static(tmp_path: Path) -> N
     frontend = tmp_path / "frontend"
     frontend.mkdir(parents=True)
     (frontend / "package.json").write_text(
-        json.dumps({
-            "dependencies": {"vue": "^3.0.0"},
-            "devDependencies": {"vite": "^5.0.0"},
-            "scripts": {"build": "vite build"},
-        })
+        json.dumps(
+            {
+                "dependencies": {"vue": "^3.0.0"},
+                "devDependencies": {"vite": "^5.0.0"},
+                "scripts": {"build": "vite build"},
+            }
+        )
     )
     result = Scanner().detect(tmp_path)
     assert result.pending is False
@@ -1298,10 +1374,12 @@ def test_subdir_node_backend_recognized(tmp_path: Path) -> None:
     server = tmp_path / "server"
     server.mkdir(parents=True)
     (server / "package.json").write_text(
-        json.dumps({
-            "dependencies": {"express": "^4.0.0"},
-            "scripts": {"start": "node server.js"},
-        })
+        json.dumps(
+            {
+                "dependencies": {"express": "^4.0.0"},
+                "scripts": {"start": "node server.js"},
+            }
+        )
     )
     (server / "server.js").write_text("// Express app")
     result = Scanner().detect(tmp_path)
@@ -1328,10 +1406,10 @@ def test_subdir_python_heavy_db_pending(tmp_path: Path) -> None:
 def test_detect_python_poetry_dependencies(tmp_path: Path) -> None:
     """BUG-502：仅 [tool.poetry.dependencies] 声明 FastAPI 应识别（不 pending）。"""
     (tmp_path / "pyproject.toml").write_text(
-        '[tool.poetry]\n'
+        "[tool.poetry]\n"
         'name = "demo"\n'
         'version = "0.1.0"\n'
-        '[tool.poetry.dependencies]\n'
+        "[tool.poetry.dependencies]\n"
         'python = "^3.11"\n'
         'fastapi = "^0.100"\n'
         'uvicorn = "^0.30"\n'

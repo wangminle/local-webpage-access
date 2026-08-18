@@ -423,9 +423,7 @@ def test_dockerfile_prefers_requirements_prod(workspace: Workspace) -> None:
     """IMP-017：requirements-prod.txt 路径 → 直接装 prod 清单，不剥离 pytest。"""
     workspace.ensure_app_dirs("api")
     (workspace.app_current("api") / "requirements-prod.txt").write_text("fastapi\n")
-    m = _mk_manifest(
-        install="pip install -r requirements-prod.txt", start="uvicorn main:app"
-    )
+    m = _mk_manifest(install="pip install -r requirements-prod.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "COPY current/requirements-prod.txt requirements-prod.txt" in content
     assert "pip install -r requirements-prod.txt" in content
@@ -440,9 +438,7 @@ def test_dockerfile_prefers_requirements_prod(workspace: Workspace) -> None:
 def test_dockerfile_nested_requirements_path_consistent(workspace: Workspace) -> None:
     """BUG-083：pip install -r requirements/prod.txt → COPY 保留嵌套路径 + mkdir 父目录。"""
     workspace.ensure_app_dirs("api")
-    m = _mk_manifest(
-        install="pip install -r requirements/prod.txt", start="uvicorn main:app"
-    )
+    m = _mk_manifest(install="pip install -r requirements/prod.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     # COPY 目标保留嵌套路径（不再平铺到 ./），且预先 mkdir 父目录
     assert "RUN mkdir -p requirements" in content
@@ -457,9 +453,7 @@ def test_dockerfile_nested_requirements_path_consistent(workspace: Workspace) ->
 def test_dockerfile_flat_requirements_no_mkdir(workspace: Workspace) -> None:
     """BUG-083：扁平 requirements.txt → COPY 到同名文件，无需 mkdir 父目录。"""
     workspace.ensure_app_dirs("api")
-    m = _mk_manifest(
-        install="pip install -r requirements.txt", start="uvicorn main:app"
-    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     assert "COPY current/requirements.txt requirements.txt" in content
     # 扁平路径无父目录，不应插入 mkdir
@@ -472,9 +466,7 @@ def test_dockerfile_flat_requirements_no_mkdir(workspace: Workspace) -> None:
 def test_python_node_toolchain_before_full_source_copy(workspace: Workspace) -> None:
     """BUG-117：Node 安装与 npm ci 必须在 COPY current/ ./ 之前，避免源码改动打掉缓存。"""
     workspace.ensure_app_dirs("api")
-    (workspace.app_current("api") / "package.json").write_text(
-        '{"name":"app","dependencies":{}}'
-    )
+    (workspace.app_current("api") / "package.json").write_text('{"name":"app","dependencies":{}}')
     m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
     idx_node = content.find("nodejs-release")
@@ -579,9 +571,7 @@ def test_apt_mirror_rejects_shell_injection() -> None:
     from local_webpage_access.dockerfile_templates import _apt_mirror_prefix
 
     with pytest.raises(ValueError, match="非法 aptMirror"):
-        _apt_mirror_prefix(
-            BuildMirrors(enabled=True, aptMirror="evil.com/$(curl x)")
-        )
+        _apt_mirror_prefix(BuildMirrors(enabled=True, aptMirror="evil.com/$(curl x)"))
     with pytest.raises(ValueError, match="非法 aptMirror"):
         _apt_mirror_prefix(BuildMirrors(enabled=True, aptMirror="a; rm -rf /"))
     ok = _apt_mirror_prefix(BuildMirrors(enabled=True, aptMirror="mirrors.aliyun.com"))
@@ -709,9 +699,7 @@ def test_apt_deps_strips_comments_and_environment_markers(workspace: Workspace) 
     """IMP-054：注释行与环境标记不影响包名解析。"""
     workspace.ensure_app_dirs("api")
     (workspace.app_current("api") / "requirements.txt").write_text(
-        "# barcode scanning\n"
-        "pyzbar>=0.1.9 ; python_version >= '3.10'\n"
-        "pillow>=11.0.0  # imaging\n",
+        "# barcode scanning\npyzbar>=0.1.9 ; python_version >= '3.10'\npillow>=11.0.0  # imaging\n",
         encoding="utf-8",
     )
     m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
@@ -761,9 +749,7 @@ def test_extract_requirements_file_glued_dash_r() -> None:
     assert _extract_requirements_file("pip install -rrequirements-prod.txt") == (
         "requirements-prod.txt"
     )
-    assert _extract_requirements_file("pip install -r requirements.txt") == (
-        "requirements.txt"
-    )
+    assert _extract_requirements_file("pip install -r requirements.txt") == ("requirements.txt")
     assert _extract_requirements_file("pip install --registry https://example.com/simple .") == (
         "requirements.txt"
     )

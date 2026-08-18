@@ -34,9 +34,7 @@ def test_reject_alias_if_absolute_spa_assets_allows_relative() -> None:
         '<link href="assets/index-abc.css" rel="stylesheet">'
         "</head><body></body></html>"
     )
-    reject_alias_if_absolute_spa_assets(
-        html=html, alias="ok-site", instance_id="demo"
-    )
+    reject_alias_if_absolute_spa_assets(html=html, alias="ok-site", instance_id="demo")
 
 
 def test_reject_alias_if_absolute_spa_assets_skips_empty_html() -> None:
@@ -104,8 +102,7 @@ def test_set_alias_rejects_when_entrypoint_has_absolute_assets(
         path_alias,
         "_fetch_entrypoint_html_for_alias_guard",
         lambda **kwargs: (
-            '<script src="/assets/app.js"></script>'
-            '<link href="/assets/app.css" rel="stylesheet">'
+            '<script src="/assets/app.js"></script><link href="/assets/app.css" rel="stylesheet">'
         ),
     )
 
@@ -181,8 +178,7 @@ def test_set_alias_blocks_absolute_assets_for_docker_compose(
         path_alias,
         "_fetch_entrypoint_html_for_alias_guard",
         lambda **kwargs: (
-            '<script src="/assets/app.js"></script>'
-            '<link href="/assets/app.css" rel="stylesheet">'
+            '<script src="/assets/app.js"></script><link href="/assets/app.css" rel="stylesheet">'
         ),
     )
 

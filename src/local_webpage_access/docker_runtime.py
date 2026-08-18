@@ -99,9 +99,7 @@ def probe_docker_permission() -> str | None:
         return None
     blob = f"{result.stderr or ''}\n{result.stdout or ''}"
     if is_docker_permission_error(blob):
-        return (
-            "Docker 权限不足（无法访问 docker.sock）：" + DOCKER_PERMISSION_HINT
-        )
+        return "Docker 权限不足（无法访问 docker.sock）：" + DOCKER_PERMISSION_HINT
     return None
 
 
@@ -303,9 +301,7 @@ def _execute_streaming(
                     with contextlib.suppress(Exception):
                         stdout.close()
 
-            reader = threading.Thread(
-                target=_reader, name="lwa-docker-exec-reader", daemon=True
-            )
+            reader = threading.Thread(target=_reader, name="lwa-docker-exec-reader", daemon=True)
             reader.start()
 
             deadline = time.monotonic() + timeout
@@ -376,9 +372,7 @@ def _execute_streaming(
     return ComposeResult(args=list(args), returncode=returncode, stdout=out, stderr="")
 
 
-def _persist_docker_worker(
-    instance_id: str, proc: subprocess.Popen, identity: str
-) -> None:
+def _persist_docker_worker(instance_id: str, proc: subprocess.Popen, identity: str) -> None:
     try:
         import os
         import sys
@@ -414,9 +408,7 @@ def _clear_docker_worker(instance_id: str) -> None:
         if build_token is None:
             return
         for gate in list(_gates.values()):
-            gate.update_build_task(
-                instance_id, build_token=build_token, clear_worker=True
-            )
+            gate.update_build_task(instance_id, build_token=build_token, clear_worker=True)
     except Exception:  # noqa: BLE001
         pass
 
@@ -482,8 +474,7 @@ class DockerRuntime:
             # BUG-204 / BUG-230：组权限未刷新时给出 newgrp + 重启 manager/daemon 指引
             if is_docker_permission_error(err_blob):
                 raise DockerError(
-                    "Docker 权限不足（无法访问 docker.sock）："
-                    + DOCKER_PERMISSION_HINT,
+                    "Docker 权限不足（无法访问 docker.sock）：" + DOCKER_PERMISSION_HINT,
                 )
             raise DockerError(
                 "Docker 不可用：请确认 Docker 已安装、dockerd 正在运行、且当前用户在 docker 组中"
@@ -724,7 +715,10 @@ class DockerRuntime:
                 count = sum(1 for p in host_data.rglob("*") if p.is_file())
                 log.warning(
                     "BUG-205：从容器 %s:%s 救出 %d 个数据文件 → %s",
-                    cid, src, count, host_data,
+                    cid,
+                    src,
+                    count,
+                    host_data,
                 )
                 self._event(
                     instance_id,
@@ -762,9 +756,7 @@ class DockerRuntime:
 
     # ---- 观测（WBS-14.09~11）---------------------------------------------
 
-    def container_id(
-        self, instance_id: str, *, all_containers: bool = False
-    ) -> str | None:
+    def container_id(self, instance_id: str, *, all_containers: bool = False) -> str | None:
         """查询 service 容器 id（WBS-14.09）。
 
         默认 ``docker compose ps -q``（仅运行中）。``all_containers=True`` 时加
@@ -775,15 +767,11 @@ class DockerRuntime:
         区分两者（BUG-429）。
         """
         try:
-            return self.container_id_strict(
-                instance_id, all_containers=all_containers
-            )
+            return self.container_id_strict(instance_id, all_containers=all_containers)
         except DockerError:
             return None
 
-    def container_id_strict(
-        self, instance_id: str, *, all_containers: bool = False
-    ) -> str | None:
+    def container_id_strict(self, instance_id: str, *, all_containers: bool = False) -> str | None:
         """严格版 :meth:`container_id`：仅"查询成功但无容器"返回 None。
 
         查询失败（非零退出）抛 :class:`DockerError`——调用方须 fail-safe，
@@ -843,9 +831,7 @@ class DockerRuntime:
             return ir.stdout.strip()
         return None
 
-    def bind_mounts(
-        self, instance_id: str, *, all_containers: bool = True
-    ) -> list[BindMount]:
+    def bind_mounts(self, instance_id: str, *, all_containers: bool = True) -> list[BindMount]:
         """读取容器 bind mount 列表（BUG-421，只读观测）。
 
         用 ``docker inspect <cid> --format '{{json .Mounts}}'`` 解析挂载，
@@ -920,8 +906,7 @@ class DockerRuntime:
             err_blob = f"{result.stderr or ''}\n{result.stdout or ''}"
             if is_docker_permission_error(err_blob):
                 raise DockerError(
-                    "Docker 权限不足（无法访问 docker.sock）："
-                    + DOCKER_PERMISSION_HINT,
+                    "Docker 权限不足（无法访问 docker.sock）：" + DOCKER_PERMISSION_HINT,
                 )
             return None
         for data in _iter_ps_json(result.stdout):

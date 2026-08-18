@@ -54,9 +54,7 @@ MIN_WSL_PACKAGE_VERSION = "2.1.5"
 MACOS_MIN_MAJOR = 14
 SUPPORTED_ARCHES = frozenset({"x86_64", "amd64", "aarch64", "arm64"})
 
-_WINDOWS_ACTION = (
-    "Windows 原生不受支持；请在 WSL2 的 Ubuntu 22.04+/Debian 12+ 中安装并运行 lwa"
-)
+_WINDOWS_ACTION = "Windows 原生不受支持；请在 WSL2 的 Ubuntu 22.04+/Debian 12+ 中安装并运行 lwa"
 
 
 def _normalize_ubuntu_series(version: str) -> str | None:
@@ -527,9 +525,7 @@ def collect_platform_support_report(
     if distro_version is None and os_rel:
         distro_version = os_rel.get("VERSION_ID")
     if distro_codename is None and os_rel:
-        distro_codename = (
-            os_rel.get("VERSION_CODENAME") or os_rel.get("UBUNTU_CODENAME") or None
-        )
+        distro_codename = os_rel.get("VERSION_CODENAME") or os_rel.get("UBUNTU_CODENAME") or None
 
     if kernel_version is None and plat != PLATFORM_WINDOWS:
         kernel_version = _detect_kernel_version()
@@ -549,14 +545,10 @@ def collect_platform_support_report(
 
     if systemd_available is None:
         systemd_available = (
-            _detect_systemd_available()
-            if plat in (PLATFORM_LINUX, PLATFORM_WSL)
-            else False
+            _detect_systemd_available() if plat in (PLATFORM_LINUX, PLATFORM_WSL) else False
         )
     if systemd_pid1 is None:
-        systemd_pid1 = (
-            systemd_is_pid1() if plat in (PLATFORM_LINUX, PLATFORM_WSL) else False
-        )
+        systemd_pid1 = systemd_is_pid1() if plat in (PLATFORM_LINUX, PLATFORM_WSL) else False
 
     if docker_backend is None and plat == PLATFORM_WSL:
         docker_backend = detect_wsl_docker_backend()
@@ -642,9 +634,7 @@ def collect_platform_support_report(
                 f"Ubuntu {dver or 'unknown'}"
                 + (f"（{dcode}）" if dcode else "")
                 + " 不在正式支持矩阵（仅 "
-                + "/".join(
-                    f"{ver}={code}" for ver, code in sorted(SUPPORTED_UBUNTU_LTS.items())
-                )
+                + "/".join(f"{ver}={code}" for ver, code in sorted(SUPPORTED_UBUNTU_LTS.items()))
                 + "）"
             )
     elif did == "debian":
@@ -653,8 +643,7 @@ def collect_platform_support_report(
                 reasons.append(
                     f"Debian 代号 {dcode} 不是 Stable（仅支持 "
                     + "/".join(
-                        f"{maj}={code}"
-                        for maj, code in sorted(SUPPORTED_DEBIAN_STABLE.items())
+                        f"{maj}={code}" for maj, code in sorted(SUPPORTED_DEBIAN_STABLE.items())
                     )
                     + "）"
                 )
@@ -664,8 +653,7 @@ def collect_platform_support_report(
                     + (f"（{dcode}）" if dcode else "")
                     + " 不在正式支持矩阵或版本/代号不匹配（仅 "
                     + "/".join(
-                        f"{maj}={code}"
-                        for maj, code in sorted(SUPPORTED_DEBIAN_STABLE.items())
+                        f"{maj}={code}" for maj, code in sorted(SUPPORTED_DEBIAN_STABLE.items())
                     )
                     + "）"
                 )
@@ -675,14 +663,10 @@ def collect_platform_support_report(
         )
 
     if not kernel_version or not version_ge(kernel_version, MIN_KERNEL_VERSION):
-        reasons.append(
-            f"内核 {kernel_version or 'unknown'} 低于最低要求 {MIN_KERNEL_VERSION}"
-        )
+        reasons.append(f"内核 {kernel_version or 'unknown'} 低于最低要求 {MIN_KERNEL_VERSION}")
 
     if not libc_version or not version_ge(libc_version, MIN_GLIBC_VERSION):
-        reasons.append(
-            f"glibc {libc_version or 'unknown'} 低于最低要求 {MIN_GLIBC_VERSION}"
-        )
+        reasons.append(f"glibc {libc_version or 'unknown'} 低于最低要求 {MIN_GLIBC_VERSION}")
 
     if plat == PLATFORM_LINUX:
         if not systemd_available:
@@ -699,9 +683,7 @@ def collect_platform_support_report(
                 f"（需 ≥ {MIN_WSL_PACKAGE_VERSION}）"
             )
         elif not version_ge(pkg, MIN_WSL_PACKAGE_VERSION):
-            reasons.append(
-                f"WSL 包版本 {pkg} 低于最低要求 {MIN_WSL_PACKAGE_VERSION}"
-            )
+            reasons.append(f"WSL 包版本 {pkg} 低于最低要求 {MIN_WSL_PACKAGE_VERSION}")
         if not systemd_pid1:
             reasons.append(
                 "WSL 中 systemd 不是 PID 1；请在 /etc/wsl.conf 启用 "

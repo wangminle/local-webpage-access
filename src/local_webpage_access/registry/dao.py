@@ -87,9 +87,7 @@ class Registry:
                 conn.execute("PRAGMA busy_timeout=5000")
                 self._conn = conn
             except (OSError, sqlite3.Error) as exc:
-                raise RegistryError(
-                    f"只读打开 Registry 失败（{self.db_path}）：{exc}"
-                ) from exc
+                raise RegistryError(f"只读打开 Registry 失败（{self.db_path}）：{exc}") from exc
         return self
 
     def close(self) -> None:
@@ -120,16 +118,12 @@ class Registry:
         except sqlite3.DatabaseError as exc:
             raise RegistryError(f"数据库操作失败：{exc}") from exc
 
-    def _fetchone(
-        self, sql: str, params: tuple[Any, ...] | list[Any] = ()
-    ) -> sqlite3.Row | None:
+    def _fetchone(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> sqlite3.Row | None:
         """线程安全的单行查询（BUG-052）。"""
         with locked_connection(self.conn) as conn:
             return conn.execute(sql, params).fetchone()
 
-    def _fetchall(
-        self, sql: str, params: tuple[Any, ...] | list[Any] = ()
-    ) -> list[sqlite3.Row]:
+    def _fetchall(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> list[sqlite3.Row]:
         """线程安全的多行查询（BUG-052）。"""
         with locked_connection(self.conn) as conn:
             return conn.execute(sql, params).fetchall()
@@ -190,20 +184,14 @@ class Registry:
             if data.get("container"):
                 container = self._container_row(data["id"], data["container"])
                 self._upsert_mapping(tx, "containers", container, "instance_id")
-                tx.execute(
-                    "DELETE FROM static_sites WHERE instance_id = ?", (data["id"],)
-                )
+                tx.execute("DELETE FROM static_sites WHERE instance_id = ?", (data["id"],))
             elif data.get("static"):
                 static = self._static_row(data["id"], data["static"])
                 self._upsert_mapping(tx, "static_sites", static, "instance_id")
-                tx.execute(
-                    "DELETE FROM containers WHERE instance_id = ?", (data["id"],)
-                )
+                tx.execute("DELETE FROM containers WHERE instance_id = ?", (data["id"],))
 
     @staticmethod
-    def _upsert_mapping(
-        tx: sqlite3.Connection, table: str, row: dict[str, Any], key: str
-    ) -> None:
+    def _upsert_mapping(tx: sqlite3.Connection, table: str, row: dict[str, Any], key: str) -> None:
         cols = ", ".join(row.keys())
         placeholders = ", ".join(["?"] * len(row))
         updates = ", ".join(f"{c}=excluded.{c}" for c in row if c != key)
@@ -214,21 +202,15 @@ class Registry:
         )
 
     def get_instance(self, instance_id: str) -> dict[str, Any] | None:
-        row = self._fetchone(
-            "SELECT * FROM instances WHERE id = ?", (instance_id,)
-        )
+        row = self._fetchone("SELECT * FROM instances WHERE id = ?", (instance_id,))
         return dict(row) if row else None
 
     def list_instances(self) -> list[dict[str, Any]]:
-        rows = self._fetchall(
-            "SELECT * FROM instances ORDER BY created_at ASC"
-        )
+        rows = self._fetchall("SELECT * FROM instances ORDER BY created_at ASC")
         return [dict(r) for r in rows]
 
     def instance_exists(self, instance_id: str) -> bool:
-        row = self._fetchone(
-            "SELECT 1 FROM instances WHERE id = ?", (instance_id,)
-        )
+        row = self._fetchone("SELECT 1 FROM instances WHERE id = ?", (instance_id,))
         return row is not None
 
     def update_status(
@@ -339,9 +321,7 @@ class Registry:
         """
         with self.txn() as tx:
             for table in _CHILD_TABLES:
-                tx.execute(
-                    f"DELETE FROM {table} WHERE instance_id = ?", (instance_id,)
-                )
+                tx.execute(f"DELETE FROM {table} WHERE instance_id = ?", (instance_id,))
             tx.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
 
     # ---- 孤儿数据（BUG-473）-------------------------------------------------
@@ -390,9 +370,7 @@ class Registry:
             self._upsert_mapping(tx, "containers", row, "instance_id")
 
     @staticmethod
-    def _container_row(
-        instance_id: str, container: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _container_row(instance_id: str, container: dict[str, Any]) -> dict[str, Any]:
         rl = container.get("resourceLimits") or {}
         return {
             "instance_id": instance_id,
@@ -412,9 +390,7 @@ class Registry:
         }
 
     def get_container(self, instance_id: str) -> dict[str, Any] | None:
-        row = self._fetchone(
-            "SELECT * FROM containers WHERE instance_id = ?", (instance_id,)
-        )
+        row = self._fetchone("SELECT * FROM containers WHERE instance_id = ?", (instance_id,))
         return dict(row) if row else None
 
     def delete_container(self, instance_id: str) -> None:
@@ -443,14 +419,10 @@ class Registry:
         }
 
     def get_static_site(self, instance_id: str) -> dict[str, Any] | None:
-        row = self._fetchone(
-            "SELECT * FROM static_sites WHERE instance_id = ?", (instance_id,)
-        )
+        row = self._fetchone("SELECT * FROM static_sites WHERE instance_id = ?", (instance_id,))
         return dict(row) if row else None
 
-    def list_route_hosts(
-        self, *, exclude_instance: str | None = None
-    ) -> dict[str, str]:
+    def list_route_hosts(self, *, exclude_instance: str | None = None) -> dict[str, str]:
         """IMP-006 / IMP-014：返回 ``{route_host: instance_id}`` 映射（仅 route_mode='name'）。
 
         用于路径别名全局唯一性校验，**跨静态站点与容器实例**（IMP-014 放开容器别名后，
@@ -484,9 +456,7 @@ class Registry:
     def delete_static_site(self, instance_id: str) -> None:
         """删除静态站点子表行（runtime 切换清理用，BUG-005）。不存在时为空操作。"""
         with self.txn() as tx:
-            tx.execute(
-                "DELETE FROM static_sites WHERE instance_id = ?", (instance_id,)
-            )
+            tx.execute("DELETE FROM static_sites WHERE instance_id = ?", (instance_id,))
 
     # ---- 端口（WBS-05.12）--------------------------------------------------
 
@@ -508,9 +478,7 @@ class Registry:
             if cur.rowcount > 0:
                 return True
             # 该端口已有记录但不是本次插入：判断归属
-            row = tx.execute(
-                "SELECT instance_id FROM ports WHERE port = ?", (port,)
-            ).fetchone()
+            row = tx.execute("SELECT instance_id FROM ports WHERE port = ?", (port,)).fetchone()
             return row is not None and row["instance_id"] == instance_id
 
     def release_port(self, port: int) -> None:
@@ -534,16 +502,12 @@ class Registry:
         return [int(r["port"]) for r in rows]
 
     def port_owner(self, port: int) -> str | None:
-        row = self._fetchone(
-            "SELECT instance_id FROM ports WHERE port = ?", (port,)
-        )
+        row = self._fetchone("SELECT instance_id FROM ports WHERE port = ?", (port,))
         return row["instance_id"] if row else None
 
     # ---- 事件（WBS-05.13）-------------------------------------------------
 
-    def add_event(
-        self, instance_id: str | None, event_type: str, message: str
-    ) -> int:
+    def add_event(self, instance_id: str | None, event_type: str, message: str) -> int:
         with self.txn() as tx:
             cur = tx.execute(
                 "INSERT INTO events(instance_id, event_type, message, created_at) "
@@ -559,9 +523,7 @@ class Registry:
         self, instance_id: str | None = None, *, limit: int = 100
     ) -> list[dict[str, Any]]:
         if instance_id is None:
-            rows = self._fetchall(
-                "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
-            )
+            rows = self._fetchall("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
         else:
             rows = self._fetchall(
                 "SELECT * FROM events WHERE instance_id = ? ORDER BY id DESC LIMIT ?",
@@ -581,8 +543,7 @@ class Registry:
     ) -> int:
         with self.txn() as tx:
             cur = tx.execute(
-                "INSERT INTO builds(instance_id, status, started_at, log_path) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO builds(instance_id, status, started_at, log_path) VALUES (?, ?, ?, ?)",
                 (instance_id, status, started_at or now_iso(), log_path),
             )
             row_id = cur.lastrowid
@@ -622,9 +583,7 @@ class Registry:
         self, instance_id: str | None = None, *, limit: int = 50
     ) -> list[dict[str, Any]]:
         if instance_id is None:
-            rows = self._fetchall(
-                "SELECT * FROM builds ORDER BY id DESC LIMIT ?", (limit,)
-            )
+            rows = self._fetchall("SELECT * FROM builds ORDER BY id DESC LIMIT ?", (limit,))
         else:
             rows = self._fetchall(
                 "SELECT * FROM builds WHERE instance_id = ? ORDER BY id DESC LIMIT ?",
@@ -681,17 +640,13 @@ class Registry:
             tx.execute(sql, tuple(row.values()))
 
     def get_resources(self, instance_id: str) -> dict[str, Any] | None:
-        row = self._fetchone(
-            "SELECT * FROM resources WHERE instance_id = ?", (instance_id,)
-        )
+        row = self._fetchone("SELECT * FROM resources WHERE instance_id = ?", (instance_id,))
         return dict(row) if row else None
 
     # ---- 统计（供管理页，WBS-05 观测）------------------------------------
 
     def status_counts(self) -> dict[str, int]:
-        rows = self._fetchall(
-            "SELECT status, COUNT(*) AS n FROM instances GROUP BY status"
-        )
+        rows = self._fetchall("SELECT status, COUNT(*) AS n FROM instances GROUP BY status")
         return {r["status"]: int(r["n"]) for r in rows}
 
     def total_count(self) -> int:

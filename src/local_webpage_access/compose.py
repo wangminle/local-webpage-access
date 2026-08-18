@@ -58,9 +58,7 @@ services:
       - "${{HOST_PORT}}:${{INTERNAL_PORT}}"
     env_file:
       - .env
-{env_local_block}{extra_environment}    volumes:
-      - {data_volume}
-    mem_limit: ${{MEMORY_LIMIT:-{memory}}}
+{env_local_block}{extra_environment}{volumes_block}    mem_limit: ${{MEMORY_LIMIT:-{memory}}}
     cpus: "${{CPU_LIMIT:-{cpus}}}"
     restart: unless-stopped
 """
@@ -76,10 +74,9 @@ def uses_runtime_root(source_dir: Path | None, manifest: InstanceManifest) -> bo
         return True
     if source_dir is None:
         return False
-    return (
-        (source_dir / "src" / "app" / "runtime_paths.py").is_file()
-        or (source_dir / "app" / "runtime_paths.py").is_file()
-    )
+    return (source_dir / "src" / "app" / "runtime_paths.py").is_file() or (
+        source_dir / "app" / "runtime_paths.py"
+    ).is_file()
 
 
 def _uses_runtime_root(source_dir: Path, manifest: InstanceManifest) -> bool:
@@ -125,6 +122,9 @@ def generate_compose(
     # FastAPI 常见 src/ 布局：不重建镜像时也要能找到 main（与 Dockerfile ENV 对齐）。
     if (source_dir / "src" / "main.py").is_file():
         env_lines.append("      - PYTHONPATH=src")
+    # issue#1 附加观察：统一注入 PORT 环境变量（= .env 的 INTERNAL_PORT），
+    # 让按 PORT 约定监听的应用与探针端口天然对齐，无需手工对表。
+    env_lines.append("      - PORT=${INTERNAL_PORT}")
 
     data_volume = _DATA_VOLUME_APP
     if _is_sqlite(manifest) and _uses_runtime_root(source_dir, manifest):
@@ -135,13 +135,26 @@ def generate_compose(
     if env_lines:
         extra_environment = "    environment:\n" + "\n".join(env_lines) + "\n"
 
+    # issue#1 问题2：volumes 合并 manifest.container.extraVolumes（业务定制挂载）。
+    # 手工编辑 compose.yaml 会在重生成时被抹掉；持久化出口是 local-web.json 的
+    # container.extraVolumes，每次渲染原样合并。安全审计在写出前统一把关。
+    volumes: list[str] = [data_volume]
+    for extra in container.extraVolumes:
+        entry = extra.strip()
+        if not entry or "\n" in entry or "\r" in entry:
+            raise ValueError(
+                f"实例 {manifest.id} container.extraVolumes 含非法条目（空或换行）：{extra!r}"
+            )
+        volumes.append(entry)
+    volumes_block = "    volumes:\n" + "".join(f"      - {v}\n" for v in volumes)
+
     content = _COMPOSE_TEMPLATE.format(
         project_name=container.projectName,
         instance_id=manifest.id,
         service=_SERVICE_NAME,
         host_port=host_port,
         internal_port=container.internalPort,
-        data_volume=data_volume,
+        volumes_block=volumes_block,
         memory=limits.memory,
         cpus=limits.cpus,
         env_local_block=_ENV_LOCAL_BLOCK,
@@ -154,9 +167,7 @@ def generate_compose(
     findings = audit_compose(content)
     if has_critical(findings):
         codes = ", ".join(f.code for f in findings if f.level == "critical")
-        raise RuntimeError(
-            f"生成的 compose.yaml 含 critical 安全问题（{codes}），已拒绝写出"
-        )
+        raise RuntimeError(f"生成的 compose.yaml 含 critical 安全问题（{codes}），已拒绝写出")
     for f in findings:
         log.warning("compose 安全审计 [%s] %s", f.code, f.message)
 
@@ -199,8 +210,7 @@ def generate_env(
         # 无消费证据时保留原配置，避免把不读取 DATABASE_URL 的应用指向新空库。
         db_config = getattr(manifest, "databaseConfig", None)
         consumes_db_url = (
-            db_config is not None
-            and db_config.get("consumesDatabaseUrl", False)
+            db_config is not None and db_config.get("consumesDatabaseUrl", False)
             if isinstance(db_config, dict)
             else False
         )
@@ -211,7 +221,7 @@ def generate_env(
         if out_path.is_file():
             for line in out_path.read_text(encoding="utf-8").splitlines():
                 if line.startswith("DATABASE_URL=") and not line.startswith("#"):
-                    preserved_db_url = line[len("DATABASE_URL="):]
+                    preserved_db_url = line[len("DATABASE_URL=") :]
                     break
 
         if consumes_db_url:
@@ -219,7 +229,8 @@ def generate_env(
                 # 保留已有 DATABASE_URL（用户或上一次部署已确认可用）
                 log.info(
                     "保留已有 DATABASE_URL（实例 %s）：%s",
-                    manifest.id, preserved_db_url,
+                    manifest.id,
+                    preserved_db_url,
                 )
                 lines.append(f"DATABASE_URL={preserved_db_url}")
             else:
@@ -256,11 +267,13 @@ def generate_env(
                 target_db_path = host_data_dir / db_filename
                 if source_db_path.is_file() and not target_db_path.exists():
                     import shutil
+
                     try:
                         shutil.copy2(source_db_path, target_db_path)
                         log.info(
                             "已复制源 SQLite 文件 %s -> %s",
-                            source_db_path, target_db_path,
+                            source_db_path,
+                            target_db_path,
                         )
                     except OSError as exc:
                         log.warning("复制源 SQLite 文件失败（忽略）：%s", exc)
@@ -322,8 +335,7 @@ def ensure_env_local_secrets(docker_dir: Path, env_example: Path | None = None) 
         return None
     jwt = secrets.token_hex(32)
     local_path.write_text(
-        "# 由 lwa 自动生成（BUG-199）；可按 .env.example 补充其它密钥。\n"
-        f"JWT_SECRET={jwt}\n",
+        f"# 由 lwa 自动生成（BUG-199）；可按 .env.example 补充其它密钥。\nJWT_SECRET={jwt}\n",
         encoding="utf-8",
     )
     try:
@@ -340,11 +352,7 @@ def service_name() -> str:
 
 
 def _is_sqlite(manifest: InstanceManifest) -> bool:
-    return bool(
-        manifest.hasDatabase
-        and manifest.database
-        and manifest.database.type == "sqlite"
-    )
+    return bool(manifest.hasDatabase and manifest.database and manifest.database.type == "sqlite")
 
 
 __all__ = [

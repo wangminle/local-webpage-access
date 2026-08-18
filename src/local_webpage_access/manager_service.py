@@ -77,6 +77,7 @@ def read_manager_log(workspace: Workspace, *, tail: int = 200) -> str:
 
     return tail_text_file(log_file_path(workspace), 0 if tail is None else tail)
 
+
 def read_state(workspace: Workspace) -> ManagerState | None:
     path = state_path(workspace)
     if not path.is_file():
@@ -169,12 +170,7 @@ def health_matches_workspace(
         except (OSError, ValueError):
             return False
     # BUG-065：旧版 health 无 workspaceRoot —— 仅当 state 证明 pid 仍存活
-    if (
-        state is not None
-        and state.enabled
-        and state.pid is not None
-        and is_pid_alive(state.pid)
-    ):
+    if state is not None and state.enabled and state.pid is not None and is_pid_alive(state.pid):
         return True
     return False
 
@@ -310,10 +306,7 @@ def manager_start_lock(workspace: Workspace, *, timeout: float = 5.0) -> Iterato
                 holder_pid = int(content[0]) if content else 0
                 stale = not is_pid_alive(holder_pid)
                 if not stale:
-                    stale = (
-                        time.time() - path.stat().st_mtime
-                        > MANAGER_START_LOCK_STALE_SECONDS
-                    )
+                    stale = time.time() - path.stat().st_mtime > MANAGER_START_LOCK_STALE_SECONDS
             except (OSError, ValueError):
                 stale = True
             if stale:
@@ -412,9 +405,7 @@ def start_manager(workspace: Workspace, config: Config) -> int:
         # 端口已被占用：仅当健康端点确认属于本工作区时才恢复状态
         if health_matches_workspace(bind_host, bind_port, workspace.root, state=state):
             recovered_pid = find_listening_pid(bind_port)
-            if recovered_pid is not None and not _manager_pid_matches(
-                recovered_pid, workspace
-            ):
+            if recovered_pid is not None and not _manager_pid_matches(recovered_pid, workspace):
                 recovered_pid = None
             state = ManagerState(
                 enabled=True,
@@ -488,8 +479,10 @@ def stop_manager(workspace: Workspace) -> bool:
         else:
             stopped = _terminate_pid(pid, workspace=workspace)
 
-    if pid is None and state.enabled and health_matches_workspace(
-        state.host, state.port, workspace.root, state=state
+    if (
+        pid is None
+        and state.enabled
+        and health_matches_workspace(state.host, state.port, workspace.root, state=state)
     ):
         # BUG-126：健康端点仍属于本工作区但找不到可确认身份的 PID，不能假报成功。
         log.warning("管理页仍健康但未找到可安全终止的监听 PID（port=%s）", state.port)

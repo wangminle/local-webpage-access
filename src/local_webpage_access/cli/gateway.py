@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import typer
 
-from local_webpage_access.cli._common import coordinated_autostart_disable, log, open_workspace_registry
+from local_webpage_access.cli._common import (
+    coordinated_autostart_disable,
+    log,
+    open_workspace_registry,
+)
 from local_webpage_access.errors import LwaError
 
 app = typer.Typer(help="控制 Caddy 网关（master 生命周期与 :8080 别名入口）")
@@ -38,9 +42,7 @@ def _require_caddy_version(config) -> None:
             suggestion=f"安装 Caddy ≥ {MIN_CADDY_VERSION} 并加入 PATH",
         )
     try:
-        result = subprocess.run(
-            ["caddy", "version"], capture_output=True, text=True, timeout=10
-        )
+        result = subprocess.run(["caddy", "version"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
         raise LwaError(
             f"无法获取 Caddy 版本：{exc}",
@@ -93,9 +95,7 @@ def gateway_on(
             if port:
                 from local_webpage_access.ports import format_http_host
 
-                typer.echo(
-                    f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/"
-                )
+                typer.echo(f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/")
             typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
             typer.echo("  刷新地址：lwa access refresh")
             # G6：交接收尾后默认复核访问；可选自动 rebuild。
@@ -105,9 +105,7 @@ def gateway_on(
                 # finalize 已 refresh；此处只跑 review（refresh 幂等再跑一次亦可，
                 # 但共享编排 review=True 会再 refresh——gateway on 路径 finalize
                 # 已写盘，这里仅 review 避免重复写）。
-                pass_result = run_access_pass(
-                    ws, config, reg, review=True, dry_run=False
-                )
+                pass_result = run_access_pass(ws, config, reg, review=True, dry_run=False)
                 report = pass_result.review
                 if report is None and pass_result.review_error:
                     raise RuntimeError(pass_result.review_error)
@@ -121,15 +119,11 @@ def gateway_on(
                     rebuild_if_needed=rebuild_if_needed,
                 )
                 typer.echo("")
-                typer.echo(
-                    format_review_report(report, rebuild_report=rebuild_report)
-                )
+                typer.echo(format_review_report(report, rebuild_report=rebuild_report))
                 review_failed = report.has_failures
                 rebuild_failed = not rebuild_report.all_ok
             except Exception as exc:  # noqa: BLE001 — review 失败不掩盖网关已启动
-                log.warning(
-                    "gateway on 后 access review 失败（不阻断启动）：%s", exc
-                )
+                log.warning("gateway on 后 access review 失败（不阻断启动）：%s", exc)
                 typer.secho(
                     f"  访问复核失败（网关已启动）：{exc}",
                     fg=typer.colors.YELLOW,
@@ -211,9 +205,7 @@ def gateway_status_cmd() -> None:
             lan_ip = resolve_lan_ip(config) or "127.0.0.1"
             from local_webpage_access.ports import format_http_host
 
-            typer.echo(
-                f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/"
-            )
+            typer.echo(f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/")
         if not st["running"] and st["backend"] == "caddy":
             typer.echo("  启动：lwa gateway on")
     except LwaError as exc:
@@ -290,9 +282,7 @@ def gateway_switch(
                 else:
                     _require_caddy_version(config)
 
-            result = switch_gateway(
-                ws, config, reg, target, dry_run=dry_run, review=review
-            )
+            result = switch_gateway(ws, config, reg, target, dry_run=dry_run, review=review)
             if json_out:
                 typer.echo(json_mod.dumps(result.to_dict(), ensure_ascii=False, indent=2))
             else:

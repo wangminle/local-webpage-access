@@ -100,9 +100,11 @@ class TestGateCRequiredProbe:
         project = tmp_path / "fastapi-app"
         project.mkdir()
         (project / "requirements.txt").write_text(
-            "fastapi\nuvicorn[standard]\n", encoding="utf-8",
+            "fastapi\nuvicorn[standard]\n",
+            encoding="utf-8",
         )
-        (project / "app.py").write_text(textwrap.dedent("""\
+        (project / "app.py").write_text(
+            textwrap.dedent("""\
             from fastapi import FastAPI
             from fastapi.responses import JSONResponse
             import os
@@ -120,19 +122,26 @@ class TestGateCRequiredProbe:
             @app.get("/")
             def root():
                 return {"message": "hello"}
-        """), encoding="utf-8")
-        (project / "Dockerfile").write_text(textwrap.dedent("""\
+        """),
+            encoding="utf-8",
+        )
+        (project / "Dockerfile").write_text(
+            textwrap.dedent("""\
             FROM python:3.13-slim
             WORKDIR /app
             COPY requirements.txt .
             RUN pip install --no-cache-dir -r requirements.txt
             COPY app.py .
             CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-        """), encoding="utf-8")
+        """),
+            encoding="utf-8",
+        )
         return project
 
     def test_healthy_container_passes_required_probe(
-        self, fastapi_project: Path, tmp_path: Path,
+        self,
+        fastapi_project: Path,
+        tmp_path: Path,
     ) -> None:
         """健康容器 -> required probe 通过 -> RUNNING。"""
         from local_webpage_access.docker_runtime import DockerRuntime
@@ -154,7 +163,8 @@ class TestGateCRequiredProbe:
 
             compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
-            (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
+            (compose_dir / "compose.yaml").write_text(
+                textwrap.dedent(f"""\
                 services:
                   app:
                     build: {fastapi_project}
@@ -162,12 +172,15 @@ class TestGateCRequiredProbe:
                       - "{host_port}:8000"
                     environment:
                       - FAIL_HEALTH=0
-            """), encoding="utf-8")
+            """),
+                encoding="utf-8",
+            )
 
             runtime.build(instance_id)
             runtime.up(instance_id)
 
             import time
+
             time.sleep(3)
 
             assert runtime.is_running(instance_id)
@@ -175,11 +188,7 @@ class TestGateCRequiredProbe:
             manifest.capabilityContract = CapabilityContract(
                 servesUi=True,
                 servesApi=True,
-                requiredProbes=[
-                    ProbeSpec(
-                        path="/health", isMandatory=True, source="declared"
-                    )
-                ],
+                requiredProbes=[ProbeSpec(path="/health", isMandatory=True, source="declared")],
             ).model_dump()
             verification = _evaluate_container_verification(
                 host_port, manifest, ws, reg, instance_id
@@ -193,7 +202,9 @@ class TestGateCRequiredProbe:
             reg.close()
 
     def test_unhealthy_container_fails_required_probe(
-        self, fastapi_project: Path, tmp_path: Path,
+        self,
+        fastapi_project: Path,
+        tmp_path: Path,
     ) -> None:
         """不健康容器 -> required probe 失败 -> 不写 RUNNING。"""
         from local_webpage_access.docker_runtime import DockerRuntime
@@ -215,7 +226,8 @@ class TestGateCRequiredProbe:
 
             compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
-            (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
+            (compose_dir / "compose.yaml").write_text(
+                textwrap.dedent(f"""\
                 services:
                   app:
                     build: {fastapi_project}
@@ -223,12 +235,15 @@ class TestGateCRequiredProbe:
                       - "{host_port}:8000"
                     environment:
                       - FAIL_HEALTH=1
-            """), encoding="utf-8")
+            """),
+                encoding="utf-8",
+            )
 
             runtime.build(instance_id)
             runtime.up(instance_id)
 
             import time
+
             time.sleep(3)
 
             assert runtime.is_running(instance_id)
@@ -236,11 +251,7 @@ class TestGateCRequiredProbe:
             manifest.capabilityContract = CapabilityContract(
                 servesUi=True,
                 servesApi=True,
-                requiredProbes=[
-                    ProbeSpec(
-                        path="/health", isMandatory=True, source="declared"
-                    )
-                ],
+                requiredProbes=[ProbeSpec(path="/health", isMandatory=True, source="declared")],
             ).model_dump()
             verification = _evaluate_container_verification(
                 host_port, manifest, ws, reg, instance_id
@@ -268,7 +279,8 @@ class TestGateCFingerprintChange:
         project = tmp_path / "http-app"
         project.mkdir()
         (project / "requirements.txt").write_text("", encoding="utf-8")
-        (project / "app.py").write_text(textwrap.dedent("""\
+        (project / "app.py").write_text(
+            textwrap.dedent("""\
             from http.server import HTTPServer, BaseHTTPRequestHandler
 
             class Handler(BaseHTTPRequestHandler):
@@ -278,11 +290,14 @@ class TestGateCFingerprintChange:
                     self.wfile.write(b"hello v1")
 
             HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
-        """), encoding="utf-8")
+        """),
+            encoding="utf-8",
+        )
         return project
 
     def test_source_change_detected_by_fingerprint(
-        self, simple_http_project: Path,
+        self,
+        simple_http_project: Path,
     ) -> None:
         """修改源码后 sourceHash 变化。"""
         from local_webpage_access.lifecycle import _compute_source_fingerprint
@@ -290,7 +305,8 @@ class TestGateCFingerprintChange:
         h1 = _compute_source_fingerprint(str(simple_http_project))
         assert len(h1) == 64
 
-        (simple_http_project / "app.py").write_text(textwrap.dedent("""\
+        (simple_http_project / "app.py").write_text(
+            textwrap.dedent("""\
             from http.server import HTTPServer, BaseHTTPRequestHandler
 
             class Handler(BaseHTTPRequestHandler):
@@ -300,7 +316,9 @@ class TestGateCFingerprintChange:
                     self.wfile.write(b"hello v2")
 
             HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
-        """), encoding="utf-8")
+        """),
+            encoding="utf-8",
+        )
 
         h2 = _compute_source_fingerprint(str(simple_http_project))
         assert h1 != h2, "源码修改后指纹应变化"
@@ -333,16 +351,20 @@ class TestGateCComposeLifecycle:
 
             compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
-            (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
+            (compose_dir / "compose.yaml").write_text(
+                textwrap.dedent(f"""\
                 services:
                   app:
                     image: nginx:alpine
                     ports:
                       - "{host_port}:80"
-            """), encoding="utf-8")
+            """),
+                encoding="utf-8",
+            )
 
             runtime.up(instance_id)
             import time
+
             time.sleep(2)
             assert runtime.is_running(instance_id)
 
@@ -412,7 +434,9 @@ class TestGateCMigrationSideEffect:
         manifest.capabilityContract = {"requiresMigrations": True}
 
         records = _collect_side_effect_records(
-            manifest, liveness_ok=True, verification_status="passed",
+            manifest,
+            liveness_ok=True,
+            verification_status="passed",
         )
         assert len(records) == 1
         assert records[0].kind == "migration"
@@ -444,15 +468,19 @@ class TestGateCFailureScenePreservation:
 
             compose_dir = ws.app_docker(instance_id)
             compose_dir.mkdir(parents=True)
-            (compose_dir / "compose.yaml").write_text(textwrap.dedent(f"""\
+            (compose_dir / "compose.yaml").write_text(
+                textwrap.dedent(f"""\
                 services:
                   app:
                     build: .
                     ports:
                       - "{host_port}:80"
-            """), encoding="utf-8")
+            """),
+                encoding="utf-8",
+            )
             (compose_dir / "Dockerfile").write_text(
-                "FROM non-existent-image-12345:latest\n", encoding="utf-8",
+                "FROM non-existent-image-12345:latest\n",
+                encoding="utf-8",
             )
 
             with pytest.raises(DockerError):

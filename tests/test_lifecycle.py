@@ -77,9 +77,7 @@ class _FakeRuntime:
         if not type(self)._has_container:
             from local_webpage_access.errors import DockerError
 
-            raise DockerError(
-                'service "app" has no container to start', instance_id=iid
-            )
+            raise DockerError('service "app" has no container to start', instance_id=iid)
         type(self).calls.append("start")
         type(self)._running = True
 
@@ -169,9 +167,7 @@ def _seed_container(
     return manifest
 
 
-def _seed_static(
-    workspace: Workspace, registry: Registry, iid: str = "demo"
-) -> InstanceManifest:
+def _seed_static(workspace: Workspace, registry: Registry, iid: str = "demo") -> InstanceManifest:
     workspace.ensure_app_dirs(iid)
     (workspace.app_current(iid) / "index.html").write_text("<html>hi</html>")
     from tests._helpers import make_static_manifest
@@ -235,7 +231,11 @@ def test_instance_lock_timeout_raises(workspace) -> None:
     try_acquire_exclusive(fd)
     write_lock_payload(fd, f"{os.getpid()}\n{time_mod.time():.3f}\n".encode())
     try:
-        with pytest.raises(LifecycleError, match="超时"):
+        # issue#1 问题3：错误信息带持有者 PID 与重试指引
+        with pytest.raises(LifecycleError, match=f"PID {os.getpid()}"):
+            with instance_lock(workspace, "api", timeout=0.3):
+                pass
+        with pytest.raises(LifecycleError, match="稍候重试"):
             with instance_lock(workspace, "api", timeout=0.3):
                 pass
     finally:
@@ -383,9 +383,7 @@ def test_start_recovers_via_full_rebuild_after_rebuild_failure(
 
     def fail_build(self, iid, *, build_id=None, **kw):
         if build_id is not None and self.registry is not None:
-            self.registry.finish_build(
-                build_id, status="failed", error_summary="rebuild boom"
-            )
+            self.registry.finish_build(build_id, status="failed", error_summary="rebuild boom")
         raise DockerError("rebuild boom", instance_id=iid)
 
     monkeypatch.setattr(fake_runtime, "build", fail_build)
@@ -415,9 +413,7 @@ def test_start_recovers_via_full_rebuild_after_rebuild_failure(
     assert "start" not in fake_runtime.calls
 
 
-def test_start_static_dispatches_to_host_static(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_start_static_dispatches_to_host_static(workspace, registry, config, fake_runtime) -> None:
     """静态实例 start → host_instance 的静态分支（不碰 Docker）。"""
     _seed_static(workspace, registry, "demo")
     manifest = start_instance(workspace, config, registry, "demo")
@@ -448,9 +444,7 @@ def test_stop_container_marks_stopped_and_keeps_port(
 # ---- restart ---------------------------------------------------------------
 
 
-def test_restart_container_stop_then_light_start(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_restart_container_stop_then_light_start(workspace, registry, config, fake_runtime) -> None:
     _seed_container(workspace, registry, "api", deployed=True)
     registry.allocate_port("api", 21000)
     fake_runtime._running = True  # 模拟在跑
@@ -464,9 +458,7 @@ def test_restart_container_stop_then_light_start(
 # ---- rebuild ---------------------------------------------------------------
 
 
-def test_rebuild_container_forces_full_rebuild(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_rebuild_container_forces_full_rebuild(workspace, registry, config, fake_runtime) -> None:
     """rebuild → host_container：down 旧 + build + up。"""
     _seed_container(workspace, registry, "api", deployed=True)
     fake_runtime._running = True
@@ -476,9 +468,7 @@ def test_rebuild_container_forces_full_rebuild(
     assert "up" in fake_runtime.calls
 
 
-def test_rebuild_writes_build_queue_events(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_rebuild_writes_build_queue_events(workspace, registry, config, fake_runtime) -> None:
     """rebuild 通过 BuildQueue 调度，应写入 build_start 事件（WBS-20.06）。"""
     _seed_container(workspace, registry, "api", deployed=False)
     rebuild_instance(workspace, config, registry, "api")
@@ -489,9 +479,7 @@ def test_rebuild_writes_build_queue_events(
 # ---- remove ----------------------------------------------------------------
 
 
-def test_remove_default_keeps_files_and_data(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_default_keeps_files_and_data(workspace, registry, config, fake_runtime) -> None:
     _seed_container(workspace, registry, "api", deployed=True)
     data_dir = workspace.app_data("api")
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -526,18 +514,14 @@ def test_remove_clears_pageviews(workspace, registry, config, fake_runtime) -> N
     store2.close()
 
 
-def test_remove_purge_deletes_files(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_purge_deletes_files(workspace, registry, config, fake_runtime) -> None:
     _seed_container(workspace, registry, "api", deployed=False)
     remove_instance(workspace, config, registry, "api", purge=True, force=True)
     assert registry.get_instance("api") is None
     assert not workspace.app_dir("api").exists()
 
 
-def test_remove_purge_best_effort_removes_image(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_purge_best_effort_removes_image(workspace, registry, config, fake_runtime) -> None:
     """BUG-345：purge 时按 imageId/image 尽力 docker rmi，避免小主机磁盘泄漏。"""
     m = _seed_container(workspace, registry, "api", deployed=True)
     assert m.container is not None
@@ -553,9 +537,7 @@ def test_remove_purge_best_effort_removes_image(
     assert registry.get_instance("api") is None
 
 
-def test_remove_tolerates_corrupt_manifest(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_tolerates_corrupt_manifest(workspace, registry, config, fake_runtime) -> None:
     """BUG-347：local-web.json 损坏时 remove 仍按 registry 降级清理，不得整段崩溃。"""
     _seed_container(workspace, registry, "api", deployed=True)
     workspace.app_manifest_path("api").write_text("{not-json", encoding="utf-8")
@@ -566,9 +548,7 @@ def test_remove_tolerates_corrupt_manifest(
     assert registry.get_instance("api") is None
 
 
-def test_remove_purge_protects_nonempty_data(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_purge_protects_nonempty_data(workspace, registry, config, fake_runtime) -> None:
     """IMP-035：purge 但 data/ 非空且未 force → DataNonemptyError(code=data_nonempty)。"""
     from local_webpage_access.errors import DataNonemptyError
 
@@ -597,9 +577,7 @@ def test_remove_purge_force_deletes_nonempty_data(
     assert not workspace.app_dir("api").exists()
 
 
-def test_remove_container_calls_compose_down(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_container_calls_compose_down(workspace, registry, config, fake_runtime) -> None:
     _seed_container(workspace, registry, "api", deployed=True)
     remove_instance(workspace, config, registry, "api")
     assert "stop" in fake_runtime.calls
@@ -637,9 +615,7 @@ def test_remove_static_without_manifest_still_disables_gateway(
         def cleanup_instance_routes(self, iid):
             calls.append(f"cleanup:{iid}")
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", _FakeGW
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _FakeGW)
 
     remove_instance(workspace, config, registry, "demo")
 
@@ -660,9 +636,7 @@ def test_remove_container_clears_path_alias_config(
         portPool=PortPool(start=21000, end=21050),
     )
     monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
-    monkeypatch.setattr(
-        StaticGateway, "_reload_with_self_heal", lambda self: (True, "")
-    )
+    monkeypatch.setattr(StaticGateway, "_reload_with_self_heal", lambda self: (True, ""))
 
     iid = "prd-workflow"
     _seed_container(workspace, registry, iid, deployed=True)
@@ -714,9 +688,7 @@ def test_remove_traversal_id_rejected_before_delete(
     assert workspace.app_dir("demo").is_dir()
 
 
-def test_remove_purge_valid_id_confined_to_apps(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_purge_valid_id_confined_to_apps(workspace, registry, config, fake_runtime) -> None:
     """合法 purge 只删 apps/<id>/，不动 apps/ 同级与工作区根。"""
     sentinel = workspace.root / "DO-NOT-DELETE.txt"
     sentinel.write_text("workspace root sentinel")
@@ -735,9 +707,7 @@ def test_remove_purge_valid_id_confined_to_apps(
 # ---- observe_status --------------------------------------------------------
 
 
-def test_observe_status_container_running(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_observe_status_container_running(workspace, registry, config, fake_runtime) -> None:
     _seed_container(workspace, registry, "api", deployed=True)
     # manifest 落 stopped，但容器在跑 → observe 改写 running
     fake_runtime._running = True
@@ -746,9 +716,7 @@ def test_observe_status_container_running(
     assert registry.get_instance("api")["status"] == "running"
 
 
-def test_observe_status_container_stopped(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_observe_status_container_stopped(workspace, registry, config, fake_runtime) -> None:
     _seed_container(workspace, registry, "api", deployed=True)
     # manifest 落 running，容器实际没跑 → 改写 stopped
     from local_webpage_access.models import Status as S
@@ -782,16 +750,10 @@ def test_observe_container_docker_permission_preserves_running(
             pass
 
         def is_running(self, iid):
-            raise DockerError(
-                "Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`"
-            )
+            raise DockerError("Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`")
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.health.http_ok", lambda port, **kw: (False, None)
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime)
+    monkeypatch.setattr("local_webpage_access.health.http_ok", lambda port, **kw: (False, None))
 
     observed = observe_status(workspace, config, registry, "api")
     assert observed == Status.RUNNING
@@ -823,16 +785,10 @@ def test_observe_container_docker_permission_http_fallback_running(
             pass
 
         def is_running(self, iid):
-            raise DockerError(
-                "Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`"
-            )
+            raise DockerError("Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`")
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.health.http_ok", lambda port, **kw: (True, 200)
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime)
+    monkeypatch.setattr("local_webpage_access.health.http_ok", lambda port, **kw: (True, 200))
 
     observed = observe_status(workspace, config, registry, "api")
     assert observed == Status.RUNNING
@@ -855,9 +811,7 @@ def test_observe_container_programming_error_preserves_trusted_state(
         def is_running(self, iid):
             raise TypeError("programming bug")
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _BrokenRuntime
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _BrokenRuntime)
     observed = observe_status(workspace, config, registry, "api")
     row = registry.get_instance("api")
     assert observed == Status.RUNNING
@@ -892,17 +846,13 @@ def test_observe_container_trusted_state_refresh_on_concurrent_update(
                 S.RUNNING.value,
                 last_trusted_state=S.RUNNING.value,
             )
-            raise DockerError(
-                "Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`"
-            )
+            raise DockerError("Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`")
 
     monkeypatch.setattr(
         "local_webpage_access.docker_runtime.DockerRuntime",
         _ConcurrentUpdateRuntime,
     )
-    monkeypatch.setattr(
-        "local_webpage_access.health.http_ok", lambda port, **kw: (False, None)
-    )
+    monkeypatch.setattr("local_webpage_access.health.http_ok", lambda port, **kw: (False, None))
 
     observed = observe_status(workspace, config, registry, "api")
     row = registry.get_instance("api")
@@ -913,9 +863,7 @@ def test_observe_container_trusted_state_refresh_on_concurrent_update(
     assert row.get("last_trusted_state") == "running"
 
 
-def test_observe_status_no_change_no_event(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_observe_status_no_change_no_event(workspace, registry, config, fake_runtime) -> None:
     """观测状态与现状一致时不写 status_change 事件。"""
     _seed_container(workspace, registry, "api", deployed=True)
     fake_runtime._running = False  # 与 manifest stopped 一致
@@ -1038,13 +986,8 @@ def test_observe_distinguishes_gateway_down(workspace, registry, config, monkeyp
     from local_webpage_access.lifecycle import _observe_static_status
 
     _seed_enabled_static(workspace, registry, "demo", host_port=21100)
-    _patch_gateway_for_observe(
-        monkeypatch, backend="caddy", admin_alive=False, health_ok=False
-    )
-    assert (
-        _observe_static_status(workspace, config, registry, "demo")
-        == Status.GATEWAY_DOWN
-    )
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=False, health_ok=False)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.GATEWAY_DOWN
 
 
 def test_observe_config_invalid_when_master_up_but_site_unreachable(
@@ -1054,13 +997,8 @@ def test_observe_config_invalid_when_master_up_but_site_unreachable(
     from local_webpage_access.lifecycle import _observe_static_status
 
     _seed_enabled_static(workspace, registry, "demo", host_port=21100)
-    _patch_gateway_for_observe(
-        monkeypatch, backend="caddy", admin_alive=True, health_ok=False
-    )
-    assert (
-        _observe_static_status(workspace, config, registry, "demo")
-        == Status.CONFIG_INVALID
-    )
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=True, health_ok=False)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.CONFIG_INVALID
 
 
 def test_observe_health_first_keeps_running_even_if_admin_down(
@@ -1070,12 +1008,8 @@ def test_observe_health_first_keeps_running_even_if_admin_down(
     from local_webpage_access.lifecycle import _observe_static_status
 
     _seed_enabled_static(workspace, registry, "demo", host_port=21100)
-    _patch_gateway_for_observe(
-        monkeypatch, backend="caddy", admin_alive=False, health_ok=True
-    )
-    assert (
-        _observe_static_status(workspace, config, registry, "demo") == Status.RUNNING
-    )
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=False, health_ok=True)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.RUNNING
 
 
 def test_recover_instance_brings_up_gateway_then_restarts(
@@ -1108,8 +1042,8 @@ def test_recover_instance_brings_up_gateway_then_restarts(
     monkeypatch.setattr(
         lifecycle,
         "_restart_instance_locked",
-        lambda *a, **kw: calls.append("restart") or _seed_enabled_static(
-            workspace, registry, "demo"
+        lambda *a, **kw: (
+            calls.append("restart") or _seed_enabled_static(workspace, registry, "demo")
         ),
     )
 
@@ -1214,9 +1148,7 @@ def test_instance_lock_heartbeat_keeps_lock_fresh(workspace, monkeypatch) -> Non
 #          remove 事件以 orphan event（instance_id=NULL）写入，不受级联影响。
 
 
-def test_remove_keeps_audit_event_as_orphan(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_keeps_audit_event_as_orphan(workspace, registry, config, fake_runtime) -> None:
     """remove 后 remove 事件应作为孤儿事件保留（BUG-047）。"""
     _seed_container(workspace, registry, "api", deployed=True)
     remove_instance(workspace, config, registry, "api")
@@ -1257,9 +1189,7 @@ def test_remove_writes_stage_orphan_events(
         logger.removeHandler(caplog.handler)
         logger.setLevel(orig_level)
 
-    stages = [
-        e for e in registry.list_events(None) if e["event_type"] == "remove_stage"
-    ]
+    stages = [e for e in registry.list_events(None) if e["event_type"] == "remove_stage"]
     names = []
     for ev in stages:
         assert ev["instance_id"] is None
@@ -1285,9 +1215,7 @@ def test_remove_writes_stage_orphan_events(
     assert any("remove stage=done" in r.message for r in caplog.records)
 
 
-def test_remove_data_guard_logs_fail_stage(
-    workspace, registry, config, fake_runtime
-) -> None:
+def test_remove_data_guard_logs_fail_stage(workspace, registry, config, fake_runtime) -> None:
     """IMP-041：data_nonempty 拒绝前写 data_guard fail orphan event。"""
     from local_webpage_access.errors import DataNonemptyError
 
@@ -1299,13 +1227,8 @@ def test_remove_data_guard_logs_fail_stage(
     with pytest.raises(DataNonemptyError):
         remove_instance(workspace, config, registry, "api", purge=True, force=False)
 
-    stages = [
-        e for e in registry.list_events(None) if e["event_type"] == "remove_stage"
-    ]
-    assert any(
-        "stage=data_guard" in e["message"] and "result=fail" in e["message"]
-        for e in stages
-    )
+    stages = [e for e in registry.list_events(None) if e["event_type"] == "remove_stage"]
+    assert any("stage=data_guard" in e["message"] and "result=fail" in e["message"] for e in stages)
     assert registry.get_instance("api") is not None
 
 
@@ -1372,7 +1295,6 @@ def test_remove_redundant_none_when_all_unique(workspace, registry, config) -> N
     assert remove_redundant(workspace, config, registry) == []
 
 
-
 # ---- IMP-014：容器实例路径别名 --------------------------------------------
 
 
@@ -1428,9 +1350,7 @@ def test_container_path_alias(workspace, registry, config, monkeypatch) -> None:
 # ---- IMP-021：端口漂移同步别名片段 ----------------------------------------
 
 
-def test_sync_alias_port_rewrites_when_drifted(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_sync_alias_port_rewrites_when_drifted(workspace, registry, config, monkeypatch) -> None:
     """IMP-021：别名片段端口与当前 hostPort 不一致 → 重写 + reload。"""
     from local_webpage_access import static_gateway as sg
     from local_webpage_access.lifecycle import _sync_alias_port
@@ -1474,9 +1394,7 @@ def test_sync_alias_port_rewrites_when_drifted(
     assert calls["reload"] == 1
 
 
-def test_sync_alias_port_noop_when_unchanged(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_sync_alias_port_noop_when_unchanged(workspace, registry, config, monkeypatch) -> None:
     """IMP-021：别名片段端口与 hostPort 一致 → 不重写、不 reload。"""
     from local_webpage_access import static_gateway as sg
     from local_webpage_access.lifecycle import _sync_alias_port
@@ -1541,9 +1459,7 @@ def test_rebuild_syncs_drifted_alias_port(
 
     monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
     # 模拟端口漂移：rebuild 时 host_container 分配到新端口 21001
-    monkeypatch.setattr(
-        hosting, "_ensure_container_port", lambda *a, **kw: (21001, True)
-    )
+    monkeypatch.setattr(hosting, "_ensure_container_port", lambda *a, **kw: (21001, True))
 
     rebuild_instance(workspace, config, registry, "api")
 
@@ -1687,9 +1603,7 @@ def test_alias_clear_allows_builtin(workspace, registry, config, monkeypatch) ->
 # ---- BUG-167：路径别名并发唯一性 --------------------------------------------
 
 
-def test_concurrent_path_alias_rejects_duplicate(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_concurrent_path_alias_rejects_duplicate(workspace, registry, config, monkeypatch) -> None:
     """BUG-167：双线程同时设同一别名时，仅一方成功，另一方报冲突。"""
     from local_webpage_access import path_alias
     from local_webpage_access.errors import PathError
@@ -1741,9 +1655,7 @@ def test_concurrent_path_alias_rejects_duplicate(
     def worker(iid: str) -> None:
         barrier.wait()
         try:
-            set_instance_path_alias(
-                workspace, config, registry, iid, "same-alias"
-            )
+            set_instance_path_alias(workspace, config, registry, iid, "same-alias")
             successes.append(iid)
         except PathError:
             errors.append(iid)
@@ -1782,21 +1694,16 @@ def test_remove_purge_rmtree_failure_is_visible(
         remove_instance(workspace, config, registry, "api", purge=True, force=True)
 
     assert app_dir.exists(), "失败时应保留 apps/<id> 供重试"
-    stages = [
-        e for e in registry.list_events(None) if e["event_type"] == "remove_stage"
-    ]
+    stages = [e for e in registry.list_events(None) if e["event_type"] == "remove_stage"]
     assert any(
-        "stage=purge_tree" in e["message"] and "result=fail" in e["message"]
-        for e in stages
+        "stage=purge_tree" in e["message"] and "result=fail" in e["message"] for e in stages
     ), stages
-    assert not any(
-        "stage=done" in e["message"] and "result=ok" in e["message"] for e in stages
-    ), "失败路径不得记 done=ok"
+    assert not any("stage=done" in e["message"] and "result=ok" in e["message"] for e in stages), (
+        "失败路径不得记 done=ok"
+    )
 
 
-def test_path_alias_lock_does_not_steal_live_holder_by_age(
-    workspace, monkeypatch
-) -> None:
+def test_path_alias_lock_does_not_steal_live_holder_by_age(workspace, monkeypatch) -> None:
     """BUG-327：持锁进程仍存活时，不得仅因锁文件年龄而抢走 path-alias.lock。"""
     import os
     import time

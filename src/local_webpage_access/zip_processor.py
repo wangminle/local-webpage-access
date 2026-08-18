@@ -40,9 +40,7 @@ _MAX_COMPRESSION_RATIO = 100.0
 _MIN_RATIO_CHECK_BYTES = 1024 * 1024  # 小文本高度重复很常见，不单凭压缩比拒绝
 
 
-def _assert_zip_bomb_safe(
-    members: list[zipfile.ZipInfo], *, path: str | None = None
-) -> None:
+def _assert_zip_bomb_safe(members: list[zipfile.ZipInfo], *, path: str | None = None) -> None:
     """按声明元数据拒绝可疑压缩炸弹（BUG-123）。"""
     if len(members) > _MAX_ZIP_MEMBERS:
         raise ZipImportError(
@@ -150,10 +148,7 @@ def safe_extract(zip_path: Path, target: Path) -> ZipSanitizeResult:
             # BUG-123：解压前再次按声明元数据拦截（validate_zip 后文件可能被替换）
             _assert_zip_bomb_safe(members, path=str(zip_path))
             names = [m.filename for m in members]
-            modes = [
-                (m.external_attr >> 16) & 0xFFFF if m.external_attr else 0
-                for m in members
-            ]
+            modes = [(m.external_attr >> 16) & 0xFFFF if m.external_attr else 0 for m in members]
 
             # 1. 剥离分类（IMP-001）：冗余包 / 缓存不落盘、不审计
             sanitized = sanitize_zip_members(names, modes=modes)
@@ -162,9 +157,8 @@ def safe_extract(zip_path: Path, target: Path) -> ZipSanitizeResult:
             _assert_zip_bomb_safe(keep_members, path=str(zip_path))
             if sanitized.stripped_names:
                 parts = ", ".join(
-                    f"{rule}×{n}" for rule, n in sorted(
-                        sanitized.categories.items(), key=lambda kv: -kv[1]
-                    )
+                    f"{rule}×{n}"
+                    for rule, n in sorted(sanitized.categories.items(), key=lambda kv: -kv[1])
                 )
                 log.info(
                     "剥离冗余成员 %d 项（含 symlink %d）：%s",
@@ -176,17 +170,14 @@ def safe_extract(zip_path: Path, target: Path) -> ZipSanitizeResult:
             # 2. 集中安全审计（BUG-049）：仅保留成员
             keep_names = [m.filename for m in keep_members]
             keep_modes = [
-                (m.external_attr >> 16) & 0xFFFF if m.external_attr else 0
-                for m in keep_members
+                (m.external_attr >> 16) & 0xFFFF if m.external_attr else 0 for m in keep_members
             ]
             findings = audit_zip_members(keep_names, modes=keep_modes)
             for f in findings:
                 if f.level == "critical":
                     log.warning("zip 成员审计 [%s] %s", f.code, f.message)
             if has_critical(findings):
-                codes = ", ".join(
-                    f.code for f in findings if f.level == "critical"
-                )
+                codes = ", ".join(f.code for f in findings if f.level == "critical")
                 raise ZipImportError(
                     f"zip 成员安全审计未通过（{codes}）",
                     members=keep_names,

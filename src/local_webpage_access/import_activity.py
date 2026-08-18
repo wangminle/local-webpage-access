@@ -58,9 +58,7 @@ def import_activity_lock(
             while True:
                 try:
                     try_acquire_exclusive(fd)
-                    write_lock_payload(
-                        fd, f"{os.getpid()}\n{time.time():.3f}\n".encode()
-                    )
+                    write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
                     file_acquired = True
                     break
                 except BlockingIOError:
@@ -112,8 +110,7 @@ def wait_until_import_idle(
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise LwaError(
-                        "仍有导入进行中，请待导入完成后再执行 lwa update"
-                        f"（已等待 {timeout:g}s）",
+                        f"仍有导入进行中，请待导入完成后再执行 lwa update（已等待 {timeout:g}s）",
                         code="IMPORT_BUSY",
                     )
                 if not logged:

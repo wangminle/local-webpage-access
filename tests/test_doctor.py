@@ -42,9 +42,7 @@ from local_webpage_access.registry import Registry
 
 
 def _proc(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=stderr
-    )
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def _runner_from_map(
@@ -130,13 +128,9 @@ def test_pid_alive_local_windows_does_not_os_kill(monkeypatch) -> None:
         def CloseHandle(self, handle):
             return 1
 
-    monkeypatch.setattr(
-        ctypes, "WinDLL", lambda name, **kw: _FakeKernelAlive(), raising=False
-    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kw: _FakeKernelAlive(), raising=False)
     assert doc._pid_alive_local(1234) is True
-    monkeypatch.setattr(
-        ctypes, "WinDLL", lambda name, **kw: _FakeKernelDead(), raising=False
-    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kw: _FakeKernelDead(), raising=False)
     assert doc._pid_alive_local(1234) is False
     # 关键：win32 分支绝不走 os.kill（否则 TerminateProcess 误杀）
     assert killed == []
@@ -146,18 +140,14 @@ def test_pid_alive_local_windows_does_not_os_kill(monkeypatch) -> None:
 
 
 def test_check_docker_ok() -> None:
-    runner = _runner_from_map(
-        {("docker", "version"): _proc(0, stdout="29.6.1\n")}
-    )
+    runner = _runner_from_map({("docker", "version"): _proc(0, stdout="29.6.1\n")})
     r = check_docker(runner=runner)
     assert r.status == STATUS_OK
     assert "29.6.1" in r.message
 
 
 def test_check_docker_version_too_low() -> None:
-    runner = _runner_from_map(
-        {("docker", "version"): _proc(0, stdout="28.9.9\n")}
-    )
+    runner = _runner_from_map({("docker", "version"): _proc(0, stdout="28.9.9\n")})
     r = check_docker(runner=runner)
     assert r.status == STATUS_FAIL
     assert "29.0.0" in r.message
@@ -204,18 +194,14 @@ def test_check_docker_permission_denied_suggests_newgrp() -> None:
 
 
 def test_check_docker_compose_v2_ok() -> None:
-    runner = _runner_from_map(
-        {("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n")}
-    )
+    runner = _runner_from_map({("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n")})
     r = check_docker_compose(runner=runner)
     assert r.status == STATUS_OK
     assert "5.2.0" in r.message
 
 
 def test_check_docker_compose_supported_v2_warns_without_failing() -> None:
-    runner = _runner_from_map(
-        {("docker", "compose", "version"): _proc(0, stdout="v2.40.3\n")}
-    )
+    runner = _runner_from_map({("docker", "compose", "version"): _proc(0, stdout="v2.40.3\n")})
     r = check_docker_compose(runner=runner)
     assert r.status == STATUS_WARN
     assert "推荐" in r.message
@@ -223,9 +209,7 @@ def test_check_docker_compose_supported_v2_warns_without_failing() -> None:
 
 
 def test_check_docker_compose_version_too_low() -> None:
-    runner = _runner_from_map(
-        {("docker", "compose", "version"): _proc(0, stdout="2.39.9\n")}
-    )
+    runner = _runner_from_map({("docker", "compose", "version"): _proc(0, stdout="2.39.9\n")})
     r = check_docker_compose(runner=runner)
     assert r.status == STATUS_FAIL
     assert "2.40.2" in r.message
@@ -337,9 +321,7 @@ def test_check_port_pool_ignores_allocated_instance_ports() -> None:
     def busy_allocated_only(port: int) -> bool:
         return port == 21000
 
-    r = check_port_pool(
-        cfg, port_in_use=busy_allocated_only, allocated_ports={21000}
-    )
+    r = check_port_pool(cfg, port_in_use=busy_allocated_only, allocated_ports={21000})
     assert r.status == STATUS_OK
 
 
@@ -360,9 +342,7 @@ def test_check_port_pool_excludes_static_gateway_port_when_busy() -> None:
     """建议 H：staticGatewayPort（别名入口）由 caddy 自用，不判为冲突。"""
     from local_webpage_access.config import Config, PortPool
 
-    cfg = Config(
-        staticGatewayPort=8090, portPool=PortPool(start=21000, end=21010)
-    )
+    cfg = Config(staticGatewayPort=8090, portPool=PortPool(start=21000, end=21010))
 
     def entry_busy(port: int) -> bool:
         return port == 8090
@@ -544,7 +524,9 @@ def test_diagnose_instance_failed_status(env) -> None:
 def test_run_doctor_full_report(env) -> None:
     ws, config, _reg = env
     report = run_doctor(
-        ws, config, runner=_runner_from_map(
+        ws,
+        config,
+        runner=_runner_from_map(
             {
                 ("docker", "version"): _proc(0, stdout="29.6.1\n"),
                 ("docker", "compose", "version"): _proc(0, stdout="5.2.1\n"),
@@ -570,8 +552,11 @@ def test_run_doctor_with_instance(env) -> None:
     ws, config, _reg = env
     instance_id = _import_static(env)
     report = run_doctor(
-        ws, config, instance_id=instance_id,
-        runner=_failing_runner, port_in_use=_all_ports_free,
+        ws,
+        config,
+        instance_id=instance_id,
+        runner=_failing_runner,
+        port_in_use=_all_ports_free,
     )
     assert report.instance_id == instance_id
     assert len(report.instance_checks) > 0
@@ -579,9 +564,7 @@ def test_run_doctor_with_instance(env) -> None:
 
 def test_run_doctor_overall_fail(env) -> None:
     ws, config, _reg = env
-    report = run_doctor(
-        ws, config, runner=_failing_runner, port_in_use=_all_ports_free
-    )
+    report = run_doctor(ws, config, runner=_failing_runner, port_in_use=_all_ports_free)
     # Docker / Compose 失败 → overall 应 fail
     assert report.has_failures
     assert report.overall == STATUS_FAIL
@@ -590,9 +573,7 @@ def test_run_doctor_overall_fail(env) -> None:
 
 def test_format_report_renders(env) -> None:
     ws, config, _reg = env
-    report = run_doctor(
-        ws, config, runner=_failing_runner, port_in_use=_all_ports_free
-    )
+    report = run_doctor(ws, config, runner=_failing_runner, port_in_use=_all_ports_free)
     text = format_report(report)
     assert "环境检查" in text
     assert "总体" in text
@@ -602,9 +583,7 @@ def test_format_report_renders(env) -> None:
 def test_check_result_to_dict_and_passed() -> None:
     r = CheckResult("x", STATUS_OK, "ok", detail="d", suggestion="s")
     d = r.to_dict()
-    assert d == {
-        "name": "x", "status": "ok", "message": "ok", "detail": "d", "suggestion": "s"
-    }
+    assert d == {"name": "x", "status": "ok", "message": "ok", "detail": "d", "suggestion": "s"}
     assert r.passed
     fail = CheckResult("x", STATUS_FAIL, "boom")
     assert not fail.passed
@@ -684,16 +663,16 @@ def test_cli_doctor_json_valid_when_caddy_hidden(env, monkeypatch) -> None:
 
     ws, _config, _reg = env
     # 默认配置即 staticGateway=caddy；隐藏 caddy 使 check_caddy_health 走"降级 builtin"WARN
-    monkeypatch.setattr(
-        "local_webpage_access.doctor.shutil.which", lambda name: None
-    )
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda name: None)
     monkeypatch.chdir(ws.root)
 
     runner = CliRunner()
     result = runner.invoke(app, ["doctor", "--json"])
     import json
 
-    data = json.loads(result.output)  # 不应 JSONDecodeError（无 warning 污染 stdout）
+    # BUG-241 / IMP-036：--json 纯 stdout；bootstrap/日志走 stderr，勿用 result.output
+    # （否则进程首个 CLI 用例的「文件日志」INFO 会混入导致 JSONDecodeError）。
+    data = json.loads(result.stdout)  # 不应 JSONDecodeError（无 warning 污染 stdout）
     assert "checks" in data
     names = {c["name"]: c["status"] for c in data["checks"]}
     assert names.get("caddy_health") == "warn"
@@ -732,9 +711,7 @@ def _patch_static_gateway(monkeypatch, ws, *, backend="caddy", admin_alive=True,
             return ws.run / "caddy.pid"
 
     monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _Fake)
-    monkeypatch.setattr(
-        "local_webpage_access.doctor.shutil.which", lambda name: "/usr/bin/caddy"
-    )
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda name: "/usr/bin/caddy")
     return state
 
 
@@ -755,9 +732,7 @@ def test_check_caddy_health_warns_when_caddy_missing(env, monkeypatch) -> None:
     assert "builtin" in r.message
 
 
-def test_check_caddy_health_ok_when_admin_up_and_validate_passes(
-    env, monkeypatch
-) -> None:
+def test_check_caddy_health_ok_when_admin_up_and_validate_passes(env, monkeypatch) -> None:
     ws, config, _reg = env
     config.staticGateway = "caddy"
     _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True)
@@ -883,9 +858,7 @@ def test_check_caddy_health_warns_on_unreachable_alias_entry(env, monkeypatch) -
     def _health(port, path="/"):
         return port != entry_port
 
-    _patch_static_gateway(
-        monkeypatch, ws, backend="caddy", admin_alive=True, health=_health
-    )
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True, health=_health)
     main = ws.static_gateway / "Caddyfile"
     main.parent.mkdir(parents=True, exist_ok=True)
     main.write_text(":8080 {}\n")
@@ -910,9 +883,7 @@ def test_check_caddy_health_entry_probe_uses_alias_path(env, monkeypatch) -> Non
             return True
         return path == "/myapp/"
 
-    _patch_static_gateway(
-        monkeypatch, ws, backend="caddy", admin_alive=True, health=_health
-    )
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True, health=_health)
     main = ws.static_gateway / "Caddyfile"
     main.parent.mkdir(parents=True, exist_ok=True)
     main.write_text(":8080 {}\n")
@@ -944,10 +915,8 @@ def test_check_caddy_health_ok_when_all_sites_reachable(env, monkeypatch) -> Non
 def test_check_lan_url_stale_warns_on_drift(env, monkeypatch) -> None:
     """lanUrl host 与当前 LAN IP 不一致 → WARN。"""
     ws, config, reg = env
-    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
-                            lan_url="http://10.0.0.99:18000")
-    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip",
-                        lambda cfg: "192.168.1.50")
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://10.0.0.99:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
     r = check_lan_url_stale(ws, config, reg)
     assert r.status == STATUS_WARN
     assert "refresh" in (r.suggestion or "")
@@ -957,10 +926,8 @@ def test_check_lan_url_stale_warns_on_drift(env, monkeypatch) -> None:
 def test_check_lan_url_stale_ok_when_current(env, monkeypatch) -> None:
     """lanUrl host 与当前 LAN IP 一致 → OK。"""
     ws, config, reg = env
-    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
-                            lan_url="http://192.168.1.50:18000")
-    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip",
-                        lambda cfg: "192.168.1.50")
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://192.168.1.50:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
     r = check_lan_url_stale(ws, config, reg)
     assert r.status == STATUS_OK
 
@@ -968,12 +935,8 @@ def test_check_lan_url_stale_ok_when_current(env, monkeypatch) -> None:
 def test_check_lan_url_stale_warns_when_lan_ip_unresolvable(env, monkeypatch) -> None:
     """BUG-358：无法解析 LAN IP 且实例带 lanUrl 时不得静默 OK。"""
     ws, config, reg = env
-    _seed_static_for_doctor(
-        ws, reg, "demo", host_port=18000, lan_url="http://10.0.0.99:18000"
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: None
-    )
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://10.0.0.99:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: None)
     r = check_lan_url_stale(ws, config, reg)
     assert r.status in (STATUS_WARN, STATUS_SKIP)
     assert r.status != STATUS_OK
@@ -992,8 +955,10 @@ def test_check_port_contention_detects_orphan_admin(env, monkeypatch) -> None:
     ws, config, _reg = env
     config.staticGateway = "caddy"
     # 无 caddy.pid（caddy_pid=None），:2019 被某 caddy 占，admin 不可达（非健康 master）
-    monkeypatch.setattr("local_webpage_access.doctor._list_listeners",
-                        lambda port: [("caddy", "75224")] if port == 2019 else [])
+    monkeypatch.setattr(
+        "local_webpage_access.doctor._list_listeners",
+        lambda port: [("caddy", "75224")] if port == 2019 else [],
+    )
 
     class _FakeGateway:
         def __init__(self, w, c):
@@ -1006,16 +971,13 @@ def test_check_port_contention_detects_orphan_admin(env, monkeypatch) -> None:
             return False
 
     # check_port_contention 内部 lazy `from static_gateway import StaticGateway`
-    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway",
-                        _FakeGateway)
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _FakeGateway)
     r = check_port_contention(ws, config)
     assert r.status == STATUS_FAIL
     assert "2019" in r.message
 
 
-def test_check_port_contention_fails_on_mixed_entry_listeners(
-    env, monkeypatch
-) -> None:
+def test_check_port_contention_fails_on_mixed_entry_listeners(env, monkeypatch) -> None:
     """BUG-107：别名入口同时有 caddy 与 python 监听 → FAIL（不得因有 caddy 放行）。"""
     ws, config, _reg = env
     config.staticGateway = "caddy"
@@ -1026,9 +988,7 @@ def test_check_port_contention_fails_on_mixed_entry_listeners(
             return [("caddy", "1"), ("python", "2")]
         return []
 
-    monkeypatch.setattr(
-        "local_webpage_access.doctor._list_listeners", fake_listeners
-    )
+    monkeypatch.setattr("local_webpage_access.doctor._list_listeners", fake_listeners)
 
     class _FakeGateway:
         def __init__(self, w, c):
@@ -1040,18 +1000,14 @@ def test_check_port_contention_fails_on_mixed_entry_listeners(
         def _admin_alive(self, **kw):
             return True
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", _FakeGateway
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _FakeGateway)
     r = check_port_contention(ws, config)
     assert r.status == STATUS_FAIL
     assert str(entry) in r.message
     assert "python" in r.message
 
 
-def test_check_port_contention_ok_when_entry_only_caddy(
-    env, monkeypatch
-) -> None:
+def test_check_port_contention_ok_when_entry_only_caddy(env, monkeypatch) -> None:
     """别名入口仅 caddy 监听 → OK。"""
     ws, config, _reg = env
     config.staticGateway = "caddy"
@@ -1072,9 +1028,7 @@ def test_check_port_contention_ok_when_entry_only_caddy(
         def _admin_alive(self, **kw):
             return True
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", _FakeGateway
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _FakeGateway)
     r = check_port_contention(ws, config)
     assert r.status == STATUS_OK
 
@@ -1083,16 +1037,14 @@ def test_check_backend_handoff_detects_double_serve(env, monkeypatch) -> None:
     """同一 hostPort 上 caddy + python 同时监听 → FAIL（切换残留）。"""
     ws, config, reg = env
     config.staticGateway = "caddy"
-    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
-                            lan_url="http://127.0.0.1:18000")
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://127.0.0.1:18000")
 
     def fake_listeners(port):
         if port == 18000:
             return [("caddy", "1"), ("python", "2")]
         return []
 
-    monkeypatch.setattr("local_webpage_access.doctor._list_listeners",
-                        fake_listeners)
+    monkeypatch.setattr("local_webpage_access.doctor._list_listeners", fake_listeners)
     r = check_backend_handoff(ws, config, reg)
     assert r.status == STATUS_FAIL
     assert "18000" in (r.detail or "")
@@ -1102,11 +1054,12 @@ def test_check_backend_handoff_ok_single_listener(env, monkeypatch) -> None:
     """hostPort 仅 caddy 监听（无 builtin 残留）→ OK。"""
     ws, config, reg = env
     config.staticGateway = "caddy"
-    _seed_static_for_doctor(ws, reg, "demo", host_port=18000,
-                            lan_url="http://127.0.0.1:18000")
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://127.0.0.1:18000")
 
-    monkeypatch.setattr("local_webpage_access.doctor._list_listeners",
-                        lambda port: [("caddy", "1")] if port == 18000 else [])
+    monkeypatch.setattr(
+        "local_webpage_access.doctor._list_listeners",
+        lambda port: [("caddy", "1")] if port == 18000 else [],
+    )
     r = check_backend_handoff(ws, config, reg)
     assert r.status == STATUS_OK
 
@@ -1141,12 +1094,8 @@ def test_run_doctor_json_fields_current_lan_and_drifted(env, monkeypatch) -> Non
     from local_webpage_access.doctor import run_doctor
 
     ws, config, reg = env
-    _seed_static_for_doctor(
-        ws, reg, "demo", host_port=18000, lan_url="http://10.0.0.99:18000"
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://10.0.0.99:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
     report = run_doctor(ws, config)
     assert report.current_lan_ip == "192.168.1.50"
     assert "demo" in report.drifted_instance_ids
@@ -1165,9 +1114,7 @@ def test_doctor_access_reuses_review_access(env, monkeypatch) -> None:
         called["n"] += 1
         return AccessReviewReport(lan_ip="192.168.1.50")
 
-    monkeypatch.setattr(
-        "local_webpage_access.access_workflow.review_access", fake_review
-    )
+    monkeypatch.setattr("local_webpage_access.access_workflow.review_access", fake_review)
     report = run_doctor(ws, config, access_review=True)
     assert called["n"] == 1
     assert report.access_review is not None
@@ -1197,9 +1144,7 @@ def test_check_registry_does_not_create_or_migrate(tmp_path: Path) -> None:
         conn.execute(
             "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )
-        conn.execute(
-            "INSERT INTO schema_version(version, applied_at) VALUES (1, 'seed')"
-        )
+        conn.execute("INSERT INTO schema_version(version, applied_at) VALUES (1, 'seed')")
         conn.execute("CREATE TABLE instances (id TEXT PRIMARY KEY)")
         conn.commit()
     finally:
@@ -1211,9 +1156,7 @@ def test_check_registry_does_not_create_or_migrate(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(str(ws.db_path))
     try:
-        version = conn.execute(
-            "SELECT MAX(version) FROM schema_version"
-        ).fetchone()[0]
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
     finally:
         conn.close()
     assert version == 1
@@ -1323,9 +1266,7 @@ def test_workspace_consistency_ok_when_paths_canonical(env, monkeypatch) -> None
     assert r.status == STATUS_OK
 
 
-def test_workspace_consistency_warns_on_stale_derived_fields(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_warns_on_stale_derived_fields(env, monkeypatch) -> None:
     """manifest/registry 派生字段陈旧 → WARN，detail 含实例、字段、实际/期望。"""
     from local_webpage_access.doctor import check_workspace_path_consistency
     from local_webpage_access.docker_runtime import DockerRuntime
@@ -1357,9 +1298,7 @@ def test_workspace_consistency_warns_on_stale_derived_fields(
     assert "relocate" in r.suggestion
 
 
-def test_workspace_consistency_warns_on_missing_caddy_paths(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_warns_on_missing_caddy_paths(env, monkeypatch) -> None:
     """Caddy 片段引用不存在本地路径 → WARN。"""
     from local_webpage_access.doctor import check_workspace_path_consistency
     from local_webpage_access.docker_runtime import DockerRuntime
@@ -1370,8 +1309,7 @@ def test_workspace_consistency_warns_on_missing_caddy_paths(
     main = ws.static_gateway / "Caddyfile"
     main.parent.mkdir(parents=True, exist_ok=True)
     main.write_text(
-        f"import `{ws.static_sites / 'demo.conf'}`\n"
-        f"root * `{missing}`\n",
+        f"import `{ws.static_sites / 'demo.conf'}`\nroot * `{missing}`\n",
         encoding="utf-8",
     )
     site = ws.static_sites / "demo.conf"
@@ -1385,9 +1323,7 @@ def test_workspace_consistency_warns_on_missing_caddy_paths(
     assert r.suggestion is not None
 
 
-def test_workspace_consistency_warns_on_sqlite_mount_drift(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_warns_on_sqlite_mount_drift(env, monkeypatch) -> None:
     """SQLite data mount 漂移 → WARN。"""
     from local_webpage_access.doctor import check_workspace_path_consistency
     from local_webpage_access.docker_runtime import BindMount
@@ -1414,9 +1350,7 @@ def test_workspace_consistency_warns_on_sqlite_mount_drift(
                 )
             ]
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _FakeRT
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRT)
 
     r = check_workspace_path_consistency(ws, config, registry=reg)
     assert r.status == STATUS_WARN
@@ -1427,9 +1361,7 @@ def test_workspace_consistency_warns_on_sqlite_mount_drift(
     assert r.suggestion is not None
 
 
-def test_workspace_consistency_ignores_external_zip_and_history(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_ignores_external_zip_and_history(env, monkeypatch) -> None:
     """外部 sourceZipPath 与历史 builds/events → 不告警。"""
     from local_webpage_access.doctor import check_workspace_path_consistency
     from local_webpage_access.docker_runtime import DockerRuntime
@@ -1459,9 +1391,7 @@ def test_workspace_consistency_ignores_external_zip_and_history(
     assert "/old/workspace" not in (r.detail or "")
 
 
-def test_workspace_consistency_skips_mounts_when_docker_unavailable(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_skips_mounts_when_docker_unavailable(env, monkeypatch) -> None:
     """Docker 不可用/观测失败 → 挂载部分 SKIP，仍返回其他路径检查结果。"""
     from local_webpage_access.doctor import check_workspace_path_consistency
     from local_webpage_access.docker_runtime import DockerError
@@ -1485,9 +1415,7 @@ def test_workspace_consistency_skips_mounts_when_docker_unavailable(
         def bind_mounts(self, iid, *, all_containers=True):
             raise AssertionError("Docker 不可用时不应调用 bind_mounts")
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _FakeUnavailable
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeUnavailable)
     r = check_workspace_path_consistency(ws, config, registry=reg)
     assert r.status == STATUS_WARN  # 陈旧 appPath 仍 WARN
     assert stale in (r.detail or "")
@@ -1495,9 +1423,12 @@ def test_workspace_consistency_skips_mounts_when_docker_unavailable(
     # 挂载子项应标记跳过，不得因 Docker 把整体 FAIL
     assert r.status != STATUS_FAIL
     detail_lower = (r.detail or "").lower() + " " + (r.message or "").lower()
-    assert "skip" in detail_lower or "跳过" in detail_lower or "不可用" in (
-        r.detail or ""
-    ) or "不可用" in (r.message or "")
+    assert (
+        "skip" in detail_lower
+        or "跳过" in detail_lower
+        or "不可用" in (r.detail or "")
+        or "不可用" in (r.message or "")
+    )
 
     class _FakeInspectFail:
         def __init__(self, workspace, registry=None):
@@ -1513,17 +1444,16 @@ def test_workspace_consistency_skips_mounts_when_docker_unavailable(
     # 恢复规范路径，仅测观测失败时挂载 SKIP、整体不 FAIL
     m2 = _seed_sqlite_container_with_canonical_paths(ws, reg, "api2")
     assert m2.appPath
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _FakeInspectFail
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeInspectFail)
     r2 = check_workspace_path_consistency(ws, config, registry=reg)
     assert r2.status != STATUS_FAIL
     # api 的陈旧字段仍在；api2 规范路径 + 挂载 SKIP → 仍可能 WARN（来自 api）
     # 但不得因为挂载观测失败而整体 FAIL
-    assert "api2" not in (r2.detail or "") or "bind" not in (
-        (r2.detail or "").lower()
-    ) or "skip" in ((r2.detail or "") + (r2.message or "")).lower() or "跳过" in (
-        (r2.detail or "") + (r2.message or "")
+    assert (
+        "api2" not in (r2.detail or "")
+        or "bind" not in ((r2.detail or "").lower())
+        or "skip" in ((r2.detail or "") + (r2.message or "")).lower()
+        or "跳过" in ((r2.detail or "") + (r2.message or ""))
     )
 
 
@@ -1553,9 +1483,7 @@ def test_workspace_consistency_warns_on_caddy_ref_outside_workspace_even_if_exis
 
 
 @pytest.mark.parametrize("quote", ['"', "`"])
-def test_workspace_consistency_ignores_missing_caddy_output_log(
-    env, monkeypatch, quote
-) -> None:
+def test_workspace_consistency_ignores_missing_caddy_output_log(env, monkeypatch, quote) -> None:
     """BUG-428：``log { output file <path> }`` 的日志文件由 Caddy 运行时
     按需创建，全新工作区/无访问时尚不存在属正常——不得对它做存在性校验
     而误报并错误建议 rebuild/recover（双引号与反引号两种引用格式均覆盖）。
@@ -1588,9 +1516,7 @@ def test_workspace_consistency_ignores_missing_caddy_output_log(
     assert r.detail is None
 
 
-def test_workspace_consistency_ignores_missing_log_with_comment_header(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_ignores_missing_log_with_comment_header(env, monkeypatch) -> None:
     """BUG-428：``generate_site_config`` 生成的片段首行是 ``# 渲染变量：…``
     注释头，其中已含同一日志路径；若豁免逻辑只看首次出现位置，命中的是
     注释行而非 ``output file`` 指令行，豁免失效仍会误报。必须扫描所有
@@ -1643,12 +1569,7 @@ def test_workspace_consistency_warns_on_caddy_output_log_outside_workspace(
     site.parent.mkdir(parents=True, exist_ok=True)
     drifted = "/old/workspace/logs/static-access.log"
     site.write_text(
-        "log {\n"
-        f'\toutput file "{drifted}" {{\n'
-        "\t\troll_size 10mb\n"
-        "\t}\n"
-        "\tformat json\n"
-        "}\n",
+        f'log {{\n\toutput file "{drifted}" {{\n\t\troll_size 10mb\n\t}}\n\tformat json\n}}\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(DockerRuntime, "is_available", staticmethod(lambda: False))
@@ -1659,9 +1580,7 @@ def test_workspace_consistency_warns_on_caddy_output_log_outside_workspace(
     assert "不在当前工作区" in (r.detail or "")
 
 
-def test_workspace_consistency_skip_status_when_mount_check_not_done(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_skip_status_when_mount_check_not_done(env, monkeypatch) -> None:
     """BUG-427：无其他发现但挂载检查未完成 → STATUS_SKIP，不得报 OK。"""
     from local_webpage_access.doctor import check_workspace_path_consistency
     from local_webpage_access.docker_runtime import DockerRuntime
@@ -1687,9 +1606,7 @@ def test_workspace_consistency_skip_when_registry_unavailable(env) -> None:
     assert r.suggestion is not None
 
 
-def test_workspace_consistency_skip_when_registry_read_fails(
-    env, monkeypatch
-) -> None:
+def test_workspace_consistency_skip_when_registry_read_fails(env, monkeypatch) -> None:
     """BUG-430：registry.list_instances 抛错 → STATUS_SKIP，不得静默 rows=[] 报 OK。"""
     from local_webpage_access.doctor import check_workspace_path_consistency
 
@@ -1703,4 +1620,3 @@ def test_workspace_consistency_skip_when_registry_read_fails(
     assert r.status == STATUS_SKIP
     assert "registry" in (r.detail or "")
     assert "database is locked" in (r.detail or "")
-

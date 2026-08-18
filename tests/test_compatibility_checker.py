@@ -16,10 +16,10 @@ from local_webpage_access.compatibility_checker import check_compatibility
 def test_p03_fetch_absolute_api(tmp_path: Path) -> None:
     """fetch('/api/...') 应命中 CHK-P03 critical。"""
     (tmp_path / "app.js").write_text(
-        'async function loadData() {\n'
+        "async function loadData() {\n"
         '  const res = await fetch("/api/users");\n'
-        '  return res.json();\n'
-        '}\n',
+        "  return res.json();\n"
+        "}\n",
         encoding="utf-8",
     )
     findings = check_compatibility(tmp_path)
@@ -48,9 +48,7 @@ def test_p03_axios_absolute_api(tmp_path: Path) -> None:
 def test_p03_empty_api_base_const(tmp_path: Path) -> None:
     """const API = '' 应命中 CHK-P03 critical。"""
     (tmp_path / "config.js").write_text(
-        "const API = '';\n"
-        "const apiBase = \"\";\n"
-        "export { API, apiBase };\n",
+        "const API = '';\nconst apiBase = \"\";\nexport { API, apiBase };\n",
         encoding="utf-8",
     )
     findings = check_compatibility(tmp_path)
@@ -168,8 +166,7 @@ def test_p04_no_warning_when_base_url_present(tmp_path: Path) -> None:
 def test_p04_no_warning_when_x_forwarded_prefix(tmp_path: Path) -> None:
     """有 X-Forwarded-Prefix 关键字 -> 不出 P04。"""
     (tmp_path / "server.py").write_text(
-        '# X-Forwarded-Prefix\n'
-        'pass\n',
+        "# X-Forwarded-Prefix\npass\n",
         encoding="utf-8",
     )
     findings = check_compatibility(tmp_path)
@@ -180,8 +177,7 @@ def test_p04_no_warning_when_x_forwarded_prefix(tmp_path: Path) -> None:
 def test_p04_no_warning_when_script_name(tmp_path: Path) -> None:
     """有 SCRIPT_NAME 关键字 -> 不出 P04。"""
     (tmp_path / "wsgi.py").write_text(
-        'import os\n'
-        'script_name = os.environ.get("SCRIPT_NAME", "")\n',
+        'import os\nscript_name = os.environ.get("SCRIPT_NAME", "")\n',
         encoding="utf-8",
     )
     findings = check_compatibility(tmp_path)
@@ -249,8 +245,7 @@ def test_monorepo_excludes_desktop_package(tmp_path: Path) -> None:
 def test_combined_p03_and_p04(tmp_path: Path) -> None:
     """同时有 P03 命中和 P04 warning。"""
     (tmp_path / "app.js").write_text(
-        'fetch("/api/data");\n'
-        '// 没有 base path 关键字\n',
+        'fetch("/api/data");\n// 没有 base path 关键字\n',
         encoding="utf-8",
     )
     findings = check_compatibility(tmp_path)

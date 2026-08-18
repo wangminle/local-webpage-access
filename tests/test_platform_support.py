@@ -354,9 +354,7 @@ def test_run_full_bootstrap_drvfs_only_blocks_on_wsl(monkeypatch, tmp_path: Path
         yes=True,
         workspace_root=tmp_path,
     )
-    assert not any(
-        "/mnt/<drive>" in m or "Windows 文件系统" in m for m in result_linux.messages
-    )
+    assert not any("/mnt/<drive>" in m or "Windows 文件系统" in m for m in result_linux.messages)
 
     result_wsl = run_full_bootstrap(
         platform="wsl",
@@ -364,9 +362,7 @@ def test_run_full_bootstrap_drvfs_only_blocks_on_wsl(monkeypatch, tmp_path: Path
         workspace_root=tmp_path,
     )
     assert result_wsl.ok is False
-    assert any(
-        "/mnt/<drive>" in m or "Windows 文件系统" in m for m in result_wsl.messages
-    )
+    assert any("/mnt/<drive>" in m or "Windows 文件系统" in m for m in result_wsl.messages)
 
 
 def test_init_full_blocks_drvfs_before_writing(monkeypatch, tmp_path: Path) -> None:
@@ -664,11 +660,7 @@ def test_detect_wsl_package_version_parses_utf16le_bytes(monkeypatch) -> None:
     import local_webpage_access.platform_support as ps
     from local_webpage_access.platform_support import detect_wsl_package_version
 
-    sample = (
-        "WSL version: 2.4.13.0\n"
-        "Kernel version: 5.15.167.4-1\n"
-        "WSLg version: 1.0.65\n"
-    )
+    sample = "WSL version: 2.4.13.0\nKernel version: 5.15.167.4-1\nWSLg version: 1.0.65\n"
     raw = sample.encode("utf-16-le")
 
     def runner(args, **kwargs):  # noqa: ANN001, ANN003
@@ -724,17 +716,13 @@ def test_detect_wsl_package_version_retries_runner_without_env(monkeypatch) -> N
     from local_webpage_access.platform_support import detect_wsl_package_version
 
     def runner(args, capture_output=True, text=False, timeout=5, check=False):  # noqa: ANN001
-        return SimpleNamespace(
-            returncode=0, stdout=b"WSL version: 2.4.13.0\n", stderr=b""
-        )
+        return SimpleNamespace(returncode=0, stdout=b"WSL version: 2.4.13.0\n", stderr=b"")
 
     monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
     assert detect_wsl_package_version(runner=runner) == "2.4.13.0"
 
 
-def test_wsl_exe_candidates_scans_drvfs_when_not_on_path(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_wsl_exe_candidates_scans_drvfs_when_not_on_path(monkeypatch, tmp_path: Path) -> None:
     """BUG-291：PATH 无 wsl.exe 时扫描 /mnt/<drive>/Windows/System32/wsl.exe。"""
     import local_webpage_access.platform_support as ps
 
@@ -790,9 +778,7 @@ def test_detect_wsl_package_version_unknown_when_runner_fails(monkeypatch) -> No
     assert detect_wsl_package_version(runner=runner) == "unknown"
 
 
-def test_doctor_human_prints_platform_support_when_unsupported(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_doctor_human_prints_platform_support_when_unsupported(monkeypatch, tmp_path: Path) -> None:
     """BUG-283：人类可读 doctor 须打印平台 reasons，不能只静默 exit 1。"""
     from typer.testing import CliRunner
 

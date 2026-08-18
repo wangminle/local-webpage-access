@@ -93,12 +93,12 @@ def test_remove_site_config(gateway: StaticGateway, workspace: Workspace) -> Non
 # BUG-003：detect_backend 此前只看 caddy 可执行文件，完全忽略 config.staticGateway。
 
 
-def test_detect_backend_builtin_config_forces_builtin(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_detect_backend_builtin_config_forces_builtin(workspace: Workspace, monkeypatch) -> None:
     """BUG-003：staticGateway=builtin 时即使环境装了 caddy 也必须用 builtin。"""
     # 假装 caddy 存在
-    monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy")
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy"
+    )
     gw = StaticGateway(workspace, Config(staticGateway="builtin"))
     assert gw.detect_backend() == "builtin"
 
@@ -124,9 +124,7 @@ def test_detect_backend_full_profile_fails_when_caddy_missing(
         gw.detect_backend()
 
 
-def test_detect_backend_ignores_unready_full_setup_state(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_detect_backend_ignores_unready_full_setup_state(workspace: Workspace, monkeypatch) -> None:
     """BUG-305：Full 安装未验收成功时不得提前启用严格 Caddy 模式。"""
     from local_webpage_access.capability import save_profile_state
 
@@ -136,14 +134,13 @@ def test_detect_backend_ignores_unready_full_setup_state(
     )
     monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: None)
 
-    assert StaticGateway(
-        workspace, Config(profile="default", staticGateway="caddy")
-    ).detect_backend() == "builtin"
+    assert (
+        StaticGateway(workspace, Config(profile="default", staticGateway="caddy")).detect_backend()
+        == "builtin"
+    )
 
 
-def test_ensure_caddy_running_rejects_foreign_admin(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_ensure_caddy_running_rejects_foreign_admin(workspace: Workspace, monkeypatch) -> None:
     """IMP-033：admin 在线但非本工作区 pid → ensure 失败（owner mismatch）。"""
     gw = StaticGateway(workspace, Config(staticGateway="caddy"))
     monkeypatch.setattr(gw, "_admin_alive", lambda **kw: True)
@@ -212,9 +209,7 @@ def test_process_user_for_pid_ps_path(monkeypatch) -> None:
         return _Result()
 
     monkeypatch.setattr("local_webpage_access.static_gateway.sys.platform", "darwin")
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", fake_run
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.run", fake_run)
     user = StaticGateway._process_user_for_pid(12345)
     assert user == "alice"
     assert calls and calls[0][:3] == ["ps", "-o", "user="]
@@ -238,9 +233,7 @@ def test_process_user_for_pid_windows_uses_invoke_cim_method(monkeypatch) -> Non
         "local_webpage_access.platform_detect.subprocess_hidden_kwargs",
         lambda: {},
     )
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", fake_run
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.run", fake_run)
     user = StaticGateway._process_user_for_pid(4242)
     assert user == "Alice"
     assert calls, "应调用 powershell"
@@ -254,7 +247,9 @@ def test_detect_backend_caddy_config_uses_caddy_when_present(
     workspace: Workspace, monkeypatch
 ) -> None:
     """BUG-003：配置 caddy 且 caddy 存在 → caddy。"""
-    monkeypatch.setattr("local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy")
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy"
+    )
     gw = StaticGateway(workspace, Config(staticGateway="caddy"))
     assert gw.detect_backend() == "caddy"
 
@@ -311,9 +306,7 @@ def _caddy_gateway(workspace: Workspace, monkeypatch) -> StaticGateway:
     return StaticGateway(workspace, Config(staticGateway="caddy"))
 
 
-def test_is_enabled_caddy_true_when_site_config_exists(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_is_enabled_caddy_true_when_site_config_exists(workspace: Workspace, monkeypatch) -> None:
     """BUG-078：Caddy 模式下站点配置存在即视为 enabled（无 per-instance pid）。"""
     gw = _caddy_gateway(workspace, monkeypatch)
     site = gw.site_config_path("demo")
@@ -322,9 +315,7 @@ def test_is_enabled_caddy_true_when_site_config_exists(
     assert gw.is_enabled("demo") is True
 
 
-def test_is_enabled_caddy_false_when_no_site_config(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_is_enabled_caddy_false_when_no_site_config(workspace: Workspace, monkeypatch) -> None:
     """BUG-078：Caddy 模式下无站点配置 → 未启用。"""
     gw = _caddy_gateway(workspace, monkeypatch)
     assert gw.is_enabled("demo") is False
@@ -461,9 +452,7 @@ def test_reload_all_first_time_failure_deletes_broken_config(
     assert not main.exists()
 
 
-def test_reload_all_existing_failure_restores_previous(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+def test_reload_all_existing_failure_restores_previous(gateway: StaticGateway, monkeypatch) -> None:
     """有旧配置时 reload 失败应恢复上一份内容（既有正确行为，回归保护）。
 
     BUG-259：隔离宿主机真实 Caddy admin，避免误入所有权保护分支。
@@ -549,7 +538,9 @@ def test_start_builtin_rotates_gateway_log_before_open(
 # BUG-020：import / root 路径未做 Caddyfile 引用，含空格的工作区路径被拆词。
 
 
-def test_assemble_main_config_has_no_admin_off(gateway: StaticGateway, workspace: Workspace) -> None:
+def test_assemble_main_config_has_no_admin_off(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
     """BUG-014：主 Caddyfile 不得包含 ``admin off``，否则后续 reload 失败。"""
     root = workspace.app_public("demo")
     root.mkdir(parents=True)
@@ -573,13 +564,15 @@ def test_assemble_main_config_quotes_import_paths(
     content = gateway._assemble_main_config()
     # 每行 import 的路径都被反引号包裹
     import_line = [ln for ln in content.splitlines() if ln.startswith("import ")][0]
-    rest = import_line[len("import "):]
+    rest = import_line[len("import ") :]
     assert rest.startswith("`") and rest.endswith("`")
     # 引号内的路径等于站点配置的 posix 路径
     assert rest.strip("`") == site_conf.as_posix()
 
 
-def test_generate_site_config_quotes_root_path(gateway: StaticGateway, workspace: Workspace) -> None:
+def test_generate_site_config_quotes_root_path(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
     """BUG-020：站点配置 root 路径必须被反引号引用。"""
     root = workspace.app_public("demo")
     root.mkdir(parents=True)
@@ -603,7 +596,7 @@ def test_caddy_quote_falls_back_for_backtick_path() -> None:
     """BUG-020：路径本身含反引号时回退到双引号 + 转义。"""
     from local_webpage_access.static_gateway import _caddy_quote
 
-    quoted = _caddy_quote('/tmp/`whoami`/site')
+    quoted = _caddy_quote("/tmp/`whoami`/site")
     assert quoted.startswith('"') and quoted.endswith('"')
     # 内部反引号原样保留（Caddyfile 双引号字符串不把反引号当特殊字符）
     assert "`whoami`" in quoted
@@ -652,9 +645,7 @@ def test_stop_builtin_clears_pid_when_kill_succeeds(
     assert gateway._read_pid("demo") is None
 
 
-def test_stop_builtin_refuses_foreign_reused_pid(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+def test_stop_builtin_refuses_foreign_reused_pid(gateway: StaticGateway, monkeypatch) -> None:
     """BUG-125：孤儿 PID 身份不匹配时清 pidfile，但绝不 killpg。"""
     gateway._write_pid("demo", 4242)
     monkeypatch.setattr(gateway, "_pid_alive", lambda pid: True)
@@ -686,7 +677,6 @@ def _caddy_present(workspace, monkeypatch, *, modules: str = "") -> StaticGatewa
     monkeypatch.setattr(
         "local_webpage_access.static_gateway.shutil.which", lambda name: "/usr/bin/caddy"
     )
-
 
     class _FakeResult:
         returncode = 0
@@ -725,9 +715,7 @@ def test_rate_limit_directive_disabled_returns_empty(gateway: StaticGateway) -> 
     assert gateway._rate_limit_directive("demo") == ""
 
 
-def test_rate_limit_directive_builtin_returns_empty(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_rate_limit_directive_builtin_returns_empty(workspace: Workspace, monkeypatch) -> None:
     """builtin 后端不支持限流，指令为空。"""
     from local_webpage_access.config import StaticRateLimit
 
@@ -738,24 +726,18 @@ def test_rate_limit_directive_builtin_returns_empty(
     assert gw._rate_limit_directive("demo") == ""
 
 
-def test_rate_limit_directive_caddy_without_module_warns(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_rate_limit_directive_caddy_without_module_warns(workspace: Workspace, monkeypatch) -> None:
     """Caddy 后端但无 rate_limit 模块 → 指令为空（站点仍可访问）。"""
     gw = _caddy_present(workspace, monkeypatch, modules="http.handlers.file_server\n")
     from local_webpage_access.config import StaticRateLimit
 
-    gw.config = Config(
-        staticGateway="caddy", staticRateLimit=StaticRateLimit(enabled=True)
-    )
+    gw.config = Config(staticGateway="caddy", staticRateLimit=StaticRateLimit(enabled=True))
     # 重新探测前清缓存
     gw._supports_rate_limit = None
     assert gw._rate_limit_directive("demo") == ""
 
 
-def test_rate_limit_directive_injected_when_capable(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_rate_limit_directive_injected_when_capable(workspace: Workspace, monkeypatch) -> None:
     """Caddy + rate_limit 模块 → 注入指令，令牌桶参数正确。"""
     from local_webpage_access.config import StaticRateLimit
 
@@ -779,9 +761,7 @@ def test_rate_limit_directive_injected_when_capable(
     assert "{remote_host}" in directive
 
 
-def test_rate_limit_window_fractional_uses_millis(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_rate_limit_window_fractional_uses_millis(workspace: Workspace, monkeypatch) -> None:
     """burst < rps 时窗口小于 1 秒，用毫秒表示（如 rps=10, burst=5 → 500ms）。"""
     from local_webpage_access.config import StaticRateLimit
 
@@ -800,9 +780,7 @@ def test_rate_limit_window_fractional_uses_millis(
     assert "window 500ms" in directive
 
 
-def test_rate_limit_directive_generated_into_site_config(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_rate_limit_directive_generated_into_site_config(workspace: Workspace, monkeypatch) -> None:
     """generate_site_config 把指令写入站点 .conf。"""
     from local_webpage_access.config import StaticRateLimit
 
@@ -838,12 +816,9 @@ def test_rate_limit_not_injected_when_disabled_in_site_config(
     assert "file_server" in content
 
 
-def test_supports_rate_limit_caches_result(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_supports_rate_limit_caches_result(workspace: Workspace, monkeypatch) -> None:
     """supports_rate_limit 在实例生命周期内缓存，不重复探测。"""
     call_count = {"n": 0}
-
 
     class _FakeResult:
         returncode = 0
@@ -941,15 +916,11 @@ def test_generate_alias_config_spa_fallback_off_for_all_runtimes(
     gateway: StaticGateway,
 ) -> None:
     """IMP-055：spa_fallback 未传时，shared-static 和 docker-compose 均不追加回退。"""
-    path = gateway.generate_alias_config(
-        "demo", "blog", 18001, runtime="shared-static"
-    )
+    path = gateway.generate_alias_config("demo", "blog", 18001, runtime="shared-static")
     content = path.read_text(encoding="utf-8")
     assert "spa_assets" not in content
 
-    path = gateway.generate_alias_config(
-        "demo", "blog", 18001, runtime="docker-compose"
-    )
+    path = gateway.generate_alias_config("demo", "blog", 18001, runtime="docker-compose")
     content = path.read_text(encoding="utf-8")
     assert "spa_assets" not in content
 
@@ -1023,9 +994,7 @@ def test_assemble_main_config_no_alias_block_when_port_none(
     assert "IMP-006" not in content
 
 
-def test_assemble_main_config_alias_block_uses_configured_port(
-    workspace: Workspace
-) -> None:
+def test_assemble_main_config_alias_block_uses_configured_port(workspace: Workspace) -> None:
     """统一入口端口跟随 config.staticGatewayPort。"""
     gw = StaticGateway(workspace, Config(staticGatewayPort=9090))
     root = workspace.app_public("demo")
@@ -1037,7 +1006,9 @@ def test_assemble_main_config_alias_block_uses_configured_port(
     assert ":8080" not in content
 
 
-def test_disable_removes_alias_fragment(gateway: StaticGateway, workspace: Workspace, monkeypatch) -> None:
+def test_disable_removes_alias_fragment(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
     """disable 同时清理站点配置与别名片段（builtin 模式也清）。"""
     monkeypatch.setattr(gateway, "detect_backend", lambda: "builtin")
     monkeypatch.setattr(gateway, "_stop_builtin", lambda iid: None)
@@ -1095,9 +1066,7 @@ def test_enable_failure_restores_previous_site_and_alias(
     root = workspace.app_public("demo")
     root.mkdir(parents=True)
     (root / "index.html").write_text("hi")
-    old_site = gateway.generate_site_config("demo", 18001, root).read_text(
-        encoding="utf-8"
-    )
+    old_site = gateway.generate_site_config("demo", 18001, root).read_text(encoding="utf-8")
     gateway.generate_alias_config("demo", "blog", 18001)
     old_alias = workspace.app_alias_config("demo").read_text(encoding="utf-8")
     main = gateway.main_config_path()
@@ -1161,6 +1130,7 @@ def test_enable_builtin_health_failure_restores_previous_process(
     # 至少停过一次旧进程，并按旧 port/root 再 start
     assert "demo" in stops
     assert any(p == 18011 and Path(r) == root for _, p, r in starts)
+
 
 def test_disable_leaves_no_dangling_import(
     gateway: StaticGateway, workspace: Workspace, monkeypatch
@@ -1227,9 +1197,7 @@ def test_sync_main_config_writes_assembled_content(
     """_sync_main_config 经 write_main_config 落盘后 reload（BUG-069 / BUG-420）。"""
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
     reloads: list[int] = []
-    monkeypatch.setattr(
-        gateway, "_reload_with_self_heal", lambda: reloads.append(1) or (True, "")
-    )
+    monkeypatch.setattr(gateway, "_reload_with_self_heal", lambda: reloads.append(1) or (True, ""))
     main = gateway.main_config_path()
     main.parent.mkdir(parents=True, exist_ok=True)
     main.write_text("# stale\nimport `/nope/missing.conf`\n", encoding="utf-8")
@@ -1248,9 +1216,7 @@ def test_sync_main_config_writes_assembled_content(
 _DEAD_PID = 0xFFFFFFFE  # 几乎不可能存活的 pid，用于 stale pid 测试
 
 
-def test_reload_with_self_heal_retries_after_failure(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+def test_reload_with_self_heal_retries_after_failure(gateway: StaticGateway, monkeypatch) -> None:
     """IMP-010/0.4：reload 首次失败、ensure 成功后应再 reload 一次并成功。"""
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
     state = {"n": 0}
@@ -1303,9 +1269,7 @@ def test_reload_all_invokes_ensure_caddy_running(
     assert called["ensure"] is True
 
 
-def test_ensure_caddy_running_starts_when_admin_down(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+def test_ensure_caddy_running_starts_when_admin_down(gateway: StaticGateway, monkeypatch) -> None:
     """IMP-010/0.3：admin 不在线时调 caddy_start 拉起。"""
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
     monkeypatch.setattr(gateway, "caddy_start", lambda: True)
@@ -1330,7 +1294,9 @@ def test_ensure_caddy_running_returns_true_when_admin_up(
             "runtime": "ready",
         },
     )
-    monkeypatch.setattr(gateway, "caddy_start", lambda: started.__setitem__("n", started["n"] + 1) or True)
+    monkeypatch.setattr(
+        gateway, "caddy_start", lambda: started.__setitem__("n", started["n"] + 1) or True
+    )
     assert gateway.ensure_caddy_running() is True
     assert started["n"] == 0  # admin 在线，不触发 start
 
@@ -1376,9 +1342,7 @@ class _FakeCaddyPopen:
         if self._hang_communicate:
             # 模拟 caddy daemon 继承 PIPE 写端：无超时则永久阻塞
             if timeout is None:
-                raise AssertionError(
-                    "BUG-412：caddy_start 不得对 PIPE 调用无超时 communicate()"
-                )
+                raise AssertionError("BUG-412：caddy_start 不得对 PIPE 调用无超时 communicate()")
             raise sp.TimeoutExpired(cmd=self.args, timeout=timeout)
         self.returncode = self._returncode if self._returncode is not None else 0
         return b"", self._stderr
@@ -1396,9 +1360,7 @@ class _FakeCaddyPopen:
         self.returncode = self._returncode if self._returncode is not None else -9
 
 
-def test_caddy_start_uses_devnull_not_pipes(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+def test_caddy_start_uses_devnull_not_pipes(gateway: StaticGateway, monkeypatch) -> None:
     """BUG-412：Popen 必须 DEVNULL，避免 daemon 继承 PIPE 写端死锁。"""
     captured: dict = {}
 
@@ -1406,9 +1368,7 @@ def test_caddy_start_uses_devnull_not_pipes(
         captured["kwargs"] = kw
         return _FakeCaddyPopen(cmd, returncode=0)
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.Popen", fake_popen
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.Popen", fake_popen)
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
     assert gateway.caddy_start() is True
@@ -1420,9 +1380,7 @@ def test_caddy_start_does_not_call_bare_communicate_after_exit(
     gateway: StaticGateway, monkeypatch
 ) -> None:
     """BUG-412：前台已退出时不得调用会永久阻塞的 communicate()。"""
-    fake = _FakeCaddyPopen(
-        ["caddy", "start"], returncode=1, hang_communicate=True, stderr=b"x"
-    )
+    fake = _FakeCaddyPopen(["caddy", "start"], returncode=1, hang_communicate=True, stderr=b"x")
 
     monkeypatch.setattr(
         "local_webpage_access.static_gateway.subprocess.Popen",
@@ -1447,9 +1405,7 @@ def test_caddy_start_uses_main_when_present(
         captured["cmd"] = cmd
         return _FakeCaddyPopen(cmd, returncode=0)
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.Popen", fake_popen
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.Popen", fake_popen)
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
 
     assert gateway.caddy_start() is True
@@ -1470,9 +1426,7 @@ def test_caddy_start_falls_back_to_bootstrap_when_no_main(
         captured["cmd"] = cmd
         return _FakeCaddyPopen(cmd, returncode=0)
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.Popen", fake_popen
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.Popen", fake_popen)
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
 
     assert gateway.caddy_start() is True
@@ -1486,9 +1440,7 @@ def test_caddy_start_admin_probe_when_cmd_fails_but_admin_alive(
     """BUG-102：caddy start 非零退出但 admin + 本工作区 pidfile 就绪 → True。"""
     monkeypatch.setattr(
         "local_webpage_access.static_gateway.subprocess.Popen",
-        lambda cmd, **kw: _FakeCaddyPopen(
-            cmd, returncode=1, stderr=b"pingback timeout"
-        ),
+        lambda cmd, **kw: _FakeCaddyPopen(cmd, returncode=1, stderr=b"pingback timeout"),
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
@@ -1504,15 +1456,11 @@ def test_caddy_start_returns_false_when_cmd_fails_and_admin_down(
         lambda cmd, **kw: _FakeCaddyPopen(cmd, returncode=1, stderr=b"real error"),
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway._ADMIN_STARTUP_WAIT", 0.05
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway._ADMIN_STARTUP_WAIT", 0.05)
     assert gateway.caddy_start() is False
 
 
-def test_caddy_start_recovers_on_timeout_exception(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+def test_caddy_start_recovers_on_timeout_exception(gateway: StaticGateway, monkeypatch) -> None:
     """ADJ-036/BUG-102：pingback 子进程挂起但本工作区 admin+pidfile 就绪 → 提前 True。"""
     monkeypatch.setattr(
         "local_webpage_access.static_gateway.subprocess.Popen",
@@ -1523,17 +1471,13 @@ def test_caddy_start_recovers_on_timeout_exception(
     assert gateway.caddy_start() is True
 
 
-def test_caddy_start_file_not_found_is_hard_fail(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+def test_caddy_start_file_not_found_is_hard_fail(gateway: StaticGateway, monkeypatch) -> None:
     """§10.2-C2：PATH 无 caddy（FileNotFoundError）立即失败，不认领孤儿 admin。"""
 
     def _missing(*a, **kw):
         raise FileNotFoundError("caddy")
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.Popen", _missing
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.Popen", _missing)
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
     assert gateway.caddy_start() is False
@@ -1545,17 +1489,14 @@ def test_caddy_start_rejects_orphan_admin_without_workspace_pid(
     """§10.2-C2：pingback 失败后 admin 在线但本工作区 pidfile 无效 → 不认领。"""
     monkeypatch.setattr(
         "local_webpage_access.static_gateway.subprocess.Popen",
-        lambda cmd, **kw: _FakeCaddyPopen(
-            cmd, returncode=1, stderr=b"pingback timeout"
-        ),
+        lambda cmd, **kw: _FakeCaddyPopen(cmd, returncode=1, stderr=b"pingback timeout"),
     )
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: False)
     assert gateway.caddy_start() is False
 
-def test_caddy_stop_clears_pid_when_admin_down(
-    gateway: StaticGateway, monkeypatch
-) -> None:
+
+def test_caddy_stop_clears_pid_when_admin_down(gateway: StaticGateway, monkeypatch) -> None:
     """IMP-010/BUG-070：admin 不在线时 caddy_stop 视为已停并清理 stale caddy pid。"""
     monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: False)
     caddy_pid = gateway.caddy_pid_path()
@@ -1640,9 +1581,7 @@ def test_reload_all_waits_on_gateway_config_lock(
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     ensure_lockable(fd)
     try_acquire_exclusive(fd)
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway._GATEWAY_MUTATION_TIMEOUT", 0.05
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway._GATEWAY_MUTATION_TIMEOUT", 0.05)
     monkeypatch.setattr("local_webpage_access.static_gateway.time.sleep", lambda *_: None)
     try:
         with pytest.raises(GatewayError, match="配置锁"):

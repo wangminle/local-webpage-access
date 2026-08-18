@@ -28,8 +28,7 @@ def _inject_orphan(db_path: Path, instance_id: str, route_host: str) -> None:
     try:
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute(
-            "INSERT INTO static_sites(instance_id, route_mode, route_host) "
-            "VALUES (?, 'name', ?)",
+            "INSERT INTO static_sites(instance_id, route_mode, route_host) VALUES (?, 'name', ?)",
             (instance_id, route_host),
         )
         conn.commit()
@@ -55,8 +54,7 @@ def test_registry_check_reports_orphans(workspace: Workspace, monkeypatch) -> No
     data = json.loads(result.stdout)
     assert data["count"] >= 1
     assert any(
-        o["instance_id"] == "ghost" and o["table"] == "static_sites"
-        for o in data["orphans"]
+        o["instance_id"] == "ghost" and o["table"] == "static_sites" for o in data["orphans"]
     )
     # 真实实例不算孤儿
     assert all(o["instance_id"] != "real" for o in data["orphans"])
@@ -81,9 +79,7 @@ def test_registry_repair_cleans_orphans(workspace: Workspace, monkeypatch) -> No
         reg.close()
 
 
-def test_registry_repair_requires_yes_in_non_tty(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_registry_repair_requires_yes_in_non_tty(workspace: Workspace, monkeypatch) -> None:
     """非 TTY 且无 --yes 时拒绝破坏性清理（CliRunner 默认非 TTY）。"""
     from local_webpage_access.cli.registry import app
 

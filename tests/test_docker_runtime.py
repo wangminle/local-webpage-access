@@ -96,13 +96,9 @@ class _FakeExecute:
                 stderr=self.default.stderr,
             )
         elif tuple(args[:2]) == ("docker", "version"):
-            result = ComposeResult(
-                args=list(args), returncode=0, stdout="29.6.1\n", stderr=""
-            )
+            result = ComposeResult(args=list(args), returncode=0, stdout="29.6.1\n", stderr="")
         elif len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
-            result = ComposeResult(
-                args=list(args), returncode=0, stdout="v5.2.0\n", stderr=""
-            )
+            result = ComposeResult(args=list(args), returncode=0, stdout="v5.2.0\n", stderr="")
         else:
             # 命令的子命令关键字（build/up/stop/start/restart/down/logs/ps/version/inspect/images）
             for key, mapped in self.by_subcmd.items():
@@ -215,9 +211,7 @@ def test_ensure_available_accepts_supported_compose_v2(workspace, monkeypatch) -
     class _ComposeV2Fake(_FakeExecute):
         def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
             if len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
-                return ComposeResult(
-                    args=list(args), returncode=0, stdout="2.40.3\n", stderr=""
-                )
+                return ComposeResult(args=list(args), returncode=0, stdout="2.40.3\n", stderr="")
             return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
 
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _ComposeV2Fake())
@@ -228,9 +222,7 @@ def test_ensure_available_raises_when_docker_version_too_low(workspace, monkeypa
     class _LowDockerFake(_FakeExecute):
         def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
             if tuple(args[:2]) == ("docker", "version"):
-                return ComposeResult(
-                    args=list(args), returncode=0, stdout="28.9.9\n", stderr=""
-                )
+                return ComposeResult(args=list(args), returncode=0, stdout="28.9.9\n", stderr="")
             return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
 
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _LowDockerFake())
@@ -242,9 +234,7 @@ def test_ensure_available_raises_when_compose_version_too_low(workspace, monkeyp
     class _LowComposeFake(_FakeExecute):
         def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
             if len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
-                return ComposeResult(
-                    args=list(args), returncode=0, stdout="2.39.9\n", stderr=""
-                )
+                return ComposeResult(args=list(args), returncode=0, stdout="2.39.9\n", stderr="")
             return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
 
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _LowComposeFake())
@@ -315,9 +305,7 @@ def test_build_failure_raises_and_marks_failed(workspace, registry, monkeypatch)
     _seed_compose_files(workspace, "api")
     _seed_instance(registry, "api")
     fake = _FakeExecute()
-    fake.by_subcmd["build"] = ComposeResult(
-        args=[], returncode=1, stderr="npm error: ENOTFOUND\n"
-    )
+    fake.by_subcmd["build"] = ComposeResult(args=[], returncode=1, stderr="npm error: ENOTFOUND\n")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
 
     build_id = registry.add_build("api", status="running")
@@ -431,9 +419,7 @@ def test_lifecycle_writes_to_run_log(workspace, monkeypatch) -> None:
 def test_logs_returns_stdout(workspace, monkeypatch) -> None:
     _seed_compose_files(workspace, "api")
     fake = _FakeExecute()
-    fake.by_subcmd["logs"] = ComposeResult(
-        args=[], returncode=0, stdout="line1\nline2\n"
-    )
+    fake.by_subcmd["logs"] = ComposeResult(args=[], returncode=0, stdout="line1\nline2\n")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
     text = DockerRuntime(workspace).logs("api", tail=50)
     assert "line1" in text
@@ -466,9 +452,7 @@ def test_logs_failure_raises(workspace, monkeypatch) -> None:
 def test_container_id_returns_first_line(workspace, monkeypatch) -> None:
     _seed_compose_files(workspace, "api")
     fake = _FakeExecute()
-    fake.by_subcmd["ps"] = ComposeResult(
-        args=[], returncode=0, stdout="abc123def\n"
-    )
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="abc123def\n")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
     assert DockerRuntime(workspace).container_id("api") == "abc123def"
 
@@ -485,9 +469,7 @@ def test_image_id_via_inspect(workspace, monkeypatch) -> None:
     fake = _FakeExecute()
     # ps -q 返回容器 id，inspect 返回镜像 sha
     fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="abc123\n")
-    fake.by_subcmd["inspect"] = ComposeResult(
-        args=[], returncode=0, stdout="sha256:deadbeef\n"
-    )
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout="sha256:deadbeef\n")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
     assert DockerRuntime(workspace).image_id("api") == "sha256:deadbeef"
 
@@ -501,12 +483,8 @@ def test_image_id_fallback_to_compose_config_images(workspace, monkeypatch) -> N
     _seed_compose_files(workspace, "api")
     fake = _FakeExecute()
     fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")  # 无容器
-    fake.by_subcmd["config"] = ComposeResult(
-        args=[], returncode=0, stdout="lwa-api-app:latest\n"
-    )
-    fake.by_subcmd["inspect"] = ComposeResult(
-        args=[], returncode=0, stdout="sha256:img999\n"
-    )
+    fake.by_subcmd["config"] = ComposeResult(args=[], returncode=0, stdout="lwa-api-app:latest\n")
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout="sha256:img999\n")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
     assert DockerRuntime(workspace).image_id("api") == "sha256:img999"
     config_call = [c for c in fake.calls if "config" in c["args"]][0]
@@ -517,16 +495,11 @@ def test_image_id_fallback_to_compose_config_images(workspace, monkeypatch) -> N
     assert "lwa-api-app:latest" in inspect_call["args"]
 
 
-def test_image_id_fallback_custom_project_uses_compose(
-    workspace, monkeypatch
-) -> None:
+def test_image_id_fallback_custom_project_uses_compose(workspace, monkeypatch) -> None:
     """自定义 project/image 时经 config --images 取引用，不猜 legacy 镜像名。"""
     workspace.ensure_app_dirs("api")
     workspace.app_compose_path("api").write_text(
-        "name: custom-proj\n"
-        "services:\n"
-        "  app:\n"
-        "    image: my-custom-image:latest\n"
+        "name: custom-proj\nservices:\n  app:\n    image: my-custom-image:latest\n"
     )
     workspace.app_env_path("api").write_text("HOST_PORT=18000\n")
     fake = _FakeExecute()
@@ -534,9 +507,7 @@ def test_image_id_fallback_custom_project_uses_compose(
     fake.by_subcmd["config"] = ComposeResult(
         args=[], returncode=0, stdout="my-custom-image:latest\n"
     )
-    fake.by_subcmd["inspect"] = ComposeResult(
-        args=[], returncode=0, stdout="sha256:customimg\n"
-    )
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout="sha256:customimg\n")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
     assert DockerRuntime(workspace).image_id("api") == "sha256:customimg"
     config_call = [c for c in fake.calls if "config" in c["args"]][0]
@@ -547,9 +518,7 @@ def test_image_id_fallback_custom_project_uses_compose(
     assert "lwa-api-app" not in inspect_call["args"]
 
 
-def test_image_id_fallback_returns_none_when_image_missing(
-    workspace, monkeypatch
-) -> None:
+def test_image_id_fallback_returns_none_when_image_missing(workspace, monkeypatch) -> None:
     """config --images 无输出或 image inspect 失败（镜像已删）→ None（BUG-425）。"""
     _seed_compose_files(workspace, "api")
     fake = _FakeExecute()
@@ -560,12 +529,8 @@ def test_image_id_fallback_returns_none_when_image_missing(
 
     fake2 = _FakeExecute()
     fake2.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
-    fake2.by_subcmd["config"] = ComposeResult(
-        args=[], returncode=0, stdout="gone-image:latest\n"
-    )
-    fake2.by_subcmd["inspect"] = ComposeResult(
-        args=[], returncode=1, stderr="No such image"
-    )
+    fake2.by_subcmd["config"] = ComposeResult(args=[], returncode=0, stdout="gone-image:latest\n")
+    fake2.by_subcmd["inspect"] = ComposeResult(args=[], returncode=1, stderr="No such image")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake2)
     assert DockerRuntime(workspace).image_id("api") is None
 
@@ -579,14 +544,10 @@ def test_status_parses_json_lines(workspace, monkeypatch) -> None:
         "State": "running",
         "Status": "Up 2 minutes",
         "Health": "healthy",
-        "Publishers": [
-            {"URL": "0.0.0.0:18000", "PublishedPort": 18000, "TargetPort": 8000}
-        ],
+        "Publishers": [{"URL": "0.0.0.0:18000", "PublishedPort": 18000, "TargetPort": 8000}],
     }
     fake = _FakeExecute()
-    fake.by_subcmd["ps"] = ComposeResult(
-        args=[], returncode=0, stdout=json.dumps(payload) + "\n"
-    )
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout=json.dumps(payload) + "\n")
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
     st = DockerRuntime(workspace).status("api")
     assert isinstance(st, ContainerStatus)
@@ -647,11 +608,7 @@ def test_execute_streams_log_while_command_running(tmp_path: Path) -> None:
     """
     log = tmp_path / "build.log"
     marker = "STREAM_MARKER_VISIBLE"
-    code = (
-        "import sys, time; "
-        f"print({marker!r}, flush=True); "
-        "time.sleep(3)"
-    )
+    code = f"import sys, time; print({marker!r}, flush=True); time.sleep(3)"
     args = [sys.executable, "-c", code]
     seen = threading.Event()
 
@@ -826,9 +783,7 @@ class _RescueCopyFake(_FakeExecute):
         # container_id 查询（docker compose ps -q）返回容器 id
         if "ps" in args:
             self.ps_args = list(args)
-            return ComposeResult(
-                args=list(args), returncode=0, stdout=self._ps_stdout, stderr=""
-            )
+            return ComposeResult(args=list(args), returncode=0, stdout=self._ps_stdout, stderr="")
         # docker cp：<cid>:<src>/. <host>/ —— 模拟写入数据文件
         if tuple(args[:2]) == ("docker", "cp"):
             target = args[-1].rstrip("/")
@@ -839,9 +794,7 @@ class _RescueCopyFake(_FakeExecute):
         return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
 
 
-def test_rescue_container_data_copies_when_host_empty(
-    workspace, registry, monkeypatch
-) -> None:
+def test_rescue_container_data_copies_when_host_empty(workspace, registry, monkeypatch) -> None:
     """BUG-205：宿主 data/ 为空、容器存在 → down 前从容器救出数据文件。"""
     _seed_compose_files(workspace, "api")
     _seed_instance(registry, "api")
@@ -883,9 +836,7 @@ def test_rescue_container_data_skips_when_host_has_content(
     assert fake.cp_targets == []
 
 
-def test_rescue_container_data_no_container_returns_zero(
-    workspace, registry, monkeypatch
-) -> None:
+def test_rescue_container_data_no_container_returns_zero(workspace, registry, monkeypatch) -> None:
     """BUG-205：容器不存在（ps 无输出）→ 返回 0、不抛错、不 cp。"""
     _seed_compose_files(workspace, "api")
     _seed_instance(registry, "api")
@@ -900,9 +851,7 @@ def test_rescue_container_data_no_container_returns_zero(
     assert fake.cp_targets == []
 
 
-def test_rescue_container_data_finds_stopped_container(
-    workspace, registry, monkeypatch
-) -> None:
+def test_rescue_container_data_finds_stopped_container(workspace, registry, monkeypatch) -> None:
     """BUG-318：数据救援查询必须包含已停止但尚未删除的容器。"""
     _seed_compose_files(workspace, "api")
     _seed_instance(registry, "api")
@@ -911,9 +860,10 @@ def test_rescue_container_data_finds_stopped_container(
     fake = _RescueCopyFake()
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
 
-    assert DockerRuntime(workspace, registry).rescue_container_data(
-        "api", host_data, ["/app/data"]
-    ) == 1
+    assert (
+        DockerRuntime(workspace, registry).rescue_container_data("api", host_data, ["/app/data"])
+        == 1
+    )
     assert "--all" in fake.ps_args
 
 
@@ -1045,9 +995,7 @@ def test_bind_mounts_ignores_volume_mounts(workspace, monkeypatch) -> None:
     ]
     fake = _FakeExecute()
     fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="cid1\n")
-    fake.by_subcmd["inspect"] = ComposeResult(
-        args=[], returncode=0, stdout=json.dumps(mounts)
-    )
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout=json.dumps(mounts))
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
 
     assert DockerRuntime(workspace).bind_mounts("api") == []

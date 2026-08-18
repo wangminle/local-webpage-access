@@ -140,9 +140,7 @@ def list_logs(workspace: Workspace, instance_id: str) -> list[LogInfo]:
             st = p.stat()
         except OSError:
             continue
-        infos.append(
-            LogInfo(category=p.stem, path=p, size=st.st_size, mtime=st.st_mtime)
-        )
+        infos.append(LogInfo(category=p.stem, path=p, size=st.st_size, mtime=st.st_mtime))
     return infos
 
 
@@ -259,9 +257,7 @@ def rotate_all(
     """对实例所有日志执行滚动，返回触发滚动的分类列表。"""
     rotated: list[str] = []
     for info in list_logs(workspace, instance_id):
-        if rotate_log(
-            workspace, instance_id, info.category, max_bytes=max_bytes, keep=keep
-        ):
+        if rotate_log(workspace, instance_id, info.category, max_bytes=max_bytes, keep=keep):
             rotated.append(info.category)
     return rotated
 

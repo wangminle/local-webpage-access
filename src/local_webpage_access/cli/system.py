@@ -33,9 +33,7 @@ def setup_cmd(
         "--full",
         help="装配档位：检查并安装 Caddy + Docker Engine + Compose 至最低版本",
     ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="full 档跳过确认直接安装（非 TTY 时必须）"
-    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="full 档跳过确认直接安装（非 TTY 时必须）"),
     resume: bool = typer.Option(
         False,
         "--resume",
@@ -57,9 +55,9 @@ def setup_cmd(
         help="兼容入口：委托 `lwa autostart install`（跨平台前台监管；需已初始化工作区）",
     ),
     with_caddy: bool = typer.Option(
-        False,
-        "--with-caddy",
-        help="与 --autostart 配合：额外生成 caddy 网关自启（仅 staticGateway=caddy）",
+        None,
+        "--with-caddy/--no-with-caddy",
+        help="与 --autostart 配合：是否监管 caddy 网关（缺省：caddy 在用即纳入）",
     ),
 ) -> None:
     """检测宿主机工具环境并给出安装指引（可在 ``lwa init`` 之前运行）。
@@ -237,17 +235,31 @@ def setup_cmd(
         if docker_offer.script_ok is False or docker_offer.recheck_ok is False:
             raise typer.Exit(code=1)
 
+    # IMP-061.02：default 档收尾在 Linux systemd + 已初始化工作区时引导自启
+    if profile == "default" and not json_output:
+        try:
+            from local_webpage_access.config import load_config
+            from local_webpage_access.paths import find_workspace_root
+
+            ws_root = find_workspace_root()
+            if ws_root is not None:
+                from local_webpage_access import autostart as asm
+                from local_webpage_access.paths import Workspace
+
+                ws = Workspace(ws_root)
+                offer = asm.maybe_offer_autostart_install(ws, load_config(ws))
+                for msg in offer.messages:
+                    typer.echo(msg)
+        except Exception:  # noqa: BLE001 — 引导失败不阻断 setup
+            pass
+
     if not report.ready:
         raise typer.Exit(code=1)
 
 
 def doctor_cmd(
-    instance_id: str = typer.Argument(
-        None, help="可选：对单个实例执行健康诊断"
-    ),
-    json_output: bool = typer.Option(
-        False, "--json", help="输出 JSON 报告（便于脚本解析）"
-    ),
+    instance_id: str = typer.Argument(None, help="可选：对单个实例执行健康诊断"),
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON 报告（便于脚本解析）"),
     profile: str = typer.Option(
         None,
         "--profile",
@@ -305,9 +317,7 @@ def doctor_cmd(
 
         def _platform_report() -> PlatformSupportReport:
             if not _ps_cache:
-                _ps_cache.append(
-                    collect_platform_support_report(workspace_root=ws.root)
-                )
+                _ps_cache.append(collect_platform_support_report(workspace_root=ws.root))
             return _ps_cache[0]
 
         if profile in ("full", "default") or getattr(config, "profile", None) == "full":
@@ -365,9 +375,7 @@ def doctor_cmd(
                 "overall": report.overall,
                 "instance_id": report.instance_id,
                 "checks": [c.to_dict() for c in report.checks],
-                "instance_checks": [
-                    c.to_dict() for c in report.instance_checks
-                ],
+                "instance_checks": [c.to_dict() for c in report.instance_checks],
                 "currentLanIp": report.current_lan_ip,
                 "driftedInstanceIds": report.drifted_instance_ids,
                 "platformSupport": _platform_report().to_dict(),
@@ -376,9 +384,7 @@ def doctor_cmd(
                 payload["accessReview"] = report.access_review.to_dict()
             if cap_payload is not None:
                 payload["capabilities"] = cap_payload
-            typer.echo(
-                json_mod.dumps(payload, ensure_ascii=False, indent=2)
-            )
+            typer.echo(json_mod.dumps(payload, ensure_ascii=False, indent=2))
         else:
             typer.echo(format_report(report))
             if report.access_review is not None:
@@ -421,9 +427,7 @@ def doctor_cmd(
 
 
 def capabilities_cmd(
-    json_output: bool = typer.Option(
-        False, "--json", help="输出 CapabilityReport JSON"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="输出 CapabilityReport JSON"),
 ) -> None:
     """输出当前工作区能力报告（IMP-033 ``lwa capabilities``）。"""
     import json as json_mod
@@ -439,9 +443,7 @@ def capabilities_cmd(
             config_profile=getattr(config, "profile", None),
         )
         if json_output:
-            typer.echo(
-                json_mod.dumps(report.to_dict(), ensure_ascii=False, indent=2)
-            )
+            typer.echo(json_mod.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         else:
             typer.echo(
                 f"profile={report.profile} overall={report.overall} "
@@ -474,20 +476,32 @@ def update_cmd(
         "--repo",
         help="lwa 源码根（默认识别 editable 安装路径或 git 根）",
     ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="只探测远端版本（fetch 但不改工作树与 Runtime；不要求已 init 工作区）",
+    ),
+    no_pull: bool = typer.Option(
+        False,
+        "--no-pull",
+        help="不联网做源码快进，仅用本地代码刷新 Runtime（旧行为兼容）",
+    ),
+    remote: str = typer.Option(None, "--remote", help="覆盖 upstream 解析的远端名（如 origin）"),
+    ref: str = typer.Option(
+        None, "--ref", help="覆盖 upstream 解析的远端分支名（如 main；不接受 tag/commit）"
+    ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="仅展示计划，不执行 pip/同步/重启"
+        False, "--dry-run", help="仅展示计划，不执行 pip/同步/重启（零写入：不联网不取锁）"
     ),
     skip_pip: bool = typer.Option(
-        False, "--skip-pip", help="跳过 pip install -e .（已手动装过）"
+        False, "--skip-pip", help="跳过 pip install -e .（仅限不改 HEAD 的路径）"
     ),
     sync_templates: bool = typer.Option(
         False,
         "--sync-templates",
         help="同步 templates/（默认关，避免覆盖用户改过的模板）",
     ),
-    no_doctor: bool = typer.Option(
-        False, "--no-doctor", help="结束后不跑 lwa doctor"
-    ),
+    no_doctor: bool = typer.Option(False, "--no-doctor", help="结束后不跑 lwa doctor"),
     restart_instances: bool = typer.Option(
         False,
         "--restart-instances",
@@ -496,79 +510,211 @@ def update_cmd(
     no_sync_skills: bool = typer.Option(
         False, "--no-sync-skills", help="跳过同步 skills/（默认同步）"
     ),
-    no_restart_manager: bool = typer.Option(
-        False, "--no-restart-manager", help="跳过重启管理页"
-    ),
-    no_restart_daemon: bool = typer.Option(
-        False, "--no-restart-daemon", help="跳过重启 daemon"
-    ),
-    no_restart_gateway: bool = typer.Option(
-        False, "--no-restart-gateway", help="跳过重启 Gateway"
+    no_restart_manager: bool = typer.Option(False, "--no-restart-manager", help="跳过重启管理页"),
+    no_restart_daemon: bool = typer.Option(False, "--no-restart-daemon", help="跳过重启 daemon"),
+    no_restart_gateway: bool = typer.Option(False, "--no-restart-gateway", help="跳过重启 Gateway"),
+    no_reconcile: bool = typer.Option(
+        False,
+        "--no-reconcile",
+        help="仅排障用：不做服务级期望态收敛（enabled 但未运行的自有服务不自动拉起）",
     ),
     review_access: bool = typer.Option(
         True,
         "--review-access/--no-review-access",
         help="升级收尾后做轻量访问复核（默认开启；失败不与 pip 混为一类）",
     ),
-    json_output: bool = typer.Option(
-        False, "--json", help="输出机器可读的 JSON 摘要"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="输出机器可读的 JSON 摘要"),
 ) -> None:
-    """刷新 lwa 安装、同步工作区附属物、重启自有服务（IMP-008）。
+    """刷新 lwa 安装、同步工作区附属物、重启自有服务（IMP-008 / IMP-063）。
 
-    ``git pull`` / 改代码后一条命令收敛运行态。默认**不动**已导入的实例
-    （apps/）；变更涉及托管逻辑时加 ``--restart-instances``。仅当 manager /
-    daemon / Gateway 原本 running 时才重启，原本 stopped 不会被自动开启。
+    一键更新通道（IMP-063）：默认先做源码探测与**安全快进**（upstream 或
+    ``--remote/--ref`` → 单次 fetch 固定候选 OID → ``--ff-only``），再
+    ``pip install -e .``，HEAD 变化后由**新解释器接力**执行 Runtime 后半段，
+    禁止新旧代码混跑。tracked 脏/分叉/detached/shallow 历史不足会拒绝快进并
+    结构化报错；断网/代理失败降级 warning，仍以本地代码完成 Runtime 刷新。
+    实例默认**不动**（apps/）。服务重启按 IMP-059 三态 reconcile。
     """
     import json as json_mod
     from pathlib import Path
 
-    from local_webpage_access.paths import require_workspace
-    from local_webpage_access.updater import UpdateOptions, format_report, run_update
+    from local_webpage_access.updater import UpdateOptions
 
-    try:
-        ws = (
-            require_workspace(Path(workspace))
-            if workspace
-            else require_workspace()
+    if check and dry_run:
+        typer.secho(
+            "--check 与 --dry-run 互斥：check 会 fetch（允许刷新 .git 元数据），dry-run 严格零写入",
+            fg=typer.colors.RED,
+            err=True,
         )
-        from local_webpage_access.config import load_config
+        raise typer.Exit(code=2)
 
-        config = load_config(ws)
-        from local_webpage_access.registry import Registry
+    # ---- --check：独立路径，不要求已 init 工作区（在加载 workspace 之前分流）----
+    if check:
+        from local_webpage_access import update_source as us
+        from local_webpage_access.updater import locate_repo
 
-        reg = Registry(ws.db_path)
-        reg.open()
+        repo_path: Path | None
         try:
-            options = UpdateOptions(
-                dry_run=dry_run,
-                skip_pip=skip_pip,
-                sync_skills=not no_sync_skills,
-                sync_templates=sync_templates,
-                restart_manager=not no_restart_manager,
-                restart_daemon=not no_restart_daemon,
-                restart_gateway=not no_restart_gateway,
-                restart_instances=restart_instances,
-                run_doctor=not no_doctor,
-                review_access=review_access,
-                repo=repo,
+            repo_path = locate_repo(repo)
+        except FileNotFoundError as exc:
+            if json_output:
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "schemaVersion": us.SCHEMA_VERSION,
+                            "status": "blocked",
+                            "repo": repo,
+                            "error": {
+                                "kind": "invalid_repo",
+                                "message": str(exc),
+                                "action": None,
+                            },
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        if repo_path is None:
+            msg = (
+                "未识别到 lwa 源码根（editable 安装 / git 根 / --repo）；--check 需要 git 克隆安装"
             )
-            report = run_update(ws, config, reg, options=options)
+            if json_output:
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "schemaVersion": us.SCHEMA_VERSION,
+                            "status": "blocked",
+                            "repo": None,
+                            "error": {
+                                "kind": "repo_not_found",
+                                "message": msg,
+                                "action": "用 --repo 指定源码根",
+                            },
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                typer.secho(msg, fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        locks = None
+        try:
+            # 会 fetch 的 check 与 update 互斥：取 repo 锁
+            repo_fd = us.acquire_repo_lock(repo_path)
+            from local_webpage_access.update_source import UpdateLocks
+
+            locks = UpdateLocks(
+                repo_fd,
+                us._git_common_dir(repo_path) / us.REPO_LOCK_FILENAME,
+                -1,
+                Path("/nonexistent"),
+            )
+            source_report = us.run_source_check(repo_path, remote=remote, ref=ref)
+        except us.UpdateLockBusy as exc:
+            typer.secho(
+                f"更新锁被占用，已有 update/check 在执行：{exc}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
         finally:
-            reg.close()
+            if locks is not None:
+                locks.close()
 
         if json_output:
-            typer.echo(
-                json_mod.dumps(report.to_dict(), ensure_ascii=False, indent=2)
-            )
+            typer.echo(json_mod.dumps(source_report.to_dict(), ensure_ascii=False, indent=2))
         else:
-            typer.echo(format_report(report))
+            typer.echo(format_source_check_report(source_report))
+        raise typer.Exit(code=source_report.exit_code())
+
+    # ---- 常规 update：不在加载 Config/Registry 之前做源码阶段（bootstrap）----
+    from local_webpage_access.paths import require_workspace
+
+    try:
+        ws = require_workspace(Path(workspace)) if workspace else require_workspace()
+        options = UpdateOptions(
+            dry_run=dry_run,
+            skip_pip=skip_pip,
+            sync_skills=not no_sync_skills,
+            sync_templates=sync_templates,
+            restart_manager=not no_restart_manager,
+            restart_daemon=not no_restart_daemon,
+            restart_gateway=not no_restart_gateway,
+            restart_instances=restart_instances,
+            run_doctor=not no_doctor,
+            review_access=review_access,
+            repo=repo,
+            reconcile_services=not no_reconcile,
+            pull=not no_pull,
+            remote=remote,
+            ref=ref,
+        )
+        from local_webpage_access.update_flow import run_update_flow
+
+        report = run_update_flow(ws.root, options)
+
+        if json_output:
+            typer.echo(json_mod.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        else:
+            typer.echo(format_update_report(report))
         if report.has_failures:
             raise typer.Exit(code=1)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def format_update_report(report) -> str:
+    from local_webpage_access.updater import format_report
+
+    return format_report(report)
+
+
+def format_source_check_report(report) -> str:
+    """``lwa update --check`` 人类可读报告。"""
+    lines: list[str] = []
+    lines.append("── lwa update --check ──")
+    lines.append(f"  仓库       {report.repo}")
+    status_label = {
+        "upToDate": "已是最新",
+        "updateAvailable": "有新版本可更新",
+        "blocked": "探测完成但不宜快进（blocked）",
+        "unavailable": "远端不可达",
+    }.get(report.status, report.status)
+    lines.append(f"  状态       {status_label}")
+    if report.current is not None:
+        cur = report.current
+        cur_label = cur.version or (cur.head[:12] if cur.head else "?")
+        lines.append(f"  当前       {cur_label}（{cur.subject or ''}）")
+    if report.target:
+        tgt = report.target
+        tgt_label = tgt.get("version") or str(tgt.get("head", ""))[:12]
+        lines.append(
+            f"  目标       {tgt_label}（{tgt.get('remote')}/{tgt.get('branch')}，"
+            f"{tgt.get('subject') or ''}）"
+        )
+    lines.append(
+        f"  关系       {report.relation}（ahead {report.ahead_by} / behind {report.behind_by}）"
+    )
+    for blocker in report.blockers:
+        lines.append(f"  ⚠️ blocker  [{blocker.get('kind')}] {blocker.get('message')}")
+        if blocker.get("action"):
+            lines.append(f"              → {blocker.get('action')}")
+    behind = report.behind[:20]
+    for commit in behind:
+        lines.append(f"  · {commit.head[:12]} {commit.subject or ''}")
+    if len(report.behind) > 20:
+        lines.append(f"  · …（其余 {len(report.behind) - 20} 条见 --json，最多 100 条）")
+    if report.error:
+        lines.append(f"  ⚠️ error    [{report.error.get('kind')}] {report.error.get('message')}")
+        if report.error.get("action"):
+            lines.append(f"              → {report.error.get('action')}")
+    return "\n".join(lines)
 
 
 def register(app: typer.Typer) -> None:

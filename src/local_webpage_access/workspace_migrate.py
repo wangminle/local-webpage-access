@@ -98,9 +98,7 @@ class MigrateSnapshot:
             desired_states=dict(data.get("desired_states") or {}),
             autostart_installed=list(data.get("autostart_installed") or []),
             control_plane_running=list(data.get("control_plane_running") or []),
-            pageview_hits={
-                str(k): int(v) for k, v in (data.get("pageview_hits") or {}).items()
-            },
+            pageview_hits={str(k): int(v) for k, v in (data.get("pageview_hits") or {}).items()},
             captured_at=str(data.get("captured_at") or ""),
         )
 
@@ -257,9 +255,7 @@ def migrate_lock(workspace: Workspace) -> Iterator[list[Path]]:
             try:
                 fd = os.open(str(path), flags, 0o600)
             except FileExistsError as exc:
-                raise MigrateError(
-                    f"工作区迁移锁被占用；若确认无迁移在跑可删除 {path}"
-                ) from exc
+                raise MigrateError(f"工作区迁移锁被占用；若确认无迁移在跑可删除 {path}") from exc
         try:
             os.write(fd, str(os.getpid()).encode("utf-8"))
         finally:
@@ -272,9 +268,7 @@ def migrate_lock(workspace: Workspace) -> Iterator[list[Path]]:
     finally:
         with contextlib.suppress(OSError):
             lp = holder[0]
-            if lp.is_file() and lp.read_text(encoding="utf-8").strip() == str(
-                os.getpid()
-            ):
+            if lp.is_file() and lp.read_text(encoding="utf-8").strip() == str(os.getpid()):
                 lp.unlink()
 
 
@@ -363,9 +357,7 @@ def preflight_migrate(old: Path, new: Path) -> PreflightReport:
         )
 
     if new_r.exists():
-        blocking.append(
-            MigrateIssue("target_exists", f"目标路径已存在：{new_r}")
-        )
+        blocking.append(MigrateIssue("target_exists", f"目标路径已存在：{new_r}"))
 
     same = _same_device(old_r, new_r)
     if same is False:
@@ -977,9 +969,7 @@ def verify_migrate(
                 cur = int((summary.get(iid) or {}).get("hits") or 0)
                 # 允许少量新流量；禁止接近翻倍
                 if base > 0 and cur > max(base * 1.05 + 20, base + 20):
-                    notes.append(
-                        f"pageviews[{iid}] 异常增长：基线 {base} → {cur}"
-                    )
+                    notes.append(f"pageviews[{iid}] 异常增长：基线 {base} → {cur}")
                     ok = False
         finally:
             store.close()
@@ -991,10 +981,7 @@ def verify_migrate(
         # 不一定必须存在；仅当备份时有才警告——此处只记录提示
         notes.append("info: daemon-processed.json 当前不存在（若迁前也没有则正常）")
 
-    if (
-        snapshot.control_plane_running
-        and not snapshot.autostart_installed
-    ):
+    if snapshot.control_plane_running and not snapshot.autostart_installed:
         notes.append(
             "info: 迁前控制面为 detached 运行（"
             + ",".join(snapshot.control_plane_running)
@@ -1053,11 +1040,7 @@ def run_migrate(
     if rollback:
         # 与正向迁移共用锁，避免与并发 relocate 互踩（BUG-396）
         old_r, new_r = old.resolve(), new.resolve()
-        lock_ws = (
-            Workspace(new_r)
-            if (new_r / "local-web.yml").is_file()
-            else Workspace(old_r)
-        )
+        lock_ws = Workspace(new_r) if (new_r / "local-web.yml").is_file() else Workspace(old_r)
         if not lock_ws.root.exists():
             raise MigrateError("回滚目标工作区不存在")
         with migrate_lock(lock_ws):
@@ -1092,9 +1075,7 @@ def run_migrate(
                     try:
                         snap = capture_snapshot(ws, reg, read_only=True)
                         actions.extend(
-                            quiesce_workspace(
-                                ws, load_config(ws), reg, snap, dry_run=True
-                            )
+                            quiesce_workspace(ws, load_config(ws), reg, snap, dry_run=True)
                         )
                     finally:
                         reg.close()
@@ -1108,9 +1089,7 @@ def run_migrate(
             phase=MigratePhase.PREFLIGHT.value,
             preflight=preflight,
             planned_actions=actions,
-            error=None
-            if preflight.ok
-            else "; ".join(i.message for i in preflight.blocking),
+            error=None if preflight.ok else "; ".join(i.message for i in preflight.blocking),
         )
 
     if not preflight.ok and not resume:
@@ -1129,9 +1108,7 @@ def run_migrate(
         # journal 可能已在 new
         if (new_r / "run" / JOURNAL_NAME).is_file():
             ws = Workspace(new_r)
-        elif not (old_r / "local-web.yml").is_file() and (
-            new_r / "local-web.yml"
-        ).is_file():
+        elif not (old_r / "local-web.yml").is_file() and (new_r / "local-web.yml").is_file():
             ws = Workspace(new_r)
 
     lock_ws = ws if ws.root.exists() else Workspace(old_r)
@@ -1184,9 +1161,7 @@ def _run_migrate_locked(
         # PREFLIGHT
         if not resume or phase in (MigratePhase.PREFLIGHT.value, None):
             if not preflight.ok:
-                raise MigrateError(
-                    "; ".join(i.message for i in preflight.blocking)
-                )
+                raise MigrateError("; ".join(i.message for i in preflight.blocking))
             ws.run.mkdir(parents=True, exist_ok=True)
             _save(MigratePhase.PREFLIGHT.value)
             phase = MigratePhase.BACKUP.value
@@ -1244,10 +1219,7 @@ def _run_migrate_locked(
             # resume：仅当 journal 已有真正采集过的快照时复用（captured_at 非空），
             # 避免 PREFLIGHT 写入的空 snapshot={} 导致跳过采样（BUG-387）
             prior = (journal or {}).get("snapshot") if resume else None
-            prior_ok = (
-                isinstance(prior, dict)
-                and bool(str(prior.get("captured_at") or "").strip())
-            )
+            prior_ok = isinstance(prior, dict) and bool(str(prior.get("captured_at") or "").strip())
             if prior_ok:
                 snapshot = MigrateSnapshot.from_dict(prior)  # type: ignore[arg-type]
                 if not backup_dir:
@@ -1264,9 +1236,7 @@ def _run_migrate_locked(
 
         # QUIESCE
         if phase == MigratePhase.QUIESCE.value:
-            actions = quiesce_workspace(
-                ws, config, reg, snapshot, dry_run=False
-            )
+            actions = quiesce_workspace(ws, config, reg, snapshot, dry_run=False)
             _save(MigratePhase.QUIESCE.value, quiesce_actions=actions)
             phase = MigratePhase.MOVE.value
 
@@ -1280,9 +1250,11 @@ def _run_migrate_locked(
             # backup_dir 随目录树搬到 NEW，刷新 journal 内绝对路径（BUG-393）
             if backup_dir:
                 old_s = str(old_r)
-                if backup_dir == old_s or backup_dir.startswith(
-                    old_s + os.sep
-                ) or backup_dir.startswith(old_s + "/"):
+                if (
+                    backup_dir == old_s
+                    or backup_dir.startswith(old_s + os.sep)
+                    or backup_dir.startswith(old_s + "/")
+                ):
                     backup_dir = str(new_r) + backup_dir[len(old_s) :]
             config = load_config(ws)
             reg.close()
@@ -1316,9 +1288,7 @@ def _run_migrate_locked(
         verify_ok = True
         verify_notes: list[str] = []
         if phase == MigratePhase.VERIFY.value:
-            verify_ok, verify_notes = verify_migrate(
-                ws, str(old_r), str(new_r), snapshot
-            )
+            verify_ok, verify_notes = verify_migrate(ws, str(old_r), str(new_r), snapshot)
             _save(
                 MigratePhase.VERIFY.value,
                 verify_ok=verify_ok,
@@ -1469,9 +1439,7 @@ def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
             started=started,
             verify_notes=notes,
         )
-    raise MigrateError(
-        "自动回滚条件不满足（需 NEW 在、OLD 不在）；请按 DOC-081 人工回滚"
-    )
+    raise MigrateError("自动回滚条件不满足（需 NEW 在、OLD 不在）；请按 DOC-081 人工回滚")
 
 
 __all__ = [

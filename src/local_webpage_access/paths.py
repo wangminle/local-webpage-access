@@ -23,19 +23,21 @@ _PATH_ALIAS_MAX_LEN = 63  # DNS 标签上限，路径别名同理
 # IMP-006：保留字——会被网关入口、管理页 API 路由或工作区顶层目录占用。
 # 即使别名入口（staticGatewayPort）与管理页（managerPort）端口不同，
 # 仍拒绝这些别名，避免用户混淆并预留未来端口合并的余地。
-_PATH_ALIAS_RESERVED = frozenset({
-    "api",
-    "static-gateway",
-    "inbox",
-    "apps",
-    "registry",
-    "run",
-    "manager",
-    "logs",
-    "skills",
-    "templates",
-    "health",
-})
+_PATH_ALIAS_RESERVED = frozenset(
+    {
+        "api",
+        "static-gateway",
+        "inbox",
+        "apps",
+        "registry",
+        "run",
+        "manager",
+        "logs",
+        "skills",
+        "templates",
+        "health",
+    }
+)
 
 
 def validate_instance_id(instance_id: str) -> str:

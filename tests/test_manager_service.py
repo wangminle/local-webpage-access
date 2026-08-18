@@ -419,15 +419,9 @@ def test_health_matches_workspace_legacy_without_workspace_root(
         "local_webpage_access.manager_service._fetch_health",
         return_value=legacy_health,
     ):
-        with patch(
-            "local_webpage_access.manager_service.is_pid_alive", return_value=True
-        ):
-            assert health_matches_workspace(
-                "0.0.0.0", cfg.managerPort, workspace.root, state=state
-            )
-        with patch(
-            "local_webpage_access.manager_service.is_pid_alive", return_value=False
-        ):
+        with patch("local_webpage_access.manager_service.is_pid_alive", return_value=True):
+            assert health_matches_workspace("0.0.0.0", cfg.managerPort, workspace.root, state=state)
+        with patch("local_webpage_access.manager_service.is_pid_alive", return_value=False):
             assert not health_matches_workspace(
                 "0.0.0.0", cfg.managerPort, workspace.root, state=state
             )
@@ -445,9 +439,7 @@ def test_health_matches_workspace_rejects_foreign_root_even_with_state(
         "local_webpage_access.manager_service._fetch_health",
         return_value=foreign_health,
     ):
-        with patch(
-            "local_webpage_access.manager_service.is_pid_alive", return_value=True
-        ):
+        with patch("local_webpage_access.manager_service.is_pid_alive", return_value=True):
             assert not health_matches_workspace(
                 "0.0.0.0", cfg.managerPort, workspace.root, state=state
             )
@@ -466,13 +458,9 @@ def test_is_running_legacy_manager_without_workspace_root(workspace: Workspace) 
         "local_webpage_access.manager_service._fetch_health",
         return_value=legacy_health,
     ):
-        with patch(
-            "local_webpage_access.manager_service.is_pid_alive", return_value=True
-        ):
+        with patch("local_webpage_access.manager_service.is_pid_alive", return_value=True):
             assert is_running(workspace, cfg) is True
-        with patch(
-            "local_webpage_access.manager_service.is_pid_alive", return_value=False
-        ):
+        with patch("local_webpage_access.manager_service.is_pid_alive", return_value=False):
             assert is_running(workspace, cfg) is False
 
 
@@ -519,9 +507,7 @@ def test_spawn_manager_rejects_windows_native(workspace: Workspace, monkeypatch)
         _spawn_manager(workspace)
 
 
-def test_spawn_manager_rotates_manager_log_before_open(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_spawn_manager_rotates_manager_log_before_open(workspace: Workspace, monkeypatch) -> None:
     """BUG-186：_spawn_manager 须经 open_append 打开 manager.log。"""
     from local_webpage_access import logs as logs_mod
 
@@ -581,9 +567,7 @@ def test_run_service_main_passes_log_dir(
         "argv",
         ["manager_service", "--workspace", str(workspace.root)],
     )
-    monkeypatch.setattr(
-        "local_webpage_access.logging.setup_logging", fake_setup_logging
-    )
+    monkeypatch.setattr("local_webpage_access.logging.setup_logging", fake_setup_logging)
     with patch("local_webpage_access.manager_api.run_manager"):
         with patch("local_webpage_access.registry.Registry") as reg_cls:
             reg_cls.return_value.open.return_value = None

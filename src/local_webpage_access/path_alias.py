@@ -265,9 +265,7 @@ def _apply_gateway_alias(
     if backend == "caddy":
         fragment_path = gateway.ws.app_alias_config(instance_id)
         had_fragment = fragment_path.is_file()
-        previous_fragment = (
-            fragment_path.read_text(encoding="utf-8") if had_fragment else None
-        )
+        previous_fragment = fragment_path.read_text(encoding="utf-8") if had_fragment else None
         try:
             if alias:
                 gateway.generate_alias_config(instance_id, alias, host_port, runtime=runtime)
@@ -289,8 +287,7 @@ def _apply_gateway_alias(
 
     if alias:
         log.warning(
-            "实例 %s 配置了路径别名 %s，但当前静态后端为 %s，别名入口未启用"
-            "（仅通过端口 %s 访问）",
+            "实例 %s 配置了路径别名 %s，但当前静态后端为 %s，别名入口未启用（仅通过端口 %s 访问）",
             instance_id,
             alias,
             backend,
@@ -333,9 +330,7 @@ def path_alias_lock(
         while True:
             try:
                 try_acquire_exclusive(fd)
-                write_lock_payload(
-                    fd, f"{os.getpid()}\n{time.time():.3f}\n".encode()
-                )
+                write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
                 file_acquired = True
                 break
             except BlockingIOError:
@@ -371,9 +366,7 @@ def set_instance_path_alias(
 
     with path_alias_lock(workspace):
         with instance_lock(workspace, instance_id):
-            return _set_instance_path_alias_locked(
-                workspace, config, registry, instance_id, alias
-            )
+            return _set_instance_path_alias_locked(workspace, config, registry, instance_id, alias)
 
 
 def _set_instance_path_alias_locked(
@@ -436,9 +429,7 @@ def _set_instance_path_alias_locked(
         )
         if html is not None:
             html_verified = True
-            reject_alias_if_absolute_spa_assets(
-                html=html, alias=alias, instance_id=instance_id
-            )
+            reject_alias_if_absolute_spa_assets(html=html, alias=alias, instance_id=instance_id)
 
     # 运行中 + Caddy：先网关重载，成功后再落盘，避免「manifest 已改但入口未生效」
     alias_entry_enabled, gateway_reloaded = _apply_gateway_alias(

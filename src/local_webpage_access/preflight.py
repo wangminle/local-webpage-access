@@ -219,9 +219,7 @@ def _check_copy_source(result: DetectionResult, source_dir: Path) -> CheckResult
         passed=False,
         autofixed=False,
         action=None,
-        detail=(
-            f"COPY 源路径 {req_file} 在根目录和常见子目录下均不存在，build 将失败"
-        ),
+        detail=(f"COPY 源路径 {req_file} 在根目录和常见子目录下均不存在，build 将失败"),
     )
 
 
@@ -393,11 +391,7 @@ def _check_db_path(result: DetectionResult) -> CheckResult:
         )
 
     # 解析注入将使用的文件名：优先源文件名，否则默认兜底
-    db_filename = (
-        result.database.dbFilename
-        if result.database.dbFilename
-        else "app.sqlite"
-    )
+    db_filename = result.database.dbFilename if result.database.dbFilename else "app.sqlite"
 
     # A.R01：检查应用是否消费 DATABASE_URL
     db_signal = None
@@ -570,10 +564,7 @@ def _check_alembic_cwd(result: DetectionResult, source_dir: Path) -> CheckResult
     # 不需要 cd <subdir>。注入 cd 会导致容器内找不到 /app/<subdir> 而启动失败。
     manifest_subdir = getattr(result, "source_subdir", None)
     if manifest_subdir and manifest_subdir == subdir:
-        detail = (
-            f"alembic.ini 在子目录 {subdir}/，Dockerfile 扁平复制到 /app/，"
-            f"无需 cwd 编排"
-        )
+        detail = f"alembic.ini 在子目录 {subdir}/，Dockerfile 扁平复制到 /app/，无需 cwd 编排"
         if script_location_missing:
             detail += f"；注意 script_location={script_location!r} 目录不存在，迁移可能仍会失败"
         return CheckResult(
@@ -640,7 +631,7 @@ def _inject_cwd_sequence(cmd: str, subdir: str) -> str:
     if match:
         before = cmd[: match.start()]
         alembic_part = match.group(1)
-        after = cmd[match.end():]
+        after = cmd[match.end() :]
         return f"{before}cd {subdir} && {alembic_part} && cd /app &&{after}"
 
     # 整个命令就是 alembic（无 && 后续）
@@ -742,14 +733,16 @@ def check_and_fix(result: DetectionResult, source_dir: Path) -> PreflightResult:
 
     # 汇总状态
     has_autofix = any(c.autofixed for c in preflight.checks)
-    has_warning = r_v06.passed and not r_v06.autofixed and r_v06.detail.startswith("检测到项目自带 Dockerfile")
+    has_warning = (
+        r_v06.passed
+        and not r_v06.autofixed
+        and r_v06.detail.startswith("检测到项目自带 Dockerfile")
+    )
     has_rejection = any(not c.passed for c in preflight.checks)
 
     if has_rejection:
         preflight.status = REJECTED
-        preflight.rejections.extend(
-            c.detail for c in preflight.checks if not c.passed
-        )
+        preflight.rejections.extend(c.detail for c in preflight.checks if not c.passed)
     elif has_autofix:
         preflight.status = AUTOFIXED
         preflight.notes.extend(

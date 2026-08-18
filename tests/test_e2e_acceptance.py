@@ -143,9 +143,7 @@ def test_e2e_static_html_accessible_via_http(ws_env, tmp_path: Path) -> None:
         assert host_port, f"静态实例未分配端口：{manifest}"
 
         _wait_port_ready(host_port, timeout=10)
-        resp = urllib.request.urlopen(
-            f"http://127.0.0.1:{host_port}/", timeout=5
-        )
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{host_port}/", timeout=5)
         body = resp.read().decode("utf-8")
         assert "static demo" in body.lower()
     finally:
@@ -165,9 +163,7 @@ def test_e2e_vite_react_detected_as_frontend(ws_env, tmp_path: Path) -> None:
 # ---- WBS-29.08 Node/Express 后端 ------------------------------------------
 
 
-def test_e2e_node_express_detected_and_compose_generated(
-    ws_env, tmp_path: Path
-) -> None:
+def test_e2e_node_express_detected_and_compose_generated(ws_env, tmp_path: Path) -> None:
     result = _import(ws_env, "node_express", tmp_path)
     assert result.detection.kind.value == "node"
     assert result.detection.form == "backend-container"
@@ -188,9 +184,7 @@ def test_e2e_node_express_detected_and_compose_generated(
 # ---- WBS-29.10 FastAPI + SQLite -------------------------------------------
 
 
-def test_e2e_fastapi_sqlite_detected_and_compose_generated(
-    ws_env, tmp_path: Path
-) -> None:
+def test_e2e_fastapi_sqlite_detected_and_compose_generated(ws_env, tmp_path: Path) -> None:
     result = _import(ws_env, "fastapi_sqlite", tmp_path)
     assert result.detection.kind.value == "python"
     assert not result.detection.pending

@@ -36,6 +36,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -293,8 +294,7 @@ def read_pid_cmdline(pid: int) -> str | None:
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    "(Get-CimInstance Win32_Process -Filter "
-                    f"'ProcessId={int(pid)}').CommandLine",
+                    f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine",
                 ],
                 capture_output=True,
                 text=True,
@@ -706,9 +706,7 @@ def process_zip(
         iid = result.instance_id
         summary["instance_id"] = iid
         # 可确定且轻量：自动启动（WBS-21.08）；与管理页文件夹导入共用 try_auto_start_after_import
-        auto = try_auto_start_after_import(
-            workspace, config, registry, result, log_prefix="daemon"
-        )
+        auto = try_auto_start_after_import(workspace, config, registry, result, log_prefix="daemon")
         summary["action"] = auto["action"]
         summary["note"] = auto["note"]
         return summary
@@ -728,7 +726,8 @@ def process_zip(
                 )
             log.warning(
                 "daemon: %s 与已有实例 %s 冲突，跳过（提示 --update）",
-                zip_path.name, conflict_id,
+                zip_path.name,
+                conflict_id,
             )
             return summary
         # 无 instance_id → 校验/解压类失败，归入 failed（watcher 下轮重试）
@@ -789,9 +788,7 @@ def reconcile(
         log.debug("daemon reconcile LAN refresh 失败", exc_info=True)
 
     # start_instance 返回 Manifest；类型上宽于 Optional restarter 形参，故用局部绑定。
-    do_restart: Callable[[Workspace, Config, Registry, str], object] = (
-        restarter or start_instance
-    )
+    do_restart: Callable[[Workspace, Config, Registry, str], object] = restarter or start_instance
     # Full Profile：后台能力闭环未 ready 时，容器自动纠正整轮 fail-closed；
     # 静态实例仍可按自身网关状态恢复。
     full_containers_blocked = False
@@ -806,8 +803,7 @@ def reconcile(
         full_containers_blocked = cap.profile == "full" and cap.overall != "ready"
         if full_containers_blocked:
             log.warning(
-                "daemon reconcile: Full Profile 能力未闭环（overall=%s），"
-                "本轮跳过容器自动纠正",
+                "daemon reconcile: Full Profile 能力未闭环（overall=%s），本轮跳过容器自动纠正",
                 cap.overall,
             )
     except Exception as exc:  # noqa: BLE001
@@ -900,13 +896,32 @@ def reconcile(
         if caddy_gateway_off and runtime == "shared-static":
             log.debug("daemon reconcile: 网关被显式关闭，跳过 caddy 静态实例 %s", iid)
             continue
+        # issue#1 问题3：刚进入 failed 的实例先退避一轮（seed 一次失败计数）。
+        # Gate-C 探针失败回滚后 desired 仍是 running，若下一 tick 立即自动重建，
+        # 会长时间持有 lifecycle 锁，与用户手工 restart 相撞（30s 锁超时假象）。
+        # 探针失败基本是确定性的，等一个 backoff 周期再自动重试更稳妥；
+        # 陈旧失败（updated_at 早于退避窗口，如宿主机重启前）保持立即自愈。
+        if registry_status == "failed" and failure_state is None:
+            try:
+                failed_at = datetime.fromisoformat(row.get("updated_at") or "").timestamp()
+            except ValueError:
+                failed_at = 0.0
+            if failed_at and time.time() - failed_at < RECONCILE_BACKOFF_BASE_SECONDS:
+                _reconcile_failures[failure_key] = (
+                    1,
+                    monotonic() + RECONCILE_BACKOFF_BASE_SECONDS,
+                )
+                log.info(
+                    "daemon reconcile: 实例 %s 刚失败，本轮退避 %ds 后再自动重试",
+                    iid,
+                    int(RECONCILE_BACKOFF_BASE_SECONDS),
+                )
+                continue
         try:
             do_restart(workspace, config, registry, iid)
             _reconcile_failures.pop(failure_key, None)
             restarted.append(iid)
-            log.info(
-                "daemon reconcile: 恢复实例 %s（%s → running）", iid, actual_status or "?"
-            )
+            log.info("daemon reconcile: 恢复实例 %s（%s → running）", iid, actual_status or "?")
             with contextlib.suppress(Exception):
                 registry.add_event(
                     iid,
@@ -936,8 +951,7 @@ def run_watcher(
     stop_event: threading.Event | None = None,
     poll_interval: float | None = None,
     stable_seconds: float = DEFAULT_STABLE_SECONDS,
-    process_fn: Callable[[Workspace, Config, Registry, Path], dict[str, Any]]
-    | None = None,
+    process_fn: Callable[[Workspace, Config, Registry, Path], dict[str, Any]] | None = None,
     clock: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
     heartbeat: Callable[[], None] | None = None,
@@ -969,9 +983,7 @@ def run_watcher(
     与 manager/gateway 对齐，吸收 systemd 三 unit 同启竞态。
     """
     stop_event = stop_event or threading.Event()
-    poll_interval = (
-        poll_interval if poll_interval is not None else DEFAULT_POLL_INTERVAL
-    )
+    poll_interval = poll_interval if poll_interval is not None else DEFAULT_POLL_INTERVAL
     process_fn = process_fn or process_zip
     stable_seconds = _effective_stable_seconds(stable_seconds, poll_interval)
     if heartbeat_interval is None:
@@ -995,9 +1007,7 @@ def run_watcher(
                 except Exception:  # noqa: BLE001 — 心跳失败不中断 watcher
                     log.exception("daemon 心跳刷新失败")
 
-        hb_thread = threading.Thread(
-            target=_hb_loop, name="lwa-daemon-hb", daemon=True
-        )
+        hb_thread = threading.Thread(target=_hb_loop, name="lwa-daemon-hb", daemon=True)
         hb_thread.start()
     try:
         while not stop_event.is_set():

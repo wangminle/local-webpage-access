@@ -23,9 +23,23 @@ log = get_logger("compatibility_checker")
 
 # 排除目录
 _EXCLUDE_DIRS = {
-    "node_modules", ".git", ".venv", "venv", "__pycache__",
-    "dist", "build", ".next", ".svelte-kit", "out", ".output",
-    "tests", "test", "__tests__", "spec", ".spec", "e2e",
+    "node_modules",
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".next",
+    ".svelte-kit",
+    "out",
+    ".output",
+    "tests",
+    "test",
+    "__tests__",
+    "spec",
+    ".spec",
+    "e2e",
     "packages/desktop",  # electron 子包
 }
 
@@ -95,33 +109,37 @@ def check_compatibility(
 
         # CHK-P03: 绝对 API 路径
         for match in _P03_FETCH_API_RE.finditer(content):
-            line_num = content[:match.start()].count("\n") + 1
+            line_num = content[: match.start()].count("\n") + 1
             line_content = _get_line(content, line_num)
-            findings.append(CompatibilityFinding(
-                checkId="CHK-P03",
-                severity="critical",
-                title="SSR/服务端模板绝对 API 路径",
-                file=rel_path,
-                line=line_num,
-                code=line_content.strip()[:200] if line_content else None,
-                impact="路径别名下去除前缀后，fetch('/api/...') 会打到入口根而非后端 API",
-                fix="支持 BASE_PATH（或等价），注入客户端常量，并在路由匹配前剥前缀",
-            ))
+            findings.append(
+                CompatibilityFinding(
+                    checkId="CHK-P03",
+                    severity="critical",
+                    title="SSR/服务端模板绝对 API 路径",
+                    file=rel_path,
+                    line=line_num,
+                    code=line_content.strip()[:200] if line_content else None,
+                    impact="路径别名下去除前缀后，fetch('/api/...') 会打到入口根而非后端 API",
+                    fix="支持 BASE_PATH（或等价），注入客户端常量，并在路由匹配前剥前缀",
+                )
+            )
 
         # CHK-P03: 空 API base
         for match in _P03_EMPTY_API_BASE_RE.finditer(content):
-            line_num = content[:match.start()].count("\n") + 1
+            line_num = content[: match.start()].count("\n") + 1
             line_content = _get_line(content, line_num)
-            findings.append(CompatibilityFinding(
-                checkId="CHK-P03",
-                severity="critical",
-                title="空 API base 常量",
-                file=rel_path,
-                line=line_num,
-                code=line_content.strip()[:200] if line_content else None,
-                impact="API base 为空字符串意味着所有请求走绝对根路径，别名下会失效",
-                fix="将 API base 设为可配置的 BASE_PATH 或环境变量",
-            ))
+            findings.append(
+                CompatibilityFinding(
+                    checkId="CHK-P03",
+                    severity="critical",
+                    title="空 API base 常量",
+                    file=rel_path,
+                    line=line_num,
+                    code=line_content.strip()[:200] if line_content else None,
+                    impact="API base 为空字符串意味着所有请求走绝对根路径，别名下会失效",
+                    fix="将 API base 设为可配置的 BASE_PATH 或环境变量",
+                )
+            )
 
         # CHK-P04: 检测 base path 关键字
         if not has_base_path_keyword:
@@ -132,18 +150,20 @@ def check_compatibility(
 
     # CHK-P04: 若未检出任何 base path 关键字 -> warning
     if not has_base_path_keyword and files_scanned > 0:
-        findings.append(CompatibilityFinding(
-            checkId="CHK-P04",
-            severity="warning",
-            title="未检出常见 base path / 代理前缀关键字",
-            file=None,
-            line=None,
-            code=None,
-            impact="路径别名时应用可能无法正确处理前缀",
-            fix="引入 BASE_PATH / BASE_URL / X-Forwarded-Prefix 等机制；"
+        findings.append(
+            CompatibilityFinding(
+                checkId="CHK-P04",
+                severity="warning",
+                title="未检出常见 base path / 代理前缀关键字",
+                file=None,
+                line=None,
+                code=None,
+                impact="路径别名时应用可能无法正确处理前缀",
+                fix="引入 BASE_PATH / BASE_URL / X-Forwarded-Prefix 等机制；"
                 "此为启发式：未检出常见关键字 ≠ 一定不兼容；"
                 "设别名时仍以 IMP-055 运行时探测为准",
-        ))
+            )
+        )
 
     return findings
 

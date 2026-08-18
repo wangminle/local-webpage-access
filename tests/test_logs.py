@@ -244,6 +244,7 @@ def test_setup_logging_uses_rotating_file_handler(
         for handler in list(logger.handlers):
             handler.close()
 
+
 def test_read_log_tail_avoids_full_read_text(workspace, monkeypatch) -> None:
     """BUG-186：tail>0 时不得 Path.read_text 全量读入。"""
     _write(workspace, "api", "build", "keep-me\n" + ("noise\n" * 5000) + "TAIL-A\nTAIL-B\n")

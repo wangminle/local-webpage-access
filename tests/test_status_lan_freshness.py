@@ -12,7 +12,16 @@ from local_webpage_access.registry import Registry
 from local_webpage_access.status import instance_status
 
 
-def _seed(workspace: Workspace, registry: Registry, iid: str = "demo", *, host_port: int = 21000, lan_url: str, route_host: str | None = None, route_url: str | None = None):
+def _seed(
+    workspace: Workspace,
+    registry: Registry,
+    iid: str = "demo",
+    *,
+    host_port: int = 21000,
+    lan_url: str,
+    route_host: str | None = None,
+    route_url: str | None = None,
+):
     from local_webpage_access.models import (
         DesiredState,
         InstanceManifest,
@@ -73,9 +82,7 @@ def test_status_synthesizes_live_lan_url_when_persisted_stale(ws_reg, monkeypatc
     """旧落盘 IP + mock 新 IP → DTO lanUrl 已是新地址。"""
     ws, reg = ws_reg
     _seed(ws, reg, lan_url="http://10.0.0.99:21000")
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
     cfg = Config(lanIpStrategy="auto", portPool=PortPool(start=21000, end=21050))
     snap = instance_status(ws, cfg, reg, "demo")
     data = snap.to_dict()
@@ -95,9 +102,7 @@ def test_status_synthesizes_route_url_host_on_drift(ws_reg, monkeypatch) -> None
         route_host="demo",
         route_url="http://10.0.0.99:8080/demo/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
     cfg = Config(
         lanIpStrategy="auto",
         staticGatewayPort=8080,

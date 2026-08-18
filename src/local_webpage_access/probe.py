@@ -31,14 +31,10 @@ def mark_probe_url(url: str) -> str:
     """
     parts = urlsplit(url)
     query = [
-        (k, v)
-        for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        if k != LWA_PROBE_PARAM
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != LWA_PROBE_PARAM
     ]
     query.append((LWA_PROBE_PARAM, LWA_PROBE_VALUE))
-    return urlunsplit(
-        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
-    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def urlopen_direct(url: str | urllib.request.Request, *, timeout: float | None = None) -> Any:

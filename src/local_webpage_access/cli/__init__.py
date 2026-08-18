@@ -59,7 +59,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.7.11-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.8.0-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -84,9 +84,7 @@ def init(
         "--full",
         help="装配档位：初始化后检查并安装 Caddy + Docker Engine + Compose",
     ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="full 档跳过确认直接安装（非 TTY 时必须）"
-    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="full 档跳过确认直接安装（非 TTY 时必须）"),
     install_docker: bool = typer.Option(
         False,
         "--install-docker",
@@ -179,9 +177,31 @@ def init(
             for msg in offer.messages:
                 typer.echo(msg)
             # BUG-197：安装失败或复检失败时非零退出
-            if offer.attempted and (
-                offer.script_ok is False or offer.recheck_ok is False
-            ):
+            if offer.attempted and (offer.script_ok is False or offer.recheck_ok is False):
+                raise typer.Exit(code=1)
+
+        # IMP-061.02：Linux systemd 环境收尾引导安装自启（TTY 询问；非 TTY 仅提示）
+        from local_webpage_access import autostart as asm
+        from local_webpage_access.config import load_config
+        from local_webpage_access.paths import Workspace as _Workspace
+
+        # CHK-224#2：引导属增强项——探测/安装的**任何**异常（AutostartError/
+        # OSError 等）都不阻断 init 主流程；结果处理放 else 块，保证
+        # `typer.Exit`（click.Exit 继承 RuntimeError→Exception）不被吞掉。
+        try:
+            _ws = _Workspace(ws)
+            autostart_offer = asm.maybe_offer_autostart_install(_ws, load_config(_ws))
+        except Exception:  # noqa: BLE001 — 见上：引导失败不阻断 init 主流程
+            log.debug("init 收尾自启引导异常（忽略）", exc_info=True)
+        else:
+            for msg in autostart_offer.messages:
+                typer.echo(msg)
+            if autostart_offer.attempted and autostart_offer.ok is False:
+                typer.secho(
+                    "自启动安装未完全成功；可稍后 `lwa autostart check` 复核并按提示修复",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
                 raise typer.Exit(code=1)
 
         typer.echo("\n下一步：把 zip 放入 inbox/ 后执行 `lwa import inbox/xxx.zip`")

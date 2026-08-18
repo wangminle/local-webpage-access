@@ -225,9 +225,7 @@ def test_run_marks_queued_when_waiting(registry, config) -> None:
 
     def quick_builder(iid):
         # 第二个：此时第一个还在跑，应该处于 queued
-        queued_seen["v"] = (
-            registry.get_instance(iid)["status"] == Status.QUEUED.value
-        )
+        queued_seen["v"] = registry.get_instance(iid)["status"] == Status.QUEUED.value
         second_checked.set()
         return iid
 
@@ -315,9 +313,7 @@ def test_queue_timeout_does_not_leave_status_queued(registry, config) -> None:
     def blocking_builder(iid):
         # 期间 api2 应被标记为 queued
         time.sleep(0.15)
-        queued_seen["v"] = (
-            registry.get_instance("api2")["status"] == Status.QUEUED.value
-        )
+        queued_seen["v"] = registry.get_instance("api2")["status"] == Status.QUEUED.value
         release.wait(2.0)
         return iid
 
@@ -472,9 +468,7 @@ def test_cancel_building_kills_process_tree(registry, config) -> None:
     with q._guard:
         assert q._tasks["api"].status == "cancelled"
     assert errors, "builder 线程应因取消而退出"
-    assert any(
-        isinstance(e, (LifecycleError, BuildCancelled)) or "取消" in str(e) for e in errors
-    )
+    assert any(isinstance(e, (LifecycleError, BuildCancelled)) or "取消" in str(e) for e in errors)
 
 
 def test_cancel_idempotent_and_does_not_mutate_completed(registry, config) -> None:
@@ -533,7 +527,6 @@ def test_cancel_pid_reuse_does_not_signal_unrelated(registry, config, tmp_path) 
     import os
     import subprocess
     import sys
-
 
     if sys.platform == "win32":
         pytest.skip("PID 复用身份校验用例以 POSIX 为准")
@@ -803,9 +796,7 @@ def test_cross_process_gate_reclaims_dead_holder_slot(tmp_path) -> None:
         "g.acquire('leaker', 2.0)\n"
         # 进程退出，slot 行残留
     )
-    subprocess.run(
-        [sys.executable, "-c", leak_script], capture_output=True, timeout=15, check=True
-    )
+    subprocess.run([sys.executable, "-c", leak_script], capture_output=True, timeout=15, check=True)
 
     gate = CrossProcessBuildGate(db, 1)
     # acquire 时应回收死进程的槽位并获取成功
@@ -928,15 +919,11 @@ def test_cancel_query_ignores_different_build_generation(registry, config) -> No
         cancel_requested_at=time.time(),
     )
 
-    assert (
-        q._gate.is_cancel_requested("api", build_token="current-generation") is False
-    )
+    assert q._gate.is_cancel_requested("api", build_token="current-generation") is False
     assert q._gate.is_cancel_requested("api", build_token="old-generation") is True
 
 
-def test_cross_process_cancel_interrupts_gate_wait_immediately(
-    registry, config
-) -> None:
+def test_cross_process_cancel_interrupts_gate_wait_immediately(registry, config) -> None:
     """BUG-293：取消 queued 任务后，owner 不得继续等占槽任务结束。"""
     _seed_instance(registry, "blocker")
     _seed_instance(registry, "target")
@@ -1014,9 +1001,7 @@ def test_build_task_update_rejects_stale_token(registry, config) -> None:
     assert row["status"] == "building"
 
 
-def test_build_task_cancelled_terminal_rejects_success_overwrite(
-    registry, config
-) -> None:
+def test_build_task_cancelled_terminal_rejects_success_overwrite(registry, config) -> None:
     """BUG-307：同代际 cancelled 终态不得被迟到的 success 覆盖。"""
     q = BuildQueue(config, registry, concurrency=1)
     q._gate.upsert_build_task(
@@ -1047,9 +1032,7 @@ def test_build_task_cancelled_terminal_rejects_success_overwrite(
     assert row["status"] == "cancelled"
 
 
-def test_reclaim_dead_owner_terminates_orphan_worker(
-    registry, config, monkeypatch
-) -> None:
+def test_reclaim_dead_owner_terminates_orphan_worker(registry, config, monkeypatch) -> None:
     """BUG-308：owner 死亡时须先终止身份匹配的孤儿 worker 再回收任务。"""
     q = BuildQueue(config, registry, concurrency=1)
     q._gate.upsert_build_task(
@@ -1069,10 +1052,9 @@ def test_reclaim_dead_owner_terminates_orphan_worker(
     )
     monkeypatch.setattr(
         "local_webpage_access.build_queue.kill_pid_tree_if_matches",
-        lambda pid, *, expected_pgid, expected_identity: killed.append(
-            (pid, expected_pgid, expected_identity)
-        )
-        or True,
+        lambda pid, *, expected_pgid, expected_identity: (
+            killed.append((pid, expected_pgid, expected_identity)) or True
+        ),
     )
 
     slot = q._gate.acquire("next", 0.0)

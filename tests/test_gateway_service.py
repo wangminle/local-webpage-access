@@ -334,9 +334,9 @@ def test_start_gateway_writes_main_config_before_caddy_start(
     start_gateway(workspace, config)
     assert fake_gateway["write_main_calls"] == 1
     assert fake_gateway["sync_calls"] == 0
-    assert fake_gateway["call_order"].index("write_main_config") < fake_gateway[
-        "call_order"
-    ].index("caddy_start")
+    assert fake_gateway["call_order"].index("write_main_config") < fake_gateway["call_order"].index(
+        "caddy_start"
+    )
 
 
 def test_start_gateway_recovers_state_when_already_running(
@@ -508,9 +508,7 @@ def test_start_gateway_without_registry_skips_finalize(
 # ---- stop_gateway -----------------------------------------------------------
 
 
-def test_stop_gateway_clears_state(
-    workspace: Workspace, config: Config, fake_gateway
-) -> None:
+def test_stop_gateway_clears_state(workspace: Workspace, config: Config, fake_gateway) -> None:
     write_state(workspace, GatewayState(enabled=True, pid=12345, started_at="t", port=8080))
     fake_gateway["stop_ok"] = True
     assert stop_gateway(workspace, config) is True
@@ -519,9 +517,7 @@ def test_stop_gateway_clears_state(
     assert st is not None and st.enabled is False and st.pid is None
 
 
-def test_stop_gateway_reports_failure(
-    workspace: Workspace, config: Config, fake_gateway
-) -> None:
+def test_stop_gateway_reports_failure(workspace: Workspace, config: Config, fake_gateway) -> None:
     write_state(workspace, GatewayState(enabled=True, pid=12345, started_at="t", port=8080))
     fake_gateway["stop_ok"] = False
     assert stop_gateway(workspace, config) is False
@@ -558,9 +554,7 @@ def test_stop_gateway_builtin_still_stops_alive_master(
 # ---- gateway_status ---------------------------------------------------------
 
 
-def test_gateway_status_running_caddy(
-    workspace: Workspace, config: Config, fake_gateway
-) -> None:
+def test_gateway_status_running_caddy(workspace: Workspace, config: Config, fake_gateway) -> None:
     fake_gateway["admin_alive"] = True
     fake_gateway["pid"] = 999
     # 写一个 caddy.pid，status 应补读
@@ -584,9 +578,7 @@ def test_gateway_status_not_running_no_state(
     assert st["pid"] is None
 
 
-def test_gateway_status_builtin_backend(
-    workspace: Workspace, config: Config, fake_gateway
-) -> None:
+def test_gateway_status_builtin_backend(workspace: Workspace, config: Config, fake_gateway) -> None:
     fake_gateway["backend"] = "builtin"
     fake_gateway["admin_alive"] = False
     st = gateway_status(workspace, config)
@@ -750,15 +742,11 @@ def test_run_gateway_foreground_refreshes_capability_after_start(
         probe_order.append(f"write:{role}:{report.gateway_access}")
         return real_write(root, role, report)
 
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_service.start_gateway", fake_start
-    )
+    monkeypatch.setattr("local_webpage_access.gateway_service.start_gateway", fake_start)
     monkeypatch.setattr(
         "local_webpage_access.gateway_service.is_gateway_running", lambda *a, **k: True
     )
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_service.stop_gateway", lambda *a, **k: None
-    )
+    monkeypatch.setattr("local_webpage_access.gateway_service.stop_gateway", lambda *a, **k: None)
     monkeypatch.setattr(cap_mod, "collect_capability_report", fake_collect)
     monkeypatch.setattr(cap_mod, "log_capability_probe", fake_log_probe)
     monkeypatch.setattr(cap_mod, "write_capability_cache", fake_write)

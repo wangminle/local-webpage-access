@@ -16,15 +16,19 @@ from local_webpage_access.errors import LwaError
 def start(
     instance_id: str = typer.Argument(..., help="要启动的实例 ID"),
     auto_fallback: bool = typer.Option(
-        False, "--auto-fallback",
+        False,
+        "--auto-fallback",
         help="top-1 候选失败时自动降级到等价计划（跳过确认）",
     ),
     no_fallback: bool = typer.Option(
-        False, "--no-fallback",
+        False,
+        "--no-fallback",
         help="top-1 候选失败时不降级（直接失败）",
     ),
     yes: bool = typer.Option(
-        False, "--yes", "-y",
+        False,
+        "--yes",
+        "-y",
         help="非交互确认（CI / 脚本调用，等价于 --auto-fallback）",
     ),
 ) -> None:
@@ -53,13 +57,20 @@ def start(
         try:
             try:
                 manifest = start_instance(
-                    ws, config, reg, instance_id,
+                    ws,
+                    config,
+                    reg,
+                    instance_id,
                     fallback_policy=fallback_policy,
                 )
             except FallbackConfirmationRequired as fcr:
                 # C.R03：交互式确认--展示等价计划并等待用户选择
                 manifest = _handle_fallback_confirmation(
-                    ws, config, reg, instance_id, fcr,
+                    ws,
+                    config,
+                    reg,
+                    instance_id,
+                    fcr,
                 )
         finally:
             reg.close()
@@ -133,8 +144,7 @@ def _handle_fallback_confirmation(
     # 非交互式环境 -> fail-closed
     if not sys.stdin.isatty():
         typer.secho(
-            "\n非交互式环境：无法确认降级。"
-            "使用 --auto-fallback 或 --yes 自动降级。",
+            "\n非交互式环境：无法确认降级。使用 --auto-fallback 或 --yes 自动降级。",
             fg=typer.colors.RED,
             err=True,
         )
@@ -148,7 +158,10 @@ def _handle_fallback_confirmation(
     # 确认后以 auto-equivalent 重试
     typer.secho("正在降级到等价候选...", fg=typer.colors.YELLOW)
     return start_instance(
-        ws, config, reg, instance_id,
+        ws,
+        config,
+        reg,
+        instance_id,
         fallback_policy="auto-equivalent",
     )
 
@@ -240,9 +253,7 @@ def cancel_build(
         outcome = getattr(result, "outcome", "unknown")
         message = getattr(result, "message", "") or outcome
         if outcome == "cancelled":
-            typer.secho(
-                f"已取消构建：{instance_id}（{message}）", fg=typer.colors.GREEN
-            )
+            typer.secho(f"已取消构建：{instance_id}（{message}）", fg=typer.colors.GREEN)
         elif outcome == "cancel_failed":
             typer.secho(
                 f"取消失败：{instance_id}（{message}）",
@@ -269,17 +280,13 @@ def cancel_build(
 def remove(
     instance_id: str = typer.Argument(None, help="要移除的实例 ID"),
     purge: bool = typer.Option(False, "--purge", help="同时删除 apps/<id>/ 磁盘文件"),
-    force: bool = typer.Option(
-        False, "--force", help="purge 时强制删除非空 data/（默认保护）"
-    ),
+    force: bool = typer.Option(False, "--force", help="purge 时强制删除非空 data/（默认保护）"),
     redundant: bool = typer.Option(
         False,
         "--redundant",
         help="IMP-012：批量移除冗余实例（按原始 zip 指纹去重，保留每组最早者）",
     ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="非交互确认（CI / 脚本调用）"
-    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="非交互确认（CI / 脚本调用）"),
 ) -> None:
     """移除实例（默认保留磁盘文件与 data/，仅删 registry 索引）。
 
@@ -337,9 +344,7 @@ def remove(
         if purge:
             typer.secho(f"已移除实例（含磁盘文件）：{instance_id}", fg=typer.colors.GREEN)
         else:
-            typer.secho(
-                f"已移除实例（保留磁盘文件）：{instance_id}", fg=typer.colors.GREEN
-            )
+            typer.secho(f"已移除实例（保留磁盘文件）：{instance_id}", fg=typer.colors.GREEN)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -363,9 +368,7 @@ def logs(
             if not text:
                 available = [i.category for i in list_logs(ws, instance_id)]
                 hint = f"（可用分类：{', '.join(available) or '无'}）" if available else ""
-                typer.secho(
-                    f"日志 {category}.log 不存在或为空{hint}", fg=typer.colors.YELLOW
-                )
+                typer.secho(f"日志 {category}.log 不存在或为空{hint}", fg=typer.colors.YELLOW)
             else:
                 typer.echo(text)
         finally:

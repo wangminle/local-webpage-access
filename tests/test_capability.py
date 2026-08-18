@@ -123,9 +123,7 @@ def test_full_overall_requires_caddy_gateway_and_backends() -> None:
     assert _compute_overall(owner_bad) == "unready"
 
 
-def test_write_capability_cache_uses_atomic_replace(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_write_capability_cache_uses_atomic_replace(tmp_path: Path, monkeypatch) -> None:
     """能力缓存须同目录临时文件 + os.replace，避免并发读到半截 JSON。"""
     import os
 
@@ -244,9 +242,7 @@ def test_gateway_role_overall_only_requires_caddy_fields() -> None:
     assert _compute_overall(report) == "ready"
 
 
-def test_live_manager_probe_is_not_overwritten_by_own_cache(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_live_manager_probe_is_not_overwritten_by_own_cache(tmp_path: Path, monkeypatch) -> None:
     """BUG-246：manager 实时探测优先于旧 capability-manager.json。"""
     write_capability_cache(
         tmp_path,
@@ -275,9 +271,7 @@ def test_live_manager_probe_is_not_overwritten_by_own_cache(
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_docker_access_state", lambda: "ready"
     )
-    monkeypatch.setattr(
-        "local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready"
-    )
+    monkeypatch.setattr("local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready")
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_caddy_runtime_fields",
         lambda _root: ("ready", "lwa_service_user", "fenix", "ready"),
@@ -293,9 +287,7 @@ def test_live_manager_probe_is_not_overwritten_by_own_cache(
     assert report.overall == "ready"
 
 
-def test_stale_gateway_cache_does_not_override_live_caddy(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_stale_gateway_cache_does_not_override_live_caddy(tmp_path: Path, monkeypatch) -> None:
     """BUG-253：gateway 已停或缓存陈旧时，不得用旧 ready 覆盖 live admin_unavailable。"""
     write_capability_cache(
         tmp_path,
@@ -315,9 +307,7 @@ def test_stale_gateway_cache_does_not_override_live_caddy(
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_docker_access_state", lambda: "ready"
     )
-    monkeypatch.setattr(
-        "local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready"
-    )
+    monkeypatch.setattr("local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready")
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_caddy_runtime_fields",
         lambda _root: ("admin_unavailable", "unknown", None, "ready"),
@@ -354,9 +344,7 @@ def test_live_caddy_not_overwritten_even_when_gateway_cache_alive(
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_docker_access_state", lambda: "ready"
     )
-    monkeypatch.setattr(
-        "local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready"
-    )
+    monkeypatch.setattr("local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready")
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_caddy_runtime_fields",
         lambda _root: ("admin_unavailable", "unknown", None, "ready"),
@@ -437,9 +425,7 @@ def test_read_capability_health_fragment_rejects_stale_cache(tmp_path: Path) -> 
     assert read_capability_health_fragment(tmp_path) is None
 
 
-def test_backend_role_alive_rejects_unrelated_python_pid(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_backend_role_alive_rejects_unrelated_python_pid(tmp_path: Path, monkeypatch) -> None:
     """BUG-256：PID 存活但命令行非 manager/本工作区时不得信任缓存。"""
     import os
 
@@ -496,9 +482,7 @@ def test_log_capability_probe_does_not_raise(caplog) -> None:
         logger.setLevel(orig_level)
 
 
-def test_overlay_recomputes_overall_when_gateway_becomes_ready(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_overlay_recomputes_overall_when_gateway_becomes_ready(tmp_path: Path, monkeypatch) -> None:
     """BUG-284：overlay 纠偏 gatewayAccess 后须重算 overall，不得留下陈旧 unready。"""
     from local_webpage_access.capability import (
         CapabilityReport,
@@ -566,9 +550,7 @@ def test_overlay_never_invents_overall_without_manager_fragment(
     assert out.get("overall") != "ready"
 
 
-def test_overlay_never_invents_ready_from_startup_placeholder(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_overlay_never_invents_ready_from_startup_placeholder(tmp_path: Path, monkeypatch) -> None:
     """BUG-284：manager 启动占位片段（capabilities 为空）不得被纠偏成 ready。
 
     default profile 下 ``_compute_overall`` 对全 unknown 返回 ready，若不设防会在
@@ -601,9 +583,7 @@ def test_overlay_never_invents_ready_from_startup_placeholder(
     assert out["overall"] == "unknown"
 
 
-def test_overlay_keeps_unready_when_other_capability_still_bad(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_overlay_keeps_unready_when_other_capability_still_bad(tmp_path: Path, monkeypatch) -> None:
     """BUG-284：仅 gatewayAccess 转 ready 不足以翻盘，其余强制项仍失败时保持 unready。"""
     from local_webpage_access.capability import (
         CapabilityReport,
@@ -692,9 +672,7 @@ def test_three_role_caches_converge_manager_and_cli_overall_ready(
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_docker_access_state", lambda: "ready"
     )
-    monkeypatch.setattr(
-        "local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready"
-    )
+    monkeypatch.setattr("local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready")
     monkeypatch.setattr(
         "local_webpage_access.capability.probe_caddy_runtime_fields",
         lambda _root: ("ready", "lwa_service_user", "lwa", "ready"),

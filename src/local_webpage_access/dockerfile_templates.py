@@ -62,6 +62,7 @@ def _copy_prefix(manifest: InstanceManifest) -> str:
         return f"current/{sanitized}/"
     return "current/"
 
+
 # IMP-054：Python 包 → 所需 apt 系统库映射。
 # 这些包的 wheel 不含系统共享库，运行时 import 会 ImportError；LWA 在
 # 生成 Dockerfile 时自动追加 apt-get install，避免 rebuild 后丢失手动装的包。
@@ -130,9 +131,7 @@ def generate_dockerfile(
     findings = audit_dockerfile(content)
     if has_critical(findings):
         codes = ", ".join(f.code for f in findings if f.level == "critical")
-        raise RuntimeError(
-            f"生成的 Dockerfile 含 critical 安全问题（{codes}），已拒绝写出"
-        )
+        raise RuntimeError(f"生成的 Dockerfile 含 critical 安全问题（{codes}），已拒绝写出")
     for f in findings:
         log.warning("Dockerfile 安全审计 [%s] %s", f.code, f.message)
 
@@ -140,9 +139,7 @@ def generate_dockerfile(
     # BUG-117：构建上下文是 apps/<id>/，.dockerignore 与 Dockerfile 一并生成。
     # BUG-128：有 build 步骤才排除 dist/build（构建会重生成）；否则保留预构建产物。
     has_build = bool(manifest.entry and manifest.entry.build)
-    generate_dockerignore(
-        workspace, manifest.id, exclude_build_artifacts=has_build
-    )
+    generate_dockerignore(workspace, manifest.id, exclude_build_artifacts=has_build)
     log.info("已生成 Dockerfile：%s", out_path)
     return out_path
 
@@ -320,9 +317,7 @@ def _validate_apt_mirror_host(host: str) -> str:
     """校验 aptMirror 为安全 hostname（拒绝 shell 元字符注入）。"""
     host = host.strip()
     if not host or not _APT_MIRROR_HOST_RE.fullmatch(host):
-        raise ValueError(
-            f"非法 aptMirror：{host!r}（仅允许 hostname，如 mirrors.aliyun.com）"
-        )
+        raise ValueError(f"非法 aptMirror：{host!r}（仅允许 hostname，如 mirrors.aliyun.com）")
     return host
 
 
@@ -397,9 +392,7 @@ def _detect_apt_deps(source_dir: Path | None, install: str) -> list[str]:
     return apt_deps
 
 
-def _render_apt_deps_block(
-    apt_deps: list[str], mirrors: BuildMirrors | None
-) -> str:
+def _render_apt_deps_block(apt_deps: list[str], mirrors: BuildMirrors | None) -> str:
     """渲染 apt-get install 系统依赖的 RUN 指令（IMP-054）。
 
     与 node_toolchain 的 apt 块对称：使用 ``_apt_mirror_prefix``，
@@ -458,21 +451,13 @@ def _render_python(
             start = run_prefix + start
     elif install.startswith("pip install ."):
         needs_early_full_copy = True
-        deps_block = (
-            f"COPY {cpfx} ./\n"
-            + _pip_run(install, mirrors=mirrors)
-            + "\n"
-        )
+        deps_block = f"COPY {cpfx} ./\n" + _pip_run(install, mirrors=mirrors) + "\n"
     elif "pipenv" in install:
         install_cmd = install
         if install_cmd.startswith("pipenv "):
             install_cmd = f"pip install pipenv && {install_cmd}"
         install_cmd = install_cmd.replace("pip install --no-cache-dir", "pip install")
-        deps_block = (
-            f"COPY {cpfx}Pipfile* ./\n"
-            + _pip_run(install_cmd, mirrors=mirrors)
-            + "\n"
-        )
+        deps_block = f"COPY {cpfx}Pipfile* ./\n" + _pip_run(install_cmd, mirrors=mirrors) + "\n"
     elif install.startswith("pip install -r"):
         # requirements 路径（默认 / requirements-prod.txt，IMP-017）。
         # 从 install 命令解析目标文件名，使 COPY 与 RUN 始终一致。
@@ -490,15 +475,12 @@ def _render_python(
             # pytest-xdist 等含版本号或 extras 的行），让镜像不含测试包。
             # python:3.13-slim（Debian）自带 GNU sed，-E 用扩展正则。
             # BUG-360：须匹配 pytest[extras]、前导空白；旧正则漏掉 extras 写法。
-            strip_step = (
-                f"RUN sed -i -E '/^\\s*pytest([-_]|[<>=!~\\[]|$)/d' {req_file}\n"
-            )
+            strip_step = f"RUN sed -i -E '/^\\s*pytest([-_]|[<>=!~\\[]|$)/d' {req_file}\n"
         else:
             # requirements-prod.txt 已是生产子集，无需剥离。
             strip_step = ""
         deps_block = (
-            f"{req_copy}\n{strip_step}"
-            f"{_pip_run(f'pip install -r {req_file}', mirrors=mirrors)}\n"
+            f"{req_copy}\n{strip_step}{_pip_run(f'pip install -r {req_file}', mirrors=mirrors)}\n"
         )
     else:
         # 兜底（无法解析的 install）：按 requirements.txt 处理
@@ -506,9 +488,7 @@ def _render_python(
         if "pip install" in fallback and "--no-cache-dir" not in fallback:
             pass
         deps_block = (
-            f"COPY {cpfx}requirements.txt ./\n"
-            + _pip_run(fallback, mirrors=mirrors)
-            + "\n"
+            f"COPY {cpfx}requirements.txt ./\n" + _pip_run(fallback, mirrors=mirrors) + "\n"
         )
 
     # IMP-016（WBS-20260708 阶段2.5）：Python 全栈镜像含 Node 运行时。
@@ -517,7 +497,7 @@ def _render_python(
     #
     # 注意：不要用 Debian 的 ``apt install nodejs npm``——``npm`` 元包会拉入
     # webpack/terser 等约 300+ 依赖，在 Docker Desktop 默认内存下易 OOM
-    #（cannot allocate memory）。改用官方 Node 二进制 tarball（含 npm）。
+    # （cannot allocate memory）。改用官方 Node 二进制 tarball（含 npm）。
     #
     # BUG-117：Node 工具链与 npm ci 必须在完整 ``COPY current/`` 之前，
     # 否则任意源码改动都会打掉 Node 下载层（约 30MB）与 npm 依赖层。
@@ -531,27 +511,22 @@ def _render_python(
             f"  {apt_prefix}"
             "apt-get update; \\\n"
             "  apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \\\n"
-            "  ARCH=\"$(dpkg --print-architecture)\"; \\\n"
-            "  case \"$ARCH\" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;"
-            " *) echo \"unsupported arch: $ARCH\" >&2; exit 1;; esac; \\\n"
+            '  ARCH="$(dpkg --print-architecture)"; \\\n'
+            '  case "$ARCH" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;'
+            ' *) echo "unsupported arch: $ARCH" >&2; exit 1;; esac; \\\n'
             "  curl -fsSL"
-            f" \"{node_base}/v{_NODE_DIST_VERSION}/"
-            f"node-v{_NODE_DIST_VERSION}-linux-${{NODE_ARCH}}.tar.xz\""
+            f' "{node_base}/v{_NODE_DIST_VERSION}/'
+            f'node-v{_NODE_DIST_VERSION}-linux-${{NODE_ARCH}}.tar.xz"'
             " | tar -xJ -C /usr/local --strip-components=1; \\\n"
             "  rm -rf /var/lib/apt/lists/*; \\\n"
             "  node -v && npm -v\n"
         )
-        npm_install = _with_npm_registry(
-            "npm ci --omit=dev || npm install --omit=dev", mirrors
-        )
+        npm_install = _with_npm_registry("npm ci --omit=dev || npm install --omit=dev", mirrors)
         if needs_early_full_copy:
             # 源码已整包拷入，只需 npm 安装。
             npm_block = f"RUN {npm_install}\n"
         else:
-            npm_block = (
-                f"COPY {cpfx}package*.json ./\n"
-                f"RUN {npm_install}\n"
-            )
+            npm_block = f"COPY {cpfx}package*.json ./\nRUN {npm_install}\n"
 
     sqlite_mkdir = ""
     if _is_sqlite(manifest):
@@ -569,9 +544,7 @@ def _render_python(
 
     # IMP-054：探测 requirements.txt 中需要系统库的 Python 包，自动追加 apt-get install。
     # 放在 WORKDIR 之后、pip 依赖层之前，确保系统库先于 Python 包安装。
-    apt_deps_block = _render_apt_deps_block(
-        _detect_apt_deps(source_dir, install), mirrors
-    )
+    apt_deps_block = _render_apt_deps_block(_detect_apt_deps(source_dir, install), mirrors)
 
     # 分层顺序：系统库 -> Node 工具链（最稳）-> Python 依赖 -> npm 依赖 -> 完整源码。
     final_copy = "" if needs_early_full_copy else f"COPY {cpfx} ./\n"
@@ -595,9 +568,7 @@ def _render_python(
     return "\n".join(line for line in lines if line) + "\n"
 
 
-def _uses_runtime_root_layout(
-    manifest: InstanceManifest, source_dir: Path | None
-) -> bool:
+def _uses_runtime_root_layout(manifest: InstanceManifest, source_dir: Path | None) -> bool:
     """BUG-198：应用是否用 RUNTIME_ROOT / runtime/data 落库。
 
     与 :func:`local_webpage_access.compose.uses_runtime_root` 共用同一判定。
@@ -695,15 +666,11 @@ def _to_exec_form(shell_cmd: str) -> str:
         parts = parts[1:]
     if parts:
         return "[" + ", ".join(json.dumps(p) for p in parts) + "]"
-    return f'{json.dumps(shell_cmd)}'
+    return f"{json.dumps(shell_cmd)}"
 
 
 def _is_sqlite(manifest: InstanceManifest) -> bool:
-    return bool(
-        manifest.hasDatabase
-        and manifest.database
-        and manifest.database.type == "sqlite"
-    )
+    return bool(manifest.hasDatabase and manifest.database and manifest.database.type == "sqlite")
 
 
 def _database_label(manifest: InstanceManifest) -> str:
@@ -737,7 +704,11 @@ def _node_dependency_copy_block(
                 pkg = json.loads(root_pkg.read_text(encoding="utf-8"))
                 workspaces = pkg.get("workspaces")
                 if workspaces:
-                    patterns = workspaces if isinstance(workspaces, list) else workspaces.get("packages", [])
+                    patterns = (
+                        workspaces
+                        if isinstance(workspaces, list)
+                        else workspaces.get("packages", [])
+                    )
                     for pattern in patterns:
                         # 将 glob（如 "packages/*"）展开为实际目录
                         for pkg_dir in sorted(source_dir.glob(pattern)):

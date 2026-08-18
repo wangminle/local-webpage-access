@@ -46,9 +46,7 @@ def is_port_in_use(port: int, *, host: str = "0.0.0.0") -> bool:
         sock.close()
 
 
-def is_port_listening(
-    port: int, *, host: str = "127.0.0.1", timeout: float = 0.3
-) -> bool:
+def is_port_listening(port: int, *, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
     """端口上是否有进程正在监听（可接受连接）。
 
     用 ``connect`` 探测：连得上说明有活跃监听者；连不上（如 ECONNREFUSED）

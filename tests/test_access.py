@@ -110,10 +110,8 @@ def _seed_static(
 
 def test_refresh_rewrites_lanurl_on_drift(workspace, registry, config, monkeypatch):
     """LAN IP 变化后 refresh 重写 lanUrl 并报告漂移。"""
-    _seed_static(workspace, registry, "demo", host_port=21000,
-                 lan_url="http://10.0.0.99:21000")
-    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip",
-                        lambda cfg: "192.168.1.50")
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://10.0.0.99:21000")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
 
     report = refresh_network_entries(workspace, config, registry)
 
@@ -137,10 +135,15 @@ def test_refresh_rewrites_lanurl_on_drift(workspace, registry, config, monkeypat
 
 def test_refresh_preserves_path_alias_and_routeurl(workspace, registry, config, monkeypatch):
     """刷新保留 pathAlias，并按当前 LAN IP 重算 routeUrl。"""
-    _seed_static(workspace, registry, "vp", host_port=21001,
-                 lan_url="http://10.0.0.99:21001", route_host="voiceprint")
-    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip",
-                        lambda cfg: "192.168.1.50")
+    _seed_static(
+        workspace,
+        registry,
+        "vp",
+        host_port=21001,
+        lan_url="http://10.0.0.99:21001",
+        route_host="voiceprint",
+    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
 
     report = refresh_network_entries(workspace, config, registry)
     item = report.refreshed[0]
@@ -153,9 +156,7 @@ def test_refresh_preserves_path_alias_and_routeurl(workspace, registry, config, 
     assert saved.network.routeUrl == "http://192.168.1.50:8080/voiceprint/"
 
 
-def test_refresh_preserves_network_extra_fields(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_refresh_preserves_network_extra_fields(workspace, registry, config, monkeypatch) -> None:
     """BUG-365：refresh 只更新地址字段，不得抹掉 NetworkConfig extra=allow 的扩展键。"""
     _seed_static(
         workspace,
@@ -174,9 +175,7 @@ def test_refresh_preserves_network_extra_fields(
     )
     manifest.save(manifest_path)
 
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
     refresh_network_entries(workspace, config, registry)
 
     saved = InstanceManifest.load(manifest_path)
@@ -248,9 +247,7 @@ def test_refresh_ignores_stale_routehost_when_port_mode(
     _hp2, active_alias, _ip2 = _extract_host_port_alias(manifest, for_review=False)
     assert active_alias is None
 
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
     report = refresh_network_entries(workspace, config, registry)
     assert report.refreshed[0].route_url is None
 
@@ -265,10 +262,8 @@ def test_refresh_ignores_stale_routehost_when_port_mode(
 
 def test_refresh_is_idempotent_when_no_drift(workspace, registry, config, monkeypatch):
     """地址未漂移时刷新幂等，drifted_count=0。"""
-    _seed_static(workspace, registry, "demo", host_port=21000,
-                 lan_url="http://192.168.1.50:21000")
-    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip",
-                        lambda cfg: "192.168.1.50")
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://192.168.1.50:21000")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
 
     report = refresh_network_entries(workspace, config, registry)
     assert report.drifted_count == 0
@@ -278,19 +273,28 @@ def test_refresh_is_idempotent_when_no_drift(workspace, registry, config, monkey
 def test_refresh_skips_instance_without_hostport(workspace, registry, config, monkeypatch):
     """无 hostPort 的实例被跳过，不报错。"""
     from local_webpage_access.models import (
-        InstanceManifest, Kind, Runtime, ServingMode, Status, DesiredState,
+        InstanceManifest,
+        Kind,
+        Runtime,
+        ServingMode,
+        Status,
+        DesiredState,
     )
 
     workspace.ensure_app_dirs("noport")
     manifest = InstanceManifest(
-        id="noport", name="noport", version="1", kind=Kind.STATIC,
-        runtime=Runtime.SHARED_STATIC, servingMode=ServingMode.SHARED_STATIC,
-        status=Status.PENDING, desiredState=DesiredState.STOPPED,
+        id="noport",
+        name="noport",
+        version="1",
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        status=Status.PENDING,
+        desiredState=DesiredState.STOPPED,
     )
     manifest.save(workspace.app_manifest_path("noport"))
     registry.upsert_from_manifest(manifest)
-    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip",
-                        lambda cfg: "192.168.1.50")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
 
     report = refresh_network_entries(workspace, config, registry)
     assert "noport" in report.skipped
@@ -311,9 +315,7 @@ def test_refresh_skips_write_when_lan_ip_unavailable(
     )
     from local_webpage_access.models import InstanceManifest
 
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: None
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: None)
 
     report = refresh_network_entries(workspace, config, registry)
 
@@ -331,10 +333,8 @@ def test_refresh_skips_write_when_lan_ip_unavailable(
 
 def test_review_detects_lan_url_stale(workspace, registry, config, monkeypatch):
     """lanUrl host 与当前 LAN IP 不一致 → lan_url_stale=True。"""
-    _seed_static(workspace, registry, "demo", host_port=21000,
-                 lan_url="http://10.0.0.99:21000")
-    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip",
-                        lambda cfg: "192.168.1.50")
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://10.0.0.99:21000")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
     # 回环探活通过（服务在本机跑）
     monkeypatch.setattr(
         "local_webpage_access.access._http_get",
@@ -348,9 +348,7 @@ def test_review_detects_lan_url_stale(workspace, registry, config, monkeypatch):
     assert any("漂移" in f for f in rep.findings)
 
 
-def test_review_skips_desired_stopped_instance(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_review_skips_desired_stopped_instance(workspace, registry, config, monkeypatch) -> None:
     """BUG-301：用户已停用的实例不应因端口不可达被判访问失败。"""
     _seed_static(
         workspace,
@@ -388,9 +386,9 @@ class _SpaHandler(http.server.BaseHTTPRequestHandler):
     """模拟 IMP-023 场景：别名入口 HTML 含绝对资源；绝对路径空 200，带前缀有实体。"""
 
     HTML = (
-        b'<!doctype html><html><head>'
+        b"<!doctype html><html><head>"
         b'<script type="module" src="/assets/app.js"></script>'
-        b'</head><body>spa</body></html>'
+        b"</head><body>spa</body></html>"
     )
 
     def do_GET(self):  # noqa: N802
@@ -447,13 +445,15 @@ def test_review_detects_spa_empty_200(workspace, registry, config, spa_server, m
     # host_port 与 staticGatewayPort 都指向测试服务（同一端口的 `/` 返回 200）
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "vp", host_port=port,
+        workspace,
+        registry,
+        "vp",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",  # 同机，不漂移
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip",
-                        lambda cfg: "127.0.0.1")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
@@ -472,9 +472,9 @@ class _Spa404Handler(http.server.BaseHTTPRequestHandler):
     """BUG-381：绝对路径 404、带前缀 200 —— 常见别名白屏（非空 200）。"""
 
     HTML = (
-        b'<!doctype html><html><head>'
+        b"<!doctype html><html><head>"
         b'<script type="module" src="/assets/app.js"></script>'
-        b'</head><body>spa</body></html>'
+        b"</head><body>spa</body></html>"
     )
 
     def do_GET(self):  # noqa: N802
@@ -503,9 +503,9 @@ class _SpaMimeHandler(http.server.BaseHTTPRequestHandler):
     """BUG-381：绝对路径返回非空 HTML（错误 MIME），带前缀返回真实 JS。"""
 
     HTML = (
-        b'<!doctype html><html><head>'
+        b"<!doctype html><html><head>"
         b'<script type="module" src="/assets/app.js"></script>'
-        b'</head><body>spa</body></html>'
+        b"</head><body>spa</body></html>"
     )
 
     def do_GET(self):  # noqa: N802
@@ -565,14 +565,15 @@ def test_review_detects_spa_absolute_404_mismatch(
     port = spa_404_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "vp404", host_port=port,
+        workspace,
+        registry,
+        "vp404",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
@@ -594,9 +595,7 @@ def test_alias_mismatch_ignores_connection_failures() -> None:
 
     prefixed = UrlProbe(url="http://x/alias/a.js", ok=True, content_length=10)
     for note in ("TIMEOUT", "REFUSED", "UNREACHABLE"):
-        absolute = UrlProbe(
-            url="http://x/a.js", ok=False, status_code=None, note=note
-        )
+        absolute = UrlProbe(url="http://x/a.js", ok=False, status_code=None, note=note)
         empty, mismatch = _alias_resource_mismatch("/a.js", absolute, prefixed)
         assert empty is False
         assert mismatch is False, note
@@ -613,14 +612,15 @@ def test_review_detects_spa_wrong_mime_mismatch(
     port = spa_mime_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "vpmime", host_port=port,
+        workspace,
+        registry,
+        "vpmime",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
@@ -641,28 +641,25 @@ def test_review_no_mismatch_when_both_absolute_and_prefixed_fail(
 
     config.staticGatewayPort = 18080
     _seed_static(
-        workspace, registry, "bothfail", host_port=18080,
+        workspace,
+        registry,
+        "bothfail",
+        host_port=18080,
         lan_url="http://127.0.0.1:18080",
         route_host="alias",
         route_url="http://127.0.0.1:18080/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(
         "local_webpage_access.access._fetch_text",
-        lambda url, **kw: (
-            '<script src="/assets/app.js"></script>' if "/alias/" in url else None
-        ),
+        lambda url, **kw: '<script src="/assets/app.js"></script>' if "/alias/" in url else None,
     )
 
     def fake_get(url, **kw):
         # 入口/回环通；绝对与带前缀资源均 404
         if url.rstrip("/").endswith("/alias") or url.endswith(":18080/"):
             return UrlProbe(url=url, status_code=200, content_length=10, ok=True)
-        return UrlProbe(
-            url=url, status_code=404, content_length=0, ok=False, note="HTTP 404"
-        )
+        return UrlProbe(url=url, status_code=404, content_length=0, ok=False, note="HTTP 404")
 
     monkeypatch.setattr("local_webpage_access.access._http_get", fake_get)
     report = review_access(workspace, config, registry)
@@ -679,14 +676,15 @@ def test_review_no_mismatch_when_absolute_mime_correct(
     port = spa_ok_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "okmime", host_port=port,
+        workspace,
+        registry,
+        "okmime",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
     assert rep.subresources
@@ -696,9 +694,9 @@ def test_review_no_mismatch_when_absolute_mime_correct(
 
 class _SpaOkHandler(http.server.BaseHTTPRequestHandler):
     HTML = (
-        b'<!doctype html><html><head>'
+        b"<!doctype html><html><head>"
         b'<script type="module" src="/assets/app.js"></script>'
-        b'</head><body>spa</body></html>'
+        b"</head><body>spa</body></html>"
     )
 
     def do_GET(self):  # noqa: N802
@@ -778,13 +776,15 @@ def test_review_synthesizes_route_when_route_url_missing(
     port = spa_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "prd", host_port=port,
+        workspace,
+        registry,
+        "prd",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=None,  # 元数据漂移：有别名无 routeUrl
     )
-    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip",
-                        lambda cfg: "127.0.0.1")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
@@ -805,14 +805,15 @@ def test_instances_needing_rebuild_from_imp023(
     port = spa_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "vp", host_port=port,
+        workspace,
+        registry,
+        "vp",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     assert instances_needing_rebuild(report) == ["vp"]
@@ -831,14 +832,15 @@ def test_maybe_rebuild_skipped_without_flag(
     port = spa_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "vp", host_port=port,
+        workspace,
+        registry,
+        "vp",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
     report = review_access(workspace, config, registry)
     calls: list[str] = []
 
@@ -846,7 +848,10 @@ def test_maybe_rebuild_skipped_without_flag(
         calls.append(iid)
 
     out = maybe_rebuild_after_review(
-        workspace, config, registry, report,
+        workspace,
+        config,
+        registry,
+        report,
         rebuild_if_needed=False,
         rebuild_fn=fake_rebuild,
     )
@@ -863,14 +868,15 @@ def test_maybe_rebuild_runs_when_flag_set(
     port = spa_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "vp", host_port=port,
+        workspace,
+        registry,
+        "vp",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
     # 复检桩为「已修复」，避免 spa_server 仍返回绝对路径导致 still_imp023。
     monkeypatch.setattr(
         "local_webpage_access.access.instance_still_has_imp023",
@@ -883,7 +889,10 @@ def test_maybe_rebuild_runs_when_flag_set(
         calls.append(iid)
 
     out = maybe_rebuild_after_review(
-        workspace, config, registry, report,
+        workspace,
+        config,
+        registry,
+        report,
         rebuild_if_needed=True,
         rebuild_fn=fake_rebuild,
     )
@@ -904,20 +913,24 @@ def test_maybe_rebuild_still_imp023_when_assets_unchanged(
     port = spa_server
     config.staticGatewayPort = port
     _seed_static(
-        workspace, registry, "vp", host_port=port,
+        workspace,
+        registry,
+        "vp",
+        host_port=port,
         lan_url=f"http://127.0.0.1:{port}",
         route_host="alias",
         route_url=f"http://127.0.0.1:{port}/alias/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
     report = review_access(workspace, config, registry)
     # spa_server 仍提供绝对 /assets → 复检应仍命中
     assert instance_still_has_imp023(config, path_alias="alias") is True
 
     out = maybe_rebuild_after_review(
-        workspace, config, registry, report,
+        workspace,
+        config,
+        registry,
+        report,
         rebuild_if_needed=True,
         rebuild_fn=lambda *a, **k: None,
     )
@@ -936,25 +949,29 @@ def test_maybe_rebuild_ignores_non_imp023_warnings(
 ) -> None:
     """G6：仅 LAN 漂移等 WARN 不进入 rebuild 候选。"""
     _seed_static(
-        workspace, registry, "demo", host_port=21000,
+        workspace,
+        registry,
+        "demo",
+        host_port=21000,
         lan_url="http://10.0.0.99:21000",  # 与当前 IP 不一致 → 漂移
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "10.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "10.0.0.1")
     # 回环不通时 status=fail，仍不应因漂移触发 rebuild；此处桩回环为通。
     monkeypatch.setattr(
         "local_webpage_access.access._http_get",
-        lambda url, **kw: __import__(
-            "local_webpage_access.access", fromlist=["UrlProbe"]
-        ).UrlProbe(url=url, status_code=200, content_length=10, ok=True),
+        lambda url, **kw: __import__("local_webpage_access.access", fromlist=["UrlProbe"]).UrlProbe(
+            url=url, status_code=200, content_length=10, ok=True
+        ),
     )
     report = review_access(workspace, config, registry)
     assert any(r.lan_url_stale for r in report.instances)
     assert instances_needing_rebuild(report) == []
     calls: list[str] = []
     out = maybe_rebuild_after_review(
-        workspace, config, registry, report,
+        workspace,
+        config,
+        registry,
+        report,
         rebuild_if_needed=True,
         rebuild_fn=lambda *a, **k: calls.append(a[3]),
     )
@@ -972,14 +989,12 @@ def test_enable_caddy_stops_live_builtin(workspace, config, monkeypatch):
     gateway = StaticGateway(workspace, config)
     # 模拟一个「存活」的 builtin pid 文件（不真正起进程，用当前进程 pid 兜底判定）
     calls = {"stopped": []}
-    monkeypatch.setattr(gateway, "_stop_builtin",
-                        lambda iid: calls["stopped"].append(iid))
+    monkeypatch.setattr(gateway, "_stop_builtin", lambda iid: calls["stopped"].append(iid))
     monkeypatch.setattr(gateway, "_read_pid", lambda iid: 99999)
     monkeypatch.setattr(gateway, "_pid_alive", lambda pid: True)
     # enable 的其余依赖桩掉
     monkeypatch.setattr(gateway, "_clear_stale_static_pid", lambda iid: None)
-    monkeypatch.setattr(gateway, "generate_site_config",
-                        lambda iid, hp, root: Path("/tmp/x"))
+    monkeypatch.setattr(gateway, "generate_site_config", lambda iid, hp, root: Path("/tmp/x"))
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
     monkeypatch.setattr(gateway, "reload_all", lambda: None)
 
@@ -1002,8 +1017,7 @@ def test_stop_all_builtin_clears_live_and_dead(workspace, config, monkeypatch):
 
     stopped = []
     monkeypatch.setattr(gateway, "_read_pid", lambda iid: {"live": 111, "dead": 222}.get(iid))
-    monkeypatch.setattr(gateway, "_pid_alive",
-                        lambda pid: pid == 111)  # live 存活，dead 已死
+    monkeypatch.setattr(gateway, "_pid_alive", lambda pid: pid == 111)  # live 存活，dead 已死
     monkeypatch.setattr(gateway, "_stop_builtin", lambda iid: stopped.append(iid))
     monkeypatch.setattr(gateway, "_clear_stale_static_pid", lambda iid: None)
     # 无 pid-less 孤儿
@@ -1021,20 +1035,20 @@ def test_stop_all_builtin_kills_pid_less_orphans(workspace, config, monkeypatch)
     gateway = StaticGateway(workspace, config)
     # 无 pid 文件，但枚举发现一个孤儿
     monkeypatch.setattr(gateway, "_read_pid", lambda iid: None)
-    monkeypatch.setattr(gateway, "_enumerate_workspace_builtin_pids",
-                        lambda: [(65599, "demo-static")])
+    monkeypatch.setattr(
+        gateway, "_enumerate_workspace_builtin_pids", lambda: [(65599, "demo-static")]
+    )
     killed = []
-    monkeypatch.setattr(gateway, "_kill_process",
-                        lambda pid, proc=None, **kw: killed.append(pid) or True)
+    monkeypatch.setattr(
+        gateway, "_kill_process", lambda pid, proc=None, **kw: killed.append(pid) or True
+    )
 
     result = gateway.stop_all_builtin()
     assert result == ["demo-static"]
     assert killed == [65599]
 
 
-def test_enumerate_workspace_builtin_pids_parses_pgrep_lf(
-    workspace, config, monkeypatch
-):
+def test_enumerate_workspace_builtin_pids_parses_pgrep_lf(workspace, config, monkeypatch):
     """§10.2-C1 / BUG-512：Darwin 用 ``pgrep -lf``；Linux 用 ``pgrep -af``。"""
     from local_webpage_access.static_gateway import StaticGateway
 
@@ -1056,9 +1070,7 @@ def test_enumerate_workspace_builtin_pids_parses_pgrep_lf(
 
         return _R()
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", fake_run
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.run", fake_run)
     found = gateway._enumerate_workspace_builtin_pids()
     assert captured["cmd"][0] == "pgrep"
     if sys.platform.startswith("linux"):
@@ -1076,9 +1088,7 @@ def test_enumerate_workspace_builtin_pids_parses_pgrep_lf(
 
         return _R()
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.subprocess.run", fake_af
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.run", fake_af)
     assert gateway._enumerate_workspace_builtin_pids() == []
 
 
@@ -1129,11 +1139,7 @@ class _BookshelfApiHandler(http.server.BaseHTTPRequestHandler):
         b'<script type="module" src="/assets/index-abc.js"></script>'
         b"</head><body>bookshelf</body></html>"
     )
-    BUNDLE = (
-        b'const u="/api/v1/members";'
-        b'const b="/api/v1/books";'
-        b"fetch(u);"
-    )
+    BUNDLE = b'const u="/api/v1/members";const b="/api/v1/books";fetch(u);'
     MEMBERS_JSON = b'[{"id":1,"name":"a"}]'
     NOT_FOUND_JSON = b'{"detail":"Not Found"}'
 
@@ -1198,10 +1204,7 @@ def test_extract_api_paths_preserves_concrete_endpoint() -> None:
 
 
 def test_extract_js_bundle_paths_finds_script_srcs() -> None:
-    html = (
-        '<script src="./assets/index.js"></script>'
-        '<script src="/vendor/runtime.js"></script>'
-    )
+    html = '<script src="./assets/index.js"></script><script src="/vendor/runtime.js"></script>'
     srcs = _extract_js_bundle_paths(html)
     assert "./assets/index.js" in srcs
     assert "/vendor/runtime.js" in srcs
@@ -1210,16 +1213,11 @@ def test_extract_js_bundle_paths_finds_script_srcs() -> None:
 def test_collect_api_paths_fetches_bundle_via_alias(bookshelf_api_server) -> None:
     """BUG-467：绝对 script 在入口根为空时，须经别名前缀拉取真实 bundle。"""
     port = bookshelf_api_server
-    html = (
-        "<!doctype html>"
-        '<script type="module" src="/assets/index-abc.js"></script>'
-    )
+    html = '<!doctype html><script type="module" src="/assets/index-abc.js"></script>'
     # 不带别名：入口根空 bundle → 抽不到 API
     assert "/api/v1/members" not in _collect_api_paths(html, entry_port=port)
     # 带别名：从 /home-bookshelf/assets/... 取到真实 bundle
-    paths = _collect_api_paths(
-        html, entry_port=port, path_alias="home-bookshelf"
-    )
+    paths = _collect_api_paths(html, entry_port=port, path_alias="home-bookshelf")
     assert "/api/v1/members" in paths
     assert "/api/v1/books" in paths
 
@@ -1244,9 +1242,7 @@ def test_review_detects_api_mismatch_from_js_bundle(
         route_host="home-bookshelf",
         route_url=f"http://127.0.0.1:{port}/home-bookshelf/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
@@ -1284,12 +1280,8 @@ def test_has_api_mismatch_ignores_non_mismatch_findings() -> None:
     rep.api_findings.append(
         ApiPathFinding(
             path="/api/v1/members",
-            absolute=UrlProbe(
-                url="c", status_code=200, ok=True, content_length=0
-            ),
-            prefixed=UrlProbe(
-                url="d", status_code=200, ok=True, content_length=42
-            ),
+            absolute=UrlProbe(url="c", status_code=200, ok=True, content_length=0),
+            prefixed=UrlProbe(url="d", status_code=200, ok=True, content_length=42),
             mismatch=True,
         )
     )
@@ -1313,12 +1305,8 @@ def test_format_rebuild_advice_api_only_mismatch() -> None:
     rep.api_findings.append(
         ApiPathFinding(
             path="/api/v1/members",
-            absolute=UrlProbe(
-                url="a", status_code=200, ok=True, content_length=0
-            ),
-            prefixed=UrlProbe(
-                url="b", status_code=200, ok=True, content_length=10
-            ),
+            absolute=UrlProbe(url="a", status_code=200, ok=True, content_length=0),
+            prefixed=UrlProbe(url="b", status_code=200, ok=True, content_length=10),
             mismatch=True,
         )
     )
@@ -1439,10 +1427,7 @@ def prefixed_script_bundle_server():
 def test_collect_api_paths_strips_alias_for_host_port(prefixed_script_bundle_server) -> None:
     """已带别名前缀的 script src：hostPort 须请求 /assets/...，不得双前缀。"""
     port = prefixed_script_bundle_server
-    html = (
-        "<!doctype html>"
-        '<script type="module" src="/home-bookshelf/assets/index.js"></script>'
-    )
+    html = '<!doctype html><script type="module" src="/home-bookshelf/assets/index.js"></script>'
     fetched: list[str] = []
 
     def tracking_fetch(url: str, **_kw):
@@ -1460,9 +1445,7 @@ def test_collect_api_paths_strips_alias_for_host_port(prefixed_script_bundle_ser
     assert f"http://127.0.0.1:{port}/assets/index.js" in fetched
     assert not any("/home-bookshelf/home-bookshelf/" in u for u in fetched)
     # 仅 hostPort 也能抽到（去前缀后命中真实 bundle）
-    assert "/api/v1" in _collect_api_paths(
-        html, host_port=port, path_alias="home-bookshelf"
-    )
+    assert "/api/v1" in _collect_api_paths(html, host_port=port, path_alias="home-bookshelf")
 
 
 def test_collect_api_paths_ignores_html_spa_fallback_as_bundle() -> None:
@@ -1488,9 +1471,7 @@ def test_collect_api_paths_ignores_html_spa_fallback_as_bundle() -> None:
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     try:
-        paths = _collect_api_paths(
-            html, host_port=trap_port, entry_port=trap_port, path_alias="x"
-        )
+        paths = _collect_api_paths(html, host_port=trap_port, entry_port=trap_port, path_alias="x")
         assert "/api/v1/trap" not in paths
     finally:
         httpd.shutdown()
@@ -1512,9 +1493,7 @@ def test_review_detects_probable_api_mismatch_from_base_and_json_404(
         route_host="home-bookshelf",
         route_url=f"http://127.0.0.1:{port}/home-bookshelf/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
@@ -1598,9 +1577,7 @@ def test_review_compatible_prefixed_app_overall_ok(
         route_host="home-bookshelf",
         route_url=f"http://127.0.0.1:{port}/home-bookshelf/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
@@ -1670,9 +1647,7 @@ def test_review_no_api_project_default_probes_no_false_positive(
         route_host="demo",
         route_url=f"http://127.0.0.1:{port}/demo/",
     )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1"
-    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "127.0.0.1")
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]

@@ -137,9 +137,7 @@ class InstanceStatus:
             "lanUrl": self.lan_url,
             # 建议项 D（gateway-switch-access-review）：始终可用的本机回环链接，
             # 作 LAN URL 漂移失效时的兜底（DHCP 换网后管理页旧 lanUrl 打不开）。
-            "localhostUrl": (
-                f"http://127.0.0.1:{self.host_port}/" if self.host_port else None
-            ),
+            "localhostUrl": (f"http://127.0.0.1:{self.host_port}/" if self.host_port else None),
             "routeHost": self.route_host,
             "routeUrl": self.route_url,
             # IMP-040：当前应打开的地址相关元数据（向后兼容可选字段）
@@ -180,13 +178,9 @@ def instance_status(
     if row is None:
         from local_webpage_access.errors import LifecycleError
 
-        raise LifecycleError(
-            f"实例 {instance_id} 不存在", instance_id=instance_id
-        )
+        raise LifecycleError(f"实例 {instance_id} 不存在", instance_id=instance_id)
 
-    host_port, internal_port = _resolve_ports(
-        workspace, registry, instance_id, row["runtime"]
-    )
+    host_port, internal_port = _resolve_ports(workspace, registry, instance_id, row["runtime"])
     net = _resolve_network_urls(workspace, config, instance_id, host_port)
     resources = registry.get_resources(instance_id) or {}
 
@@ -244,9 +238,7 @@ def instance_status(
     )
 
 
-def all_statuses(
-    workspace: Workspace, config: Config, registry: Registry
-) -> list[InstanceStatus]:
+def all_statuses(workspace: Workspace, config: Config, registry: Registry) -> list[InstanceStatus]:
     """全部实例状态快照（按创建时间排序）。"""
     from local_webpage_access.importer import refresh_display_name_from_homepage
 
@@ -381,10 +373,7 @@ def _recover_stale_building(registry: Registry, instance_id: str) -> bool:
             # BUG-129：构建记录已经结束，但实例可能因进程在两次写入之间崩溃
             # 而永久留在 building。结束记录超过阈值即可确认不是正常过渡窗口。
             finished_at = latest.get("finished_at") or latest.get("started_at")
-            if (
-                finished_at
-                and _age_seconds(finished_at) > _STALE_BUILDING_SECONDS
-            ):
+            if finished_at and _age_seconds(finished_at) > _STALE_BUILDING_SECONDS:
                 is_stale = True
                 detail = (
                     f"最新构建已为 {latest.get('status')}，"
@@ -396,10 +385,7 @@ def _recover_stale_building(registry: Registry, instance_id: str) -> bool:
         row = registry.get_instance(instance_id)
         if row:
             updated_at = row.get("updated_at")
-            if (
-                updated_at
-                and _age_seconds(updated_at) > _STALE_BUILDING_NO_BUILD_SECONDS
-            ):
+            if updated_at and _age_seconds(updated_at) > _STALE_BUILDING_NO_BUILD_SECONDS:
                 is_stale = True
                 detail = f"building 状态已停留 {_age_seconds(updated_at):.0f}s（无 builds 行）"
 
@@ -407,9 +393,7 @@ def _recover_stale_building(registry: Registry, instance_id: str) -> bool:
         return False
 
     error_msg = f"构建进程疑似崩溃，已自动回收 stale building（{detail}）"
-    registry.update_status(
-        instance_id, Status.FAILED.value, last_error=error_msg
-    )
+    registry.update_status(instance_id, Status.FAILED.value, last_error=error_msg)
     with contextlib.suppress(Exception):
         registry.add_event(instance_id, "build_recover", error_msg)
     log.warning("实例 %s %s", instance_id, error_msg)
@@ -462,9 +446,7 @@ def _resolve_ports(
     return host_port, internal_port
 
 
-def _resolve_host_port_from_manifest(
-    workspace: Workspace, instance_id: str
-) -> int | None:
+def _resolve_host_port_from_manifest(workspace: Workspace, instance_id: str) -> int | None:
     """从 ``local-web.json`` 读取 ``network.hostPort`` / ``static.hostPort``。"""
     manifest_path = workspace.app_manifest_path(instance_id)
     if not manifest_path.is_file():
@@ -482,9 +464,7 @@ def _resolve_host_port_from_manifest(
     return None
 
 
-def _resolve_internal_port_from_manifest(
-    workspace: Workspace, instance_id: str
-) -> int | None:
+def _resolve_internal_port_from_manifest(workspace: Workspace, instance_id: str) -> int | None:
     """从 ``local-web.json`` 读取 ``network.internalPort``（或 container 段兜底）。"""
     manifest_path = workspace.app_manifest_path(instance_id)
     if not manifest_path.is_file():
@@ -502,9 +482,7 @@ def _resolve_internal_port_from_manifest(
     return None
 
 
-def _resolve_lan_url(
-    workspace: Workspace, instance_id: str, host_port: int | None
-) -> str | None:
+def _resolve_lan_url(workspace: Workspace, instance_id: str, host_port: int | None) -> str | None:
     """兼容旧调用：仅读落盘 lanUrl（测试 / 内部兜底）。IMP-040 主路径用
     :func:`_resolve_network_urls`。"""
     if not host_port:
@@ -523,9 +501,7 @@ def _resolve_lan_url(
     return None
 
 
-def _resolve_route(
-    workspace: Workspace, instance_id: str
-) -> tuple[str | None, str | None]:
+def _resolve_route(workspace: Workspace, instance_id: str) -> tuple[str | None, str | None]:
     """IMP-006：读取路径别名与统一入口 URL（``routeMode=name`` 时）。"""
     manifest_path = workspace.app_manifest_path(instance_id)
     if not manifest_path.is_file():
@@ -614,11 +590,7 @@ def _resolve_network_urls(
         route_url = persisted_route if route_mode_name else None
         current_ip = None
 
-    stale = bool(
-        persisted_lan
-        and current_ip
-        and persisted_lan not in (current_ip, "127.0.0.1")
-    )
+    stale = bool(persisted_lan and current_ip and persisted_lan not in (current_ip, "127.0.0.1"))
     return {
         "lan_url": lan_url,
         "route_host": route_host if route_mode_name else None,

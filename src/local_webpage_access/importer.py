@@ -242,9 +242,7 @@ def resolve_auto_display_name(project_dir: Path, *, slug: str) -> str:
     index = find_homepage_index(project_dir)
     if index is not None:
         try:
-            title = extract_html_title(
-                index.read_text(encoding="utf-8", errors="replace")
-            )
+            title = extract_html_title(index.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             title = None
         if title:
@@ -300,9 +298,7 @@ def refresh_display_name_from_homepage(
             return None
     else:
         return None
-    if not is_auto_titleized_name(
-        current_name, instance_id, name_source=name_source
-    ):
+    if not is_auto_titleized_name(current_name, instance_id, name_source=name_source):
         return None
     current_dir = workspace.app_current(instance_id)
     if not current_dir.is_dir():
@@ -318,9 +314,7 @@ def refresh_display_name_from_homepage(
             log.warning("实例 %s 回填显示名时锁内重读 manifest 失败", instance_id)
             return None
         fresh_source = getattr(manifest, "nameSource", None)
-        if not is_auto_titleized_name(
-            manifest.name, instance_id, name_source=fresh_source
-        ):
+        if not is_auto_titleized_name(manifest.name, instance_id, name_source=fresh_source):
             return None
         if manifest.name == new_name:
             return None
@@ -499,6 +493,7 @@ class Importer:
                 from local_webpage_access.compatibility_checker import (
                     check_compatibility,
                 )
+
                 findings = check_compatibility(
                     current_dir,
                     primary_subdir=detection.source_subdir,
@@ -539,11 +534,15 @@ class Importer:
             for note in detection.notes:
                 if note.startswith("[预检修正]"):
                     self.registry.add_event(
-                        instance_id, "preflight", note,
+                        instance_id,
+                        "preflight",
+                        note,
                     )
                 elif note.startswith("[预检警告]"):
                     self.registry.add_event(
-                        instance_id, "preflight", note,
+                        instance_id,
+                        "preflight",
+                        note,
                     )
             # IMP-056 Gate-2：兼容性预检发现登记为 registry 事件（B.04）。
             for f in manifest.compatibilityFindings:
@@ -565,9 +564,8 @@ class Importer:
             # IMP-001：剥离摘要登记为可审计事件（仅当实际剥离了成员时）
             if sanitized is not None and sanitized.stripped_names:
                 parts = ", ".join(
-                    f"{rule}×{n}" for rule, n in sorted(
-                        sanitized.categories.items(), key=lambda kv: -kv[1]
-                    )
+                    f"{rule}×{n}"
+                    for rule, n in sorted(sanitized.categories.items(), key=lambda kv: -kv[1])
                 )
                 self.registry.add_event(
                     instance_id,
@@ -581,9 +579,7 @@ class Importer:
             if detection.pending:
                 from local_webpage_access.security import unknown_zip_risk_hint
 
-                self.registry.add_event(
-                    instance_id, "security", unknown_zip_risk_hint()
-                )
+                self.registry.add_event(instance_id, "security", unknown_zip_risk_hint())
 
             log.info("导入成功：%s（%s）", instance_id, detection.form)
             return ImportResult(
@@ -696,9 +692,7 @@ class Importer:
 
         # 2. hash 未变化 → 跳过
         if new_hash == old_hash:
-            log.info(
-                "实例 %s 的 zip 未变化（sha256=%s），跳过更新", instance_id, new_hash[:12]
-            )
+            log.info("实例 %s 的 zip 未变化（sha256=%s），跳过更新", instance_id, new_hash[:12])
             self.registry.add_event(
                 instance_id,
                 "update",
@@ -770,11 +764,7 @@ class Importer:
                 self.registry.get_container(instance_id),
             )
             old_host_port = next(
-                (
-                    int(row["host_port"])
-                    for row in old_port_rows
-                    if row and row.get("host_port")
-                ),
+                (int(row["host_port"]) for row in old_port_rows if row and row.get("host_port")),
                 None,
             )
             current_swapped = False
@@ -836,18 +826,14 @@ class Importer:
                 # status/desiredState 由 apply_detection_to_manifest 决定
                 # （pending→识别成功 → stopped；已在跑/已停则保留），
                 # 勿再强制写回 old status（BUG-444）。
-                manifest = apply_detection_to_manifest(
-                    old_manifest, detection, self.ws
-                )
+                manifest = apply_detection_to_manifest(old_manifest, detection, self.ws)
                 # 若旧名仍是 slug 美化名，且新包主页有 <title>，顺带刷新显示名
                 if is_auto_titleized_name(
                     old_manifest.name,
                     instance_id,
                     name_source=getattr(old_manifest, "nameSource", None),
                 ):
-                    refreshed = resolve_auto_display_name(
-                        current_dir, slug=instance_id
-                    )
+                    refreshed = resolve_auto_display_name(current_dir, slug=instance_id)
                     if refreshed != old_manifest.name:
                         manifest.name = refreshed
                         manifest.nameSource = "html_title"
@@ -894,10 +880,7 @@ class Importer:
                         manifest.container.hostPort = old_host_port
                 # DEV-067 / BUG-112：容器源码已换 → 作废旧部署标记，避免
                 # restart/start 走轻量 compose start 继续跑旧镜像。
-                if (
-                    manifest.runtime.value == "docker-compose"
-                    and manifest.container is not None
-                ):
+                if manifest.runtime.value == "docker-compose" and manifest.container is not None:
                     manifest.container.containerId = None
                     manifest.container.imageId = None
                 manifest.touch()
@@ -932,9 +915,7 @@ class Importer:
                 if sanitized is not None and sanitized.stripped_names:
                     parts = ", ".join(
                         f"{rule}×{n}"
-                        for rule, n in sorted(
-                            sanitized.categories.items(), key=lambda kv: -kv[1]
-                        )
+                        for rule, n in sorted(sanitized.categories.items(), key=lambda kv: -kv[1])
                     )
                     self.registry.add_event(
                         instance_id,
@@ -963,19 +944,14 @@ class Importer:
                 # 失败时清理暂存区；current/ 已通过原子换入保护未被破坏
                 # （换入前异常 current/ 原封未动；换入后异常也已回滚）
                 log.error("更新实例 %s 失败：%s", instance_id, exc)
-                raise ZipImportError(
-                    f"更新失败：{exc}", instance_id=instance_id
-                ) from exc
+                raise ZipImportError(f"更新失败：{exc}", instance_id=instance_id) from exc
             finally:
                 for stale in (staging, old_current):
                     if stale.exists():
                         shutil.rmtree(stale, ignore_errors=True)
 
         # 容器必须 rebuild 镜像；静态/前端只需 restart 同步 public。
-        is_container = (
-            manifest is not None
-            and manifest.runtime.value == "docker-compose"
-        )
+        is_container = manifest is not None and manifest.runtime.value == "docker-compose"
         needs_rebuild = bool(restart and was_running and is_container)
         needs_restart = bool(restart and was_running and not is_container)
         log.info(
@@ -1044,18 +1020,12 @@ class Importer:
             validate_source_dir,
         )
 
-        resolved_dir = validate_source_dir(
-            source_dir, workspace_root=self.ws.root
-        )
+        resolved_dir = validate_source_dir(source_dir, workspace_root=self.ws.root)
         sync_hash = compute_source_hash(resolved_dir)
-        log.info(
-            "文件夹源导入：%s（指纹 %s）", resolved_dir, sync_hash[:12]
-        )
+        log.info("文件夹源导入：%s（指纹 %s）", resolved_dir, sync_hash[:12])
 
         # 打包为临时 zip 后复用 import_zip（已持锁，走 _locked）
-        fd, tmp_zip_path = tempfile.mkstemp(
-            suffix=".zip", prefix="lwa-folder-import-"
-        )
+        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-folder-import-")
         os.close(fd)
         tmp_zip = Path(tmp_zip_path)
         try:
@@ -1086,9 +1056,7 @@ class Importer:
             f"文件夹源导入：{resolved_dir}（指纹 {sync_hash[:12]}）",
         )
 
-        log.info(
-            "文件夹源导入成功：%s（源 %s）", result.instance_id, resolved_dir
-        )
+        log.info("文件夹源导入成功：%s（源 %s）", result.instance_id, resolved_dir)
         return result
 
     def update_from_dir(
@@ -1208,9 +1176,7 @@ class Importer:
         )
 
         # 打包为临时 zip 后复用 update_zip（已持锁，走 _locked）
-        fd, tmp_zip_path = tempfile.mkstemp(
-            suffix=".zip", prefix="lwa-folder-update-"
-        )
+        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-folder-update-")
         os.close(fd)
         tmp_zip = Path(tmp_zip_path)
         try:
@@ -1243,9 +1209,7 @@ class Importer:
         return result
 
     @staticmethod
-    def _kind_changed(
-        old: InstanceManifest, detection: DetectionResult
-    ) -> bool:
+    def _kind_changed(old: InstanceManifest, detection: DetectionResult) -> bool:
         """新扫描结果与旧 manifest 的 kind/runtime 是否不一致。
 
         pending（未识别）视为可更新（沿用 static 草稿），不算形态变化；
@@ -1253,9 +1217,7 @@ class Importer:
         static 草稿、删 containers 登记却不停容器，造成孤儿（BUG-180）。此时判为
         形态变化，交由 force_kind_change 的拒绝/停机流程处理，避免静默孤儿化。
         """
-        old_rt = (
-            old.runtime.value if hasattr(old.runtime, "value") else old.runtime
-        )
+        old_rt = old.runtime.value if hasattr(old.runtime, "value") else old.runtime
         if detection.pending or detection.kind is None:
             # 容器实例被 pending zip 改写为 static 草稿 = 跨形态（BUG-180）
             return old_rt == "docker-compose"
@@ -1263,15 +1225,11 @@ class Importer:
         if detection.runtime is None:
             return detection.kind != old_kind
         new_rt = (
-            detection.runtime.value
-            if hasattr(detection.runtime, "value")
-            else detection.runtime
+            detection.runtime.value if hasattr(detection.runtime, "value") else detection.runtime
         )
         return detection.kind != old_kind or new_rt != old_rt
 
-    def _preserve_hostport(
-        self, manifest: InstanceManifest, instance_id: str
-    ) -> None:
+    def _preserve_hostport(self, manifest: InstanceManifest, instance_id: str) -> None:
         """把 registry 中已登记的 hostPort 回填到 manifest（IMP-009）。
 
         ``apply_detection_to_manifest`` 重建出的 manifest 其 static/container
@@ -1364,8 +1322,7 @@ class Importer:
                 self.registry.upsert_container(
                     instance_id,
                     {
-                        "projectName": old_container.get("compose_project")
-                        or f"lwa-{instance_id}",
+                        "projectName": old_container.get("compose_project") or f"lwa-{instance_id}",
                         "serviceName": old_container.get("service_name", "app"),
                         "image": old_container.get("image"),
                         "imageId": old_container.get("image_id"),
@@ -1397,19 +1354,13 @@ class Importer:
 
     # ---- id 冲突处理 --------------------------------------------------------
 
-    def _claim_unique_id(
-        self, base_slug: str, *, on_conflict: str = "rename"
-    ) -> str:
+    def _claim_unique_id(self, base_slug: str, *, on_conflict: str = "rename") -> str:
         """原子占用实例目录，避免并发导入同一 slug（BUG-127 / BUG-313）。"""
         candidate = base_slug
         n = 2
 
         def _conflict_error(*, concurrent: bool = False) -> ZipImportError:
-            prefix = (
-                f"实例 {base_slug} 已被并发创建"
-                if concurrent
-                else f"实例 {base_slug} 已存在"
-            )
+            prefix = f"实例 {base_slug} 已被并发创建" if concurrent else f"实例 {base_slug} 已存在"
             return ZipImportError(
                 f"{prefix}。请换一个含英文/数字的名称，或先删除该实例后再导入；"
                 f"若要覆盖更新已有实例，可用「从源更新」或 "
@@ -1493,9 +1444,7 @@ class Importer:
             with contextlib.suppress(OSError):
                 html = index.read_text(encoding="utf-8", errors="replace")
         # html 为 None 时守卫函数内部不拦截（与 set_instance_path_alias 一致）
-        reject_alias_if_absolute_spa_assets(
-            html=html, alias=alias, instance_id=instance_id
-        )
+        reject_alias_if_absolute_spa_assets(html=html, alias=alias, instance_id=instance_id)
 
     # ---- manifest 构建 ------------------------------------------------------
 
@@ -1573,6 +1522,7 @@ def build_manifest_from_detection(
     if detection.evidence is not None:
         try:
             from local_webpage_access.candidate_generator import generate_plans
+
             plans = generate_plans(detection.evidence)
         except Exception as exc:  # noqa: BLE001
             plan_error = exc
@@ -1588,13 +1538,9 @@ def build_manifest_from_detection(
         detection.pending = True
         detection.confidence = "low"
         if plan_error is not None:
-            detection.notes.append(
-                f"部署计划生成失败，标记 pending：{plan_error}"
-            )
+            detection.notes.append(f"部署计划生成失败，标记 pending：{plan_error}")
         else:
-            detection.notes.append(
-                "部署计划为空（候选层与识别结果不一致），标记 pending"
-            )
+            detection.notes.append("部署计划为空（候选层与识别结果不一致），标记 pending")
 
     if detection.pending or detection.kind is None:
         # 未识别：以 static 草稿落盘，标记 pending
@@ -1652,9 +1598,7 @@ def build_manifest_from_detection(
             # BUG-509：非法端口已在 scanner 置 pending，不会走进本分支。
             # 此处 None 只可能是未声明端口；容器字段需要 int，沿用 8000 兜底。
             "internalPort": (
-                detection.internalPort
-                if detection.internalPort is not None
-                else 8000
+                detection.internalPort if detection.internalPort is not None else 8000
             ),
             "composePath": str(workspace.app_compose_path(instance_id)),
             "dockerfilePath": str(workspace.app_dockerfile_path(instance_id)),
@@ -1674,10 +1618,10 @@ def build_manifest_from_detection(
     if detection.source_subdir:
         manifest.sourceSubdir = detection.source_subdir
     if detection.candidates and len(detection.candidates) > 1:
-        manifest.deploymentCandidates = [
-            c.model_dump() for c in detection.candidates[1:]
-        ]
-    preflight_notes = [n for n in detection.notes if n.startswith("[预检修正]") or n.startswith("[预检警告]")]
+        manifest.deploymentCandidates = [c.model_dump() for c in detection.candidates[1:]]
+    preflight_notes = [
+        n for n in detection.notes if n.startswith("[预检修正]") or n.startswith("[预检警告]")
+    ]
     if preflight_notes:
         manifest.preflightSummary = "; ".join(preflight_notes)
     # Gate-C C.01/C.06：附加已生成的部署计划与能力契约。

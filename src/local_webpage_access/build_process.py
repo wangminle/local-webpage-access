@@ -61,9 +61,7 @@ class BuildProcessHub:
         with self._lock:
             self._cancel_flags.pop(instance_id, None)
 
-    def register(
-        self, instance_id: str, proc: subprocess.Popen, *, identity: str = ""
-    ) -> None:
+    def register(self, instance_id: str, proc: subprocess.Popen, *, identity: str = "") -> None:
         with self._lock:
             self._procs[instance_id] = ActiveBuildProc(
                 instance_id=instance_id,

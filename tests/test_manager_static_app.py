@@ -613,7 +613,10 @@ def test_app_remove_dialog_methods_and_no_native_confirm() -> None:
     assert "advanceRemoveDialog" in src
     # 单项目删除不得依赖原生 confirm；批量冗余可保留
     # 定位 removeSingleInstance / openRemoveDialog 区域：不得出现 confirm(
-    assert "removeSingleInstance: function" not in src or "confirm(" not in src.split("removeSingleInstance")[0][-200:]
+    assert (
+        "removeSingleInstance: function" not in src
+        or "confirm(" not in src.split("removeSingleInstance")[0][-200:]
+    )
     # 更稳：删除流程应打开模态而非 confirm
     assert "openRemoveDialog" in src
     assert "removeDialog" in src

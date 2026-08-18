@@ -144,9 +144,7 @@ def switch_fakes(monkeypatch, workspace: Workspace):
             )
             path = self.ws.app_alias_config(instance_id)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                f"# regenerated {alias} -> {host_port}\n", encoding="utf-8"
-            )
+            path.write_text(f"# regenerated {alias} -> {host_port}\n", encoding="utf-8")
             return path
 
         def reload_all(self) -> None:
@@ -220,18 +218,10 @@ def switch_fakes(monkeypatch, workspace: Workspace):
             result.review_error = "review boom"
         return result
 
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.StaticGateway", _FakeGW
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.start_gateway", _fake_start
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.stop_gateway", _fake_stop
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.run_access_pass", _fake_access
-    )
+    monkeypatch.setattr("local_webpage_access.gateway_switch.StaticGateway", _FakeGW)
+    monkeypatch.setattr("local_webpage_access.gateway_switch.start_gateway", _fake_start)
+    monkeypatch.setattr("local_webpage_access.gateway_switch.stop_gateway", _fake_stop)
+    monkeypatch.setattr("local_webpage_access.gateway_switch.run_access_pass", _fake_access)
     # 切到 caddy 时预检；切到 builtin 不要求
     monkeypatch.setattr(
         "local_webpage_access.gateway_switch._caddy_available",
@@ -333,9 +323,7 @@ def test_switch_to_caddy_fails_when_alias_reload_fails(
     assert switch_fakes["reload_calls"] >= 1
 
 
-def test_switch_noop_when_already_on_target(
-    workspace: Workspace, registry, switch_fakes
-) -> None:
+def test_switch_noop_when_already_on_target(workspace: Workspace, registry, switch_fakes) -> None:
     from local_webpage_access.gateway_switch import switch_gateway
 
     cfg = _builtin_config()
@@ -373,9 +361,7 @@ def test_switch_to_caddy_fails_when_caddy_missing(
     assert workspace.config_path.read_text(encoding="utf-8") == yml_before
 
 
-def test_switch_mid_fail_rolls_back_yaml(
-    workspace: Workspace, registry, switch_fakes
-) -> None:
+def test_switch_mid_fail_rolls_back_yaml(workspace: Workspace, registry, switch_fakes) -> None:
     from local_webpage_access.gateway_switch import switch_gateway
 
     cfg = _caddy_config()
@@ -476,8 +462,7 @@ def test_switch_setup_failure_is_not_misreported_as_lock_failure(
 
     assert result.ok is False
     assert any(
-        stage.get("stage") == expected_stage and stage.get("ok") is False
-        for stage in result.stages
+        stage.get("stage") == expected_stage and stage.get("ok") is False for stage in result.stages
     )
     assert not any(stage.get("stage") == "switch_lock" for stage in result.stages)
     assert switch_fakes["stop_gateway_calls"] == 0
@@ -505,8 +490,7 @@ def test_switch_unexpected_exception_is_not_mislabelled_as_lock(
     assert result.error and "unexpected boom" in result.error
     assert not any(stage.get("stage") == "switch_lock" for stage in result.stages)
     assert any(
-        stage.get("stage") == "failed" and stage.get("ok") is False
-        for stage in result.stages
+        stage.get("stage") == "failed" and stage.get("ok") is False for stage in result.stages
     )
 
 
@@ -537,9 +521,7 @@ def test_switch_fail_after_sync_restores_manifest_and_registry(
             raise LwaError("access boom", code="ACCESS_FAIL")
         return AccessPassResult()
 
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.run_access_pass", _boom_then_ok
-    )
+    monkeypatch.setattr("local_webpage_access.gateway_switch.run_access_pass", _boom_then_ok)
 
     result = switch_gateway(workspace, cfg, registry, "builtin")
 
@@ -558,9 +540,7 @@ def test_switch_fail_after_sync_restores_manifest_and_registry(
     assert row_after["route_host"] == row_before["route_host"]
 
 
-def test_dry_run_does_not_write(
-    workspace: Workspace, registry, switch_fakes
-) -> None:
+def test_dry_run_does_not_write(workspace: Workspace, registry, switch_fakes) -> None:
     from local_webpage_access.gateway_switch import plan_switch, switch_gateway
 
     cfg = _caddy_config()
@@ -660,17 +640,18 @@ def test_switch_fails_closed_on_unloadable_manifest(
     assert switch_fakes["stop_gateway_calls"] == 0  # 预检失败，未进入切换事务
 
 
-def test_plan_switch_rejects_invalid_target(
-    workspace: Workspace, registry, switch_fakes
-) -> None:
+def test_plan_switch_rejects_invalid_target(workspace: Workspace, registry, switch_fakes) -> None:
     from local_webpage_access.gateway_switch import plan_switch
 
     cfg = _builtin_config()
     with pytest.raises(LwaError) as ei:
         plan_switch(workspace, cfg, registry, "nginx")
-    assert "GATEWAY" in ei.value.code or "backend" in str(ei.value).lower() or "nginx" in str(
-        ei.value
-    ).lower() or "目标" in str(ei.value)
+    assert (
+        "GATEWAY" in ei.value.code
+        or "backend" in str(ei.value).lower()
+        or "nginx" in str(ei.value).lower()
+        or "目标" in str(ei.value)
+    )
 
 
 def test_cli_switch_dry_run_precheck_failure_shows_error(
@@ -702,12 +683,8 @@ def test_cli_switch_dry_run_precheck_failure_shows_error(
             repair_hint="安装 Caddy 并加入 PATH，或改用 lwa gateway switch builtin",
         )
 
-    monkeypatch.setattr(
-        "local_webpage_access.cli.gateway.open_workspace_registry", _fake_open
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.switch_gateway", _fake_switch
-    )
+    monkeypatch.setattr("local_webpage_access.cli.gateway.open_workspace_registry", _fake_open)
+    monkeypatch.setattr("local_webpage_access.gateway_switch.switch_gateway", _fake_switch)
 
     res = CliRunner().invoke(app, ["gateway", "switch", "caddy", "--dry-run"])
     assert res.exit_code == 1

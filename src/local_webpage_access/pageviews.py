@@ -60,17 +60,42 @@ _CONTAINER_SEEN_RETAIN = 3000  # 每实例容器日志去重集保留的哈希�
 # 资源扩展名黑名单（小写，含点）：命中即非页面。CLF 无 Content-Type，靠后缀兜底。
 _ASSET_EXT: frozenset[str] = frozenset(
     {
-        ".js", ".mjs", ".css", ".map",
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico", ".bmp",
-        ".woff", ".woff2", ".ttf", ".eot", ".otf",
-        ".mp4", ".webm", ".mov", ".mp3", ".ogg", ".wav", ".wasm",
-        ".json", ".xml", ".txt", ".pdf", ".zip", ".gz", ".webmanifest",
+        ".js",
+        ".mjs",
+        ".css",
+        ".map",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".avif",
+        ".svg",
+        ".ico",
+        ".bmp",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".otf",
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".mp3",
+        ".ogg",
+        ".wav",
+        ".wasm",
+        ".json",
+        ".xml",
+        ".txt",
+        ".pdf",
+        ".zip",
+        ".gz",
+        ".webmanifest",
     }
 )
 # 常见非页面端点：精确匹配或 /api/ 前缀。容器 access log 无 content-type 时的必要兜底。
-_NON_PAGE_PATHS: frozenset[str] = frozenset(
-    {"/api", "/graphql", "/health", "/healthz", "/metrics"}
-)
+_NON_PAGE_PATHS: frozenset[str] = frozenset({"/api", "/graphql", "/health", "/healthz", "/metrics"})
 # pageviews.db schema 版本。旧库 user_version=0；升级时单事务重建派生表（IMP-025.e）。
 # v3（BUG-303）：时间戳统一存 UTC、按系统本地日期分桶；旧混合时区派生数据需重摄入。
 # v4（BUG-383）：文件游标改为路径无关稳定 key；仅改写 ingest_cursor，保留统计数据。
@@ -150,9 +175,7 @@ _ingest_lock = threading.Lock()
 
 # 兼容 http.server 的 "[09/Jul/2026 12:00:00]" 与标准 CLF 的
 # "[09/Jul/2026:12:00:00 +0800]"：方括号内任意非 ] 内容。
-_CLF_RE = re.compile(
-    r'^(\S+)\s+\S+\s+\S+\s+\[([^\]]+)\]\s+"([A-Z]+)\s+(\S+)[^"]*"\s+(\d{3})'
-)
+_CLF_RE = re.compile(r'^(\S+)\s+\S+\s+\S+\s+\[([^\]]+)\]\s+"([A-Z]+)\s+(\S+)[^"]*"\s+(\d{3})')
 
 _CLF_DATE_FORMATS = (
     "%d/%b/%Y:%H:%M:%S %z",  # 标准 CLF（冒号 + 时区）
@@ -236,8 +259,8 @@ def parse_caddy_json_line(line: str) -> AccessHit | None:
 #   [I 220101 12:00:00] 200 GET / (1.2ms) (tornado)
 _CONTAINER_RE = re.compile(
     r'"([A-Z]+)\s+(\S+)[^"]*"\s+(\d{3})'
-    r'|'
-    r'\b(\d{3})\b\s+([A-Z]+)\s+(\S+)'
+    r"|"
+    r"\b(\d{3})\b\s+([A-Z]+)\s+(\S+)"
 )
 
 
@@ -390,8 +413,7 @@ def _migrate_ingest_cursor_keys_to_stable(conn: sqlite3.Connection) -> None:
         if new_key is None:
             continue
         existing = conn.execute(
-            "SELECT offset_bytes, last_ts, updated_at FROM ingest_cursor "
-            "WHERE source_key=?",
+            "SELECT offset_bytes, last_ts, updated_at FROM ingest_cursor WHERE source_key=?",
             (new_key,),
         ).fetchone()
         if existing is None:
@@ -409,8 +431,7 @@ def _migrate_ingest_cursor_keys_to_stable(conn: sqlite3.Connection) -> None:
             keep_ts = existing[1]
             keep_updated = existing[2]
         conn.execute(
-            "UPDATE ingest_cursor SET offset_bytes=?, last_ts=?, updated_at=? "
-            "WHERE source_key=?",
+            "UPDATE ingest_cursor SET offset_bytes=?, last_ts=?, updated_at=? WHERE source_key=?",
             (keep_offset, keep_ts, keep_updated, new_key),
         )
         conn.execute("DELETE FROM ingest_cursor WHERE source_key=?", (source_key,))
@@ -519,15 +540,12 @@ class PageviewStore:
         offset, last_ts, _updated_at = self.get_cursor_with_updated_at(source_key)
         return (offset, last_ts)
 
-    def get_cursor_with_updated_at(
-        self, source_key: str
-    ) -> tuple[int, str | None, str | None]:
+    def get_cursor_with_updated_at(self, source_key: str) -> tuple[int, str | None, str | None]:
         """返回 ``(offset, last_ts, updated_at)``；无行时 ``(0, None, None)``。"""
         conn = self._conn_or_open()
         with self._lock:
             row = conn.execute(
-                "SELECT offset_bytes, last_ts, updated_at FROM ingest_cursor "
-                "WHERE source_key=?",
+                "SELECT offset_bytes, last_ts, updated_at FROM ingest_cursor WHERE source_key=?",
                 (source_key,),
             ).fetchone()
         if not row:
@@ -549,9 +567,7 @@ class PageviewStore:
 
     # ---- 写入 ----
 
-    def record_hits(
-        self, instance_id: str, source: str, hits: Iterable[AccessHit]
-    ) -> int:
+    def record_hits(self, instance_id: str, source: str, hits: Iterable[AccessHit]) -> int:
         """按天聚合写入 **page 命中**；返回计入的 page 条数（IMP-025）。
 
         非 page 命中（资源文件 / 非 GET / 错误响应 / ``__lwa_probe`` 探针）在摄入期
@@ -574,9 +590,7 @@ class PageviewStore:
         per_day: dict[str, dict[str, Any]] = defaultdict(
             lambda: {"hits": 0, "ips": set(), "last": ""}
         )
-        per_remote: dict[str, dict[str, Any]] = defaultdict(
-            lambda: {"hits": 0, "last": ""}
-        )
+        per_remote: dict[str, dict[str, Any]] = defaultdict(lambda: {"hits": 0, "last": ""})
         detail_rows: list[tuple] = []
         for h in page_hits:
             normalized_ts = _normalize_ts(h.ts)
@@ -592,9 +606,7 @@ class PageviewStore:
                 rb["hits"] += 1
                 if normalized_ts > rb["last"]:
                     rb["last"] = normalized_ts
-            detail_rows.append(
-                (instance_id, normalized_ts, h.method, h.path, h.status, h.remote)
-            )
+            detail_rows.append((instance_id, normalized_ts, h.method, h.path, h.status, h.remote))
         with self._lock:
             owns_transaction = not conn.in_transaction
             if owns_transaction:
@@ -712,8 +724,7 @@ class PageviewStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 changed = conn.execute(
-                    "SELECT 1 FROM pageviews WHERE instance_id=? "
-                    "AND source<>'container' LIMIT 1",
+                    "SELECT 1 FROM pageviews WHERE instance_id=? AND source<>'container' LIMIT 1",
                     (instance_id,),
                 ).fetchone()
                 if changed is not None:
@@ -721,8 +732,7 @@ class PageviewStore:
 
                 for line_hash, hit in pairs:
                     cur = conn.execute(
-                        "INSERT OR IGNORE INTO container_seen(instance_id, line_hash) "
-                        "VALUES(?,?)",
+                        "INSERT OR IGNORE INTO container_seen(instance_id, line_hash) VALUES(?,?)",
                         (instance_id, line_hash),
                     )
                     if cur.rowcount > 0:
@@ -789,8 +799,7 @@ class PageviewStore:
                 "source FROM pageviews GROUP BY instance_id"
             ).fetchall()
             ip_rows = conn.execute(
-                "SELECT instance_id, COUNT(*) AS ips "
-                "FROM pageview_ip_stats GROUP BY instance_id"
+                "SELECT instance_id, COUNT(*) AS ips FROM pageview_ip_stats GROUP BY instance_id"
             ).fetchall()
         ip_map = {r[0]: int(r[1]) for r in ip_rows}
         out: dict[str, dict[str, Any]] = {}
@@ -834,8 +843,7 @@ class PageviewStore:
             "instanceId": instance_id,
             "source": src,
             "byDay": [
-                {"day": d[0], "hits": int(d[1] or 0), "uniqueIps": int(d[2] or 0)}
-                for d in days
+                {"day": d[0], "hits": int(d[1] or 0), "uniqueIps": int(d[2] or 0)} for d in days
             ],
             "recent": [
                 {
@@ -882,13 +890,10 @@ class PageviewStore:
         conn.execute("DELETE FROM pageviews WHERE instance_id=?", (instance_id,))
         conn.execute("DELETE FROM pageview_detail WHERE instance_id=?", (instance_id,))
         conn.execute("DELETE FROM pageview_ips WHERE instance_id=?", (instance_id,))
-        conn.execute(
-            "DELETE FROM pageview_ip_stats WHERE instance_id=?", (instance_id,)
-        )
+        conn.execute("DELETE FROM pageview_ip_stats WHERE instance_id=?", (instance_id,))
         conn.execute("DELETE FROM container_seen WHERE instance_id=?", (instance_id,))
         conn.execute(
-            "DELETE FROM ingest_cursor WHERE source_key=? OR source_key=? "
-            "OR source_key LIKE ?",
+            "DELETE FROM ingest_cursor WHERE source_key=? OR source_key=? OR source_key LIKE ?",
             (
                 f"container:{instance_id}",
                 builtin_cursor_key(instance_id),
@@ -896,9 +901,7 @@ class PageviewStore:
             ),
         )
 
-    def filter_new_container_lines(
-        self, instance_id: str, line_hashes: list[str]
-    ) -> list[int]:
+    def filter_new_container_lines(self, instance_id: str, line_hashes: list[str]) -> list[int]:
         """返回 ``line_hashes`` 中"首次见到"的下标，并把它们标记为已见（含裁剪）。
 
         用 ``INSERT OR IGNORE`` + ``rowcount`` 判定是否新插入；新插入即"之前没见过"。
@@ -913,8 +916,7 @@ class PageviewStore:
         with self._lock:
             for i, lh in enumerate(line_hashes):
                 cur = conn.execute(
-                    "INSERT OR IGNORE INTO container_seen(instance_id, line_hash) "
-                    "VALUES(?,?)",
+                    "INSERT OR IGNORE INTO container_seen(instance_id, line_hash) VALUES(?,?)",
                     (instance_id, lh),
                 )
                 if cur.rowcount > 0:
@@ -978,12 +980,7 @@ def _format_consumed_archives(fps: set[str]) -> str | None:
 
 def _is_rotarch_meta(meta: str | None) -> bool:
     """是否已写入轮转归档消费指纹（含空集合以外的 rotarch / rotarchs）。"""
-    return bool(
-        meta
-        and (
-            meta.startswith(_ROTARCHS_PREFIX) or meta.startswith(_ROTARCH_PREFIX)
-        )
-    )
+    return bool(meta and (meta.startswith(_ROTARCHS_PREFIX) or meta.startswith(_ROTARCH_PREFIX)))
 
 
 def _cursor_updated_at_ns(updated_at: str | None) -> int | None:
@@ -1071,11 +1068,7 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
     archived_lines: list[str] = []
     consumed = _parse_consumed_archives(meta)
     all_archives = _list_rotated_archives(path)
-    unconsumed = [
-        arch
-        for arch in all_archives
-        if _archive_fingerprint(arch) not in consumed
-    ]
+    unconsumed = [arch for arch in all_archives if _archive_fingerprint(arch) not in consumed]
     new_meta = meta
     updated_ns = _cursor_updated_at_ns(updated_at)
 
@@ -1104,8 +1097,7 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
                 recent_unconsumed.append(arch)
         if historical:
             new_meta = _format_consumed_archives(
-                consumed
-                | {_archive_fingerprint(a) for a in historical}
+                consumed | {_archive_fingerprint(a) for a in historical}
             )
             consumed = _parse_consumed_archives(new_meta)
 
@@ -1346,9 +1338,7 @@ def ingest_all(
                     # 别名前缀匹配优先（命中后端口匹配被短路），不会双计。
                     port_to_id[s.host_port] = s.instance_id
             if alias_to_id or port_to_id:
-                _ingest_caddy_shared(
-                    workspace, caddy_log, alias_to_id, port_to_id, store, sources
-                )
+                _ingest_caddy_shared(workspace, caddy_log, alias_to_id, port_to_id, store, sources)
 
         # 2. 逐实例：builtin gateway.log + container docker logs
         for s in sources:
@@ -1361,9 +1351,7 @@ def ingest_all(
                 log.debug("摄入 %s 浏览量失败：%s", s.instance_id, exc)
 
 
-def _ingest_builtin(
-    workspace: Workspace, src: _InstanceSource, store: PageviewStore
-) -> None:
+def _ingest_builtin(workspace: Workspace, src: _InstanceSource, store: PageviewStore) -> None:
     log_path = workspace.app_logs(src.instance_id) / "gateway.log"
     cursor_key = builtin_cursor_key(src.instance_id)
     batch = _read_new_lines(log_path, cursor_key, store)
@@ -1424,7 +1412,7 @@ def _ingest_caddy_shared(
             if hit.path == pfx or hit.path.startswith(pfx + "/"):
                 # IMP-027：剥掉 /<alias> 前缀（query 保留），分类器看到 app 相对路径；
                 # 否则 /alias/api/data 不命中裸 /api/ 规则、又无扩展名 → 误算为 page。
-                stripped = hit.path[len(pfx):] or "/"
+                stripped = hit.path[len(pfx) :] or "/"
                 matched_id = alias_to_id[pfx]
                 break
         if matched_id is None and port_to_id:

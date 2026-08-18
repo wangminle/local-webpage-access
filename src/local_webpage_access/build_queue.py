@@ -53,9 +53,7 @@ _DEFAULT_CANCEL_WAIT = 60.0
 
 _BUILD_TASK_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"queued", "building", "cancelled", "failed"}),
-    "building": frozenset(
-        {"building", "cancelling", "cancelled", "success", "failed"}
-    ),
+    "building": frozenset({"building", "cancelling", "cancelled", "success", "failed"}),
     "cancelling": frozenset({"cancelling", "cancelled", "cancel_failed"}),
     "success": frozenset({"success"}),
     "failed": frozenset({"failed"}),
@@ -239,15 +237,12 @@ class CrossProcessBuildGate:
             try:
                 self._reclaim_dead(conn)
                 taken = {row[0] for row in conn.execute("SELECT slot FROM build_slots")}
-                slot = next(
-                    (s for s in range(self.concurrency) if s not in taken), None
-                )
+                slot = next((s for s in range(self.concurrency) if s not in taken), None)
                 if slot is None:
                     conn.execute("ROLLBACK")
                     return None
                 conn.execute(
-                    "INSERT INTO build_slots(slot, instance_id, pid, acquired_at) "
-                    "VALUES(?,?,?,?)",
+                    "INSERT INTO build_slots(slot, instance_id, pid, acquired_at) VALUES(?,?,?,?)",
                     (slot, instance_id, os.getpid(), time.time()),
                 )
                 conn.execute("COMMIT")
@@ -284,9 +279,7 @@ class CrossProcessBuildGate:
                 if worker_pid is not None:
                     kill_pid_tree_if_matches(
                         int(worker_pid),
-                        expected_pgid=int(worker_pgid)
-                        if worker_pgid is not None
-                        else None,
+                        expected_pgid=int(worker_pgid) if worker_pgid is not None else None,
                         expected_identity=str(worker_identity or ""),
                     )
                 conn.execute(
@@ -558,9 +551,7 @@ class BuildQueue:
         wait_timeout: float | None = _DEFAULT_WAIT_TIMEOUT,
     ) -> None:
         self.registry = registry
-        self.concurrency = (
-            concurrency if concurrency is not None else config.buildConcurrency
-        )
+        self.concurrency = concurrency if concurrency is not None else config.buildConcurrency
         if self.concurrency < 1:
             self.concurrency = 1
         self.wait_timeout = wait_timeout
@@ -600,9 +591,7 @@ class BuildQueue:
                             instance_id=instance_id,
                         )
                 self._mark_queued(instance_id, task)
-                slot = self._gate.acquire(
-                    instance_id, timeout, build_token=task.build_token
-                )
+                slot = self._gate.acquire(instance_id, timeout, build_token=task.build_token)
                 if slot is None:
                     with self._guard:
                         if self._cancel_pending(task, instance_id):
@@ -622,9 +611,7 @@ class BuildQueue:
             with self._guard:
                 # BUG-278：跨进程 cancel 只改持久化行，须合并 DB 与内存状态
                 if self._cancel_pending(task, instance_id):
-                    self.registry.add_event(
-                        instance_id, "build_cancel", "排队任务已取消，跳过构建"
-                    )
+                    self.registry.add_event(instance_id, "build_cancel", "排队任务已取消，跳过构建")
                     log.info("实例 %s 构建已取消，跳过 builder", instance_id)
                     self._finish_task_local(task, "cancelled")
                     raise LifecycleError(
@@ -641,9 +628,7 @@ class BuildQueue:
                     f"实例 {instance_id} 构建已取消",
                     instance_id=instance_id,
                 )
-            self.registry.add_event(
-                instance_id, "build_start", "获得构建槽位，开始构建"
-            )
+            self.registry.add_event(instance_id, "build_start", "获得构建槽位，开始构建")
             enter_build_context(instance_id, build_token=task.build_token)
             try:
                 result = builder(instance_id)
@@ -745,9 +730,7 @@ class BuildQueue:
                     task.cancel_requested_at = time.time()
                     task.finished_at = time.time()
                     self._persist_task(task, status="cancelled")
-                    self.registry.add_event(
-                        instance_id, "build_cancel", "排队任务已取消"
-                    )
+                    self.registry.add_event(instance_id, "build_cancel", "排队任务已取消")
                     log.info("实例 %s 排队构建已取消", instance_id)
                     try:
                         self.registry.update_status(
@@ -772,14 +755,10 @@ class BuildQueue:
                         cancel_requested_at=task.cancel_requested_at,
                     )
                     try:
-                        self.registry.update_status(
-                            instance_id, Status.CANCELLING.value
-                        )
+                        self.registry.update_status(instance_id, Status.CANCELLING.value)
                     except Exception:  # noqa: BLE001
                         log.exception("更新 cancelling 状态失败")
-                    self.registry.add_event(
-                        instance_id, "build_cancel", "正在取消进行中的构建"
-                    )
+                    self.registry.add_event(instance_id, "build_cancel", "正在取消进行中的构建")
                 finish_ev = self._finish_events.get(instance_id)
             else:
                 finish_ev = None
@@ -810,9 +789,7 @@ class BuildQueue:
                         previous_status=row["status"],
                         message=f"无活动构建（{row['status']}）",
                     )
-                self.registry.add_event(
-                    instance_id, "build_cancel", "无活动构建，忽略取消请求"
-                )
+                self.registry.add_event(instance_id, "build_cancel", "无活动构建，忽略取消请求")
                 return CancelResult(
                     instance_id=instance_id,
                     outcome="noop",
@@ -827,9 +804,7 @@ class BuildQueue:
                     status="cancelled",
                     cancel_requested_at=time.time(),
                 )
-                self.registry.add_event(
-                    instance_id, "build_cancel", "排队任务已取消（跨进程）"
-                )
+                self.registry.add_event(instance_id, "build_cancel", "排队任务已取消（跨进程）")
                 return CancelResult(
                     instance_id=instance_id,
                     outcome="cancelled",
@@ -901,9 +876,7 @@ class BuildQueue:
                 build_token=final.build_token,
                 status="cancel_failed",
             )
-        self.registry.add_event(
-            instance_id, "build_cancel", "取消失败：等待构建退出超时"
-        )
+        self.registry.add_event(instance_id, "build_cancel", "取消失败：等待构建退出超时")
         try:
             self.registry.update_status(
                 instance_id,
@@ -930,11 +903,7 @@ class BuildQueue:
 
     def in_flight(self) -> int:
         with self._guard:
-            return sum(
-                1
-                for t in self._tasks.values()
-                if t.status in ("building", "cancelling")
-            )
+            return sum(1 for t in self._tasks.values() if t.status in ("building", "cancelling"))
 
     def global_in_flight(self) -> int:
         return self._gate.active_slots()
@@ -953,9 +922,7 @@ class BuildQueue:
         """
         if task.status in ("cancelled", "cancelling"):
             return True
-        if not self._gate.is_cancel_requested(
-            instance_id, build_token=task.build_token
-        ):
+        if not self._gate.is_cancel_requested(instance_id, build_token=task.build_token):
             return False
         row = self._gate.get_build_task(instance_id)
         status = (row or {}).get("status")
@@ -1027,9 +994,7 @@ class BuildQueue:
             return False
         return kill_pid_tree_if_matches(
             int(worker_pid),
-            expected_pgid=int(row["worker_pgid"])
-            if row.get("worker_pgid") is not None
-            else None,
+            expected_pgid=int(row["worker_pgid"]) if row.get("worker_pgid") is not None else None,
             expected_identity=str(row.get("worker_identity") or ""),
         )
 
@@ -1099,9 +1064,7 @@ class BuildQueue:
         except Exception:  # noqa: BLE001
             log.exception("标记 queued 失败")
 
-    def _mark_timeout(
-        self, instance_id: str, task: BuildTask, timeout: float | None
-    ) -> None:
+    def _mark_timeout(self, instance_id: str, task: BuildTask, timeout: float | None) -> None:
         task.status = "failed"
         task.error = f"构建排队超时（{timeout}s）"
         self._persist_task(task, status="failed")

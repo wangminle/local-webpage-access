@@ -96,9 +96,7 @@ def _script_platform(plat: str | None = None) -> str:
         return "linux"
     if p == "macos":
         return "macos"
-    raise FileNotFoundError(
-        f"当前平台 {p} 无内置安装脚本（本期仅 macOS / Linux / WSL）"
-    )
+    raise FileNotFoundError(f"当前平台 {p} 无内置安装脚本（本期仅 macOS / Linux / WSL）")
 
 
 def resolve_install_script(kind: InstallKind, plat: str | None = None) -> Path:
@@ -122,9 +120,7 @@ def resolve_install_script(kind: InstallKind, plat: str | None = None) -> Path:
     except (FileNotFoundError, ModuleNotFoundError, TypeError, AttributeError, OSError):
         pass
 
-    raise FileNotFoundError(
-        f"找不到内置安装脚本 {name}；请从源码树运行或重新 pip install -e ."
-    )
+    raise FileNotFoundError(f"找不到内置安装脚本 {name}；请从源码树运行或重新 pip install -e .")
 
 
 def detect_docker_engine(
@@ -221,12 +217,8 @@ def plan_full_install(
 
     docker = detect_docker_engine(runner=runner)
     compose = detect_docker_compose(runner=runner)
-    if (
-        not skip_distro_docker
-        and (
-            docker.status in ("missing", "outdated")
-            or compose.status in ("missing", "outdated")
-        )
+    if not skip_distro_docker and (
+        docker.status in ("missing", "outdated") or compose.status in ("missing", "outdated")
     ):
         if docker.status != "daemon_down":
             reason_parts = []
@@ -254,9 +246,7 @@ def plan_full_install(
     return items
 
 
-def _default_subprocess_run(
-    cmd: Sequence[str], **kwargs
-) -> subprocess.CompletedProcess[str]:
+def _default_subprocess_run(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess[str]:
     # 捕获输出以便失败时回流到 messages；同时回放到终端，保留用户可见进度。
     result = subprocess.run(
         list(cmd),
@@ -278,9 +268,7 @@ def _default_subprocess_run(
     return result
 
 
-def _script_failure_detail(
-    result: subprocess.CompletedProcess[str], *, limit: int = 400
-) -> str:
+def _script_failure_detail(result: subprocess.CompletedProcess[str], *, limit: int = 400) -> str:
     """从脚本结果提取可展示的失败摘要（优先 stderr）。"""
     blob = (result.stderr or result.stdout or "").strip()
     if not blob:
@@ -385,8 +373,7 @@ def run_full_bootstrap(
             planned=[],
             ran=[],
             messages=[
-                "Full Profile 需要已初始化的工作区；请先执行 lwa init，再运行 "
-                "lwa setup --full。"
+                "Full Profile 需要已初始化的工作区；请先执行 lwa init，再运行 lwa setup --full。"
             ],
             overall="unready",
             exit_code=1,
@@ -427,9 +414,7 @@ def run_full_bootstrap(
             elif _stdin_is_interactive():
                 confirmed = input(prompt).strip().lower() in {"y", "yes"}
             else:
-                messages.append(
-                    "非交互终端且未传 --yes：跳过自动安装。可手动执行：\n" + listing
-                )
+                messages.append("非交互终端且未传 --yes：跳过自动安装。可手动执行：\n" + listing)
                 return FullBootstrapResult(
                     ok=False,
                     planned=planned,
@@ -490,9 +475,7 @@ def run_full_bootstrap(
     compose_after = detect_docker_compose(runner=detect_runner)
     caddy_after = detect_caddy(runner=detect_runner)
     components_ok = (
-        docker_after.status == "ok"
-        and compose_after.status == "ok"
-        and caddy_after.status == "ok"
+        docker_after.status == "ok" and compose_after.status == "ok" and caddy_after.status == "ok"
     )
     if docker_after.status == "daemon_down":
         messages.append("安装完成但 Docker daemon 未起，请启动后再验。")
@@ -597,9 +580,7 @@ def run_full_bootstrap(
             )
             _persist_full_config(workspace_root, service_user, ready=False)
             exit_overall = (
-                "session_refresh_required"
-                if report.session_refresh_required
-                else "unready"
+                "session_refresh_required" if report.session_refresh_required else "unready"
             )
             return FullBootstrapResult(
                 ok=False,
@@ -624,9 +605,7 @@ def run_full_bootstrap(
             },
         )
         _persist_full_config(workspace_root, service_user, ready=True)
-        messages.append(
-            "Full Profile 能力验收通过（CLI + manager + daemon + Caddy + gateway）。"
-        )
+        messages.append("Full Profile 能力验收通过（CLI + manager + daemon + Caddy + gateway）。")
 
     return FullBootstrapResult(
         ok=True,
@@ -639,9 +618,7 @@ def run_full_bootstrap(
     )
 
 
-def _try_start_backends_for_capability(
-    workspace_root: Path, messages: list[str]
-) -> None:
+def _try_start_backends_for_capability(workspace_root: Path, messages: list[str]) -> None:
     """setup --full 验收前尽量启动后台，以便写入真实能力缓存（BUG-234/235）。"""
     import time
 
@@ -688,9 +665,7 @@ def _try_start_backends_for_capability(
     time.sleep(1.5)
 
 
-def _persist_full_config(
-    workspace_root: Path, service_user: str, *, ready: bool
-) -> None:
+def _persist_full_config(workspace_root: Path, service_user: str, *, ready: bool) -> None:
     """把 profile/serviceUser 写回 local-web.yml（平滑，不破坏其它字段）。"""
     try:
         from local_webpage_access.config import load_config
@@ -740,8 +715,7 @@ def maybe_offer_docker_install(
     if state.status == "outdated":
         script = resolve_install_script("docker", platform)
         messages.append(
-            f"Docker Engine {state.version} < {MIN_DOCKER_VERSION}。"
-            f"可手动升级：bash {script}"
+            f"Docker Engine {state.version} < {MIN_DOCKER_VERSION}。可手动升级：bash {script}"
         )
         return DockerOfferResult(messages=messages)
     if not should_offer_docker_install(state):
@@ -756,17 +730,14 @@ def maybe_offer_docker_install(
     if install_docker is None:
         if _stdin_is_interactive():
             prompt = (
-                "未检测到 Docker Engine。是否执行内置安装脚本"
-                f"（阿里云源，路径 {script}）？[y/N] "
+                f"未检测到 Docker Engine。是否执行内置安装脚本（阿里云源，路径 {script}）？[y/N] "
             )
             if confirm is not None:
                 do_install = confirm(prompt)
             else:
                 do_install = input(prompt).strip().lower() in {"y", "yes"}
         else:
-            messages.append(
-                f"非交互终端：跳过 Docker 安装询问。需要时执行：bash {script}"
-            )
+            messages.append(f"非交互终端：跳过 Docker 安装询问。需要时执行：bash {script}")
             return DockerOfferResult(messages=messages)
 
     if not do_install:
@@ -778,8 +749,7 @@ def maybe_offer_docker_install(
     result = run(["bash", str(script)])
     if result.returncode != 0:
         messages.append(
-            f"Docker 安装脚本失败（exit {result.returncode})"
-            + _script_failure_detail(result)
+            f"Docker 安装脚本失败（exit {result.returncode})" + _script_failure_detail(result)
         )
         return DockerOfferResult(
             messages=messages, attempted=True, script_ok=False, recheck_ok=False
@@ -789,19 +759,15 @@ def maybe_offer_docker_install(
     compose_after = detect_docker_compose(runner=detect_runner)
     recheck = after.status == "ok" and compose_after.status == "ok"
     if after.status == "daemon_down":
-        messages.append(
-            "安装脚本已完成，但 Docker daemon 未起：请启动 Desktop / dockerd 后再验。"
-        )
+        messages.append("安装脚本已完成，但 Docker daemon 未起：请启动 Desktop / dockerd 后再验。")
         recheck = False
     elif recheck:
         messages.append(
-            f"Docker 安装并复检通过：Engine {after.version}，"
-            f"Compose {compose_after.version}。"
+            f"Docker 安装并复检通过：Engine {after.version}，Compose {compose_after.version}。"
         )
     else:
         messages.append(
-            f"安装脚本已执行，但复检未通过："
-            f"docker={after.status} compose={compose_after.status}"
+            f"安装脚本已执行，但复检未通过：docker={after.status} compose={compose_after.status}"
         )
     return DockerOfferResult(
         messages=messages,

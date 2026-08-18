@@ -51,9 +51,9 @@ _MAX_FALLBACK_CANDIDATES = 3  # 最多尝试的 fallback 候选数（不含 top-
 _CANDIDATE_TIMEOUT_SECONDS = 300.0  # 单候选 Layer 3 超时（5 分钟）
 
 # Gate-C C.07 fallback 策略
-_FALLBACK_CONFIRM = "confirm"        # 默认：需用户确认才降级
+_FALLBACK_CONFIRM = "confirm"  # 默认：需用户确认才降级
 _FALLBACK_AUTO_EQUIVALENT = "auto-equivalent"  # 自动降级（仅能力等价）
-_FALLBACK_DISABLED = "disabled"      # 禁止降级
+_FALLBACK_DISABLED = "disabled"  # 禁止降级
 
 # 进程内每个实例一把可重入锁；与文件锁叠加，使同一进程的线程也互斥，
 # 避免文件锁的 PID 检查在同进程多线程下失效（PID 相同）。
@@ -91,6 +91,27 @@ def _touch_lock_heartbeat(lock_path: Path) -> None:
         return
 
 
+def _lock_timeout_message(instance_id: str, lock_path: Path, timeout: float) -> str:
+    """issue#1 问题3：锁超时错误附持有者信息，给出可操作的重试指引。
+
+    读锁文件首行 PID 与心跳时间戳（BUG-046 写入格式），持有者存活且心跳
+    新鲜说明上一次操作仍在收尾（失败回滚也会持锁一段时间），提示稍候重试
+    而非让用户误判为死锁。
+    """
+    holder = ""
+    try:
+        content = lock_path.read_text(encoding="utf-8").strip().splitlines()
+        pid = int(content[0]) if content else 0
+        ts = float(content[1]) if len(content) > 1 else 0.0
+    except (OSError, ValueError):
+        return f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）"
+    age = time.time() - ts if ts > 0 else -1.0
+    if pid and _pid_alive(pid):
+        holder = f"（持有者 PID {pid}，心跳 {age:.0f} 秒前仍在刷新）"
+    hint = "上一次操作尚未收尾，请稍候重试"
+    return f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）{holder}：{hint}"
+
+
 @contextlib.contextmanager
 def instance_lock(
     workspace: Workspace,
@@ -117,7 +138,9 @@ def instance_lock(
     tlock = _get_thread_lock(instance_id)
     if not tlock.acquire(timeout=timeout):
         raise LifecycleError(
-            f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）",
+            _lock_timeout_message(
+                instance_id, workspace.run / f"lifecycle-{instance_id}.lock", timeout
+            ),
             instance_id=instance_id,
         )
     fd: int | None = None
@@ -133,14 +156,12 @@ def instance_lock(
             try:
                 ensure_lockable(fd)
                 try_acquire_exclusive(fd)
-                write_lock_payload(
-                    fd, f"{os.getpid()}\n{time.time():.3f}\n".encode()
-                )
+                write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise LifecycleError(
-                        f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）",
+                        _lock_timeout_message(instance_id, lock_path, timeout),
                         instance_id=instance_id,
                     )
                 time.sleep(0.1)
@@ -232,9 +253,7 @@ def _load(workspace: Workspace, instance_id: str) -> InstanceManifest:
     return _load_manifest(workspace, instance_id)
 
 
-def _load_optional(
-    workspace: Workspace, instance_id: str
-) -> InstanceManifest | None:
+def _load_optional(workspace: Workspace, instance_id: str) -> InstanceManifest | None:
     path = workspace.app_manifest_path(instance_id)
     if not path.is_file():
         return None
@@ -308,7 +327,11 @@ def start_instance(
                     f"Gate-C C.R06 指纹变化（{', '.join(changed_fields)}），强制重建",
                 )
                 manifest = _try_host_with_fallback(
-                    workspace, config, registry, instance_id, manifest,
+                    workspace,
+                    config,
+                    registry,
+                    instance_id,
+                    manifest,
                     host_instance,
                     fallback_policy=fallback_policy,
                 )
@@ -318,7 +341,11 @@ def start_instance(
         else:
             # Gate-C：尝试 top-1 候选，失败时降级到 fallback
             manifest = _try_host_with_fallback(
-                workspace, config, registry, instance_id, manifest,
+                workspace,
+                config,
+                registry,
+                instance_id,
+                manifest,
                 host_instance,
                 fallback_policy=fallback_policy,
             )
@@ -386,15 +413,17 @@ def _try_host_with_fallback(
         # C.R05：从异常 context 提取副作用记录
         exc_context = getattr(exc, "context", {}) or {}
         side_effect_records = exc_context.get("side_effect_records", [])
-        side_effects_auto_recoverable = exc_context.get(
-            "side_effects_auto_recoverable", True
-        )
+        side_effects_auto_recoverable = exc_context.get("side_effects_auto_recoverable", True)
 
         # CHK-192/P1：DockerError（build/start 最常见失败）也需进入 fallback 流程，
         # 不能只捕获 HostingError 而让 DockerError 绕过降级。
         # C.06/C.R04/C.R05：回滚本次 attempt（容器、端口、生成文件、manifest 选中状态）
         rollback = _rollback_attempt(
-            workspace, config, registry, instance_id, manifest,
+            workspace,
+            config,
+            registry,
+            instance_id,
+            manifest,
             attempt_id=attempt_id,
             snapshot=snapshot,
             side_effect_records=side_effect_records,
@@ -424,22 +453,32 @@ def _try_host_with_fallback(
         fallbacks = _get_fallback_plans(manifest)
         if not fallbacks:
             # 无 fallback → 直接输出诊断
-            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
-                instanceId=instance_id,
-                overallStatus="failed",
-                candidatesTried=[top1_diagnosis],
-                recommendedAction="无 fallback 候选；请检查 Dockerfile 与源码兼容性",
-            ))
+            _write_diagnosis(
+                workspace,
+                registry,
+                instance_id,
+                DiagnosisReport(
+                    instanceId=instance_id,
+                    overallStatus="failed",
+                    candidatesTried=[top1_diagnosis],
+                    recommendedAction="无 fallback 候选；请检查 Dockerfile 与源码兼容性",
+                ),
+            )
             raise
 
         # fallback_policy="disabled" → 不降级
         if fallback_policy == _FALLBACK_DISABLED:
-            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
-                instanceId=instance_id,
-                overallStatus="failed",
-                candidatesTried=[top1_diagnosis],
-                recommendedAction="fallback_policy=disabled，未尝试降级",
-            ))
+            _write_diagnosis(
+                workspace,
+                registry,
+                instance_id,
+                DiagnosisReport(
+                    instanceId=instance_id,
+                    overallStatus="failed",
+                    candidatesTried=[top1_diagnosis],
+                    recommendedAction="fallback_policy=disabled，未尝试降级",
+                ),
+            )
             raise
 
         # 静态实例不参与降级
@@ -462,7 +501,9 @@ def _try_host_with_fallback(
                     skipped_inequivalent.append((i, plan_dict))
                     log.info(
                         "实例 %s C.R02 契约不等价：fallback #%d 差异=%s",
-                        instance_id, i + 1, diff,
+                        instance_id,
+                        i + 1,
+                        diff,
                     )
         else:
             # 向后兼容：无 contract 时回退到 3-value family 比较
@@ -495,12 +536,17 @@ def _try_host_with_fallback(
             )
 
         if not equivalent_fallbacks:
-            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
-                instanceId=instance_id,
-                overallStatus="failed",
-                candidatesTried=[top1_diagnosis],
-                recommendedAction="所有 fallback 候选能力不等价，未降级",
-            ))
+            _write_diagnosis(
+                workspace,
+                registry,
+                instance_id,
+                DiagnosisReport(
+                    instanceId=instance_id,
+                    overallStatus="failed",
+                    candidatesTried=[top1_diagnosis],
+                    recommendedAction="所有 fallback 候选能力不等价，未降级",
+                ),
+            )
             raise
 
         # C.06：回滚不成功 → 不允许自动降级
@@ -511,12 +557,17 @@ def _try_host_with_fallback(
                 ", ".join(rollback.rolledBackItems) or "无",
             )
             top1_diagnosis.rollback = rollback
-            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
-                instanceId=instance_id,
-                overallStatus="failed",
-                candidatesTried=[top1_diagnosis],
-                recommendedAction="回滚未完成，不允许自动降级；请手动检查残留容器/端口",
-            ))
+            _write_diagnosis(
+                workspace,
+                registry,
+                instance_id,
+                DiagnosisReport(
+                    instanceId=instance_id,
+                    overallStatus="failed",
+                    candidatesTried=[top1_diagnosis],
+                    recommendedAction="回滚未完成，不允许自动降级；请手动检查残留容器/端口",
+                ),
+            )
             raise
 
         # C.07：confirm 策略 → 需用户确认（非交互调用抛 FallbackConfirmationRequired）
@@ -540,13 +591,18 @@ def _try_host_with_fallback(
                 instance_id,
             )
             top1_diagnosis.rollback = rollback
-            _write_diagnosis(workspace, registry, instance_id, DiagnosisReport(
-                instanceId=instance_id,
-                overallStatus="failed",
-                candidatesTried=[top1_diagnosis],
-                recommendedAction="回滚不安全（可能已执行迁移等不可逆操作），"
-                                  "禁止自动降级；请手动检查数据一致性后重试",
-            ))
+            _write_diagnosis(
+                workspace,
+                registry,
+                instance_id,
+                DiagnosisReport(
+                    instanceId=instance_id,
+                    overallStatus="failed",
+                    candidatesTried=[top1_diagnosis],
+                    recommendedAction="回滚不安全（可能已执行迁移等不可逆操作），"
+                    "禁止自动降级；请手动检查数据一致性后重试",
+                ),
+            )
             raise
 
         # C.07：auto-equivalent → 自动降级
@@ -581,8 +637,13 @@ def _try_host_with_fallback(
             fb_snapshot = _snapshot_attempt(workspace, registry, instance_id, manifest)
             try:
                 return _apply_plan_and_host(
-                    workspace, config, registry, instance_id, manifest,
-                    plan_dict, host_fn,
+                    workspace,
+                    config,
+                    registry,
+                    instance_id,
+                    manifest,
+                    plan_dict,
+                    host_fn,
                 )
             except (HostingError, DockerError) as fallback_exc:
                 # CHK-192/P1：fallback 候选的 DockerError 同样需要捕获
@@ -595,32 +656,36 @@ def _try_host_with_fallback(
                 # C.R05：从异常 context 提取副作用记录
                 fb_exc_context = getattr(fallback_exc, "context", {}) or {}
                 fb_se_records = fb_exc_context.get("side_effect_records", [])
-                fb_se_auto = fb_exc_context.get(
-                    "side_effects_auto_recoverable", True
-                )
+                fb_se_auto = fb_exc_context.get("side_effects_auto_recoverable", True)
                 fb_rollback = _rollback_attempt(
-                    workspace, config, registry, instance_id, manifest,
+                    workspace,
+                    config,
+                    registry,
+                    instance_id,
+                    manifest,
                     attempt_id=fb_attempt_id,
                     snapshot=fb_snapshot,
                     side_effect_records=fb_se_records,
                     side_effects_auto_recoverable=fb_se_auto,
                 )
-                diagnoses.append(CandidateDiagnosis(
-                    candidateIndex=orig_index + 1,
-                    candidateTier=tier,
-                    failureLayer=_infer_failure_layer(fallback_exc),
-                    failureReason=str(fallback_exc)[:500],
-                    fixSuggestion=_suggest_fix(fallback_exc),
-                    verification=VerificationResult(
-                        attemptId=fb_attempt_id,
+                diagnoses.append(
+                    CandidateDiagnosis(
                         candidateIndex=orig_index + 1,
                         candidateTier=tier,
-                        buildSucceeded=False,
-                        overallStatus="failed",
-                        error=str(fallback_exc)[:500],
-                    ),
-                    rollback=fb_rollback,
-                ))
+                        failureLayer=_infer_failure_layer(fallback_exc),
+                        failureReason=str(fallback_exc)[:500],
+                        fixSuggestion=_suggest_fix(fallback_exc),
+                        verification=VerificationResult(
+                            attemptId=fb_attempt_id,
+                            candidateIndex=orig_index + 1,
+                            candidateTier=tier,
+                            buildSucceeded=False,
+                            overallStatus="failed",
+                            error=str(fallback_exc)[:500],
+                        ),
+                        rollback=fb_rollback,
+                    )
+                )
                 continue
 
         # 全部失败 → Layer 4 诊断报告
@@ -713,6 +778,7 @@ def _compute_plan_fingerprint(plan_dict: dict | None) -> str:
     if not plan_dict:
         return ""
     import json
+
     canonical = json.dumps(plan_dict, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -1024,6 +1090,7 @@ def _rollback_attempt(
     # 1. 回滚容器（最先执行--停止可能正在运行的副作用）
     try:
         from local_webpage_access.docker_runtime import DockerRuntime
+
         runtime = DockerRuntime(workspace, registry)
         if runtime.is_running(instance_id):
             container_was_running = True
@@ -1041,6 +1108,7 @@ def _rollback_attempt(
     # 2. 回滚端口（仅释放本次 attempt 新分配的，BUG-510）
     try:
         from local_webpage_access.ports import PortAllocator
+
         allocator = PortAllocator(config, registry)
         # BUG-510：不能再拿 containerId 是否为空当“本轮新分配”的代理——重建会先清
         # containerId，复用的旧端口会被误释放（破坏 BUG-045/182 复用保留契约）。
@@ -1060,7 +1128,11 @@ def _rollback_attempt(
     # 3. C.R04：从快照恢复生成文件和 manifest 字段
     if snapshot is not None:
         restored, file_residuals = _restore_from_snapshot(
-            workspace, registry, instance_id, manifest, snapshot,
+            workspace,
+            registry,
+            instance_id,
+            manifest,
+            snapshot,
         )
         rolled_back.extend(restored)
         residuals.extend(file_residuals)
@@ -1086,9 +1158,7 @@ def _rollback_attempt(
     requires_migrations = False
     if isinstance(contract, dict):
         requires_migrations = contract.get("requiresMigrations", False)
-    automatic_fallback_safe = rollback_ok and (
-        not container_was_running or not requires_migrations
-    )
+    automatic_fallback_safe = rollback_ok and (not container_was_running or not requires_migrations)
     # C.R05：副作用不可自动恢复时覆盖为 False
     if not side_effects_auto_recoverable:
         automatic_fallback_safe = False
@@ -1114,8 +1184,7 @@ def _rollback_attempt(
         residualItems=residuals,
         snapshotData=snapshot,
         sideEffectRecords=[
-            SideEffectRecord(**r) if isinstance(r, dict) else r
-            for r in (side_effect_records or [])
+            SideEffectRecord(**r) if isinstance(r, dict) else r for r in (side_effect_records or [])
         ],
     )
 
@@ -1128,6 +1197,7 @@ def _has_active_resources(
     """检查实例是否有活跃的容器或端口登记。"""
     try:
         from local_webpage_access.docker_runtime import DockerRuntime
+
         runtime = DockerRuntime(workspace, registry)
         if runtime.is_running(instance_id):
             return True
@@ -1184,8 +1254,7 @@ class FallbackConfirmationRequired(LwaError):
         self.primary_failure = primary_failure
         self.equivalent_candidates = equivalent_candidates or []
         candidate_desc = ", ".join(
-            f"#{c.get('index', '?')}({c.get('kind', '?')})"
-            for c in (equivalent_candidates or [])
+            f"#{c.get('index', '?')}({c.get('kind', '?')})" for c in (equivalent_candidates or [])
         )
         msg = (
             f"实例 {instance_id} top-1 候选部署失败（{primary_failure[:100]}），"
@@ -1253,10 +1322,7 @@ def _get_fallback_plans(manifest: InstanceManifest) -> list[dict]:
     plans = getattr(manifest, "deploymentPlans", None) or []
     if plans:
         # 过滤：只保留 alternate/fallback tier，排除 primary（已尝试）和 diagnostic
-        fallback_plans = [
-            p for p in plans
-            if p.get("confidenceTier") in ("alternate", "fallback")
-        ]
+        fallback_plans = [p for p in plans if p.get("confidenceTier") in ("alternate", "fallback")]
         if fallback_plans:
             return fallback_plans
         return []  # 有 plans 但无可用 fallback
@@ -1366,7 +1432,8 @@ def _contracts_equivalent(contract_a: dict, contract_b: dict) -> bool:
     return (
         contract_a.get("servesApi", False) == contract_b.get("servesApi", False)
         and contract_a.get("requiresDatabase", False) == contract_b.get("requiresDatabase", False)
-        and contract_a.get("requiresMigrations", False) == contract_b.get("requiresMigrations", False)
+        and contract_a.get("requiresMigrations", False)
+        == contract_b.get("requiresMigrations", False)
         and contract_a.get("servesUi", False) == contract_b.get("servesUi", False)
     )
 
@@ -1402,8 +1469,13 @@ def _apply_plan_and_host(
     # 如果已经是扁平候选（向后兼容），直接走旧路径
     if "components" not in plan_dict:
         return _apply_candidate_and_host(
-            workspace, config, registry, instance_id, manifest,
-            plan_dict, host_fn,
+            workspace,
+            config,
+            registry,
+            instance_id,
+            manifest,
+            plan_dict,
+            host_fn,
         )
 
     # C.R01：DeploymentPlan -> 提取 primary runtime component -> 候选 dict
@@ -1427,8 +1499,13 @@ def _apply_plan_and_host(
         manifest.capabilityContract = new_contract
 
     return _apply_candidate_and_host(
-        workspace, config, registry, instance_id, manifest,
-        candidate_dict, host_fn,
+        workspace,
+        config,
+        registry,
+        instance_id,
+        manifest,
+        candidate_dict,
+        host_fn,
     )
 
 
@@ -1464,9 +1541,7 @@ def _apply_candidate_and_host(
             rt = Runtime(candidate_runtime.replace("_", "-"))
             manifest.runtime = rt
             manifest.servingMode = (
-                ServingMode.SHARED_STATIC
-                if rt == Runtime.SHARED_STATIC
-                else ServingMode.CONTAINER
+                ServingMode.SHARED_STATIC if rt == Runtime.SHARED_STATIC else ServingMode.CONTAINER
             )
         except ValueError:
             pass
@@ -1513,9 +1588,7 @@ def _write_diagnosis(
                 f"（{', '.join(rb.rolledBackItems) or '无'}）"
             )
             if rb.externalSideEffects:
-                lines.append(
-                    f"    ⚠️ 残余副作用: {', '.join(rb.externalSideEffects)}"
-                )
+                lines.append(f"    ⚠️ 残余副作用: {', '.join(rb.externalSideEffects)}")
         # C.01/C.07：能力差异
         if d.capabilityDiff:
             lines.append(f"    能力差异: {d.capabilityDiff}")
@@ -1533,9 +1606,7 @@ def _write_diagnosis(
     except Exception:  # noqa: BLE001
         log.warning("实例 %s 写入诊断 manifest 失败", instance_id)
 
-    registry.update_status(
-        instance_id, Status.FAILED.value, last_error=diagnosis_text[:500]
-    )
+    registry.update_status(instance_id, Status.FAILED.value, last_error=diagnosis_text[:500])
     registry.add_event(
         instance_id,
         "diagnosis",
@@ -1636,9 +1707,7 @@ def recover_instance(
                     )
                     maybe_start_gateway(workspace, config)
             except Exception as exc:  # noqa: BLE001 — 网关拉起失败不阻断 restart
-                log.warning(
-                    "recover %s: 拉起网关失败（继续 restart）：%s", instance_id, exc
-                )
+                log.warning("recover %s: 拉起网关失败（继续 restart）：%s", instance_id, exc)
         return _restart_instance_locked(workspace, config, registry, instance_id)
 
 
@@ -1742,8 +1811,7 @@ def remove_instance(
                 detail="data_nonempty",
             )
             raise DataNonemptyError(
-                f"实例 {instance_id} 的 data/ 目录非空，删除前请确认"
-                f"（使用 --force 强制删除数据）",
+                f"实例 {instance_id} 的 data/ 目录非空，删除前请确认（使用 --force 强制删除数据）",
                 instance_id=instance_id,
             )
 
@@ -1757,17 +1825,13 @@ def remove_instance(
                 "remove",
                 f"移除实例 {instance_id}（purge={purge}, force={force}）",
             )
-        _log_remove_stage(
-            registry, instance_id, "begin", "ok", purge=purge, force=force
-        )
+        _log_remove_stage(registry, instance_id, "begin", "ok", purge=purge, force=force)
 
         # 2. 停止实例（容忍缺失 manifest 或已停止）
         if manifest is not None:
             try:
                 stop_instance(workspace, config, registry, instance_id)
-                _log_remove_stage(
-                    registry, instance_id, "stop", "ok", purge=purge, force=force
-                )
+                _log_remove_stage(registry, instance_id, "stop", "ok", purge=purge, force=force)
             except LwaError as exc:
                 # 停止失败不应阻塞移除；继续清理 registry / 别名 / 磁盘。
                 _log_remove_stage(
@@ -1824,17 +1888,32 @@ def remove_instance(
                 try:
                     DockerRuntime(workspace, registry).down(instance_id)
                     _log_remove_stage(
-                        registry, instance_id, "compose_down", "ok",
-                        purge=purge, force=force, detail="registry fallback",
+                        registry,
+                        instance_id,
+                        "compose_down",
+                        "ok",
+                        purge=purge,
+                        force=force,
+                        detail="registry fallback",
                     )
                 except Exception as exc:  # noqa: BLE001
                     _log_remove_stage(
-                        registry, instance_id, "compose_down", "warn",
-                        purge=purge, force=force, detail=f"registry fallback: {exc}",
+                        registry,
+                        instance_id,
+                        "compose_down",
+                        "warn",
+                        purge=purge,
+                        force=force,
+                        detail=f"registry fallback: {exc}",
                     )
                 _log_remove_stage(
-                    registry, instance_id, "stop", "skip",
-                    purge=purge, force=force, detail="no manifest; compose down used",
+                    registry,
+                    instance_id,
+                    "stop",
+                    "skip",
+                    purge=purge,
+                    force=force,
+                    detail="no manifest; compose down used",
                 )
             elif runtime_value == "shared-static":
                 try:
@@ -1845,21 +1924,41 @@ def remove_instance(
                 except Exception as exc:  # noqa: BLE001
                     result, detail = "warn", f"registry fallback: {exc}"
                 _log_remove_stage(
-                    registry, instance_id, "stop", result,
-                    purge=purge, force=force, detail=detail,
+                    registry,
+                    instance_id,
+                    "stop",
+                    result,
+                    purge=purge,
+                    force=force,
+                    detail=detail,
                 )
                 _log_remove_stage(
-                    registry, instance_id, "compose_down", "skip",
-                    purge=purge, force=force, detail="shared-static",
+                    registry,
+                    instance_id,
+                    "compose_down",
+                    "skip",
+                    purge=purge,
+                    force=force,
+                    detail="shared-static",
                 )
             else:
                 _log_remove_stage(
-                    registry, instance_id, "stop", "skip",
-                    purge=purge, force=force, detail="no manifest or runtime",
+                    registry,
+                    instance_id,
+                    "stop",
+                    "skip",
+                    purge=purge,
+                    force=force,
+                    detail="no manifest or runtime",
                 )
                 _log_remove_stage(
-                    registry, instance_id, "compose_down", "skip",
-                    purge=purge, force=force, detail="no manifest or runtime",
+                    registry,
+                    instance_id,
+                    "compose_down",
+                    "skip",
+                    purge=purge,
+                    force=force,
+                    detail="no manifest or runtime",
                 )
 
         # 2.5 BUG-268 / IMP-041：全 runtime 清理路径别名（容器 stop 不走 disable）。
@@ -2058,9 +2157,7 @@ def _instance_zip_fingerprint(workspace: Workspace, instance_id: str) -> str | N
     return digest.hexdigest()
 
 
-def list_redundant_instances(
-    workspace: Workspace, registry: Registry
-) -> list[dict[str, Any]]:
+def list_redundant_instances(workspace: Workspace, registry: Registry) -> list[dict[str, Any]]:
     """IMP-012：列出冗余实例（按原始 zip 指纹分组，保留 createdAt 最早者）。
 
     返回每个冗余实例的描述字典（``id`` / ``name`` / ``sourceZipHash`` /
@@ -2210,7 +2307,9 @@ def _observe_status_locked(
     elif runtime_value == "shared-static":
         observed = _observe_static_status(workspace, config, registry, instance_id)
     else:
-        return Status(manifest.status.value if isinstance(manifest.status, Status) else manifest.status)
+        return Status(
+            manifest.status.value if isinstance(manifest.status, Status) else manifest.status
+        )
 
     if observed.value != current:
         registry.update_status(instance_id, observed.value)
@@ -2235,9 +2334,7 @@ def _observe_status_locked(
     return observed
 
 
-def _observe_container_status(
-    workspace: Workspace, registry: Registry, instance_id: str
-) -> Status:
+def _observe_container_status(workspace: Workspace, registry: Registry, instance_id: str) -> Status:
     """观测容器真实状态（WBS-17.07；IMP-033 正式观测模型）。
 
     * ``docker compose ps`` 成功且 running → ``RUNNING``；
@@ -2295,11 +2392,7 @@ def _observe_container_status(
     ) -> Status:
         # BUG-369：写回前重读，避免入口快照覆盖并发更新的可信状态。
         latest = registry.get_instance(instance_id) or {}
-        latest_trusted = (
-            latest.get("last_trusted_state")
-            or latest.get("status")
-            or trusted
-        )
+        latest_trusted = latest.get("last_trusted_state") or latest.get("status") or trusted
         latest_status_raw = latest.get("status")
         if latest_status_raw:
             with contextlib.suppress(ValueError):
@@ -2394,6 +2487,7 @@ def _observe_container_status(
             msg=f"Docker 观测异常：{exc}",
             keep=current,
         )
+
 
 def _observe_static_status(
     workspace: Workspace, config: Config, registry: Registry, instance_id: str

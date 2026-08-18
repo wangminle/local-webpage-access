@@ -225,9 +225,7 @@ def locked_connection(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 def get_schema_version(conn: sqlite3.Connection) -> int:
     """读取当前 schema 版本；未初始化时返回 0。"""
     try:
-        row = conn.execute(
-            "SELECT MAX(version) AS v FROM schema_version"
-        ).fetchone()
+        row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
     except sqlite3.OperationalError:
         return 0
     if row is None or row["v"] is None:

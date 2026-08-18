@@ -123,6 +123,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
             tmp_path.unlink()
         raise
 
+
 # ---- Caddy master 生命周期（IMP-010 / BUG-069 / BUG-070）-------------------
 # admin API 固定走 IPv4 loopback（macOS 上 localhost 常解析为 ::1，而 Caddy admin
 # 仅监听 IPv4，见 BUG-068）。reload/start/stop 全部显式使用 127.0.0.1。
@@ -138,9 +139,7 @@ _CADDY_START_TIMEOUT = 20
 # 仅保证 Caddy admin 在线的最小 bootstrap 配置（无任何站点；真实站点由 reload_all 注入）。
 # 不含 ``admin off``（BUG-014：首次加载后关闭 admin 会让后续 reload 全部失败）；
 # Caddy 默认即在 :2019 暴露 admin。仅注释行 → 等价空配置。
-_MIN_CADDYFILE = (
-    "# lwa bootstrap：仅保证 Caddy admin 在线，真实站点由 reload_all 注入\n"
-)
+_MIN_CADDYFILE = "# lwa bootstrap：仅保证 Caddy admin 在线，真实站点由 reload_all 注入\n"
 
 
 def _refuse_caddy_admin_in_pytest(action: str) -> None:
@@ -387,9 +386,7 @@ class StaticGateway:
                     continue
         return _FALLBACK_TEMPLATE
 
-    def generate_site_config(
-        self, instance_id: str, host_port: int, root: Path
-    ) -> Path:
+    def generate_site_config(self, instance_id: str, host_port: int, root: Path) -> Path:
         """渲染并写入 ``static-gateway/sites/<id>.conf``（WBS-09.03）。"""
         template = self._load_template()
         content = template.format(
@@ -397,9 +394,7 @@ class StaticGateway:
             root=_caddy_quote(str(root).replace("\\", "/")),
             site_id=instance_id,
             rate_limit_block=self._rate_limit_directive(instance_id),
-            access_log=_caddy_quote(
-                str(self.ws.logs / "static-access.log").replace("\\", "/")
-            ),
+            access_log=_caddy_quote(str(self.ws.logs / "static-access.log").replace("\\", "/")),
         )
         path = self.site_config_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -425,31 +420,31 @@ class StaticGateway:
     ) -> Path:
         """渲染路径别名路由片段，写入 ``aliases/<id>.conf``（IMP-006）。
 
-        片段被主 Caddyfile 的统一入口块 ``import`` 进 ``:{staticGatewayPort}`` 站点。
-        ``handle_path`` 自动去前缀——upstream 收到的是去掉 ``/<alias>`` 后的路径，
-        避免应用看到 ``/alias/index.html`` 找不到资源；``handle /<alias>`` 处理
-        无尾斜杠访问，301 到 ``/<alias>/``。
+           片段被主 Caddyfile 的统一入口块 ``import`` 进 ``:{staticGatewayPort}`` 站点。
+           ``handle_path`` 自动去前缀——upstream 收到的是去掉 ``/<alias>`` 后的路径，
+           避免应用看到 ``/alias/index.html`` 找不到资源；``handle /<alias>`` 处理
+           无尾斜杠访问，301 到 ``/<alias>/``。
 
-        alias slug 已由 :func:`paths.validate_path_alias` 校验为
-        ``[a-z0-9-]+``，host_port 为 int，均可安全内插 Caddyfile。
+           alias slug 已由 :func:`paths.validate_path_alias` 校验为
+           ``[a-z0-9-]+``，host_port 为 int，均可安全内插 Caddyfile。
 
-     .. note:: SPA 绝对资源路径限制（IMP-006 / IMP-023 / IMP-055）
+        .. note:: SPA 绝对资源路径限制（IMP-006 / IMP-023 / IMP-055）
 
-            ``handle_path`` 去掉 ``/<alias>`` 前缀后转发给 upstream，因此
-            **相对路径资源**（``./assets/app.js``、``assets/logo.png``）能正确
-            解析为 ``/<alias>/assets/...``。但**绝对路径资源**
-            （``/assets/app.js``、以 ``/`` 开头的 ``src``/``href``）会绕过别名，
-            直接打到统一入口根 ``/assets/...`` -> 空 200 / 404。
+               ``handle_path`` 去掉 ``/<alias>`` 前缀后转发给 upstream，因此
+               **相对路径资源**（``./assets/app.js``、``assets/logo.png``）能正确
+               解析为 ``/<alias>/assets/...``。但**绝对路径资源**
+               （``/assets/app.js``、以 ``/`` 开头的 ``src``/``href``）会绕过别名，
+               直接打到统一入口根 ``/assets/...`` -> 空 200 / 404。
 
-            受影响的项目应在构建时设显式 base path（Vite ``--base=/<alias>/``）
-            并让 Router/API 跟 ``BASE_URL``，或继续使用 hostPort 端口直达。
-            设别名时若检出绝对路径资源会硬失败（IMP-023 / IMP-055）。
+               受影响的项目应在构建时设显式 base path（Vite ``--base=/<alias>/``）
+               并让 Router/API 跟 ``BASE_URL``，或继续使用 hostPort 端口直达。
+               设别名时若检出绝对路径资源会硬失败（IMP-023 / IMP-055）。
 
-            .. deprecated:: IMP-055
+               .. deprecated:: IMP-055
 
-                ``spa_fallback=True`` 保留 BUG-465 全局 ``/assets`` 回退作为
-                **逃生舱**（多实例争抢 ``/assets``、管不住 ``/api`` 与 Router），
-                **默认关闭**，不作为长期通用方案。应用侧应按方案 B 改造。
+                   ``spa_fallback=True`` 保留 BUG-465 全局 ``/assets`` 回退作为
+                   **逃生舱**（多实例争抢 ``/assets``、管不住 ``/api`` 与 Router），
+                   **默认关闭**，不作为长期通用方案。应用侧应按方案 B 改造。
         """
         from local_webpage_access.paths import validate_path_alias
 
@@ -553,7 +548,10 @@ class StaticGateway:
                 log.warning(
                     "实例 %s 配置了路径别名 %s，但当前静态后端为 %s，别名入口未启用"
                     "（builtin 模式暂不支持，仅通过端口 %d 访问）",
-                    instance_id, alias, backend, host_port,
+                    instance_id,
+                    alias,
+                    backend,
+                    host_port,
                 )
 
             if backend == "builtin":
@@ -701,9 +699,7 @@ class StaticGateway:
         except Exception:  # noqa: BLE001
             return False
 
-    def _wait_until_healthy(
-        self, host_port: int, *, timeout: float = _START_WAIT
-    ) -> bool:
+    def _wait_until_healthy(self, host_port: int, *, timeout: float = _START_WAIT) -> bool:
         """启动后轮询健康检查（BUG-045）。
 
         ``subprocess.Popen`` 返回时 ``http.server`` 已 fork 但仍在导入 / 绑定
@@ -748,9 +744,7 @@ class StaticGateway:
         # IMP-033：admin 已在线时必须确认归属本工作区，禁止误操外部/系统 Caddy。
         if self._admin_alive():
             owner = self.inspect_caddy_owner()
-            if owner.get("owner") != "lwa_service_user" or not owner.get(
-                "workspace_match"
-            ):
+            if owner.get("owner") != "lwa_service_user" or not owner.get("workspace_match"):
                 raise GatewayError(
                     "Caddy master 所有权不匹配，禁止 reload",
                     detail=(
@@ -1081,9 +1075,7 @@ class StaticGateway:
             not pingback_failed or self._workspace_caddy_pid_alive()
         ):
             if pingback_failed:
-                log.warning(
-                    "caddy start --pingback 未确认成功但本工作区 Caddy 已就绪（BUG-102）"
-                )
+                log.warning("caddy start --pingback 未确认成功但本工作区 Caddy 已就绪（BUG-102）")
             return True
         return False
 
@@ -1276,9 +1268,7 @@ class StaticGateway:
         pid = self._read_pid(instance_id)
         if pid is None or not self._pid_alive(pid):
             return False
-        log.info(
-            "启用前停掉残留存活的 builtin 静态服务 %s（pid=%d）", instance_id, pid
-        )
+        log.info("启用前停掉残留存活的 builtin 静态服务 %s（pid=%d）", instance_id, pid)
         self._stop_builtin(instance_id)
         return True
 
@@ -1319,7 +1309,8 @@ class StaticGateway:
                 continue
             log.info(
                 "切换后端：停止残留 builtin http.server %s（pid=%d，无 pid 文件）",
-                iid, pid,
+                iid,
+                pid,
             )
             if self._kill_process(pid, expected_path=self.ws.apps):
                 stopped.append(iid)
@@ -1340,7 +1331,11 @@ class StaticGateway:
             # BUG-512：procps（Linux）的 ``-l`` 只输出进程名（comm，截断 15 字符），
             # ``-a`` 才输出完整命令行；Darwin 的 ``-lf`` 已含命令行（``-af`` 只输出 PID）。
             # 按平台选择旗标，否则 Linux 上孤儿 builtin 枚举恒空。
-            pgrep_flags = ["-af", "http.server"] if sys.platform.startswith("linux") else ["-lf", "http.server"]
+            pgrep_flags = (
+                ["-af", "http.server"]
+                if sys.platform.startswith("linux")
+                else ["-lf", "http.server"]
+            )
             result = subprocess.run(
                 ["pgrep", *pgrep_flags],
                 capture_output=True,
@@ -1373,9 +1368,7 @@ class StaticGateway:
         import re
 
         # 形如 ... --directory /path/apps/<iid>/public [--bind ...]
-        m = re.search(
-            re.escape(apps_prefix) + r"/([^/]+)/public", cmdline
-        )
+        m = re.search(re.escape(apps_prefix) + r"/([^/]+)/public", cmdline)
         return m.group(1) if m else None
 
     # ---- builtin 进程管理 ---------------------------------------------------
@@ -1430,9 +1423,7 @@ class StaticGateway:
             "stdin": subprocess.DEVNULL,
         }
         if os.name == "nt":
-            popen_kwargs["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-            )
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         else:
             popen_kwargs["start_new_session"] = True
 

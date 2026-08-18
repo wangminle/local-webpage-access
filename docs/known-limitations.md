@@ -199,3 +199,15 @@ swap=4GB
   并关注版本变更说明。
 * `local-web.json` schema 有版本字段（`version: "1"`），
   未来破坏性变更会升版本号并提供迁移脚本。
+
+## 一键更新通道（IMP-063 / V0.8.0）
+
+* **仅 fast-forward**：`lwa update` 的源码阶段只做 `git merge --ff-only <固定候选 OID>`。tracked 文件有本地修改、与远端分叉、detached HEAD、浅克隆历史不足时**拒绝快进**（工作树零改动，结构化 `errorKind` + 下一步指引）；不做 merge/rebase/reset/stash 代操作，无 `--force` 类破坏性旗标。
+* **`--ref` 仅接受远端分支**（MVP）：不接受 tag / 任意 commit；tag 化发布体系成熟后再议。
+* **无 upstream 时须显式给全目标**：必须同时提供 `--remote <name>` 与 `--ref <branch>`，只给其一报 `target_incomplete`。
+* **`--skip-pip` 门禁**：检测到落后（behind）又传 `--skip-pip` 会在快进前拒绝（`skip_pip_conflict`）；`--no-pull --skip-pip`、已是最新 + `--skip-pip`、fetch warning + `--skip-pip` 保留旧语义。
+* **fetch 失败是降级不是故障**：断网/代理/凭据问题 → `sourceUpdate warning`，以本地代码完成 Runtime 刷新（离线可用）；代理与凭据沿用 git 自身机制（`https_proxy` / credential helper / SSH remote），lwa 不内置代理配置、不存 token。
+* **非 git 克隆安装**（如 release zip 解包）：`sourceUpdate skipped` 并提示迁移到 clone + `pip install -e .`，不会自动 clone。
+* **并发互斥**：可变更的 update 全程持 repo（git common-dir）+ workspace 双锁（固定顺序）；两个 update 并发时后者 fail-fast 报「更新锁被占用」。会 fetch 的 `--check` 也取 repo 锁；`--dry-run` 严格零写入（不联网、不 fetch、不取锁，数据标 `fresh=false`）。
+* **不自动回滚**：快进后 pip/接力失败只在报告中给人工恢复链（`git status` 复查 → 干净时 `git reset --keep <oldHead>` → 重跑 `lwa update`）。
+* **服务拉起边界（IMP-059）**：仅当 `run/*.json` 持久化 `enabled=true`（含 config 交叉校验）的自有服务会被 update 拉起；`--no-reconcile` 回到纯观察态。裸进程模式（无自启单元）重启后仍不会自动恢复——靠 `lwa doctor` 的 `restart_resilience` WARN（IMP-060）与 IMP-061 引导收敛。

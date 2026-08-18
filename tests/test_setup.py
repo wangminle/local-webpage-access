@@ -18,9 +18,7 @@ from local_webpage_access.setup import (
 
 
 def _proc(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=stderr
-    )
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def _runner_from_map(mapping: dict[tuple[str, ...], subprocess.CompletedProcess]):
@@ -126,9 +124,7 @@ def test_render_setup_script_per_platform() -> None:
 
 def test_cli_setup_command() -> None:
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["setup", "--static-gateway", "builtin", "--no-install-docker"]
-    )
+    result = runner.invoke(app, ["setup", "--static-gateway", "builtin", "--no-install-docker"])
     assert result.exit_code in (0, 1)
     assert "宿主机环境检测" in result.output or "python" in result.output.lower()
 
@@ -143,11 +139,7 @@ def test_cli_setup_script_flag() -> None:
         assert "brew install" in result.output
     elif plat == "windows":
         # IMP-036：原生 Windows 应提示改用 WSL2（门禁也可能非零退出）
-        assert (
-            "WSL2" in result.output
-            or "不支持" in result.output
-            or result.exit_code != 0
-        )
+        assert "WSL2" in result.output or "不支持" in result.output or result.exit_code != 0
 
 
 def test_cli_setup_rejects_default_and_full() -> None:

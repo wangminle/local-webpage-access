@@ -46,9 +46,7 @@ def init_workspace(
     ws.ensure_workspace_dirs()
 
     # 2. 写入默认配置
-    config_written = _write_default_config(
-        ws, force=force, static_gateway=static_gateway
-    )
+    config_written = _write_default_config(ws, force=force, static_gateway=static_gateway)
 
     # 3. 复制默认模板（用于用户编辑）
     templates_written = _copy_default_templates(ws, force=force)
@@ -171,7 +169,9 @@ def _format_summary(
     lines.append(f"  skills/      {ws.skills}")
     lines.append("")
     lines.append("── 初始化结果 ──")
-    lines.append(f"  配置文件     {'已写入' if config_written else '已存在（保留）'}  {ws.config_path}")
+    lines.append(
+        f"  配置文件     {'已写入' if config_written else '已存在（保留）'}  {ws.config_path}"
+    )
     if templates_written:
         lines.append(f"  默认模板     已复制 {len(templates_written)} 个文件")
     else:
@@ -190,8 +190,7 @@ def _format_summary(
             lines.append("               token 见 run/manager-token.json 或 lwa manager status")
         else:
             lines.append(
-                f"  管理页       已启用但未启动；执行 lwa manager on"
-                f"（端口 {config.managerPort}）"
+                f"  管理页       已启用但未启动；执行 lwa manager on（端口 {config.managerPort}）"
             )
     else:
         lines.append("  管理页       managerEnabled=false，未自动启动")

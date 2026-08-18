@@ -13,7 +13,14 @@ from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 
 
-def _seed(workspace: Workspace, registry: Registry, iid: str = "demo", *, host_port: int = 21000, lan_url: str):
+def _seed(
+    workspace: Workspace,
+    registry: Registry,
+    iid: str = "demo",
+    *,
+    host_port: int = 21000,
+    lan_url: str,
+):
     from local_webpage_access.models import (
         DesiredState,
         InstanceManifest,
@@ -73,12 +80,8 @@ def test_throttled_refresh_writes_once_within_window(env, monkeypatch) -> None:
 
     ws, cfg, reg = env
     _seed(ws, reg, lan_url="http://10.0.0.99:21000")
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda c: "192.168.1.50"
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda c: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda c: "192.168.1.50")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda c: "192.168.1.50")
     aw.reset_lan_refresh_throttle_state()
 
     calls = {"n": 0}
@@ -103,12 +106,8 @@ def test_throttled_refresh_single_flight(env, monkeypatch) -> None:
 
     ws, cfg, reg = env
     _seed(ws, reg, lan_url="http://10.0.0.99:21000")
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda c: "192.168.1.50"
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda c: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda c: "192.168.1.50")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda c: "192.168.1.50")
     aw.reset_lan_refresh_throttle_state()
 
     started = threading.Event()
@@ -147,9 +146,7 @@ def test_manual_strategy_does_not_auto_refresh(env, monkeypatch) -> None:
     cfg.lanIpStrategy = "manual"
     cfg.manualLanIp = "192.168.9.9"
     _seed(ws, reg, lan_url="http://10.0.0.99:21000")
-    monkeypatch.setattr(
-        "local_webpage_access.ports.detect_lan_ip", lambda: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.ports.detect_lan_ip", lambda: "192.168.1.50")
     aw.reset_lan_refresh_throttle_state()
     calls = {"n": 0}
     monkeypatch.setattr(

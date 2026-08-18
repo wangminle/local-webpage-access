@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import typer
 
-from local_webpage_access.cli._common import coordinated_autostart_disable, log, open_workspace_registry
+from local_webpage_access.cli._common import (
+    coordinated_autostart_disable,
+    log,
+    open_workspace_registry,
+)
 from local_webpage_access.errors import LwaError
 
 app = typer.Typer(help="控制管理页 HTTP 服务")
@@ -118,9 +122,7 @@ def manager_status_cmd() -> None:
 
 @app.command("token")
 def manager_token(
-    json_output: bool = typer.Option(
-        False, "--json", help="以 JSON 格式输出（便于 Agent 解析）"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="以 JSON 格式输出（便于 Agent 解析）"),
 ) -> None:
     """IMP-046：查看当前管理页 API token 及轮换信息。
 
@@ -135,9 +137,10 @@ def manager_token(
         meta = read_token_metadata(ws)
         token = meta["token"]
         created_at = meta["createdAt"]
-        rotate_hours = getattr(
-            config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT
-        ) or TOKEN_ROTATE_HOURS_DEFAULT
+        rotate_hours = (
+            getattr(config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT)
+            or TOKEN_ROTATE_HOURS_DEFAULT
+        )
 
         if not token:
             if json_output:
@@ -150,16 +153,20 @@ def manager_token(
         next_rotate_at = None
         if created_at:
             from datetime import datetime, timedelta
+
             try:
                 created_dt = datetime.fromisoformat(created_at)
                 if created_dt.tzinfo is None:
                     created_dt = created_dt.astimezone()
-                next_rotate_at = (created_dt + timedelta(hours=rotate_hours)).isoformat(timespec="seconds")
+                next_rotate_at = (created_dt + timedelta(hours=rotate_hours)).isoformat(
+                    timespec="seconds"
+                )
             except (ValueError, TypeError):
                 pass
 
         if json_output:
             import json as _json
+
             payload = {
                 "token": token,
                 "createdAt": created_at,

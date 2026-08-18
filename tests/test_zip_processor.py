@@ -63,9 +63,7 @@ def test_validate_zip_rejects_truncated(tmp_path: Path) -> None:
         validate_zip(zp)
 
 
-def test_validate_zip_rejects_high_compression_ratio(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_validate_zip_rejects_high_compression_ratio(tmp_path: Path, monkeypatch) -> None:
     """BUG-123：在 testzip 解压前拒绝异常高压缩比。"""
     from local_webpage_access import zip_processor
 
@@ -76,9 +74,7 @@ def test_validate_zip_rejects_high_compression_ratio(
         validate_zip(zp)
 
 
-def test_validate_zip_rejects_too_many_members(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_validate_zip_rejects_too_many_members(tmp_path: Path, monkeypatch) -> None:
     """BUG-123：成员数超过上限时拒绝。"""
     from local_webpage_access import zip_processor
 

@@ -94,7 +94,9 @@ def _seed_frontend_instance(workspace: Workspace, registry: Registry, iid: str =
     """构造一个已导入的前端实例（current/ 含 package.json，build 脚本存在）。"""
     workspace.ensure_app_dirs(iid)
     current = workspace.app_current(iid)
-    (current / "package.json").write_text('{"dependencies":{"react":"^18"},"scripts":{"build":"vite build"}}')
+    (current / "package.json").write_text(
+        '{"dependencies":{"react":"^18"},"scripts":{"build":"vite build"}}'
+    )
     detection = DetectionResult(
         kind=Kind.NODE,
         runtime=Runtime.SHARED_STATIC,
@@ -294,9 +296,7 @@ def test_run_command_timeout_kills_child_tree(tmp_path: Path) -> None:
 # ---- WBS-10 纯静态托管（端到端）------------------------------------------
 
 
-def test_host_static_end_to_end(
-    workspace: Workspace, registry: Registry, config: Config
-) -> None:
+def test_host_static_end_to_end(workspace: Workspace, registry: Registry, config: Config) -> None:
     _seed_static_instance(workspace, registry, "demo")
     manifest = host_static(workspace, config, registry, "demo")
 
@@ -442,6 +442,7 @@ def test_build_and_host_frontend_success(
             (dist / "index.html").write_text("<html>built</html>")
 
         return _subprocess_completed(0)
+
     monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
 
     manifest = build_and_host_frontend(workspace, config, registry, "spa")
@@ -463,6 +464,7 @@ def test_build_and_host_frontend_build_failure(
 
     def fake_run(cmd, *, cwd, log_path, **kw):
         raise BuildError("npm run build 失败", command=cmd, exit_code=1)
+
     monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
 
     with pytest.raises(BuildError):
@@ -491,6 +493,7 @@ def test_build_and_host_frontend_no_artifact(
     def fake_run(cmd, *, cwd, log_path, **kw):
         # 不创建 dist/
         return _subprocess_completed(0)
+
     monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
 
     with pytest.raises(BuildError, match="产物"):
@@ -571,9 +574,7 @@ def test_build_and_host_frontend_rejects_source_subdir_escape(
     current = workspace.app_current("spa-escape")
     outside = current.parent / "outside"
     outside.mkdir()
-    (outside / "package.json").write_text(
-        '{"scripts":{"build":"vite build"}}'
-    )
+    (outside / "package.json").write_text('{"scripts":{"build":"vite build"}}')
     fe = current / "frontend"
     fe.mkdir()
     (fe / "package.json").write_text(
@@ -646,7 +647,9 @@ def _subprocess_completed(returncode: int):
 # BUG-006：stop_instance 对容器实例静默无操作，CLI 仍报"已停止"
 
 
-def _seed_nested_static_instance(workspace: Workspace, registry: Registry, iid: str = "demo") -> None:
+def _seed_nested_static_instance(
+    workspace: Workspace, registry: Registry, iid: str = "demo"
+) -> None:
     """构造一个 index.html 嵌套于子目录 site/ 的静态实例。"""
     workspace.ensure_app_dirs(iid)
     current = workspace.app_current(iid)
@@ -881,9 +884,7 @@ def test_host_container_keeps_reused_port_on_build_failure(
             raise DockerError("build boom")
 
     monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
-    monkeypatch.setattr(
-        "local_webpage_access.hosting.is_port_listening", lambda _p: False
-    )
+    monkeypatch.setattr("local_webpage_access.hosting.is_port_listening", lambda _p: False)
 
     with pytest.raises(DockerError, match="build boom"):
         host_container(workspace, config, registry, "api")

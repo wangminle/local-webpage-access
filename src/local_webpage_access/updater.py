@@ -7,11 +7,13 @@
     识别上下文 → 预检（dry-run）→ pip install -e . → 同步 skills/templates
     → 配置缺省字段补齐 → 重启 manager/daemon/gateway → 可选重启实例 → lwa doctor
 
-设计约束（见 ``docs/plan/待改进功能点记录-20260706.md`` IMP-008）：
+设计约束（见 ``docs/plan/待改进功能点记录-20260706.md`` IMP-008；IMP-059 修订）：
 
 * 每步**独立失败不中断后续**，最终退出码反映是否存在失败；
 * pip 成功但 manager 重启失败**不回滚** Python 包；提示查 ``run/manager.json``；
-* 重启 manager/daemon/gateway **仅在原本运行时**才执行，原本 stopped 不自动开启；
+* 重启 manager/daemon/gateway 按三态 reconcile（IMP-059）：运行中→重启；
+  **enabled=true 且未运行→拉起**并标注「意外未运行，已恢复」；enabled=false→
+  跳过（``--no-reconcile`` 回到纯观察态）；
 * 实例默认**不动**；``--restart-instances`` 时跳过 building/queued/pending；
 * ``--dry-run`` 不产生任何文件、进程、registry 变更；
 * ``--sync-templates`` 默认关闭（避免覆盖用户改过的模板）。
@@ -70,6 +72,13 @@ class UpdateOptions:
     run_doctor: bool = True
     review_access: bool = True  # IMP-038：升级后默认轻量 access review
     repo: str | None = None  # 显式 --repo，覆盖自动识别
+    # IMP-059：服务级期望态 reconcile——enabled 但未运行的自有服务在 update 时
+    # 自动拉起并标注「意外未运行，已恢复」；--no-reconcile 回到纯观察态。
+    reconcile_services: bool = True
+    # IMP-063：源码阶段开关
+    pull: bool = True  # --no-pull：不联网，仅用本地代码刷新 Runtime
+    remote: str | None = None  # --remote：覆盖 upstream 解析的远端
+    ref: str | None = None  # --ref：覆盖 upstream 解析的分支
 
 
 @dataclass
@@ -77,7 +86,7 @@ class StepResult:
     """单步执行结果。"""
 
     name: str
-    status: str  # ok | failed | skipped | pending
+    status: str  # ok | warning | failed | skipped | pending
     message: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -101,6 +110,11 @@ class UpdateReport:
     def has_failures(self) -> bool:
         return any(s.status == "failed" for s in self.steps)
 
+    @property
+    def has_warnings(self) -> bool:
+        """IMP-063：warning 计入 hasWarnings 但不计入 hasFailures。"""
+        return any(s.status == "warning" for s in self.steps)
+
     def step(self, name: str) -> StepResult | None:
         for s in self.steps:
             if s.name == name:
@@ -116,7 +130,33 @@ class UpdateReport:
             "steps": [s.to_dict() for s in self.steps],
             "managerUrl": self.manager_url,
             "doctorStatus": self.doctor_status,
+            "hasFailures": self.has_failures,
+            "hasWarnings": self.has_warnings,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "UpdateReport":
+        """从 continuation 子报告 JSON 重建（IMP-063 父进程合并用）。"""
+        steps: list[StepResult] = []
+        for s in data.get("steps") or []:
+            extra = {k: v for k, v in s.items() if k not in ("name", "status", "message")}
+            steps.append(
+                StepResult(
+                    name=str(s.get("name", "?")),
+                    status=str(s.get("status", "skipped")),
+                    message=str(s.get("message", "")),
+                    extra=extra,
+                )
+            )
+        return cls(
+            workspace=str(data.get("workspace", "")),
+            repo=data.get("repo"),
+            version_before=str(data.get("versionBefore", "")),
+            version_after=str(data.get("versionAfter", "")),
+            steps=steps,
+            manager_url=data.get("managerUrl"),
+            doctor_status=data.get("doctorStatus"),
+        )
 
 
 # ---- 上下文识别 ------------------------------------------------------------
@@ -182,8 +222,7 @@ def run_pip_install(repo: Path) -> str:
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-5:]
         raise RuntimeError(
-            f"pip install -e . 失败（exit {result.returncode}）：\n"
-            + "\n".join(tail)
+            f"pip install -e . 失败（exit {result.returncode}）：\n" + "\n".join(tail)
         )
     # 成功：取最后几行（含 Successfully installed ...）
     lines = (result.stdout or "").strip().splitlines()
@@ -308,9 +347,7 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
         if not isinstance(default_value, dict) or not isinstance(current_value, dict):
             continue
         nested_missing = {
-            child: value
-            for child, value in default_value.items()
-            if child not in current_value
+            child: value for child, value in default_value.items() if child not in current_value
         }
         if not nested_missing:
             continue
@@ -347,8 +384,7 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
             # 尽量沿用原行结尾风格
             if lines[start].endswith("\r\n"):
                 replacement = [
-                    (ln if ln.endswith("\r\n") else ln.rstrip("\n") + "\r\n")
-                    for ln in replacement
+                    (ln if ln.endswith("\r\n") else ln.rstrip("\n") + "\r\n") for ln in replacement
                 ]
             lines[start : start + 1] = replacement
         else:
@@ -357,12 +393,8 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
                 lines[end].startswith((" ", "\t")) or not lines[end].strip()
             ):
                 end += 1
-            fragment = yaml.safe_dump(
-                nested_missing, allow_unicode=True, sort_keys=False
-            )
-            lines[end:end] = [
-                "  " + line for line in fragment.splitlines(keepends=True)
-            ]
+            fragment = yaml.safe_dump(nested_missing, allow_unicode=True, sort_keys=False)
+            lines[end:end] = ["  " + line for line in fragment.splitlines(keepends=True)]
         updated_raw = "".join(lines)
     addition = yaml.safe_dump(
         {key: defaults[key] for key in missing},
@@ -415,9 +447,7 @@ def run_migrate_config_defaults(ws: Workspace) -> tuple[list[str], bool]:
     try:
         payload = json.loads(line[-1])
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"配置迁移子进程输出无法解析：{(proc.stdout or '')[:200]}"
-        ) from exc
+        raise RuntimeError(f"配置迁移子进程输出无法解析：{(proc.stdout or '')[:200]}") from exc
     missing = payload.get("missing") or []
     if not isinstance(missing, list):
         missing = []
@@ -461,26 +491,104 @@ def verify_manager_version(
     return False, last_actual
 
 
-def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
-    """幂等重启管理页：仅当原本 running 时 stop→start。
+def _down_since_fields(name: str, ws: Workspace) -> tuple[float | None, str]:
+    """IMP-059.04：中断时长估算，返回 (epoch 秒 | None, 文案后缀)。"""
+    from local_webpage_access.service_intent import (
+        estimate_down_since,
+        format_down_duration,
+    )
 
-    原本 stopped 不自动开启（避免意外拉起用户故意关闭的服务）。
-    返回 ``{"wasRunning": bool, "pid": int|None, "message": str, ...}``。
+    down_since = estimate_down_since(name, ws)
+    return down_since, format_down_duration(down_since)
 
-    BUG-451：重启成功后比对 ``/api/health.version`` 与当前 ``display_version()``；
-    不一致时再重启一次，仍不一致则抛错（避免 CLI 报告升级成功而管理页仍旧版）。
+
+def _down_since_iso(down_since: float | None) -> str | None:
+    if down_since is None:
+        return None
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(down_since, tz=timezone.utc).isoformat()
+
+
+def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) -> dict[str, Any]:
+    """幂等重启管理页：仅当原本 running 时 stop→start（IMP-059 升级为三态）。
+
+    三态语义（059.02）：
+
+    * running → 重启（BUG-191 协调 + BUG-451 版本校验，行为不变）；
+    * enabled=true 且未运行 → **拉起**，报告标注「意外未运行（中断约 X），已恢复」；
+    * enabled=false → 跳过，文案不变（"原本未运行，跳过重启"）。
+
+    ``reconcile=False``（``--no-reconcile``）时回到纯观察态：未运行一律跳过。
     """
-    from local_webpage_access.cli._common import coordinated_autostart_restart
+    from local_webpage_access.cli._common import (
+        coordinated_autostart_restart,
+        coordinated_autostart_start,
+    )
     from local_webpage_access.manager_service import (
         is_running,
         start_manager,
         stop_manager,
     )
+    from local_webpage_access.service_intent import (
+        INTENT_ENABLED,
+        service_intent,
+    )
     from local_webpage_access.version_info import display_version
 
     was_running = is_running(ws, config)
     if not was_running:
-        return {"wasRunning": False, "pid": None, "message": "管理页原本未运行，跳过重启"}
+        if not reconcile or service_intent(ws, config).manager != INTENT_ENABLED:
+            return {"wasRunning": False, "pid": None, "message": "管理页原本未运行，跳过重启"}
+        # IMP-059：enabled 但意外未运行 → 拉起并标注（不掩盖事实）
+        down_since, down_note = _down_since_fields("manager", ws)
+        note, _ok, managed = coordinated_autostart_start(ws, "manager")
+        if managed:
+            ok, actual = verify_manager_version(config)
+            if not ok:
+                coordinated_autostart_start(ws, "manager")
+                ok, actual = verify_manager_version(config)
+            if not ok:
+                raise RuntimeError(
+                    f"管理页拉起后版本不一致：期望 {display_version()}，"
+                    f"实际 {actual or '未知'}；可 `lwa manager off` 后 `lwa manager on`"
+                )
+            msg = f"管理页意外未运行{down_note}，已恢复（{note or '通过自启动单元拉起'}）"
+            if actual:
+                msg = f"{msg}（version={actual}）"
+            return {
+                "wasRunning": False,
+                "reconciled": True,
+                "unexpectedDown": True,
+                "downSince": _down_since_iso(down_since),
+                "pid": None,
+                "version": actual,
+                "message": msg,
+            }
+        pid = start_manager(ws, config)
+        ok, actual = verify_manager_version(config)
+        if not ok:
+            if not stop_manager(ws):
+                raise RuntimeError(
+                    f"管理页版本不一致（实际 {actual or '未知'}）且二次停止失败；"
+                    f"期望 {display_version()}"
+                )
+            pid = start_manager(ws, config)
+            ok, actual = verify_manager_version(config)
+        if not ok:
+            raise RuntimeError(
+                f"管理页拉起后版本不一致：期望 {display_version()}，"
+                f"实际 {actual or '未知'}；可 `lwa manager off` 后重试 `lwa manager on`"
+            )
+        return {
+            "wasRunning": False,
+            "reconciled": True,
+            "unexpectedDown": True,
+            "downSince": _down_since_iso(down_since),
+            "pid": pid,
+            "version": actual,
+            "message": f"管理页意外未运行{down_note}，已恢复（pid={pid}）",
+        }
     # BUG-191：自启动在管时交监督器重启（单一进程），否则 stop 杀掉后被
     # KeepAlive/Restart 立即拉回、再与 start_manager 的 detached spawn 抢状态。
     note, _ok, managed = coordinated_autostart_restart(ws, "manager")
@@ -534,17 +642,43 @@ def restart_manager(ws: Workspace, config: Config) -> dict[str, Any]:
     }
 
 
-def restart_daemon(ws: Workspace, config: Config) -> dict[str, Any]:
-    """幂等重启 daemon：仅当原本 running 时 stop→start。
+def restart_daemon(ws: Workspace, config: Config, *, reconcile: bool = True) -> dict[str, Any]:
+    """幂等重启 daemon：running 才 stop→start；IMP-059 三态 reconcile。
 
-    原本 stopped 不自动开启。
+    enabled=true 且未运行 → 拉起并标注「意外未运行（中断约 X），已恢复」；
+    enabled=false / ``--no-reconcile`` → 跳过（文案不变）。
     """
     from local_webpage_access import daemon as daemon_mod
-    from local_webpage_access.cli._common import coordinated_autostart_restart
+    from local_webpage_access.cli._common import (
+        coordinated_autostart_restart,
+        coordinated_autostart_start,
+    )
+    from local_webpage_access.service_intent import INTENT_ENABLED, service_intent
 
     was_running = daemon_mod.is_running(ws)
     if not was_running:
-        return {"wasRunning": False, "pid": None, "message": "daemon 原本未运行，跳过重启"}
+        if not reconcile or service_intent(ws, config).daemon != INTENT_ENABLED:
+            return {"wasRunning": False, "pid": None, "message": "daemon 原本未运行，跳过重启"}
+        down_since, down_note = _down_since_fields("daemon", ws)
+        note, _ok, managed = coordinated_autostart_start(ws, "daemon")
+        if managed:
+            return {
+                "wasRunning": False,
+                "reconciled": True,
+                "unexpectedDown": True,
+                "downSince": _down_since_iso(down_since),
+                "pid": None,
+                "message": f"daemon 意外未运行{down_note}，已恢复（{note or '通过自启动单元拉起'}）",
+            }
+        pid = daemon_mod.start_daemon(ws, config)
+        return {
+            "wasRunning": False,
+            "reconciled": True,
+            "unexpectedDown": True,
+            "downSince": _down_since_iso(down_since),
+            "pid": pid,
+            "message": f"daemon 意外未运行{down_note}，已恢复（pid={pid}）",
+        }
     # BUG-191：自启动在管时交监督器重启，避免 KeepAlive/Restart 拉回 + detached 抢锁
     # 产生重复 watcher（叠加 BUG-173）。
     note, _ok, managed = coordinated_autostart_restart(ws, "daemon")
@@ -557,25 +691,29 @@ def restart_daemon(ws: Workspace, config: Config) -> dict[str, Any]:
     # BUG-192：stop 失败不得报成重启成功（旧进程/锁仍在，重复 watcher 风险）。
     if not daemon_mod.stop_daemon(ws):
         raise RuntimeError(
-            "daemon 停止失败（pid 仍存活），已跳过重启；"
-            "可 `lwa daemon off` 后重试 `lwa daemon on`"
+            "daemon 停止失败（pid 仍存活），已跳过重启；可 `lwa daemon off` 后重试 `lwa daemon on`"
         )
     pid = daemon_mod.start_daemon(ws, config)
     return {"wasRunning": True, "pid": pid, "message": f"daemon 已重启（pid={pid}）"}
 
 
-def restart_gateway(ws: Workspace, config: Config) -> dict[str, Any]:
-    """幂等重启 Caddy Gateway：仅对已运行的 Caddy 执行重启。
+def restart_gateway(ws: Workspace, config: Config, *, reconcile: bool = True) -> dict[str, Any]:
+    """幂等重启 Caddy Gateway：仅对已运行的 Caddy 执行重启；IMP-059 三态 reconcile。
 
-    自启动监督器在管时由监督器重启 gateway_service，确保升级后的监督与能力缓存
-    刷新逻辑生效；未托管时 stop→start Caddy master。原本 stopped 不自动开启。
+    自启动监督器在管时由监督器重启/拉起 gateway_service，确保升级后的监督与能力缓存
+    刷新逻辑生效；未托管时 stop→start / detached start。enabled=false（或
+    ``staticGateway!=caddy``）跳过，文案不变。
     """
-    from local_webpage_access.cli._common import coordinated_autostart_restart
+    from local_webpage_access.cli._common import (
+        coordinated_autostart_restart,
+        coordinated_autostart_start,
+    )
     from local_webpage_access.gateway_service import (
         is_gateway_running,
         start_gateway,
         stop_gateway,
     )
+    from local_webpage_access.service_intent import INTENT_ENABLED, service_intent
 
     if config.staticGateway != "caddy":
         return {
@@ -584,10 +722,33 @@ def restart_gateway(ws: Workspace, config: Config) -> dict[str, Any]:
             "message": f"staticGateway={config.staticGateway}，无需重启 Caddy Gateway",
         }
     if not is_gateway_running(ws, config):
+        if not reconcile or service_intent(ws, config).gateway != INTENT_ENABLED:
+            return {
+                "wasRunning": False,
+                "pid": None,
+                "message": "Gateway 原本未运行，跳过重启",
+            }
+        down_since, down_note = _down_since_fields("gateway", ws)
+        note, ok, managed = coordinated_autostart_start(ws, "gateway")
+        if managed:
+            if not ok:
+                raise RuntimeError(note or "Gateway 自启动监督器拉起失败")
+            return {
+                "wasRunning": False,
+                "reconciled": True,
+                "unexpectedDown": True,
+                "downSince": _down_since_iso(down_since),
+                "pid": None,
+                "message": f"Gateway 意外未运行{down_note}，已恢复（{note or '通过自启动单元拉起'}）",
+            }
+        pid = start_gateway(ws, config)
         return {
             "wasRunning": False,
-            "pid": None,
-            "message": "Gateway 原本未运行，跳过重启",
+            "reconciled": True,
+            "unexpectedDown": True,
+            "downSince": _down_since_iso(down_since),
+            "pid": pid,
+            "message": f"Gateway 意外未运行{down_note}，已恢复（pid={pid}）",
         }
 
     note, ok, managed = coordinated_autostart_restart(ws, "gateway")
@@ -608,9 +769,7 @@ def restart_gateway(ws: Workspace, config: Config) -> dict[str, Any]:
     return {"wasRunning": True, "pid": pid, "message": f"Gateway 已重启（pid={pid}）"}
 
 
-def restart_instances(
-    ws: Workspace, config: Config, registry: Registry
-) -> dict[str, Any]:
+def restart_instances(ws: Workspace, config: Config, registry: Registry) -> dict[str, Any]:
     """逐个重启 running/stopped/failed 实例，跳过 building/queued/pending。
 
     每个实例独立失败不中断后续；返回 ``{"restarted": [...], "skipped": [...], "failed": {...}}``。
@@ -675,11 +834,14 @@ def run_doctor_check(ws: Workspace, config: Config) -> str:
 def run_update(
     workspace: Workspace,
     config: Config,
-    registry: Registry,
+    registry: Registry | None,
     *,
     options: UpdateOptions,
 ) -> UpdateReport:
     """编排 ``lwa update`` 全流程（IMP-008.02）。
+
+    ``registry`` 允许为 ``None``：仅 dry-run 调用方使用（BUG-530 零写入——
+    dry-run 分支在触碰 registry 前即返回）；非 dry-run 传 ``None`` 直接报错。
 
     每步独立捕获异常写入 :class:`StepResult`，**不中断后续步骤**；
     ``options.dry_run`` 为真时只做识别与计划展示，不执行任何变更。
@@ -699,9 +861,7 @@ def run_update(
         repo = locate_repo(options.repo)
         report.repo = str(repo) if repo else None
         if options.skip_pip:
-            report.steps.append(
-                StepResult("pip", "skipped", "已通过 --skip-pip 跳过")
-            )
+            report.steps.append(StepResult("pip", "skipped", "已通过 --skip-pip 跳过"))
         elif repo is None:
             report.steps.append(
                 StepResult(
@@ -724,9 +884,7 @@ def run_update(
             if s.status == "pending":
                 s.status = "skipped"
                 s.message = f"[dry-run] 将执行：{s.message}"
-        report.steps.append(
-            StepResult("syncSkills", "skipped", "[dry-run] 计划同步 skills/")
-        )
+        report.steps.append(StepResult("syncSkills", "skipped", "[dry-run] 计划同步 skills/"))
         if options.sync_templates:
             report.steps.append(
                 StepResult("syncTemplates", "skipped", "[dry-run] 计划同步 templates/")
@@ -747,17 +905,11 @@ def run_update(
             report.steps.append(
                 StepResult("restartInstances", "skipped", "[dry-run] 计划重启可重启实例")
             )
-        report.steps.append(
-            StepResult("accessRefresh", "skipped", "[dry-run] 计划刷新访问地址")
-        )
+        report.steps.append(StepResult("accessRefresh", "skipped", "[dry-run] 计划刷新访问地址"))
         if options.review_access:
-            report.steps.append(
-                StepResult("accessReview", "skipped", "[dry-run] 计划轻量访问复核")
-            )
+            report.steps.append(StepResult("accessReview", "skipped", "[dry-run] 计划轻量访问复核"))
         if options.run_doctor:
-            report.steps.append(
-                StepResult("doctor", "skipped", "[dry-run] 计划运行 lwa doctor")
-            )
+            report.steps.append(StepResult("doctor", "skipped", "[dry-run] 计划运行 lwa doctor"))
         return report
 
     # ---- 2. pip install -e . ----
@@ -772,6 +924,27 @@ def run_update(
         except Exception as exc:  # noqa: BLE001
             pip_step.status = "failed"
             pip_step.message = str(exc)
+
+    if registry is None:
+        raise ValueError("非 dry-run update 需要已打开的 registry")
+    _run_runtime_phase(workspace, config, registry, options, report)
+    return report
+
+
+def _run_runtime_phase(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    options: UpdateOptions,
+    report: UpdateReport,
+) -> None:
+    """Runtime 后半段：skills/templates → migrate → 重启 → access → doctor。
+
+    IMP-063：旧进程改了自身源码（HEAD 变化）后**不得**继续执行本段——它依赖
+    新 schema/新函数；必须由新解释器接力执行（continuation）。HEAD 未变化的
+    内联路径与 continuation 共用本函数。
+    """
+    from local_webpage_access.version_info import resolve_version
 
     # ---- 3. 同步 skills ----
     if options.sync_skills:
@@ -822,9 +995,7 @@ def run_update(
     # ---- 6. 重启 manager（先等导入空闲，避免打断进行中的导入）----
     if options.restart_manager or options.restart_daemon:
         try:
-            waited = wait_until_import_idle(
-                workspace, timeout=DEFAULT_IDLE_WAIT
-            )
+            waited = wait_until_import_idle(workspace, timeout=DEFAULT_IDLE_WAIT)
             if waited >= 0.05:
                 report.steps.append(
                     StepResult(
@@ -852,27 +1023,15 @@ def run_update(
                         f"{msg}（已跳过重启 daemon；pip 可能已更新）",
                     )
                 )
-            options = UpdateOptions(
-                dry_run=options.dry_run,
-                skip_pip=options.skip_pip,
-                sync_skills=options.sync_skills,
-                sync_templates=options.sync_templates,
-                restart_manager=False,
-                restart_daemon=False,
-                restart_gateway=options.restart_gateway,
-                restart_instances=options.restart_instances,
-                run_doctor=options.run_doctor,
-                review_access=options.review_access,
-                repo=options.repo,
-            )
+            import dataclasses
+
+            options = dataclasses.replace(options, restart_manager=False, restart_daemon=False)
 
     if options.restart_manager:
         try:
-            info = restart_manager(workspace, config)
-            status = "ok" if info["wasRunning"] else "skipped"
-            report.steps.append(
-                StepResult("restartManager", status, info["message"], extra=info)
-            )
+            info = restart_manager(workspace, config, reconcile=options.reconcile_services)
+            status = "ok" if (info.get("wasRunning") or info.get("reconciled")) else "skipped"
+            report.steps.append(StepResult("restartManager", status, info["message"], extra=info))
             if info["pid"]:
                 report.manager_url = f"http://127.0.0.1:{config.managerPort}/"
         except Exception as exc:  # noqa: BLE001
@@ -887,22 +1046,18 @@ def run_update(
     # ---- 7. 重启 daemon ----
     if options.restart_daemon:
         try:
-            info = restart_daemon(workspace, config)
-            status = "ok" if info["wasRunning"] else "skipped"
-            report.steps.append(
-                StepResult("restartDaemon", status, info["message"], extra=info)
-            )
+            info = restart_daemon(workspace, config, reconcile=options.reconcile_services)
+            status = "ok" if (info.get("wasRunning") or info.get("reconciled")) else "skipped"
+            report.steps.append(StepResult("restartDaemon", status, info["message"], extra=info))
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("restartDaemon", "failed", str(exc)))
 
     # ---- 8. 重启 Gateway ----
     if options.restart_gateway:
         try:
-            info = restart_gateway(workspace, config)
-            status = "ok" if info["wasRunning"] else "skipped"
-            report.steps.append(
-                StepResult("restartGateway", status, info["message"], extra=info)
-            )
+            info = restart_gateway(workspace, config, reconcile=options.reconcile_services)
+            status = "ok" if (info.get("wasRunning") or info.get("reconciled")) else "skipped"
+            report.steps.append(StepResult("restartGateway", status, info["message"], extra=info))
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("restartGateway", "failed", str(exc)))
 
@@ -934,9 +1089,7 @@ def run_update(
         dry_run=False,
     )
     if access.refresh_error:
-        report.steps.append(
-            StepResult("accessRefresh", "failed", access.refresh_error)
-        )
+        report.steps.append(StepResult("accessRefresh", "failed", access.refresh_error))
     elif access.refresh is not None:
         report.steps.append(
             StepResult(
@@ -949,15 +1102,11 @@ def run_update(
             )
         )
     else:
-        report.steps.append(
-            StepResult("accessRefresh", "skipped", "未执行访问地址刷新")
-        )
+        report.steps.append(StepResult("accessRefresh", "skipped", "未执行访问地址刷新"))
 
     if options.review_access:
         if access.review_error:
-            report.steps.append(
-                StepResult("accessReview", "failed", access.review_error)
-            )
+            report.steps.append(StepResult("accessReview", "failed", access.review_error))
         elif access.review is not None:
             report.steps.append(
                 StepResult(
@@ -968,27 +1117,20 @@ def run_update(
                 )
             )
         else:
-            report.steps.append(
-                StepResult("accessReview", "skipped", "未执行访问复核")
-            )
+            report.steps.append(StepResult("accessReview", "skipped", "未执行访问复核"))
     else:
-        report.steps.append(
-            StepResult("accessReview", "skipped", "已通过 --no-review-access 跳过")
-        )
+        report.steps.append(StepResult("accessReview", "skipped", "已通过 --no-review-access 跳过"))
 
     # ---- 10. doctor / Full 能力缓存验收 ----
     if options.run_doctor:
         try:
             report.doctor_status = run_doctor_check(workspace, config)
-            report.steps.append(
-                StepResult("doctor", "ok", f"总体：{report.doctor_status.upper()}")
-            )
+            report.steps.append(StepResult("doctor", "ok", f"总体：{report.doctor_status.upper()}"))
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("doctor", "failed", str(exc)))
 
     # ---- 版本收尾 ----
     report.version_after = resolve_version()
-    return report
 
 
 def format_report(report: UpdateReport) -> str:
@@ -998,15 +1140,15 @@ def format_report(report: UpdateReport) -> str:
     lines.append(f"  工作区     {report.workspace}")
     lines.append(f"  源码根     {report.repo or '（未识别）'}")
     if report.version_before != report.version_after:
-        lines.append(
-            f"  版本       {report.version_before} → {report.version_after}"
-        )
+        lines.append(f"  版本       {report.version_before} → {report.version_after}")
     else:
         lines.append(f"  版本       {report.version_after}")
     lines.append("")
     lines.append("── 步骤 ──")
     for s in report.steps:
-        icon = {"ok": "✓", "failed": "✗", "skipped": "·", "pending": "…"}.get(s.status, "?")
+        icon = {"ok": "✓", "failed": "✗", "warning": "!", "skipped": "·", "pending": "…"}.get(
+            s.status, "?"
+        )
         lines.append(f"  {icon} {s.name:<18} {s.message}")
     if report.manager_url:
         lines.append("")
@@ -1014,6 +1156,9 @@ def format_report(report: UpdateReport) -> str:
     if report.has_failures:
         lines.append("")
         lines.append("  存在失败步骤，详见上方 ✗ 行；退出码非零。")
+    elif report.has_warnings:
+        lines.append("")
+        lines.append("  存在 warning 步骤（详见上方 ! 行）；整体仍视为成功。")
     return "\n".join(lines)
 
 

@@ -17,9 +17,7 @@ def _ok(stdout: str, returncode: int = 0) -> CompletedProcess[str]:
 
 
 class TestPickDirectoryDarwin:
-    def test_osascript_success_returns_absolute_path(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_osascript_success_returns_absolute_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("local_webpage_access.directory_picker.sys.platform", "darwin")
 
         def fake_run(cmd: list[str], **kwargs: Any) -> CompletedProcess[str]:
@@ -116,9 +114,7 @@ class TestPickDirectoryCommon:
             pick_directory(runner=lambda *a, **k: _ok(""))
         assert exc.value.code == "unavailable"
 
-    def test_empty_stdout_treated_as_cancel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_empty_stdout_treated_as_cancel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("local_webpage_access.directory_picker.sys.platform", "darwin")
 
         def fake_run(cmd: list[str], **kwargs: Any) -> CompletedProcess[str]:

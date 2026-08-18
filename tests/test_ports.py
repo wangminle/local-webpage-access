@@ -291,10 +291,7 @@ def test_build_route_url_brackets_ipv6() -> None:
     """IPv6 lan_ip 的 routeUrl 须加方括号。"""
     from local_webpage_access.ports import build_route_url
 
-    assert (
-        build_route_url("2001:db8::a", 8080, "demo")
-        == "http://[2001:db8::a]:8080/demo/"
-    )
+    assert build_route_url("2001:db8::a", 8080, "demo") == "http://[2001:db8::a]:8080/demo/"
     assert build_route_url("::1", 80, "demo") == "http://[::1]/demo/"
 
 

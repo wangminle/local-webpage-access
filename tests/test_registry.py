@@ -108,9 +108,7 @@ def test_migrate_runs_on_fresh_db(workspace_root: Path) -> None:
     reg.close()
 
 
-def test_concurrent_migrate_serializes_schema_version_check(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_concurrent_migrate_serializes_schema_version_check(tmp_path: Path, monkeypatch) -> None:
     """BUG-294：两连接同时从 v1 升级时不得重复 ALTER 崩溃。"""
     import local_webpage_access.registry.connection as connection_mod
 
@@ -118,9 +116,7 @@ def test_concurrent_migrate_serializes_schema_version_check(
     seed = connection_mod.connect(db_path)
     for statement in connection_mod._SCHEMAS[1]:
         seed.execute(statement)
-    seed.execute(
-        "INSERT INTO schema_version(version, applied_at) VALUES (1, 'seed')"
-    )
+    seed.execute("INSERT INTO schema_version(version, applied_at) VALUES (1, 'seed')")
     seed.close()
 
     original_get = connection_mod.get_schema_version
@@ -159,9 +155,7 @@ def test_concurrent_migrate_serializes_schema_version_check(
         verify.close()
 
 
-def test_init_db_wraps_connect_error_with_path(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_init_db_wraps_connect_error_with_path(tmp_path: Path, monkeypatch) -> None:
     """BUG-316：Registry 打开失败应转为 RegistryError，不泄漏 sqlite traceback。"""
     import sqlite3
 
@@ -325,8 +319,7 @@ def test_find_and_purge_orphan_rows(registry: Registry) -> None:
     registry.upsert_from_manifest(_static_manifest("real"))
     _run_fk_off(
         registry.db_path,
-        "INSERT INTO static_sites(instance_id, route_mode, route_host) "
-        "VALUES (?, 'name', ?)",
+        "INSERT INTO static_sites(instance_id, route_mode, route_host) VALUES (?, 'name', ?)",
         ("ghost-static", "ghost-alias"),
     )
     _run_fk_off(
@@ -354,8 +347,7 @@ def test_list_route_hosts_ignores_orphans(registry: Registry) -> None:
     registry.upsert_from_manifest(_static_manifest("real"))
     _run_fk_off(
         registry.db_path,
-        "INSERT INTO static_sites(instance_id, route_mode, route_host) "
-        "VALUES (?, 'name', ?)",
+        "INSERT INTO static_sites(instance_id, route_mode, route_host) VALUES (?, 'name', ?)",
         ("ghost", "ghost-alias"),
     )
     assert "ghost-alias" not in registry.list_route_hosts()
@@ -619,9 +611,7 @@ def test_upsert_from_manifest_rolls_back_when_child_write_fails(
     """BUG-333：子表写入失败时，主表不得单独提交留下不一致状态。"""
     original = Registry._upsert_mapping
 
-    def flaky(
-        tx: object, table: str, row: dict, key: str
-    ) -> None:
+    def flaky(tx: object, table: str, row: dict, key: str) -> None:
         if table == "static_sites":
             raise RuntimeError("simulated child write failure")
         return original(tx, table, row, key)  # type: ignore[arg-type]

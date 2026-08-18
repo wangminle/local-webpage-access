@@ -202,7 +202,53 @@ V1 要求 Docker Compose 插件（`docker compose` 子命令）。安装 `docker
 清理 `inbox/`（已导入的原始 zip）、`logs/`、或 `apps/<id>/source/`（原始快照）。
 也可迁移整个工作区到更大磁盘。
 
+## 更新与服务韧性
+
+### `lwa update` 现在会自动 git pull 吗？（IMP-063 / V0.8.0）
+
+会。默认执行 `fetch → 固定候选 OID → git merge --ff-only → pip install -e . → 新解释器接力 Runtime 后半段`。
+只做快进：tracked 文件有本地修改、与远端分叉、detached HEAD、浅克隆历史不足都会**拒绝快进**
+（工作树零改动）并给出下一步指引；`--skip-pip` 与「检测到落后」组合会在快进前拒绝
+（`skip_pip_conflict`）。`--no-pull --skip-pip`、已是最新 + `--skip-pip`、断网 + `--skip-pip`
+保持旧语义。
+
+* `lwa update --check [--repo ...] [--json]`：只探测远端版本（会 fetch，但不改工作树与
+  Runtime；不要求已 init 工作区）。退出码：0 探测完成、1 本地仓库/参数不合法、2 远端不可达。
+* `lwa update --dry-run`：零写入预览（不联网、不 fetch、不取锁），数据标 `fresh=false`。
+* 无 upstream 的仓库：必须同时给 `--remote <name> --ref <branch>`（MVP 不接受 tag/commit）。
+* 代理与凭据：沿用 git 自身机制（`https_proxy` 环境变量、credential helper、SSH remote），
+  lwa 不内置代理配置、不存 token。
+* 断网/代理失效：`sourceUpdate warning`，仍以本地代码完成全部 Runtime 刷新（离线可用）。
+* 非 git 克隆安装：`sourceUpdate skipped` 并提示迁移到 clone + `pip install -e .`。
+* 快进后 pip/接力失败：报告附人工恢复链（`git status` 复查 → 干净时
+  `git reset --keep <oldHead>` → 重跑 `lwa update`）；不自动回滚。
+
+### 机器重启后 manager/网关没了、别名入口失效？（IMP-059/060/061）
+
+三个互补机制：
+
+1. `lwa update` 三态 reconcile（IMP-059）：`run/*.json` 标记 enabled 但未运行的自有服务会
+   在 update 时自动拉起，报告标注「意外未运行（中断约 X），已恢复」；`--no-reconcile` 仅排障用。
+2. `lwa doctor`（IMP-060）：`service_runtime_state` 对 enabled 未运行直接 **FAIL**（附
+   `lwa manager on` 等恢复命令），对**已停用但进程残留**的服务 WARN（建议 `lwa X off` 清理）；
+   `restart_resilience` 对任一 enabled 服务缺自启单元（逐项差集，含 gateway）/ 单元已装未启用 /
+   无 linger / 容器 restart 策略不符给出 **WARN** 与实证修复命令。
+3. 缺省安全（IMP-061）：`lwa autostart install` 在 caddy 环境默认纳入 gateway 单元、默认
+   尝试 linger；`lwa init`/`setup` 收尾在 Linux systemd 环境 TTY 交互引导安装。一条命令修复：
+   `lwa autostart install --with-caddy --linger`。
+
 ## 导入类问题
+
+### 零依赖 stdlib Python 服务如何导入（issue#1）
+
+纯标准库 `http.server` 服务（无任何第三方依赖）会被 scanner 弱信号识别为
+`backend-container`（stack=`stdlib-http`，置信度 medium）：顶层 `server.py` /
+`app.py` / `main.py` 任一文件 import 了 `http.server` 或 `socketserver` 即命中，
+启动命令为 `python <入口文件>`。无需再"伪造"框架依赖绕过。
+
+注意：应用应从 **`PORT` 环境变量**读监听端口（compose 已统一注入
+`PORT=${INTERNAL_PORT}`，默认 8000），否则探针探测的端口与应用实际监听端口
+不一致，首次启动会判定失败。
 
 ### zip 导入失败：路径穿越（zip slip）
 
@@ -280,6 +326,30 @@ lwa import --from-dir /abs/path/to/my-site --update <id>
 * 导入进行中不要立刻 `lwa update`：升级会先等待导入空闲（约 180s），超时则跳过重启 manager/daemon。
 
 ## 容器类问题
+
+### 容器需要额外挂载宿主目录（extraVolumes，issue#1）
+
+手工编辑 `docker/compose.yaml` 追加的挂载会在下次 `lwa start` 重生成时被
+抹掉。持久化的出口是 `apps/<id>/local-web.json` 的 `container.extraVolumes`
+（字符串数组，compose 短格式 `宿主路径:容器路径[:ro]`）：
+
+```json
+"container": {
+  "extraVolumes": ["/home/user/.openclaw/workspace:/workspace:ro"],
+  ...
+}
+```
+
+改完后 `lwa restart <id>` 生效。安全边界仍在：家目录整体（`/home`、`/Users`）、
+`/etc`、`docker.sock`、`.ssh`/`.aws` 等凭据目录挂载会被 compose 安全审计拒绝。
+
+### "实例 xx 正在被其他操作占用，等待超时"（issue#1）
+
+lifecycle 锁在同一实例的操作间互斥（build/探针/回滚全程持锁）。探针失败后的
+回滚收尾、daemon 自愈重建都会短时间占锁。V0.7.11+ 的报错会带持有者 PID 与
+心跳信息；若持有者存活且心跳新鲜，说明上一次操作尚未收尾，稍候重试即可，
+不是死锁。另外 daemon 对**刚失败**的实例会先退避一个周期（默认 60s）再自动
+重建，避免与手工 `lwa restart` 相撞。
 
 ### 构建失败（OOM）
 

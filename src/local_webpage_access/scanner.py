@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import tomllib  # Python 3.11+ 标准库（项目要求 >=3.13）
@@ -35,8 +36,15 @@ log = get_logger("scanner")
 
 NODE_FRONTEND = {"vite", "react", "react-dom", "vue", "@vitejs/plugin-react", "svelte", "preact"}
 NODE_BACKEND = {
-    "express", "fastify", "koa", "@nestjs/core", "next", "nuxt",
-    "@hono/node-server", "polka", "restana",
+    "express",
+    "fastify",
+    "koa",
+    "@nestjs/core",
+    "next",
+    "nuxt",
+    "@hono/node-server",
+    "polka",
+    "restana",
 }
 PYTHON_WEB = {
     "flask": ("flask", 5000),
@@ -54,17 +62,41 @@ PYTHON_WEB = {
 # 必须按同一优先级挑框架。否则 flask+gunicorn 等多框架项目会因 matched（源自 set
 # 迭代）顺序随机，出现 internalPort 推断与启动命令端口不一致，部署出不可达实例。
 _PYTHON_FRAMEWORK_PRIORITY = (
-    "fastapi", "flask", "django", "streamlit", "gradio", "uvicorn",
-    "gunicorn", "starlette", "sanic", "tornado",
+    "fastapi",
+    "flask",
+    "django",
+    "streamlit",
+    "gradio",
+    "uvicorn",
+    "gunicorn",
+    "starlette",
+    "sanic",
+    "tornado",
 )
-HEAVY_DATABASES = {"psycopg2", "psycopg", "asyncpg", "pymysql", "mysqlclient", "redis", "aiomysql", "aioredis"}
+HEAVY_DATABASES = {
+    "psycopg2",
+    "psycopg",
+    "asyncpg",
+    "pymysql",
+    "mysqlclient",
+    "redis",
+    "aiomysql",
+    "aioredis",
+}
 SQLITE_MARKERS = {"sqlite3", "better-sqlite3", "sqlalchemy", "peewee", "tortoise-orm", "aiosqlite"}
 SQLITE_FILE_EXT = (".sqlite", ".sqlite3", ".db")
 # IMP-018（WBS-20260708 阶段2.3）：命中即把资源档位自动升 medium（已 medium/heavy 不降）。
 # 这些库运行时常驻较重内存（向量库/张量/嵌入缓存），恒 512m 易 OOM（runtime §4.2-P8）。
 HEAVY_RUNTIMES = {
-    "lancedb", "pyarrow", "torch", "transformers", "tensorflow",
-    "openai", "anthropic", "chromadb", "pymilvus",
+    "lancedb",
+    "pyarrow",
+    "torch",
+    "transformers",
+    "tensorflow",
+    "openai",
+    "anthropic",
+    "chromadb",
+    "pymilvus",
 }
 
 
@@ -88,7 +120,9 @@ class FileSummary:
     has_manage_py: bool = False
     has_alembic_ini: bool = False  # IMP-052：顶层 alembic.ini
     has_runtime_paths: bool = False  # BUG-198：src/app/runtime_paths.py 等
-    node_deps: dict[str, str] = field(default_factory=dict)  # 包名 -> 版本（含 devDependencies，BUG-019）
+    node_deps: dict[str, str] = field(
+        default_factory=dict
+    )  # 包名 -> 版本（含 devDependencies，BUG-019）
     node_runtime_deps: dict[str, str] = field(default_factory=dict)
     node_scripts: dict[str, str] = field(default_factory=dict)
     python_deps: set[str] = field(default_factory=set)
@@ -141,10 +175,9 @@ def summarize(root: Path) -> FileSummary:
 
     # BUG-349：只用相对项目根的显式路径判定 runtime_paths，避免工作区绝对路径
     # 含 "app" 段时全局误判。
-    if (
-        (root / "src" / "app" / "runtime_paths.py").is_file()
-        or (root / "app" / "runtime_paths.py").is_file()
-    ):
+    if (root / "src" / "app" / "runtime_paths.py").is_file() or (
+        root / "app" / "runtime_paths.py"
+    ).is_file():
         summary.has_runtime_paths = True
 
     if summary.has_package_json:
@@ -202,10 +235,9 @@ def summarize_package(root: Path, package_path: str) -> FileSummary:
             summary.total_files += 1
 
     # runtime_paths 检查（在子包目录中）
-    if (
-        (pkg_dir / "src" / "app" / "runtime_paths.py").is_file()
-        or (pkg_dir / "app" / "runtime_paths.py").is_file()
-    ):
+    if (pkg_dir / "src" / "app" / "runtime_paths.py").is_file() or (
+        pkg_dir / "app" / "runtime_paths.py"
+    ).is_file():
         summary.has_runtime_paths = True
 
     return summary
@@ -344,7 +376,9 @@ class DetectionResult:
     runtime: Runtime | None = None
     servingMode: ServingMode | None = None
     resourceProfile: ResourceProfile = ResourceProfile.SMALL
-    form: str = "unknown"  # static / frontend-static / backend-container / fullstack-sqlite / unknown
+    form: str = (
+        "unknown"  # static / frontend-static / backend-container / fullstack-sqlite / unknown
+    )
     stack: list[str] = field(default_factory=list)
     hasDatabase: bool = False
     database: DatabaseConfig | None = None
@@ -420,7 +454,6 @@ class Scanner:
             _apply_preflight(result, preflight)
             return result
 
-
         # IMP-058 Gate-B：Layer 0+1 多候选识别。
         # 收集证据并生成候选列表，检测子目录布局（如 backend/+frontend/）。
         evidence = _collect_evidence(project_dir)
@@ -450,9 +483,7 @@ class Scanner:
                     f"检测到重型数据库依赖：{', '.join(sorted(heavy))}，标记 pending"
                 )
                 self._fill_language(subdir_summary, result)
-                result.notes.append(
-                    f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录"
-                )
+                result.notes.append(f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录")
                 return result
 
             self._detect_sqlite(subdir_summary, result)
@@ -480,9 +511,7 @@ class Scanner:
             # 预检
             preflight = _preflight_check(result, project_dir)
             _apply_preflight(result, preflight)
-            result.notes.append(
-                f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录"
-            )
+            result.notes.append(f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录")
             return result
 
         # 1. 重型数据库优先判断（不自动启动）
@@ -509,9 +538,11 @@ class Scanner:
             or summary.has_requirements_prod
             or summary.has_pipfile
         )
+        # issue#1：零依赖 stdlib HTTP 服务（仅 server.py/app.py/main.py + http.server）
+        # 无任何 Python 工程文件，也路由到 Python 分支做弱信号识别。
         if summary.has_package_json and self._is_real_node(summary):
             self._detect_node(summary, result)
-        elif has_python_signal:
+        elif has_python_signal or _stdlib_http_entry(summary) is not None:
             self._detect_python(summary, result)
         elif summary.has_package_json and not has_python_signal:
             # package.json 存在但既非真 Node 也无 Python 工程文件：仍按 Node 兜底尝试
@@ -624,16 +655,12 @@ class Scanner:
             return
         if result.resourceProfile in (ResourceProfile.TINY, ResourceProfile.SMALL):
             result.resourceProfile = ResourceProfile.MEDIUM
-            result.notes.append(
-                f"检测到重运行时依赖：{', '.join(sorted(hit))}，资源档位升 medium"
-            )
+            result.notes.append(f"检测到重运行时依赖：{', '.join(sorted(hit))}，资源档位升 medium")
 
     # ---- SQLite ------------------------------------------------------------
 
     def _detect_sqlite(self, summary: FileSummary, result: DetectionResult) -> None:
-        has_sqlite_dep = bool(
-            SQLITE_MARKERS & {d.lower() for d in summary.python_deps}
-        ) or bool(
+        has_sqlite_dep = bool(SQLITE_MARKERS & {d.lower() for d in summary.python_deps}) or bool(
             SQLITE_MARKERS & {d.lower() for d in summary.node_deps}
         )
         if summary.sqlite_files or has_sqlite_dep:
@@ -689,9 +716,11 @@ class Scanner:
             result.runtime = Runtime.DOCKER_COMPOSE
             result.servingMode = ServingMode.CONTAINER
             result.form = "fullstack-sqlite" if result.hasDatabase else "backend-container"
-            result.resourceProfile = ResourceProfile.MEDIUM if (
-                "next" in deps_lower or "nuxt" in deps_lower
-            ) else ResourceProfile.SMALL
+            result.resourceProfile = (
+                ResourceProfile.MEDIUM
+                if ("next" in deps_lower or "nuxt" in deps_lower)
+                else ResourceProfile.SMALL
+            )
             result.internalPort = _infer_node_port(summary)
             if result.internalPort is None:
                 # BUG-509：优先脚本声明的端口非法（越出 1..65535）时，不得再按
@@ -772,19 +801,45 @@ class Scanner:
                         "检测到 alembic.ini，已在启动命令前自动执行 alembic upgrade head"
                     )
         else:
-            result.pending = True
-            result.confidence = "low"
-            result.notes.append("Python 项目缺少 Web 框架特征，标记 pending")
+            # issue#1 问题1：无框架特征时先做 stdlib HTTP 弱信号识别
+            # （http.server / socketserver 的零依赖服务），命中则不再 pending。
+            stdlib_entry = _stdlib_http_entry(summary)
+            if stdlib_entry is not None:
+                result.runtime = Runtime.DOCKER_COMPOSE
+                result.servingMode = ServingMode.CONTAINER
+                result.form = "backend-container"
+                result.stack = ["stdlib-http"]
+                result.resourceProfile = ResourceProfile.TINY
+                result.confidence = "medium"
+                # 零依赖：无 requirements/pyproject/pipfile 时 install 置 None，
+                # 避免容器构建执行 pip install -r requirements.txt 落空失败。
+                has_dep_file = (
+                    summary.has_uv_lock
+                    or summary.has_requirements_prod
+                    or summary.has_requirements_txt
+                    or summary.has_pyproject_toml
+                    or summary.has_pipfile
+                )
+                result.entry = EntryConfig(
+                    install=_python_install_command(summary) if has_dep_file else None,
+                    build=None,
+                    start=f"python {stdlib_entry}",
+                )
+                result.notes.append(
+                    f"识别到零依赖 stdlib HTTP 服务（{stdlib_entry} 使用 http.server），"
+                    "弱信号识别，监听端口请读 PORT 环境变量（compose 已注入，默认 8000）"
+                )
+            else:
+                result.pending = True
+                result.confidence = "low"
+                result.notes.append("Python 项目缺少 Web 框架特征，标记 pending")
 
 
 # ---- 辅助：端口与命令推断 ---------------------------------------------------
 
 
 def _has_lockfile(summary: FileSummary) -> bool:
-    return any(
-        f in summary.top_files
-        for f in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")
-    )
+    return any(f in summary.top_files for f in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml"))
 
 
 def _node_install_command(summary: FileSummary) -> str:
@@ -863,6 +918,51 @@ def _infer_python_port(summary: FileSummary, matched: list[str]) -> int:
     return 8000
 
 
+# issue#1：零依赖 stdlib HTTP 服务的入口候选文件，按此优先级探测。
+_STDLIB_HTTP_ENTRY_FILES = ("server.py", "app.py", "main.py")
+
+
+def _imports_stdlib_http(tree: ast.AST) -> bool:
+    """AST 精确判定是否 import 了 ``http.server`` / ``socketserver``。
+
+    BUG-534：只匹配模块名精确等值，``from mypkg import socketserver``
+    （module=mypkg）与 ``import mysocketserver`` 都不算命中。
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name in ("http.server", "socketserver") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in ("http.server", "socketserver"):
+                return True
+    return False
+
+
+def _stdlib_http_entry(summary: FileSummary) -> str | None:
+    """弱信号识别零依赖 stdlib HTTP 服务（issue#1 问题 1）。
+
+    无第三方 Web 框架时，若顶层存在 ``server.py`` / ``app.py`` / ``main.py``
+    且源码 import 了 ``http.server`` 或 ``socketserver``，按 stdlib-http
+    模板处理（``start=python <file>``，端口默认 8000，应用应读 ``PORT``
+    环境变量对齐）。返回入口文件名；未命中返回 ``None``。
+
+    用 :mod:`ast` 解析 import（BUG-534），不做字符串包含判断；解析失败
+    （语法错误/非源码）视为未命中，保持保守。
+    """
+    for name in _STDLIB_HTTP_ENTRY_FILES:
+        path = summary.root / name
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(content)
+        except (OSError, ValueError, SyntaxError):
+            continue
+        if _imports_stdlib_http(tree):
+            return name
+    return None
+
+
 def _python_install_command(summary: FileSummary) -> str:
     if summary.has_uv_lock:
         return "uv sync"
@@ -889,7 +989,7 @@ def _python_start_command(matched: list[str], summary: FileSummary | None) -> st
             cmd = f'sh -c "alembic upgrade head && exec {cmd}"'
         return cmd
     if fw == "flask":
-        return 'flask --app app run --host 0.0.0.0 --port 5000'
+        return "flask --app app run --host 0.0.0.0 --port 5000"
     if fw == "django":
         return "python manage.py runserver 0.0.0.0:8000"
     if fw == "streamlit":

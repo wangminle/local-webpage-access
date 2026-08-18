@@ -63,7 +63,7 @@ def test_docker_scripts_default_registry_mirrors_nonempty(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "docker.m.daocloud.io" in text or "mirror.aliyuncs.com" in text
     # 默认非空；仅 none/- 才跳过
-    assert 'LWA_DOCKER_REGISTRY_MIRRORS:-' in text or 'LWA_DOCKER_REGISTRY_MIRRORS-' in text
+    assert "LWA_DOCKER_REGISTRY_MIRRORS:-" in text or "LWA_DOCKER_REGISTRY_MIRRORS-" in text
     assert "跳过 registry-mirrors" in text or "跳过 ~/.docker/daemon.json" in text
     # 跳过条件应是 none，而非默认空
     assert '== "none"' in text or "none" in text
@@ -120,7 +120,7 @@ def test_linux_script_supports_debian_family_without_ubuntu_spoof() -> None:
     """IMP-036：Debian 走 /linux/debian，不得伪装成 Ubuntu 代号。"""
     text = _LINUX.read_text(encoding="utf-8")
     assert "detect_debian_family" in text
-    assert "/linux/debian" in text or 'linux/${family}' in text or "linux/${family}" in text
+    assert "/linux/debian" in text or "linux/${family}" in text or "linux/${family}" in text
     assert "bookworm" in text
     # 不得在 Debian 分支写死 ubuntu apt 路径伪装
     assert "不得" in text or "严禁" in text or "debian" in text.lower()

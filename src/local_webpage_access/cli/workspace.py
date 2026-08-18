@@ -29,24 +29,16 @@ def workspace_relocate(
         "--from",
         help="显式旧工作区根（默认：当前定位到的工作区）",
     ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="只跑预检与计划，零副作用"
-    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只跑预检与计划，零副作用"),
     as_json: bool = typer.Option(False, "--json", help="机器可读 JSON 输出"),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="跳过确认（非 TTY 必须）"
-    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认（非 TTY 必须）"),
     snapshot_out: Path | None = typer.Option(
         None,
         "--snapshot-out",
         help="把迁移快照额外写到工作区外路径",
     ),
-    resume: bool = typer.Option(
-        False, "--resume", help="从 journal 失败阶段继续"
-    ),
-    verify: bool = typer.Option(
-        False, "--verify", help="不搬迁，只跑验收不变量"
-    ),
+    resume: bool = typer.Option(False, "--resume", help="从 journal 失败阶段继续"),
+    verify: bool = typer.Option(False, "--verify", help="不搬迁，只跑验收不变量"),
     rollback: bool = typer.Option(
         False, "--rollback", help="在 journal 允许时回滚到旧路径（v1 同卷）"
     ),
@@ -229,10 +221,7 @@ def _print_result(result) -> None:
                     fg=typer.colors.YELLOW,
                 )
             if result.preflight.path_holders:
-                typer.echo(
-                    "  路径持有者："
-                    + ", ".join(result.preflight.path_holders[:12])
-                )
+                typer.echo("  路径持有者：" + ", ".join(result.preflight.path_holders[:12]))
         if result.planned_actions:
             typer.echo("  计划阶段/动作：")
             for a in result.planned_actions[:40]:
@@ -259,4 +248,6 @@ def _print_result(result) -> None:
         typer.echo("  或：lwa workspace relocate --rollback")
         typer.echo("  人工逃生舱：docs/workspace-rename.md")
     elif result.ok:
-        typer.secho("  完成。建议：cd NEW && lwa workspace relocate --verify", fg=typer.colors.GREEN)
+        typer.secho(
+            "  完成。建议：cd NEW && lwa workspace relocate --verify", fg=typer.colors.GREEN
+        )

@@ -37,9 +37,7 @@ ComponentState = Literal[
     "read_denied",
     "write_denied",
 ]
-CaddyOwner = Literal[
-    "lwa_service_user", "system_caddy", "foreign_process", "unknown"
-]
+CaddyOwner = Literal["lwa_service_user", "system_caddy", "foreign_process", "unknown"]
 
 # 观测失败分类（与实例 runtimeAccess / observationError 对齐）
 ObservationError = Literal[
@@ -353,9 +351,7 @@ def collect_capability_report(
     """
     root = Path(workspace_root) if workspace_root else None
     state = load_profile_state(root)
-    resolved = profile or resolve_profile_name(
-        config_profile or state.get("profile"), root
-    )
+    resolved = profile or resolve_profile_name(config_profile or state.get("profile"), root)
     if isinstance(state.get("serviceUser"), str) and state["serviceUser"]:
         service_user = state["serviceUser"]
     else:
@@ -418,9 +414,7 @@ def collect_capability_report(
         report.daemon_docker_access = docker_access
     elif role == "gateway":
         # 网关进程自身：Docker 非其职责；gatewayAccess 由 Caddy 运行态决定
-        report.gateway_access = (
-            "ready" if caddy_runtime == "ready" else caddy_runtime
-        )
+        report.gateway_access = "ready" if caddy_runtime == "ready" else caddy_runtime
 
     if include_backend_cached and root is not None:
         _merge_cached_backend_probes(report, root, current_role=role)
@@ -473,9 +467,7 @@ def _role_pid_matches(pid: int, role: str, workspace_root: Path) -> bool:
 
     root = str(workspace_root)
     if role == "manager":
-        return pid_cmdline_contains(
-            pid, "local_webpage_access.manager_service", root
-        )
+        return pid_cmdline_contains(pid, "local_webpage_access.manager_service", root)
     if role == "daemon":
         return pid_cmdline_contains(pid, "local_webpage_access.daemon", root)
     if role == "gateway":
@@ -491,11 +483,7 @@ def _backend_role_alive(root: Path, role: str) -> bool:
     ws = Workspace(Path(root))
 
     def _alive(pid: int | None) -> bool:
-        return bool(
-            pid
-            and is_pid_alive(pid)
-            and _role_pid_matches(pid, role, ws.root)
-        )
+        return bool(pid and is_pid_alive(pid) and _role_pid_matches(pid, role, ws.root))
 
     if role == "manager":
         from local_webpage_access.manager_service import read_state
@@ -712,16 +700,10 @@ def _refresh_overall_in_health_fragment(fragment: dict[str, Any]) -> None:
         caddy_runtime=str(caps.get("caddyRuntime") or "unknown"),  # type: ignore[arg-type]
         caddy_owner=str(caps.get("caddyOwner") or "unknown"),  # type: ignore[arg-type]
         caddy_process_user=caps.get("caddyProcessUser"),
-        caddy_workspace_access=str(
-            caps.get("caddyWorkspaceAccess") or "unknown"
-        ),  # type: ignore[arg-type]
+        caddy_workspace_access=str(caps.get("caddyWorkspaceAccess") or "unknown"),  # type: ignore[arg-type]
         cli_docker_access=str(caps.get("cliDockerAccess") or "unknown"),  # type: ignore[arg-type]
-        manager_docker_access=str(
-            caps.get("managerDockerAccess") or "unknown"
-        ),  # type: ignore[arg-type]
-        daemon_docker_access=str(
-            caps.get("daemonDockerAccess") or "unknown"
-        ),  # type: ignore[arg-type]
+        manager_docker_access=str(caps.get("managerDockerAccess") or "unknown"),  # type: ignore[arg-type]
+        daemon_docker_access=str(caps.get("daemonDockerAccess") or "unknown"),  # type: ignore[arg-type]
         gateway_access=str(caps.get("gatewayAccess") or "unknown"),  # type: ignore[arg-type]
         session_refresh_required=bool(caps.get("sessionRefreshRequired")),
         details={"role": "manager"},

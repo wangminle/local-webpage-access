@@ -30,9 +30,7 @@ from local_webpage_access.version_requirements import (
 
 
 def _proc(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=stderr
-    )
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def test_resolve_install_script_docker_linux() -> None:
@@ -70,9 +68,7 @@ def test_resolve_profile_full() -> None:
 
 
 def test_detect_docker_engine_missing(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "local_webpage_access.host_bootstrap.shutil.which", lambda _: None
-    )
+    monkeypatch.setattr("local_webpage_access.host_bootstrap.shutil.which", lambda _: None)
     state = detect_docker_engine(runner=lambda _: _proc(127))
     assert state.status == "missing"
     assert should_offer_docker_install(state) is True
@@ -94,9 +90,7 @@ def test_detect_docker_engine_daemon_down(monkeypatch) -> None:
 
 
 def test_detect_docker_engine_outdated(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "local_webpage_access.host_bootstrap.shutil.which", lambda _: "/bin/docker"
-    )
+    monkeypatch.setattr("local_webpage_access.host_bootstrap.shutil.which", lambda _: "/bin/docker")
 
     def runner(args):
         if "Server" in args[-1]:
@@ -110,9 +104,7 @@ def test_detect_docker_engine_outdated(monkeypatch) -> None:
 
 
 def test_detect_docker_engine_ok(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "local_webpage_access.host_bootstrap.shutil.which", lambda _: "/bin/docker"
-    )
+    monkeypatch.setattr("local_webpage_access.host_bootstrap.shutil.which", lambda _: "/bin/docker")
 
     def runner(args):
         return _proc(0, f"{MIN_DOCKER_VERSION}\n")
@@ -161,9 +153,7 @@ def test_plan_full_install_lists_missing(monkeypatch) -> None:
 def test_run_full_bootstrap_requires_yes_without_tty(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.plan_full_install",
-        lambda **_: [
-            MagicMock(kind="docker", script=Path("/tmp/x.sh"), reason="missing")
-        ],
+        lambda **_: [MagicMock(kind="docker", script=Path("/tmp/x.sh"), reason="missing")],
     )
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap._stdin_is_interactive",
@@ -194,9 +184,7 @@ def test_run_full_bootstrap_yes_runs_scripts(monkeypatch, tmp_path: Path) -> Non
     script.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.plan_full_install",
-        lambda **_: [
-            type("P", (), {"kind": "docker", "script": script, "reason": "missing"})()
-        ],
+        lambda **_: [type("P", (), {"kind": "docker", "script": script, "reason": "missing"})()],
     )
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.detect_docker_engine",
@@ -243,9 +231,7 @@ def test_run_full_bootstrap_requires_initialized_workspace(monkeypatch) -> None:
         called["plan"] = True
         return []
 
-    monkeypatch.setattr(
-        "local_webpage_access.host_bootstrap.plan_full_install", fake_plan
-    )
+    monkeypatch.setattr("local_webpage_access.host_bootstrap.plan_full_install", fake_plan)
     result = run_full_bootstrap(platform="linux", yes=True, workspace_root=None)
     assert result.ok is False
     assert result.overall == "unready"
@@ -271,9 +257,7 @@ def test_run_full_bootstrap_resume_reinstalls_missing_components(
     )
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.plan_full_install",
-        lambda **_: [
-            type("P", (), {"kind": "caddy", "script": script, "reason": "missing"})()
-        ],
+        lambda **_: [type("P", (), {"kind": "caddy", "script": script, "reason": "missing"})()],
     )
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.detect_docker_engine",
@@ -444,17 +428,13 @@ def test_maybe_offer_script_failure_includes_stderr(monkeypatch, tmp_path: Path)
     assert "apt-get: package not found" in joined
 
 
-def test_run_full_bootstrap_script_failure_includes_stderr(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_run_full_bootstrap_script_failure_includes_stderr(monkeypatch, tmp_path: Path) -> None:
     """审查 L5：full bootstrap 脚本失败消息须含 stderr 摘要。"""
     script = tmp_path / "install-caddy-linux.sh"
     script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.plan_full_install",
-        lambda **_: [
-            type("P", (), {"kind": "caddy", "script": script, "reason": "missing"})()
-        ],
+        lambda **_: [type("P", (), {"kind": "caddy", "script": script, "reason": "missing"})()],
     )
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap._stdin_is_interactive",
@@ -494,18 +474,14 @@ def test_maybe_offer_rechecks_after_success(monkeypatch, tmp_path: Path) -> None
     )
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.detect_docker_compose",
-        lambda **_: ComponentNeed(
-            name="compose", status="ok", version=MIN_COMPOSE_VERSION
-        ),
+        lambda **_: ComponentNeed(name="compose", status="ok", version=MIN_COMPOSE_VERSION),
     )
     monkeypatch.setattr(
         "local_webpage_access.host_bootstrap.resolve_install_script",
         lambda *a, **k: script,
     )
 
-    result = maybe_offer_docker_install(
-        install_docker=True, runner=lambda *a, **k: _proc(0)
-    )
+    result = maybe_offer_docker_install(install_docker=True, runner=lambda *a, **k: _proc(0))
     assert result.attempted is True
     assert result.script_ok is True
     assert result.recheck_ok is True

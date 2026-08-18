@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | [`lwa-import-zip`](lwa-import-zip/SKILL.md) | 拿到 zip 要部署 / 同项目出新版本 | 判断 import vs `--update`，避免重复新建 |
 | [`lwa-import-folder`](lwa-import-folder/SKILL.md) | 本机目录导入 / `--from-dir` 更新 | 只读复制进工作区；禁止就地运行；路径须绝对且与关联一致；管理页选目录仅 loopback（IMP-051） |
-| [`lwa-update-runtime`](lwa-update-runtime/SKILL.md) | git pull / 代码升级后刷新 runtime | 优先 `lwa update`，手动兜底重启 manager/daemon |
+| [`lwa-update-runtime`](lwa-update-runtime/SKILL.md) | 代码升级后刷新 runtime | `lwa update` 一键（V0.8.0 起含源码快进 + 新解释器接力，无需先 git pull）；手动兜底重启 manager/daemon |
 | [`lwa-relocate-workspace`](lwa-relocate-workspace/SKILL.md) | 同卷改名/迁移 Runtime 工作区 | 只调 `lwa workspace relocate`；禁 sed/mv/删 daemon-processed |
 | [`lwa-review-access-urls`](lwa-review-access-urls/SKILL.md) | 换网 / 升级后访问地址失效或别名白屏 | refresh → review → 分层排障；rebuild 须显式确认 |
 | [`lwa-detect-stack`](lwa-detect-stack/SKILL.md) | 识别项目技术栈 | 修改 `local-web.json` 的 `stack`/`kind` |

@@ -132,16 +132,11 @@ def _write_token(workspace: Workspace, token: str) -> str:
     path = token_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = (
-        json.dumps(
-            {"token": token, "createdAt": _now_iso()}, ensure_ascii=False, indent=2
-        )
-        + "\n"
+        json.dumps({"token": token, "createdAt": _now_iso()}, ensure_ascii=False, indent=2) + "\n"
     )
     # BUG-447：先写临时文件再 os.replace，避免 O_TRUNC 窗口并发读到空/残缺 → 401。
     # BUG-334：临时文件一步以 0o600 创建，避免 write_text 后 chmod 的权限窗口。
-    tmp_path = path.with_name(
-        f".manager-token.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-    )
+    tmp_path = path.with_name(f".manager-token.{os.getpid()}.{secrets.token_hex(8)}.tmp")
     fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with contextlib.suppress(OSError):
@@ -357,7 +352,7 @@ def _normalize_client_host(host: str) -> str:
     直接比对 ``_LOCALHOST_HOSTS`` 永不命中；剥前缀后与 IPv4 回环统一判定。
     """
     if host.startswith("::ffff:"):
-        return host[len("::ffff:"):]
+        return host[len("::ffff:") :]
     return host
 
 
@@ -556,8 +551,7 @@ def create_app(
             frag = dict(prev) if isinstance(prev, dict) else {}
             frag["overall"] = "unknown"
             frag["action"] = (
-                "capability_probe_failed；"
-                "请查 manager.log 或 GET /api/capability?refresh=true"
+                "capability_probe_failed；请查 manager.log 或 GET /api/capability?refresh=true"
             )
             frag["probeError"] = str(exc)[:200]
             caps = dict(frag.get("capabilities") or {})
@@ -566,8 +560,7 @@ def create_app(
             app.state.capability_fragment = frag
             now = _time.monotonic()
             if force_log or (
-                now - float(app_state_holder["last_error_log_at"])
-                >= _CAPABILITY_ERROR_LOG_INTERVAL
+                now - float(app_state_holder["last_error_log_at"]) >= _CAPABILITY_ERROR_LOG_INTERVAL
             ):
                 app_state_holder["last_error_log_at"] = now
                 log.exception("manager 能力自检失败")
@@ -585,9 +578,7 @@ def create_app(
                     break
                 delay = _CAPABILITY_REFRESH_INTERVAL
 
-        probe_thread = _threading.Thread(
-            target=_bg_probe, name="lwa-capability-probe", daemon=True
-        )
+        probe_thread = _threading.Thread(target=_bg_probe, name="lwa-capability-probe", daemon=True)
         probe_thread.start()
         app.state.capability_probe_thread = probe_thread
 
@@ -595,7 +586,10 @@ def create_app(
         # BUG-446：yield 前主线程同步 maybe_rotate，避免冷启动窗口打印/使用已失效 token。
         # 046.05：后台 tick 守护线程，默认每 30 min 检查一次。
         # 046.06：_verify_token 每次请求读盘，轮换后新 token 立即生效、旧 token 立即 401。
-        rotate_hours = getattr(config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT) or TOKEN_ROTATE_HOURS_DEFAULT
+        rotate_hours = (
+            getattr(config, "managerTokenRotateHours", TOKEN_ROTATE_HOURS_DEFAULT)
+            or TOKEN_ROTATE_HOURS_DEFAULT
+        )
         try:
             maybe_rotate_token(workspace, hours=rotate_hours)
         except Exception:  # noqa: BLE001 - 轮换失败不阻断管理页
@@ -702,9 +696,7 @@ def _register_routes(app: FastAPI) -> None:
         # managerHost 配 LAN IP / 双栈 :: 时，本机经该地址自连的 client.host 等于
         # 绑定地址（或呈 ::ffff:127.0.0.1），也算可信——仅本机自连能命中，局域网他机源
         # IP 不同，不会泄露。
-        local_ok = _is_localhost_client(request) or _is_self_connection(
-            request, app.state.config
-        )
+        local_ok = _is_localhost_client(request) or _is_self_connection(request, app.state.config)
         if local_ok:
             body["workspaceRoot"] = str(ws.root.resolve())
         # BUG-236：已鉴权局域网客户端也应拿到完整 capabilities（供管理页降级 UI）
@@ -786,9 +778,7 @@ def _register_routes(app: FastAPI) -> None:
                 Status.BUILDING.value: counts.get(Status.BUILDING.value, 0),
                 # DEV-043：可恢复的异常态也纳入统计（BUG-081）
                 Status.GATEWAY_DOWN.value: counts.get(Status.GATEWAY_DOWN.value, 0),
-                Status.CONFIG_INVALID.value: counts.get(
-                    Status.CONFIG_INVALID.value, 0
-                ),
+                Status.CONFIG_INVALID.value: counts.get(Status.CONFIG_INVALID.value, 0),
             },
             "typeDistribution": type_dist,
             "databaseCount": db_count,
@@ -813,10 +803,7 @@ def _register_routes(app: FastAPI) -> None:
         statuses = all_statuses(ctx.workspace, ctx.config, ctx.registry)
         # IMP-019（WBS-22.13）：标注冗余实例（同 zip 指纹分组中非最早者），
         # 前端据此显示冗余徽章 / 黄色边框 / 行内删除。
-        redundant_ids = {
-            r["id"]
-            for r in list_redundant_instances(ctx.workspace, ctx.registry)
-        }
+        redundant_ids = {r["id"] for r in list_redundant_instances(ctx.workspace, ctx.registry)}
         items: list[dict[str, Any]] = []
         for snap in statuses:
             data = snap.to_dict()
@@ -843,7 +830,12 @@ def _register_routes(app: FastAPI) -> None:
         if not backend:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error": {"code": "GATEWAY_BACKEND_INVALID", "message": "缺少 backend（caddy|builtin）"}},
+                detail={
+                    "error": {
+                        "code": "GATEWAY_BACKEND_INVALID",
+                        "message": "缺少 backend（caddy|builtin）",
+                    }
+                },
             )
         dry_run = bool(payload.get("dryRun", False))
         review = bool(payload.get("review", True))
@@ -920,9 +912,7 @@ def _register_routes(app: FastAPI) -> None:
     def get_resources(instance_id: str) -> dict[str, Any]:
         ctx = _Ctx(app)
         _require_instance(ctx, instance_id)
-        info = instance_resources(
-            ctx.workspace, ctx.config, ctx.registry, instance_id
-        )
+        info = instance_resources(ctx.workspace, ctx.config, ctx.registry, instance_id)
         return {"instanceId": instance_id, "resources": info.to_dict()}
 
     # ---- 操作（WBS-22.08）----
@@ -934,10 +924,7 @@ def _register_routes(app: FastAPI) -> None:
         row = ctx.registry.get_instance(instance_id) or {}
         runtime = str(row.get("runtime") or "")
         serving = str(row.get("serving_mode") or row.get("servingMode") or "")
-        is_container = (
-            runtime in ("docker-compose", "container")
-            or serving == "container"
-        )
+        is_container = runtime in ("docker-compose", "container") or serving == "container"
         if not is_container:
             # 再看 registry runtime_access：若曾观测到权限失败，仍阻断容器类操作
             # 但静态站点不走此路径
@@ -1024,7 +1011,9 @@ def _register_routes(app: FastAPI) -> None:
 
         try:
             return _lifecycle_op(
-                instance_id, start_instance, label="start",
+                instance_id,
+                start_instance,
+                label="start",
                 fallback_policy=fallback_policy,
             )
         except FallbackConfirmationRequired as fcr:
@@ -1035,10 +1024,7 @@ def _register_routes(app: FastAPI) -> None:
                 "pendingConfirmation": True,
                 "primaryFailure": fcr.primary_failure,
                 "equivalentCandidates": fcr.equivalent_candidates,
-                "hint": (
-                    "调用 /api/instances/{instance_id}/confirm-fallback"
-                    " 以确认降级到等价候选"
-                ),
+                "hint": ("调用 /api/instances/{instance_id}/confirm-fallback 以确认降级到等价候选"),
             }
 
     @app.post(
@@ -1055,7 +1041,9 @@ def _register_routes(app: FastAPI) -> None:
         from local_webpage_access.lifecycle import start_instance
 
         return _lifecycle_op(
-            instance_id, start_instance, label="start",
+            instance_id,
+            start_instance,
+            label="start",
             fallback_policy="auto-equivalent",
         )
 
@@ -1191,9 +1179,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         except LwaError as exc:
             code = _lwa_error_code(exc)
-            http_status = _ERROR_STATUS.get(
-                code, status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            http_status = _ERROR_STATUS.get(code, status.HTTP_500_INTERNAL_SERVER_ERROR)
             # IMP-041：破坏性 API 审计（无 token）
             log.info(
                 "audit remove instance=%s purge=%s force=%s status=%s code=%s",
@@ -1290,22 +1276,16 @@ def _register_routes(app: FastAPI) -> None:
         if result.needs_rebuild:
             from local_webpage_access.lifecycle import rebuild_instance
 
-            rebuild_instance(
-                ctx.workspace, ctx.config, ctx.registry, instance_id
-            )
+            rebuild_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
             rebuilt_runtime = True
         elif result.needs_restart:
             from local_webpage_access.lifecycle import restart_instance
 
-            restart_instance(
-                ctx.workspace, ctx.config, ctx.registry, instance_id
-            )
+            restart_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
             restarted = True
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
-        snap = instance_status(
-            ctx.workspace, ctx.config, ctx.registry, instance_id
-        )
+        snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
         return {
             "instanceId": instance_id,
             "action": "update",
@@ -1368,22 +1348,16 @@ def _register_routes(app: FastAPI) -> None:
         if result.needs_rebuild:
             from local_webpage_access.lifecycle import rebuild_instance
 
-            rebuild_instance(
-                ctx.workspace, ctx.config, ctx.registry, instance_id
-            )
+            rebuild_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
             rebuilt_runtime = True
         elif result.needs_restart:
             from local_webpage_access.lifecycle import restart_instance
 
-            restart_instance(
-                ctx.workspace, ctx.config, ctx.registry, instance_id
-            )
+            restart_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
             restarted = True
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
-        snap = instance_status(
-            ctx.workspace, ctx.config, ctx.registry, instance_id
-        )
+        snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
         return {
             "instanceId": instance_id,
             "action": "update-from-dir",
@@ -1441,9 +1415,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         except LwaError as exc:
             code = _lwa_error_code(exc)
-            http_status = _ERROR_STATUS.get(
-                code, status.HTTP_400_BAD_REQUEST
-            )
+            http_status = _ERROR_STATUS.get(code, status.HTTP_400_BAD_REQUEST)
             raise HTTPException(
                 status_code=http_status,
                 detail={"error": {"code": code, "message": exc.message or str(exc)}},
@@ -1461,9 +1433,7 @@ def _register_routes(app: FastAPI) -> None:
         )
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, result.instance_id)
-        snap = instance_status(
-            ctx.workspace, ctx.config, ctx.registry, result.instance_id
-        )
+        snap = instance_status(ctx.workspace, ctx.config, ctx.registry, result.instance_id)
         return {
             "instanceId": result.instance_id,
             "action": "import-from-dir",
@@ -1573,9 +1543,7 @@ def _register_routes(app: FastAPI) -> None:
         )
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
-        snap = instance_status(
-            ctx.workspace, ctx.config, ctx.registry, instance_id
-        )
+        snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
         body = result.to_dict()
         body["action"] = "path-alias"
         body["instance"] = snap.to_dict()
@@ -1667,9 +1635,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         except LwaError as exc:
             code = _lwa_error_code(exc)
-            http_status = _ERROR_STATUS.get(
-                code, status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            http_status = _ERROR_STATUS.get(code, status.HTTP_500_INTERNAL_SERVER_ERROR)
             log.info(
                 "audit remove-redundant purge=%s force=%s status=%s code=%s count=0",
                 str(purge).lower(),
@@ -1719,9 +1685,7 @@ def _port_pool_summary(ctx: _Ctx) -> dict[str, Any]:
         "total": total_in_range,
         "allocated": len(allocated),
         "free": max(0, total_in_range - len(allocated)),
-        "ports": [
-            {"port": port, "instanceId": owners.get(port)} for port in allocated
-        ],
+        "ports": [{"port": port, "instanceId": owners.get(port)} for port in allocated],
     }
 
 

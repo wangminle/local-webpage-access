@@ -88,9 +88,9 @@ def test_slug_basis_prefers_path_when_name_is_cjk() -> None:
     """BUG：纯中文 --name 不应把所有导入都抢成 id=instance。"""
     from local_webpage_access.importer import slug_basis_for_id
 
-    assert slug_basis_for_id(name="分布式唤醒示意图", path_stem="multidevices-arbitration-simulator") == (
-        "multidevices-arbitration-simulator"
-    )
+    assert slug_basis_for_id(
+        name="分布式唤醒示意图", path_stem="multidevices-arbitration-simulator"
+    ) == ("multidevices-arbitration-simulator")
     assert slugify(slug_basis_for_id(name="分布式唤醒示意图", path_stem="src")) == "src"
     # 名称本身含 ASCII 时仍用名称
     assert slug_basis_for_id(name="Demo 演示", path_stem="src") == "Demo 演示"
@@ -175,12 +175,7 @@ def test_import_uses_html_title_as_display_name(
 ) -> None:
     zip_path = _make_zip(
         tmp_path / "ai-review-prd-v0-2-7.zip",
-        {
-            "index.html": (
-                "<html><head><title>AI Review · PRD</title></head>"
-                "<body>hi</body></html>"
-            )
-        },
+        {"index.html": ("<html><head><title>AI Review · PRD</title></head><body>hi</body></html>")},
     )
     result = importer.import_zip(zip_path)
     assert result.manifest.name == "AI Review · PRD"
@@ -189,9 +184,7 @@ def test_import_uses_html_title_as_display_name(
     assert row["name"] == "AI Review · PRD"
 
 
-def test_import_explicit_name_overrides_html_title(
-    importer: Importer, tmp_path: Path
-) -> None:
+def test_import_explicit_name_overrides_html_title(importer: Importer, tmp_path: Path) -> None:
     zip_path = _make_zip(
         tmp_path / "demo.zip",
         {"index.html": "<html><title>From HTML</title></html>"},
@@ -205,9 +198,7 @@ def test_is_auto_titleized_name() -> None:
     assert is_auto_titleized_name(
         "Ai Review Prd V0 2 7", "ai-review-prd-v0-2-7", name_source="slug"
     )
-    assert not is_auto_titleized_name(
-        "Keep Me", "keep-me", name_source="user"
-    )
+    assert not is_auto_titleized_name("Keep Me", "keep-me", name_source="user")
     assert not is_auto_titleized_name("AI Review · PRD", "ai-review-prd-v0-2-7")
     assert not is_auto_titleized_name(
         "AI Review · PRD", "ai-review-prd-v0-2-7", name_source="html_title"
@@ -224,12 +215,8 @@ def test_refresh_display_name_from_homepage_updates_auto_name(
     result = importer.import_zip(zip_path)
     assert result.manifest.name == "Demo Site"
     current = workspace.app_current(result.instance_id)
-    (current / "index.html").write_text(
-        "<html><title>真实站点名</title></html>", encoding="utf-8"
-    )
-    new_name = refresh_display_name_from_homepage(
-        workspace, registry, result.instance_id
-    )
+    (current / "index.html").write_text("<html><title>真实站点名</title></html>", encoding="utf-8")
+    new_name = refresh_display_name_from_homepage(workspace, registry, result.instance_id)
     assert new_name == "真实站点名"
     row = registry.get_instance(result.instance_id)
     assert row is not None and row["name"] == "真实站点名"
@@ -258,10 +245,7 @@ def test_refresh_display_name_preserves_registered_host_port(
     (workspace.app_current(instance_id) / "index.html").write_text(
         "<html><title>端口保留测试</title></html>", encoding="utf-8"
     )
-    assert (
-        refresh_display_name_from_homepage(workspace, registry, instance_id)
-        == "端口保留测试"
-    )
+    assert refresh_display_name_from_homepage(workspace, registry, instance_id) == "端口保留测试"
     site = registry.get_static_site(instance_id)
     assert site is not None
     assert site["host_port"] == 21001
@@ -277,10 +261,7 @@ def test_refresh_display_name_skips_user_custom_name(
         {"index.html": "<html><title>HTML Title</title></html>"},
     )
     result = importer.import_zip(zip_path, name="Keep Me")
-    assert (
-        refresh_display_name_from_homepage(workspace, registry, result.instance_id)
-        is None
-    )
+    assert refresh_display_name_from_homepage(workspace, registry, result.instance_id) is None
     row = registry.get_instance(result.instance_id)
     assert row is not None and row["name"] == "Keep Me"
 
@@ -339,10 +320,7 @@ def test_refresh_display_name_holds_lock_and_rereads_manifest(
     monkeypatch.setattr(InstanceManifest, "save", checked_save)
     monkeypatch.setattr(lifecycle_mod, "instance_lock", tracked_lock)
 
-    assert (
-        refresh_display_name_from_homepage(workspace, registry, instance_id)
-        == "锁内回填"
-    )
+    assert refresh_display_name_from_homepage(workspace, registry, instance_id) == "锁内回填"
     assert saved_under_lock is True
     loaded = InstanceManifest.load(manifest_path)
     assert loaded.name == "锁内回填"
@@ -398,7 +376,9 @@ def test_import_writes_registry(importer: Importer, registry: Registry, tmp_path
 # ---- 单层根目录拍平 --------------------------------------------------------
 
 
-def test_import_flattens_single_root(importer: Importer, workspace: Workspace, tmp_path: Path) -> None:
+def test_import_flattens_single_root(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
     zip_path = _make_zip(
         tmp_path / "wrapped.zip",
         {
@@ -513,6 +493,7 @@ def test_import_rejects_zip_symlink(importer: Importer, tmp_path: Path) -> None:
 
 # ---- 错误处理 --------------------------------------------------------------
 
+
 def test_import_missing_file(importer: Importer, tmp_path: Path) -> None:
     with pytest.raises(ZipImportError, match="不存在"):
         importer.import_zip(tmp_path / "nope.zip")
@@ -594,9 +575,7 @@ def test_import_unrecognized_marks_pending(importer: Importer, tmp_path: Path) -
     assert result.manifest.lastError is not None
 
 
-def test_import_non_index_html_is_static_stopped(
-    importer: Importer, tmp_path: Path
-) -> None:
+def test_import_non_index_html_is_static_stopped(importer: Importer, tmp_path: Path) -> None:
     """非 index 文件名的 HTML 包应识别为静态且落盘 stopped（非 pending）。"""
     zip_path = _make_zip(
         tmp_path / "chapters.zip",
@@ -762,9 +741,7 @@ def test_import_strip_regression_absolute_path(importer: Importer, tmp_path: Pat
         importer.import_zip(zip_path)
 
 
-def test_import_clean_zip_has_empty_sanitized(
-    importer: Importer, tmp_path: Path
-) -> None:
+def test_import_clean_zip_has_empty_sanitized(importer: Importer, tmp_path: Path) -> None:
     """无冗余成员的 zip，sanitized 非空但 stripped_names 为空。"""
     zip_path = _make_zip(
         tmp_path / "clean.zip",
@@ -802,9 +779,7 @@ def test_import_with_path_alias_writes_route_mode(
     assert row["route_host"] == "voiceprint-app-demo"
 
 
-def test_import_without_path_alias_keeps_port_mode(
-    importer: Importer, tmp_path: Path
-) -> None:
+def test_import_without_path_alias_keeps_port_mode(importer: Importer, tmp_path: Path) -> None:
     """不传别名时 routeMode 仍为 port（默认行为不变）。"""
     zip_path = _make_static_zip(tmp_path / "demo.zip")
     result = importer.import_zip(zip_path)
@@ -814,17 +789,13 @@ def test_import_without_path_alias_keeps_port_mode(
     assert static.routeHost is None
 
 
-def test_import_path_alias_rejects_reserved(
-    importer: Importer, tmp_path: Path
-) -> None:
+def test_import_path_alias_rejects_reserved(importer: Importer, tmp_path: Path) -> None:
     zip_path = _make_static_zip(tmp_path / "demo.zip")
     with pytest.raises(PathError):
         importer.import_zip(zip_path, path_alias="api")
 
 
-def test_import_path_alias_rejects_bad_format(
-    importer: Importer, tmp_path: Path
-) -> None:
+def test_import_path_alias_rejects_bad_format(importer: Importer, tmp_path: Path) -> None:
     zip_path = _make_static_zip(tmp_path / "demo.zip")
     with pytest.raises(PathError):
         importer.import_zip(zip_path, path_alias="Bad_Alias!")
@@ -957,9 +928,7 @@ def test_update_replaces_content_and_hash(
     assert getattr(m, "sourceZipHash", None) == result.zip_hash
 
 
-def test_update_same_hash_skips(
-    importer: Importer, workspace: Workspace, tmp_path: Path
-) -> None:
+def test_update_same_hash_skips(importer: Importer, workspace: Workspace, tmp_path: Path) -> None:
     """相同 hash 再次更新 → skipped，不 rebuild。"""
     zip_path = _make_static_zip(tmp_path / "demo.zip", "v1")
     r1 = importer.import_zip(zip_path)
@@ -1002,9 +971,7 @@ def test_update_kind_change_forced(
         tmp_path / "demo-api.zip",
         {"requirements.txt": "fastapi\n", "main.py": "x = 1"},
     )
-    result = importer.update_zip(
-        container_zip, iid, restart=False, force_kind_change=True
-    )
+    result = importer.update_zip(container_zip, iid, restart=False, force_kind_change=True)
     assert result.rebuilt is True
     assert result.kind_changed is True
 
@@ -1039,9 +1006,7 @@ def test_update_force_kind_change_stops_old_runtime(
         {"requirements.txt": "fastapi\n", "main.py": "x = 1"},
     )
 
-    result = importer.update_zip(
-        container_zip, iid, restart=False, force_kind_change=True
-    )
+    result = importer.update_zip(container_zip, iid, restart=False, force_kind_change=True)
 
     assert stopped == [iid]
     assert result.kind_changed is True
@@ -1114,9 +1079,7 @@ def test_update_failure_after_current_swap_rolls_back(
             raise OSError("manifest write boom")
         return original_save(self, path)
 
-    monkeypatch.setattr(
-        importer_mod.InstanceManifest, "save", fail_update_manifest_save
-    )
+    monkeypatch.setattr(importer_mod.InstanceManifest, "save", fail_update_manifest_save)
 
     v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
     with pytest.raises(ZipImportError, match="manifest write boom"):
@@ -1130,9 +1093,7 @@ def test_update_failure_after_current_swap_rolls_back(
     assert workspace.app_original_zip(iid).read_bytes() == v1.read_bytes()
 
 
-def test_update_preserves_data(
-    importer: Importer, workspace: Workspace, tmp_path: Path
-) -> None:
+def test_update_preserves_data(importer: Importer, workspace: Workspace, tmp_path: Path) -> None:
     """keep_data=True（默认）：data/ 内文件在更新后仍在。"""
     v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
     r1 = importer.import_zip(v1)
@@ -1355,9 +1316,7 @@ def test_update_force_kind_change_preserves_hostport_across_static_to_container(
         tmp_path / "demo-api.zip",
         {"requirements.txt": "fastapi\n", "main.py": "x = 1"},
     )
-    result = importer.update_zip(
-        container_zip, iid, restart=False, force_kind_change=True
-    )
+    result = importer.update_zip(container_zip, iid, restart=False, force_kind_change=True)
 
     assert result.manifest.container is not None
     assert result.manifest.container.hostPort == 18001
@@ -1514,9 +1473,7 @@ def test_cli_import_update_dry_run_says_rebuild_for_container(
         reg.close()
 
 
-def test_update_dry_run_no_writes(
-    importer: Importer, workspace: Workspace, tmp_path: Path
-) -> None:
+def test_update_dry_run_no_writes(importer: Importer, workspace: Workspace, tmp_path: Path) -> None:
     """--dry-run：不写 current/、不生成 .bak、manifest hash 不变。"""
     v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
     r1 = importer.import_zip(v1)
@@ -1695,9 +1652,7 @@ def test_build_manifest_small_profile_uses_small_limits(workspace: Workspace) ->
     assert manifest.container.resourceLimits.memory == "256m"
 
 
-def test_build_manifest_plan_failure_fails_closed(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_build_manifest_plan_failure_fails_closed(workspace: Workspace, monkeypatch) -> None:
     """BUG-501：generate_plans 失败时容器后端应标记 pending（失败封闭），
     不得退回 servesUi-only 契约导致首页 200 假绿。"""
     from local_webpage_access import candidate_generator
@@ -1783,9 +1738,7 @@ def test_import_env_example_records_event(
 
 
 @pytest.fixture()
-def builtin_importer(
-    workspace: Workspace, registry: Registry
-) -> Importer:
+def builtin_importer(workspace: Workspace, registry: Registry) -> Importer:
     """强制 builtin 后端的导入器（模拟 Caddy 不可用降级）。"""
     return Importer(workspace, Config(staticGateway="builtin"), registry)
 

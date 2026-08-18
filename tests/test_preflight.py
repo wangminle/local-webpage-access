@@ -149,7 +149,9 @@ def test_chk_v02_semicolon_operator(tmp_path: Path) -> None:
 def test_chk_v02_bare_parentheses_operator(tmp_path: Path) -> None:
     """IMP-058 Gate-A：含裸 () 的命令也自动包裹（文档 §6.4 CHK-V02）。"""
     _ensure_requirements(tmp_path)
-    result = _mk_python_result(start="docker-entrypoint.sh (alembic upgrade) && uvicorn app.main:app")
+    result = _mk_python_result(
+        start="docker-entrypoint.sh (alembic upgrade) && uvicorn app.main:app"
+    )
     pre = check_and_fix(result, tmp_path)
     v02 = next(c for c in pre.checks if c.check_id == "CHK-V02")
     assert v02.autofixed is True
@@ -476,7 +478,9 @@ def test_chk_v05_no_script_reference(tmp_path: Path) -> None:
 def test_chk_v05_script_exists_at_root(tmp_path: Path) -> None:
     """正例：entry.start 引用的 .sh 脚本在根目录存在 → 通过。"""
     _ensure_requirements(tmp_path)
-    (tmp_path / "docker-entrypoint.sh").write_text("#!/bin/sh\nalembic upgrade head\n", encoding="utf-8")
+    (tmp_path / "docker-entrypoint.sh").write_text(
+        "#!/bin/sh\nalembic upgrade head\n", encoding="utf-8"
+    )
     result = _mk_python_result(start="docker-entrypoint.sh && uvicorn app.main:app")
     pre = check_and_fix(result, tmp_path)
     v05 = next(c for c in pre.checks if c.check_id == "CHK-V05")
@@ -490,7 +494,9 @@ def test_chk_v05_script_exists_in_subdir(tmp_path: Path) -> None:
     _ensure_requirements(tmp_path)
     backend = tmp_path / "backend"
     backend.mkdir()
-    (backend / "entrypoint.sh").write_text("#!/bin/sh\nexec uvicorn app.main:app\n", encoding="utf-8")
+    (backend / "entrypoint.sh").write_text(
+        "#!/bin/sh\nexec uvicorn app.main:app\n", encoding="utf-8"
+    )
     result = _mk_python_result(start="backend/entrypoint.sh")
     pre = check_and_fix(result, tmp_path)
     v05 = next(c for c in pre.checks if c.check_id == "CHK-V05")
@@ -501,7 +507,9 @@ def test_chk_v05_script_exists_in_subdir(tmp_path: Path) -> None:
 def test_chk_v05_script_not_found_rejected(tmp_path: Path) -> None:
     """反例：entry.start 引用的 .sh 脚本不存在 → rejected。"""
     _ensure_requirements(tmp_path)
-    result = _mk_python_result(start="docker-entrypoint.sh alembic upgrade head && uvicorn app.main:app")
+    result = _mk_python_result(
+        start="docker-entrypoint.sh alembic upgrade head && uvicorn app.main:app"
+    )
     pre = check_and_fix(result, tmp_path)
     v05 = next(c for c in pre.checks if c.check_id == "CHK-V05")
     assert v05.passed is False

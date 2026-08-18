@@ -224,9 +224,62 @@ def test_cli_init_full_passes_workspace_root(tmp_path: Path, monkeypatch) -> Non
     )
     ws = tmp_path / "full-ws"
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["init", "--workspace", str(ws), "--full", "--yes"]
-    )
+    result = runner.invoke(app, ["init", "--workspace", str(ws), "--full", "--yes"])
     assert result.exit_code == 2, result.output
     assert captured.get("workspace_root") == ws.resolve()
     assert captured.get("yes") is True
+
+
+# ---- CHK-224#2：init 收尾自启引导异常兜底 ------------------------------------
+
+
+def test_cli_init_autostart_offer_exception_does_not_break_init(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """引导探测抛任意异常（AutostartError/OSError）不阻断 init 主流程。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access import autostart as asm
+    from local_webpage_access.cli import app
+
+    def boom(*args, **kwargs):
+        raise asm.AutostartError("平台异常：unit 目录不可写")
+
+    monkeypatch.setattr(asm, "maybe_offer_autostart_install", boom)
+    ws = tmp_path / "offer-broken-ws"
+    result = CliRunner().invoke(app, ["init", "--workspace", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert "已初始化工作区" in result.output
+    assert (ws / "local-web.yml").is_file()
+
+
+def test_cli_init_autostart_offer_generic_exception_swallowed(tmp_path: Path, monkeypatch) -> None:
+    """非 LwaError 的普通异常（如 OSError）同样兜底，不冒栈中断。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access import autostart as asm
+    from local_webpage_access.cli import app
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(asm, "maybe_offer_autostart_install", boom)
+    ws = tmp_path / "offer-oserror-ws"
+    result = CliRunner().invoke(app, ["init", "--workspace", str(ws)])
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_init_autostart_offer_failed_install_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
+    """引导已执行但启用失败（attempted=True, ok=False）仍非零退出且不被吞。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access import autostart as asm
+    from local_webpage_access.autostart import AutostartOfferResult
+    from local_webpage_access.cli import app
+
+    offer = AutostartOfferResult(messages=["执行：lwa autostart install"], attempted=True, ok=False)
+    monkeypatch.setattr(asm, "maybe_offer_autostart_install", lambda *a, **k: offer)
+    ws = tmp_path / "offer-failed-ws"
+    result = CliRunner().invoke(app, ["init", "--workspace", str(ws)])
+    assert result.exit_code == 1
+    assert "autostart check" in result.output

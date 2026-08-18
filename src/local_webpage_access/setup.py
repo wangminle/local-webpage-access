@@ -99,9 +99,7 @@ def _check_lwa_package() -> SetupItem:
         status=STATUS_OK,
         message=f"{PRODUCT_NAME} (lwa) {__version__} 已安装",
         required="pip install -e .",
-        install_hint=(
-            "在项目根目录执行：`pip install -e .`（开发）或 `pip install .`（安装）"
-        ),
+        install_hint=("在项目根目录执行：`pip install -e .`（开发）或 `pip install .`（安装）"),
     )
 
 
@@ -178,9 +176,7 @@ def run_setup(
         _from_doctor_check(
             check_python_packages,
             name="python_packages",
-            required=(
-                f"fastapi ≥ {MIN_FASTAPI_VERSION}，uvicorn ≥ {MIN_UVICORN_VERSION}"
-            ),
+            required=(f"fastapi ≥ {MIN_FASTAPI_VERSION}，uvicorn ≥ {MIN_UVICORN_VERSION}"),
             install_hint=(
                 f"pip install -U 'fastapi>={MIN_FASTAPI_VERSION}' "
                 f"'uvicorn>={MIN_UVICORN_VERSION}' 或 pip install -e ."
@@ -197,8 +193,7 @@ def run_setup(
             check_docker_compose,
             name="docker_compose",
             required=(
-                f"Docker Compose ≥ {MIN_COMPOSE_VERSION}"
-                f"（推荐 ≥ {RECOMMENDED_COMPOSE_VERSION}）"
+                f"Docker Compose ≥ {MIN_COMPOSE_VERSION}（推荐 ≥ {RECOMMENDED_COMPOSE_VERSION}）"
             ),
             install_hint=_compose_install_hint(hint_plat),
             runner=runner,
@@ -282,10 +277,7 @@ def _caddy_install_hint(plat: str) -> str:
             f"（需 ≥ {MIN_CADDY_VERSION}）"
         )
     if plat == "windows":
-        return (
-            "Windows 原生不受支持；请在 WSL2 内安装 Caddy"
-            f"（需 ≥ {MIN_CADDY_VERSION}）"
-        )
+        return f"Windows 原生不受支持；请在 WSL2 内安装 Caddy（需 ≥ {MIN_CADDY_VERSION}）"
     return f"安装 Caddy ≥ {MIN_CADDY_VERSION}；或将 local-web.yml 的 staticGateway 设为 builtin"
 
 
@@ -295,9 +287,7 @@ def _node_install_hint(plat: str) -> str:
     if plat == "linux":
         return f"推荐：NodeSource / fnm / nvm 安装 Node ≥ {MIN_NODE_VERSION}"
     if plat == "windows":
-        return (
-            f"Windows 原生不受支持；请在 WSL2 内安装 Node ≥ {MIN_NODE_VERSION}"
-        )
+        return f"Windows 原生不受支持；请在 WSL2 内安装 Node ≥ {MIN_NODE_VERSION}"
     return f"安装 Node.js ≥ {MIN_NODE_VERSION}（仅前端 SPA 构建需要）"
 
 

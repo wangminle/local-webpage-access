@@ -112,7 +112,9 @@ class DatabaseSignal(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     consumesDatabaseUrl: bool = False  # 应用是否读取 DATABASE_URL 环境变量
-    defaultUrl: str | None = None  # config 中的默认 DATABASE_URL（如 "sqlite:///./data/bookshelf.db"）
+    defaultUrl: str | None = (
+        None  # config 中的默认 DATABASE_URL（如 "sqlite:///./data/bookshelf.db"）
+    )
     isRelative: bool = False  # 默认 URL 是否相对路径
     dbFilename: str | None = None  # 从默认 URL 解析的数据库文件名
     sourcePath: str | None = None  # 解析来源文件相对路径（如 "config.py"）
@@ -156,6 +158,9 @@ class ContainerConfig(BaseModel):
     # 让 registry containers 表与别名统一入口（reverse_proxy hostPort）联动。
     routeMode: str = RouteMode.PORT.value
     routeHost: str | None = None
+    # issue#1：额外 bind mount（``宿主路径:容器路径[:ro]`` 列表），渲染 compose 时
+    # 合并进 volumes--手工改 compose.yaml 会在重生成时被抹掉，业务定制走这里。
+    extraVolumes: list[str] = Field(default_factory=list)
 
 
 class NetworkConfig(BaseModel):
@@ -182,7 +187,9 @@ class EntryConfig(BaseModel):
     install: str | None = None
     build: str | None = None
     start: str | None = None
-    buildOutputDir: str | None = None  # 构建产物目录（相对项目根），monorepo 子包为 packages/<name>/dist
+    buildOutputDir: str | None = (
+        None  # 构建产物目录（相对项目根），monorepo 子包为 packages/<name>/dist
+    )
 
 
 # ---- Monorepo 包分类（IMP-057 Gate-1）---------------------------------------
@@ -441,7 +448,9 @@ class RollbackResult(BaseModel):
 
     attemptId: str = ""
     rollbackSucceeded: bool = False
-    rolledBackItems: list[str] = Field(default_factory=list)  # ["container", "port", "files", "manifest"]
+    rolledBackItems: list[str] = Field(
+        default_factory=list
+    )  # ["container", "port", "files", "manifest"]
     externalSideEffects: list[str] = Field(default_factory=list)  # ["migration:alembic_head_xxx"]
     automaticFallbackSafe: bool = False  # 仅当副作用可丢弃/已回滚/已快照恢复
     # C.R04：残留项（未能恢复，需人工处置）
@@ -700,9 +709,7 @@ class InstanceManifest(BaseModel):
         return cls.from_dict(raw, path=path)
 
     @classmethod
-    def from_dict(
-        cls, data: dict[str, Any], *, path: Path | None = None
-    ) -> InstanceManifest:
+    def from_dict(cls, data: dict[str, Any], *, path: Path | None = None) -> InstanceManifest:
         try:
             return cls.model_validate(data)
         except ValueError as exc:

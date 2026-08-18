@@ -40,9 +40,7 @@ SWITCH_LOCK_TIMEOUT = 15.0
 
 
 @contextlib.contextmanager
-def _switch_lock(
-    workspace: Workspace, *, timeout: float = SWITCH_LOCK_TIMEOUT
-) -> Iterator[None]:
+def _switch_lock(workspace: Workspace, *, timeout: float = SWITCH_LOCK_TIMEOUT) -> Iterator[None]:
     """串行化完整 gateway 切换事务（BUG-514：并发切换会交错 YAML/manifest/进程）。"""
     path = workspace.run / SWITCH_LOCK_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,9 +164,7 @@ def _normalize_target(target: str) -> str:
     return t
 
 
-def _unloadable_running_static_manifests(
-    workspace: Workspace, registry: Registry
-) -> list[str]:
+def _unloadable_running_static_manifests(workspace: Workspace, registry: Registry) -> list[str]:
     """返回「运行中」但 manifest 无法加载的静态实例 ID（BUG-516）。
 
     切到 builtin 时这些实例无进程承接，会静默下线。已停止的损坏 manifest
@@ -207,11 +203,7 @@ def _iter_static_instances(
         except Exception as exc:  # noqa: BLE001
             log.warning("跳过无法加载的 manifest %s：%s", iid, exc)
             continue
-        rt = (
-            manifest.runtime.value
-            if hasattr(manifest.runtime, "value")
-            else str(manifest.runtime)
-        )
+        rt = manifest.runtime.value if hasattr(manifest.runtime, "value") else str(manifest.runtime)
         if rt != Runtime.SHARED_STATIC.value:
             continue
         if manifest.static is None:
@@ -388,11 +380,7 @@ def _enable_running_builtin(
             # 兜底：部分测试/历史布局把 public 放在 current/public
             alt = workspace.app_current(iid) / "public"
             public = alt if alt.is_dir() else public
-        alias = (
-            st.routeHost
-            if st.routeMode == RouteMode.NAME.value and st.routeHost
-            else None
-        )
+        alias = st.routeHost if st.routeMode == RouteMode.NAME.value and st.routeHost else None
         gateway.enable(
             iid,
             int(st.hostPort),
@@ -504,9 +492,7 @@ def _rollback(
             gw = StaticGateway(workspace, restored)
             _enable_running_builtin(workspace, restored, registry, gw)
             stages.append({"stage": "rollback_enable_builtin", "ok": True})
-        review_result = run_access_pass(
-            workspace, restored, registry, review=True, dry_run=False
-        )
+        review_result = run_access_pass(workspace, restored, registry, review=True, dry_run=False)
         if _access_ok(review_result) is False:
             raise LifecycleError("回滚后的访问复核失败")
         return True, None
@@ -578,7 +564,9 @@ def switch_gateway(
         return GatewaySwitchResult(
             ok=False,
             from_backend=(config.staticGateway or ""),
-            to_backend=_normalize_target(target) if target.strip().lower() in _ALLOWED_BACKENDS else target,
+            to_backend=_normalize_target(target)
+            if target.strip().lower() in _ALLOWED_BACKENDS
+            else target,
             error=str(exc),
             stages=[{"stage": "precheck", "ok": False, "error": str(exc)}],
         )
@@ -611,13 +599,9 @@ def switch_gateway(
     try:
         # BUG-514：完整切换事务持跨进程锁，防止 CLI 与 API 并发交错。
         with _switch_lock(workspace):
-            return _switch_gateway_locked(
-                workspace, config, registry, plan, result, stages, review
-            )
+            return _switch_gateway_locked(workspace, config, registry, plan, result, stages, review)
     except Exception as exc:  # noqa: BLE001
-        is_lock = (
-            isinstance(exc, LwaError) and exc.code == "GATEWAY_SWITCH_LOCKED"
-        )
+        is_lock = isinstance(exc, LwaError) and exc.code == "GATEWAY_SWITCH_LOCKED"
         stage = "switch_lock" if is_lock else "failed"
         log.exception(
             "网关切换%s失败：%s",
@@ -703,14 +687,10 @@ def _switch_gateway_locked(
 
             gw = StaticGateway(workspace, live_config)
             enabled = _enable_running_builtin(workspace, live_config, registry, gw)
-            stages.append(
-                {"stage": "enable_builtin", "ok": True, "instances": enabled}
-            )
+            stages.append({"stage": "enable_builtin", "ok": True, "instances": enabled})
 
             synced = _sync_manifests_gateway(workspace, registry, "builtin")
-            stages.append(
-                {"stage": "sync_manifests", "ok": True, "updated": synced}
-            )
+            stages.append({"stage": "sync_manifests", "ok": True, "updated": synced})
 
         else:
             # builtin → caddy
@@ -723,19 +703,13 @@ def _switch_gateway_locked(
 
             gw = StaticGateway(workspace, live_config)
             rebuilt = _rebuild_caddy_aliases(workspace, registry, gw)
-            stages.append(
-                {"stage": "rebuild_aliases", "ok": True, "instances": rebuilt}
-            )
+            stages.append({"stage": "rebuild_aliases", "ok": True, "instances": rebuilt})
 
             synced = _sync_manifests_gateway(workspace, registry, "caddy")
-            stages.append(
-                {"stage": "sync_manifests", "ok": True, "updated": synced}
-            )
+            stages.append({"stage": "sync_manifests", "ok": True, "updated": synced})
 
         # access 收尾
-        access = run_access_pass(
-            workspace, live_config, registry, review=review, dry_run=False
-        )
+        access = run_access_pass(workspace, live_config, registry, review=review, dry_run=False)
         result.access = access
         result.access_ok = _access_ok(access)
         stages.append(
@@ -759,9 +733,7 @@ def _switch_gateway_locked(
     except Exception as exc:  # noqa: BLE001
         log.exception("网关切换失败，尝试回滚：%s", exc)
         stages.append({"stage": "failed", "ok": False, "error": str(exc)})
-        rb_ok, hint = _rollback(
-            workspace, config, registry, snap, stages=stages
-        )
+        rb_ok, hint = _rollback(workspace, config, registry, snap, stages=stages)
         result.ok = False
         result.error = str(exc)
         if not rb_ok:

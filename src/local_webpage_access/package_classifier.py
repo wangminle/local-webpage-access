@@ -238,7 +238,9 @@ def classify_and_select(root: Path) -> ClassificationResult:
 
     # 选主（§4.4 决策表）
     web_servers = [c for c in classifications if c.packageType == PackageType.WEB_SERVER.value]
-    frontend_builds = [c for c in classifications if c.packageType == PackageType.FRONTEND_BUILD.value]
+    frontend_builds = [
+        c for c in classifications if c.packageType == PackageType.FRONTEND_BUILD.value
+    ]
 
     notes: list[str] = []
     primary: PackageClassification | None = None
@@ -252,13 +254,17 @@ def classify_and_select(root: Path) -> ClassificationResult:
         notes.append(f"primary={primary.path} ({primary.name})")
     elif len(web_servers) >= 2:
         candidates = ", ".join(f"{c.path} ({c.name})" for c in web_servers)
-        notes.append(f"发现 {len(web_servers)} 个 web_server 子包：{candidates}；标记 pending（后续可用 --package 指定）")
+        notes.append(
+            f"发现 {len(web_servers)} 个 web_server 子包：{candidates}；标记 pending（后续可用 --package 指定）"
+        )
     elif len(frontend_builds) == 1:
         primary = frontend_builds[0]
         notes.append(f"primary={primary.path} ({primary.name})")
     elif len(frontend_builds) >= 2:
         candidates = ", ".join(f"{c.path} ({c.name})" for c in frontend_builds)
-        notes.append(f"发现 {len(frontend_builds)} 个 frontend_build 子包：{candidates}；标记 pending（后续可用 --package 指定）")
+        notes.append(
+            f"发现 {len(frontend_builds)} 个 frontend_build 子包：{candidates}；标记 pending（后续可用 --package 指定）"
+        )
     else:
         notes.append("monorepo 中未发现 Web 可部署子包")
 

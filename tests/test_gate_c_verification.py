@@ -133,7 +133,9 @@ class TestDeploymentPlan:
             planId="plan-fullstack-backend",
             components=[frontend, backend],
             capabilityContract=CapabilityContract(
-                servesUi=True, servesApi=True, requiresDatabase=True,
+                servesUi=True,
+                servesApi=True,
+                requiresDatabase=True,
             ),
         )
         assert len(plan.components) == 2
@@ -169,13 +171,10 @@ class TestPlanGeneration:
         )
         (tmp_path / "backend" / "app").mkdir()
         (tmp_path / "backend" / "app" / "main.py").write_text("# FastAPI")
-        (tmp_path / "backend" / "alembic.ini").write_text(
-            "[alembic]\nscript_location = alembic\n"
-        )
+        (tmp_path / "backend" / "alembic.ini").write_text("[alembic]\nscript_location = alembic\n")
         (tmp_path / "frontend").mkdir()
         (tmp_path / "frontend" / "package.json").write_text(
-            '{"name":"fe","scripts":{"build":"vite build"},'
-            '"dependencies":{"vue":"3","vite":"5"}}'
+            '{"name":"fe","scripts":{"build":"vite build"},"dependencies":{"vue":"3","vite":"5"}}'
         )
         (tmp_path / "frontend" / "index.html").write_text("<html></html>")
 
@@ -345,9 +344,7 @@ class TestStateMachine:
 class TestFallbackPolicy:
     """Gate-C C.07：fallback 策略测试。"""
 
-    def _mk_manifest(
-        self, *, fallbacks: list[dict] | None = None
-    ) -> InstanceManifest:
+    def _mk_manifest(self, *, fallbacks: list[dict] | None = None) -> InstanceManifest:
         return InstanceManifest(
             id="test",
             name="Test",
@@ -371,20 +368,27 @@ class TestFallbackPolicy:
             _try_host_with_fallback,
         )
 
-        manifest = self._mk_manifest(fallbacks=[
-            {
-                "kind": "node",
-                "runtime": "docker-compose",
-                "servingMode": "container",
-                "form": "backend-container",
-                "confidenceTier": "fallback",
-            }
-        ])
+        manifest = self._mk_manifest(
+            fallbacks=[
+                {
+                    "kind": "node",
+                    "runtime": "docker-compose",
+                    "servingMode": "container",
+                    "form": "backend-container",
+                    "confidenceTier": "fallback",
+                }
+            ]
+        )
         host_fn = MagicMock(side_effect=HostingError("build failed"))
 
         with pytest.raises(FallbackConfirmationRequired) as exc_info:
             _try_host_with_fallback(
-                MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                "test",
+                manifest,
+                host_fn,
                 fallback_policy="confirm",
             )
         assert host_fn.call_count == 1
@@ -394,16 +398,21 @@ class TestFallbackPolicy:
         """disabled 策略 → 直接抛原始错误。"""
         from local_webpage_access.lifecycle import _try_host_with_fallback
 
-        manifest = self._mk_manifest(fallbacks=[
-            {"kind": "node", "runtime": "docker-compose", "form": "backend-container"}
-        ])
+        manifest = self._mk_manifest(
+            fallbacks=[{"kind": "node", "runtime": "docker-compose", "form": "backend-container"}]
+        )
         host_fn = MagicMock(side_effect=HostingError("fail"))
         mock_ws = MagicMock()
         mock_ws.app_manifest_path.return_value = Path("/tmp/m.json")
 
         with pytest.raises(HostingError, match="fail"):
             _try_host_with_fallback(
-                mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn,
+                mock_ws,
+                MagicMock(),
+                MagicMock(),
+                "test",
+                manifest,
+                host_fn,
                 fallback_policy="disabled",
             )
         assert host_fn.call_count == 1
@@ -413,19 +422,26 @@ class TestFallbackPolicy:
         from local_webpage_access.lifecycle import _try_host_with_fallback
 
         success = self._mk_manifest()
-        manifest = self._mk_manifest(fallbacks=[
-            {
-                "kind": "node",
-                "runtime": "docker-compose",
-                "servingMode": "container",
-                "form": "backend-container",
-                "confidenceTier": "fallback",
-            }
-        ])
+        manifest = self._mk_manifest(
+            fallbacks=[
+                {
+                    "kind": "node",
+                    "runtime": "docker-compose",
+                    "servingMode": "container",
+                    "form": "backend-container",
+                    "confidenceTier": "fallback",
+                }
+            ]
+        )
         host_fn = MagicMock(side_effect=[HostingError("py fail"), success])
 
         result = _try_host_with_fallback(
-            MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="auto-equivalent",
         )
         assert result is success
@@ -479,9 +495,7 @@ class TestFaultInjection:
     每层失败应被正确捕获并产生对应失败诊断。
     """
 
-    def _mk_manifest(
-        self, *, fallbacks: list[dict] | None = None
-    ) -> InstanceManifest:
+    def _mk_manifest(self, *, fallbacks: list[dict] | None = None) -> InstanceManifest:
         return InstanceManifest(
             id="fault-test",
             name="Fault Test",
@@ -533,22 +547,29 @@ class TestFaultInjection:
         from local_webpage_access.lifecycle import _try_host_with_fallback
 
         # top-1 是 python backend，fallback 是 static
-        manifest = self._mk_manifest(fallbacks=[
-            {
-                "kind": "static",
-                "runtime": "shared_static",
-                "servingMode": "shared_static",
-                "form": "static",
-                "confidenceTier": "fallback",
-            }
-        ])
+        manifest = self._mk_manifest(
+            fallbacks=[
+                {
+                    "kind": "static",
+                    "runtime": "shared_static",
+                    "servingMode": "shared_static",
+                    "form": "static",
+                    "confidenceTier": "fallback",
+                }
+            ]
+        )
         host_fn = MagicMock(side_effect=HostingError("backend build failed"))
         mock_ws = MagicMock()
         mock_ws.app_manifest_path.return_value = Path("/tmp/m.json")
 
         with pytest.raises(HostingError, match="backend build failed"):
             _try_host_with_fallback(
-                mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn,
+                mock_ws,
+                MagicMock(),
+                MagicMock(),
+                "test",
+                manifest,
+                host_fn,
                 fallback_policy="auto-equivalent",  # 即使允许自动降级也不应降级到 static
             )
         # host_fn 只调用一次（top-1），static 不被尝试
@@ -695,7 +716,10 @@ class TestBackendCapabilityObservation:
             )
         assert evaluation.overall_status == "passed"
         assert evaluation.observed_capabilities == {
-            "ui", "api", "database", "migrations",
+            "ui",
+            "api",
+            "database",
+            "migrations",
         }
 
     def test_successful_declared_probe_observes_api(self) -> None:
@@ -750,9 +774,7 @@ class TestBackendCapabilityObservation:
         for plan in primary:
             for probe in plan.capabilityContract.requiredProbes:
                 if probe.source == "guessed":
-                    assert not probe.isMandatory, (
-                        f"guessed 探针 {probe.path} 不应是 mandatory"
-                    )
+                    assert not probe.isMandatory, f"guessed 探针 {probe.path} 不应是 mandatory"
 
     def test_backend_plan_discovers_health_probe_from_source(self, tmp_path: Path) -> None:
         """BUG-504：源码声明的 /health 路由生成 discovered mandatory 探针，
@@ -787,10 +809,14 @@ class TestBackendCapabilityObservation:
 
         server = tmp_path / "server"
         server.mkdir()
-        (server / "package.json").write_text(json.dumps({
-            "dependencies": {"express": "^4"},
-            "scripts": {"start": "node server.js"},
-        }))
+        (server / "package.json").write_text(
+            json.dumps(
+                {
+                    "dependencies": {"express": "^4"},
+                    "scripts": {"start": "node server.js"},
+                }
+            )
+        )
         (server / "server.js").write_text(
             "const app = require('express')();\n"
             "app.get('/health', (req, res) => res.json({ok: true}));\n"
@@ -823,8 +849,7 @@ class TestBackendCapabilityObservation:
         primary = [p for p in plans if p.confidenceTier == "primary"]
         assert len(primary) >= 1
         discovered = [
-            p for p in primary[0].capabilityContract.requiredProbes
-            if p.source == "discovered"
+            p for p in primary[0].capabilityContract.requiredProbes if p.source == "discovered"
         ]
         assert discovered == []
 
@@ -837,10 +862,14 @@ class TestBackendCapabilityObservation:
 
         server = tmp_path / "server"
         server.mkdir()
-        (server / "package.json").write_text(json.dumps({
-            "dependencies": {"express": "^4"},
-            "scripts": {"start": "node server.js"},
-        }))
+        (server / "package.json").write_text(
+            json.dumps(
+                {
+                    "dependencies": {"express": "^4"},
+                    "scripts": {"start": "node server.js"},
+                }
+            )
+        )
         (server / "server.js").write_text(
             "const app = require('express')();\n"
             "app.post('/health', (req, res) => res.json({ok: true}));\n"
@@ -850,8 +879,7 @@ class TestBackendCapabilityObservation:
         primary = [p for p in plans if p.confidenceTier == "primary"]
         assert len(primary) >= 1
         discovered = [
-            p for p in primary[0].capabilityContract.requiredProbes
-            if p.source == "discovered"
+            p for p in primary[0].capabilityContract.requiredProbes if p.source == "discovered"
         ]
         assert discovered == []
 
@@ -873,8 +901,7 @@ class TestBackendCapabilityObservation:
         primary = [p for p in plans if p.confidenceTier == "primary"]
         assert len(primary) >= 1
         discovered = [
-            p for p in primary[0].capabilityContract.requiredProbes
-            if p.source == "discovered"
+            p for p in primary[0].capabilityContract.requiredProbes if p.source == "discovered"
         ]
         assert discovered == []
 
@@ -885,9 +912,7 @@ class TestBackendCapabilityObservation:
         from local_webpage_access.candidate_generator import generate_plans
 
         (tmp_path / "requirements.txt").write_text("flask\n")
-        (tmp_path / "app.py").write_text(
-            "from flask import Flask\napp = Flask(__name__)\n"
-        )
+        (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n")
 
         plans = generate_plans(collect(tmp_path))
         primary = [p for p in plans if p.confidenceTier == "primary"]
@@ -987,8 +1012,7 @@ class TestContainerRuntimeEvidence:
 
         manifest = self._sqlite_manifest()
         manifest.entry.start = (
-            "sh -c 'alembic upgrade head && exec uvicorn app.main:app "
-            "--host 0.0.0.0 --port 8000'"
+            "sh -c 'alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000'"
         )
         assert _migration_command_succeeded(manifest, liveness_ok=True) is True
 
@@ -1015,11 +1039,18 @@ class TestContainerRuntimeEvidence:
             patch("local_webpage_access.hosting._migration_command_succeeded", return_value=True),
         ):
             result = _evaluate_container_verification(
-                18000, manifest, workspace, MagicMock(), "api",
+                18000,
+                manifest,
+                workspace,
+                MagicMock(),
+                "api",
             )
         assert result["overall_status"] == "passed"
         assert result["observed_capabilities"] == [
-            "api", "database", "migrations", "ui",
+            "api",
+            "database",
+            "migrations",
+            "ui",
         ]
 
     def test_hosting_guessed_probe_does_not_satisfy_serves_api(self, workspace) -> None:
@@ -1045,7 +1076,11 @@ class TestContainerRuntimeEvidence:
             patch("local_webpage_access.hosting._probe_path", return_value=(True, 200)),
         ):
             result = _evaluate_container_verification(
-                18000, manifest, workspace, MagicMock(), "api",
+                18000,
+                manifest,
+                workspace,
+                MagicMock(),
+                "api",
             )
         # guessed /health 200 不得观察为 api；无证据来源 → degraded（非 failed 假红）
         assert result["overall_status"] == "degraded"
@@ -1067,7 +1102,11 @@ class TestContainerRuntimeEvidence:
             patch("local_webpage_access.hosting._probe_path", return_value=(False, 404)),
         ):
             result = _evaluate_container_verification(
-                18000, manifest, workspace, MagicMock(), "api",
+                18000,
+                manifest,
+                workspace,
+                MagicMock(),
+                "api",
             )
         assert result["overall_status"] == "degraded"
         assert result["optional_warnings"]
@@ -1083,18 +1122,14 @@ class TestNodeSubdirCandidate:
 
         (tmp_path / "server").mkdir()
         (tmp_path / "server" / "package.json").write_text(
-            '{"name":"api","scripts":{"start":"node server.js"},'
-            '"dependencies":{"express":"4"}}'
+            '{"name":"api","scripts":{"start":"node server.js"},"dependencies":{"express":"4"}}'
         )
         (tmp_path / "server" / "server.js").write_text("// Express app")
 
         evidence = collect(tmp_path)
         candidates = generate_candidates(evidence)
 
-        node_subdir = [
-            c for c in candidates
-            if c.kind == "node" and c.sourceSubdir == "server"
-        ]
+        node_subdir = [c for c in candidates if c.kind == "node" and c.sourceSubdir == "server"]
         assert len(node_subdir) == 1
         assert node_subdir[0].confidenceTier == "primary"
         assert node_subdir[0].form == "backend-container"
@@ -1106,8 +1141,7 @@ class TestNodeSubdirCandidate:
 
         (tmp_path / "backend").mkdir()
         (tmp_path / "backend" / "package.json").write_text(
-            '{"name":"api","scripts":{"start":"node server.js"},'
-            '"dependencies":{"fastify":"4"}}'
+            '{"name":"api","scripts":{"start":"node server.js"},"dependencies":{"fastify":"4"}}'
         )
         (tmp_path / "backend" / "server.js").write_text("// Fastify app")
 
@@ -1125,12 +1159,8 @@ class TestNodeSubdirCandidate:
 
         server = tmp_path / "server"
         server.mkdir()
-        (server / "package.json").write_text(
-            '{"name":"api","scripts":{"start":"node server.js"}}'
-        )
-        (server / "server.js").write_text(
-            'require("http").createServer(() => {}).listen(8080)'
-        )
+        (server / "package.json").write_text('{"name":"api","scripts":{"start":"node server.js"}}')
+        (server / "server.js").write_text('require("http").createServer(() => {}).listen(8080)')
 
         candidates = generate_candidates(collect(tmp_path))
         assert any(
@@ -1143,7 +1173,9 @@ class TestNodeSubdirCandidate:
         ["vite", "vite preview", "react-scripts start", "next dev", "nuxt dev"],
     )
     def test_frontend_start_script_is_not_node_backend(
-        self, tmp_path: Path, start_script: str,
+        self,
+        tmp_path: Path,
+        start_script: str,
     ) -> None:
         """前端开发/预览脚本不得被误判为 Node 后端。"""
         from local_webpage_access.candidate_generator import generate_candidates
@@ -1151,9 +1183,7 @@ class TestNodeSubdirCandidate:
 
         server = tmp_path / "server"
         server.mkdir()
-        (server / "package.json").write_text(
-            '{"scripts":{"start":"' + start_script + '"}}'
-        )
+        (server / "package.json").write_text('{"scripts":{"start":"' + start_script + '"}}')
 
         candidates = generate_candidates(collect(tmp_path))
         assert not any(
@@ -1168,12 +1198,8 @@ class TestNodeSubdirCandidate:
 
         backend = tmp_path / "backend"
         backend.mkdir()
-        (backend / "requirements.txt").write_text(
-            "fastapi\nuvicorn\nsqlalchemy\nalembic\n"
-        )
-        (backend / "alembic.ini").write_text(
-            "[alembic]\nscript_location = alembic\n"
-        )
+        (backend / "requirements.txt").write_text("fastapi\nuvicorn\nsqlalchemy\nalembic\n")
+        (backend / "alembic.ini").write_text("[alembic]\nscript_location = alembic\n")
 
         evidence = collect(tmp_path)
         signal = next(item for item in evidence.subdirSignals if item.path == "backend")
@@ -1190,10 +1216,10 @@ class TestPoetryDepsCollection:
         from local_webpage_access.evidence_collector import _collect_python_deps
 
         (tmp_path / "pyproject.toml").write_text(
-            '[tool.poetry]\n'
+            "[tool.poetry]\n"
             'name = "demo"\n'
             'version = "0.1.0"\n'
-            '[tool.poetry.dependencies]\n'
+            "[tool.poetry.dependencies]\n"
             'python = "^3.11"\n'
             'fastapi = "^0.100"\n'
             'uvicorn = "^0.30"\n'
@@ -1208,15 +1234,15 @@ class TestPoetryDepsCollection:
         from local_webpage_access.evidence_collector import _collect_python_deps
 
         (tmp_path / "pyproject.toml").write_text(
-            '[tool.poetry]\n'
+            "[tool.poetry]\n"
             'name = "demo"\n'
             'version = "0.1.0"\n'
-            '[tool.poetry.dependencies]\n'
+            "[tool.poetry.dependencies]\n"
             'python = "^3.11"\n'
             'fastapi = "^0.100"\n'
-            '[tool.poetry.dev-dependencies]\n'
+            "[tool.poetry.dev-dependencies]\n"
             'pytest = "^8.0"\n'
-            '[tool.poetry.group.test.dependencies]\n'
+            "[tool.poetry.group.test.dependencies]\n"
             'httpx = "^0.27"\n'
         )
         deps = _collect_python_deps(tmp_path)
@@ -1232,10 +1258,10 @@ class TestPoetryDepsCollection:
         backend = tmp_path / "backend"
         backend.mkdir()
         (backend / "pyproject.toml").write_text(
-            '[tool.poetry]\n'
+            "[tool.poetry]\n"
             'name = "demo"\n'
             'version = "0.1.0"\n'
-            '[tool.poetry.dependencies]\n'
+            "[tool.poetry.dependencies]\n"
             'python = "^3.11"\n'
             'fastapi = "^0.100"\n'
         )

@@ -8,14 +8,26 @@
 ## 统一命令：`lwa autostart`
 
 ```bash
-lwa autostart install [--with-caddy] [--no-enable] [--linger]  # 生成并默认启用
+lwa autostart install [--with-caddy/--no-with-caddy] [--no-enable] [--linger/--no-linger]
 lwa autostart enable | disable                                  # 加载/卸载单元
-lwa autostart status                                            # 单元 + 前台进程状态
+lwa autostart status [--json]                                   # 单元 + 前台进程 + 运行模式
 lwa autostart check [--json]                                    # 完备性深检
-lwa autostart repair [--with-caddy]                             # 重写路径/迁移旧单元/重新启用
+lwa autostart repair [--with-caddy/--no-with-caddy]             # 重写路径/迁移旧单元/重新启用
 lwa autostart uninstall [--purge-linger]                        # 停服务 + 删单元
 lwa autostart doctor-hints                                      # 人工待办（Docker Desktop/WSL）
 ```
+
+**IMP-061 缺省值（V0.8.0 起，缺省安全、显式退出）**：
+
+- `--with-caddy` 缺省（三态）：`staticGateway=caddy` 时 gateway 单元**默认纳入**；
+  `--no-with-caddy` 显式排除；旧命令 `--with-caddy` 行为不变；
+- `--linger` 缺省（三态）：Linux/WSL **默认尝试** `enable-linger`，失败仅 WARN 不失败；
+  `--no-linger` 显式跳过；旧命令 `--linger` 行为不变；
+- `lwa init` / `lwa setup` 收尾在 **Linux + systemd** 环境：交互 TTY 询问是否安装自启
+  （`[y/N]`）；非 TTY（管道/CI/Agent）零阻塞，仅打印建议命令；
+- `lwa status` 与 `lwa autostart status`（含 `--json` 的 `services[].mode`）标注每个
+  服务的运行模式：「systemd 监管 / launchd 监管」或「裸进程（重启后不自动恢复）」；
+  `lwa doctor` 的 `restart_resilience` 检查（IMP-060）会因裸进程模式给出 WARN。
 
 `install` 生成的单元用**前台入口**：
 
@@ -67,7 +79,11 @@ launchctl bootout      gui/$(id -u)/com.fenix.lwa.daemon
 
 ```bash
 cd <工作区根>
-lwa autostart install            # 生成 ~/.config/systemd/user/lwa-*.service 并 enable --now
+# caddy 在用时一条命令装齐（gateway 默认纳入 + linger 默认尝试，IMP-061）：
+lwa autostart install --with-caddy --linger
+# 等价缺省写法（staticGateway=caddy 时）：
+lwa autostart install
+# linger 失败时手动补：
 sudo loginctl enable-linger $USER   # 登出后 user 服务仍保活（强烈建议）
 ```
 

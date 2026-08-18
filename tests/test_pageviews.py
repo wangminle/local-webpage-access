@@ -122,9 +122,7 @@ def test_detect_static_backend_mirrors_gateway_caddy_missing(monkeypatch) -> Non
     class _CaddyCfg:
         staticGateway = "caddy"
 
-    monkeypatch.setattr(
-        "local_webpage_access.pageviews.shutil.which", lambda _name: None
-    )
+    monkeypatch.setattr("local_webpage_access.pageviews.shutil.which", lambda _name: None)
     assert _detect_static_backend(_CaddyCfg()) == "builtin"
 
     monkeypatch.setattr(
@@ -175,9 +173,7 @@ def test_store_aggregates_by_day_and_unique_ips(store: PageviewStore) -> None:
     assert len(detail["recent"]) == 4
 
 
-def test_pageview_timezone_uses_local_day_and_utc_ordering(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_pageview_timezone_uses_local_day_and_utc_ordering(tmp_path: Path, monkeypatch) -> None:
     """BUG-303：分桶按本地日历日，存储/最近时间统一按 UTC 比较。
 
     策略：入库时间戳一律规范为 UTC ISO8601；日历日按系统本地时区分桶
@@ -187,9 +183,7 @@ def test_pageview_timezone_uses_local_day_and_utc_ordering(
     monkeypatch.setenv("TZ", "Asia/Shanghai")
     time.tzset()
     try:
-        local_clf = parse_clf_line(
-            '1.1.1.1 - - [28/Jul/2026 00:30:00] "GET / HTTP/1.1" 200 1'
-        )
+        local_clf = parse_clf_line('1.1.1.1 - - [28/Jul/2026 00:30:00] "GET / HTTP/1.1" 200 1')
         assert local_clf is not None
         assert local_clf.ts == "2026-07-27T16:30:00+00:00"
 
@@ -210,9 +204,7 @@ def test_pageview_timezone_uses_local_day_and_utc_ordering(
                 ],
             )
             detail = s.detail("demo")
-            assert detail["byDay"] == [
-                {"day": "2026-07-28", "hits": 2, "uniqueIps": 2}
-            ]
+            assert detail["byDay"] == [{"day": "2026-07-28", "hits": 2, "uniqueIps": 2}]
             assert s.summary()["demo"]["lastSeen"] == "2026-07-27T20:00:00+00:00"
         finally:
             s.close()
@@ -237,9 +229,7 @@ def test_pageview_last_seen_ignores_offset_lexicographic_trap(
         ],
     )
     assert store.summary()["demo"]["lastSeen"] == "2026-07-27T15:00:00+00:00"
-    ips = {
-        row["ip"]: row["lastSeen"] for row in store.detail("demo")["uniqueIpList"]
-    }
+    ips = {row["ip"]: row["lastSeen"] for row in store.detail("demo")["uniqueIpList"]}
     assert ips["1.1.1.1"] == "2026-07-27T14:00:00+00:00"
     assert ips["2.2.2.2"] == "2026-07-27T15:00:00+00:00"
 
@@ -259,9 +249,7 @@ def test_pageview_last_seen_keeps_later_across_batches(
         [AccessHit("2026-07-27T18:00:00+00:00", "GET", "/a", 200, "1.1.1.1")],
     )
     assert store.summary()["demo"]["lastSeen"] == "2026-07-27T20:00:00+00:00"
-    ips = {
-        row["ip"]: row["lastSeen"] for row in store.detail("demo")["uniqueIpList"]
-    }
+    ips = {row["ip"]: row["lastSeen"] for row in store.detail("demo")["uniqueIpList"]}
     assert ips["1.1.1.1"] == "2026-07-27T20:00:00+00:00"
 
 
@@ -294,8 +282,12 @@ def test_clear_instance_does_not_overmatch_sibling_cursors(
     store: PageviewStore, tmp_path: Path
 ) -> None:
     """clear_instance 游标清理不可误伤同前缀兄弟实例（如 demo vs demo-2）。"""
-    store.record_hits("demo", "builtin", [AccessHit("2026-07-09T10:00:00+08:00", "GET", "/", 200, "1.1.1.1")])
-    store.record_hits("demo-2", "builtin", [AccessHit("2026-07-09T10:00:00+08:00", "GET", "/", 200, "2.2.2.2")])
+    store.record_hits(
+        "demo", "builtin", [AccessHit("2026-07-09T10:00:00+08:00", "GET", "/", 200, "1.1.1.1")]
+    )
+    store.record_hits(
+        "demo-2", "builtin", [AccessHit("2026-07-09T10:00:00+08:00", "GET", "/", 200, "2.2.2.2")]
+    )
     # 手动建两条 builtin 游标
     store.set_cursor("builtin:demo:/x/gateway.log", 100, None)
     store.set_cursor("builtin:demo-2:/x/gateway.log", 200, None)
@@ -339,8 +331,7 @@ def test_ingest_container_idempotent_no_double_count(
     import local_webpage_access.pageviews as pv
 
     log_text = (
-        'INFO: 172.17.0.1:0 - "GET /docs HTTP/1.1" 200\n'
-        'INFO: 172.17.0.1:0 - "GET / HTTP/1.1" 200\n'
+        'INFO: 172.17.0.1:0 - "GET /docs HTTP/1.1" 200\nINFO: 172.17.0.1:0 - "GET / HTTP/1.1" 200\n'
     )
 
     class _FakeRuntime:
@@ -354,9 +345,7 @@ def test_ingest_container_idempotent_no_double_count(
         def logs(self, instance_id, *, tail=400, since=None):  # noqa: ANN001
             return log_text  # 每次都返回同样的两行（模拟 --since 边界重叠）
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime)
     src = pv._InstanceSource("api", "container")
 
     pv._ingest_container(workspace, object(), src, store)
@@ -386,21 +375,15 @@ def test_ingest_container_rebuilds_after_caddy_source_switch(
         def logs(self, instance_id, *, tail=400, since=None):  # noqa: ANN001
             return 'INFO: 172.17.0.1:0 - "GET / HTTP/1.1" 200\n'
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime)
 
-    pv._ingest_container(
-        workspace, object(), pv._InstanceSource("api", "container"), store
-    )
+    pv._ingest_container(workspace, object(), pv._InstanceSource("api", "container"), store)
 
     summary = store.summary()["api"]
     assert summary["hits"] == 1
     assert summary["source"] == "container"
     # 切换重建只发生一次；再次拉到同一 docker 行仍由 container_seen 去重。
-    pv._ingest_container(
-        workspace, object(), pv._InstanceSource("api", "container"), store
-    )
+    pv._ingest_container(workspace, object(), pv._InstanceSource("api", "container"), store)
     assert store.summary()["api"]["hits"] == 1
 
 
@@ -421,9 +404,7 @@ def test_ingest_container_rolls_back_seen_hash_when_recording_fails(
         def logs(self, instance_id, *, tail=400, since=None):  # noqa: ANN001
             return 'INFO: 172.17.0.1:0 - "GET / HTTP/1.1" 200\n'
 
-    monkeypatch.setattr(
-        "local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime
-    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime)
     conn = store._conn_or_open()
     conn.execute(
         "CREATE TRIGGER fail_pageview_detail BEFORE INSERT ON pageview_detail "
@@ -446,8 +427,7 @@ def test_store_truncates_detail_to_retain_window(store: PageviewStore) -> None:
 
     n = pv._DETAIL_RETAIN + 50
     hits = [
-        AccessHit("2026-07-09T10:00:00+08:00", "GET", f"/p{i}", 200, "1.1.1.1")
-        for i in range(n)
+        AccessHit("2026-07-09T10:00:00+08:00", "GET", f"/p{i}", 200, "1.1.1.1") for i in range(n)
     ]
     store.record_hits("big", "caddy", hits)
     detail = store.detail("big", limit=9999)
@@ -604,12 +584,8 @@ def test_schema_v3_to_v4_migrates_path_cursors_without_dropping_stats(
         INSERT INTO pageview_ip_stats VALUES ('demo','1.1.1.1',42,'2026-07-01T00:00:00+00:00');
         """
     )
-    conn.execute(
-        "INSERT INTO ingest_cursor VALUES (?, 1234, null, null)", (old_builtin,)
-    )
-    conn.execute(
-        "INSERT INTO ingest_cursor VALUES (?, 5678, null, null)", (old_caddy,)
-    )
+    conn.execute("INSERT INTO ingest_cursor VALUES (?, 1234, null, null)", (old_builtin,))
+    conn.execute("INSERT INTO ingest_cursor VALUES (?, 5678, null, null)", (old_caddy,))
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -626,9 +602,7 @@ def test_schema_v3_to_v4_migrates_path_cursors_without_dropping_stats(
         s.close()
 
 
-def test_ingest_builtin_handles_missing_log(
-    workspace: Workspace, store: PageviewStore
-) -> None:
+def test_ingest_builtin_handles_missing_log(workspace: Workspace, store: PageviewStore) -> None:
     """日志不存在时安全跳过，不报错不计数。"""
     _ingest_builtin(workspace, _InstanceSource("ghost", "builtin"), store)
     assert store.summary() == {}
@@ -660,9 +634,7 @@ def test_ingest_caddy_shared_routes_by_alias_prefix(
     assert all(v["hits"] == 2 or k == "demo" for k, v in summ.items())
 
 
-def test_ingest_caddy_shared_prefix_specificity(
-    workspace: Workspace, store: PageviewStore
-) -> None:
+def test_ingest_caddy_shared_prefix_specificity(workspace: Workspace, store: PageviewStore) -> None:
     """长别名不被短别名前缀吞掉（/api-v2 不应算到 /api）。"""
     access_log = workspace.root / ACCESS_LOG_REL
     access_log.parent.mkdir(parents=True, exist_ok=True)
@@ -705,9 +677,7 @@ def test_parse_caddy_json_line_captures_host() -> None:
     assert h.host == "10.0.0.1:18000"
 
 
-def test_ingest_caddy_shared_routes_by_port(
-    workspace: Workspace, store: PageviewStore
-) -> None:
+def test_ingest_caddy_shared_routes_by_port(workspace: Workspace, store: PageviewStore) -> None:
     """IMP-028：无别名的直连端口静态站点，按 request.host 端口归属访问量。"""
     access_log = workspace.root / ACCESS_LOG_REL
     access_log.parent.mkdir(parents=True, exist_ok=True)
@@ -776,11 +746,11 @@ def test_is_page_view_excludes_probe_marker() -> None:
 
 def test_is_page_view_decodes_percent_encoded_path() -> None:
     """URL 编码的资源/API 路径应先 decode 再判定，不计为页面（BUG-145）。"""
-    assert not _is_page_view("GET", "/a%2Ejs", 200)       # /a.js → 资源
-    assert not _is_page_view("GET", "/img%2Epng", 200)    # /img.png → 资源
-    assert not _is_page_view("GET", "/api%2Fdata", 200)   # /api/data → API
+    assert not _is_page_view("GET", "/a%2Ejs", 200)  # /a.js → 资源
+    assert not _is_page_view("GET", "/img%2Epng", 200)  # /img.png → 资源
+    assert not _is_page_view("GET", "/api%2Fdata", 200)  # /api/data → API
     # 未编码的正常页面仍计为 page（回归保护）
-    assert _is_page_view("GET", "/about%20us", 200)       # /about us → 无扩展名 → page
+    assert _is_page_view("GET", "/about%20us", 200)  # /about us → 无扩展名 → page
 
 
 def test_record_hits_filters_to_pages_and_aggregates_ips(
@@ -915,9 +885,7 @@ def test_schema_migration_rebuilds_unversioned_db(tmp_path: Path) -> None:
         off, _ = s.get_cursor("builtin:demo:/x/gateway.log")
         assert off == 0  # 旧游标已清零
         c = s._conn_or_open()
-        names = {
-            r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "pageview_ip_stats" in names
         assert c.execute("SELECT COUNT(*) FROM container_seen").fetchone()[0] == 0
         # 重摄入按 page 口径
@@ -1080,9 +1048,7 @@ def test_connect_sets_busy_timeout(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_clear_instance_pageviews_reuses_shared_store(
-    workspace: Workspace, monkeypatch
-) -> None:
+def test_clear_instance_pageviews_reuses_shared_store(workspace: Workspace, monkeypatch) -> None:
     """BUG-363：clear 须复用进程内共享 store，不得新建后 close 掉单例连接。"""
     from local_webpage_access import pageviews as pv
 
@@ -1213,9 +1179,9 @@ def test_read_new_lines_ingests_caddy_gzip_rotated_archive(
 
     batch = _read_new_lines(log_path, cursor_key, store)
     joined = "\n".join(batch.lines)
-    assert "/tail" in joined      # 归档尾部补读
-    assert "/new" in joined       # 新文件内容
-    assert "/old" not in joined   # 游标之前的不重读
+    assert "/tail" in joined  # 归档尾部补读
+    assert "/new" in joined  # 新文件内容
+    assert "/old" not in joined  # 游标之前的不重读
 
 
 def test_read_new_lines_does_not_reread_archive_after_cursor_advanced(
@@ -1233,12 +1199,9 @@ def test_read_new_lines_does_not_reread_archive_after_cursor_advanced(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # 归档未压缩体积须明显大于新文件，才能复现 archive_raw[offset:] 重读
     old_lines = [
-        f'127.0.0.1 - - [30/Jul/2026 21:49:00] "GET /old{i} HTTP/1.1" 200 -\n'
-        for i in range(20)
+        f'127.0.0.1 - - [30/Jul/2026 21:49:00] "GET /old{i} HTTP/1.1" 200 -\n' for i in range(20)
     ]
-    old_lines.append(
-        '127.0.0.1 - - [30/Jul/2026 21:49:40] "GET /tail HTTP/1.1" 200 -\n'
-    )
+    old_lines.append('127.0.0.1 - - [30/Jul/2026 21:49:40] "GET /tail HTTP/1.1" 200 -\n')
     old_content = "".join(old_lines)
     log_path.write_text(old_content, encoding="utf-8")
     cursor_key = f"builtin:demo:{log_path.as_posix()}"
@@ -1293,9 +1256,7 @@ def test_read_new_lines_processes_newer_archive_after_prior_consumed(
     cursor_key = "builtin:demo:gateway"
     store.set_cursor(cursor_key, len(gen1.splitlines(keepends=True)[0].encode()), None)
 
-    arch1 = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T13-00-00.000-size{log_path.suffix}.gz"
-    )
+    arch1 = log_path.with_name(f"{log_path.stem}-2026-07-30T13-00-00.000-size{log_path.suffix}.gz")
     with _gzip.open(arch1, "wb") as fh:
         fh.write(gen1.encode("utf-8"))
     gen2 = '10.0.0.1 - - [30/Jul/2026 21:01:00] "GET /b1 HTTP/1.1" 200 -\n'
@@ -1308,15 +1269,12 @@ def test_read_new_lines_processes_newer_archive_after_prior_consumed(
 
     # 第二次轮转：当前 gen2 归档为 arch2，新文件 gen3；mtime 须更新
     time.sleep(0.05)
-    arch2 = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T13-01-00.000-size{log_path.suffix}.gz"
-    )
+    arch2 = log_path.with_name(f"{log_path.stem}-2026-07-30T13-01-00.000-size{log_path.suffix}.gz")
     with _gzip.open(arch2, "wb") as fh:
         fh.write(
-            (
-                gen2
-                + '10.0.0.1 - - [30/Jul/2026 21:01:30] "GET /b-tail HTTP/1.1" 200 -\n'
-            ).encode("utf-8")
+            (gen2 + '10.0.0.1 - - [30/Jul/2026 21:01:30] "GET /b-tail HTTP/1.1" 200 -\n').encode(
+                "utf-8"
+            )
         )
     # 游标停在 gen2 末尾；归档含 gen2+/b-tail，新文件为 gen3
     store.set_cursor(cursor_key, len(gen2.encode("utf-8")), first.cursor_meta)
@@ -1347,21 +1305,13 @@ def test_read_new_lines_cold_start_ingests_all_archives(
     log_path = workspace.app_logs("demo") / "gateway.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    arch1_body = (
-        '127.0.0.1 - - [29/Jul/2026 10:00:00] "GET /old-arch HTTP/1.1" 200 -\n'
-    )
-    arch1 = log_path.with_name(
-        f"{log_path.stem}-2026-07-29T09-09-45.000-size{log_path.suffix}.gz"
-    )
+    arch1_body = '127.0.0.1 - - [29/Jul/2026 10:00:00] "GET /old-arch HTTP/1.1" 200 -\n'
+    arch1 = log_path.with_name(f"{log_path.stem}-2026-07-29T09-09-45.000-size{log_path.suffix}.gz")
     with _gzip.open(arch1, "wb") as fh:
         fh.write(arch1_body.encode("utf-8"))
     time.sleep(0.05)
-    arch2_body = (
-        '127.0.0.1 - - [30/Jul/2026 13:00:00] "GET /new-arch HTTP/1.1" 200 -\n'
-    )
-    arch2 = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T13-49-50.000-size{log_path.suffix}.gz"
-    )
+    arch2_body = '127.0.0.1 - - [30/Jul/2026 13:00:00] "GET /new-arch HTTP/1.1" 200 -\n'
+    arch2 = log_path.with_name(f"{log_path.stem}-2026-07-30T13-49-50.000-size{log_path.suffix}.gz")
     with _gzip.open(arch2, "wb") as fh:
         fh.write(arch2_body.encode("utf-8"))
     log_path.write_text(
@@ -1398,18 +1348,12 @@ def test_read_new_lines_catches_up_two_archives_between_ingests(
     offset = len(gen_a.splitlines(keepends=True)[0].encode())
     store.set_cursor(cursor_key, offset, None)
 
-    arch1 = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
-    )
+    arch1 = log_path.with_name(f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz")
     with _gzip.open(arch1, "wb") as fh:
         fh.write(gen_a.encode("utf-8"))
     time.sleep(0.05)
-    gen_b = (
-        '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /b-full HTTP/1.1" 200 -\n'
-    )
-    arch2 = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T11-00-00.000-size{log_path.suffix}.gz"
-    )
+    gen_b = '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /b-full HTTP/1.1" 200 -\n'
+    arch2 = log_path.with_name(f"{log_path.stem}-2026-07-30T11-00-00.000-size{log_path.suffix}.gz")
     with _gzip.open(arch2, "wb") as fh:
         fh.write(gen_b.encode("utf-8"))
     log_path.write_text(
@@ -1447,9 +1391,7 @@ def test_read_new_lines_pivot_oldest_when_newer_archive_also_long_enough(
     offset = len(line_a0.encode("utf-8"))
     store.set_cursor(cursor_key, offset, None)
 
-    arch1 = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
-    )
+    arch1 = log_path.with_name(f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz")
     with _gzip.open(arch1, "wb") as fh:
         fh.write(gen_a.encode("utf-8"))
     time.sleep(0.05)
@@ -1458,9 +1400,7 @@ def test_read_new_lines_pivot_oldest_when_newer_archive_also_long_enough(
     line_b1 = '10.0.0.1 - - [30/Jul/2026 11:00:01] "GET /b-tail HTTP/1.1" 200 -\n'
     gen_b = line_b0 + line_b1
     assert len(gen_b.encode("utf-8")) >= offset
-    arch2 = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T11-00-00.000-size{log_path.suffix}.gz"
-    )
+    arch2 = log_path.with_name(f"{log_path.stem}-2026-07-30T11-00-00.000-size{log_path.suffix}.gz")
     with _gzip.open(arch2, "wb") as fh:
         fh.write(gen_b.encode("utf-8"))
     log_path.write_text(
@@ -1489,9 +1429,7 @@ def test_read_new_lines_legacy_cursor_does_not_reread_preexisting_archives(
 
     log_path = workspace.app_logs("demo") / "gateway.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    current = (
-        '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /already-counted HTTP/1.1" 200 -\n'
-    )
+    current = '127.0.0.1 - - [30/Jul/2026 10:00:00] "GET /already-counted HTTP/1.1" 200 -\n'
     log_path.write_text(current, encoding="utf-8")
     cursor_key = "builtin:demo:legacy-upgrade"
     offset = len(current.encode("utf-8"))
@@ -1502,9 +1440,7 @@ def test_read_new_lines_legacy_cursor_does_not_reread_preexisting_archives(
         '10.0.0.1 - - [29/Jul/2026 09:00:00] "GET /hist-old HTTP/1.1" 200 -\n'
         '10.0.0.1 - - [29/Jul/2026 09:00:01] "GET /hist-new HTTP/1.1" 200 -\n'
     )
-    arch = log_path.with_name(
-        f"{log_path.stem}-2026-07-29T09-00-00.000-size{log_path.suffix}.gz"
-    )
+    arch = log_path.with_name(f"{log_path.stem}-2026-07-29T09-00-00.000-size{log_path.suffix}.gz")
     with _gzip.open(arch, "wb") as fh:
         fh.write(hist.encode("utf-8"))
     os.utime(arch, (1_700_000_000, 1_700_000_000))
@@ -1542,9 +1478,7 @@ def test_read_new_lines_does_not_mark_unreadable_archive_consumed(
     offset = len(old.splitlines(keepends=True)[0].encode("utf-8"))
     store.set_cursor(cursor_key, offset, None)
 
-    bad = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
-    )
+    bad = log_path.with_name(f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz")
     bad.write_bytes(b"not-a-gzip-file")
     # 新文件更短，强制走归档 catchup（经典截断）
     log_path.write_text(
@@ -1597,12 +1531,8 @@ def test_read_new_lines_defers_catchup_when_any_archive_unreadable(
     store.set_cursor(cursor_key, offset, None)
 
     # 两次轮转：较旧归档（游标所属代际）可读，较新归档损坏
-    older = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
-    )
-    newer = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T10-30-00.000-size{log_path.suffix}.gz"
-    )
+    older = log_path.with_name(f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz")
+    newer = log_path.with_name(f"{log_path.stem}-2026-07-30T10-30-00.000-size{log_path.suffix}.gz")
     with _gzip.open(older, "wb") as fh:
         fh.write((line_old + line_tail).encode("utf-8"))
     newer.write_bytes(b"not-a-gzip-file")
@@ -1657,21 +1587,14 @@ def test_read_new_lines_defers_when_pivot_missing_due_to_unreadable(
     line_tail = '127.0.0.1 - - [30/Jul/2026 10:00:01] "GET /tail HTTP/1.1" 200 -\n'
     line_mid = '127.0.0.1 - - [30/Jul/2026 10:30:00] "GET /mid HTTP/1.1" 200 -\n'
     pad = "Z" * 180
-    line_new = (
-        '10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /new HTTP/1.1" 200 -\n'
-        f"{pad}\n"
-    )
+    line_new = f'10.0.0.1 - - [30/Jul/2026 11:00:00] "GET /new HTTP/1.1" 200 -\n{pad}\n'
     log_path.write_text(line_old + line_tail, encoding="utf-8")
     cursor_key = "builtin:demo:pivot-missing"
     offset = len((line_old + line_tail).encode("utf-8"))
     store.set_cursor(cursor_key, offset, None)
 
-    older = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz"
-    )
-    newer = log_path.with_name(
-        f"{log_path.stem}-2026-07-30T10-30-00.000-size{log_path.suffix}.gz"
-    )
+    older = log_path.with_name(f"{log_path.stem}-2026-07-30T10-00-00.000-size{log_path.suffix}.gz")
+    newer = log_path.with_name(f"{log_path.stem}-2026-07-30T10-30-00.000-size{log_path.suffix}.gz")
     older.write_bytes(b"not-a-gzip-file")
     with _gzip.open(newer, "wb") as fh:
         fh.write(line_mid.encode("utf-8"))
@@ -1723,9 +1646,7 @@ def test_ingest_all_counts_direct_port_for_aliased_static(
 
     # demo 既有别名(demo)又有端口(18002)——正是 BUG-415 受体
     reg = _FakeReg(
-        instances=[
-            {"id": "demo", "runtime": "shared-static", "serving_mode": "shared-static"}
-        ],
+        instances=[{"id": "demo", "runtime": "shared-static", "serving_mode": "shared-static"}],
         static={"demo": {"route_host": "demo", "host_port": 18002, "route_mode": "name"}},
     )
 

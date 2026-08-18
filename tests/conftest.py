@@ -17,6 +17,7 @@ from local_webpage_access.paths import Workspace
 # 真实 Docker 集成测试需要 docker 守护进程；CI 与开发机可能不具备。
 # 用 ``@pytest.mark.requires_docker`` 或 ``@requires_docker`` 守卫。
 
+
 def _docker_available() -> bool:
     """宿主机是否存在 docker 命令（不保证守护进程运行）。"""
     return shutil.which("docker") is not None
@@ -34,9 +35,7 @@ requires_docker_daemon = pytest.mark.skipif(
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers", "requires_docker: 需要宿主机 docker 命令"
-    )
+    config.addinivalue_line("markers", "requires_docker: 需要宿主机 docker 命令")
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:  # noqa: ARG001
@@ -131,7 +130,7 @@ def _pgrep_lf(pattern: str) -> str:
             ps = (
                 "Get-CimInstance Win32_Process | "
                 f"Where-Object {{ $_.CommandLine -match '{pattern}' }} | "
-                "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+                'ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }'
             )
             proc = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps],
@@ -171,7 +170,8 @@ def _list_http_server_pids_on_test_ports() -> set[int]:
 
 
 def _list_lwa_service_pids_on_pytest_workspaces(
-    *, only_under: str | os.PathLike[str] | None = None,
+    *,
+    only_under: str | os.PathLike[str] | None = None,
     include_orphans: bool = False,
 ) -> set[int]:
     """枚举 ``manager_service``/``daemon`` 且 ``--workspace`` 落在 pytest 临时目录的 PID。
@@ -205,16 +205,10 @@ def _list_lwa_service_pids_on_pytest_workspaces(
                 ws_norm = os.path.realpath(ws)
             except (OSError, ValueError):
                 ws_norm = ws
-            under_this = ws_norm == only_under_norm or ws_norm.startswith(
-                only_under_norm + os.sep
-            )
+            under_this = ws_norm == only_under_norm or ws_norm.startswith(only_under_norm + os.sep)
             if not under_this:
                 # 非本会话进程：仅在显式要求且确认其工作区已删除（孤儿）时纳入
-                if (
-                    include_orphans
-                    and _PYTEST_WS_MARK.search(ws)
-                    and not os.path.isdir(ws)
-                ):
+                if include_orphans and _PYTEST_WS_MARK.search(ws) and not os.path.isdir(ws):
                     pids.add(pid)
                 continue
             pids.add(pid)
@@ -258,9 +252,12 @@ def _cleanup_orphan_test_processes(tmp_path_factory) -> None:
     session_basetemp = str(tmp_path_factory.getbasetemp())
     # 启动：本会话残留（极少见）+ 工作区已不存在的真孤儿
     own_pids = _list_lwa_service_pids_on_pytest_workspaces(only_under=session_basetemp)
-    orphan_pids = _list_lwa_service_pids_on_pytest_workspaces(
-        only_under=session_basetemp, include_orphans=True
-    ) - own_pids
+    orphan_pids = (
+        _list_lwa_service_pids_on_pytest_workspaces(
+            only_under=session_basetemp, include_orphans=True
+        )
+        - own_pids
+    )
     for pid in sorted(own_pids | orphan_pids):
         _kill_pid(pid)
     initial_http = _list_http_server_pids_on_test_ports()
@@ -269,7 +266,5 @@ def _cleanup_orphan_test_processes(tmp_path_factory) -> None:
     for pid in sorted(leaked_http):
         _kill_pid(pid)
     # 结束：只清理本会话自己拉起的进程，绝不触碰并发会话
-    for pid in sorted(
-        _list_lwa_service_pids_on_pytest_workspaces(only_under=session_basetemp)
-    ):
+    for pid in sorted(_list_lwa_service_pids_on_pytest_workspaces(only_under=session_basetemp)):
         _kill_pid(pid)

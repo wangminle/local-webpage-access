@@ -34,7 +34,9 @@ def access_refresh() -> None:
             reg.close()
         typer.secho("访问地址刷新完成", fg=typer.colors.GREEN)
         typer.echo(f"  当前 LAN IP：{report.lan_ip or '(无)'}")
-        typer.echo(f"  刷新实例：{len(report.refreshed)} 个（其中 {report.drifted_count} 个地址漂移）")
+        typer.echo(
+            f"  刷新实例：{len(report.refreshed)} 个（其中 {report.drifted_count} 个地址漂移）"
+        )
         for item in report.refreshed:
             if item.drifted:
                 typer.secho(
@@ -54,9 +56,7 @@ def access_refresh() -> None:
 
 @app.command("review")
 def access_review(
-    json_output: bool = typer.Option(
-        False, "--json", help="输出 JSON 报告（便于脚本解析）"
-    ),
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON 报告（便于脚本解析）"),
     rebuild_if_needed: bool = typer.Option(
         False,
         "--rebuild-if-needed",
@@ -95,9 +95,7 @@ def access_review(
             payload["rebuild"] = rebuild_report.to_dict()
             typer.echo(json_mod.dumps(payload, ensure_ascii=False, indent=2))
         else:
-            typer.echo(
-                format_review_report(report, rebuild_report=rebuild_report)
-            )
+            typer.echo(format_review_report(report, rebuild_report=rebuild_report))
         if report.has_failures or not rebuild_report.all_ok:
             raise typer.Exit(code=1)
     except LwaError as exc:

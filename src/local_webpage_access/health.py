@@ -181,7 +181,7 @@ def evaluate_success_predicate(
     mandatory_results: list[tuple[str, bool, int | None]] = []
     mandatory_all_passed = True
     successful_business_probe = False
-    for spec in (required_probes or []):
+    for spec in required_probes or []:
         if not spec.isMandatory:
             continue
         passed, code = run_probe_spec(host_port, spec, timeout=timeout)
@@ -196,16 +196,14 @@ def evaluate_success_predicate(
 
     # 可选探针 warning 收集
     optional_warnings: list[str] = []
-    for spec in (required_probes or []):
+    for spec in required_probes or []:
         if spec.isMandatory:
             continue
         passed, code = run_probe_spec(host_port, spec, timeout=timeout)
         if passed:
             successful_business_probe = True
         if not passed:
-            optional_warnings.append(
-                f"可选探针 {spec.path} 未通过（code={code}）"
-            )
+            optional_warnings.append(f"可选探针 {spec.path} 未通过（code={code}）")
 
     # 观测到的能力
     observed: set[str] = set()
@@ -300,9 +298,7 @@ def check_health(
     host_port = _resolve_host_port(manifest, registry)
     if not host_port:
         result = HealthResult(ok=False, host_port=None, reason="实例尚未分配端口")
-        registry.add_event(
-            instance_id, "health_check", "健康检查跳过：无可用端口"
-        )
+        registry.add_event(instance_id, "health_check", "健康检查跳过：无可用端口")
         return result
 
     ok, code = http_ok(host_port, timeout=timeout)

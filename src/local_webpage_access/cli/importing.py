@@ -14,9 +14,7 @@ from local_webpage_access.errors import LwaError
 
 
 def import_cmd(
-    zip_path: str = typer.Argument(
-        None, help="要导入的 zip 文件路径（与 --from-dir 互斥）"
-    ),
+    zip_path: str = typer.Argument(None, help="要导入的 zip 文件路径（与 --from-dir 互斥）"),
     name: str = typer.Option(None, "--name", "-n", help="实例显示名称（默认从文件名推导）"),
     path_alias: str = typer.Option(
         None,
@@ -35,9 +33,7 @@ def import_cmd(
         help="IMP-047：从本机文件夹源导入（复制进工作区，非就地运行）。"
         "与 zip_path 互斥；加 --update <id> 时从关联源目录更新。",
     ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="非交互确认（CI / daemon 调用）"
-    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="非交互确认（CI / daemon 调用）"),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="仅预演：展示 hash 差异与形态变化，不写盘"
     ),
@@ -175,8 +171,7 @@ def _print_import_result(result, config) -> None:
         alias = result.manifest.container.routeHost
     if alias:
         typer.secho(
-            f"  路径别名：/{alias}/"
-            f"（lwa start 后生效，入口端口 {config.staticGatewayPort}）",
+            f"  路径别名：/{alias}/（lwa start 后生效，入口端口 {config.staticGatewayPort}）",
             fg=typer.colors.CYAN,
         )
     # IMP-015：检测到业务 .env.example 时提示用户部署后填写密钥（不自动填）。
@@ -190,8 +185,7 @@ def _print_import_result(result, config) -> None:
     if result.sanitized and result.sanitized.stripped_names:
         san = result.sanitized
         parts = ", ".join(
-            f"{rule}×{n}"
-            for rule, n in sorted(san.categories.items(), key=lambda kv: -kv[1])
+            f"{rule}×{n}" for rule, n in sorted(san.categories.items(), key=lambda kv: -kv[1])
         )
         typer.secho(
             f"  已剥离冗余成员 {len(san.stripped_names)} 项"
@@ -242,8 +236,7 @@ def _print_folder_source_note(result, importer) -> None:
                 fg=typer.colors.CYAN,
             )
             typer.secho(
-                "  更新：lwa import --from-dir <目录> --update "
-                f"{result.instance_id}",
+                f"  更新：lwa import --from-dir <目录> --update {result.instance_id}",
                 fg=typer.colors.CYAN,
             )
 
@@ -401,9 +394,7 @@ def _do_update(
             else:
                 typer.echo("  原状态：running（--no-restart，不会自动 rebuild/restart）")
         if result.sanitized and result.sanitized.stripped_names:
-            typer.echo(
-                f"  将剥离冗余成员 {len(result.sanitized.stripped_names)} 项"
-            )
+            typer.echo(f"  将剥离冗余成员 {len(result.sanitized.stripped_names)} 项")
         return
 
     typer.secho(f"已更新实例：{instance_id}", fg=typer.colors.GREEN)
@@ -414,8 +405,7 @@ def _do_update(
     if result.sanitized and result.sanitized.stripped_names:
         san = result.sanitized
         parts = ", ".join(
-            f"{rule}×{n}"
-            for rule, n in sorted(san.categories.items(), key=lambda kv: -kv[1])
+            f"{rule}×{n}" for rule, n in sorted(san.categories.items(), key=lambda kv: -kv[1])
         )
         typer.secho(
             f"  已剥离冗余成员 {len(san.stripped_names)} 项"
@@ -439,11 +429,7 @@ def _do_update(
         typer.secho("  正在 restart…", fg=typer.colors.CYAN)
         restart_instance(ws, config, reg, instance_id)
         typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
-    elif (
-        not result.skipped
-        and result.manifest.runtime.value == "docker-compose"
-        and not restart
-    ):
+    elif not result.skipped and result.manifest.runtime.value == "docker-compose" and not restart:
         typer.secho(
             "  提示：容器源码已更新但未重建镜像（--no-restart）。"
             "运行中的仍是旧镜像；就绪后请执行："

@@ -85,7 +85,9 @@ def test_preflight_target_exists(ws_root: Path, tmp_path: Path) -> None:
     assert any(i.code == "target_exists" for i in report.blocking)
 
 
-def test_preflight_cross_device(ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preflight_cross_device(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(wm, "_same_device", lambda a, b: False)
     report = wm.preflight_migrate(ws_root, tmp_path / "new-ws")
     assert not report.ok
@@ -98,7 +100,9 @@ def test_preflight_ok_same_device(ws_root: Path, tmp_path: Path) -> None:
     assert report.same_device is True
 
 
-def test_preflight_wsl_drvfs(ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preflight_wsl_drvfs(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         "local_webpage_access.platform_support.is_wsl_drvfs_path",
         lambda p: True,
@@ -149,9 +153,7 @@ def test_capture_snapshot_and_backup(ws_root: Path) -> None:
 # ---- Task 4: quiesce -------------------------------------------------------
 
 
-def test_quiesce_keeps_daemon_processed(
-    ws_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_quiesce_keeps_daemon_processed(ws_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = Workspace(ws_root)
     processed = ws.run / "daemon-processed.json"
     processed.write_text('{"x": 1}\n', encoding="utf-8")
@@ -167,12 +169,8 @@ def test_quiesce_keeps_daemon_processed(
         "local_webpage_access.autostart.disable",
         lambda *a, **k: MagicMock(success=True),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.daemon.stop_daemon", lambda *a, **k: True
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager", lambda *a, **k: True
-    )
+    monkeypatch.setattr("local_webpage_access.daemon.stop_daemon", lambda *a, **k: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda *a, **k: True)
 
     from local_webpage_access.config import load_config
 
@@ -284,9 +282,7 @@ def test_rewrite_registry_paths(ws_root: Path) -> None:
     wm.rewrite_registry_paths(ws.db_path, old, new)
     conn = sqlite3.connect(ws.db_path)
     try:
-        app_path = conn.execute(
-            "SELECT app_path FROM instances WHERE id='x'"
-        ).fetchone()[0]
+        app_path = conn.execute("SELECT app_path FROM instances WHERE id='x'").fetchone()[0]
         compose, cid = conn.execute(
             "SELECT compose_path, container_id FROM containers WHERE instance_id='x'"
         ).fetchone()
@@ -313,8 +309,19 @@ def test_rewrite_registry_paths_boundary_and_idempotent(ws_root: Path) -> None:
                 "INSERT INTO instances (id, name, version, kind, runtime, serving_mode, "
                 "status, desired_state, app_path, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (iid, iid, "1", "static", "docker", "container", "stopped",
-                 "stopped", app_path, "t", "t"),
+                (
+                    iid,
+                    iid,
+                    "1",
+                    "static",
+                    "docker",
+                    "container",
+                    "stopped",
+                    "stopped",
+                    app_path,
+                    "t",
+                    "t",
+                ),
             )
         conn.commit()
     finally:
@@ -356,16 +363,25 @@ def test_rewrite_registry_paths_does_not_select_like_underscore_siblings(
                 "INSERT INTO instances (id, name, version, kind, runtime, serving_mode, "
                 "status, desired_state, app_path, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (iid, iid, "1", "static", "docker", "container", "stopped",
-                 "stopped", app_path, "t", "t"),
+                (
+                    iid,
+                    iid,
+                    "1",
+                    "static",
+                    "docker",
+                    "container",
+                    "stopped",
+                    "stopped",
+                    app_path,
+                    "t",
+                    "t",
+                ),
             )
         conn.commit()
     finally:
         conn.close()
 
-    monkeypatch.setattr(
-        wm, "_rewrite_text_paths", lambda text, _old, _new: f"HIT:{text}"
-    )
+    monkeypatch.setattr(wm, "_rewrite_text_paths", lambda text, _old, _new: f"HIT:{text}")
     wm.rewrite_registry_paths(ws.db_path, old, new)
     conn = sqlite3.connect(ws.db_path)
     try:
@@ -389,9 +405,7 @@ def test_contains_old_path_prefix_boundary() -> None:
 # ---- Task 7: regenerate -----------------------------------------------------
 
 
-def test_regenerate_clears_capability_only(
-    ws_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_regenerate_clears_capability_only(ws_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = Workspace(ws_root)
     processed = ws.run / "daemon-processed.json"
     processed.write_text("{}", encoding="utf-8")
@@ -412,9 +426,7 @@ def test_regenerate_clears_capability_only(
         def _sync_main_config(self) -> None:
             synced.append(True)
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", FakeGW
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", FakeGW)
 
     from local_webpage_access.config import load_config
 
@@ -443,7 +455,9 @@ def test_run_migrate_dry_run_no_move(ws_root: Path, tmp_path: Path) -> None:
     assert "move" in result.planned_actions
 
 
-def test_run_migrate_happy_path(ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_migrate_happy_path(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     new = tmp_path / "new-ws"
     old = str(ws_root.resolve())
 
@@ -463,12 +477,8 @@ def test_run_migrate_happy_path(ws_root: Path, tmp_path: Path, monkeypatch: pyte
     (ws_root / "run" / "daemon-processed.json").write_text("{}", encoding="utf-8")
     (ws_root / "run" / "capability-manager.json").write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.stop_instance_op", lambda *a, **k: None
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.start_instance", lambda *a, **k: None
-    )
+    monkeypatch.setattr("local_webpage_access.lifecycle.stop_instance_op", lambda *a, **k: None)
+    monkeypatch.setattr("local_webpage_access.lifecycle.start_instance", lambda *a, **k: None)
     monkeypatch.setattr(
         "local_webpage_access.autostart.disable",
         lambda *a, **k: MagicMock(success=True),
@@ -481,15 +491,9 @@ def test_run_migrate_happy_path(ws_root: Path, tmp_path: Path, monkeypatch: pyte
         "local_webpage_access.autostart.repair",
         lambda *a, **k: (MagicMock(), ["rewrote"]),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.autostart.installed_services", lambda *a, **k: []
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.daemon.stop_daemon", lambda *a, **k: True
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager", lambda *a, **k: True
-    )
+    monkeypatch.setattr("local_webpage_access.autostart.installed_services", lambda *a, **k: [])
+    monkeypatch.setattr("local_webpage_access.daemon.stop_daemon", lambda *a, **k: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda *a, **k: True)
 
     class FakeGW:
         def __init__(self, *a, **k) -> None:
@@ -498,9 +502,7 @@ def test_run_migrate_happy_path(ws_root: Path, tmp_path: Path, monkeypatch: pyte
         def _sync_main_config(self) -> None:
             pass
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", FakeGW
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", FakeGW)
     monkeypatch.setattr(
         "local_webpage_access.autostart.run_check",
         lambda *a, **k: MagicMock(overall="ok", items=[]),
@@ -520,14 +522,12 @@ def test_run_migrate_happy_path(ws_root: Path, tmp_path: Path, monkeypatch: pyte
     assert journal["phase"] == "complete"
 
 
-def test_run_migrate_rollback(ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_migrate_rollback(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     new = tmp_path / "new-ws"
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.stop_instance_op", lambda *a, **k: None
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.start_instance", lambda *a, **k: None
-    )
+    monkeypatch.setattr("local_webpage_access.lifecycle.stop_instance_op", lambda *a, **k: None)
+    monkeypatch.setattr("local_webpage_access.lifecycle.start_instance", lambda *a, **k: None)
     monkeypatch.setattr(
         "local_webpage_access.autostart.disable",
         lambda *a, **k: MagicMock(success=True),
@@ -540,15 +540,9 @@ def test_run_migrate_rollback(ws_root: Path, tmp_path: Path, monkeypatch: pytest
         "local_webpage_access.autostart.repair",
         lambda *a, **k: (MagicMock(), []),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.autostart.installed_services", lambda *a, **k: []
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.daemon.stop_daemon", lambda *a, **k: True
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager", lambda *a, **k: True
-    )
+    monkeypatch.setattr("local_webpage_access.autostart.installed_services", lambda *a, **k: [])
+    monkeypatch.setattr("local_webpage_access.daemon.stop_daemon", lambda *a, **k: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda *a, **k: True)
 
     class FakeGW:
         def __init__(self, *a, **k) -> None:
@@ -557,9 +551,7 @@ def test_run_migrate_rollback(ws_root: Path, tmp_path: Path, monkeypatch: pytest
         def _sync_main_config(self) -> None:
             pass
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", FakeGW
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", FakeGW)
     monkeypatch.setattr(
         "local_webpage_access.autostart.run_check",
         lambda *a, **k: MagicMock(overall="ok", items=[]),
@@ -594,12 +586,8 @@ def test_verify_detects_old_path_in_manifest(ws_root: Path) -> None:
 
 
 def _patch_migrate_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.stop_instance_op", lambda *a, **k: None
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.start_instance", lambda *a, **k: None
-    )
+    monkeypatch.setattr("local_webpage_access.lifecycle.stop_instance_op", lambda *a, **k: None)
+    monkeypatch.setattr("local_webpage_access.lifecycle.start_instance", lambda *a, **k: None)
     monkeypatch.setattr(
         "local_webpage_access.autostart.disable",
         lambda *a, **k: MagicMock(success=True),
@@ -612,15 +600,9 @@ def _patch_migrate_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
         "local_webpage_access.autostart.repair",
         lambda *a, **k: (MagicMock(), []),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.autostart.installed_services", lambda *a, **k: []
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.daemon.stop_daemon", lambda *a, **k: True
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager", lambda *a, **k: True
-    )
+    monkeypatch.setattr("local_webpage_access.autostart.installed_services", lambda *a, **k: [])
+    monkeypatch.setattr("local_webpage_access.daemon.stop_daemon", lambda *a, **k: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda *a, **k: True)
 
     class FakeGW:
         def __init__(self, *a, **k) -> None:
@@ -629,9 +611,7 @@ def _patch_migrate_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
         def _sync_main_config(self) -> None:
             pass
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", FakeGW
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", FakeGW)
     monkeypatch.setattr(
         "local_webpage_access.autostart.run_check",
         lambda *a, **k: MagicMock(overall="ok", items=[]),
@@ -856,9 +836,7 @@ def test_regenerate_skips_autostart_when_never_installed(
         def _sync_main_config(self) -> None:
             pass
 
-    monkeypatch.setattr(
-        "local_webpage_access.static_gateway.StaticGateway", FakeGW
-    )
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", FakeGW)
 
     actions = wm.regenerate_after_move(
         ws, load_config(ws), snapshot=wm.MigrateSnapshot(autostart_installed=[])
@@ -915,9 +893,7 @@ def test_cli_resume_with_explicit_new_reads_journal(
 
         return R()
 
-    monkeypatch.setattr(
-        "local_webpage_access.workspace_migrate.run_migrate", _fake_run_migrate
-    )
+    monkeypatch.setattr("local_webpage_access.workspace_migrate.run_migrate", _fake_run_migrate)
     monkeypatch.chdir(new)
 
     res = CliRunner().invoke(
@@ -984,8 +960,7 @@ def test_rebind_rewrites_gateway_site_conf(ws_root: Path) -> None:
     sites.mkdir(parents=True, exist_ok=True)
     conf = sites / "demo.conf"
     conf.write_text(
-        f"root * `{old}/apps/demo/public`\n"
-        f"# neighbor {old}-backup/should-stay\n",
+        f"root * `{old}/apps/demo/public`\n# neighbor {old}-backup/should-stay\n",
         encoding="utf-8",
     )
     changed = wm.rebind_workspace_paths(ws, old, new)

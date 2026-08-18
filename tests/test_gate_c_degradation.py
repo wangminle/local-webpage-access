@@ -60,9 +60,7 @@ def test_no_fallback_reraises_immediately() -> None:
     mock_ws.app_manifest_path.return_value = Path("/tmp/manifest.json")
 
     with pytest.raises(HostingError, match="build failed"):
-        _try_host_with_fallback(
-            mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn
-        )
+        _try_host_with_fallback(mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn)
     # host_fn 只被调用一次（top-1）
     assert host_fn.call_count == 1
 
@@ -81,9 +79,7 @@ def test_static_instance_no_fallback() -> None:
     host_fn = MagicMock(side_effect=HostingError("static fail"))
 
     with pytest.raises(HostingError, match="static fail"):
-        _try_host_with_fallback(
-            MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn
-        )
+        _try_host_with_fallback(MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn)
     assert host_fn.call_count == 1
 
 
@@ -92,15 +88,17 @@ def test_fallback_success_after_top1_failure() -> None:
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
     success_manifest = _mk_container_manifest()
-    manifest = _mk_container_manifest(fallbacks=[
-        {
-            "kind": "node",
-            "runtime": "docker-compose",
-            "servingMode": "container",
-            "confidenceTier": "fallback",
-            "entry": {"install": "npm ci", "start": "node server.js"},
-        }
-    ])
+    manifest = _mk_container_manifest(
+        fallbacks=[
+            {
+                "kind": "node",
+                "runtime": "docker-compose",
+                "servingMode": "container",
+                "confidenceTier": "fallback",
+                "entry": {"install": "npm ci", "start": "node server.js"},
+            }
+        ]
+    )
 
     call_count = [0]
 
@@ -113,7 +111,12 @@ def test_fallback_success_after_top1_failure() -> None:
     host_fn = MagicMock(side_effect=mock_host)
 
     result = _try_host_with_fallback(
-        MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        "test",
+        manifest,
+        host_fn,
         fallback_policy="auto-equivalent",
     )
     assert result is success_manifest
@@ -127,21 +130,28 @@ def test_confirm_policy_raises_confirmation_required() -> None:
         _try_host_with_fallback,
     )
 
-    manifest = _mk_container_manifest(fallbacks=[
-        {
-            "kind": "node",
-            "runtime": "docker-compose",
-            "servingMode": "container",
-            "confidenceTier": "fallback",
-            "entry": {"install": "npm ci", "start": "node server.js"},
-        }
-    ])
+    manifest = _mk_container_manifest(
+        fallbacks=[
+            {
+                "kind": "node",
+                "runtime": "docker-compose",
+                "servingMode": "container",
+                "confidenceTier": "fallback",
+                "entry": {"install": "npm ci", "start": "node server.js"},
+            }
+        ]
+    )
 
     host_fn = MagicMock(side_effect=HostingError("python build failed"))
 
     with pytest.raises(FallbackConfirmationRequired) as exc_info:
         _try_host_with_fallback(
-            MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="confirm",  # 默认策略
         )
     # host_fn 只调用一次（top-1），不自动尝试 fallback
@@ -155,21 +165,28 @@ def test_disabled_policy_no_fallback() -> None:
     """Gate-C C.07：disabled 策略 → 不降级，直接抛出原始错误。"""
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
-    manifest = _mk_container_manifest(fallbacks=[
-        {
-            "kind": "node",
-            "runtime": "docker-compose",
-            "servingMode": "container",
-            "confidenceTier": "fallback",
-        }
-    ])
+    manifest = _mk_container_manifest(
+        fallbacks=[
+            {
+                "kind": "node",
+                "runtime": "docker-compose",
+                "servingMode": "container",
+                "confidenceTier": "fallback",
+            }
+        ]
+    )
     host_fn = MagicMock(side_effect=HostingError("build failed"))
     mock_ws = MagicMock()
     mock_ws.app_manifest_path.return_value = Path("/tmp/manifest.json")
 
     with pytest.raises(HostingError, match="build failed"):
         _try_host_with_fallback(
-            mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn,
+            mock_ws,
+            MagicMock(),
+            MagicMock(),
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="disabled",
         )
     assert host_fn.call_count == 1
@@ -179,22 +196,24 @@ def test_all_candidates_fail_produces_diagnosis() -> None:
     """全部候选失败 → Layer 4 诊断报告写入 + HostingError。"""
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
-    manifest = _mk_container_manifest(fallbacks=[
-        {
-            "kind": "node",
-            "runtime": "docker-compose",
-            "servingMode": "container",
-            "confidenceTier": "fallback",
-            "entry": {"install": "npm ci", "start": "node server.js"},
-        },
-        {
-            "kind": "python",
-            "runtime": "docker-compose",
-            "servingMode": "container",
-            "confidenceTier": "fallback",
-            "entry": {"install": "pip install -r requirements.txt", "start": "python app.py"},
-        },
-    ])
+    manifest = _mk_container_manifest(
+        fallbacks=[
+            {
+                "kind": "node",
+                "runtime": "docker-compose",
+                "servingMode": "container",
+                "confidenceTier": "fallback",
+                "entry": {"install": "npm ci", "start": "node server.js"},
+            },
+            {
+                "kind": "python",
+                "runtime": "docker-compose",
+                "servingMode": "container",
+                "confidenceTier": "fallback",
+                "entry": {"install": "pip install -r requirements.txt", "start": "python app.py"},
+            },
+        ]
+    )
 
     host_fn = MagicMock(side_effect=HostingError("always fails"))
     mock_ws = MagicMock()
@@ -203,7 +222,12 @@ def test_all_candidates_fail_produces_diagnosis() -> None:
 
     with pytest.raises(HostingError, match="所有候选均部署失败"):
         _try_host_with_fallback(
-            mock_ws, MagicMock(), mock_reg, "test", manifest, host_fn,
+            mock_ws,
+            MagicMock(),
+            mock_reg,
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="auto-equivalent",
         )
     # top-1 + 2 fallbacks = 3 calls
@@ -239,7 +263,12 @@ def test_max_fallback_candidates_limit() -> None:
 
     with pytest.raises(HostingError):
         _try_host_with_fallback(
-            mock_ws, MagicMock(), mock_reg, "test", manifest, host_fn,
+            mock_ws,
+            MagicMock(),
+            mock_reg,
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="auto-equivalent",
         )
     # top-1 + _MAX_FALLBACK_CANDIDATES
@@ -254,22 +283,29 @@ def test_backend_rejects_static_fallback() -> None:
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
     # top-1 是 python 容器（backend），fallback 是 static（index.html 兜底候选）
-    manifest = _mk_container_manifest(fallbacks=[
-        {
-            "kind": "static",
-            "runtime": "shared_static",
-            "servingMode": "shared_static",
-            "form": "static",
-            "confidenceTier": "fallback",
-        }
-    ])
+    manifest = _mk_container_manifest(
+        fallbacks=[
+            {
+                "kind": "static",
+                "runtime": "shared_static",
+                "servingMode": "shared_static",
+                "form": "static",
+                "confidenceTier": "fallback",
+            }
+        ]
+    )
     host_fn = MagicMock(side_effect=HostingError("backend build failed"))
     mock_ws = MagicMock()
     mock_ws.app_manifest_path.return_value = Path("/tmp/manifest.json")
 
     with pytest.raises(HostingError, match="backend build failed"):
         _try_host_with_fallback(
-            mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn,
+            mock_ws,
+            MagicMock(),
+            MagicMock(),
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="auto-equivalent",
         )
     # host_fn 只调用一次（top-1），不尝试 static fallback
@@ -282,22 +318,27 @@ def test_backend_allows_equivalent_backend_fallback() -> None:
 
     success_manifest = _mk_container_manifest()
     # top-1 是 python 容器（backend），fallback 是 node 容器（同为 backend）
-    manifest = _mk_container_manifest(fallbacks=[
-        {
-            "kind": "node",
-            "runtime": "docker_compose",
-            "servingMode": "container",
-            "form": "backend-container",
-            "confidenceTier": "fallback",
-            "entry": {"install": "npm ci", "start": "node server.js"},
-        }
-    ])
-    host_fn = MagicMock(
-        side_effect=[HostingError("python failed"), success_manifest]
+    manifest = _mk_container_manifest(
+        fallbacks=[
+            {
+                "kind": "node",
+                "runtime": "docker_compose",
+                "servingMode": "container",
+                "form": "backend-container",
+                "confidenceTier": "fallback",
+                "entry": {"install": "npm ci", "start": "node server.js"},
+            }
+        ]
     )
+    host_fn = MagicMock(side_effect=[HostingError("python failed"), success_manifest])
 
     result = _try_host_with_fallback(
-        MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        "test",
+        manifest,
+        host_fn,
         fallback_policy="auto-equivalent",
     )
     assert result is success_manifest
@@ -553,8 +594,12 @@ def _mk_backend_plan(
                 "componentId": comp_id,
                 "role": "runtime",
                 "sourceSubdir": None,
-                "startCommand": {"shell": f"{kind} app.py"} if kind != "node" else {"shell": "node server.js"},
-                "buildCommand": {"shell": "pip install -r requirements.txt"} if kind != "node" else {"shell": "npm ci"},
+                "startCommand": {"shell": f"{kind} app.py"}
+                if kind != "node"
+                else {"shell": "node server.js"},
+                "buildCommand": {"shell": "pip install -r requirements.txt"}
+                if kind != "node"
+                else {"shell": "npm ci"},
                 "internalPort": 8000,
             }
         ],
@@ -637,7 +682,11 @@ def test_apply_plan_and_host_delegates_to_candidate_for_flat_dict() -> None:
     from local_webpage_access.lifecycle import _apply_plan_and_host
 
     manifest = _mk_plan_manifest()
-    flat_candidate = {"kind": "node", "runtime": "docker-compose", "entry": {"start": "node server.js"}}
+    flat_candidate = {
+        "kind": "node",
+        "runtime": "docker-compose",
+        "entry": {"start": "node server.js"},
+    }
     result_manifest = _mk_plan_manifest()
     host_fn = MagicMock(return_value=result_manifest)
     mock_ws = MagicMock()
@@ -673,11 +722,15 @@ def test_apply_plan_and_host_updates_capability_contract() -> None:
 
     manifest = _mk_plan_manifest()
     new_contract = {
-        "servesUi": True, "servesApi": True,
-        "requiresDatabase": False, "requiresMigrations": False,
+        "servesUi": True,
+        "servesApi": True,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
     }
     plan = _mk_backend_plan(
-        plan_id="plan-node-002", tier="alternate", kind="node",
+        plan_id="plan-node-002",
+        tier="alternate",
+        kind="node",
         contract=new_contract,
     )
     result_manifest = _mk_plan_manifest()
@@ -685,9 +738,7 @@ def test_apply_plan_and_host_updates_capability_contract() -> None:
     mock_ws = MagicMock()
     mock_ws.app_manifest_path.return_value = Path("/tmp/manifest.json")
 
-    _apply_plan_and_host(
-        mock_ws, MagicMock(), MagicMock(), "test", manifest, plan, host_fn
-    )
+    _apply_plan_and_host(mock_ws, MagicMock(), MagicMock(), "test", manifest, plan, host_fn)
     assert manifest.capabilityContract == new_contract
 
 
@@ -696,16 +747,22 @@ def test_try_host_with_fallback_uses_deployment_plans() -> None:
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
     primary_contract = {
-        "servesUi": False, "servesApi": True,
-        "requiresDatabase": True, "requiresMigrations": False,
+        "servesUi": False,
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
     }
     alt_contract = {
-        "servesUi": False, "servesApi": True,
-        "requiresDatabase": True, "requiresMigrations": False,
+        "servesUi": False,
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
     }
     primary = _mk_backend_plan(tier="primary", contract=primary_contract)
     alt = _mk_backend_plan(
-        plan_id="plan-node-001", tier="alternate", kind="node",
+        plan_id="plan-node-001",
+        tier="alternate",
+        kind="node",
         contract=alt_contract,
     )
     manifest = _mk_plan_manifest(
@@ -724,7 +781,12 @@ def test_try_host_with_fallback_uses_deployment_plans() -> None:
 
     host_fn = MagicMock(side_effect=mock_host)
     result = _try_host_with_fallback(
-        MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        "test",
+        manifest,
+        host_fn,
         fallback_policy="auto-equivalent",
     )
     assert result is success_manifest
@@ -739,8 +801,10 @@ def test_contracts_equivalent_same_contract() -> None:
     from local_webpage_access.lifecycle import _contracts_equivalent
 
     contract = {
-        "servesApi": True, "requiresDatabase": True,
-        "requiresMigrations": False, "servesUi": False,
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
     }
     assert _contracts_equivalent(contract, dict(contract)) is True
 
@@ -749,8 +813,18 @@ def test_contracts_equivalent_different_api() -> None:
     """C.R02：servesApi 不同 -> 不等价（API 能力不可丢失）。"""
     from local_webpage_access.lifecycle import _contracts_equivalent
 
-    a = {"servesApi": True, "requiresDatabase": False, "requiresMigrations": False, "servesUi": False}
-    b = {"servesApi": False, "requiresDatabase": False, "requiresMigrations": False, "servesUi": False}
+    a = {
+        "servesApi": True,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
+    b = {
+        "servesApi": False,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
     assert _contracts_equivalent(a, b) is False
 
 
@@ -758,8 +832,18 @@ def test_contracts_equivalent_different_database() -> None:
     """C.R02：requiresDatabase 不同 -> 不等价（数据库能力不可丢失）。"""
     from local_webpage_access.lifecycle import _contracts_equivalent
 
-    a = {"servesApi": True, "requiresDatabase": True, "requiresMigrations": False, "servesUi": False}
-    b = {"servesApi": True, "requiresDatabase": False, "requiresMigrations": False, "servesUi": False}
+    a = {
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
+    b = {
+        "servesApi": True,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
     assert _contracts_equivalent(a, b) is False
 
 
@@ -768,7 +852,12 @@ def test_contracts_equivalent_different_migrations() -> None:
     from local_webpage_access.lifecycle import _contracts_equivalent
 
     a = {"servesApi": True, "requiresDatabase": True, "requiresMigrations": True, "servesUi": False}
-    b = {"servesApi": True, "requiresDatabase": True, "requiresMigrations": False, "servesUi": False}
+    b = {
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
     assert _contracts_equivalent(a, b) is False
 
 
@@ -776,8 +865,18 @@ def test_contracts_equivalent_different_ui() -> None:
     """C.R02：servesUi 不同 -> 不等价。"""
     from local_webpage_access.lifecycle import _contracts_equivalent
 
-    a = {"servesApi": False, "requiresDatabase": False, "requiresMigrations": False, "servesUi": True}
-    b = {"servesApi": False, "requiresDatabase": False, "requiresMigrations": False, "servesUi": False}
+    a = {
+        "servesApi": False,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": True,
+    }
+    b = {
+        "servesApi": False,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
     assert _contracts_equivalent(a, b) is False
 
 
@@ -793,8 +892,18 @@ def test_contract_diff_describes_differences() -> None:
     """C.R02：_contract_diff 正确描述差异。"""
     from local_webpage_access.lifecycle import _contract_diff
 
-    a = {"servesApi": True, "requiresDatabase": True, "requiresMigrations": False, "servesUi": False}
-    b = {"servesApi": True, "requiresDatabase": False, "requiresMigrations": False, "servesUi": True}
+    a = {
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
+    b = {
+        "servesApi": True,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": True,
+    }
     diff = _contract_diff(a, b)
     assert "requiresDatabase: True -> False" in diff
     assert "servesUi: False -> True" in diff
@@ -805,7 +914,12 @@ def test_manifest_capability_contract_from_manifest_field() -> None:
     """C.R02：_manifest_capability_contract 优先使用 manifest.capabilityContract。"""
     from local_webpage_access.lifecycle import _manifest_capability_contract
 
-    contract = {"servesApi": True, "requiresDatabase": True, "requiresMigrations": False, "servesUi": False}
+    contract = {
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
     manifest = _mk_plan_manifest(capability_contract=contract)
     result = _manifest_capability_contract(manifest)
     assert result == contract
@@ -815,7 +929,12 @@ def test_manifest_capability_contract_from_plans() -> None:
     """C.R02：无 capabilityContract 字段时从 deploymentPlans[0] 提取。"""
     from local_webpage_access.lifecycle import _manifest_capability_contract
 
-    contract = {"servesApi": True, "requiresDatabase": False, "requiresMigrations": False, "servesUi": False}
+    contract = {
+        "servesApi": True,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": False,
+    }
     primary = _mk_backend_plan(tier="primary", contract=contract)
     manifest = _mk_plan_manifest(plans=[primary], capability_contract=None)
     manifest.capabilityContract = None
@@ -828,16 +947,22 @@ def test_cr02_rejects_database_loss_fallback() -> None:
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
     primary_contract = {
-        "servesApi": True, "requiresDatabase": True,
-        "requiresMigrations": False, "servesUi": False,
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
     }
     alt_contract = {
-        "servesApi": True, "requiresDatabase": False,  # 丢失数据库能力
-        "requiresMigrations": False, "servesUi": False,
+        "servesApi": True,
+        "requiresDatabase": False,  # 丢失数据库能力
+        "requiresMigrations": False,
+        "servesUi": False,
     }
     primary = _mk_backend_plan(tier="primary", contract=primary_contract)
     alt = _mk_backend_plan(
-        plan_id="plan-nodb-001", tier="alternate", kind="node",
+        plan_id="plan-nodb-001",
+        tier="alternate",
+        kind="node",
         contract=alt_contract,
     )
     manifest = _mk_plan_manifest(
@@ -850,7 +975,12 @@ def test_cr02_rejects_database_loss_fallback() -> None:
 
     with pytest.raises(HostingError, match="build failed"):
         _try_host_with_fallback(
-            mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn,
+            mock_ws,
+            MagicMock(),
+            MagicMock(),
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="auto-equivalent",
         )
     # top-1 only -- alt 被能力守恒过滤
@@ -862,16 +992,22 @@ def test_cr02_rejects_api_loss_fallback() -> None:
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
     primary_contract = {
-        "servesApi": True, "requiresDatabase": False,
-        "requiresMigrations": False, "servesUi": True,
+        "servesApi": True,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": True,
     }
     alt_contract = {
         "servesApi": False,  # 丢失 API 能力
-        "requiresDatabase": False, "requiresMigrations": False, "servesUi": True,
+        "requiresDatabase": False,
+        "requiresMigrations": False,
+        "servesUi": True,
     }
     primary = _mk_backend_plan(tier="primary", contract=primary_contract)
     alt = _mk_backend_plan(
-        plan_id="plan-static-001", tier="alternate", kind="static",
+        plan_id="plan-static-001",
+        tier="alternate",
+        kind="static",
         contract=alt_contract,
     )
     manifest = _mk_plan_manifest(
@@ -884,7 +1020,12 @@ def test_cr02_rejects_api_loss_fallback() -> None:
 
     with pytest.raises(HostingError, match="build failed"):
         _try_host_with_fallback(
-            mock_ws, MagicMock(), MagicMock(), "test", manifest, host_fn,
+            mock_ws,
+            MagicMock(),
+            MagicMock(),
+            "test",
+            manifest,
+            host_fn,
             fallback_policy="auto-equivalent",
         )
     assert host_fn.call_count == 1
@@ -895,16 +1036,22 @@ def test_cr02_allows_equivalent_contract_fallback() -> None:
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
     primary_contract = {
-        "servesApi": True, "requiresDatabase": True,
-        "requiresMigrations": False, "servesUi": False,
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
     }
     alt_contract = {
-        "servesApi": True, "requiresDatabase": True,
-        "requiresMigrations": False, "servesUi": False,
+        "servesApi": True,
+        "requiresDatabase": True,
+        "requiresMigrations": False,
+        "servesUi": False,
     }
     primary = _mk_backend_plan(tier="primary", contract=primary_contract)
     alt = _mk_backend_plan(
-        plan_id="plan-node-001", tier="alternate", kind="node",
+        plan_id="plan-node-001",
+        tier="alternate",
+        kind="node",
         contract=alt_contract,
     )
     manifest = _mk_plan_manifest(
@@ -923,7 +1070,12 @@ def test_cr02_allows_equivalent_contract_fallback() -> None:
 
     host_fn = MagicMock(side_effect=mock_host)
     result = _try_host_with_fallback(
-        MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        "test",
+        manifest,
+        host_fn,
         fallback_policy="auto-equivalent",
     )
     assert result is success_manifest
@@ -935,26 +1087,31 @@ def test_cr02_falls_back_to_family_when_no_contract() -> None:
     from local_webpage_access.lifecycle import _try_host_with_fallback
 
     # 使用 deploymentCandidates（无 contract），验证 family 回退仍然工作
-    manifest = _mk_container_manifest(fallbacks=[
-        {
-            "kind": "node",
-            "runtime": "docker-compose",
-            "servingMode": "container",
-            "form": "backend-container",
-            "confidenceTier": "fallback",
-            "entry": {"start": "node server.js"},
-        }
-    ])
+    manifest = _mk_container_manifest(
+        fallbacks=[
+            {
+                "kind": "node",
+                "runtime": "docker-compose",
+                "servingMode": "container",
+                "form": "backend-container",
+                "confidenceTier": "fallback",
+                "entry": {"start": "node server.js"},
+            }
+        ]
+    )
     # 确保 capabilityContract 为 None
     manifest.capabilityContract = None
     manifest.deploymentPlans = []
 
     success_manifest = _mk_container_manifest()
-    host_fn = MagicMock(
-        side_effect=[HostingError("python failed"), success_manifest]
-    )
+    host_fn = MagicMock(side_effect=[HostingError("python failed"), success_manifest])
     result = _try_host_with_fallback(
-        MagicMock(), MagicMock(), MagicMock(), "test", manifest, host_fn,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        "test",
+        manifest,
+        host_fn,
         fallback_policy="auto-equivalent",
     )
     assert result is success_manifest
@@ -1063,9 +1220,7 @@ def test_restore_from_snapshot_removes_new_files(tmp_path: Path) -> None:
     env_path.write_text("DATABASE_URL=sqlite:///test.db")
 
     manifest = _mk_container_manifest(instance_id="test-remove")
-    restored, residuals = _restore_from_snapshot(
-        ws, MagicMock(), "test-remove", manifest, snapshot
-    )
+    restored, residuals = _restore_from_snapshot(ws, MagicMock(), "test-remove", manifest, snapshot)
     assert "file:.env:removed" in restored
     assert not env_path.exists()
 
@@ -1097,9 +1252,7 @@ def test_restore_from_snapshot_restores_manifest_fields(tmp_path: Path) -> None:
         "files": {},
     }
 
-    restored, residuals = _restore_from_snapshot(
-        ws, MagicMock(), "test-mf", manifest, snapshot
-    )
+    restored, residuals = _restore_from_snapshot(ws, MagicMock(), "test-mf", manifest, snapshot)
     assert "manifest" in restored
     assert manifest.selectedPlanId == "plan-original"
     assert manifest.kind == Kind.PYTHON
@@ -1132,7 +1285,11 @@ def test_rollback_with_snapshot_restores_files(tmp_path: Path) -> None:
     ws.app_dockerfile_path("test-rb").write_text("modified Dockerfile")
 
     result = _rollback_attempt(
-        ws, MagicMock(), MagicMock(), "test-rb", manifest,
+        ws,
+        MagicMock(),
+        MagicMock(),
+        "test-rb",
+        manifest,
         attempt_id="attempt-test-rb-0",
         snapshot=snapshot,
     )
@@ -1183,7 +1340,11 @@ def test_rollback_without_snapshot_no_file_restore(tmp_path: Path) -> None:
     manifest = _mk_container_manifest(instance_id="test-nosnap")
 
     result = _rollback_attempt(
-        ws, MagicMock(), MagicMock(), "test-nosnap", manifest,
+        ws,
+        MagicMock(),
+        MagicMock(),
+        "test-nosnap",
+        manifest,
         attempt_id="attempt-test-nosnap-0",
         snapshot=None,
     )
@@ -1211,7 +1372,11 @@ def test_rollback_residuals_on_manifest_restore_failure(tmp_path: Path) -> None:
     }
 
     result = _rollback_attempt(
-        ws, MagicMock(), MagicMock(), "test-residual", manifest,
+        ws,
+        MagicMock(),
+        MagicMock(),
+        "test-residual",
+        manifest,
         attempt_id="attempt-test-residual-0",
         snapshot=snapshot,
     )
@@ -1267,7 +1432,9 @@ def test_collect_side_effect_records_detects_migration() -> None:
     )
 
     records = _collect_side_effect_records(
-        manifest, liveness_ok=True, verification_status="passed",
+        manifest,
+        liveness_ok=True,
+        verification_status="passed",
     )
     assert len(records) == 1
     assert records[0].kind == "migration"
@@ -1284,7 +1451,9 @@ def test_collect_side_effect_records_no_migration() -> None:
     manifest.entry = EntryConfig(start="python app.py")
 
     records = _collect_side_effect_records(
-        manifest, liveness_ok=True, verification_status="passed",
+        manifest,
+        liveness_ok=True,
+        verification_status="passed",
     )
     assert len(records) == 0
 
@@ -1295,8 +1464,9 @@ def test_side_effects_auto_recoverable_all_recoverable() -> None:
     from local_webpage_access.models import SideEffectRecord
 
     records = [
-        SideEffectRecord(kind="hook", description="cache warm", intent="warm",
-                         autoRecoverable=True),
+        SideEffectRecord(
+            kind="hook", description="cache warm", intent="warm", autoRecoverable=True
+        ),
     ]
     assert _side_effects_auto_recoverable(records) is True
 
@@ -1307,10 +1477,12 @@ def test_side_effects_auto_recoverable_has_non_recoverable() -> None:
     from local_webpage_access.models import SideEffectRecord
 
     records = [
-        SideEffectRecord(kind="hook", description="cache warm", intent="warm",
-                         autoRecoverable=True),
-        SideEffectRecord(kind="migration", description="alembic", intent="migrate",
-                         autoRecoverable=False),
+        SideEffectRecord(
+            kind="hook", description="cache warm", intent="warm", autoRecoverable=True
+        ),
+        SideEffectRecord(
+            kind="migration", description="alembic", intent="migrate", autoRecoverable=False
+        ),
     ]
     assert _side_effects_auto_recoverable(records) is False
 
@@ -1346,7 +1518,11 @@ def test_rollback_with_non_recoverable_side_effects_unsafe(tmp_path: Path) -> No
     ]
 
     result = _rollback_attempt(
-        ws, MagicMock(), MagicMock(), "test-se", manifest,
+        ws,
+        MagicMock(),
+        MagicMock(),
+        "test-se",
+        manifest,
         attempt_id="attempt-test-se-0",
         snapshot=None,
         side_effect_records=se_records,
@@ -1383,7 +1559,11 @@ def test_rollback_with_recoverable_side_effects_can_be_safe(tmp_path: Path) -> N
     ]
 
     result = _rollback_attempt(
-        ws, MagicMock(), MagicMock(), "test-se-safe", manifest,
+        ws,
+        MagicMock(),
+        MagicMock(),
+        "test-se-safe",
+        manifest,
         attempt_id="attempt-test-se-safe-0",
         snapshot=None,
         side_effect_records=se_records,
@@ -1407,7 +1587,11 @@ def test_rollback_no_side_effects_safe_by_default(tmp_path: Path) -> None:
     manifest.capabilityContract = {"requiresMigrations": False}
 
     result = _rollback_attempt(
-        ws, MagicMock(), MagicMock(), "test-no-se", manifest,
+        ws,
+        MagicMock(),
+        MagicMock(),
+        "test-no-se",
+        manifest,
         attempt_id="attempt-test-no-se-0",
         snapshot=None,
         side_effect_records=None,
@@ -1419,6 +1603,7 @@ def test_rollback_no_side_effects_safe_by_default(tmp_path: Path) -> None:
 
 
 # ---- C.R03：confirm 策略与 FallbackConfirmationRequired -----------------------
+
 
 def test_fallback_confirmation_required_attributes():
     """C.R03：FallbackConfirmationRequired 携带等价候选列表。"""
@@ -1458,8 +1643,18 @@ def test_confirm_policy_raises_fallback_confirmation():
     manifest = _mk_container_manifest(
         instance_id="test-confirm",
         fallbacks=[
-            {"index": 0, "kind": "python", "form": "backend-container", "confidenceTier": "primary"},
-            {"index": 1, "kind": "python", "form": "backend-container", "confidenceTier": "fallback"},
+            {
+                "index": 0,
+                "kind": "python",
+                "form": "backend-container",
+                "confidenceTier": "primary",
+            },
+            {
+                "index": 1,
+                "kind": "python",
+                "form": "backend-container",
+                "confidenceTier": "fallback",
+            },
         ],
     )
 
@@ -1477,7 +1672,11 @@ def test_confirm_policy_raises_fallback_confirmation():
 
     with pytest.raises(FallbackConfirmationRequired) as exc_info:
         _try_host_with_fallback(
-            ws, MagicMock(), MagicMock(), "test-confirm", manifest,
+            ws,
+            MagicMock(),
+            MagicMock(),
+            "test-confirm",
+            manifest,
             failing_host,
             fallback_policy="confirm",
         )
@@ -1495,8 +1694,18 @@ def test_disabled_policy_does_not_raise_confirmation():
     manifest = _mk_container_manifest(
         instance_id="test-disabled",
         fallbacks=[
-            {"index": 0, "kind": "python", "form": "backend-container", "confidenceTier": "primary"},
-            {"index": 1, "kind": "python", "form": "backend-container", "confidenceTier": "fallback"},
+            {
+                "index": 0,
+                "kind": "python",
+                "form": "backend-container",
+                "confidenceTier": "primary",
+            },
+            {
+                "index": 1,
+                "kind": "python",
+                "form": "backend-container",
+                "confidenceTier": "fallback",
+            },
         ],
     )
 
@@ -1512,7 +1721,11 @@ def test_disabled_policy_does_not_raise_confirmation():
     # disabled 策略应直接抛出 HostingError，不抛 FallbackConfirmationRequired
     with pytest.raises(HostingError):
         _try_host_with_fallback(
-            ws, MagicMock(), MagicMock(), "test-disabled", manifest,
+            ws,
+            MagicMock(),
+            MagicMock(),
+            "test-disabled",
+            manifest,
             failing_host,
             fallback_policy="disabled",
         )
@@ -1525,8 +1738,18 @@ def test_auto_equivalent_policy_does_not_raise_confirmation():
     manifest = _mk_container_manifest(
         instance_id="test-auto",
         fallbacks=[
-            {"index": 0, "kind": "python", "form": "backend-container", "confidenceTier": "primary"},
-            {"index": 1, "kind": "python", "form": "backend-container", "confidenceTier": "fallback"},
+            {
+                "index": 0,
+                "kind": "python",
+                "form": "backend-container",
+                "confidenceTier": "primary",
+            },
+            {
+                "index": 1,
+                "kind": "python",
+                "form": "backend-container",
+                "confidenceTier": "fallback",
+            },
         ],
     )
 
@@ -1547,7 +1770,11 @@ def test_auto_equivalent_policy_does_not_raise_confirmation():
     ws.app_manifest_path = MagicMock(return_value=Path("/tmp/nonexistent-manifest.json"))
 
     result = _try_host_with_fallback(
-        ws, MagicMock(), MagicMock(), "test-auto", manifest,
+        ws,
+        MagicMock(),
+        MagicMock(),
+        "test-auto",
+        manifest,
         first_fail_second_succeed,
         fallback_policy="auto-equivalent",
     )
@@ -1648,6 +1875,7 @@ def test_compute_config_fingerprint_missing_files():
 
     # missing 与存在文件应不同
     import tempfile
+
     with tempfile.TemporaryDirectory() as tmpdir:
         compose = Path(tmpdir) / "compose.yaml"
         compose.write_text("services: {}", encoding="utf-8")

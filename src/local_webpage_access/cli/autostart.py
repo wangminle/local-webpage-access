@@ -28,13 +28,17 @@ def _unsupported_exit(exc: AutostartError) -> None:
 @app.command("install")
 def autostart_install(
     with_caddy: bool = typer.Option(
-        False, "--with-caddy", help="额外监管 caddy 网关（仅 staticGateway=caddy）"
+        None,
+        "--with-caddy/--no-with-caddy",
+        help="是否监管 caddy 网关（缺省：staticGateway=caddy 时自动纳入，IMP-061）",
     ),
     no_enable: bool = typer.Option(
         False, "--no-enable", help="只生成单元文件，不立即启用（默认安装即启用）"
     ),
     linger: bool = typer.Option(
-        False, "--linger", help="Linux/WSL 下尝试 loginctl enable-linger（登出保活）"
+        None,
+        "--linger/--no-linger",
+        help="Linux/WSL 是否尝试 enable-linger（缺省：默认尝试，失败仅提示，IMP-061）",
     ),
 ) -> None:
     """生成并启用自启动单元（前台监管 daemon/manager/可选 gateway）。"""
@@ -43,9 +47,7 @@ def autostart_install(
     try:
         ws, config, _reg = open_workspace_registry()
         _reg.close()
-        result = asm.install(
-            ws, config, with_caddy=with_caddy, enable=not no_enable, linger=linger
-        )
+        result = asm.install(ws, config, with_caddy=with_caddy, enable=not no_enable, linger=linger)
     except AutostartError as exc:
         _unsupported_exit(exc)
     except LwaError as exc:
@@ -143,13 +145,21 @@ def autostart_uninstall(
         raise typer.Exit(code=1)
     _print_op(op, ok_msg="已卸载自启动单元")
     if purge_linger and not op.success:
-        typer.secho("提示：disable-linger 失败，请手动 sudo loginctl disable-linger $USER",
-                    fg=typer.colors.YELLOW)
+        typer.secho(
+            "提示：disable-linger 失败，请手动 sudo loginctl disable-linger $USER",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command("status")
-def autostart_status() -> None:
-    """查看自启动单元与对应前台进程状态。"""
+def autostart_status(
+    json_output: bool = typer.Option(
+        False, "--json", help="输出 JSON（含每个服务的运行模式 mode 字段）"
+    ),
+) -> None:
+    """查看自启动单元与对应前台进程状态（含运行模式标注，IMP-061.03）。"""
+    import json as json_mod
+
     from local_webpage_access import autostart as asm
 
     try:
@@ -161,7 +171,6 @@ def autostart_status() -> None:
         raise typer.Exit(code=1)
 
     plat = asm.detect_platform()
-    typer.echo(f"平台：{plat}")
     try:
         backend = asm.select_backend()
     except AutostartError as exc:
@@ -169,6 +178,19 @@ def autostart_status() -> None:
         raise typer.Exit(code=EXIT_UNSUPPORTED)
 
     services = asm.installed_services(ws, backend)
+    if json_output:
+        # IMP-061.03：JSON 契约——已装单元 + 全部自有服务的运行模式
+        payload = {
+            "platform": plat,
+            "installedServices": services,
+            "services": [
+                {"name": name, "mode": asm.service_supervision_mode(name)}
+                for name in asm.ALL_SERVICES
+            ],
+        }
+        typer.echo(json_mod.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    typer.echo(f"平台：{plat}")
     if not services:
         typer.echo("尚未安装任何自启动单元（lwa autostart install）")
         return
@@ -180,8 +202,13 @@ def autostart_status() -> None:
         typer.echo(f"\n[{name}]")
         typer.echo(f"  单元文件：{path}（{'存在' if exists else '未安装'}）")
         if legacy:
-            typer.secho("  形态：旧 detached 启动器（建议 lwa autostart repair）", fg=typer.colors.YELLOW)
+            typer.secho(
+                "  形态：旧 detached 启动器（建议 lwa autostart repair）", fg=typer.colors.YELLOW
+            )
         typer.echo(f"  已加载/激活：{'是' if loaded else '否'}")
+        mode = asm.service_supervision_mode(name)
+        colored = typer.colors.RED if mode == asm.SERVICE_MODE_BARE else None
+        typer.secho(f"  运行模式：{mode}", fg=colored)
         _echo_process_status(ws, config, name)
 
 
@@ -210,10 +237,14 @@ def autostart_check(
     else:
         typer.echo(f"── 自启动完备性检查（{report.platform}）overall={report.overall} ──")
         for item in report.items:
-            color = {"ok": typer.colors.GREEN, "warn": typer.colors.YELLOW, "fail": typer.colors.RED}.get(
-                item.status, None
+            color = {
+                "ok": typer.colors.GREEN,
+                "warn": typer.colors.YELLOW,
+                "fail": typer.colors.RED,
+            }.get(item.status, None)
+            typer.secho(
+                f"  [{item.status.upper():4}] {item.category}/{item.name}: {item.message}", fg=color
             )
-            typer.secho(f"  [{item.status.upper():4}] {item.category}/{item.name}: {item.message}", fg=color)
             if item.fix:
                 typer.echo(f"           修复：{item.fix}")
     if report.overall == "fail":
@@ -223,9 +254,9 @@ def autostart_check(
 @app.command("repair")
 def autostart_repair(
     with_caddy: bool = typer.Option(
-        False,
-        "--with-caddy",
-        help="原先未安装时新增 gateway；已安装的 gateway 默认保留，无需此开关",
+        None,
+        "--with-caddy/--no-with-caddy",
+        help="原先未安装时是否新增 gateway（缺省：caddy 在用即纳入；已安装默认保留）",
     ),
 ) -> None:
     """修复：重写失效路径、迁移旧启动器单元、重新启用。"""

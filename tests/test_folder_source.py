@@ -207,7 +207,9 @@ class TestComputeSourceHash:
 
     def test_changes_on_content_edit(self, source_dir: Path) -> None:
         h1 = compute_source_hash(source_dir)
-        source_dir.joinpath("index.html").write_text("<html><body>Changed</body></html>", encoding="utf-8")
+        source_dir.joinpath("index.html").write_text(
+            "<html><body>Changed</body></html>", encoding="utf-8"
+        )
         h2 = compute_source_hash(source_dir)
         assert h1 != h2
 
@@ -250,9 +252,7 @@ class TestComputeSourceHash:
 
 
 class TestImportFromDir:
-    def test_basic_import(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_basic_import(self, importer: Importer, source_dir: Path) -> None:
         result = importer.import_from_dir(source_dir)
         assert result.instance_id
         assert result.app_dir.exists()
@@ -269,43 +269,30 @@ class TestImportFromDir:
         assert manifest.sourceSyncHash is not None
         assert len(manifest.sourceSyncHash) == 64
 
-    def test_name_defaults_to_dir_name(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_name_defaults_to_dir_name(self, importer: Importer, source_dir: Path) -> None:
         result = importer.import_from_dir(source_dir)
         # import_zip 用 name 参数，slug 后可能不同，但应该包含目录名
         assert source_dir.name.lower() in result.instance_id.lower() or result.instance_id
 
-    def test_custom_name(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_custom_name(self, importer: Importer, source_dir: Path) -> None:
         result = importer.import_from_dir(source_dir, name="custom-app")
         assert "custom" in result.instance_id.lower()
 
-    def test_event_recorded(
-        self, importer: Importer, source_dir: Path, registry: Registry
-    ) -> None:
+    def test_event_recorded(self, importer: Importer, source_dir: Path, registry: Registry) -> None:
         result = importer.import_from_dir(source_dir)
         events = registry.list_events(result.instance_id)
         assert any("文件夹源导入" in e.get("message", "") for e in events)
 
-    def test_source_dir_not_modified(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_source_dir_not_modified(self, importer: Importer, source_dir: Path) -> None:
         """红线：导入不得修改源目录。"""
         original_files = sorted(
-            str(p.relative_to(source_dir))
-            for p in source_dir.rglob("*")
-            if p.is_file()
+            str(p.relative_to(source_dir)) for p in source_dir.rglob("*") if p.is_file()
         )
         importer.import_from_dir(source_dir)
         after_files = sorted(
-            str(p.relative_to(source_dir))
-            for p in source_dir.rglob("*")
-            if p.is_file()
+            str(p.relative_to(source_dir)) for p in source_dir.rglob("*") if p.is_file()
         )
         assert original_files == after_files
-
 
     def test_chinese_name_uses_folder_basename_as_id(
         self, importer: Importer, tmp_path: Path, workspace: Workspace
@@ -327,9 +314,7 @@ class TestImportFromDir:
 
 
 class TestUpdateFromDir:
-    def test_no_change_skipped(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_no_change_skipped(self, importer: Importer, source_dir: Path) -> None:
         result = importer.import_from_dir(source_dir)
         # 不修改源目录 -> update 应跳过
         update_result = importer.update_from_dir(result.instance_id)
@@ -372,9 +357,7 @@ class TestUpdateFromDir:
         with pytest.raises(ZipImportError, match="不是文件夹源"):
             importer.update_from_dir(result.instance_id)
 
-    def test_nonexistent_instance_raises(
-        self, importer: Importer
-    ) -> None:
+    def test_nonexistent_instance_raises(self, importer: Importer) -> None:
         with pytest.raises(ZipImportError, match="不存在"):
             importer.update_from_dir("nonexistent-id")
 
@@ -447,9 +430,7 @@ class TestUpdateFromDir:
         update_result = importer.update_from_dir(result.instance_id)
         assert update_result.skipped is False
 
-        manifest = InstanceManifest.load(
-            workspace.app_manifest_path(result.instance_id)
-        )
+        manifest = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
         assert manifest.status == Status.STOPPED
         assert manifest.sourceKind == "folder"
         assert manifest.lastError is None
@@ -495,9 +476,7 @@ class TestCliFromDirUpdatePathGuard:
         assert exc_info.value.exit_code == 2
 
         # 拒绝后仍为 folder 源，且指纹未因误更新改变
-        manifest = InstanceManifest.load(
-            workspace.app_manifest_path(result.instance_id)
-        )
+        manifest = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
         assert manifest.sourceKind == "folder"
         assert manifest.sourceDirPath == str(source_dir.resolve())
 
@@ -525,9 +504,7 @@ class TestCliFromDirUpdatePathGuard:
             dry_run=False,
             force_kind_change=False,
         )
-        manifest = InstanceManifest.load(
-            workspace.app_manifest_path(result.instance_id)
-        )
+        manifest = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
         assert manifest.sourceKind == "folder"
 
     def test_cli_invoke_mismatched_from_dir_exit_2(
@@ -585,9 +562,7 @@ class TestScanPreservesFolderSource:
         from local_webpage_access.scanner import Scanner
 
         result = importer.import_from_dir(source_dir)
-        manifest = InstanceManifest.load(
-            workspace.app_manifest_path(result.instance_id)
-        )
+        manifest = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
         assert manifest.sourceKind == "folder"
         old_dir = manifest.sourceDirPath
         old_hash = manifest.sourceSyncHash
@@ -637,11 +612,12 @@ class TestIsolationRedLine:
         result = importer.import_from_dir(source_dir)
         current = result.app_dir / "current"
         assert current.exists()
-        assert workspace.root in current.resolve().parents or current.resolve() == workspace.root.resolve()
+        assert (
+            workspace.root in current.resolve().parents
+            or current.resolve() == workspace.root.resolve()
+        )
 
-    def test_current_dir_not_at_source_dir(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_current_dir_not_at_source_dir(self, importer: Importer, source_dir: Path) -> None:
         """current/ 不得指向源目录。"""
         result = importer.import_from_dir(source_dir)
         current = (result.app_dir / "current").resolve()
@@ -649,9 +625,7 @@ class TestIsolationRedLine:
         assert current != source_resolved
         assert source_resolved not in current.parents
 
-    def test_source_dir_not_in_app_dir(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_source_dir_not_in_app_dir(self, importer: Importer, source_dir: Path) -> None:
         """源目录不得位于 apps/ 下（反向也成立）。"""
         result = importer.import_from_dir(source_dir)
         source_resolved = source_dir.resolve()
@@ -678,9 +652,7 @@ class TestIsolationRedLine:
         assert copied_index.is_file()
         assert not copied_index.is_symlink()
 
-    def test_update_does_not_modify_source_dir(
-        self, importer: Importer, source_dir: Path
-    ) -> None:
+    def test_update_does_not_modify_source_dir(self, importer: Importer, source_dir: Path) -> None:
         """update_from_dir 不得修改源目录。"""
         result = importer.import_from_dir(source_dir)
         source_dir.joinpath("index.html").write_text(

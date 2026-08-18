@@ -23,12 +23,12 @@ from pathlib import Path
 STATIC_HTML = {
     "index.html": (
         "<!DOCTYPE html>\n"
-        "<html lang=\"zh\">\n"
-        "<head><meta charset=\"utf-8\"><title>Static Demo</title>\n"
-        "<link rel=\"stylesheet\" href=\"css/style.css\"></head>\n"
+        '<html lang="zh">\n'
+        '<head><meta charset="utf-8"><title>Static Demo</title>\n'
+        '<link rel="stylesheet" href="css/style.css"></head>\n'
         "<body><h1>Hello from lwa static demo</h1>\n"
         "<p>这是一个纯静态 HTML 样例。</p>\n"
-        "<script src=\"js/app.js\"></script></body></html>\n"
+        '<script src="js/app.js"></script></body></html>\n'
     ),
     "css/style.css": "body { font-family: sans-serif; margin: 2rem; }\nh1 { color: #2a7; }\n",
     "js/app.js": "console.log('static demo loaded');\n",

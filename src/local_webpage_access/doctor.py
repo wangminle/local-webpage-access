@@ -28,7 +28,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Protocol
 
 from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
@@ -114,40 +114,47 @@ class DoctorReport:
         return any(c.status == STATUS_FAIL for c in self.checks + self.instance_checks)
 
     def failures(self) -> list[CheckResult]:
-        return [
-            c
-            for c in self.checks + self.instance_checks
-            if c.status == STATUS_FAIL
-        ]
+        return [c for c in self.checks + self.instance_checks if c.status == STATUS_FAIL]
 
 
 # ---- 可注入的探测 callable 类型 --------------------------------------------
 
-#: subprocess 运行器：接受 args 列表，返回 CompletedProcess（含 returncode/stdout/stderr）。
-SubprocessRunner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
+
+#: subprocess 运行器：接受 args 列表与可选 kwargs（如 capture_output），
+#: 返回 CompletedProcess（含 returncode/stdout/stderr）。
+#: 与 :class:`local_webpage_access.autostart.SubprocessRunner` 结构一致，
+#: 使 doctor 的 runner 可直接传给 autostart 侧 API（is_enabled / linger_enabled）。
+class SubprocessRunner(Protocol):
+    def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess: ...
+
 
 #: 端口占用探测：接受端口号，返回 True 表示已被占用。
 PortChecker = Callable[[int], bool]
 
 
-def _default_runner(args: Sequence[str]) -> "subprocess.CompletedProcess[str]":
-    """默认 subprocess 运行器：捕获输出，不在终端回显。"""
+def _default_runner(cmd: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[str]":
+    """默认 subprocess 运行器：捕获输出，不在终端回显。
+
+    接受可选 ``**kwargs``（如 ``capture_output``）并覆盖内部缺省，
+    保持与 :class:`SubprocessRunner` 协议一致（避免重复传参给 ``subprocess.run``）。
+    """
+    run_kwargs: dict[str, Any] = {
+        "capture_output": True,
+        "text": True,
+        "timeout": 15,
+        "check": False,
+    }
+    run_kwargs.update(kwargs)
     try:
-        return subprocess.run(
-            list(args),
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
+        return subprocess.run(cmd, **run_kwargs)
     except FileNotFoundError as exc:
         # 命令不存在 → 返回一个非零结果，由检查项解释
         return subprocess.CompletedProcess(
-            args=list(args), returncode=127, stdout="", stderr=str(exc)
+            args=list(cmd), returncode=127, stdout="", stderr=str(exc)
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
-            args=list(args), returncode=124, stdout="", stderr="timeout"
+            args=list(cmd), returncode=124, stdout="", stderr="timeout"
         )
 
 
@@ -169,9 +176,7 @@ def check_python_version() -> CheckResult:
     info = sys.version_info
     current = f"{info.major}.{info.minor}.{info.micro}"
     if (info.major, info.minor) >= (3, 13):
-        return CheckResult(
-            "python_version", STATUS_OK, f"Python {current}（满足 ≥ 3.13）"
-        )
+        return CheckResult("python_version", STATUS_OK, f"Python {current}（满足 ≥ 3.13）")
     return CheckResult(
         "python_version",
         STATUS_FAIL,
@@ -234,11 +239,8 @@ def check_docker_compose(runner: SubprocessRunner = _default_runner) -> CheckRes
             return CheckResult(
                 "docker_compose",
                 STATUS_FAIL,
-                f"检测到 docker-compose v1（{(result_v1.stdout or '').strip()}），"
-                "不满足最低要求",
-                suggestion=(
-                    f"升级到 `docker compose` 插件，版本需 ≥ {MIN_COMPOSE_VERSION}"
-                ),
+                f"检测到 docker-compose v1（{(result_v1.stdout or '').strip()}），不满足最低要求",
+                suggestion=(f"升级到 `docker compose` 插件，版本需 ≥ {MIN_COMPOSE_VERSION}"),
             )
         return CheckResult(
             "docker_compose",
@@ -268,9 +270,7 @@ def check_docker_compose(runner: SubprocessRunner = _default_runner) -> CheckRes
     )
 
 
-def check_caddy(
-    config: Config, runner: SubprocessRunner = _default_runner
-) -> CheckResult:
+def check_caddy(config: Config, runner: SubprocessRunner = _default_runner) -> CheckResult:
     """Caddy 版本检查：缺失时与运行时一致，降级 builtin 并告警。"""
     if config.staticGateway != "caddy":
         return CheckResult(
@@ -455,9 +455,7 @@ def check_static_gateway(ws: Workspace) -> CheckResult:
             f"静态网关目录不存在：{ws.static_gateway}",
             suggestion="运行 `lwa init` 创建（不影响容器实例）",
         )
-    return CheckResult(
-        "static_gateway", STATUS_OK, f"静态网关目录就绪（{ws.static_gateway}）"
-    )
+    return CheckResult("static_gateway", STATUS_OK, f"静态网关目录就绪（{ws.static_gateway}）")
 
 
 def _pid_alive_local(pid: int) -> bool:
@@ -534,9 +532,7 @@ def check_caddy_health(
     validate_ok = True
     main = gateway.main_config_path()
     if main.is_file():
-        result = runner(
-            ["caddy", "validate", "--config", str(main), "--adapter", "caddyfile"]
-        )
+        result = runner(["caddy", "validate", "--config", str(main), "--adapter", "caddyfile"])
         validate_ok = result.returncode == 0
         if not validate_ok:
             stderr = (result.stderr or "").strip().splitlines()
@@ -569,9 +565,7 @@ def check_caddy_health(
             # BUG-080：入口根路径 / 无路由（仅 /<alias>/ 有），必须探别名子路径，
             # 否则恒 404 误报 WARN。取任一别名的 /<alias>/ 探测。
             probe_alias = next(iter(aliases))
-            if not gateway.health_check(
-                int(entry_port), path=f"/{probe_alias}/"
-            ):
+            if not gateway.health_check(int(entry_port), path=f"/{probe_alias}/"):
                 entry_unreachable = True
                 findings.append(
                     f"别名入口 :{entry_port}/{probe_alias}/ 不可达"
@@ -687,9 +681,7 @@ def _is_local_filesystem_path(raw: str) -> bool:
     return False
 
 
-_CADDY_OUTPUT_FILE_LINE = re.compile(
-    r"^\s*output\s+file\s+", re.MULTILINE
-)
+_CADDY_OUTPUT_FILE_LINE = re.compile(r"^\s*output\s+file\s+", re.MULTILINE)
 
 
 def _extract_caddy_local_paths(text: str) -> list[str]:
@@ -769,9 +761,7 @@ def _path_field_mismatch(
         return None
     if actual == expected:
         return None
-    return (
-        f"{instance_id} {source}.{field}: actual={actual} expected={expected}"
-    )
+    return f"{instance_id} {source}.{field}: actual={actual} expected={expected}"
 
 
 def check_workspace_path_consistency(
@@ -814,8 +804,7 @@ def check_workspace_path_consistency(
         except Exception as exc:  # noqa: BLE001 — 只读诊断，registry 异常不阻断
             rows = []
             registry_note = (
-                f"registry 读取失败，manifest/registry 字段与数据挂载检查未完成"
-                f"（SKIP）：{exc}"
+                f"registry 读取失败，manifest/registry 字段与数据挂载检查未完成（SKIP）：{exc}"
             )
     if registry_note is not None:
         mount_notes.append(registry_note)
@@ -929,8 +918,7 @@ def check_workspace_path_consistency(
                 # BUG-426：旧路径可能仍然存在（如 Docker 自动重建的旧工作区），
                 # 仅查存在性会漏报——必须按当前工作区判定规范归属。
                 findings.append(
-                    f"caddy {label}: 引用路径不在当前工作区 "
-                    f"actual={ref} expected={ws_root} 之内"
+                    f"caddy {label}: 引用路径不在当前工作区 actual={ref} expected={ws_root} 之内"
                 )
                 continue
             # BUG-428：``log { output file <path> }`` 指向的日志文件由 Caddy
@@ -966,9 +954,7 @@ def check_workspace_path_consistency(
                 has_sqlite = True
                 break
         if has_sqlite:
-            mount_notes.append(
-                "data mount: Docker 不可用，跳过挂载漂移检查（SKIP）"
-            )
+            mount_notes.append("data mount: Docker 不可用，跳过挂载漂移检查（SKIP）")
     else:
         runtime = DockerRuntime(ws, registry)
         for row in rows:
@@ -985,24 +971,16 @@ def check_workspace_path_consistency(
             try:
                 mounts = runtime.bind_mounts(iid, all_containers=True)
             except DockerError as exc:
-                mount_notes.append(
-                    f"{iid} data mount: 观测失败，跳过（SKIP）：{exc}"
-                )
+                mount_notes.append(f"{iid} data mount: 观测失败，跳过（SKIP）：{exc}")
                 continue
             except Exception as exc:  # noqa: BLE001
-                mount_notes.append(
-                    f"{iid} data mount: 观测失败，跳过（SKIP）：{exc}"
-                )
+                mount_notes.append(f"{iid} data mount: 观测失败，跳过（SKIP）：{exc}")
                 continue
             expected_src = ws.app_data(iid).resolve()
-            destinations = set(
-                container_data_paths(ws.app_current(iid), manifest)
-            )
+            destinations = set(container_data_paths(ws.app_current(iid), manifest))
             managed = [m for m in mounts if m.destination in destinations]
             for mount in managed:
-                actual = (
-                    Path(mount.source).resolve() if mount.source else None
-                )
+                actual = Path(mount.source).resolve() if mount.source else None
                 if actual != expected_src:
                     findings.append(
                         f"{iid} dataMount[{mount.destination}]: "
@@ -1033,8 +1011,7 @@ def check_workspace_path_consistency(
             STATUS_SKIP,
             "已完成项未见不一致；部分检查未完成（SKIP）",
             detail=detail,
-            suggestion="待 registry / Docker 可用后重跑 lwa doctor，"
-            "以完成全部一致性检查",
+            suggestion="待 registry / Docker 可用后重跑 lwa doctor，以完成全部一致性检查",
         )
     return CheckResult(
         "workspace_path_consistency",
@@ -1043,9 +1020,7 @@ def check_workspace_path_consistency(
     )
 
 
-def check_lan_url_stale(
-    ws: Workspace, config: Config, registry: Registry
-) -> CheckResult:
+def check_lan_url_stale(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
     """建议 F / G1：检测实例 lanUrl 是否指向失效（漂移）的 LAN IP。
 
     换 Wi-Fi / DHCP 续约后本机 LAN IP 变化，但各实例 ``local-web.json`` 的
@@ -1097,9 +1072,8 @@ def check_lan_url_stale(
     return CheckResult(
         "lan_url_stale",
         STATUS_OK,
-        f"实例 lanUrl 与当前 LAN IP（{lan_ip or '127.0.0.1'}）一致" + (
-            "" if not skipped else f"（{skipped} 个 manifest 跳过）"
-        ),
+        f"实例 lanUrl 与当前 LAN IP（{lan_ip or '127.0.0.1'}）一致"
+        + ("" if not skipped else f"（{skipped} 个 manifest 跳过）"),
     )
 
 
@@ -1130,9 +1104,7 @@ def _collect_lan_drifted_ids(
     return drifted, skipped
 
 
-def check_backend_handoff(
-    ws: Workspace, config: Config, registry: Registry
-) -> CheckResult:
+def check_backend_handoff(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
     """建议 F / G3：检测 builtin 与 caddy 在同一 hostPort 上双开（切换残留）。
 
     切换 builtin↔caddy 时若旧进程未停干净（建议 A 前的现场已观察到），同一
@@ -1157,13 +1129,9 @@ def check_backend_handoff(
         probed += 1
         names = {name.lower() for name, _ in listeners}
         has_caddy = any("caddy" in n for n in names)
-        has_python = any(
-            "python" in n or "http.server" in n for n in names
-        )
+        has_python = any("python" in n or "http.server" in n for n in names)
         if has_caddy and has_python:
-            double.append(
-                f"{iid}:{hp}（{', '.join(sorted(names))}）"
-            )
+            double.append(f"{iid}:{hp}（{', '.join(sorted(names))}）")
     if probed == 0:
         return CheckResult(
             "backend_handoff",
@@ -1227,7 +1195,8 @@ def check_port_contention(
     if admin_listeners:
         probed += 1
         non_self = [
-            (name, pid) for name, pid in admin_listeners
+            (name, pid)
+            for name, pid in admin_listeners
             if caddy_pid is None or pid != str(caddy_pid)
         ]
         if non_self and not gateway._admin_alive():
@@ -1249,16 +1218,11 @@ def check_port_contention(
         if entry_listeners:
             probed += 1
             non_caddy = sorted(
-                {
-                    name.lower()
-                    for name, _ in entry_listeners
-                    if "caddy" not in name.lower()
-                }
+                {name.lower() for name, _ in entry_listeners if "caddy" not in name.lower()}
             )
             if non_caddy:
                 findings.append(
-                    f":{entry_port}（别名入口）存在非 caddy 监听者"
-                    f"（{', '.join(non_caddy)}）"
+                    f":{entry_port}（别名入口）存在非 caddy 监听者（{', '.join(non_caddy)}）"
                 )
     if probed == 0:
         return CheckResult(
@@ -1298,7 +1262,7 @@ def check_disk_space(ws: Workspace, *, min_gb: float = 1.0) -> CheckResult:
             STATUS_SKIP,
             f"无法获取磁盘信息：{exc}",
         )
-    free_gb = usage.free / (1024 ** 3)
+    free_gb = usage.free / (1024**3)
     if free_gb < min_gb:
         return CheckResult(
             "disk_space",
@@ -1314,9 +1278,7 @@ def check_disk_space(ws: Workspace, *, min_gb: float = 1.0) -> CheckResult:
             f"磁盘剩余 {free_gb:.2f} GB，接近阈值",
             suggestion="关注磁盘占用增长",
         )
-    return CheckResult(
-        "disk_space", STATUS_OK, f"磁盘剩余 {free_gb:.2f} GB（充足）"
-    )
+    return CheckResult("disk_space", STATUS_OK, f"磁盘剩余 {free_gb:.2f} GB（充足）")
 
 
 def check_memory() -> CheckResult:
@@ -1381,9 +1343,7 @@ def check_memory() -> CheckResult:
 # ---- 单实例诊断（WBS-26.10/11）---------------------------------------------
 
 
-def diagnose_instance(
-    ws: Workspace, registry: Registry, instance_id: str
-) -> list[CheckResult]:
+def diagnose_instance(ws: Workspace, registry: Registry, instance_id: str) -> list[CheckResult]:
     """WBS-26.10：对单个实例执行健康诊断，返回检查项列表。"""
     from local_webpage_access.models import InstanceManifest
     from local_webpage_access.paths import validate_instance_id
@@ -1554,23 +1514,290 @@ def diagnose_instance(
             detail_lines = []
             for f in findings[:10]:
                 loc = f" ({f.file}:{f.line})" if f.file else ""
-                detail_lines.append(
-                    f"[{f.checkId}/{f.severity}] {f.title}{loc}"
-                )
+                detail_lines.append(f"[{f.checkId}/{f.severity}] {f.title}{loc}")
             results.append(
                 CheckResult(
                     f"instance:{instance_id}:compatibility",
                     STATUS_WARN if critical else STATUS_OK,
                     f"兼容性预检：{summary}（不阻断 / 以 IMP-055 为准）",
                     detail="\n".join(detail_lines) if detail_lines else None,
-                    suggestion="参考各 finding 的 fix 建议；"
-                    "设别名时仍以 IMP-055 运行时探测为准",
+                    suggestion="参考各 finding 的 fix 建议；设别名时仍以 IMP-055 运行时探测为准",
                 )
             )
     except Exception:  # noqa: BLE001 - 兼容性检查不阻断诊断
         pass
 
     return results
+
+
+# ---- 自有服务运行态与重启韧性（IMP-060）-------------------------------------
+
+
+# 事故实证修复命令（§14.1：Ubuntu 裸进程重启后丢失半天的现场修复）
+_RECOMMENDED_INSTALL_CMD_LINUX = "lwa autostart install --with-caddy --linger"
+_RECOMMENDED_INSTALL_CMD_MACOS = "lwa autostart install --with-caddy"
+
+_SERVICE_START_CMD = {
+    "daemon": "lwa daemon on",
+    "manager": "lwa manager on",
+    "gateway": "lwa gateway on",
+}
+
+
+def _service_observed_running(name: str, ws: Workspace, config: Config) -> bool | None:
+    """观测指定服务是否运行；探测异常返回 ``None``（不升 FAIL，只降 detail）。"""
+    try:
+        if name == "daemon":
+            from local_webpage_access import daemon as daemon_mod
+
+            return bool(daemon_mod.is_running(ws))
+        if name == "manager":
+            from local_webpage_access import manager_service
+
+            return bool(manager_service.is_running(ws, config))
+        from local_webpage_access import gateway_service
+
+        return bool(gateway_service.is_gateway_running(ws, config))
+    except Exception:  # noqa: BLE001 — 探测异常按未知处理，不误报 FAIL
+        return None
+
+
+def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
+    """IMP-060.01：比对自有服务意图（enabled）与观测（is_running）。
+
+    enabled=true 且未运行 → **FAIL**（当前就是故障），建议文含恢复命令；
+    enabled=false → PASS（detail 注明「已按意图停用」）；gateway 在
+    ``staticGateway != caddy`` 时不参与判定。
+    """
+    from local_webpage_access.service_intent import (
+        INTENT_ENABLED,
+        INTENT_NOT_APPLICABLE,
+        SERVICE_NAMES,
+        service_intent,
+    )
+
+    intent = service_intent(ws, config)
+    not_running: list[str] = []
+    unknown: list[str] = []
+    residual: list[str] = []
+    lines: list[str] = []
+    for name in SERVICE_NAMES:
+        it = intent.get(name)
+        if it == INTENT_NOT_APPLICABLE:
+            # n.a.（builtin 下的 gateway）无对应 caddy 服务可观测，不参与判定
+            lines.append(f"{name}: 不适用（staticGateway={config.staticGateway}）")
+            continue
+        running = _service_observed_running(name, ws, config)
+        if it != INTENT_ENABLED:
+            # CHK-224#3：反向不一致——已停用但进程仍在（残留/stale 状态文件）
+            # 至少 WARN，否则 doctor 会把残留服务报成健康。
+            if running:
+                residual.append(name)
+                lines.append(f"{name}: 已停用但进程仍在运行（残留）")
+            elif running is None:
+                lines.append(f"{name}: 已按意图停用（运行态探测失败按未知）")
+            else:
+                lines.append(f"{name}: 已按意图停用")
+            continue
+        if running is None:
+            unknown.append(name)
+            lines.append(f"{name}: enabled，运行态探测失败（未知）")
+        elif running:
+            lines.append(f"{name}: enabled 且运行中")
+        else:
+            not_running.append(name)
+            lines.append(f"{name}: enabled 但未运行")
+
+    if not_running:
+        fixes = "；".join(f"{_SERVICE_START_CMD[n]}（恢复 {n}）" for n in not_running)
+        return CheckResult(
+            "service_runtime_state",
+            STATUS_FAIL,
+            f"自有服务运行态与期望不一致：{', '.join(not_running)} enabled 但未运行",
+            detail="\n".join(lines),
+            suggestion=fixes + "；服务若常随重启/崩溃丢失，请 `lwa autostart check` 检查监管",
+        )
+    if residual:
+        return CheckResult(
+            "service_runtime_state",
+            STATUS_WARN,
+            f"已停用的服务仍有残留进程：{', '.join(residual)}",
+            detail="\n".join(lines),
+            suggestion="；".join(f"lwa {n} off（清理 {n} 残留进程）" for n in residual),
+        )
+    message = "自有服务运行态与期望态一致"
+    if unknown:
+        message += f"（{', '.join(unknown)} 探测失败按未知跳过）"
+    return CheckResult(
+        "service_runtime_state",
+        STATUS_OK,
+        message,
+        detail="\n".join(lines),
+    )
+
+
+def _container_restart_policy_mismatch(
+    runner: SubprocessRunner,
+) -> tuple[list[str], str | None]:
+    """运行中的 ``lwa-<id>`` 容器 restart 策略与模板期望 ``unless-stopped`` 对照。
+
+    返回 ``(不匹配的容器名列表, 错误信息)``；docker 不可用时返回 ``([], None)``——
+    韧性子项不因 docker 缺席而告警（check_docker 已负责报 docker 本身）。
+    """
+    try:
+        res = runner(
+            ["docker", "ps", "--no-trunc", "--format", "{{.Names}}"],
+            capture_output=True,
+        )
+    except Exception:  # noqa: BLE001
+        return [], None
+    if res.returncode != 0:
+        return [], None
+    names = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip().startswith("lwa-")]
+    mismatched: list[str] = []
+    for name in names:
+        try:
+            probe = runner(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.HostConfig.RestartPolicy.Name}}",
+                    name,
+                ],
+                capture_output=True,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if probe.returncode != 0:
+            continue
+        policy = (probe.stdout or "").strip()
+        if policy and policy != "unless-stopped":
+            mismatched.append(f"{name}（{policy}）")
+    return mismatched, None
+
+
+def check_restart_resilience(
+    ws: Workspace,
+    config: Config,
+    *,
+    runner: SubprocessRunner = _default_runner,
+) -> CheckResult:
+    """IMP-060.02：评估「机器重启后自有服务能否自动恢复」（WARN 级）。
+
+    四类场景：
+
+    1. 存在 enabled 服务但未装任何自启单元 → WARN（本次事故形态）；
+    2. gateway 意图 enabled（caddy 在用）但 gateway 单元缺失 → WARN 指明
+       ``--with-caddy``；
+    3. Linux/WSL 已装单元但未 linger → WARN（复用 ``autostart.linger_enabled``）；
+    4. 运行中容器 restart policy ≠ ``unless-stopped`` → WARN 列实例 ID。
+
+    裸进程是合法模式（开发/临时用途），只 WARN 不 FAIL；韧性检查不做网络探测
+    （只读本地文件与 systemctl/launchctl/docker 本地查询）。
+    """
+    from local_webpage_access import autostart as asm
+    from local_webpage_access.service_intent import (
+        INTENT_ENABLED,
+        SERVICE_NAMES,
+        service_intent,
+    )
+
+    try:
+        plat = asm.detect_platform()
+        backend = asm.select_backend()
+    except Exception:  # noqa: BLE001 — 平台不支持自启动时韧性判定不适用
+        return CheckResult(
+            "restart_resilience",
+            STATUS_SKIP,
+            "当前平台不支持自启动，跳过重启韧性检查",
+        )
+
+    intent = service_intent(ws, config)
+    enabled_services = [n for n in SERVICE_NAMES if intent.get(n) == INTENT_ENABLED]
+    installed = asm.installed_services(ws, backend)
+
+    warns: list[str] = []
+    fixes: list[str] = []
+    details: list[str] = [
+        f"平台：{plat}；enabled 服务：{', '.join(enabled_services) or '（无）'}；"
+        f"已装单元：{', '.join(installed) or '（无）'}",
+    ]
+
+    install_cmd = (
+        _RECOMMENDED_INSTALL_CMD_LINUX
+        if plat in (asm.PLATFORM_LINUX, asm.PLATFORM_WSL)
+        else _RECOMMENDED_INSTALL_CMD_MACOS
+    )
+
+    # BUG-533：单元文件存在 ≠ 自启生效。实证单元是否被服务管理器
+    # enabled（systemctl --user is-enabled / launchctl 非 disabled）；
+    # 文件在但 disabled 时重启后同样不会自动拉起。
+    disabled_units: list[str] = []
+    for name in installed:
+        try:
+            if not backend.is_enabled(name, runner):
+                disabled_units.append(name)
+        except Exception:  # noqa: BLE001 — 查询失败不误判，仅记录
+            log.debug("restart_resilience：查询单元 %s enabled 状态失败", name)
+    if disabled_units:
+        warns.append(
+            f"自启单元已安装但未被服务管理器启用：{'、'.join(disabled_units)}，重启后不会自动拉起"
+        )
+        fixes.append("lwa autostart enable")
+
+    # CHK-224#1：对 enabled_services 与 installed_services 做**逐项差集**——
+    # 只看"一个都没装"或"只缺 gateway"会漏掉部分安装（如 daemon+manager
+    # enabled 但只装了 daemon 单元），误报韧性完备。
+    missing_units = [n for n in enabled_services if n not in installed]
+    if enabled_services and not installed:
+        # 场景 1（本次事故形态）：enabled 服务全是裸进程，重启后无人拉起
+        warns.append(
+            f"{'、'.join(enabled_services)} 处于 enabled 但未安装任何自启动单元，"
+            "机器重启后不会自动恢复"
+        )
+        fixes.append(install_cmd)
+    elif missing_units:
+        # 场景 2（泛化）：任一 enabled 服务缺自启单元（部分安装）
+        gateway_note = "，重启后别名入口会失效" if "gateway" in missing_units else ""
+        warns.append(
+            f"enabled 服务缺自启单元：{'、'.join(missing_units)}"
+            f"（已装：{', '.join(installed) or '无'}）"
+            f"{gateway_note}，对应服务重启后不会自动恢复"
+        )
+        fixes.append(install_cmd)
+
+    if (
+        installed
+        and plat in (asm.PLATFORM_LINUX, asm.PLATFORM_WSL)
+        and not asm.linger_enabled(runner=runner)
+    ):
+        # 场景 3：user 单元未 linger，登出后即停止（复用 autostart.run_check 判定）
+        warns.append("未 enable-linger，登出后 systemd user 单元会全部停止")
+        fixes.append("sudo loginctl enable-linger $USER")
+
+    mismatched, _err = _container_restart_policy_mismatch(runner)
+    if mismatched:
+        # 场景 4：模板期望 unless-stopped（compose.py），不符的实例重启后不自愈
+        warns.append(
+            "运行中容器的 restart 策略与模板期望 unless-stopped 不符：" + "、".join(mismatched)
+        )
+        fixes.append("lwa rebuild <id> 重新生成 compose（或人工核对 restart 策略）")
+
+    if warns:
+        return CheckResult(
+            "restart_resilience",
+            STATUS_WARN,
+            "重启韧性有缺口（重启/登出后部分服务不会自动恢复）",
+            detail="\n".join([*details, *[f"⚠️ {w}" for w in warns]]),
+            suggestion="；".join(dict.fromkeys(fixes)),
+        )
+    return CheckResult(
+        "restart_resilience",
+        STATUS_OK,
+        "重启韧性完备（自启单元 / linger / 容器 restart 策略均符合期望）",
+        detail="\n".join(details),
+    )
 
 
 # ---- 聚合入口（WBS-26.01/11）-----------------------------------------------
@@ -1616,29 +1843,20 @@ def run_doctor(
             check_docker(runner=runner),
             check_docker_compose(runner=runner),
             check_caddy(config, runner=runner),
-            check_port_pool(
-                config, port_in_use=port_in_use, allocated_ports=allocated_ports
-            ),
+            check_port_pool(config, port_in_use=port_in_use, allocated_ports=allocated_ports),
             check_registry(ws),
             check_static_gateway(ws),
-            check_caddy_health(
-                ws, config, runner=runner, registry=caddy_probe_registry
-            ),
-            check_lan_url_stale(
-                ws, config, caddy_probe_registry
-            ) if caddy_probe_registry is not None
-            else CheckResult(
-                "lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"
-            ),
-            check_workspace_path_consistency(
-                ws, config, registry=caddy_probe_registry
-            ),
-            check_backend_handoff(
-                ws, config, caddy_probe_registry
-            ) if caddy_probe_registry is not None
-            else CheckResult(
-                "backend_handoff", STATUS_SKIP, "registry 不可用，跳过后端交接检测"
-            ),
+            # IMP-060：自有服务运行态（FAIL 级）+ 重启韧性（WARN 级）
+            check_service_runtime_state(ws, config),
+            check_restart_resilience(ws, config, runner=runner),
+            check_caddy_health(ws, config, runner=runner, registry=caddy_probe_registry),
+            check_lan_url_stale(ws, config, caddy_probe_registry)
+            if caddy_probe_registry is not None
+            else CheckResult("lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"),
+            check_workspace_path_consistency(ws, config, registry=caddy_probe_registry),
+            check_backend_handoff(ws, config, caddy_probe_registry)
+            if caddy_probe_registry is not None
+            else CheckResult("backend_handoff", STATUS_SKIP, "registry 不可用，跳过后端交接检测"),
             check_port_contention(ws, config, registry=caddy_probe_registry),
             check_disk_space(ws),
             check_memory(),
@@ -1647,9 +1865,7 @@ def run_doctor(
             from local_webpage_access.access_workflow import review_access
 
             try:
-                report.access_review = review_access(
-                    ws, config, caddy_probe_registry
-                )
+                report.access_review = review_access(ws, config, caddy_probe_registry)
             except Exception as exc:  # noqa: BLE001
                 report.checks.append(
                     CheckResult(
@@ -1741,6 +1957,8 @@ __all__ = [
     "check_port_pool",
     "check_registry",
     "check_static_gateway",
+    "check_service_runtime_state",
+    "check_restart_resilience",
     "check_caddy_health",
     "check_workspace_path_consistency",
     "check_lan_url_stale",

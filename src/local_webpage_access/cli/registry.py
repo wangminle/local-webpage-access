@@ -71,9 +71,7 @@ def check_cmd(
 
 @app.command("repair")
 def repair_cmd(
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="跳过确认直接清理（非 TTY 时必须）"
-    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认直接清理（非 TTY 时必须）"),
     json_output: bool = typer.Option(False, "--json", help="输出 JSON 摘要"),
 ) -> None:
     """删除 registry 子表中的孤儿行（破坏性，默认交互确认）。"""

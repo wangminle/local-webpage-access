@@ -66,9 +66,7 @@ def test_only_under_returns_own_session_pids(monkeypatch) -> None:
     """only_under=本会话根时只返回本会话拉起的进程，不碰并发会话。"""
     monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: _session_procs_output())
     own_root = "/tmp/pytest-of-u/pytest-9"
-    assert cf._list_lwa_service_pids_on_pytest_workspaces(
-        only_under=own_root
-    ) == {111, 222}
+    assert cf._list_lwa_service_pids_on_pytest_workspaces(only_under=own_root) == {111, 222}
 
 
 def test_only_under_excludes_concurrent_session(monkeypatch) -> None:
@@ -98,9 +96,7 @@ def test_only_under_with_orphans_picks_dead_workspace(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
     # 不带 orphan：other_alive_ws 不在子树且存在 → 跳过；gone-ws 不在子树
     # 且默认不查孤儿 → 跳过
-    pids_no_orphan = cf._list_lwa_service_pids_on_pytest_workspaces(
-        only_under=own_root
-    )
+    pids_no_orphan = cf._list_lwa_service_pids_on_pytest_workspaces(only_under=own_root)
     assert pids_no_orphan == set()
     # 带 orphan：other_alive_ws 存在 → 仍跳过；gone-ws 目录不存在 → 纳入
     pids_with_orphan = cf._list_lwa_service_pids_on_pytest_workspaces(
@@ -122,19 +118,17 @@ def test_only_under_with_orphans_ignores_missing_production_workspace(
     )
     monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
 
-    assert cf._list_lwa_service_pids_on_pytest_workspaces(
-        only_under=own_root, include_orphans=True
-    ) == set()
+    assert (
+        cf._list_lwa_service_pids_on_pytest_workspaces(only_under=own_root, include_orphans=True)
+        == set()
+    )
 
 
 def test_only_under_prefix_does_not_cross_directory_boundary(monkeypatch, tmp_path) -> None:
     """前缀匹配不得越界：pytest-9* 不应被 pytest-9 的根吃掉（目录分隔）。"""
     sibling = tmp_path / "session-A-extra"
     sibling.mkdir()
-    out = (
-        f"111\tpython -m local_webpage_access.manager_service "
-        f"--workspace {sibling}\n"
-    )
+    out = f"111\tpython -m local_webpage_access.manager_service --workspace {sibling}\n"
     monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
     own_root = str(tmp_path / "session-A")
     # own_root 不存在；sibling = tmp_path/session-A-extra，不以 own_root + sep 开头

@@ -54,9 +54,7 @@ def config(workspace_root: Path):
     return Config(portPool=PortPool(start=21000, end=21050))
 
 
-def _seed_container_instance(
-    workspace: Workspace, registry: Registry, iid: str = "api"
-) -> None:
+def _seed_container_instance(workspace: Workspace, registry: Registry, iid: str = "api") -> None:
     from local_webpage_access.models import (
         ContainerConfig,
         DesiredState,
@@ -101,9 +99,7 @@ def _seed_container_instance(
     registry.upsert_from_manifest(manifest)
 
 
-def _seed_static_instance(
-    workspace: Workspace, registry: Registry, iid: str = "demo"
-) -> None:
+def _seed_static_instance(workspace: Workspace, registry: Registry, iid: str = "demo") -> None:
     from local_webpage_access.models import (
         DesiredState,
         InstanceManifest,
@@ -247,9 +243,7 @@ def test_parse_container_stats_empty() -> None:
 # ---- 实例资源 ---------------------------------------------------------------
 
 
-def test_instance_resources_container_dirs(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_instance_resources_container_dirs(workspace, registry, config, monkeypatch) -> None:
     """容器实例：source/public/data 大小被统计；镜像/容器指标默认探测（无 Docker→None）。"""
     # docker 子进程探测会失败（无 Docker）→ None，不抛
     _seed_container_instance(workspace, registry, "api")
@@ -260,9 +254,7 @@ def test_instance_resources_container_dirs(
     assert info.data_size_bytes == 400
 
 
-def test_instance_resources_static_no_container_metrics(
-    workspace, registry, config
-) -> None:
+def test_instance_resources_static_no_container_metrics(workspace, registry, config) -> None:
     """静态实例不采集镜像/容器指标。"""
     _seed_static_instance(workspace, registry, "demo")
     info = instance_resources(workspace, config, registry, "demo")
@@ -272,21 +264,15 @@ def test_instance_resources_static_no_container_metrics(
     assert info.public_size_bytes is not None and info.public_size_bytes > 0
 
 
-def test_instance_resources_collect_container_false(
-    workspace, registry, config
-) -> None:
+def test_instance_resources_collect_container_false(workspace, registry, config) -> None:
     """collect_container=False 跳过 docker stats（批量场景）。"""
     _seed_container_instance(workspace, registry, "api")
-    info = instance_resources(
-        workspace, config, registry, "api", collect_container=False
-    )
+    info = instance_resources(workspace, config, registry, "api", collect_container=False)
     assert info.last_memory_bytes is None
     assert info.last_cpu_percent is None
 
 
-def test_instance_resources_with_mocked_docker(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_instance_resources_with_mocked_docker(workspace, registry, config, monkeypatch) -> None:
     """模拟 docker image inspect + docker stats 返回，验证镜像/容器指标采集。"""
     _seed_container_instance(workspace, registry, "api")
 
@@ -300,7 +286,9 @@ def test_instance_resources_with_mocked_docker(
         if "image" in args and "inspect" in args:
             return _FakeCompleted("12345678", 0)
         if "stats" in args:
-            stats_json = '{"Name": "lwa-api-app", "MemUsage": "12.5MiB / 512MiB", "CPUPerc": "0.45%"}\n'
+            stats_json = (
+                '{"Name": "lwa-api-app", "MemUsage": "12.5MiB / 512MiB", "CPUPerc": "0.45%"}\n'
+            )
             return _FakeCompleted(stats_json, 0)
         return _FakeCompleted("", 1)
 
@@ -315,9 +303,7 @@ def test_instance_resources_with_mocked_docker(
 # ---- collect_and_store -----------------------------------------------------
 
 
-def test_collect_and_store_writes_resources_table(
-    workspace, registry, config
-) -> None:
+def test_collect_and_store_writes_resources_table(workspace, registry, config) -> None:
     _seed_container_instance(workspace, registry, "api")
     info = collect_and_store(workspace, config, registry, "api")
     assert info.data_size_bytes is not None
@@ -334,9 +320,7 @@ def test_all_instance_resources(workspace, registry, config) -> None:
     assert {i.instance_id for i in infos} == {"api", "demo"}
 
 
-def test_resource_collection_failure_returns_none(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_resource_collection_failure_returns_none(workspace, registry, config, monkeypatch) -> None:
     """docker 子进程抛异常时不影响实例资源采集（降级为 None）。"""
     _seed_container_instance(workspace, registry, "api")
 

@@ -144,10 +144,7 @@ def is_gateway_running(workspace: Workspace, config: Config) -> bool:
     if not gateway._admin_alive():
         return False
     owner = gateway.inspect_caddy_owner()
-    return bool(
-        owner.get("owner") == "lwa_service_user"
-        and owner.get("workspace_match")
-    )
+    return bool(owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"))
 
 
 @contextlib.contextmanager
@@ -293,7 +290,11 @@ def start_gateway(
             except Exception as exc:  # noqa: BLE001 — reload 失败不阻断已在线网关
                 log.warning("已在线网关写盘后 reload 失败（不阻断）：%s", exc)
             _post_switch_finalize(
-                workspace, config, registry, pid, started=False,
+                workspace,
+                config,
+                registry,
+                pid,
+                started=False,
                 stopped_builtin=stopped_builtin,
             )
             # 已在线路径也要刷新能力缓存：仅补写 gateway.json 不够，
@@ -317,9 +318,7 @@ def start_gateway(
         if not gateway.caddy_start():
             # BUG-517：Caddy 启动失败时把 start 前停掉的 builtin 拉回来，否则站点
             # 会持续下线且难自愈。best-effort，失败不掩盖原始 caddy 启动异常。
-            _restore_stopped_builtin(
-                workspace, registry, gateway, stopped_builtin
-            )
+            _restore_stopped_builtin(workspace, registry, gateway, stopped_builtin)
             raise LifecycleError(
                 "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）；"
                 "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019",
@@ -341,7 +340,9 @@ def start_gateway(
         write_state(workspace, state)
         log.info(
             "网关已启动（pid=%s，admin=127.0.0.1:%d，entry=%s）",
-            pid if pid else "?", ADMIN_PORT, config.staticGatewayPort,
+            pid if pid else "?",
+            ADMIN_PORT,
+            config.staticGatewayPort,
         )
         _post_switch_finalize(
             workspace, config, registry, pid, started=True, stopped_builtin=stopped_builtin
@@ -370,14 +371,10 @@ def _post_switch_finalize(
     try:
         from local_webpage_access.access_workflow import run_access_pass
 
-        pass_result = run_access_pass(
-            workspace, config, registry, review=False, dry_run=False
-        )
+        pass_result = run_access_pass(workspace, config, registry, review=False, dry_run=False)
         report = pass_result.refresh
         if pass_result.refresh_error:
-            log.warning(
-                "切换后刷新访问地址失败（不阻断）：%s", pass_result.refresh_error
-            )
+            log.warning("切换后刷新访问地址失败（不阻断）：%s", pass_result.refresh_error)
     except Exception as exc:  # noqa: BLE001 — 地址刷新失败不阻断网关启动
         log.warning("切换后刷新访问地址失败（不阻断）：%s", exc)
         report = None

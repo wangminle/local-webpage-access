@@ -90,23 +90,44 @@ _DOCKER_SOCKET_PATHS = (
 
 # 宿主敏感目录：禁止作为 bind mount 源
 _HOST_SENSITIVE_DIRS = (
-    "/", "/etc", "/var", "/usr", "/root", "/home", "/boot", "/proc", "/sys",
-    "/dev", "/opt", "/srv", "/var/lib/docker",
+    "/",
+    "/etc",
+    "/var",
+    "/usr",
+    "/root",
+    "/home",
+    "/boot",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/opt",
+    "/srv",
+    "/var/lib/docker",
 )
 _WINDOWS_HOST_SENSITIVE_DIRS = (
-    "c:/", "c:/windows", "c:/users", "c:/program files", "c:/programdata",
+    "c:/",
+    "c:/windows",
+    "c:/users",
+    "c:/program files",
+    "c:/programdata",
 )
 # BUG-184：~ 与 ${VAR} 形式的 bind 源经 docker compose 渲染为宿主路径，无法静态展开，
 # 用已知敏感名片段（凭据/密钥目录）保守判 critical，避免绕过 host_sensitive_mount。
 _SENSITIVE_HOME_FRAGMENTS = (
-    ".ssh", ".aws", ".gnupg", ".docker", ".kube", ".config",
-    ".netrc", ".npmrc", ".pypirc", ".env",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".docker",
+    ".kube",
+    ".config",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".env",
 )
 
 # Compose 中允许的 host bind mount 源（实例自己的 data/，相对 compose 文件）
-_DEFAULT_ALLOWED_HOST_MOUNTS = frozenset(
-    {"./data", "../data", "./data/", "../data/"}
-)
+_DEFAULT_ALLOWED_HOST_MOUNTS = frozenset({"./data", "../data", "./data/", "../data/"})
 
 # 危险的 Linux capabilities
 _DANGEROUS_CAPS = frozenset(
@@ -151,19 +172,11 @@ def audit_compose(
             )
         ]
     if not isinstance(doc, dict):
-        return [
-            SecurityFinding(
-                LEVEL_CRITICAL, "invalid_yaml", "Compose 不是合法的映射结构"
-            )
-        ]
+        return [SecurityFinding(LEVEL_CRITICAL, "invalid_yaml", "Compose 不是合法的映射结构")]
 
     services = doc.get("services") or {}
     if not isinstance(services, dict):
-        return [
-            SecurityFinding(
-                LEVEL_CRITICAL, "invalid_yaml", "services 段缺失或类型错误"
-            )
-        ]
+        return [SecurityFinding(LEVEL_CRITICAL, "invalid_yaml", "services 段缺失或类型错误")]
 
     for svc_name, svc in services.items():
         if not isinstance(svc, dict):
@@ -308,6 +321,43 @@ def _audit_volume(
     # 宿主敏感目录
     src_abs = src_norm if src.startswith("/") else None
     if src_abs:
+        # issue#1：家目录整体挂载 critical（/home、/Users、以及某用户的整个
+        # 家目录 /home/<user>——后者含 .ssh/.aws 等全部凭据，等价于 /home）；
+        # 家目录下的普通业务子目录（container.extraVolumes 的典型场景，如
+        # /home/<user>/.openclaw/workspace）与 BUG-184 的 ~/ 展开路径同规则：
+        # 仅命中敏感名片段（.ssh/.aws/…）才 critical，否则与其它显式绝对路径
+        # 同等放行。
+        home_root = next((p for p in ("/home/", "/Users/") if src_abs.startswith(p)), None)
+        if src_abs.rstrip("/") in ("/home", "/Users"):
+            out.append(
+                SecurityFinding(
+                    LEVEL_CRITICAL,
+                    "host_sensitive_mount",
+                    f"服务 {svc} 挂载了宿主敏感目录：{src}",
+                )
+            )
+            return
+        if home_root is not None:
+            home_rel = src_abs[len(home_root) :].rstrip("/")
+            # BUG-532：家目录本身（/home/<user>，无更深子路径）同样 critical
+            if "/" not in home_rel:
+                out.append(
+                    SecurityFinding(
+                        LEVEL_CRITICAL,
+                        "host_sensitive_mount",
+                        f"服务 {svc} 挂载了整个用户家目录：{src}",
+                    )
+                )
+                return
+            if any(frag in src_lower for frag in _SENSITIVE_HOME_FRAGMENTS):
+                out.append(
+                    SecurityFinding(
+                        LEVEL_CRITICAL,
+                        "host_sensitive_mount",
+                        f"服务 {svc} 挂载了家目录下的敏感路径：{src}",
+                    )
+                )
+            return
         for sens in _HOST_SENSITIVE_DIRS:
             if src_abs == sens or src_abs.startswith(sens.rstrip("/") + "/"):
                 out.append(
@@ -440,9 +490,7 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
             )
         elif upper.startswith("RUN "):
             lowered = line.lower()
-            pipe_shell = re.search(
-                r"\|\s*(?:/usr/bin/|/bin/)?(?:ba)?sh\b", lowered
-            )
+            pipe_shell = re.search(r"\|\s*(?:/usr/bin/|/bin/)?(?:ba)?sh\b", lowered)
             if pipe_shell and ("curl" in lowered or "wget" in lowered):
                 findings.append(
                     SecurityFinding(
@@ -537,9 +585,7 @@ def _strip_rule_for(name: str) -> str | None:
     return None
 
 
-def sanitize_zip_members(
-    names: list[str], *, modes: list[int] | None = None
-) -> ZipSanitizeResult:
+def sanitize_zip_members(names: list[str], *, modes: list[int] | None = None) -> ZipSanitizeResult:
     """按 IMP-001 规则把 zip 成员分成「保留 / 剥离」两类。
 
     * 被 **剥离** 的成员（``node_modules/``、``__pycache__/``、``.venv/``、
@@ -581,9 +627,7 @@ def sanitize_zip_members(
 # ---- zip slip 防御纵深（WBS-25.10）------------------------------------------
 
 
-def audit_zip_members(
-    names: list[str], *, modes: list[int] | None = None
-) -> list[SecurityFinding]:
+def audit_zip_members(names: list[str], *, modes: list[int] | None = None) -> list[SecurityFinding]:
     """审计 zip 成员名（zip slip / 路径穿越，WBS-25.10，BUG-049 增强）。
 
     * ``names`` —— zip 成员名列表；
@@ -669,10 +713,7 @@ def unknown_zip_risk_hint() -> str:
 
 def trusted_zip_hint() -> str:
     """已通过识别、可确定运行形态的 zip 的提示（对比用）。"""
-    return (
-        "该 zip 已通过运行形态识别，可确定静态/容器托管方式。仍建议在首次启动前"
-        "确认其来源可信。"
-    )
+    return "该 zip 已通过运行形态识别，可确定静态/容器托管方式。仍建议在首次启动前确认其来源可信。"
 
 
 # ---- 管理页绑定策略（WBS-25.02）---------------------------------------------

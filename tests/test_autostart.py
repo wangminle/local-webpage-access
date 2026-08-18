@@ -102,9 +102,7 @@ def test_build_launchd_plist_foreground_keepalive_path(tmp_path) -> None:
 
 
 def test_build_systemd_unit_foreground_restart(tmp_path) -> None:
-    unit = asm.build_systemd_unit(
-        "manager", python_exe="/usr/bin/python3", workspace_root=tmp_path
-    )
+    unit = asm.build_systemd_unit("manager", python_exe="/usr/bin/python3", workspace_root=tmp_path)
     assert "Type=simple" in unit
     assert "Restart=on-failure" in unit
     assert "RestartSec=5" in unit
@@ -120,12 +118,8 @@ def test_build_systemd_unit_foreground_restart(tmp_path) -> None:
 
 def test_build_systemd_unit_quotes_path_with_spaces(tmp_path, monkeypatch) -> None:
     """BUG-174：systemd Environment=PATH 须整体加引号，否则含空格目录被截断。"""
-    monkeypatch.setattr(
-        asm, "_build_path_env", lambda *a, **k: "/usr/bin:/mnt/c/Program Files/app"
-    )
-    unit = asm.build_systemd_unit(
-        "daemon", python_exe="/usr/bin/python3", workspace_root=tmp_path
-    )
+    monkeypatch.setattr(asm, "_build_path_env", lambda *a, **k: "/usr/bin:/mnt/c/Program Files/app")
+    unit = asm.build_systemd_unit("daemon", python_exe="/usr/bin/python3", workspace_root=tmp_path)
     env_lines = [ln for ln in unit.splitlines() if ln.startswith("Environment=")]
     assert env_lines, "unit 缺少 Environment= 行"
     line = env_lines[0].rstrip()
@@ -138,9 +132,7 @@ def test_build_systemd_unit_quotes_path_with_spaces(tmp_path, monkeypatch) -> No
 
 def test_is_legacy_detection() -> None:
     # 旧 detached 启动器
-    assert asm.is_legacy_program_arguments(
-        ["/py", "-m", "local_webpage_access", "daemon", "on"]
-    )
+    assert asm.is_legacy_program_arguments(["/py", "-m", "local_webpage_access", "daemon", "on"])
     # 前台入口不是旧配置
     assert not asm.is_legacy_program_arguments(
         ["/py", "-m", "local_webpage_access.daemon", "--workspace", "/x"]
@@ -158,9 +150,7 @@ def test_is_legacy_detection() -> None:
 def test_mac_backend_render_roundtrip(tmp_path) -> None:
     backend = asm.MacLaunchdBackend()
     data = plistlib.loads(
-        backend.render(
-            "daemon", python_exe="/py", workspace_root=tmp_path, keep_alive=True
-        )
+        backend.render("daemon", python_exe="/py", workspace_root=tmp_path, keep_alive=True)
     )
     assert data["ProgramArguments"][-2:] == ["--workspace", str(tmp_path)]
 
@@ -305,9 +295,7 @@ def test_install_systemd_enables_via_systemctl(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(asm, "systemd_available", lambda: True)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     record: list[list[str]] = []
-    asm.install(
-        ws, config, with_caddy=False, enable=True, runner=_fake_runner(record)
-    )
+    asm.install(ws, config, with_caddy=False, enable=True, runner=_fake_runner(record))
     unit = tmp_path / "home" / ".config" / "systemd" / "user" / "lwa-daemon.service"
     assert unit.is_file()
     assert "--workspace" in unit.read_text(encoding="utf-8")
@@ -338,8 +326,10 @@ def test_coordinated_disable_when_loaded(tmp_path, monkeypatch) -> None:
         if "print-disabled" in joined:
             body = f'\t"{label}" => disabled\n' if state["disabled"] else ""
             return CompletedProcess(
-                args=cmd, returncode=0,
-                stdout=f"disabled services = {{\n{body}}}\n", stderr="",
+                args=cmd,
+                returncode=0,
+                stdout=f"disabled services = {{\n{body}}}\n",
+                stderr="",
             )
         if "print" in joined:
             if state["disabled"]:
@@ -389,9 +379,7 @@ def test_coordinated_restart_managed_when_loaded(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     backend = asm.MacLaunchdBackend()
-    backend.write_unit(
-        "daemon", backend.render("daemon", python_exe="/py", workspace_root=root)
-    )
+    backend.write_unit("daemon", backend.render("daemon", python_exe="/py", workspace_root=root))
     record: list[list[str]] = []
     res = asm.coordinated_restart(ws, "daemon", runner=_fake_runner(record))
     assert res.managed is True
@@ -415,9 +403,7 @@ def test_coordinated_restart_failure_falls_back(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     backend = asm.MacLaunchdBackend()
-    backend.write_unit(
-        "daemon", backend.render("daemon", python_exe="/py", workspace_root=root)
-    )
+    backend.write_unit("daemon", backend.render("daemon", python_exe="/py", workspace_root=root))
 
     def runner(cmd, **kwargs):
         joined = " ".join(cmd)
@@ -485,9 +471,7 @@ def test_run_check_foreground_unit_form_ok(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     backend = asm.MacLaunchdBackend()
     for name in ("daemon", "manager"):
-        backend.write_unit(
-            name, backend.render(name, python_exe="/py", workspace_root=root)
-        )
+        backend.write_unit(name, backend.render(name, python_exe="/py", workspace_root=root))
     report = asm.run_check(ws, config, runner=_fake_runner())
     units = [i for i in report.items if i.category == "unit" and i.name in ("daemon", "manager")]
     assert all(i.status == "ok" for i in units)
@@ -598,7 +582,10 @@ def test_daemon_main_writes_own_pid(tmp_path, monkeypatch) -> None:
     root, ws, config = _make_ws(tmp_path)
     # 模拟 _main 抢锁后的 pid 回写逻辑（直接调用 write_state 验证字段）
     dm.write_state(
-        ws, dm.DaemonState(enabled=True, pid=12345, started_at="2026-07-16T00:00:00", poll_interval=5.0)
+        ws,
+        dm.DaemonState(
+            enabled=True, pid=12345, started_at="2026-07-16T00:00:00", poll_interval=5.0
+        ),
     )
     state = dm.read_state(ws)
     assert state is not None and state.enabled is True and state.pid == 12345
@@ -672,7 +659,9 @@ def test_enable_bootout_nonzero_not_failure(tmp_path, monkeypatch) -> None:
         if len(cmd) >= 2 and cmd[1] == "bootout":  # 旧实例不存在 → 预期非零
             return CompletedProcess(args=cmd, returncode=36, stdout="", stderr="no service")
         if len(cmd) >= 2 and cmd[1] == "print-disabled":
-            return CompletedProcess(args=cmd, returncode=0, stdout="disabled services = {\n}\n", stderr="")
+            return CompletedProcess(
+                args=cmd, returncode=0, stdout="disabled services = {\n}\n", stderr=""
+            )
         if len(cmd) >= 2 and cmd[1] == "print":
             return CompletedProcess(
                 args=cmd, returncode=0, stdout="pid = 1\ndisabled = false\n", stderr=""
@@ -688,7 +677,8 @@ def test_check_caddy_detects_foreign_2019(tmp_path, monkeypatch) -> None:
     root, ws, config = _make_ws(tmp_path)
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setattr(
-        asm.shutil, "which",
+        asm.shutil,
+        "which",
         lambda c: "/usr/local/bin/caddy" if c == "caddy" else None,
     )
 
@@ -718,7 +708,8 @@ def test_check_caddy_no_conflict_when_ours(tmp_path, monkeypatch) -> None:
     root, ws, config = _make_ws(tmp_path)
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setattr(
-        asm.shutil, "which",
+        asm.shutil,
+        "which",
         lambda c: "/usr/local/bin/caddy" if c == "caddy" else None,
     )
     # 本工作区 gateway 持有存活且身份匹配的 pid → _port_2019_foreign 返回 False
@@ -727,7 +718,8 @@ def test_check_caddy_no_conflict_when_ours(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(dm, "is_pid_alive", lambda pid: True)
     monkeypatch.setattr(
-        dm, "pid_cmdline_contains",
+        dm,
+        "pid_cmdline_contains",
         lambda pid, *needles: True,
     )
     item = asm._check_caddy(ws, config)
@@ -742,14 +734,18 @@ def test_check_docker_uses_runtime_field(tmp_path, monkeypatch) -> None:
     reg = Registry(ws.db_path)
     reg.open()
     try:
-        reg.upsert_instance({
-            "id": "dc1", "name": "dc", "version": "1",
-            "kind": "python",              # 检测 kind，非 docker-compose
-            "runtime": "docker-compose",   # 真实 runtime 字段
-            "serving_mode": "container",
-            "created_at": "2026-07-16T00:00:00",
-            "updated_at": "2026-07-16T00:00:00",
-        })
+        reg.upsert_instance(
+            {
+                "id": "dc1",
+                "name": "dc",
+                "version": "1",
+                "kind": "python",  # 检测 kind，非 docker-compose
+                "runtime": "docker-compose",  # 真实 runtime 字段
+                "serving_mode": "container",
+                "created_at": "2026-07-16T00:00:00",
+                "updated_at": "2026-07-16T00:00:00",
+            }
+        )
     finally:
         reg.close()
     # docker CLI 缺失 → 确定性 WARN；关键是"检测到了容器实例"，不再误报"无容器实例"
@@ -765,7 +761,9 @@ def test_systemd_uninstall_reload_failure_fails(tmp_path, monkeypatch) -> None:
     # 需有单元文件；disable 成功后才会删文件并 reload
     path = backend.unit_path("daemon")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("[Service]\nExecStart=/py -m local_webpage_access.daemon --workspace /x\n", encoding="utf-8")
+    path.write_text(
+        "[Service]\nExecStart=/py -m local_webpage_access.daemon --workspace /x\n", encoding="utf-8"
+    )
 
     def runner(cmd, **kwargs):
         joined = " ".join(cmd)
@@ -851,8 +849,7 @@ def test_check_nothing_installed_is_fail(tmp_path, monkeypatch) -> None:
     report = asm.run_check(ws, config, runner=_fake_runner())
     assert report.overall == "fail"
     assert any(
-        i.category == "unit" and i.name == "install" and i.status == "fail"
-        for i in report.items
+        i.category == "unit" and i.name == "install" and i.status == "fail" for i in report.items
     )
     assert report.exit_code != 0
 
@@ -889,13 +886,17 @@ def test_cli_repair_enable_failure_exits_nonzero(tmp_path, monkeypatch) -> None:
     _init_ws_for_cli(tmp_path, monkeypatch)
     # 模拟 repair 返回 enable_ok=False（如迁移失败/bootstrap 未加载）
     monkeypatch.setattr(
-        asm, "repair",
+        asm,
+        "repair",
         lambda ws, config, **kw: (
             asm.InstallResult(
-                platform="macos", services=["daemon"], enabled=True,
+                platform="macos",
+                services=["daemon"],
+                enabled=True,
                 enable_ok=False,
-                enable_outcomes=[asm.CmdOutcome(["(migrate)", "daemon"], 1, "",
-                                                 "detached daemon 未能停止")],
+                enable_outcomes=[
+                    asm.CmdOutcome(["(migrate)", "daemon"], 1, "", "detached daemon 未能停止")
+                ],
             ),
             ["重写单元"],
         ),
@@ -913,12 +914,16 @@ def test_cli_install_enable_failure_exits_nonzero(tmp_path, monkeypatch) -> None
 
     _init_ws_for_cli(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        asm, "install",
+        asm,
+        "install",
         lambda ws, config, **kw: asm.InstallResult(
-            platform="linux", services=["daemon", "manager"], enabled=True,
+            platform="linux",
+            services=["daemon", "manager"],
+            enabled=True,
             enable_ok=False,
-            enable_outcomes=[asm.CmdOutcome(["systemctl", "enable", "--now"], 1, "",
-                                             "enable failed")],
+            enable_outcomes=[
+                asm.CmdOutcome(["systemctl", "enable", "--now"], 1, "", "enable failed")
+            ],
         ),
     )
     res = CliRunner().invoke(app, ["autostart", "install"])
@@ -935,7 +940,8 @@ def test_cli_daemon_off_blocks_when_disable_fails(tmp_path, monkeypatch) -> None
     _init_ws_for_cli(tmp_path, monkeypatch)
     # 协调停用失败（ok=False）→ 不应调用 stop_daemon
     monkeypatch.setattr(
-        cli_daemon, "coordinated_autostart_disable",
+        cli_daemon,
+        "coordinated_autostart_disable",
         lambda ws, name: ("⚠️ 停用失败", False),
     )
     stopped = {"called": False}
@@ -996,8 +1002,9 @@ def test_macos_is_enabled_via_print_disabled_when_unloaded(tmp_path, monkeypatch
         if "print-disabled" in joined:
             # 不在 disabled 列表 → 默认启用
             return CompletedProcess(
-                args=cmd, returncode=0,
-                stdout="disabled services = {\n\t\"com.other\" => disabled\n}\n",
+                args=cmd,
+                returncode=0,
+                stdout='disabled services = {\n\t"com.other" => disabled\n}\n',
                 stderr="",
             )
         if "print" in joined:
@@ -1010,7 +1017,8 @@ def test_macos_is_enabled_via_print_disabled_when_unloaded(tmp_path, monkeypatch
         joined = " ".join(cmd)
         if "print-disabled" in joined:
             return CompletedProcess(
-                args=cmd, returncode=0,
+                args=cmd,
+                returncode=0,
                 stdout=f'disabled services = {{\n\t"{label}" => disabled\n}}\n',
                 stderr="",
             )
@@ -1076,7 +1084,9 @@ def test_check_per_unit_bad_python_and_missing_mainpid(tmp_path, monkeypatch) ->
     def runner(cmd, **kwargs):
         joined = " ".join(cmd)
         if "print-disabled" in joined:
-            return CompletedProcess(args=cmd, returncode=0, stdout="disabled services = {\n}\n", stderr="")
+            return CompletedProcess(
+                args=cmd, returncode=0, stdout="disabled services = {\n}\n", stderr=""
+            )
         if "print" in joined:
             # active 但无 pid= 行 → MainPID 缺失
             return CompletedProcess(args=cmd, returncode=0, stdout="disabled = false\n", stderr="")
@@ -1105,9 +1115,7 @@ def test_check_unit_missing_path_env_fails(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     backend = asm.MacLaunchdBackend()
-    raw = plistlib.loads(
-        backend.render("daemon", python_exe=sys.executable, workspace_root=root)
-    )
+    raw = plistlib.loads(backend.render("daemon", python_exe=sys.executable, workspace_root=root))
     del raw["EnvironmentVariables"]
     path = backend.unit_path("daemon")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1126,7 +1134,8 @@ def test_port_2019_rejects_alive_but_wrong_identity(tmp_path, monkeypatch) -> No
     root, ws, config = _make_ws(tmp_path)
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setattr(
-        asm.shutil, "which",
+        asm.shutil,
+        "which",
         lambda c: "/usr/local/bin/caddy" if c == "caddy" else None,
     )
     gs.write_state(ws, gs.GatewayState(enabled=True, pid=424242))
@@ -1160,8 +1169,10 @@ def test_uninstall_keeps_manifest_and_unit_on_failure(tmp_path, monkeypatch) -> 
     backend = asm.SystemdUserBackend()
     unit = backend.unit_path("daemon")
     assert unit.is_file()
-    assert asm.installed_services(ws, backend) == ["daemon", "manager"] or \
-        "daemon" in asm.installed_services(ws, backend)
+    assert asm.installed_services(ws, backend) == [
+        "daemon",
+        "manager",
+    ] or "daemon" in asm.installed_services(ws, backend)
 
     def runner(cmd, **kwargs):
         joined = " ".join(cmd)
@@ -1192,7 +1203,8 @@ def test_enable_skips_backend_when_migrate_fails(tmp_path, monkeypatch) -> None:
     asm.install(ws, config, with_caddy=False, enable=False)
 
     monkeypatch.setattr(
-        asm, "_migrate_detached_for_supervision",
+        asm,
+        "_migrate_detached_for_supervision",
         lambda *a, **k: False,
     )
     record: list[list[str]] = []
@@ -1215,9 +1227,7 @@ def test_install_no_enable_does_not_set_daemon_enabled(tmp_path, monkeypatch) ->
     assert state is None or state.enabled is False
 
 
-def test_systemd_uninstall_reload_failure_restores_unit_for_retry(
-    tmp_path, monkeypatch
-) -> None:
+def test_systemd_uninstall_reload_failure_restores_unit_for_retry(tmp_path, monkeypatch) -> None:
     """reload 失败须恢复 unit，第二次 uninstall 仍能重试 reload（BUG-161）。"""
     root, ws, config = _make_ws(tmp_path)
     monkeypatch.setattr(asm, "detect_platform", lambda: "linux")
@@ -1267,21 +1277,18 @@ def test_check_active_rejects_alive_but_wrong_identity(tmp_path, monkeypatch) ->
 
     monkeypatch.setattr(dm, "is_pid_alive", lambda pid: True)
     monkeypatch.setattr(
-        dm, "pid_cmdline_contains",
+        dm,
+        "pid_cmdline_contains",
         lambda pid, *needles: False,  # 任意存活 PID，身份不对
     )
-    monkeypatch.setattr(
-        asm, "_service_process_running", lambda *a, **k: True
-    )
+    monkeypatch.setattr(asm, "_service_process_running", lambda *a, **k: True)
 
     item = asm._check_active(ws, config, backend, "daemon", _fake_runner())
     assert item.status == "fail"
     assert "身份" in item.message or "MainPID" in item.message
 
 
-def test_installed_services_includes_disk_orphans_outside_manifest(
-    tmp_path, monkeypatch
-) -> None:
+def test_installed_services_includes_disk_orphans_outside_manifest(tmp_path, monkeypatch) -> None:
     """BUG-168：manifest 存在时仍须检出磁盘上的孤儿单元。"""
     root, ws, config = _make_ws(tmp_path)
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
@@ -1306,34 +1313,32 @@ def test_reinstall_removes_orphan_services(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     record: list[list[str]] = []
-    asm.install(
-        ws, config, with_caddy=True, enable=False, python_exe=sys.executable
-    )
+    asm.install(ws, config, with_caddy=True, enable=False, python_exe=sys.executable)
     backend = asm.MacLaunchdBackend()
     gw = backend.unit_path("gateway")
     assert gw.is_file()
 
     # 再不带 --with-caddy：manifest 应收窄，gateway 单元须被卸载
     asm.install(
-        ws, config, with_caddy=False, enable=False,
-        python_exe=sys.executable, runner=_fake_runner(record),
+        ws,
+        config,
+        with_caddy=False,
+        enable=False,
+        python_exe=sys.executable,
+        runner=_fake_runner(record),
     )
     assert not gw.is_file()
     assert "gateway" not in (asm.read_manifest(ws) or [])
     assert "gateway" not in asm.installed_services(ws, backend)
 
 
-def test_repair_preserves_installed_gateway_without_with_caddy(
-    tmp_path, monkeypatch
-) -> None:
+def test_repair_preserves_installed_gateway_without_with_caddy(tmp_path, monkeypatch) -> None:
     """BUG-384：repair 默认保留已安装 gateway，不得当 orphan 卸载。"""
     root, ws, config = _make_ws(tmp_path)
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     record: list[list[str]] = []
-    asm.install(
-        ws, config, with_caddy=True, enable=False, python_exe=sys.executable
-    )
+    asm.install(ws, config, with_caddy=True, enable=False, python_exe=sys.executable)
     backend = asm.MacLaunchdBackend()
     gw = backend.unit_path("gateway")
     assert gw.is_file()
@@ -1350,7 +1355,10 @@ def test_repair_preserves_installed_gateway_without_with_caddy(
     gw.write_bytes(plistlib.dumps(raw, fmt=plistlib.FMT_XML, sort_keys=False))
 
     result, actions = asm.repair(
-        ws, config, with_caddy=False, python_exe=sys.executable,
+        ws,
+        config,
+        with_caddy=False,
+        python_exe=sys.executable,
         runner=_fake_runner(record),
     )
     assert gw.is_file()
@@ -1362,30 +1370,27 @@ def test_repair_preserves_installed_gateway_without_with_caddy(
     assert str(root) in fargs
 
 
-def test_repair_with_caddy_adds_gateway_when_missing(
-    tmp_path, monkeypatch
-) -> None:
+def test_repair_with_caddy_adds_gateway_when_missing(tmp_path, monkeypatch) -> None:
     """BUG-384：--with-caddy 只表示可新增 gateway，不是“是否保留”。"""
     root, ws, config = _make_ws(tmp_path)
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    asm.install(
-        ws, config, with_caddy=False, enable=False, python_exe=sys.executable
-    )
+    asm.install(ws, config, with_caddy=False, enable=False, python_exe=sys.executable)
     backend = asm.MacLaunchdBackend()
     assert not backend.unit_path("gateway").is_file()
 
     result, _actions = asm.repair(
-        ws, config, with_caddy=True, python_exe=sys.executable,
+        ws,
+        config,
+        with_caddy=True,
+        python_exe=sys.executable,
         runner=_fake_runner([]),
     )
     assert "gateway" in result.services
     assert backend.unit_path("gateway").is_file()
 
 
-def test_repair_does_not_enable_config_disabled_gateway(
-    tmp_path, monkeypatch
-) -> None:
+def test_repair_does_not_enable_config_disabled_gateway(tmp_path, monkeypatch) -> None:
     """BUG-389：staticGateway=builtin 时 repair 不得重新启用残留 gateway 单元。"""
     root, ws, _ = _make_ws(tmp_path)
     from local_webpage_access.config import Config
@@ -1394,9 +1399,7 @@ def test_repair_does_not_enable_config_disabled_gateway(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     # 先以 caddy 模式装上 gateway
     caddy_cfg = Config(staticGateway="caddy", managerEnabled=True)
-    asm.install(
-        ws, caddy_cfg, with_caddy=True, enable=False, python_exe=sys.executable
-    )
+    asm.install(ws, caddy_cfg, with_caddy=True, enable=False, python_exe=sys.executable)
     backend = asm.MacLaunchdBackend()
     gw = backend.unit_path("gateway")
     assert gw.is_file()
@@ -1404,7 +1407,10 @@ def test_repair_does_not_enable_config_disabled_gateway(
     record: list[list[str]] = []
     builtin_cfg = Config(staticGateway="builtin", managerEnabled=True)
     result, actions = asm.repair(
-        ws, builtin_cfg, with_caddy=False, python_exe=sys.executable,
+        ws,
+        builtin_cfg,
+        with_caddy=False,
+        python_exe=sys.executable,
         runner=_fake_runner(record),
     )
     assert gw.is_file(), "单元文件应保留（BUG-384）"
@@ -1412,13 +1418,11 @@ def test_repair_does_not_enable_config_disabled_gateway(
     # 不得对 gateway 执行 enable / bootstrap / kickstart
     joined = [" ".join(c) for c in record]
     assert not any(
-        "gateway" in j and ("bootstrap" in j or "kickstart" in j or "enable" in j)
-        for j in joined
+        "gateway" in j and ("bootstrap" in j or "kickstart" in j or "enable" in j) for j in joined
     ), joined
     # 应对其 disable / bootout
     assert any(
-        "gateway" in j and ("bootout" in j or "disable" in j or "unload" in j)
-        for j in joined
+        "gateway" in j and ("bootout" in j or "disable" in j or "unload" in j) for j in joined
     ), joined
 
 
@@ -1430,9 +1434,7 @@ def test_check_unit_path_rejects_useless_path(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     backend = asm.MacLaunchdBackend()
-    raw = plistlib.loads(
-        backend.render("daemon", python_exe=sys.executable, workspace_root=root)
-    )
+    raw = plistlib.loads(backend.render("daemon", python_exe=sys.executable, workspace_root=root))
     raw["EnvironmentVariables"] = {"PATH": "/definitely/missing"}
     path = backend.unit_path("daemon")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1467,9 +1469,7 @@ def test_build_systemd_unit_escapes_percent_and_quotes(tmp_path, monkeypatch) ->
         "_build_path_env",
         lambda *a, **k: '/usr/bin:/opt/with"quote/bin:/tmp/%cache',
     )
-    unit = asm.build_systemd_unit(
-        "daemon", python_exe="/usr/bin/python3", workspace_root=root
-    )
+    unit = asm.build_systemd_unit("daemon", python_exe="/usr/bin/python3", workspace_root=root)
     assert f"WorkingDirectory={root}".replace("%", "%%") in unit
     assert "WorkingDirectory=" in unit and "ws%%prod" in unit
     env_line = next(ln for ln in unit.splitlines() if ln.startswith("Environment="))

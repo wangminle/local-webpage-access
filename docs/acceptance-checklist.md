@@ -81,9 +81,22 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 
 > 如手工验收发现新问题，请在此表追加，并在对应代码/文档中修复后回归。
 
-## Full Profile / 平台 / 删除补强验收（033.13 · 035.06 · 036.08）
+## Full Profile / 平台 / 删除 / 更新通道补强验收（033.13 · 035.06 · 036.08 · 063.13）
 
 主路径代码已落地；下列为**实机**补强项（本机单元/集成测试不能替代）。验收时勾选并填「验收记录」附录。
+
+### 063.13 — 一键 GitHub 更新通道实机（IMP-063 / V0.8.0）
+
+自动化测试（`tests/test_update_source.py`，41 例）全部基于临时 bare remote 夹具；以下为**真实远端 + 真实代理环境**的实机验收（§14 事故机形态复现）。
+
+| 项 | 手工步骤 | 通过标准 |
+| --- | --- | --- |
+| A | 事故形态环境（克隆安装、落后 ≥2 个版本、`https_proxy` 指向 mihomo 等代理）执行一条 `lwa update` | 报告含 `sourceUpdate ok（V0.7.x → V0.8.0）`；全程无人工 git 操作；Runtime 步骤由 continuation 完成，版本一致 |
+| B | 已是最新时执行 `lwa update` | `sourceUpdate skipped（已是最新）`，其余步骤照旧 |
+| C | 断开代理/网络后执行 `lwa update` | `sourceUpdate warning`，本地代码完成全部 Runtime 步骤，退出码 0 |
+| D | `lwa update --check`（未 init 工作区的目录） | 输出 SourceCheckReport；不改工作树与 Runtime；退出码 0/1/2 语义正确 |
+| E | kill 一个 enabled 服务后 `lwa update`（IMP-059 联动） | 报告标注「意外未运行（中断约 X），已恢复」；accessReview 转绿 |
+| F | 两个 `lwa update` 并发 | 后者 fail-fast「更新锁被占用」，不触碰 pip/进程/registry |
 
 ### 033.13 — Full Profile Ubuntu / systemd 完整链路
 

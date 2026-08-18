@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import typer
 
-from local_webpage_access.cli._common import coordinated_autostart_disable, log, open_workspace_registry
+from local_webpage_access.cli._common import (
+    coordinated_autostart_disable,
+    log,
+    open_workspace_registry,
+)
 from local_webpage_access.errors import LwaError
 
 app = typer.Typer(help="控制 daemon 自动导入模式")

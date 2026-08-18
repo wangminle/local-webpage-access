@@ -30,7 +30,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from local_webpage_access.config import Config
 from local_webpage_access.doctor import STATUS_FAIL, STATUS_OK, STATUS_WARN
@@ -164,9 +164,7 @@ def is_legacy_exec_start(exec_start: str) -> bool:
 # ---- 单元内容生成 -----------------------------------------------------------
 
 
-def _foreground_program_arguments(
-    name: str, python_exe: str, workspace_root: Path
-) -> list[str]:
+def _foreground_program_arguments(name: str, python_exe: str, workspace_root: Path) -> list[str]:
     """前台监管命令：``python -m <module> --workspace <root>``。"""
     return [
         python_exe,
@@ -189,9 +187,7 @@ def build_launchd_plist(
     logs = workspace_root / "logs"
     plist: dict[str, Any] = {
         "Label": launchd_label(name),
-        "ProgramArguments": _foreground_program_arguments(
-            name, python_exe, workspace_root
-        ),
+        "ProgramArguments": _foreground_program_arguments(name, python_exe, workspace_root),
         "WorkingDirectory": str(workspace_root),
         "EnvironmentVariables": {"PATH": _build_path_env(caddy_dir)},
         "RunAtLoad": True,
@@ -218,10 +214,7 @@ def build_systemd_unit(
     exec_start = " ".join(shlex.quote(a) for a in args).replace("%", "%%")
     workdir = str(workspace_root).replace("%", "%%")
     path_env = (
-        _build_path_env(caddy_dir)
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("%", "%%")
+        _build_path_env(caddy_dir).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
     )
     after = "network-online.target"
     if name == "manager":
@@ -300,16 +293,30 @@ class AutostartBackend:
         return self._content_is_legacy(path)
 
     # 以下操作默认透传 runner；子类可覆盖命令构造。
-    def enable(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
+    def enable(
+        self, name: str, runner: SubprocessRunner
+    ) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
         raise NotImplementedError
 
-    def disable(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
+    def disable(
+        self, name: str, runner: SubprocessRunner
+    ) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
         raise NotImplementedError
 
-    def uninstall(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
+    def uninstall(
+        self, name: str, runner: SubprocessRunner
+    ) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
         raise NotImplementedError
 
-    def restart(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
+    def restart(
+        self, name: str, runner: SubprocessRunner
+    ) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
+        raise NotImplementedError
+
+    def start(
+        self, name: str, runner: SubprocessRunner
+    ) -> tuple[list[CmdOutcome], bool]:  # pragma: no cover
+        """启动（不重启）已加载/已启用的单元（IMP-059.03）。"""
         raise NotImplementedError
 
     def is_loaded(self, name: str, runner: SubprocessRunner) -> bool:  # pragma: no cover
@@ -363,12 +370,21 @@ class MacLaunchdBackend(AutostartBackend):
         boot = runner(["launchctl", "bootout", target], capture_output=True)
         bsp = runner(["launchctl", "bootstrap", domain, str(path)], capture_output=True)
         outcomes = [
-            CmdOutcome(["launchctl", "enable", target], ren.returncode,
-                       ren.stdout or "", ren.stderr or ""),
-            CmdOutcome(["launchctl", "bootout", target], boot.returncode,
-                       boot.stdout or "", boot.stderr or ""),
-            CmdOutcome(["launchctl", "bootstrap", domain, str(path)], bsp.returncode,
-                       bsp.stdout or "", bsp.stderr or ""),
+            CmdOutcome(
+                ["launchctl", "enable", target], ren.returncode, ren.stdout or "", ren.stderr or ""
+            ),
+            CmdOutcome(
+                ["launchctl", "bootout", target],
+                boot.returncode,
+                boot.stdout or "",
+                boot.stderr or "",
+            ),
+            CmdOutcome(
+                ["launchctl", "bootstrap", domain, str(path)],
+                bsp.returncode,
+                bsp.stdout or "",
+                bsp.stderr or "",
+            ),
         ]
         # bootout 对"可能不存在的旧实例"非零属预期；成败看 enable+bootstrap 与
         # 执行后 loaded+enabled（BUG-152）。
@@ -386,10 +402,12 @@ class MacLaunchdBackend(AutostartBackend):
         dis = runner(["launchctl", "disable", target], capture_output=True)
         res = runner(["launchctl", "bootout", target], capture_output=True)
         outcomes = [
-            CmdOutcome(["launchctl", "disable", target], dis.returncode,
-                       dis.stdout or "", dis.stderr or ""),
-            CmdOutcome(["launchctl", "bootout", target], res.returncode,
-                       res.stdout or "", res.stderr or ""),
+            CmdOutcome(
+                ["launchctl", "disable", target], dis.returncode, dis.stdout or "", dis.stderr or ""
+            ),
+            CmdOutcome(
+                ["launchctl", "bootout", target], res.returncode, res.stdout or "", res.stderr or ""
+            ),
         ]
         # bootout 对未加载单元非零可忽略；必须 disable 成功且最终未启用（BUG-152）。
         ok = dis.returncode == 0 and not self.is_enabled(name, runner)
@@ -401,8 +419,28 @@ class MacLaunchdBackend(AutostartBackend):
         # （BUG-191），不会出现 stop 杀掉后 KeepAlive 抢救与 detached 抢锁。
         res = runner(["launchctl", "kickstart", "-k", target], capture_output=True)
         outcomes = [
-            CmdOutcome(["launchctl", "kickstart", "-k", target], res.returncode,
-                       res.stdout or "", res.stderr or "")
+            CmdOutcome(
+                ["launchctl", "kickstart", "-k", target],
+                res.returncode,
+                res.stdout or "",
+                res.stderr or "",
+            )
+        ]
+        ok = res.returncode == 0 and self.is_loaded(name, runner)
+        return outcomes, ok
+
+    def start(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
+        target = self._target(name)
+        # kickstart 不带 -k：仅启动未在跑的单元（已在跑则等价 restart），由 launchd
+        # 保证单一进程（IMP-059.03：enabled 未运行时经监督器拉起，不 detached 出第二个）。
+        res = runner(["launchctl", "kickstart", target], capture_output=True)
+        outcomes = [
+            CmdOutcome(
+                ["launchctl", "kickstart", target],
+                res.returncode,
+                res.stdout or "",
+                res.stderr or "",
+            )
         ]
         ok = res.returncode == 0 and self.is_loaded(name, runner)
         return outcomes, ok
@@ -447,9 +485,7 @@ class MacLaunchdBackend(AutostartBackend):
         # `launchctl print-disabled` 实际输出 `"label" => enabled` / `=> disabled`
         # （BUG-172：旧正则只认 true/false 永不匹配，兜底恒返回 True，
         # 导致 macOS 下 disable/uninstall 与 off 协调全部失效）。
-        m = re.search(
-            rf'"{re.escape(label)}"\s*=>\s*(enabled|disabled)', out
-        )
+        m = re.search(rf'"{re.escape(label)}"\s*=>\s*(enabled|disabled)', out)
         if m:
             return m.group(1) == "enabled"
         # 未出现在 disabled 列表 → 未被持久 disable，视为仍启用（BUG-153）。
@@ -476,20 +512,26 @@ class SystemdUserBackend(AutostartBackend):
         text = path.read_text(encoding="utf-8")
         for line in text.splitlines():
             if line.startswith("ExecStart="):
-                return is_legacy_exec_start(line[len("ExecStart="):])
+                return is_legacy_exec_start(line[len("ExecStart=") :])
         return False
 
     def enable(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
         unit = systemd_unit_name(name)
         reload_ = runner(["systemctl", "--user", "daemon-reload"], capture_output=True)
-        enable = runner(
-            ["systemctl", "--user", "enable", "--now", unit], capture_output=True
-        )
+        enable = runner(["systemctl", "--user", "enable", "--now", unit], capture_output=True)
         outcomes = [
-            CmdOutcome(["systemctl", "--user", "daemon-reload"], reload_.returncode,
-                       reload_.stdout or "", reload_.stderr or ""),
-            CmdOutcome(["systemctl", "--user", "enable", "--now", unit], enable.returncode,
-                       enable.stdout or "", enable.stderr or ""),
+            CmdOutcome(
+                ["systemctl", "--user", "daemon-reload"],
+                reload_.returncode,
+                reload_.stdout or "",
+                reload_.stderr or "",
+            ),
+            CmdOutcome(
+                ["systemctl", "--user", "enable", "--now", unit],
+                enable.returncode,
+                enable.stdout or "",
+                enable.stderr or "",
+            ),
         ]
         # 须命令成功且最终既 active 又 enabled（BUG-152）；不可仅凭 is-active。
         ok = (
@@ -502,11 +544,15 @@ class SystemdUserBackend(AutostartBackend):
 
     def disable(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
         unit = systemd_unit_name(name)
-        res = runner(
-            ["systemctl", "--user", "disable", "--now", unit], capture_output=True
-        )
-        outcomes = [CmdOutcome(["systemctl", "--user", "disable", "--now", unit],
-                               res.returncode, res.stdout or "", res.stderr or "")]
+        res = runner(["systemctl", "--user", "disable", "--now", unit], capture_output=True)
+        outcomes = [
+            CmdOutcome(
+                ["systemctl", "--user", "disable", "--now", unit],
+                res.returncode,
+                res.stdout or "",
+                res.stderr or "",
+            )
+        ]
         # 须命令成功且最终既非 active 也非 enabled（BUG-152）。
         ok = (
             res.returncode == 0
@@ -520,8 +566,30 @@ class SystemdUserBackend(AutostartBackend):
         # systemctl restart 在监督下停+起，全程单一进程（BUG-191），不会与 detached
         # spawn 抢锁。
         res = runner(["systemctl", "--user", "restart", unit], capture_output=True)
-        outcomes = [CmdOutcome(["systemctl", "--user", "restart", unit],
-                               res.returncode, res.stdout or "", res.stderr or "")]
+        outcomes = [
+            CmdOutcome(
+                ["systemctl", "--user", "restart", unit],
+                res.returncode,
+                res.stdout or "",
+                res.stderr or "",
+            )
+        ]
+        ok = res.returncode == 0 and self.is_loaded(name, runner)
+        return outcomes, ok
+
+    def start(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
+        unit = systemd_unit_name(name)
+        # systemctl --user start 在监督下拉起（IMP-059.03），不与 detached spawn
+        # 抢锁产生双进程。
+        res = runner(["systemctl", "--user", "start", unit], capture_output=True)
+        outcomes = [
+            CmdOutcome(
+                ["systemctl", "--user", "start", unit],
+                res.returncode,
+                res.stdout or "",
+                res.stderr or "",
+            )
+        ]
         ok = res.returncode == 0 and self.is_loaded(name, runner)
         return outcomes, ok
 
@@ -540,18 +608,20 @@ class SystemdUserBackend(AutostartBackend):
         # 先删单元文件，再 daemon-reload 让 systemd 忘掉已删除的单元。
         # reload 结果必须收集并计入成败（BUG-144）。
         rel = runner(["systemctl", "--user", "daemon-reload"], capture_output=True)
-        outcomes.append(CmdOutcome(
-            ["systemctl", "--user", "daemon-reload"], rel.returncode,
-            rel.stdout or "", rel.stderr or ""))
+        outcomes.append(
+            CmdOutcome(
+                ["systemctl", "--user", "daemon-reload"],
+                rel.returncode,
+                rel.stdout or "",
+                rel.stderr or "",
+            )
+        )
         if rel.returncode != 0:
             if saved is not None:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(saved)
             return outcomes, False
-        return outcomes, (
-            not path.is_file()
-            and not self.is_loaded(name, runner)
-        )
+        return outcomes, (not path.is_file() and not self.is_loaded(name, runner))
 
     def is_loaded(self, name: str, runner: SubprocessRunner) -> bool:
         unit = systemd_unit_name(name)
@@ -647,8 +717,7 @@ def write_manifest(ws: Workspace, services: list[str]) -> None:
     p = _manifest_path(ws)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        json.dumps({"version": 1, "services": list(services)}, ensure_ascii=False, indent=2)
-        + "\n",
+        json.dumps({"version": 1, "services": list(services)}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -729,9 +798,7 @@ def _prepare_daemon_for_supervision(ws: Workspace) -> None:
         pass
 
 
-def _migrate_detached_for_supervision(
-    ws: Workspace, config: Config, name: str
-) -> bool:
+def _migrate_detached_for_supervision(ws: Workspace, config: Config, name: str) -> bool:
     """受控迁移（BUG-146/147）：停掉 detached 进程，让监管进程持锁/绑端口。
 
     仅在对应 detached 服务确实在跑时停止它——监管单元随后启动的前台入口会抢锁/
@@ -762,18 +829,36 @@ def _migrate_detached_for_supervision(
         return False
 
 
+def resolve_with_caddy(config: Config, with_caddy: bool | None) -> bool:
+    """IMP-061：``with_caddy`` 三态解析——None 时 caddy 在用即纳入（缺省安全）。
+
+    旧命令 ``--with-caddy``（True）与 ``--no-with-caddy``（False）语义不变。
+    """
+    if with_caddy is None:
+        return config.staticGateway == "caddy"
+    return bool(with_caddy)
+
+
 def install(
     ws: Workspace,
     config: Config,
     *,
-    with_caddy: bool = False,
+    with_caddy: bool | None = None,
     enable: bool = True,
-    linger: bool = False,
+    linger: bool | None = None,
     python_exe: str | None = None,
     preserve_installed: bool = False,
     runner: SubprocessRunner = _default_runner,
 ) -> InstallResult:
     """生成（并可选启用）自启动单元。
+
+    IMP-061 缺省值反转（缺省安全、显式退出）：
+
+    * ``with_caddy=None``（缺省）：``staticGateway=caddy`` 时 gateway 单元
+      **默认纳入**；``--no-with-caddy`` 显式排除；旧命令 ``--with-caddy``
+      行为不变；
+    * ``linger=None``（缺省）：Linux/WSL 默认**尝试** enable-linger，失败仅
+      WARN 不失败；``--no-linger`` 显式跳过；旧命令 ``--linger`` 行为不变。
 
     ``preserve_installed=True`` 时并入磁盘上已安装的服务（含 gateway），
     避免 repair 把既有单元当 orphan 卸载（BUG-384）。``with_caddy`` 只控制
@@ -802,7 +887,11 @@ def install(
             )
         ) from exc
     backend = select_backend(plat)
-    target_services = select_services(config, with_caddy=with_caddy)
+    # IMP-061：with_caddy=None → caddy 在用即纳入；linger=None → 默认尝试
+    # （None=False 会把"缺省尝试"折叠成 False，故用 is not False 判定）
+    effective_with_caddy = resolve_with_caddy(config, with_caddy)
+    effective_linger = linger is not False
+    target_services = select_services(config, with_caddy=effective_with_caddy)
     services = list(target_services)
     if preserve_installed:
         prev = installed_services(ws, backend)
@@ -872,17 +961,20 @@ def install(
                 result.enable_outcomes.extend(outs)
                 if not ok:
                     all_ok = False
-                result.notes.append(
-                    f"保留但未启用 {name}（当前配置未纳入该服务）"
-                )
+                result.notes.append(f"保留但未启用 {name}（当前配置未纳入该服务）")
                 continue
             # 受控迁移：停 detached 进程，让监管进程持锁/绑端口并回写自身 pid（BUG-146/147）。
             # 迁移失败（旧进程未停）必须计入失败，且不得再加载单元（BUG-146/159）。
             if not _migrate_detached_for_supervision(ws, config, name):
                 all_ok = False
-                result.enable_outcomes.append(CmdOutcome(
-                    ["(migrate)", name], 1, "",
-                    f"detached {name} 未能停止，监管进程可能无法持锁/绑端口"))
+                result.enable_outcomes.append(
+                    CmdOutcome(
+                        ["(migrate)", name],
+                        1,
+                        "",
+                        f"detached {name} 未能停止，监管进程可能无法持锁/绑端口",
+                    )
+                )
                 result.notes.append(
                     f"⚠️ 迁移 detached {name} 失败（旧进程未停止）；"
                     "请手动停掉旧进程后重试 lwa autostart install/enable"
@@ -903,7 +995,7 @@ def install(
             "（见下方脚本或 docs/autostart.md）运行本工具。"
         )
 
-    if linger and plat in (PLATFORM_LINUX, PLATFORM_WSL):
+    if effective_linger and plat in (PLATFORM_LINUX, PLATFORM_WSL):
         result.linger_attempted = True
         result.linger_ok = enable_linger(runner=runner)
         if not result.linger_ok:
@@ -936,9 +1028,14 @@ def enable(
     for name in services:
         if not _migrate_detached_for_supervision(ws, config, name):
             all_ok = False
-            outcomes.append(CmdOutcome(
-                ["(migrate)", name], 1, "",
-                f"detached {name} 未能停止，监管进程可能无法持锁/绑端口"))
+            outcomes.append(
+                CmdOutcome(
+                    ["(migrate)", name],
+                    1,
+                    "",
+                    f"detached {name} 未能停止，监管进程可能无法持锁/绑端口",
+                )
+            )
             # 迁移失败不得再加载单元，否则监管入口抢锁失败且可能形成重启循环（BUG-159）。
             continue
         outs, ok = backend.enable(name, runner)
@@ -988,9 +1085,7 @@ def uninstall(
     return OpResult(outcomes, all_ok)
 
 
-def is_service_loaded(
-    name: str, *, runner: SubprocessRunner = _default_runner
-) -> bool:
+def is_service_loaded(name: str, *, runner: SubprocessRunner = _default_runner) -> bool:
     """该服务单元当前是否已加载/激活（按当前平台后端判定）。"""
     try:
         backend = select_backend()
@@ -1104,12 +1199,203 @@ def coordinated_restart(
         )
     return CoordinatedResult(
         note=(
-            f"⚠️ {service_name} 自启动重启失败，回退 stop+start（KeepAlive/Restart"
-            " 可能短暂重复）"
+            f"⚠️ {service_name} 自启动重启失败，回退 stop+start（KeepAlive/Restart 可能短暂重复）"
         ),
         ok=False,
         managed=False,
     )
+
+
+def coordinated_start(
+    ws: Workspace, service_name: str, *, runner: SubprocessRunner = _default_runner
+) -> CoordinatedResult:
+    """IMP-059.03：拉起"enabled 但意外未运行"的服务时与自启动协调。
+
+    单元已加载/启用 → 交监督器 ``start``（systemctl --user start / launchctl
+    kickstart），由监督器保证单一进程；``managed=True`` 时调用方**不应**再
+    detached spawn（否则监督器与 detached 进程抢锁/端口产生双进程）。
+
+    单元不存在或未加载未启用 → ``managed=False``，调用方按 detached
+    start_manager/start_daemon/start_gateway 处理。
+    """
+    try:
+        backend = select_backend()
+    except AutostartError:
+        return CoordinatedResult()
+    if not backend.unit_path(service_name).is_file():
+        return CoordinatedResult()
+    try:
+        loaded = backend.is_loaded(service_name, runner)
+    except Exception:  # noqa: BLE001
+        loaded = False
+    try:
+        enabled = backend.is_enabled(service_name, runner)
+    except Exception:  # noqa: BLE001
+        enabled = False
+    if not (loaded or enabled):
+        return CoordinatedResult()
+    try:
+        _outcomes, ok = backend.start(service_name, runner)
+    except Exception as exc:  # noqa: BLE001 — 启动异常则回退 detached start
+        return CoordinatedResult(
+            note=f"⚠️ {service_name} 自启动单元启动异常（{exc}），回退 detached 启动",
+            ok=False,
+            managed=False,
+        )
+    if ok:
+        return CoordinatedResult(
+            note=f"已通过自启动单元拉起 {service_name}（监督器保证单一进程）",
+            ok=True,
+            managed=True,
+        )
+    return CoordinatedResult(
+        note=f"⚠️ {service_name} 自启动单元启动失败，回退 detached 启动",
+        ok=False,
+        managed=False,
+    )
+
+
+# ---- 首次引导（IMP-061.02）--------------------------------------------------
+
+
+def _stdin_is_interactive() -> bool:
+    """stdin/stdout 是否均为 TTY（Agent/管道/CI 场景零阻塞，IMP-031 同模式）。"""
+    import sys
+
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:  # noqa: BLE001 — isatty 异常按非交互处理
+        return False
+
+
+@dataclass
+class AutostartOfferResult:
+    """init/setup 收尾自启引导结果（消息供 CLI 输出，attempted/ok 决定退出码）。"""
+
+    messages: list[str] = field(default_factory=list)
+    attempted: bool = False
+    ok: bool | None = None
+    services: list[str] = field(default_factory=list)
+
+
+def recommended_install_cmd(config: Config) -> str:
+    """按平台与网关配置给出实证修复命令（§14.1）。"""
+    plat = detect_platform()
+    if plat in (PLATFORM_LINUX, PLATFORM_WSL):
+        if config.staticGateway == "caddy":
+            return "lwa autostart install --with-caddy --linger"
+        return "lwa autostart install --linger"
+    if config.staticGateway == "caddy":
+        return "lwa autostart install --with-caddy"
+    return "lwa autostart install"
+
+
+def maybe_offer_autostart_install(
+    ws: Workspace,
+    config: Config,
+    *,
+    install_flag: bool | None = None,
+    confirm: Callable[[str], bool] | None = None,
+    runner: SubprocessRunner = _default_runner,
+) -> AutostartOfferResult:
+    """IMP-061.02：``lwa init`` / ``lwa setup`` 收尾引导安装自启（缺省安全）。
+
+    * 仅**原生 Linux 且 systemd 可用**时引导（WSL / macOS 行为不变，见 IMP-030）；
+    * 交互 TTY：询问 [y/N]（仿 IMP-031 Docker 询问）；非 TTY：打印建议命令，
+      **零阻塞**（Agent/脚本场景）；
+    * 已装任何自启单元 → 跳过（无需引导）；
+    * 不强制安装：拒绝只打印命令，靠 IMP-060 WARN 收敛。
+    """
+    result = AutostartOfferResult()
+    plat = detect_platform()
+    if plat != PLATFORM_LINUX:
+        return result
+    if not systemd_available():
+        return result
+    try:
+        backend = select_backend(plat)
+        if installed_services(ws, backend):
+            result.messages.append("自启动单元已安装（可 `lwa autostart check` 复核完备性）")
+            return result
+    except AutostartError:
+        return result
+
+    cmd = recommended_install_cmd(config)
+    if install_flag is False:
+        result.messages.append(f"已跳过自启动安装。需要时执行：{cmd}")
+        return result
+
+    do_install = install_flag is True
+    if install_flag is None:
+        if _stdin_is_interactive():
+            prompt = (
+                "检测到 systemd。是否安装自启动单元（daemon/manager"
+                + ("/gateway" if config.staticGateway == "caddy" else "")
+                + "，机器重启后自动恢复）？[y/N] "
+            )
+            if confirm is not None:
+                do_install = confirm(prompt)
+            else:
+                do_install = input(prompt).strip().lower() in {"y", "yes"}
+        else:
+            result.messages.append(
+                f"非交互终端：跳过自启动询问。建议执行 `{cmd}`，"
+                "否则服务为裸进程，机器重启后不会自动恢复（lwa doctor 可见 WARN）"
+            )
+            return result
+
+    if not do_install:
+        result.messages.append(f"已跳过自启动安装。需要时执行：{cmd}")
+        return result
+
+    result.messages.append(f"执行：{cmd}")
+    install_result = install(ws, config, with_caddy=None, enable=True, linger=None, runner=runner)
+    result.attempted = True
+    result.ok = install_result.enable_ok
+    result.services = install_result.services
+    result.messages.append(
+        f"自启动已安装并启用（监管服务：{', '.join(install_result.services)}）；"
+        "用 `lwa autostart check` 复核完备性"
+    )
+    for note in install_result.notes:
+        result.messages.append(f"提示：{note}")
+    return result
+
+
+# ---- 运行模式标注（IMP-061.03）----------------------------------------------
+
+SERVICE_MODE_SYSTEMD = "systemd 监管"
+SERVICE_MODE_LAUNCHD = "launchd 监管"
+#: 裸进程：合法但脆弱——机器重启/登出后不会自动恢复（§14 事故形态）
+SERVICE_MODE_BARE = "裸进程（重启后不自动恢复）"
+
+
+def service_supervision_mode(name: str, *, runner: SubprocessRunner = _default_runner) -> str:
+    """服务运行模式：自启单元在管 → 监督器；否则裸进程。
+
+    供 ``lwa autostart status`` / ``lwa status`` 标注每个服务的运行模式，
+    让"重启后不会自动恢复"的裸进程模式自己可见（IMP-060 的 WARN 互补）。
+    """
+    try:
+        backend = select_backend()
+    except AutostartError:
+        return SERVICE_MODE_BARE
+    if not backend.unit_path(name).is_file():
+        return SERVICE_MODE_BARE
+    try:
+        loaded = backend.is_loaded(name, runner)
+    except Exception:  # noqa: BLE001
+        loaded = False
+    try:
+        enabled = backend.is_enabled(name, runner)
+    except Exception:  # noqa: BLE001
+        enabled = False
+    if not (loaded or enabled):
+        return SERVICE_MODE_BARE
+    plat = detect_platform()
+    if plat in (PLATFORM_LINUX, PLATFORM_WSL):
+        return SERVICE_MODE_SYSTEMD
+    return SERVICE_MODE_LAUNCHD
 
 
 # ---- linger ----------------------------------------------------------------
@@ -1122,9 +1408,7 @@ def _linger_username() -> str:
         try:
             user = getpass.getuser()
         except Exception as exc:  # noqa: BLE001
-            raise AutostartError(
-                f"无法确定当前用户，拒绝操作 linger：{exc}"
-            ) from exc
+            raise AutostartError(f"无法确定当前用户，拒绝操作 linger：{exc}") from exc
     if not user:
         raise AutostartError("无法确定当前用户，拒绝以 root 操作 linger")
     return user
@@ -1186,7 +1470,7 @@ def render_wsl_windows_script(ws: Workspace, config: Config) -> str:
         "#   程序: powershell.exe  参数: -NoProfile -ExecutionPolicy Bypass -File <本文件>）\n"
         "# WSL 发行版不随 Windows 开机自启，且空闲会自动关机；本脚本长驻以保活 systemd。\n"
         "# 停止保活：在任务计划程序里结束本任务（发行版随后可空闲关机）。\n"
-        f"$distro = \"{distro}\"\n"
+        f'$distro = "{distro}"\n'
         "wsl.exe -d $distro -- bash -lc 'systemctl --user start lwa-daemon.service "
         "lwa-manager.service lwa-gateway.service 2>/dev/null; exec sleep infinity'\n"
     )
@@ -1292,9 +1576,7 @@ def _extract_workspace_from_unit(name: str, plat: str) -> str | None:
             data = plistlib.loads(path.read_bytes())
             args = list(data.get("ProgramArguments", []))
         else:
-            args = shlex.split(
-                _grep_exec_start(path) or ""
-            )
+            args = shlex.split(_grep_exec_start(path) or "")
         if "--workspace" in args:
             i = args.index("--workspace")
             if i + 1 < len(args):
@@ -1307,7 +1589,7 @@ def _extract_workspace_from_unit(name: str, plat: str) -> str | None:
 def _grep_exec_start(path: Path) -> str | None:
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("ExecStart="):
-            return line[len("ExecStart="):]
+            return line[len("ExecStart=") :]
     return None
 
 
@@ -1353,26 +1635,43 @@ def _check_unit_identity(ws: Workspace, backend: AutostartBackend, name: str) ->
     """单元身份：已安装 + 前台形态 + 工作区一致 + 模块正确（杜绝假绿，BUG-151）。"""
     path = backend.unit_path(name)
     if not path.is_file():
-        return CheckItem("unit", name, STATUS_FAIL, f"{name} 单元未安装",
-                         fix=f"lwa autostart install{' --with-caddy' if name == 'gateway' else ''}")
+        return CheckItem(
+            "unit",
+            name,
+            STATUS_FAIL,
+            f"{name} 单元未安装",
+            fix=f"lwa autostart install{' --with-caddy' if name == 'gateway' else ''}",
+        )
     plat = detect_platform()
     if backend.is_legacy(name):
-        return CheckItem("unit", name, STATUS_FAIL,
-                         f"{name} 是旧 detached 启动器（… {name} on），无崩溃恢复",
-                         fix="lwa autostart repair")
+        return CheckItem(
+            "unit",
+            name,
+            STATUS_FAIL,
+            f"{name} 是旧 detached 启动器（… {name} on），无崩溃恢复",
+            fix="lwa autostart repair",
+        )
     args = _unit_args(name, plat)
     # 工作区一致
     unit_ws = _extract_workspace_from_unit(name, plat)
     if unit_ws is None or Path(unit_ws).resolve() != Path(ws.root).resolve():
-        return CheckItem("unit", name, STATUS_FAIL,
-                         f"{name} 单元工作区({unit_ws}) ≠ 当前({ws.root})",
-                         fix="lwa autostart repair（重写为当前工作区）")
+        return CheckItem(
+            "unit",
+            name,
+            STATUS_FAIL,
+            f"{name} 单元工作区({unit_ws}) ≠ 当前({ws.root})",
+            fix="lwa autostart repair（重写为当前工作区）",
+        )
     # 模块正确（前台入口）
     expected_mod = SERVICE_MODULES.get(name)
     if expected_mod and ("-m", expected_mod) not in zip(args, args[1:]):
-        return CheckItem("unit", name, STATUS_FAIL,
-                         f"{name} 单元非预期前台模块（期望 -m {expected_mod}）",
-                         fix="lwa autostart repair")
+        return CheckItem(
+            "unit",
+            name,
+            STATUS_FAIL,
+            f"{name} 单元非预期前台模块（期望 -m {expected_mod}）",
+            fix="lwa autostart repair",
+        )
     return CheckItem("unit", name, STATUS_OK, f"{name} 前台监管单元，工作区一致")
 
 
@@ -1384,8 +1683,7 @@ def _check_enabled(backend: AutostartBackend, name: str, runner: SubprocessRunne
         enabled = False
     if enabled:
         return CheckItem("enabled", name, STATUS_OK, "已启用")
-    return CheckItem("enabled", name, STATUS_FAIL, "未启用",
-                     fix="lwa autostart enable")
+    return CheckItem("enabled", name, STATUS_FAIL, "未启用", fix="lwa autostart enable")
 
 
 def _service_process_running(ws: Workspace, config: Config, name: str) -> bool:
@@ -1413,8 +1711,13 @@ def _check_active(
     except Exception:  # noqa: BLE001
         active = False
     if not active:
-        return CheckItem("active", name, STATUS_FAIL, "单元未激活（未加载/未运行）",
-                         fix="lwa autostart enable，并查 logs/launchd-<name>.err 或 journalctl --user -u lwa-<name>")
+        return CheckItem(
+            "active",
+            name,
+            STATUS_FAIL,
+            "单元未激活（未加载/未运行）",
+            fix="lwa autostart enable，并查 logs/launchd-<name>.err 或 journalctl --user -u lwa-<name>",
+        )
     try:
         mpid = backend.main_pid(name, runner)
     except Exception:  # noqa: BLE001
@@ -1423,19 +1726,29 @@ def _check_active(
     from local_webpage_access.daemon import is_pid_alive, pid_cmdline_contains
 
     if mpid and not is_pid_alive(mpid):
-        return CheckItem("active", name, STATUS_FAIL,
-                         f"{name} 单元标记 active 但 MainPID {mpid} 已死",
-                         fix="查启动日志；必要时 lwa autostart repair")
+        return CheckItem(
+            "active",
+            name,
+            STATUS_FAIL,
+            f"{name} 单元标记 active 但 MainPID {mpid} 已死",
+            fix="查启动日志；必要时 lwa autostart repair",
+        )
     # 监管单元 active 时必须有 MainPID（BUG-156）；空 PID 无法证明由本单元拉起。
     if not mpid:
-        return CheckItem("active", name, STATUS_FAIL,
-                         f"{name} 单元标记 active 但无 MainPID",
-                         fix="查 logs/launchd-<name>.err 或 journalctl --user -u lwa-<name>；必要时 lwa autostart repair")
+        return CheckItem(
+            "active",
+            name,
+            STATUS_FAIL,
+            f"{name} 单元标记 active 但无 MainPID",
+            fix="查 logs/launchd-<name>.err 或 journalctl --user -u lwa-<name>；必要时 lwa autostart repair",
+        )
     # MainPID 身份：须为本工作区对应前台模块，杜绝任意存活 PID 假绿（BUG-162）。
     expected_mod = SERVICE_MODULES.get(name, "")
     if not pid_cmdline_contains(mpid, expected_mod, str(ws.root)):
         return CheckItem(
-            "active", name, STATUS_FAIL,
+            "active",
+            name,
+            STATUS_FAIL,
             f"{name} MainPID {mpid} 身份不符（非本工作区前台模块 {expected_mod}）",
             fix="lwa autostart repair；确认无外部进程占用同名服务",
         )
@@ -1445,9 +1758,13 @@ def _check_active(
         return CheckItem("active", name, STATUS_WARN, f"单元 active，但进程探测失败：{exc}")
     if not proc_running:
         # 单元标记 active 但实际无服务进程 → 假绿，按验收标准判 fail（BUG-149）。
-        return CheckItem("active", name, STATUS_FAIL,
-                         f"{name} 单元标记 active 但服务进程未运行",
-                         fix="查 logs/launchd-<name>.err 或 journalctl --user -u lwa-<name>；必要时 lwa autostart repair")
+        return CheckItem(
+            "active",
+            name,
+            STATUS_FAIL,
+            f"{name} 单元标记 active 但服务进程未运行",
+            fix="查 logs/launchd-<name>.err 或 journalctl --user -u lwa-<name>；必要时 lwa autostart repair",
+        )
     pid_info = f"，MainPID={mpid}"
     return CheckItem("active", name, STATUS_OK, f"{name} 运行中{pid_info}")
 
@@ -1457,13 +1774,18 @@ def _check_unit_interpreter(name: str, plat: str) -> CheckItem:
     py = _unit_python(name, plat)
     if not py:
         return CheckItem(
-            "interpreter", name, STATUS_FAIL,
+            "interpreter",
+            name,
+            STATUS_FAIL,
             f"{name} 单元无法解析解释器路径",
             fix="lwa autostart repair",
         )
     ok, msg = _python_version_ok(py)
     return CheckItem(
-        "interpreter", name, STATUS_OK if ok else STATUS_FAIL, f"{name}: {msg}",
+        "interpreter",
+        name,
+        STATUS_OK if ok else STATUS_FAIL,
+        f"{name}: {msg}",
         fix="用 ≥3.13 且已 pip install -e . 的解释器重跑 lwa autostart repair" if not ok else "",
     )
 
@@ -1484,8 +1806,8 @@ def _unit_path_env(name: str, plat: str) -> str | None:
             return str(val) if val else None
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.startswith("Environment=PATH="):
-                return line[len("Environment=PATH="):]
-            if line.startswith("Environment=\"PATH="):
+                return line[len("Environment=PATH=") :]
+            if line.startswith('Environment="PATH='):
                 return line.split("PATH=", 1)[-1].rstrip('"')
     except Exception:  # noqa: BLE001
         return None
@@ -1497,21 +1819,27 @@ def _check_unit_path_env(name: str, plat: str) -> CheckItem:
     path_env = _unit_path_env(name, plat)
     if not path_env:
         return CheckItem(
-            "path", name, STATUS_FAIL,
+            "path",
+            name,
+            STATUS_FAIL,
             f"{name} 单元缺少 PATH 环境变量",
             fix="lwa autostart repair",
         )
     dirs = [d for d in path_env.split(os.pathsep) if d]
     if not dirs:
         return CheckItem(
-            "path", name, STATUS_FAIL,
+            "path",
+            name,
+            STATUS_FAIL,
             f"{name} 单元 PATH 为空",
             fix="lwa autostart repair",
         )
     existing = [d for d in dirs if Path(d).is_dir()]
     if not existing:
         return CheckItem(
-            "path", name, STATUS_FAIL,
+            "path",
+            name,
+            STATUS_FAIL,
             f"{name} 单元 PATH 目录均不存在",
             fix="lwa autostart repair",
         )
@@ -1525,14 +1853,18 @@ def _check_unit_path_env(name: str, plat: str) -> CheckItem:
         has_sys = any(d in ("/usr/bin", "/bin") and Path(d).is_dir() for d in dirs)
         if not (has_py_dir or has_sys):
             return CheckItem(
-                "path", name, STATUS_FAIL,
+                "path",
+                name,
+                STATUS_FAIL,
                 f"{name} 单元 PATH 既无解释器目录也无基础系统目录",
                 fix="lwa autostart repair",
             )
     if name == "gateway":
         if shutil.which("caddy", path=path_env) is None:
             return CheckItem(
-                "path", name, STATUS_FAIL,
+                "path",
+                name,
+                STATUS_FAIL,
                 f"{name} 单元 PATH 无法解析 caddy",
                 fix="安装 caddy 到单元 PATH 可见目录后 lwa autostart repair",
             )
@@ -1551,14 +1883,26 @@ def run_check(
 
     # 平台
     if plat not in (PLATFORM_MACOS, PLATFORM_LINUX, PLATFORM_WSL):
-        report.items.append(CheckItem("platform", "platform", STATUS_FAIL,
-                                      f"不支持的平台 {plat!r}",
-                                      fix="仅 macOS / Linux / WSL 支持自启动"))
+        report.items.append(
+            CheckItem(
+                "platform",
+                "platform",
+                STATUS_FAIL,
+                f"不支持的平台 {plat!r}",
+                fix="仅 macOS / Linux / WSL 支持自启动",
+            )
+        )
         return report
     if plat == PLATFORM_WSL and not systemd_available():
-        report.items.append(CheckItem("platform", "systemd", STATUS_FAIL,
-                                      "WSL 下 systemd 不可用",
-                                      fix="/etc/wsl.conf 设置 [boot] systemd=true 后 wsl --shutdown 重启"))
+        report.items.append(
+            CheckItem(
+                "platform",
+                "systemd",
+                STATUS_FAIL,
+                "WSL 下 systemd 不可用",
+                fix="/etc/wsl.conf 设置 [boot] systemd=true 后 wsl --shutdown 重启",
+            )
+        )
         return report
     report.items.append(CheckItem("platform", "platform", STATUS_OK, plat))
 
@@ -1567,11 +1911,15 @@ def run_check(
 
     # 工作区
     ws_ok = ws.config_path.is_file()
-    report.items.append(CheckItem(
-        "workspace", "workspace", STATUS_OK if ws_ok else STATUS_FAIL,
-        f"{ws.root}（含 local-web.yml）" if ws_ok else f"工作区未初始化：{ws.root}",
-        fix="lwa init" if not ws_ok else "",
-    ))
+    report.items.append(
+        CheckItem(
+            "workspace",
+            "workspace",
+            STATUS_OK if ws_ok else STATUS_FAIL,
+            f"{ws.root}（含 local-web.yml）" if ws_ok else f"工作区未初始化：{ws.root}",
+            fix="lwa init" if not ws_ok else "",
+        )
+    )
 
     # 逐服务（以"实际已安装"为准）：单元身份 + 解释器 + PATH + 启用态 + 运行态
     expected = select_services(config, with_caddy=config.staticGateway == "caddy")
@@ -1581,9 +1929,15 @@ def run_check(
     if not installed:
         # 一个自启动单元都没装 → 自启动实质未配置，按验收标准判 fail（BUG-149），
         # 不再仅以 expected-but-missing 的 warn 退出 0。
-        report.items.append(CheckItem(
-            "unit", "install", STATUS_FAIL, "尚未安装任何自启动单元",
-            fix="lwa autostart install"))
+        report.items.append(
+            CheckItem(
+                "unit",
+                "install",
+                STATUS_FAIL,
+                "尚未安装任何自启动单元",
+                fix="lwa autostart install",
+            )
+        )
     else:
         for name in installed:
             report.items.append(_check_unit_identity(ws, backend, name))
@@ -1595,10 +1949,15 @@ def run_check(
         for name in expected:
             if name not in installed:
                 status = STATUS_FAIL if name in required else STATUS_WARN
-                report.items.append(CheckItem(
-                    "unit", name, status,
-                    f"{name} 未纳入自启（当前配置期望）",
-                    fix=f"lwa autostart install{' --with-caddy' if name == 'gateway' else ''}"))
+                report.items.append(
+                    CheckItem(
+                        "unit",
+                        name,
+                        status,
+                        f"{name} 未纳入自启（当前配置期望）",
+                        fix=f"lwa autostart install{' --with-caddy' if name == 'gateway' else ''}",
+                    )
+                )
 
     # Caddy
     if config.staticGateway == "caddy":
@@ -1609,9 +1968,15 @@ def run_check(
         if linger_enabled(runner=runner):
             report.items.append(CheckItem("linger", "linger", STATUS_OK, "Linger=yes"))
         else:
-            report.items.append(CheckItem(
-                "linger", "linger", STATUS_WARN, "未 enable-linger，登出后 user 服务会停止",
-                fix="sudo loginctl enable-linger $USER"))
+            report.items.append(
+                CheckItem(
+                    "linger",
+                    "linger",
+                    STATUS_WARN,
+                    "未 enable-linger，登出后 user 服务会停止",
+                    fix="sudo loginctl enable-linger $USER",
+                )
+            )
 
     # WSL 待办
     if plat == PLATFORM_WSL:
@@ -1659,29 +2024,40 @@ def _check_caddy(ws: Workspace, config: Config) -> CheckItem:
     caddy = shutil.which("caddy")
     if not caddy:
         return CheckItem(
-            "caddy", "caddy_binary", STATUS_FAIL,
+            "caddy",
+            "caddy_binary",
+            STATUS_FAIL,
             "PATH 中找不到 caddy（BUG-139：监管环境 PATH 不全）",
-            fix="brew install caddy 或把 caddy 路径加入 PATH 后 lwa autostart repair")
+            fix="brew install caddy 或把 caddy 路径加入 PATH 后 lwa autostart repair",
+        )
     # 系统 caddy.service 与 LWA gateway 争用 :2019（仅 Linux 可能存在发行版单元）
     if detect_platform() in (PLATFORM_LINUX, PLATFORM_WSL):
         try:
             res = subprocess.run(
                 ["systemctl", "is-active", "caddy.service"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if res.returncode == 0:
                 return CheckItem(
-                    "caddy", "caddy_conflict", STATUS_FAIL,
+                    "caddy",
+                    "caddy_conflict",
+                    STATUS_FAIL,
                     "系统 caddy.service 正在运行，会与 LWA gateway 争用 :2019",
-                    fix="sudo systemctl disable --now caddy.service（由 LWA 托管 Caddy）")
+                    fix="sudo systemctl disable --now caddy.service（由 LWA 托管 Caddy）",
+                )
         except Exception:  # noqa: BLE001
             pass
     # 外部 Caddy/进程占用 :2019（本工作区 gateway 未持存活 pid 却探测到端口在线）
     if _port_2019_foreign(ws):
         return CheckItem(
-            "caddy", "caddy_conflict_2019", STATUS_FAIL,
+            "caddy",
+            "caddy_conflict_2019",
+            STATUS_FAIL,
             "127.0.0.1:2019 已被外部 Caddy/进程占用，LWA gateway 无法监听",
-            fix="停止占用 :2019 的进程（如 caddy stop / 关测试孤儿），或改其 admin 端口")
+            fix="停止占用 :2019 的进程（如 caddy stop / 关测试孤儿），或改其 admin 端口",
+        )
     return CheckItem("caddy", "caddy_binary", STATUS_OK, f"caddy: {caddy}，无系统服务/端口冲突")
 
 
@@ -1690,9 +2066,16 @@ def _check_wsl(ws: Workspace) -> CheckItem:
     on_mnt_c = str(ws.root).startswith("/mnt/c") or str(ws.root).startswith("/mnt/")
     notes = [f"发行版：{distro}"]
     if on_mnt_c:
-        notes.append("工作区在 /mnt/×（Windows 文件系统）：Full/autostart 写路径 fail-closed，请迁移到 ~/lwa 等 Linux 路径")
-    return CheckItem("wsl", "wsl", STATUS_WARN, "；".join(notes),
-                     detail="WSL 发行版不随 Windows 开机自启；需 Windows 登录任务唤醒 + 网络可能变化（lwa access refresh）")
+        notes.append(
+            "工作区在 /mnt/×（Windows 文件系统）：Full/autostart 写路径 fail-closed，请迁移到 ~/lwa 等 Linux 路径"
+        )
+    return CheckItem(
+        "wsl",
+        "wsl",
+        STATUS_WARN,
+        "；".join(notes),
+        detail="WSL 发行版不随 Windows 开机自启；需 Windows 登录任务唤醒 + 网络可能变化（lwa access refresh）",
+    )
 
 
 def _check_docker(ws: Workspace) -> CheckItem:
@@ -1716,9 +2099,13 @@ def _check_docker(ws: Workspace) -> CheckItem:
     if not has_container:
         return CheckItem("docker", "docker", STATUS_OK, "无容器实例，跳过")
     if not shutil.which("docker"):
-        return CheckItem("docker", "docker", STATUS_WARN,
-                         "有容器实例但 docker 命令缺失",
-                         fix="安装 Docker Engine/Desktop")
+        return CheckItem(
+            "docker",
+            "docker",
+            STATUS_WARN,
+            "有容器实例但 docker 命令缺失",
+            fix="安装 Docker Engine/Desktop",
+        )
     try:
         res = subprocess.run(["docker", "info"], capture_output=True, timeout=10, text=True)
         if res.returncode == 0:
@@ -1738,9 +2125,13 @@ def _check_docker(ws: Workspace) -> CheckItem:
                 "Docker 权限不足（docker.sock），manager/daemon 无法观测容器",
                 fix=DOCKER_PERMISSION_HINT,
             )
-        return CheckItem("docker", "docker", STATUS_WARN,
-                         "docker info 返回非零，引擎可能未启动",
-                         fix="启动 Docker Desktop/Engine（建议设为登录/开机启动）")
+        return CheckItem(
+            "docker",
+            "docker",
+            STATUS_WARN,
+            "docker info 返回非零，引擎可能未启动",
+            fix="启动 Docker Desktop/Engine（建议设为登录/开机启动）",
+        )
     except Exception as exc:  # noqa: BLE001
         return CheckItem("docker", "docker", STATUS_WARN, f"探测 Docker 失败：{exc}")
 
@@ -1752,20 +2143,21 @@ def repair(
     ws: Workspace,
     config: Config,
     *,
-    with_caddy: bool = False,
+    with_caddy: bool | None = None,
     python_exe: str | None = None,
     runner: SubprocessRunner = _default_runner,
 ) -> tuple[InstallResult, list[str]]:
     """修复：重写失效路径、迁移旧启动器单元、重新 enable。返回 (结果, 修复说明)。
 
-    默认保留磁盘上已安装的全部服务（含 gateway）；``with_caddy`` 仅在原先
-    未安装 gateway 时新增它，不会卸载已有单元（BUG-384）。启用时只 enable
-    配置目标集合；config 已关闭的残留单元会 disable 而非重启用（BUG-389）。
+    默认保留磁盘上已安装的全部服务（含 gateway）；``with_caddy=None``（IMP-061
+    缺省）时 caddy 在用即纳入 gateway，不会卸载已有单元（BUG-384）。启用时只
+    enable 配置目标集合；config 已关闭的残留单元会 disable 而非重启用（BUG-389）。
     """
     actions: list[str] = []
     backend = select_backend()
     # 检测旧单元 → 记录迁移（含已安装但 select_services 未纳入的 gateway）
-    target = select_services(config, with_caddy=with_caddy)
+    effective_with_caddy = resolve_with_caddy(config, with_caddy)
+    target = select_services(config, with_caddy=effective_with_caddy)
     installed = installed_services(ws, backend)
     check_names = [s for s in ALL_SERVICES if s in set(target) | set(installed)]
     for name in check_names:
@@ -1774,9 +2166,13 @@ def repair(
     if "gateway" in installed and "gateway" not in target:
         actions.append("保留已安装的 gateway 单元（repair 默认不卸载）")
     result = install(
-        ws, config, with_caddy=with_caddy, enable=True,
+        ws,
+        config,
+        with_caddy=effective_with_caddy,
+        enable=True,
         preserve_installed=True,
-        python_exe=python_exe, runner=runner,
+        python_exe=python_exe,
+        runner=runner,
     )
     for note in result.notes:
         if "保留但未启用" in note and note not in actions:
@@ -1797,12 +2193,16 @@ def doctor_hints(ws: Workspace, config: Config) -> str:
         lines.append("· macOS 为用户登录触发型自启（LaunchAgent），非无人值守系统服务。")
         lines.append("· Docker Desktop：在设置里勾选“Start Docker Desktop when you sign in”。")
     elif plat in (PLATFORM_LINUX, PLATFORM_WSL):
-        lines.append("· Linux/WSL 为 systemd user 服务；登出后需 linger 才保活："
-                     "sudo loginctl enable-linger $USER")
+        lines.append(
+            "· Linux/WSL 为 systemd user 服务；登出后需 linger 才保活："
+            "sudo loginctl enable-linger $USER"
+        )
         lines.append("· Docker Engine 建议设为开机自启：sudo systemctl enable docker")
         if plat == PLATFORM_WSL:
-            lines.append("· WSL：发行版需 Windows 登录任务唤醒（lwa autostart install 已生成脚本）；"
-                         "网络可能变化，IP 变更后执行 lwa access refresh。")
+            lines.append(
+                "· WSL：发行版需 Windows 登录任务唤醒（lwa autostart install 已生成脚本）；"
+                "网络可能变化，IP 变更后执行 lwa access refresh。"
+            )
     else:
         lines.append(f"· 平台 {plat!r} 暂不支持自启动（参考 docs/autostart.md）。")
     if config.staticGateway == "caddy":

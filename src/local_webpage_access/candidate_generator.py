@@ -44,23 +44,53 @@ log = get_logger("candidate_generator")
 
 # 复用 scanner 的框架常量（避免重复定义）
 _PYTHON_WEB = {
-    "flask", "fastapi", "uvicorn", "gunicorn", "django",
-    "streamlit", "gradio", "starlette", "sanic", "tornado",
+    "flask",
+    "fastapi",
+    "uvicorn",
+    "gunicorn",
+    "django",
+    "streamlit",
+    "gradio",
+    "starlette",
+    "sanic",
+    "tornado",
 }
 _NODE_FRONTEND = {"vite", "react", "react-dom", "vue", "@vitejs/plugin-react", "svelte", "preact"}
 _NODE_BACKEND = {
-    "express", "fastify", "koa", "@nestjs/core", "next", "nuxt",
-    "@hono/node-server", "polka", "restana",
+    "express",
+    "fastify",
+    "koa",
+    "@nestjs/core",
+    "next",
+    "nuxt",
+    "@hono/node-server",
+    "polka",
+    "restana",
 }
 # Python 框架默认端口
 _PYTHON_PORT = {
-    "flask": 5000, "fastapi": 8000, "uvicorn": 8000, "gunicorn": 8000,
-    "django": 8000, "streamlit": 8501, "gradio": 7860,
-    "starlette": 8000, "sanic": 8000, "tornado": 8888,
+    "flask": 5000,
+    "fastapi": 8000,
+    "uvicorn": 8000,
+    "gunicorn": 8000,
+    "django": 8000,
+    "streamlit": 8501,
+    "gradio": 7860,
+    "starlette": 8000,
+    "sanic": 8000,
+    "tornado": 8888,
 }
 _PYTHON_PRIORITY = (
-    "fastapi", "flask", "django", "streamlit", "gradio", "uvicorn",
-    "gunicorn", "starlette", "sanic", "tornado",
+    "fastapi",
+    "flask",
+    "django",
+    "streamlit",
+    "gradio",
+    "uvicorn",
+    "gunicorn",
+    "starlette",
+    "sanic",
+    "tornado",
 )
 
 
@@ -108,10 +138,12 @@ def generate_candidates(evidence: ProjectEvidence) -> list[DeploymentCandidate]:
 
     # R-python-root: 根目录 Python Web 框架
     root_python_web = set(evidence.pythonDeps) & _PYTHON_WEB
-    if root_python_web and evidence.hasPackageJson is False or (
-        root_python_web and not any(
-            s for s in evidence.subdirSignals
-            if set(s.pythonDeps) & _PYTHON_WEB
+    if (
+        root_python_web
+        and evidence.hasPackageJson is False
+        or (
+            root_python_web
+            and not any(s for s in evidence.subdirSignals if set(s.pythonDeps) & _PYTHON_WEB)
         )
     ):
         # 仅当根目录有 Python Web 框架且没有子目录 Python 候选时生成
@@ -143,7 +175,9 @@ def generate_candidates(evidence: ProjectEvidence) -> list[DeploymentCandidate]:
 
     # ---- Frontend 候选 ----
     # R-frontend-subdir: 子目录有 NODE_FRONTEND + build script
-    has_backend_candidate = any(c.kind in ("python", "node") and c.confidenceTier == "primary" for c in candidates)
+    has_backend_candidate = any(
+        c.kind in ("python", "node") and c.confidenceTier == "primary" for c in candidates
+    )
     for signal in evidence.subdirSignals:
         frontend_deps = set(signal.nodeDeps.keys()) & _NODE_FRONTEND
         if frontend_deps and "build" in signal.nodeScripts:
@@ -463,21 +497,18 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
 
     # 识别后端候选与前端候选
     backend_cands = [
-        c for c in candidates
+        c
+        for c in candidates
         if c.kind in ("python", "node")
         and c.runtime == "docker_compose"
         and c.confidenceTier == "primary"
     ]
     frontend_cands = [
-        c for c in candidates
-        if c.kind == "node"
-        and c.runtime == "shared_static"
-        and c.form == "frontend-static"
+        c
+        for c in candidates
+        if c.kind == "node" and c.runtime == "shared_static" and c.form == "frontend-static"
     ]
-    static_cands = [
-        c for c in candidates
-        if c.kind == "static"
-    ]
+    static_cands = [c for c in candidates if c.kind == "static"]
 
     if backend_cands:
         # 有后端候选：每个后端候选可能与其前端候选共同构成全栈计划
@@ -489,7 +520,8 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
 
             # 后端运行组件
             backend_component = _candidate_to_component(
-                backend, role="runtime",
+                backend,
+                role="runtime",
             )
             components.append(backend_component)
 
@@ -510,27 +542,22 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
                     backend_signal is not None and backend_signal.hasAlembicIni
                 ):
                     contract.requiresMigrations = True
-            contract.requiresDatabase = contract.requiresDatabase or bool(
-                evidence.sqliteFiles
-            )
+            contract.requiresDatabase = contract.requiresDatabase or bool(evidence.sqliteFiles)
             evidence_refs.append("backend_candidate")
 
             # 查找可协作的前端候选（纳入同一计划）
-            cooperative_frontends = [
-                f for f in frontend_cands
-                if f.confidenceTier == "alternate"
-            ]
+            cooperative_frontends = [f for f in frontend_cands if f.confidenceTier == "alternate"]
             for frontend in cooperative_frontends:
                 frontend_component = _candidate_to_component(
-                    frontend, role="build",
+                    frontend,
+                    role="build",
                 )
                 # C.03：前端构建产物传递到后端静态目录
                 frontend_component.artifactTarget = "backend/static"
                 components.append(frontend_component)
                 contract.servesUi = True
                 reasoning.append(
-                    f"前端构建组件（{frontend.sourceSubdir or 'root'}）"
-                    f"产物传递到 backend/static"
+                    f"前端构建组件（{frontend.sourceSubdir or 'root'}）产物传递到 backend/static"
                 )
                 evidence_refs.append("frontend_candidate")
 
@@ -541,23 +568,23 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
             if discovered_probes:
                 for probe in discovered_probes:
                     contract.requiredProbes.append(probe)
-                reasoning.append(
-                    f"从源码发现 {len(discovered_probes)} 个健康端点探针"
-                )
+                reasoning.append(f"从源码发现 {len(discovered_probes)} 个健康端点探针")
             else:
                 # CHK-193/P1：source="guessed" 的探针保持可选（isMandatory=False）。
                 # Flask/Django/Express 等普通后端不保证提供 /health 端点，
                 # 404 不应导致部署失败。只有源码声明或发现的端点才能作为门槛。
-                contract.requiredProbes.append(ProbeSpec(
-                    path="/health",
-                    isMandatory=False,
-                    source="guessed",
-                    description="诊断探针（HTTP GET /health，可选；不通过仅产生告警）",
-                ))
+                contract.requiredProbes.append(
+                    ProbeSpec(
+                        path="/health",
+                        isMandatory=False,
+                        source="guessed",
+                        description="诊断探针（HTTP GET /health，可选；不通过仅产生告警）",
+                    )
+                )
 
             plan = DeploymentPlan(
                 planId=f"plan-{'fullstack' if contract.servesUi else 'backend'}-"
-                       f"{backend.sourceSubdir or 'root'}",
+                f"{backend.sourceSubdir or 'root'}",
                 components=components,
                 capabilityContract=contract,
                 confidenceTier="primary",
@@ -586,12 +613,14 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
             if frontend.confidenceTier == "primary":
                 components = [_candidate_to_component(frontend, role="build-and-runtime")]
                 contract = CapabilityContract(servesUi=True)
-                contract.requiredProbes.append(ProbeSpec(
-                    path="/",
-                    isMandatory=False,
-                    source="guessed",
-                    description="诊断探针（静态首页存活，可选；liveness 已覆盖）",
-                ))
+                contract.requiredProbes.append(
+                    ProbeSpec(
+                        path="/",
+                        isMandatory=False,
+                        source="guessed",
+                        description="诊断探针（静态首页存活，可选；liveness 已覆盖）",
+                    )
+                )
                 plan = DeploymentPlan(
                     planId=f"plan-frontend-{frontend.sourceSubdir or 'root'}",
                     components=components,
@@ -606,12 +635,14 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
             if static.confidenceTier == "primary":
                 components = [_candidate_to_component(static, role="runtime")]
                 contract = CapabilityContract(servesUi=True)
-                contract.requiredProbes.append(ProbeSpec(
-                    path="/",
-                    isMandatory=False,
-                    source="guessed",
-                    description="诊断探针（静态首页存活，可选；liveness 已覆盖）",
-                ))
+                contract.requiredProbes.append(
+                    ProbeSpec(
+                        path="/",
+                        isMandatory=False,
+                        source="guessed",
+                        description="诊断探针（静态首页存活，可选；liveness 已覆盖）",
+                    )
+                )
                 plan = DeploymentPlan(
                     planId="plan-static",
                     components=components,
@@ -648,6 +679,7 @@ def _candidate_to_component(
     if candidate.entry.start:
         # C.03：检测 shell 操作符，决定用 argv 还是 shell 模式
         from local_webpage_access.dockerfile_templates import _has_shell_operators
+
         if _has_shell_operators(candidate.entry.start):
             component.startCommand = CommandSpec(
                 shell=candidate.entry.start,
@@ -655,6 +687,7 @@ def _candidate_to_component(
             )
         else:
             import shlex
+
             component.startCommand = CommandSpec(
                 argv=shlex.split(candidate.entry.start),
                 workdir="/app" if not candidate.sourceSubdir else f"/app/{candidate.sourceSubdir}",
@@ -691,7 +724,14 @@ _HEALTH_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _SKIP_DISCOVERY_DIRS = {
-    "node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", ".next",
+    "node_modules",
+    ".git",
+    "venv",
+    ".venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".next",
 }
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _TRIPLE_DOUBLE_RE = re.compile(r'"""[\s\S]*?"""')

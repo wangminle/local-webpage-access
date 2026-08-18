@@ -43,9 +43,7 @@ _PROBE_TIMEOUT = 3.0
 _MAX_SUBRESOURCES = 6
 
 # 匹配 HTML 中 src=/href= 引用的绝对路径资源（以单个 / 开头，非 // 协议相对）。
-_ABS_RESOURCE_RE = re.compile(
-    r"""(?:src|href)\s*=\s*["'](/[^/"'][^"']*)["']""", re.IGNORECASE
-)
+_ABS_RESOURCE_RE = re.compile(r"""(?:src|href)\s*=\s*["'](/[^/"'][^"']*)["']""", re.IGNORECASE)
 
 # 静态资源扩展名：用于识别「绝对路径返回 HTML」类错误 MIME（BUG-381）。
 _ASSET_EXT_RE = re.compile(r"\.(js|mjs|cjs|css|map|woff2?|ttf|otf|eot)$", re.IGNORECASE)
@@ -477,9 +475,7 @@ def refresh_network_entries(
             log.warning("刷新地址：实例 %s manifest 读取失败，跳过：%s", iid, exc)
             report.skipped.append(iid)
             continue
-        host_port, path_alias, internal_port = _extract_host_port_alias(
-            manifest, for_review=False
-        )
+        host_port, path_alias, internal_port = _extract_host_port_alias(manifest, for_review=False)
         if host_port is None:
             report.skipped.append(iid)
             continue
@@ -525,7 +521,9 @@ def refresh_network_entries(
             log.info("实例 %s 地址已刷新：%s → %s", iid, old_lan, new_lan)
     log.info(
         "地址刷新完成：当前 LAN IP=%s，刷新 %d 个实例（其中 %d 个地址漂移）",
-        lan_ip or "(无)", len(report.refreshed), report.drifted_count,
+        lan_ip or "(无)",
+        len(report.refreshed),
+        report.drifted_count,
     )
     return report
 
@@ -537,9 +535,7 @@ def _http_get(url: str, *, timeout: float = _PROBE_TIMEOUT) -> UrlProbe:
     """对 ``url`` 做 GET，返回 :class:`UrlProbe`（不抛异常）。"""
     probe = UrlProbe(url=url)
     # 实际请求带 __lwa_probe=1（不计入浏览量），UrlProbe 仍展示干净 URL
-    req = urllib.request.Request(
-        mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
-    )
+    req = urllib.request.Request(mark_probe_url(url), headers={"User-Agent": "lwa-access-review"})
     try:
         with urlopen_direct(req, timeout=timeout) as resp:
             body = resp.read()
@@ -612,7 +608,9 @@ def _is_wrong_asset_mime(path: str, probe: UrlProbe) -> bool:
     return probe.content_type.startswith("text/html")
 
 
-def _alias_resource_mismatch(path: str, absolute: UrlProbe, prefixed: UrlProbe) -> tuple[bool, bool]:
+def _alias_resource_mismatch(
+    path: str, absolute: UrlProbe, prefixed: UrlProbe
+) -> tuple[bool, bool]:
     """判定 IMP-023：返回 ``(empty_200, alias_resource_mismatch)``。
 
     仅把「拿到了 HTTP 响应但仍异常」算 mismatch：空 200 / 4xx·5xx / 错误 MIME。
@@ -644,14 +642,10 @@ def _extract_absolute_resources(html: str, *, limit: int = _MAX_SUBRESOURCES) ->
 
 
 # 匹配 HTML / JS 中出现的绝对 API 路径模式（/api/、/api/v1/、/api/v1/members 等）。
-_API_PATH_RE = re.compile(
-    r"""["\'](/api(?:/[^"\'\s]+)?)["\']""", re.IGNORECASE
-)
+_API_PATH_RE = re.compile(r"""["\'](/api(?:/[^"\'\s]+)?)["\']""", re.IGNORECASE)
 # 匹配 HTML 中 <script src=...> 引用的脚本路径（绝对或相对），用于 fetch bundle
 # 后再抽取其中的 API 路径（BUG-467：home-bookshelf 的 /api/v1/members 在 JS bundle 内）。
-_JS_SRC_RE = re.compile(
-    r"""<script\b[^>]*\bsrc\s*=\s*["']([^"']+\.js)["']""", re.IGNORECASE
-)
+_JS_SRC_RE = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']([^"']+\.js)["']""", re.IGNORECASE)
 # 常见 API 根路径（即使 HTML 中未直接出现也值得探测）。
 _DEFAULT_API_PATHS = ["/api/", "/api/v1/"]
 
@@ -707,9 +701,7 @@ def _normalize_script_src(src: str) -> str:
     return clean
 
 
-def _resolve_alias_aware_script_urls(
-    src: str, *, path_alias: str | None
-) -> tuple[str, str | None]:
+def _resolve_alias_aware_script_urls(src: str, *, path_alias: str | None) -> tuple[str, str | None]:
     """别名感知的 script URL 解析（BUG-467 / CHK-186）。
 
     覆盖三种 HTML 写法，生成去重后的后端直连路径与带单前缀网关路径：
@@ -761,9 +753,7 @@ def _fetch_javascript(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | Non
     FastAPI/SPA fallback 常对错误路径返回 ``text/html`` 200，若当 bundle
     解析会抽到入口页里的误导性 ``/api/...`` 或静默失败。
     """
-    req = urllib.request.Request(
-        mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
-    )
+    req = urllib.request.Request(mark_probe_url(url), headers={"User-Agent": "lwa-access-review"})
     try:
         with urlopen_direct(req, timeout=timeout) as resp:
             if not (200 <= resp.status < 300):
@@ -803,9 +793,7 @@ def _collect_api_paths(
         fetch_text = _fetch_javascript
     api_paths = _extract_api_paths(entry_html)
     for src in _extract_js_bundle_paths(entry_html):
-        backend_path, gateway_path = _resolve_alias_aware_script_urls(
-            src, path_alias=path_alias
-        )
+        backend_path, gateway_path = _resolve_alias_aware_script_urls(src, path_alias=path_alias)
         candidates: list[str] = []
         seen_urls: set[str] = set()
         if host_port is not None:
@@ -872,9 +860,7 @@ def _check_api_paths(
 
     for api_path in api_paths[:5]:  # 最多探测 5 条（含具体端点）
         absolute = _http_get(f"http://127.0.0.1:{entry_port}{api_path}")
-        prefixed = _http_get(
-            f"http://127.0.0.1:{entry_port}/{path_alias}{api_path}"
-        )
+        prefixed = _http_get(f"http://127.0.0.1:{entry_port}/{path_alias}{api_path}")
         # 判定 mismatch：绝对路径空 200 或失败，且带前缀有内容
         abs_empty_200 = absolute.ok and (absolute.content_length == 0)
         abs_failed = absolute.status_code is not None and not absolute.ok
@@ -971,9 +957,7 @@ def _probe_listeners(ports: list[int]) -> dict[int, PortListener]:
     return result
 
 
-def review_access(
-    workspace: Workspace, config: Config, registry: Registry
-) -> AccessReviewReport:
+def review_access(workspace: Workspace, config: Config, registry: Registry) -> AccessReviewReport:
     """对每个实例的声明 URL 做真探活，返回结构化报告（G2 / G5）。
 
     逐实例探测（遵循复盘 §4.5 / §9）：
@@ -1044,9 +1028,7 @@ def _review_instance(
         rep.status = "skip"
         rep.findings.append("实例 desiredState=stopped（已停用），跳过访问探测")
         return rep
-    host_port, path_alias, _internal = _extract_host_port_alias(
-        manifest, for_review=True
-    )
+    host_port, path_alias, _internal = _extract_host_port_alias(manifest, for_review=True)
     rep.host_port = host_port
     rep.path_alias = path_alias
     if manifest.network:
@@ -1097,9 +1079,7 @@ def _review_instance(
         if not rep.route_url:
             # 合成探测：便于报告展示实际检查的 URL
             rep.route_url = route_target
-            rep.findings.append(
-                f"network.routeUrl 为空，已用别名元数据合成探测 {route_target}"
-            )
+            rep.findings.append(f"network.routeUrl 为空，已用别名元数据合成探测 {route_target}")
         if not route_probe.ok:
             rep.findings.append(
                 f"routeUrl {route_target} 探活失败（{route_probe.note or '非 2xx'}）"
@@ -1107,13 +1087,9 @@ def _review_instance(
         elif route_probe.content_length and route_probe.content_length > 0:
             _check_subresources(rep, config, path_alias, route_probe)
             # IMP-055：对照绝对 API 路径在别名入口根 vs 带前缀
-            entry_html = _fetch_text(
-                f"http://127.0.0.1:{config.staticGatewayPort}/{path_alias}/"
-            )
+            entry_html = _fetch_text(f"http://127.0.0.1:{config.staticGatewayPort}/{path_alias}/")
             # BUG-467：内部从别名入口前缀 fetch JS bundle 抽取 API 路径
-            _check_api_paths(
-                rep, config, path_alias, entry_html, host_port=host_port
-            )
+            _check_api_paths(rep, config, path_alias, entry_html, host_port=host_port)
 
     _fill_port_listener(rep, host_port)
 
@@ -1196,9 +1172,7 @@ def _fetch_text(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | None:
     BUG-179：带 ``__lwa_probe=1`` 探针标记，避免 access review / gateway on /
     rebuild 复检拉取别名入口 HTML 时被 pageviews 计为真实浏览（与 _http_get 一致）。
     """
-    req = urllib.request.Request(
-        mark_probe_url(url), headers={"User-Agent": "lwa-access-review"}
-    )
+    req = urllib.request.Request(mark_probe_url(url), headers={"User-Agent": "lwa-access-review"})
     try:
         with urlopen_direct(req, timeout=timeout) as resp:
             if not (200 <= resp.status < 300):
@@ -1213,9 +1187,7 @@ def instances_needing_rebuild(report: AccessReviewReport) -> list[str]:
     return list(report.needs_rebuild_ids)
 
 
-def _alias_for_instance(
-    report: AccessReviewReport, instance_id: str
-) -> str | None:
+def _alias_for_instance(report: AccessReviewReport, instance_id: str) -> str | None:
     """从复核报告取实例路径别名（用于 rebuild 后复检）。"""
     for rep in report.instances:
         if rep.instance_id == instance_id:
@@ -1288,9 +1260,7 @@ def maybe_rebuild_after_review(
         try:
             rebuild_fn(workspace, config, registry, iid)
         except Exception as exc:  # noqa: BLE001 — 单实例失败不阻断其余
-            out.results.append(
-                RebuildActionResult(instance_id=iid, ok=False, error=str(exc))
-            )
+            out.results.append(RebuildActionResult(instance_id=iid, ok=False, error=str(exc)))
             log.warning("G6：自动 rebuild %s 失败：%s", iid, exc)
             continue
         alias = _alias_for_instance(report, iid)
@@ -1301,9 +1271,7 @@ def maybe_rebuild_after_review(
             except Exception as exc:  # noqa: BLE001 — 复检失败不掩盖 rebuild 成功
                 log.warning("G6：rebuild 后复检 %s 失败（不阻断）：%s", iid, exc)
                 still = False
-        out.results.append(
-            RebuildActionResult(instance_id=iid, ok=True, still_imp023=still)
-        )
+        out.results.append(RebuildActionResult(instance_id=iid, ok=True, still_imp023=still))
         if still:
             log.warning(
                 "G6：已 rebuild %s 但 IMP-023 仍命中（需固化 Vite base: './'）",
@@ -1322,9 +1290,7 @@ def format_rebuild_advice(
     """渲染 G6「建议重建 / 自动重建结果」段。"""
     lines: list[str] = []
     candidates = instances_needing_rebuild(report)
-    api_mismatch_ids = [
-        r.instance_id for r in report.instances if r.has_api_mismatch
-    ]
+    api_mismatch_ids = [r.instance_id for r in report.instances if r.has_api_mismatch]
     # BUG-468：提前返回必须同时排除 API 路径错位，否则 API-only mismatch
     # （无静态资源重建候选）会被吞掉、不输出建议。
     has_rebuild_results = bool(rebuild_report and rebuild_report.results)
@@ -1336,10 +1302,7 @@ def format_rebuild_advice(
             lines.append("  无需 rebuild（未检出 IMP-023 资源错位）")
         for r in rebuild_report.results:
             if not r.ok:
-                lines.append(
-                    f"  [FAIL] 自动 rebuild {r.instance_id} 失败："
-                    f"{r.error or '未知错误'}"
-                )
+                lines.append(f"  [FAIL] 自动 rebuild {r.instance_id} 失败：{r.error or '未知错误'}")
             elif r.still_imp023:
                 lines.append(
                     f"  [WARN] rebuild {r.instance_id} 完成，但 IMP-023 仍命中"
@@ -1347,13 +1310,9 @@ def format_rebuild_advice(
                     "仅重跑构建不会改绝对路径产物"
                 )
             else:
-                lines.append(
-                    f"  [OK  ] 已自动 rebuild {r.instance_id}，复检通过"
-                )
+                lines.append(f"  [OK  ] 已自动 rebuild {r.instance_id}，复检通过")
     elif candidates:
-        lines.append(
-            f"  建议 rebuild {len(candidates)} 个实例（别名下 SPA 绝对路径资源错位）："
-        )
+        lines.append(f"  建议 rebuild {len(candidates)} 个实例（别名下 SPA 绝对路径资源错位）：")
         for iid in candidates:
             lines.append(f"    · {iid}  →  lwa rebuild {iid}")
         lines.append(
@@ -1396,16 +1355,10 @@ def format_review_report(
     for rep in report.instances:
         tag = rep.status.upper()
         rebuild_mark = " ⚠需rebuild" if rep.needs_rebuild else ""
-        lines.append(
-            f"  [{tag:4}] {rep.instance_id}（runtime={rep.runtime or '—'}）"
-            f"{rebuild_mark}"
-        )
+        lines.append(f"  [{tag:4}] {rep.instance_id}（runtime={rep.runtime or '—'}）{rebuild_mark}")
         if rep.host_port:
             lp = rep.localhost_probe
-            lines.append(
-                f"           回环 :{rep.host_port} → "
-                f"{_probe_brief(lp) if lp else '—'}"
-            )
+            lines.append(f"           回环 :{rep.host_port} → {_probe_brief(lp) if lp else '—'}")
         if rep.lan_url:
             stale = " ⚠ 地址漂移" if rep.lan_url_stale else ""
             lines.append(
@@ -1420,14 +1373,10 @@ def format_review_report(
         for sub in rep.subresources:
             if sub.alias_resource_mismatch:
                 if sub.empty_200:
-                    detail = (
-                        f"绝对路径空 200，带前缀 {sub.prefixed.content_length} 字节"
-                    )
+                    detail = f"绝对路径空 200，带前缀 {sub.prefixed.content_length} 字节"
                 elif not sub.absolute.ok:
                     code = sub.absolute.status_code or sub.absolute.note or "失败"
-                    detail = (
-                        f"绝对路径 {code}，带前缀 {sub.prefixed.content_length} 字节"
-                    )
+                    detail = f"绝对路径 {code}，带前缀 {sub.prefixed.content_length} 字节"
                 else:
                     detail = (
                         f"绝对路径错误类型 {sub.absolute.content_type or 'unknown'}，"
@@ -1437,21 +1386,13 @@ def format_review_report(
         for apif in rep.api_findings:
             if apif.mismatch:
                 if apif.absolute.ok and apif.absolute.content_length == 0:
-                    detail = (
-                        f"根路径空 200，带前缀 {apif.prefixed.content_length} 字节"
-                    )
+                    detail = f"根路径空 200，带前缀 {apif.prefixed.content_length} 字节"
                 else:
                     code = apif.absolute.status_code or apif.absolute.note or "失败"
-                    detail = (
-                        f"根路径 {code}，带前缀 {apif.prefixed.content_length} 字节"
-                    )
-                lines.append(
-                    f"           ⚠ {apif.path}：{detail}（IMP-055 API 错位）"
-                )
+                    detail = f"根路径 {code}，带前缀 {apif.prefixed.content_length} 字节"
+                lines.append(f"           ⚠ {apif.path}：{detail}（IMP-055 API 错位）")
         if rep.port_listener and rep.port_listener.names:
-            lines.append(
-                f"           监听进程：{', '.join(sorted(set(rep.port_listener.names)))}"
-            )
+            lines.append(f"           监听进程：{', '.join(sorted(set(rep.port_listener.names)))}")
         for f in rep.findings:
             lines.append(f"           · {f}")
     lines.append("")

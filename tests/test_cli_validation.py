@@ -116,9 +116,7 @@ def test_doctor_rejects_illegal_profile(monkeypatch, tmp_path: Path) -> None:
     assert "profile" in result.output.lower() or "default" in result.output
 
 
-def test_scan_holds_instance_lock_while_saving(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_scan_holds_instance_lock_while_saving(monkeypatch, tmp_path: Path) -> None:
     """BUG-341：lwa scan 写 local-web.json 前必须持有 instance_lock。"""
     from local_webpage_access.cli import app
     from local_webpage_access.init_workspace import init_workspace
@@ -161,9 +159,7 @@ def test_scan_holds_instance_lock_while_saving(
         "local_webpage_access.platform_support.require_supported_platform",
         lambda **kw: None,
     )
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.instance_lock", tracked_lock
-    )
+    monkeypatch.setattr("local_webpage_access.lifecycle.instance_lock", tracked_lock)
     monkeypatch.setattr(InstanceManifest, "save", checked_save)
 
     result = CliRunner().invoke(app, ["scan", "demo"])

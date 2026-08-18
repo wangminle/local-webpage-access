@@ -148,11 +148,19 @@ def test_write_token_creates_file_with_mode_600_via_os_open(
     real_open = os.open
     real_replace = os.replace
 
-    def tracking_open(path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777, *args: object, **kwargs: object) -> int:
+    def tracking_open(
+        path: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
         opens.append({"path": str(path), "flags": flags, "mode": mode})
         return real_open(path, flags, mode, *args, **kwargs)
 
-    def tracking_replace(src: str | bytes | os.PathLike[str], dst: str | bytes | os.PathLike[str]) -> None:
+    def tracking_replace(
+        src: str | bytes | os.PathLike[str], dst: str | bytes | os.PathLike[str]
+    ) -> None:
         replaces.append((str(src), str(dst)))
         return real_replace(src, dst)
 
@@ -162,7 +170,8 @@ def test_write_token_creates_file_with_mode_600_via_os_open(
     final = token_path(workspace)
     # 临时文件以 0o600 创建（不再直接 O_TRUNC 目标文件）
     tmp_opens = [
-        c for c in opens
+        c
+        for c in opens
         if Path(str(c["path"])).parent == final.parent
         and Path(str(c["path"])).name != final.name
         and ".manager-token." in Path(str(c["path"])).name
@@ -174,9 +183,7 @@ def test_write_token_creates_file_with_mode_600_via_os_open(
     assert read_token(workspace)  # 内容完整可读
 
 
-def test_run_manager_does_not_log_full_token(
-    workspace: Workspace, config, monkeypatch
-) -> None:
+def test_run_manager_does_not_log_full_token(workspace: Workspace, config, monkeypatch) -> None:
     """BUG-118：run_manager 不得把完整 token 写入日志。"""
     from local_webpage_access import manager_api as ma
 
@@ -279,9 +286,12 @@ def test_should_rotate_token_returns_false_before_expiry(
 
     now = datetime.now().astimezone()
     created = now - timedelta(hours=167, minutes=59, seconds=59)
-    assert should_rotate_token(
-        created.isoformat(timespec="seconds"), now=now.isoformat(timespec="seconds")
-    ) is False
+    assert (
+        should_rotate_token(
+            created.isoformat(timespec="seconds"), now=now.isoformat(timespec="seconds")
+        )
+        is False
+    )
 
 
 def test_should_rotate_token_returns_true_at_expiry(
@@ -294,9 +304,12 @@ def test_should_rotate_token_returns_true_at_expiry(
 
     now = datetime.now().astimezone()
     created = now - timedelta(hours=168)
-    assert should_rotate_token(
-        created.isoformat(timespec="seconds"), now=now.isoformat(timespec="seconds")
-    ) is True
+    assert (
+        should_rotate_token(
+            created.isoformat(timespec="seconds"), now=now.isoformat(timespec="seconds")
+        )
+        is True
+    )
 
 
 def test_should_rotate_token_custom_hours(workspace: Workspace) -> None:
@@ -308,17 +321,23 @@ def test_should_rotate_token_custom_hours(workspace: Workspace) -> None:
     now = datetime.now().astimezone()
     created = now - timedelta(hours=2)
     # hours=1 -> 已过期
-    assert should_rotate_token(
-        created.isoformat(timespec="seconds"),
-        now=now.isoformat(timespec="seconds"),
-        hours=1,
-    ) is True
+    assert (
+        should_rotate_token(
+            created.isoformat(timespec="seconds"),
+            now=now.isoformat(timespec="seconds"),
+            hours=1,
+        )
+        is True
+    )
     # hours=3 -> 未过期
-    assert should_rotate_token(
-        created.isoformat(timespec="seconds"),
-        now=now.isoformat(timespec="seconds"),
-        hours=3,
-    ) is False
+    assert (
+        should_rotate_token(
+            created.isoformat(timespec="seconds"),
+            now=now.isoformat(timespec="seconds"),
+            hours=3,
+        )
+        is False
+    )
 
 
 def test_maybe_rotate_token_no_rotation_when_not_expired(
@@ -349,9 +368,7 @@ def test_maybe_rotate_token_rotates_when_expired(workspace: Workspace) -> None:
     # 伪造过期 createdAt
     past = (datetime.now().astimezone() - timedelta(hours=200)).isoformat(timespec="seconds")
     path = token_path(workspace)
-    path.write_text(
-        json.dumps({"token": old_token, "createdAt": past}), encoding="utf-8"
-    )
+    path.write_text(json.dumps({"token": old_token, "createdAt": past}), encoding="utf-8")
 
     result = maybe_rotate_token(workspace, hours=168)
     assert result["rotated"] is True
@@ -432,9 +449,7 @@ def test_config_manager_token_rotate_hours_validation() -> None:
         Config(managerTokenRotateHours=10000)  # > 8760 (1 year)
 
 
-def test_token_rotation_in_lifespan_starts_and_stops_cleanly(
-    workspace: Workspace, config
-) -> None:
+def test_token_rotation_in_lifespan_starts_and_stops_cleanly(workspace: Workspace, config) -> None:
     """046.04/05：lifespan 启动 token 轮换线程并在退出时清理。"""
     from local_webpage_access.manager_api import create_app, ensure_token
     from local_webpage_access.registry import Registry
@@ -481,9 +496,7 @@ def test_lifespan_sync_rotates_expired_token_before_ready(
     ws.ensure_workspace_dirs()
     _write_config(ws)
     old_token = ensure_token(ws)
-    expired_at = (datetime.now().astimezone() - timedelta(days=8)).isoformat(
-        timespec="seconds"
-    )
+    expired_at = (datetime.now().astimezone() - timedelta(days=8)).isoformat(timespec="seconds")
     token_path(ws).write_text(
         json.dumps({"token": old_token, "createdAt": expired_at}, indent=2) + "\n",
         encoding="utf-8",
@@ -530,9 +543,7 @@ def test_cli_manager_start_prints_rotated_token(
     ws = workspace
     ws.ensure_workspace_dirs()
     old_token = ensure_token(ws)
-    expired_at = (datetime.now().astimezone() - timedelta(days=8)).isoformat(
-        timespec="seconds"
-    )
+    expired_at = (datetime.now().astimezone() - timedelta(days=8)).isoformat(timespec="seconds")
     token_path(ws).write_text(
         json.dumps({"token": old_token, "createdAt": expired_at}, indent=2) + "\n",
         encoding="utf-8",
@@ -542,9 +553,7 @@ def test_cli_manager_start_prints_rotated_token(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(
-        manager_cli, "open_workspace_registry", lambda: (ws, config, _FakeReg())
-    )
+    monkeypatch.setattr(manager_cli, "open_workspace_registry", lambda: (ws, config, _FakeReg()))
     monkeypatch.setattr(
         "local_webpage_access.manager_api.run_manager",
         lambda *a, **k: None,
@@ -596,9 +605,7 @@ def test_api_rejects_missing_token(manager_env: EnvBundle) -> None:
 
 def test_loopback_rejects_cross_site_unsafe_request(manager_env: EnvBundle) -> None:
     """BUG-295：回环免 token 不能放行浏览器跨站 POST。"""
-    with TestClient(
-        manager_env.app, client=("127.0.0.1", 50000)
-    ) as local_client:
+    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/remove",
             headers={
@@ -615,9 +622,7 @@ def test_loopback_rejects_form_post_without_csrf_headers(
     manager_env: EnvBundle,
 ) -> None:
     """BUG-295：简单跨站 form POST（无自定义头）在回环亦须拒绝。"""
-    with TestClient(
-        manager_env.app, client=("127.0.0.1", 50000)
-    ) as local_client:
+    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/remove",
         )
@@ -629,9 +634,7 @@ def test_loopback_rejects_form_post_without_csrf_headers(
 
 def test_loopback_allows_mutating_with_x_lwa_token(manager_env: EnvBundle) -> None:
     """BUG-295：管理页经 X-LWA-Token 发起的写请求仍可通过。"""
-    with TestClient(
-        manager_env.app, client=("127.0.0.1", 50000)
-    ) as local_client:
+    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/stop",
             headers={"X-LWA-Token": manager_env.token},
@@ -642,9 +645,7 @@ def test_loopback_allows_mutating_with_x_lwa_token(manager_env: EnvBundle) -> No
 
 def test_loopback_allows_same_origin_mutating(manager_env: EnvBundle) -> None:
     """BUG-295：Sec-Fetch-Site=same-origin 的回环写请求可放行。"""
-    with TestClient(
-        manager_env.app, client=("127.0.0.1", 50000)
-    ) as local_client:
+    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/stop",
             headers={"Sec-Fetch-Site": "same-origin"},
@@ -680,9 +681,7 @@ def test_api_localhost_bypass_without_token(manager_env: EnvBundle) -> None:
 
 
 def test_api_rejects_wrong_token(manager_env: EnvBundle) -> None:
-    resp = manager_env.client.get(
-        "/api/instances", headers={"Authorization": "Bearer wrong-token"}
-    )
+    resp = manager_env.client.get("/api/instances", headers={"Authorization": "Bearer wrong-token"})
     assert resp.status_code == 401
 
 
@@ -738,9 +737,7 @@ def test_verify_token_accepts_matching_unicode_via_bytes(
 
 
 def test_api_accepts_bearer_token(manager_env: EnvBundle) -> None:
-    resp = manager_env.client.get(
-        "/api/instances", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     assert resp.status_code == 200
 
 
@@ -751,9 +748,7 @@ def test_api_accepts_query_token(manager_env: EnvBundle) -> None:
 
 
 def test_api_accepts_x_lwa_token_header(manager_env: EnvBundle) -> None:
-    resp = manager_env.client.get(
-        "/api/stats", headers={"X-LWA-Token": manager_env.token}
-    )
+    resp = manager_env.client.get("/api/stats", headers={"X-LWA-Token": manager_env.token})
     assert resp.status_code == 200
 
 
@@ -840,9 +835,7 @@ def test_health_capabilities_for_authenticated_lan(manager_env: EnvBundle) -> No
         assert "capabilities" not in bare
         assert "overall" in bare
 
-        authed = lan_client.get(
-            "/api/health", headers=manager_env.auth_headers()
-        ).json()
+        authed = lan_client.get("/api/health", headers=manager_env.auth_headers()).json()
         assert authed["ok"] is True
         assert "capabilities" in authed
         assert "workspaceRoot" not in authed  # 路径仍仅本机可见
@@ -856,9 +849,7 @@ def test_health_does_not_call_collect_capability(manager_env: EnvBundle, monkeyp
         calls.append("collect")
         raise AssertionError("health 不应同步探测")
 
-    monkeypatch.setattr(
-        "local_webpage_access.capability.collect_capability_report", boom
-    )
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", boom)
     manager_env.app.state.capability_fragment = {
         "profile": "full",
         "overall": "degraded",
@@ -903,9 +894,7 @@ def test_manager_capability_probe_refreshes_periodically(
 
     monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 0.05)
     monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 0.05)
-    monkeypatch.setattr(
-        "local_webpage_access.capability.collect_capability_report", fake_collect
-    )
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", fake_collect)
     monkeypatch.setattr(
         "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
     )
@@ -972,9 +961,7 @@ def test_manager_capability_tracks_caddy_ready_then_unready(
 
     monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 0.04)
     monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 0.04)
-    monkeypatch.setattr(
-        "local_webpage_access.capability.collect_capability_report", fake_collect
-    )
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", fake_collect)
     monkeypatch.setattr(
         "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
     )
@@ -992,10 +979,7 @@ def test_manager_capability_tracks_caddy_ready_then_unready(
         assert saw_ready.wait(timeout=2.0)
         assert app.state.capability_fragment["capabilities"]["caddyRuntime"] == "ready"
         assert saw_unready.wait(timeout=2.0)
-        assert (
-            app.state.capability_fragment["capabilities"]["caddyRuntime"]
-            == "admin_unavailable"
-        )
+        assert app.state.capability_fragment["capabilities"]["caddyRuntime"] == "admin_unavailable"
 
 
 def test_capability_refresh_single_flight(manager_env: EnvBundle, monkeypatch) -> None:
@@ -1022,9 +1006,7 @@ def test_capability_refresh_single_flight(manager_env: EnvBundle, monkeypatch) -
             gateway_access="ready",
         )
 
-    monkeypatch.setattr(
-        "local_webpage_access.capability.collect_capability_report", slow_collect
-    )
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", slow_collect)
     monkeypatch.setattr(
         "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
     )
@@ -1072,9 +1054,7 @@ def test_capability_refresh_single_flight(manager_env: EnvBundle, monkeypatch) -
     assert results[1]["capabilities"]["caddyRuntime"] == "ready"
 
 
-def test_capability_probe_failure_keeps_disk_cache(
-    manager_env: EnvBundle, monkeypatch
-) -> None:
+def test_capability_probe_failure_keeps_disk_cache(manager_env: EnvBundle, monkeypatch) -> None:
     """BUG-379：探测失败不覆盖磁盘快照，内存 overall 须降为 unknown。"""
     import time
 
@@ -1098,9 +1078,7 @@ def test_capability_probe_failure_keeps_disk_cache(
     def boom(**kwargs):  # noqa: ANN003
         raise RuntimeError("probe down")
 
-    monkeypatch.setattr(
-        "local_webpage_access.capability.collect_capability_report", boom
-    )
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", boom)
     monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 60.0)
     monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 60.0)
 
@@ -1117,9 +1095,7 @@ def test_capability_probe_failure_keeps_disk_cache(
                 break
             time.sleep(0.02)
         assert app.state.capability_fragment.get("overall") == "unknown"
-        assert "capability_probe_failed" in str(
-            app.state.capability_fragment.get("action") or ""
-        )
+        assert "capability_probe_failed" in str(app.state.capability_fragment.get("action") or "")
         assert cache_path.read_text(encoding="utf-8") == before
 
 
@@ -1135,9 +1111,7 @@ def test_health_overlays_fresh_gateway_access_from_cache(
         calls.append("collect")
         raise AssertionError("health 不应同步探测")
 
-    monkeypatch.setattr(
-        "local_webpage_access.capability.collect_capability_report", boom
-    )
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", boom)
     # 跳过「gateway 进程存活」检查，专注缓存合并语义
     monkeypatch.setattr(
         "local_webpage_access.capability._backend_role_alive", lambda *_a, **_k: True
@@ -1160,9 +1134,7 @@ def test_health_overlays_fresh_gateway_access_from_cache(
     )
 
     # TestClient 默认 host=testclient（非回环）；需鉴权才返回 capabilities
-    body = manager_env.client.get(
-        "/api/health", headers=manager_env.auth_headers()
-    ).json()
+    body = manager_env.client.get("/api/health", headers=manager_env.auth_headers()).json()
     assert body["ok"] is True
     assert body["capabilities"]["gatewayAccess"] == "ready"
     assert calls == []
@@ -1305,9 +1277,7 @@ def test_container_lifecycle_ignores_stale_instance_permission_when_live_ready(
         "local_webpage_access.lifecycle.start_instance",
         lambda *a, **k: called.append("start"),
     )
-    monkeypatch.setattr(
-        "local_webpage_access.status.sync_status", lambda *a, **k: None
-    )
+    monkeypatch.setattr("local_webpage_access.status.sync_status", lambda *a, **k: None)
     response = manager_env.client.post(
         f"/api/instances/{iid}/start", headers=manager_env.auth_headers()
     )
@@ -1319,9 +1289,7 @@ def test_container_lifecycle_ignores_stale_instance_permission_when_live_ready(
 
 
 def test_stats_returns_counts_and_host(manager_env: EnvBundle) -> None:
-    resp = manager_env.client.get(
-        "/api/stats", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/stats", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["counts"]["total"] >= 1
@@ -1333,9 +1301,7 @@ def test_stats_returns_counts_and_host(manager_env: EnvBundle) -> None:
     assert pp["end"] == 21050
 
 
-def test_stats_includes_recoverable_status_counts(
-    manager_env: EnvBundle, monkeypatch
-) -> None:
+def test_stats_includes_recoverable_status_counts(manager_env: EnvBundle, monkeypatch) -> None:
     """BUG-081：/api/stats counts 应含 gateway_down / config_invalid 可恢复态。"""
     from local_webpage_access.models import Status
 
@@ -1347,9 +1313,7 @@ def test_stats_includes_recoverable_status_counts(
         return Status.GATEWAY_DOWN
 
     monkeypatch.setattr("local_webpage_access.lifecycle.observe_status", fake_observe)
-    resp = manager_env.client.get(
-        "/api/stats", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/stats", headers=manager_env.auth_headers())
     body = resp.json()
     assert body["counts"]["gateway_down"] >= 1
     assert "config_invalid" in body["counts"]
@@ -1359,9 +1323,7 @@ def test_stats_includes_recoverable_status_counts(
 
 
 def test_list_instances(manager_env: EnvBundle) -> None:
-    resp = manager_env.client.get(
-        "/api/instances", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     instances = resp.json()["instances"]
     assert any(i["id"] == manager_env.instance_id for i in instances)
@@ -1379,9 +1341,7 @@ def test_list_instances_includes_stack_database_serving_and_resources(
         last_memory_bytes=4096,
         last_cpu_percent=1.25,
     )
-    resp = manager_env.client.get(
-        "/api/instances", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     row = next(i for i in resp.json()["instances"] if i["id"] == manager_env.instance_id)
     assert "stack" in row
@@ -1414,9 +1374,7 @@ def test_instance_detail_returns_camel_case_builds_and_events(
     build_id = manager_env.registry.add_build(
         manager_env.instance_id, status="running", started_at="2026-07-06T01:00:00"
     )
-    manager_env.registry.finish_build(
-        build_id, status="failed", error_summary="boom"
-    )
+    manager_env.registry.finish_build(build_id, status="failed", error_summary="boom")
     manager_env.registry.add_event(manager_env.instance_id, "scan", "done")
 
     resp = manager_env.client.get(
@@ -1440,9 +1398,7 @@ def test_instance_detail_not_found(manager_env: EnvBundle) -> None:
 
 def test_instance_detail_rejects_invalid_id(manager_env: EnvBundle) -> None:
     """非法 slug 应被 validate_instance_id 拦截（BUG-025）。"""
-    resp = manager_env.client.get(
-        "/api/instances/..%2Fetc", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/instances/..%2Fetc", headers=manager_env.auth_headers())
     assert resp.status_code in (400, 404)
 
 
@@ -1450,9 +1406,7 @@ def test_instance_detail_rejects_invalid_id_with_400(
     manager_env: EnvBundle,
 ) -> None:
     """BUG-044：非法实例 ID 应返回 400，而不是 500。"""
-    resp = manager_env.client.get(
-        "/api/instances/Bad_ID", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/instances/Bad_ID", headers=manager_env.auth_headers())
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "bad_request"
 
@@ -1501,9 +1455,7 @@ def test_instance_resources(manager_env: EnvBundle) -> None:
 
 
 def test_pending_list(manager_env: EnvBundle) -> None:
-    resp = manager_env.client.get(
-        "/api/pending", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/pending", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert "pending" in body
@@ -1528,9 +1480,7 @@ def test_stats_syncs_status_before_counting(manager_env: EnvBundle, monkeypatch)
     assert resp.json()["counts"]["stopped"] >= 1
 
 
-def test_pending_syncs_status_before_listing(
-    manager_env: EnvBundle, monkeypatch
-) -> None:
+def test_pending_syncs_status_before_listing(manager_env: EnvBundle, monkeypatch) -> None:
     """BUG-030：/api/pending 读取前应先 sync_status。"""
     from local_webpage_access.models import Status
 
@@ -1551,9 +1501,7 @@ def test_pending_syncs_status_before_listing(
 
 
 def test_port_pool(manager_env: EnvBundle) -> None:
-    resp = manager_env.client.get(
-        "/api/port-pool", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/port-pool", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     pp = resp.json()["portPool"]
     assert pp["start"] == 21000
@@ -1662,8 +1610,7 @@ def test_start_accepts_fallback_policy_query_param(
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("local_webpage_access.lifecycle.start_instance", fake_start_track)
         resp = manager_env.client.post(
-            f"/api/instances/{manager_env.instance_id}/start"
-            "?fallback_policy=auto-equivalent",
+            f"/api/instances/{manager_env.instance_id}/start?fallback_policy=auto-equivalent",
             headers=manager_env.auth_headers(),
         )
 
@@ -1931,9 +1878,7 @@ def test_update_endpoint_container_rebuild_when_running(
     with zipfile.ZipFile(api_zip, "w") as zf:
         zf.writestr("requirements.txt", "fastapi\nuvicorn\n")
         zf.writestr("main.py", "app=1\n")
-    importer = Importer(
-        manager_env.workspace, manager_env.config, manager_env.registry
-    )
+    importer = Importer(manager_env.workspace, manager_env.config, manager_env.registry)
     iid = importer.import_zip(api_zip, name="api-upd").instance_id
     mpath = manager_env.workspace.app_manifest_path(iid)
     m = InstanceManifest.load(mpath)
@@ -2057,9 +2002,7 @@ def test_path_alias_rejects_reserved_slug(manager_env: EnvBundle) -> None:
     assert resp.json()["error"]["code"] == "bad_request"
 
 
-def test_path_alias_rejects_duplicate_slug(
-    manager_env: EnvBundle, caddy_alias_gateway
-) -> None:
+def test_path_alias_rejects_duplicate_slug(manager_env: EnvBundle, caddy_alias_gateway) -> None:
     from local_webpage_access.importer import Importer
 
     zip2 = manager_env.workspace.inbox / "static2.zip"
@@ -2083,9 +2026,7 @@ def test_path_alias_rejects_duplicate_slug(
     assert "占用" in resp2.json()["error"]["message"]
 
 
-def test_path_alias_accepts_container_instance(
-    manager_env: EnvBundle, caddy_alias_gateway
-) -> None:
+def test_path_alias_accepts_container_instance(manager_env: EnvBundle, caddy_alias_gateway) -> None:
     """IMP-014：容器实例（docker-compose）也可设置路径别名，写入 container.routeHost。"""
     from local_webpage_access.models import InstanceManifest
     from tests._helpers import make_container_manifest
@@ -2476,9 +2417,7 @@ def test_api_remove_single_instance(manager_env: EnvBundle) -> None:
     assert body["purge"] is False
     assert body["force"] is False
     # registry 已清，但 apps/ 目录保留（purge 默认 false）
-    resp2 = manager_env.client.get(
-        "/api/instances", headers=manager_env.auth_headers()
-    )
+    resp2 = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     ids = [i["id"] for i in resp2.json()["instances"]]
     assert iid not in ids
     assert ws.app_dir(iid).is_dir()
@@ -2665,17 +2604,13 @@ def test_lwa_error_code_data_nonempty_is_409_not_generic_lifecycle() -> None:
 def test_api_redundant_remove_batch(manager_env: EnvBundle) -> None:
     """IMP-019：POST /api/redundant/remove 批量移除冗余，保留最早者。"""
     dup_id = _seed_redundant_duplicate(manager_env)
-    resp = manager_env.client.post(
-        "/api/redundant/remove", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.post("/api/redundant/remove", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["action"] == "remove-redundant"
     assert body["removed"] == [dup_id]
     assert body["count"] == 1
-    resp2 = manager_env.client.get(
-        "/api/instances", headers=manager_env.auth_headers()
-    )
+    resp2 = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     ids = [i["id"] for i in resp2.json()["instances"]]
     assert dup_id not in ids
     assert manager_env.instance_id in ids  # 最早者保留
@@ -2713,18 +2648,14 @@ def test_list_instances_lan_url_live_when_manifest_stale(
         },
     )
 
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
     # 避免列表旁路真写盘干扰断言（读时合成本身应正确）
     monkeypatch.setattr(
         "local_webpage_access.access_workflow.maybe_throttled_lan_refresh",
         lambda *a, **k: None,
     )
 
-    resp = manager_env.client.get(
-        "/api/instances", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     item = next(i for i in resp.json()["instances"] if i["id"] == iid)
     assert item["lanUrl"] == f"http://192.168.1.50:{host_port}"
@@ -2733,9 +2664,7 @@ def test_list_instances_lan_url_live_when_manifest_stale(
     assert item["lanAddressStale"] is True
 
 
-def test_list_instances_throttles_refresh_write(
-    manager_env: EnvBundle, monkeypatch
-) -> None:
+def test_list_instances_throttles_refresh_write(manager_env: EnvBundle, monkeypatch) -> None:
     """列表旁路节流：窗口内不重复全量 refresh。"""
     from local_webpage_access import access_workflow as aw
     from local_webpage_access.models import InstanceManifest
@@ -2763,12 +2692,8 @@ def test_list_instances_throttles_refresh_write(
         },
     )
 
-    monkeypatch.setattr(
-        "local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
-    monkeypatch.setattr(
-        "local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50"
-    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
     aw.reset_lan_refresh_throttle_state()
     calls = {"n": 0}
     real = aw.refresh_network_entries
@@ -2785,9 +2710,7 @@ def test_list_instances_throttles_refresh_write(
     assert calls["n"] == 1
 
 
-def test_manual_strategy_list_does_not_auto_refresh(
-    manager_env: EnvBundle, monkeypatch
-) -> None:
+def test_manual_strategy_list_does_not_auto_refresh(manager_env: EnvBundle, monkeypatch) -> None:
     from local_webpage_access import access_workflow as aw
     from local_webpage_access.models import InstanceManifest
 
@@ -2823,9 +2746,7 @@ def test_manual_strategy_list_does_not_auto_refresh(
         "refresh_network_entries",
         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1),
     )
-    resp = manager_env.client.get(
-        "/api/instances", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     assert calls["n"] == 0
     item = next(i for i in resp.json()["instances"] if i["id"] == iid)
@@ -2840,9 +2761,7 @@ def test_post_access_refresh(manager_env: EnvBundle, monkeypatch) -> None:
         "local_webpage_access.access.refresh_network_entries",
         lambda *a, **k: RefreshReport(lan_ip="192.168.1.50"),
     )
-    resp = manager_env.client.post(
-        "/api/access/refresh", headers=manager_env.auth_headers()
-    )
+    resp = manager_env.client.post("/api/access/refresh", headers=manager_env.auth_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
@@ -2863,9 +2782,7 @@ def test_post_gateway_switch_dry_run(manager_env: EnvBundle, monkeypatch) -> Non
             stages=[{"stage": "dry_run", "ok": True}],
         )
 
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.switch_gateway", _fake_switch
-    )
+    monkeypatch.setattr("local_webpage_access.gateway_switch.switch_gateway", _fake_switch)
     resp = manager_env.client.post(
         "/api/gateway/switch",
         headers=manager_env.auth_headers(),
@@ -2894,9 +2811,7 @@ def test_post_gateway_switch_error_uses_unified_error_shape(
             stages=[{"stage": "apply", "ok": False}],
         )
 
-    monkeypatch.setattr(
-        "local_webpage_access.gateway_switch.switch_gateway", _fake_switch
-    )
+    monkeypatch.setattr("local_webpage_access.gateway_switch.switch_gateway", _fake_switch)
     resp = manager_env.client.post(
         "/api/gateway/switch",
         headers=manager_env.auth_headers(),
@@ -2954,9 +2869,7 @@ def test_import_from_dir_auto_starts_static(manager_env: EnvBundle, tmp_path: Pa
         m.status = Status.RUNNING
         m.desiredState = DesiredState.RUNNING
         m.save(ws.app_manifest_path(iid))
-        reg.update_status(
-            iid, Status.RUNNING.value, desired_state=DesiredState.RUNNING.value
-        )
+        reg.update_status(iid, Status.RUNNING.value, desired_state=DesiredState.RUNNING.value)
         return m
 
     with pytest.MonkeyPatch.context() as mp:
@@ -3037,9 +2950,7 @@ def test_pick_directory_lan_rejected_even_with_token(
         called.append("pick")
         return "/should-not-run"
 
-    monkeypatch.setattr(
-        "local_webpage_access.directory_picker.pick_directory", boom
-    )
+    monkeypatch.setattr("local_webpage_access.directory_picker.pick_directory", boom)
     with TestClient(manager_env.app, client=("10.0.0.8", 50000)) as lan:
         resp = lan.post(
             "/api/pick-directory",
@@ -3058,9 +2969,7 @@ def test_pick_directory_cancelled_returns_400(
     def cancel(**kwargs):  # noqa: ANN003
         raise DirectoryPickerError("已取消选择", code="cancelled")
 
-    monkeypatch.setattr(
-        "local_webpage_access.directory_picker.pick_directory", cancel
-    )
+    monkeypatch.setattr("local_webpage_access.directory_picker.pick_directory", cancel)
     with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local:
         resp = local.post(
             "/api/pick-directory",

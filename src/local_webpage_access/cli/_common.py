@@ -72,9 +72,7 @@ def coordinated_autostart_disable(ws, service_name: str) -> tuple[str | None, bo
         )
 
 
-def coordinated_autostart_restart(
-    ws, service_name: str
-) -> tuple[str | None, bool, bool]:
+def coordinated_autostart_restart(ws, service_name: str) -> tuple[str | None, bool, bool]:
     """IMP-030/BUG-191：``lwa update`` 重启前若自启动单元已加载/启用，则交监督器重启
     （单一进程），避免 stop 杀后 KeepAlive/Restart 立即拉回与 detached spawn 抢锁。
 
@@ -88,4 +86,19 @@ def coordinated_autostart_restart(
         res = asm.coordinated_restart(ws, service_name)
         return res.note, res.ok, res.managed
     except Exception:  # noqa: BLE001 — 协调异常时回退 stop+start（managed=False）
+        return None, True, False
+
+
+def coordinated_autostart_start(ws, service_name: str) -> tuple[str | None, bool, bool]:
+    """IMP-059.03：拉起"enabled 但意外未运行"的服务前与自启动协调。
+
+    返回语义同 :func:`coordinated_autostart_restart`：``managed=True`` 表示监督器
+    已接管启动，调用方不再 detached spawn。
+    """
+    try:
+        from local_webpage_access import autostart as asm
+
+        res = asm.coordinated_start(ws, service_name)
+        return res.note, res.ok, res.managed
+    except Exception:  # noqa: BLE001 — 协调异常时回退 detached start
         return None, True, False

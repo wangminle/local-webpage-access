@@ -127,9 +127,7 @@ def test_pending_sample_writes_risk_event(env, tmp_path: Path) -> None:
 
     result = Importer(ws, config, reg).import_zip(str(zp))
     events = reg.list_events(result.instance_id)
-    assert any(e["event_type"] == "security" for e in events), (
-        [e["event_type"] for e in events]
-    )
+    assert any(e["event_type"] == "security" for e in events), [e["event_type"] for e in events]
 
 
 # ---- 静态样例的 manifest 形态（kind 矩阵由参数化用例覆盖）--------------------

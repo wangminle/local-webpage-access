@@ -79,10 +79,9 @@ def collect(root: Path) -> ProjectEvidence:
     # 4. 根目录其他信号
     evidence.hasManagePy = "manage.py" in evidence.rootFiles
     evidence.hasAlembicIni = "alembic.ini" in evidence.rootFiles
-    evidence.hasRuntimePaths = (
-        (root / "src" / "app" / "runtime_paths.py").is_file()
-        or (root / "app" / "runtime_paths.py").is_file()
-    )
+    evidence.hasRuntimePaths = (root / "src" / "app" / "runtime_paths.py").is_file() or (
+        root / "app" / "runtime_paths.py"
+    ).is_file()
     evidence.hasEnvExample = ".env.example" in evidence.rootFiles
 
     # 5. SQLite 文件
@@ -195,6 +194,7 @@ def _collect_python_deps(directory: Path) -> set[str]:
     if pyproject.is_file():
         try:
             import tomllib
+
             with pyproject.open("rb") as fh:
                 data = tomllib.load(fh)
             items = data.get("project", {}).get("dependencies", [])
@@ -286,18 +286,18 @@ _DATABASE_URL_ENV_PATTERNS = [
 
 # 匹配 SQLAlchemy / Starlette 配置中引用 DATABASE_URL
 _SQLALCHEMY_URL_PATTERNS = [
-    re.compile(r'SQLALCHEMY_DATABASE_URI\s*=.*DATABASE_URL', re.IGNORECASE),
-    re.compile(r'SQLALCHEMY_DATABASE_URL\s*=.*DATABASE_URL', re.IGNORECASE),
+    re.compile(r"SQLALCHEMY_DATABASE_URI\s*=.*DATABASE_URL", re.IGNORECASE),
+    re.compile(r"SQLALCHEMY_DATABASE_URL\s*=.*DATABASE_URL", re.IGNORECASE),
 ]
 
 # 匹配 pydantic Settings 中的 database_url 字段
 _PYDANTIC_DB_FIELD_RE = re.compile(
-    r'database_url\s*[:=]\s*(?:str|Optional\[str\]|str\s*\|\s*None)', re.IGNORECASE
+    r"database_url\s*[:=]\s*(?:str|Optional\[str\]|str\s*\|\s*None)", re.IGNORECASE
 )
 
 # 匹配 SQLite 默认连接串，提取文件名
 _SQLITE_URL_RE = re.compile(
-    r'sqlite:///(/?\.{0,2}/?[\w./-]+\.(?:sqlite|sqlite3|db))',
+    r"sqlite:///(/?\.{0,2}/?[\w./-]+\.(?:sqlite|sqlite3|db))",
     re.IGNORECASE,
 )
 

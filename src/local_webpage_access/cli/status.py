@@ -32,6 +32,7 @@ def status(
 
         if not statuses:
             typer.echo("（暂无实例）")
+            _echo_service_modes(instance_id)
             return
         typer.echo(
             f"{'ID':20} {'KIND':8} {'RUNTIME':16} {'STATUS':10} {'DESIRED':10} {'PORT':6} NAME"
@@ -53,10 +54,23 @@ def status(
                 typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
             if s.last_error:
                 typer.secho(f"  ↳ lastError: {s.last_error}", fg=typer.colors.RED)
+        _echo_service_modes(instance_id)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _echo_service_modes(instance_id: str | None) -> None:
+    """IMP-061.03：全量视图追加自有服务运行模式（裸进程=重启后不自动恢复）。"""
+    if instance_id:
+        return
+    from local_webpage_access import autostart as asm
+
+    typer.echo("")
+    typer.echo("── 自有服务运行模式 ──")
+    for name in asm.ALL_SERVICES:
+        typer.echo(f"  {name:<10} {asm.service_supervision_mode(name)}")
 
 
 def stats(
@@ -84,9 +98,7 @@ def stats(
         typer.secho("== 整机 ==", fg=typer.colors.CYAN)
         if host.mem_total_bytes is not None:
             mem_used = host.mem_used_bytes or 0
-            typer.echo(
-                f"  内存：{fmt_bytes(mem_used)} / {fmt_bytes(host.mem_total_bytes)}"
-            )
+            typer.echo(f"  内存：{fmt_bytes(mem_used)} / {fmt_bytes(host.mem_total_bytes)}")
         else:
             typer.echo("  内存：（非 Linux，已跳过）")
         if host.load_avg_1m is not None:
@@ -134,10 +146,7 @@ def list_cmd() -> None:
         typer.echo(f"{'ID':20} {'KIND':8} {'RUNTIME':16} {'STATUS':10} {'PORT':6} NAME")
         for s in statuses:
             port = str(s.host_port) if s.host_port else "-"
-            typer.echo(
-                f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} "
-                f"{s.status:10} {port:6} {s.name}"
-            )
+            typer.echo(f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} {s.status:10} {port:6} {s.name}")
             # IMP-007：容器实例展示端口映射（internalPort→hostPort）
             if s.port_mapping_label:
                 typer.echo(f"  ↳ 映射：{s.port_mapping_label}")
@@ -152,9 +161,7 @@ def list_cmd() -> None:
 
 def pageviews(
     instance_id: str = typer.Argument(None, help="实例 ID（省略则显示全部汇总）"),
-    limit: int = typer.Option(
-        50, "--limit", "-n", help="单实例详情时最近命中行数（1–500）"
-    ),
+    limit: int = typer.Option(50, "--limit", "-n", help="单实例详情时最近命中行数（1–500）"),
 ) -> None:
     """查看浏览量统计（对齐管理页 /api/pageviews；先惰性摄入日志再汇总）。"""
     from local_webpage_access.pageviews import PageviewStore, ingest_all
@@ -203,9 +210,7 @@ def pageviews(
                 if not summary:
                     typer.echo("（暂无浏览量数据）")
                     return
-                typer.echo(
-                    f"{'ID':24} {'HITS':8} {'UNIQUE_IP':10} {'SOURCE':10} LAST_SEEN"
-                )
+                typer.echo(f"{'ID':24} {'HITS':8} {'UNIQUE_IP':10} {'SOURCE':10} LAST_SEEN")
                 for iid, row in sorted(summary.items()):
                     typer.echo(
                         f"{iid[:24]:24} {row.get('hits', 0):<8} "

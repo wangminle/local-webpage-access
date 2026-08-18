@@ -80,9 +80,7 @@ def _normalize_path(raw: str) -> str:
 
 
 def _pick_macos(run: Runner, *, timeout: float) -> str:
-    script = (
-        f'POSIX path of (choose folder with prompt "{_PROMPT}")'
-    )
+    script = f'POSIX path of (choose folder with prompt "{_PROMPT}")'
     cmd = ["osascript", "-e", script]
     try:
         result = run(cmd, timeout=timeout)

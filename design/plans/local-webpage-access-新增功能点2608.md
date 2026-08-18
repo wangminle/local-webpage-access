@@ -586,7 +586,7 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 | 约定 | 说明 |
 | --- | --- |
 | 月度文件 | `design/plans/local-webpage-access-新增功能点YYMM.md`（本文件；进行中权威位置） |
-| IMP 号 | 全局递增不复用；046/047/**051 已落地**（含 §6.8 V0.7.1 收口）；048=后续；049/050=**优先级中 / 不着急**；042.b 不在本文件 |
+| IMP 号 | 全局递增不复用；046/047/**051 已落地**（含 §6.8 V0.7.1 收口）；048=后续；049/050=**优先级中 / 不着急**；042.b 不在本文件；**059/060/063 已落地（§14/§15，2026-08-17 事故复盘 + 当日实现）**；061 已落地（P1）；062=P2 占位（doctor 消费方，探测能力复用 063 `--check`） |
 | 与 task-list | 规划 `PLN-`；开发 `DEV-`；文档 `DOC-` |
 | 与 2607 | 7 月账本在 `design/achievement/`；本月只改本文件 |
 | achievement | **暂不入账**：本月进行中的 2608 只放 `design/plans/`；收口归档后再迁入 `achievement/`（若需要） |
@@ -870,10 +870,384 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 
 ---
 
+## 14. Ubuntu 实机 update 事故复盘（2026-08-17）→ IMP-059 / IMP-060 / IMP-061 / IMP-062
+
+> **触发**：家庭服务器（Ubuntu，`~/lwa-workspace`，V0.7.9）执行 `lwa update` 升级 V0.7.11 时，发现 manager 与 caddy 进程在当日 11:18 机器重启后已丢失约半天（9080 别名入口失效、无人察觉）；update 因「原本未运行，跳过重启」未将它们拉起，accessReview FAIL 才暴露。
+> **依据**：现场 update/doctor/autostart 输出、`lwa autostart install --with-caddy` 修复后全绿（0 FAIL 0 WARN）、以及 2026-08-17 对当前源码的逐点核验（下表行号均为 V0.7.11 工作树实测）。
+> **复盘记录**：`CHK-219`；规划入账 `PLN-040`。
+
+### 14.1 事故时间线（现场事实）
+
+| 时间 | 事件 | 结果 |
+| --- | --- | --- |
+| 08-17 11:18 | 机器重启（以 mihomo systemd 服务启动时间为证） | docker 3 实例靠 `restart: unless-stopped` 自愈（home-bookshelf 直连 18002 全程 200）；mihomo 靠 systemd 自愈；**manager / caddy 为裸进程，无自启，就此消失** |
+| 11:18 → 晚间 | 9080 别名入口失效 | **约半天无人察觉**：无监管拉起、doctor 默认不查服务运行态、无任何通知机制 |
+| 晚间 | 用户主动 `git pull`（走 mihomo 代理）+ `lwa update` | 版本升至 V0.7.11 成功；但 manager/gateway 报「原本未运行，跳过重启」→ accessReview FAIL |
+| 随后 | 人工排查 + `lwa autostart install --with-caddy` | systemd user 单元拉起 daemon/manager/gateway 三服务；别名 200 / API 200，doctor 全绿 |
+| 结论 | 该机从未安装过 autostart（可选功能，init/setup 不引导） | 裸进程模式在机器重启后**必然**复现此故障 |
+
+### 14.2 根因矩阵（缺陷 vs 代码定位）
+
+| # | 缺陷 | 代码定位 | 定性 |
+| --- | --- | --- | --- |
+| 1 | 自有服务默认 detached 裸进程、无监管：机器重启或崩溃后无人拉起 | `daemon.py:1109-1134` `_spawn_watcher`、`manager_service.py:196-232` `_spawn_manager` 均 `Popen(start_new_session=True)` 后即返回；caddy 仅 `caddy start` 自守护。唯一的前台监管入口 `gateway_service.py:513-585`（每 10s 探活）只被 autostart 单元使用 | **设计盲区**：监管被设计为可选外挂，但缺省路径毫无韧性 |
+| 2 | 故障不可见：服务断了半天，唯一发现方式是用户恰好跑 update | `doctor.py:1613-1645` 15 项检查中**无**「manager/daemon 是否在运行」（仅 caddy_health 碰网关）、**无**「是否具备自启/重启韧性」；`autostart run_check`（`autostart.py:1542-1623`）与 doctor-hints 存在但**未接入** `run_doctor` 主报告；全仓库无通知机制 | **设计盲区**：可观测性只覆盖环境与实例，不覆盖自有服务 |
+| 3 | update 观察态误判：「用户主动停」与「意外死亡」被当成同一种状态 | `updater.py:481-483`（manager）/ `545-547`（daemon）/ `586-591`（gateway）仅看运行时 `is_running`，**忽略** `run/daemon.json`、`run/manager.json`、`run/gateway.json` 持久化的 `enabled=true` 意图 | **模型缺口**：update 只有观察态，没有期望态 |
+| 4 | autostart 可选且缺省不全：三个「要记得加的参数」缺一即有洞 | `autostart.py:91-98` `select_services`：gateway 单元需 `--with-caddy`（本次缺的正是 caddy）；`autostart.py:765-771` `install(linger=False)` 默认不 linger（需 `--linger`）；`lwa init` 仅 `maybe_start_manager`，不提示 autostart | **缺省值不安全**：合法但脆弱的模式成为默认 |
+| 5 | （对照组）实例级有完整期望态自愈，服务级没有 | registry `desired_state`（`registry/dao.py:177/240/264-266`）+ daemon `reconcile` 每 60s（`daemon.py:64-66`、`754-925`）+ compose 模板固定 `restart: unless-stopped`（`compose.py:65`）——正是三个容器全活的原因 | **同构反差**：对「别人的进程」有期望态管理，对「自己的进程」没有 |
+
+### 14.3 IMP-059 — update 服务级期望态 reconcile：enabled 但未运行的自有服务自动拉起（P0）
+
+> **状态**：**已落地**（2026-08-17，DEV-118；059.01-06 全部完成）。**一句话**：update 的重启段从「was_running 才重启」升级为三态 reconcile，使 `lwa update` 顺带成为故障恢复点。实现触点：`service_intent.py`（意图判定纯函数 + 中断时长估算）、`updater.restart_manager/daemon/gateway`（三态决策 + unexpectedDown/downSince 字段）、`autostart.coordinated_start`（监督器拉起，无双进程）、CLI `--no-reconcile`。测试：`tests/test_service_intent.py`（18 用例）。
+
+**需求**
+
+1. 对 daemon / manager / gateway 三服务，重启决策由观察态单值改为三态：
+   - **运行中** → 重启（现行为不变，保留 BUG-191 监管器协调 `coordinated_autostart_restart`（`cli/_common.py:75-91`）与 BUG-451 版本一致性校验）；
+   - **enabled=true 且未运行** → **拉起**，报告中明确标注「意外未运行（上次心跳/启动于 X 前），已恢复」，与正常重启区分；
+   - **enabled=false**（gateway 另含 `staticGateway!=caddy`） → 跳过，文案不变。
+2. 中断时长估算：读状态文件 `started_at` / daemon 锁心跳时间与当前时间之差；不可得时只说「意外未运行，已恢复」。
+3. 拉起复用现有 `start_manager` / `start_daemon` / `start_gateway`；autostart 在管时优先 `systemctl --user start`（与现有协调逻辑同一通道），不产生双进程。
+
+**关键决策（拍板默认）**
+
+- **意图来源就用现有持久化字段**（`run/*.json` 的 `enabled` + `config.managerEnabled/staticGateway` 交叉校验），不新增配置项——数据早已存在，缺的只是消费方。
+- 语义与实例级 `desired_state` reconcile 对齐：服务级与实例级同构，降低理解成本。
+- reconcile **默认开启**（update 的语义就是「收敛到应有状态」），提供 `--no-reconcile` 逃生舱供排障。
+- 不掩盖事实：拉起动作必须在 update 报告里可见（含中断时长），避免「悄悄修好」造成第二次不可见。
+
+**现状触点**：`updater.py:481/545/586` 三处判断；`manager_service.py:182-193`、`daemon.py:364-383`、`gateway_service.py:135-150` 的 `is_running`（已含 enabled 语义，可直接复用拆分）；`registry/dao.py` desired_state（先例）。
+
+**WBS（可执行）**
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **059.01** | 意图判定纯函数 | S | 新增 `service_intent(ws, config) -> {daemon,manager,gateway: enabled|disabled|n.a.}` | 纯函数 + 单测（enabled 文件缺失、config 交叉不一致、staticGateway 非 caddy） | — | 无 IO 副作用；三服务全矩阵覆盖 |
+| **059.02** | 三态重启决策 | S | `updater.restart_manager/daemon/gateway` | 决策改为 `intent × is_running`：running→重启 / enabled+停→拉起 / disabled→跳过 | 059.01 | 现有「原本未运行」文案仅出现在 disabled 分支 |
+| **059.03** | 拉起与监管器协调 | M | `start_*` / `coordinated_autostart_restart` | enabled+停时：autostart 在管走 `systemctl --user start`，否则 detached start；含 BUG-451 版本校验 | 059.02 | autostart 在管场景不出现双进程/双 watcher |
+| **059.04** | 中断时长与报告 | S | 状态文件 `started_at` / 锁心跳 | 「意外未运行（中断约 X），已恢复」文案 + JSON 字段 `unexpectedDown: true, downSince` | 059.02 | kill 服务后 update 输出含该标注；正常重启不出现 |
+| **059.05** | `--no-reconcile` 逃生舱 | S | `cli/system.py` update 选项 | flag 透传；help 说明仅排障用 | 059.02 | flag 下行为回到纯观察态 |
+| **059.06** | 回归与收口 | M | `tests/test_updater*.py` | 场景回归：三态 × 三服务 × autostart 在管/不在管 | 059.01-05 | 定向 pytest 全绿；DEV 关闭；本节改「已落地」 |
+
+**验收标准**
+
+- 模拟 enabled=true 且进程已死（kill 后）→ `lwa update` 拉起并在输出标注「意外未运行，已恢复」；accessReview 由 FAIL 转绿。
+- enabled=false → 仍跳过（文案不变）；`staticGateway!=caddy` 时 gateway 仍跳过。
+- autostart 在管 + enabled 未运行 → 走 `systemctl --user start`，无双进程；版本校验仍生效。
+- 全量 pytest 通过。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-059` / `PLN-040` | 本功能点 / 规划入账 |
+| `DEV-*` | 实施时按 059.01-06 开发项 |
+
+### 14.4 IMP-060 — doctor 增设服务运行态与重启韧性检查（P0）
+
+> **状态**：**已落地**（2026-08-17，DEV-118；060.01-04 全部完成）。
+
+> **落地后修订（2026-08-18，CHK-224）**：060.02 场景 2 由「只查 gateway 单元缺失」泛化为
+> **enabled_services 与 installed_services 逐项差集**（daemon/manager/gateway 任一缺失均 WARN，
+> 部分安装不再误报 OK）；`service_runtime_state` 新增**反向不一致**检查（已停用但进程残留 → WARN，
+> 建议 `lwa X off`，不假绿）；另按 CHK-223 增补单元「已装未启用」检查（BUG-533）。**一句话**：让「服务断了」和「重启后会断」在 `lwa doctor` 里自己浮出水面。实现触点：`doctor.check_service_runtime_state`（FAIL 级）与 `check_restart_resilience`（四类 WARN：无单元 / 缺 gateway 单元 / 无 linger / 容器 restart 策略不符，复用 `autostart.linger_enabled`）；已接入 `run_doctor` 主报告与 `--json`。测试：`tests/test_doctor_service_checks.py`（11 用例）。
+
+**需求**
+
+1. 新检查项 **`service_runtime_state`**（FAIL 级）：对 daemon/manager/gateway 比对意图（enabled）与观测（is_running）：
+   - enabled=true 且未运行 → **FAIL**，建议文含 `lwa manager on` / `lwa daemon on` / `lwa autostart check`；
+   - 其余（enabled 且运行 / enabled=false）→ PASS（enabled=false 时附 INFO「已按意图停用」）。
+2. 新检查项 **`restart_resilience`**（WARN 级）：评估「机器重启后能否自动恢复」：
+   - 存在 enabled 服务但未装任何 autostart 单元 → WARN「机器重启后服务不会自动恢复，建议 `lwa autostart install --with-caddy --linger`」；
+   - `staticGateway=caddy` 且网关在用、但 gateway 单元缺失（本次事故形态）→ WARN，指明 `--with-caddy`；
+   - 已装单元但未 linger → WARN（复用 `autostart run_check` 既有判定，`autostart.py:1607-1614`）；
+   - running 容器 restart policy 与模板期望 `unless-stopped`（`compose.py:65`）不符 → WARN 列实例 ID。
+3. 实现上**复用** `autostart.run_check` / doctor-hints 的既有逻辑并入 `run_doctor` 主报告（当前二者互不感知）。
+
+**关键决策（拍板默认）**
+
+- 分级原则：**enabled 未运行 = FAIL**（当前就是故障）；**无自启/无 linger = WARN**（裸进程是合法模式，但脆弱——重启后会变成 FAIL）。
+- 保持 doctor 本地、快速、直连（BUG-380 原则，`probe.py:23-24`）：韧性检查只读本地文件与 `systemctl --user show`，**不做网络探测**，不拖慢常规 doctor。
+- 修复建议文案直接给本次事故的实证修复命令 `lwa autostart install --with-caddy --linger`。
+
+**现状触点**：`doctor.py:1613-1645` 检查列表；`autostart.py:1542-1623` run_check；`autostart.py:91-98/765-771`（单元缺省）；`compose.py:65`；`CheckResult` 模型与 `--json` 契约。
+
+**WBS（可执行）**
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **060.01** | `service_runtime_state` 检查 | S | `doctor.py` 新增 `check_service_runtime_state` | 复用 059.01 意图函数与各 `is_running` | 059.01 | 三服务 × 三态单测全绿；FAIL 文案含恢复命令 |
+| **060.02** | `restart_resilience` 检查 | M | `doctor.py` 新增，复用 `autostart.run_check` | 四类 WARN 场景（无单元/gateway 缺/无 linger/restart policy 不符） | — | 每类有单测；裸进程合法模式不误升 FAIL |
+| **060.03** | 接入主报告 | S | `doctor.py:1613-1645` 列表 | 两项进入默认检查与 `--json` 契约；skills/FAQ 同步 | 060.01-02 | `lwa doctor` 输出新两项；JSON schema 更新有测试 |
+| **060.04** | 回归与收口 | M | `tests/test_doctor.py` | kill 服务、卸 autostart、关 linger 三现场模拟回归 | 060.01-03 | 定向 pytest 全绿；DEV 关闭；本节改「已落地」 |
+
+**验收标准**
+
+- kill manager 后 `lwa doctor` → `service_runtime_state` FAIL 且建议含恢复命令。
+- 未装 autostart、caddy 在用 → `restart_resilience` WARN 并给出 `--with-caddy --linger` 完整命令。
+- 全绿环境（autostart 齐 + linger + 服务运行）doctor 输出**零新增 FAIL/WARN**（不引入噪声）。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-060` / `PLN-040` | 本功能点 / 规划入账 |
+| `DEV-*` | 实施时按 060.01-04 开发项 |
+
+### 14.5 IMP-061 — 自启安装默认化与首次引导（P1）
+
+> **状态**：**已落地**（2026-08-17，DEV-118；061.01-04 全部完成）。**一句话**：把「缺省不安全」反转成「缺省安全、显式退出」。实现触点：`autostart.resolve_with_caddy`（三态）+ `install(with_caddy=None, linger=None)` 缺省反转（双 flag 兼容，旧命令行为不变）；`maybe_offer_autostart_install`（init/setup 收尾 Linux systemd TTY 引导、非 TTY 零阻塞）；`service_supervision_mode` + `lwa autostart status --json`（services[].mode）+ `lwa status` 运行模式段；docs/autostart.md、README 同步。测试：`tests/test_autostart_defaults.py`（17 用例）。
+
+**需求**
+
+1. `lwa init` / `lwa setup` 收尾检测到 systemd（Linux）时**交互询问**是否安装自启（仿 IMP-031 Docker 安装询问模式；非交互 TTY 不阻塞，改打印后续命令提示）。
+2. `autostart install` 缺省值调整：
+   - `staticGateway=caddy` 时 gateway 单元**默认纳入**（`with_caddy` 缺省反转为 True，保留 `--no-with-caddy` 显式退出）；
+   - linger **默认尝试**，失败降级 WARN 不失败（不再要求 `--linger`，保留 `--no-linger`）。
+3. `lwa autostart status` 与 `lwa status` 标注每个服务的运行模式：「systemd 监管」/「裸进程（重启后不自动恢复）」。
+4. WSL / macOS 行为不变（LaunchAgent 登录触发语义，见 IMP-030）。
+
+**关键决策（拍板默认）**
+
+- 反转 `with_caddy` 缺省是**行为变化**：以 typer 双 flag（`--with-caddy/--no-with-caddy`）平滑兼容，skills 与 `docs/autostart.md` 同步更新。
+- **不强制安装**（保留临时/开发用途的裸进程模式）：引导 + IMP-060 的 WARN 收敛，不做硬拦。
+- 交互询问仅出现在 TTY；Agent/脚本场景零阻塞（与 IMP-031 同一模式，避免破坏自动化）。
+
+**现状触点**：`autostart.py:91-98`（select_services）、`autostart.py:765-771`（install 缺省）、`cli/autostart.py:30-47`（CLI flag）、`init_workspace.py:67-73`（init 不提示 autostart）、`cli/system.py:109-152`（setup --autostart）。
+
+**WBS（可执行）**
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **061.01** | 缺省值反转 | S | `cli/autostart.py` / `autostart.py` | with_caddy 默认 True（caddy 在用时）、linger 默认尝试 | — | 双 flag 兼容；旧命令 `--with-caddy --linger` 行为不变 |
+| **061.02** | init/setup 首次引导 | M | `init_workspace.py` / `cli/system.py` | TTY 交互询问；非交互打印建议命令 | 061.01 | 自动化路径无阻塞；交互路径可跳过 |
+| **061.03** | 运行模式标注 | S | `autostart status` / `lwa status` | 「systemd 监管 / 裸进程（重启后不自动恢复）」标注 | — | 两命令输出与 `--json` 均含 mode 字段 |
+| **061.04** | 文档与回归 | M | `docs/autostart.md` / skills / `tests/` | 文档同步 + 缺省行为回归 | 061.01-03 | 定向 pytest 全绿；DEV 关闭；本节改「已落地」 |
+
+**验收标准**
+
+- 全新 Ubuntu + systemd 环境 `lwa init`（交互）→ 引导安装后 `lwa autostart check` 全 PASS 含 gateway 单元与 linger。
+- `lwa autostart install` 不带任何 flag 在 caddy 环境装出 gateway 单元；`--no-with-caddy` 仍可排除。
+- 非交互（管道/CI）下 init/setup 不挂起、不装，仅打印建议。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-061` / `PLN-040` | 本功能点 / 规划入账 |
+| `DEV-*` | 实施时按 061.01-04 开发项 |
+
+### 14.6 IMP-062 — 版本滞后可发现性（P2 · 不着急，占位）
+
+> **状态**：占位（2026-08-17）。事故机落后两个版本（V0.7.9 → V0.7.11）无人知晓，直到用户主动 update 才发现。
+
+**需求（占位）**：`lwa update` 结束时或 `doctor --profile full` 中做**可选**远端版本检查（`git ls-remote` / GitHub API），落后即提示「有新版本可 update」；离线/失败静默 SKIP 不告警。
+
+**规划时必须回答**
+
+1. 触发频率与缓存策略（避免每次命令都联网；建议仅 update 结束时 + 24h 缓存）。
+2. 仓库地址可配置（fork / 私有镜像场景）。
+3. 代理语义：远端检查**尊重** `https_proxy` 环境变量（本次 git pull 需走 mihomo 代理的实证）；内部本机/LAN 探测继续直连（BUG-380 原则不变，二者边界要写清）。
+4. ~~`update` 文档补「源码更新需自行 git pull（可走代理）」运维提示~~——**2026-08-17 当日反转**：本条原依据「IMP-040 `--pull` 已删除不重开」，现该决策已被推翻，源码拉取与远端版本探测整体升级为 **IMP-063（§15，`lwa update` 一键 GitHub 更新通道）**；本 IMP 保留为 doctor 侧消费方，探测能力复用 IMP-063 的 `--check`。
+
+### 14.7 明确不做（本轮）
+
+- **不给 lwa 自带进程监管守护**（supervisor 化）：监管交给 systemd / LaunchAgent，lwa 保持「被监管者 + 协调者」定位（BUG-191 已确立此边界，不推翻）。
+- **不做 update 自动 git pull**：IMP-040 `--pull` 已于 2026-07-20 从计划删除（DEV-085 关闭）；人工 pull 是预期流程。**【2026-08-17 更新：本条当日晚间被用户决策反转，重开为 IMP-063（§15）；「不做」范围收缩为 15.8 所列（不 clone、不自动回滚、不代操作非 ff merge/stash 等）。】**
+- **不做通知推送**（webhook/邮件/IM）：先靠 IMP-059/060 把可见性补齐；通知渠道待有真实需求再议（家庭单人场景，doctor/CLI 输出足够）。
+- **不强制消除裸进程模式**：保留开发/临时用途，靠 IMP-060 WARN + IMP-061 引导收敛。
+- **不合并三个 systemd 单元为单一 supervisor 单元**：分单元与现有 `coordinated_autostart_restart` 协调机制匹配，收益不明确，不动。
+
+---
+
+## 15. IMP-063 — `lwa update` 一键 GitHub 更新通道（fetch → 安全拉取 → 升级）
+
+> **状态**：**已落地**（2026-08-17，DEV-119；063.01-12 完成，063.13 实机「需代理环境一键 V0.7.x→V0.7.y」待下一发布周期真机执行）。**一句话**：把「人工 `git pull`（可能要走代理）+ `lwa update`」两步收敛为 `lwa update` 一步，并让远端版本探测成为 update 的内置能力。实现触点：`update_source.py`（目标解析/双锁/九态/SourceCheckReport v1/固定 OID fetch/ff-only/恢复链）、`update_flow.py`（bootstrap 编排 + handoff v1 + pass_fds 锁继承）、`update_continuation.py`（新解释器 Runtime 后半段，缺 FD/协议/代码不符在任何写入前拒绝 exit 3）、`cli/system.py`（`--check/--no-pull/--remote/--ref` 与互斥分流）、`updater`（warning/hasWarnings、Runtime 后半段抽取共用）。测试：`tests/test_update_source.py`（41 用例，全部基于临时 bare remote 夹具，零外网）；全量 2143 passed。
+> **落地后修订（2026-08-18，CHK-223/224）**：BUG-529～536 收口——锁忙不再进 Runtime 后半段；dry-run 不落 Registry；continuation 非零退出仍回传完整子报告（恢复链仅限升级关键失败）；behindBy 改用 rev-list 真实总数（截断只影响列表）。
+> **重开说明**：原 IMP-040 `update --pull` 曾于 2026-07-20 以「价值偏低 / 非刚需」从 2607 删除（DEV-085 关闭，编号已复用于 LAN 新鲜度）。**§14 事故实证推翻该判断**：事故机落后两个版本无人知晓（版本滞后不可见）、更新需人工记忆「先 pull 再 update」且 pull 需处理代理环境（TLS 直连失败、走 mihomo 才通）——这些摩擦与盲区正应由工具吸收，本 IMP 以新编号 063 重开，非恢复旧案。
+> **规划入账**：`PLN-041`。
+
+### 15.1 需求
+
+1. **`sourceUpdate` 默认前置**：`lwa update` 在 pip 之前完成源码探测与安全快进；`--no-pull` 保留「不联网、仅用本地代码刷新 Runtime」的逃生舱。
+2. **目标解析只信 upstream，不硬编码 `origin`**：
+   - 缺省用 `@{upstream}` 解析当前分支的真实 `remote + refs/heads/<branch>`；
+   - 用两个无歧义参数覆盖：`--remote <name>` 与 `--ref <branch>`；任一缺省值可从 upstream 继承；
+   - **无 upstream 时必须同时给出 `--remote` 和 `--ref`**，显式目标可正常更新，不因缺 upstream 拒绝；只给其中一个则 `failed(target_incomplete)`；
+   - MVP **不接受 tag/任意 commit**，避免「把当前分支快进到任意对象」的语义不清；remote/ref 不存在均结构化报错。
+3. **单次 fetch，固定候选 OID**：执行 `git fetch --no-tags <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>` 后立即从该 remote-tracking ref 记录唯一 `candidateHead`；展示、祖先关系判定和最终快进均针对该 OID，不再用会二次 fetch 的 `git pull`；通过时执行 `git merge --ff-only <candidateHead>`。
+4. **安全边界（快进前置条件）**：
+   - tracked 文件有本地修改 → `failed`，列出文件并提示人工 commit/stash；
+   - HEAD 领先或与 candidate 分叉 → `failed`，不 merge/rebase/强制重置；detached HEAD → `failed`；
+   - untracked 文件不做全量阻断；若与远端新增同名文件冲突，由 ff 阶段安全拒绝并转为可操作文案；
+   - shallow clone 无法证明祖先关系 → `failed(history_insufficient)`，提示 deepen/unshallow，不把 unknown 冒充 diverged；
+   - fetch 断网/代理/凭据/超时 → `warning`，不改工作树，继续用本地代码完成 Runtime 刷新；
+   - 非 git 安装 → `skipped`，提示迁移到 clone + editable 安装；`.git` 存在但 git 不可执行 → `failed(git_unavailable)`。
+5. **两阶段自更新，禁止新旧代码混跑**：旧进程只执行「目标解析 → fetch/快进 → `pip install -e .`」；只要 HEAD 发生变化，后续 skills/config/重启/review/doctor 必须交给**新 Python 解释器进程**。接力协议携带 `schemaVersion/oldHead/newHead/workspace/options/sourceUpdateResult`，新进程强制 `noPull + skipPip`防递归，最终合并为一份报告。
+6. **关键依赖门控**：
+   - 快进后 pip 或新进程接力失败时，停止源码依赖的后续步骤，不套用原「每步互不中断」语义；进入新进程后，各 Runtime 步骤仍沿用既有独立失败模型；
+   - `--skip-pip` **只允许用于本轮不改 HEAD 的路径**（`--no-pull`、已是最新或 fetch warning）；若探测到 behind 且同时传入 `--skip-pip`，在快进前 `failed(skip_pip_conflict)`，工作树不变，提示移除该 flag 或显式 `--no-pull --skip-pip`。
+7. **`--check` 与 `--dry-run` 分层**：
+   - `lwa update --check [--repo ...]`：在加载 workspace/config/registry 之前走独立路径，**不要求已 init 工作区**；会 fetch，因而只承诺「不改工作树与 Runtime」，允许刷新 `.git` 远端跟踪元数据；
+   - `lwa update --dry-run`：保持既有严格零写入承诺，**不联网、不 fetch、不取锁**，仅根据已有 tracking ref 预览，报告标 `fresh=false`；缺缓存 ref 时 `sourceUpdate=skipped`、整体退出 0，`extra={fresh:false,relation:"unknown",candidateHead:null,reason:"tracking_ref_missing"}`，人类文案明示「无法在零写入模式确定远端版本」；
+   - `--check` 与 `--dry-run` 互斥。
+8. **恢复辅助不冒充环境回滚**：仅在本轮已快进且 pip/接力/配置迁移/版本一致性等升级关键步骤失败时，报告 `oldHead` 与恢复指引；doctor/accessReview 等业务诊断失败不默认建议退代码。先要求复查 `git status`，工作树仍干净时才给经 shell 安全转义的 `git reset --keep <oldHead>` 建议，并明示重跑 pip/update 的完整恢复链；**不自动执行**。
+9. **并发互斥**：可变更的 update 全程取 workspace 锁，源码阶段（含会 fetch 的 `--check`）另取 git common-dir 下的 repo 锁；完整 update 的锁顺序固定为 `repo → workspace`，忙时 fail-fast 并显示持有者。父进程通过 POSIX `pass_fds` 把已持有的 repo/workspace 锁 FD 传给 continuation，父子均不重新取锁，父进程等待子进程结束；任一进程存活时锁都不释放。continuation 入口不注册为公开 CLI，且缺少继承 FD/协议信息时在任何 Runtime 写入前拒绝。
+
+### 15.2 关键决策（拍板默认）
+
+- **默认拉取**：与 IMP-061「缺省安全、显式退出」同一哲学——update 的语义就是「升到最新」；风险由 ff-only + dirty 拒绝 + fetch 失败降级三重护栏兜住，而不是把风险转移给「用户记得加 flag」。
+- **只信已固定候选的 fast-forward**：fetch 一次后固定 OID，仅执行 `git merge --ff-only <candidateHead>`；任何需要非 ff merge/rebase/reset 的状态都交给用户。
+- **新进程接力是正确性门槛**：当前进程一旦更改了自身源码，不得继续执行依赖新 schema/新函数的后续步骤；这是 BUG-357「pip 后旧 `Config` 类仍驻留内存」的同类边界，不能只靠 `resolve_version.cache_clear()` 解决。
+- **git 环境零托管**：代理与凭据全部复用 git 自身机制（`https_proxy` 环境变量实证有效；私有仓库由用户自配 credential helper / SSH remote），lwa **不内置**代理配置、不管理凭据、不存 token。
+- **fetch 失败是降级不是故障**：家庭服务器可能长期内网/代理不稳，update 必须离线可用（与 IMP-062「检查失败静默 SKIP」同口径）。
+- **dirty 判定口径**：仅 tracked 修改拒绝（`git status --porcelain` 排除 `??` 前缀）；避免「工作区里一个无关临时文件就永远升不了级」。
+- **不做 tag/release 通道**：当前版本体系在 commit 主题（`V0.7.11-Build2888-20260814`），无 tag 规范；`--ref` 在 MVP 只解析远端分支，tag 化发布体系成熟后再议。
+
+### 15.3 编排协议与报告契约
+
+**两阶段时序**：
+
+```text
+旧进程（bootstrap，不加载 Config/Registry）
+  repo/目标解析 → repo/workspace 锁 → fetch 固定 OID → 状态门禁
+  → merge --ff-only <OID> → pip install -e . → 启动新解释器
+                                                ↓ stdin/stdout handoff v1 + pass_fds 锁继承
+新进程（continuation，重新 import 全部代码）
+  重读 Config/Registry → skills/templates → migrate → 重启 → access → doctor
+  → 回传子报告 → 旧进程合并最终输出与退出码
+```
+
+**StepResult 状态**：扩展为 `ok | warning | failed | skipped | pending`；`warning` 在人类报告用 `!`，计入 `hasWarnings` 但不计入 `hasFailures`。update 只有 `failed` 退出 1；纯 warning 退出 0。dirty/diverged/detached/target-incomplete/skip-pip-conflict/git-unavailable 属于 failed；远端不可达属于 warning；非 git 安装与 dry-run 缺缓存 ref 属于 skipped。
+
+**`SourceCheckReport` v1**：`--check --json` 不复用必填 workspace 的 `UpdateReport`，独立输出：
+
+```json
+{
+  "schemaVersion": 1,
+  "repo": "/abs/repo",
+  "status": "upToDate|updateAvailable|blocked|unavailable",
+  "current": {"head": "...", "version": "0.7.9", "subject": "..."},
+  "target": {"remote": "origin", "branch": "main", "head": "...", "version": "0.7.11", "subject": "..."},
+  "relation": "equal|behind|ahead|diverged|unknown",
+  "aheadBy": 0,
+  "behindBy": 2,
+  "behind": [{"head": "...", "subject": "..."}],
+  "blockers": [],
+  "truncated": false,
+  "fresh": true,
+  "checkedAt": "2026-08-17T23:00:00+08:00",
+  "error": null
+}
+```
+
+- commit 主题不含 `Vx.y.z` 时 `version=null`，人类报告降级为短 SHA + subject，不伪造版本号。
+- 人类 behind 列表最多 20 条；JSON 最多 100 条并用 `truncated=true` 表示截断。
+- `blockers` 承载 dirty/detached/ahead/diverged/history-insufficient 等已成功探测但不宜快进的原因；`error` 仅承载 `{kind,message,action}` 形式的探测失败。
+- `--check` 退出码：0=成功完成探测（含 updateAvailable/blocked），1=本地仓库/参数不合法，2=远端不可达。IMP-062/doctor 消费时把 2 映射为 SKIP，不把网络问题升为 doctor FAIL。
+- `UpdateReport` 保留 `versionBefore/versionAfter`兼容字段，`sourceUpdate.extra` 另携带 `oldHead/candidateHead/newHead/remote/branch/relation/aheadBy/behindBy/fresh`；显式 `--repo` 时版本对比以目标 repo 的 commit descriptor 为准。
+
+### 15.4 现状触点（复用）
+
+| 触点 | 位置 | 复用点 |
+| --- | --- | --- |
+| 源码根识别 | `updater.py:125-162` `locate_repo`（`--repo` > editable > git 根） | 直接复用；新增「是否 git 克隆」判定（`.git` 存在） |
+| 编排骨架 | `updater.py:675` `run_update`（每步独立 StepResult）；dry-run 分支 `721-761` | bootstrap 置于加载 Config/Registry 之前；新增 handoff 关键门控，新进程内复用原后半段 |
+| 版本解析 | `version_info.py:49-88` `resolve_version`（git log commit 主题 > metadata > 兜底）；`run_update:771` 已有 `cache_clear()` 先例 | 当前/候选均从固定 commit OID 取 subject 并尝试解析版本；不受 remote ref 后续漂移影响 |
+| pip 安装 | `updater.py:168-197` `run_pip_install`（subprocess、超时、错误不吞） | 风格与超时模式照搬给 fetch/ff；pip 成功后用 `sys.executable -m local_webpage_access` 启动 continuation |
+| CLI flag 全集 | `cli/system.py:465-509`（`--repo/--dry-run/--skip-pip/--no-*` 族） | 新 flag：`--no-pull`、`--remote`、`--ref`、`--check`；`--check` 必须在 `require_workspace` 前分流；behind + skip-pip 在快进前拒绝 |
+| 报告契约 | `updater.py:75-119` `StepResult/UpdateReport` | 增 `warning/hasWarnings`；`sourceUpdate.extra`；独立 `SourceCheckReport` v1；handoff v1 |
+| 新旧进程边界 | `updater.py:379-430` `run_migrate_config_defaults`（BUG-357） | 既有子进程先例证明旧类不可继续执行新 schema；本 IMP 升级为整个 Runtime 后半段接力 |
+| 安装口径 | `README.md:42`（clone + `pip install -e .`）；`docs/release-checklist.md:58`（release zip 为辅通道） | 文档以克隆安装为主通道，zip 安装提示迁移 |
+
+### 15.5 WBS（可执行）
+
+> 规模：S≤0.5d · M≈0.5–1.5d · L≈1.5–3d。建议顺序：**A → B → C → D → E（文档可与 D 后半段并行）→ F**。git 测试统一用临时 bare remote + clone/worktree 夹具，禁止依赖外网与真实 GitHub。
+
+#### 阶段 A — git 状态与探测（纯逻辑层）
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **063.01** | 仓库与目标解析 | M | 新建 `update_source.py`：`resolve_source_target(repo, remote, ref)` | 识别 git/link-worktree/无 git；解析 HEAD/upstream；`--remote/--ref` 独立继承与无 upstream 全显式规则；拒绝 tag/commit | — | 全程无网络；返回结构化 target/errorKind |
+| **063.02** | repo/workspace 互斥锁 | M | 新 update lock helper | git common-dir repo 锁 + workspace 锁；跨进程固定顺序、持有者信息、陈旧判定；FD 可继承 | — | 双 update 竞争时一个 fail-fast；check 取 repo 锁；`--dry-run` 不建锁 |
+| **063.03** | 本地状态与关系判定 | M | `inspect_repo(repo, candidate=None)` | tracked/untracked/detached/shallow；有 candidate 时计算 equal/behind/ahead/diverged/unknown | 063.01 | 九态矩阵；shallow 历史不足不误判分叉 |
+| **063.04** | 状态与报告基础契约 | M | `StepResult/UpdateReport` + 新 `SourceCheckReport` | `warning/hasWarnings`；source extra；check JSON v1、blockers/error、behind 截断、退出码；dry-run 缺 ref 契约 | — | 纯模型/格式化/序列化测试通过，后续无需自定义临时报告 |
+| **063.05** | 远端探测与 `--check` | M | `fetch_candidate` + CLI 早期分流 | 取 repo 锁；显式 refspec 刷新 tracking ref 后固定 candidate OID；无 workspace 输出 `SourceCheckReport` | 063.01–04 | 不改工作树；JSON/退出码契约测试；remote 失败可判型 |
+
+#### 阶段 B — 安全拉取
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **063.06** | 固定 OID 快进 | M | `apply_fast_forward(repo, candidate, options)` | 起点门禁通过后 `git merge --ff-only <OID>`；behind + skip-pip 快进前拒绝；返回 old/new/descriptor；untracked 同名冲突可诊断 | 063.02–05 | 应用 OID 与预览 OID 严格一致；所有拒绝路径工作树不变 |
+
+#### 阶段 C — 新进程接力
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **063.07** | bootstrap/pip 门控 | M | CLI update 前置分流 + `update_source.py` | Config/Registry 加载前完成 sourceUpdate；快进后 pip 失败即阻断 continuation；未改 HEAD 时保留 skip-pip 旧语义 | 063.05–06 | 旧进程未加载运行态 schema；pip 失败不执行后半段 |
+| **063.08** | handoff v1 与新进程 continuation | L | 内部 continuation 入口 + 原始子报告 | `sys.executable -m local_webpage_access` 非公开入口；stdin/stdout JSON；`pass_fds` 继承两锁；参数白名单/防递归；新解释器重读 Config/Registry 并返回 Runtime 子报告 | 063.02、04、07 | 后半段 import newHead 代码；缺 FD/协议不兼容/子进程崩溃在写入前可诊断；父死子活时锁仍有效 |
+
+#### 阶段 D — 编排、CLI 与恢复指引
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **063.09** | source/Runtime 报告整合 | M | `run_update/format_report` + 父子报告合并 | source step/extra + Runtime 子报告；warning 图标；dirty 等 failed 本地继续；快进后 pip/handoff 失败门控 | 063.04、07–08 | 单一最终报告的状态、版本、退出码与 JSON 一致 |
+| **063.10** | flag/模式分流、dry-run 与恢复 | M | `cli/system.py` + 报告收尾 | `--no-pull/--remote/--ref/--check`；check 无 workspace；dry-run 缺 ref 的 skipped/exit0/extra 契约；check/dry-run 互斥；关键失败恢复链 | 063.05、07、09 | `--no-pull` 与旧基线兼容；skip-pip 组合全矩阵；doctor/accessReview 失败不误建议退代码 |
+
+#### 阶段 E — 文档与 skills
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **063.11** | 用户文档与 skills | M | `README.md` / FAQ / operations / `lwa-update-runtime` | 一键更新；check/dry-run 副作用边界；`--remote/--ref`；skip-pip 限制；代理/凭据；离线降级；非 git 迁移；恢复链 | 063.09–10 | 用户文档与 CLI/JSON/退出码一致；Skill 不再要求人工先 pull |
+
+#### 阶段 F — 回归与收口
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **063.12** | 自动化场景矩阵 | L | `tests/test_update_source.py` + `tests/test_updater*.py` + CLI 测试 | bare remote/clone/linked worktree/shallow；九态×fetch 成败×固定 OID；handoff 新旧代码证明；双 update 竞争；check/dry-run/JSON/退出码 | 063.01–11 | 全绿且不触外网；包含路径空格与超长 behind 截断 |
+| **063.13** | 收口 | S | task-list / 本文档 / 实机 | DEV 关闭；§15 改「已落地」；需代理环境一键 V0.7.x→V0.7.y；无 workspace 实测 `--check` | 063.12 | 实机一次成功；新进程版本、source report、Runtime 报告一致 |
+
+### 15.6 验收标准
+
+- **主路径（事故场景复现）**：克隆安装、落后两个版本、需代理的环境——一条 `lwa update` 完成 fetch → 固定 OID 快进 → pip → **新进程接力** → 同步/重启/复核/doctor，报告含 `sourceUpdate ok（V0.7.9 → V0.7.11）`，全程无人工 git 操作。
+- 已是最新：`sourceUpdate skipped（已是最新）`，其余步骤照旧。
+- tracked 脏 / 分叉 / detached / 无 upstream 且未全量显式给出 remote+ref / shallow 历史不足：拒绝快进、工作树零改动、结构化 errorKind + 下一步指引；后续步骤以本地代码继续但整体退出 1。
+- 无 upstream 但显式给出 `--remote <name> --ref <branch>`：正常探测/快进；不因本地未设 upstream 拒绝。
+- 断网或代理失效：`sourceUpdate warning`，update 仍以本地代码完成全部步骤（离线可用）。
+- `--no-pull`：步骤集合/状态语义/退出码与 V0.7.11 兼容（版本/时序/文案除外）；`--check`：无 workspace 可用、不改工作树与 Runtime；`--dry-run`：不联网/不 fetch/不取锁/零写入并标记 `fresh=false`。
+- 快进后 pip 或 handoff 失败：不由旧进程执行 Runtime 后半段；恢复指引只在升级关键失败中出现。
+- behind + `--skip-pip`：在快进前拒绝且工作树不变；`--no-pull --skip-pip`、已最新 + `--skip-pip`、fetch warning + `--skip-pip` 均保留旧语义。
+- 两个 update 并发：仅一个获锁执行，另一个快速失败且不触碰 pip/进程/registry；父进程中途死亡时，continuation 继承的 FD 仍保持锁到子进程结束。
+- 非 git 安装：`skipped` + 迁移指引，不自动 clone。
+- 全量 pytest 通过，git 相关测试不依赖外网。
+
+### 15.7 实施参数（集中常量，实机可调）
+
+1. **fetch 超时缺省**：60s 起步还是 30s？（跨境代理慢网络 vs 卡死体验；可实施时按实机调，常量集中定义。）
+2. **behind 截断**：人类 20、JSON 100，集中常量；须保留 `behindBy` 总数。
+3. **锁等待**：默认 fail-fast，只读取持有者 PID/开始时间/工作区；暂不增 `--wait`。
+4. **`--check` 缓存**：本 IMP 每次实查；24h 调度与缓存由 IMP-062 doctor 消费层负责，不污染 source check 原子能力。
+
+### 15.8 明确不做（本 IMP）
+
+- 不做自动 `git clone` 安装与非 git 安装的自动迁移（只提示）。
+- 不做自动回滚（仅在关键升级失败时给 `status → reset --keep → pip/update` 人工恢复链）。
+- 不做非 ff merge/rebase/reset/stash 代操作；不做 `--force` 类破坏性 flag。
+- 不接受 tag/任意 commit 作为 MVP `--ref`；仅支持远端分支。
+- 不内置代理与凭据管理（git 生态已有成熟机制，§14 事故实证环境变量代理即可用）。
+- 不做 GitHub API / Release 附件通道（仅 git 协议；pack-release-zip 辅通道维持现状）。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-063` / `PLN-041` | 本功能点 / 规划入账 |
+| `DEV-*` | 实施时按 063.01-13 开发项 |
+| 原 IMP-040（已删）/ `DEV-085` | 历史前案（2026-07-20 删除）；本 IMP 重开依据见 §15 引言 |
+| `IMP-062`（§14.6） | 版本滞后 doctor 消费方，探测能力由本 IMP `--check` 提供 |
+
+---
+
 ## 变更日志
 
 | 日期 | 变更 |
 | --- | --- |
+| 2026-08-18 | **CHK-223/224 复审收口**：BUG-529～534 由复审会话修复、BUG-535 随 V0.8.0 版本提升（OPS-113）关闭、BUG-536（behindBy 截断）本会话修复；CHK-224 三项（restart_resilience 逐项差集 / init 引导异常兜底 / service_runtime_state 反向不一致）落地为 BUG-537～539 并修复；新增回归 16 例，全量 2159 passed。 |
+| 2026-08-17 | **§14/§15 全量落地（DEV-118/119）**：IMP-059 update 三态 reconcile（service_intent.py + coordinated_start + --no-reconcile）；IMP-060 doctor service_runtime_state/restart_resilience 两检查入主报告；IMP-061 autostart 缺省反转（with_caddy/linger 三态）+ init/setup 首次引导 + 运行模式标注（status/autostart status --json）；IMP-063 一键 GitHub 更新通道（update_source/update_flow/update_continuation + --check/--dry-run/--no-pull/--remote/--ref + handoff v1 新解释器接力 + repo/workspace 双锁 + SourceCheckReport v1 + skip-pip 门控 + 恢复链）；README/FAQ/autostart.md/lwa-update-runtime skill 同步；新增测试 87 例（059:18 + 060:11 + 061:17 + 063:41），全量 2143 passed。063.13 实机验收（需代理环境一键升级）待下一发布周期。 |
+| 2026-08-17 | **§15 IMP-063 `lwa update` 一键 GitHub 更新通道（P0，准备开工）**：事故实证重开原 IMP-040 后，根据 CHK-220 将方案加固为「upstream/显式 remote+ref 解析 → 单次 fetch 固定 OID → ff-only 快进 → pip → 新解释器 handoff → Runtime 后半段」；拍板 check/dry-run 副作用边界、warning/独立 SourceCheckReport v1/退出码、`--skip-pip` 冲突门禁、repo+workspace 锁 FD 继承、关键失败恢复链；WBS 扩为 063.01-13 并消除依赖环；`PLN-041`。 |
+| 2026-08-17 | **§14 Ubuntu 实机 update 事故复盘**：机器重启后 manager/caddy 裸进程丢失约半天不可见，update 因「原本未运行」观察态误判不拉起；根因矩阵五项（服务无监管 / doctor 不查服务运行态与韧性 / update 无期望态 / autostart 缺省不全 / 实例级有期望态而服务级没有的对照）；入账 **IMP-059**（update 服务级期望态 reconcile，P0）、**IMP-060**（doctor 服务运行态+重启韧性检查，P0）、**IMP-061**（自启默认化与首次引导，P1）、**IMP-062**（版本滞后可发现性，P2 占位）；含 WBS 059.01-06 / 060.01-04 / 061.01-04 与明确不做清单；`PLN-040`、`CHK-219`。 |
 | 2026-08-11 | **四文档参照体系补强**：§13 同步 IMP-056/057 MVP 与 IMP-058 Gate-C 实施后状态；不复制 task-list 待办，改为指向 Scanner C.R01～C.R07 和预检/Monorepo 可选包 C，供后续 Agent 继续实施。 |
 | 2026-08-11 | **§12.8 + §13 评审摘要**：路径别名门禁收紧为入口 HTML 根绝对资源负向守卫，补证据/快照边界；新增 IMP-058 Scanner 五层流水线、组件/替代计划、能力契约、成功谓词、等价 fallback 与副作用回滚摘要；明确 DEV-110 为评审前初版实现记录，修订版 Gate-C 由 DEV-111 重新承接。 |
 | 2026-08-10 | **§12 IMP-055 复盘补链**：补充 BUG-467～469、多轮复核、真实 prd-review/home-bookshelf E2E、重复别名前缀与最终 URL/MIME/JSON 404 修复；详细过程迁入独立复盘文档。 |

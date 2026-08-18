@@ -163,6 +163,46 @@ def test_compose_yaml_is_docker_compose_parseable(workspace: Workspace) -> None:
     assert svc["restart"] == "unless-stopped"
 
 
+# ---- issue#1：PORT 注入 / extraVolumes 挂载出口 -----------------------------
+
+
+def test_compose_injects_port_env(workspace: Workspace) -> None:
+    """issue#1 附加观察：统一注入 PORT=${INTERNAL_PORT}，PORT 约定应用与探针对齐。"""
+    import yaml
+
+    m = _mk_manifest(internal_port=8000)
+    path = generate_compose(m, workspace, host_port=18000)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    svc = data["services"]["app"]
+    assert "environment" in svc
+    assert "PORT=${INTERNAL_PORT}" in svc["environment"]
+
+
+def test_compose_merges_extra_volumes(workspace: Workspace) -> None:
+    """issue#1 问题2：container.extraVolumes 合并进 volumes，重生成不丢业务挂载。"""
+    import yaml
+
+    m = _mk_manifest(internal_port=8000)
+    assert m.container is not None
+    m.container.extraVolumes = ["/home/fenix-wang/.openclaw/workspace:/workspace:ro"]
+    path = generate_compose(m, workspace, host_port=18000)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    svc = data["services"]["app"]
+    assert svc["volumes"] == [
+        "../data:/app/data",
+        "/home/fenix-wang/.openclaw/workspace:/workspace:ro",
+    ]
+
+
+def test_compose_rejects_malformed_extra_volume(workspace: Workspace) -> None:
+    """extraVolumes 含换行（YAML 注入向量）时拒绝写出。"""
+    m = _mk_manifest(internal_port=8000)
+    assert m.container is not None
+    m.container.extraVolumes = ["../data:/app/data\n    privileged: true"]
+    with pytest.raises(ValueError, match="extraVolumes"):
+        generate_compose(m, workspace, host_port=18000)
+
+
 # ---- .env 渲染 ---------------------------------------------------------------
 
 
@@ -421,7 +461,6 @@ def test_env_example_not_overwritten_if_exists(workspace: Workspace) -> None:
     generate_env(m, workspace, host_port=18000)
 
     assert target.read_text(encoding="utf-8") == "USER_EDITED=keep\n"
-
 
 
 # ---- CHK-193/P1：sourceSubdir SQLite 源库复制 --------------------------------

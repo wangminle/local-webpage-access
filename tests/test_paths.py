@@ -107,7 +107,7 @@ def test_validate_instance_id_accepts_slug(iid: str) -> None:
     [
         "..",
         ".",
-    "../secret",
+        "../secret",
         "a/b",
         "a\\b",
         ".hidden",
@@ -165,8 +165,19 @@ def test_validate_path_alias_rejects_reserved_words() -> None:
     # 全部保留字均被拒
     assert "api" in _PATH_ALIAS_RESERVED
     assert "static-gateway" in _PATH_ALIAS_RESERVED
-    for reserved in ("api", "static-gateway", "inbox", "apps", "registry",
-                     "run", "manager", "logs", "skills", "templates", "health"):
+    for reserved in (
+        "api",
+        "static-gateway",
+        "inbox",
+        "apps",
+        "registry",
+        "run",
+        "manager",
+        "logs",
+        "skills",
+        "templates",
+        "health",
+    ):
         with pytest.raises(PathError):
             validate_path_alias(reserved)
 

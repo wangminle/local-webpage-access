@@ -192,9 +192,7 @@ def test_http_ok_ignores_env_http_proxy(http_server, monkeypatch) -> None:
 # ---- check_health ----------------------------------------------------------
 
 
-def test_check_health_success_records_timestamp(
-    workspace, registry, config, http_server
-) -> None:
+def test_check_health_success_records_timestamp(workspace, registry, config, http_server) -> None:
     _seed_container(workspace, registry, "api", host_port=http_server)
     result = check_health(workspace, config, registry, "api")
     assert isinstance(result, HealthResult)
@@ -204,9 +202,7 @@ def test_check_health_success_records_timestamp(
     assert row["last_health_check_at"] is not None
 
 
-def test_check_health_failure_records_last_error(
-    workspace, registry, config
-) -> None:
+def test_check_health_failure_records_last_error(workspace, registry, config) -> None:
     port = _free_port()  # 无人监听
     _seed_container(workspace, registry, "api", host_port=port)
     result = check_health(workspace, config, registry, "api", timeout=1.0)
@@ -306,9 +302,7 @@ def test_port_mapping_label_static_is_none(workspace, registry, config) -> None:
     assert st.port_mapping_label is None
 
 
-def test_port_mapping_label_static_from_manifest_internal_port(
-    workspace, registry, config
-) -> None:
+def test_port_mapping_label_static_from_manifest_internal_port(workspace, registry, config) -> None:
     """前端/静态项目：manifest.network.internalPort 与 hostPort 不同时展示映射。"""
     workspace.ensure_app_dirs("voiceprint")
     manifest = InstanceManifest(
@@ -356,9 +350,7 @@ def test_port_mapping_label_in_to_dict(workspace, registry, config) -> None:
     assert "desiredState" in d
 
 
-def test_port_mapping_label_none_in_to_dict_for_static(
-    workspace, registry, config
-) -> None:
+def test_port_mapping_label_none_in_to_dict_for_static(workspace, registry, config) -> None:
     """静态实例 to_dict() 的 portMappingLabel 为 None。"""
     _seed_static(workspace, registry, "demo", host_port=21100)
     st = instance_status(workspace, config, registry, "demo")
@@ -380,9 +372,7 @@ def test_all_statuses_returns_all(workspace, registry, config) -> None:
     assert {s.id for s in statuses} == {"api", "demo"}
 
 
-def test_status_to_dict_includes_manager_list_fields(
-    workspace, registry, config
-) -> None:
+def test_status_to_dict_includes_manager_list_fields(workspace, registry, config) -> None:
     """BUG-028：管理页列表需要 stack/database/servingMode/资源字段。"""
     _seed_container(workspace, registry, "api", has_database=True)
     registry.upsert_resources(
@@ -410,11 +400,10 @@ def test_status_to_dict_includes_manager_list_fields(
 # ---- sync_status -----------------------------------------------------------
 
 
-def test_sync_status_observes_and_reports_change(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_sync_status_observes_and_reports_change(workspace, registry, config, monkeypatch) -> None:
     """sync_status 调用 observe_status，状态变化时返回映射。"""
     _seed_container(workspace, registry, "api")
+
     # manifest 落 running，但容器实际没跑 → observe 改写 stopped
     class _FakeRT:
         def __init__(self, *a, **kw):
@@ -470,9 +459,7 @@ def test_sync_status_converges_registry_manifest_divergence(
     assert registry.get_instance("demo")["status"] == "stopped"
 
 
-def test_cli_status_syncs_before_display(
-    workspace, registry, config, monkeypatch
-) -> None:
+def test_cli_status_syncs_before_display(workspace, registry, config, monkeypatch) -> None:
     """BUG-026：lwa status 输出前应先 observe/sync，避免显示陈旧 running。"""
     from typer.testing import CliRunner
 
@@ -566,9 +553,7 @@ def test_sync_status_observes_building_without_active_build(
         reg.update_status(iid, St.RUNNING.value)
         return St.RUNNING
 
-    monkeypatch.setattr(
-        "local_webpage_access.lifecycle.observe_status", _fake_observe
-    )
+    monkeypatch.setattr("local_webpage_access.lifecycle.observe_status", _fake_observe)
 
     changed = sync_status(workspace, config, registry, "demo")
 
@@ -607,9 +592,7 @@ def test_sync_status_recovers_building_with_old_finished_build(
 
     _seed_container(workspace, registry, "api")
     registry.update_status("api", Status.BUILDING.value)
-    build_id = registry.add_build(
-        "api", status=build_status, started_at="2020-01-01T00:00:00"
-    )
+    build_id = registry.add_build("api", status=build_status, started_at="2020-01-01T00:00:00")
     with registry.conn:
         registry.conn.execute(
             "UPDATE builds SET finished_at = ? WHERE id = ?",
@@ -653,15 +636,12 @@ def test_sync_status_fails_shadowed_orphan_running_build(
             "VALUES (?, 'running', ?, NULL)",
             ("api", "2020-01-01T00:00:00+08:00"),
         )
-        orphan_id = int(
-            registry.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        )
+        orphan_id = int(registry.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
     success_id = registry.add_build("api", status="running", started_at=now_iso())
     # add_build 会把孤儿标 failed；再手工改回 running 以模拟旧库状态
     with registry.conn:
         registry.conn.execute(
-            "UPDATE builds SET status='running', finished_at=NULL, error_summary=NULL "
-            "WHERE id=?",
+            "UPDATE builds SET status='running', finished_at=NULL, error_summary=NULL WHERE id=?",
             (orphan_id,),
         )
     registry.finish_build(success_id, status="success")
