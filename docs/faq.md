@@ -223,12 +223,22 @@ V1 要求 Docker Compose 插件（`docker compose` 子命令）。安装 `docker
 * 快进后 pip/接力失败：报告附人工恢复链（`git status` 复查 → 干净时
   `git reset --keep <oldHead>` → 重跑 `lwa update`）；不自动回滚。
 
+### `lwa update` 收尾 access/doctor 偶报瞬时失败？（V0.8.2 / issue #5）
+
+重启后台服务后立刻刷新访问地址/doctor 存在竞态窗口。V0.8.2 起 update 在重启与自检之间
+**等待服务就绪**（daemon/gateway 逐项探活，最多约 30s，报告 `waitReady` 步骤）；超时仅降级
+warning 不阻断，提示稍后 `lwa doctor` 复核。若仍见瞬时 FAIL，手动重跑一次即可，持续 FAIL
+才需要按 [运维手册](operations-playbook.md) 排障。
+
 ### 机器重启后 manager/网关没了、别名入口失效？（IMP-059/060/061）
 
 三个互补机制：
 
 1. `lwa update` 三态 reconcile（IMP-059）：`run/*.json` 标记 enabled 但未运行的自有服务会
    在 update 时自动拉起，报告标注「意外未运行（中断约 X），已恢复」；`--no-reconcile` 仅排障用。
+   **V0.8.2 / issue #4**：中断时长 X 改按 live 证据估算（存活的 `run/caddy.pid`、systemd
+   `InactiveEnterTimestamp`），detached 时代的陈旧 `run/gateway.json` 不再采信；无法确定时
+   不再虚报时长。
 2. `lwa doctor`（IMP-060）：`service_runtime_state` 对 enabled 未运行直接 **FAIL**（附
    `lwa manager on` 等恢复命令），对**已停用但进程残留**的服务 WARN（建议 `lwa X off` 清理）；
    `restart_resilience` 对任一 enabled 服务缺自启单元（逐项差集，含 gateway）/ 单元已装未启用 /

@@ -1136,3 +1136,118 @@ def test_no_review_access_skips_review_step(
     assert report.step("accessRefresh").status == "ok"
     assert report.step("accessReview").status == "skipped"
     assert reviewed["n"] == 0
+
+
+# ---- issue #5：waitReady（重启后等就绪再做 access/doctor 自检） ---------------
+
+
+def test_wait_services_ready_polls_until_ready(monkeypatch) -> None:
+    """_wait_services_ready：未就绪时按间隔轮询，直到全部就绪。"""
+    import time as time_mod
+
+    from local_webpage_access import updater as upd
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(time_mod, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time_mod, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+
+    calls: list[str] = []
+
+    def fake_ready(name, ws, cfg):
+        calls.append(name)
+        return len(calls) >= 3  # 第 3 次探测才就绪
+
+    monkeypatch.setattr(upd, "_service_ready", fake_ready)
+
+    ready, waited, pending = upd._wait_services_ready(
+        None, None, names=["daemon"], poll_interval=0.5
+    )
+    assert ready is True
+    assert pending == []
+    assert waited >= 1.0  # 至少 sleep 了两个轮询间隔
+    assert len(calls) == 3
+
+
+def test_wait_services_ready_times_out(monkeypatch) -> None:
+    """_wait_services_ready：超时仍未就绪 -> (False, 等待秒数, 未就绪列表)。"""
+    import time as time_mod
+
+    from local_webpage_access import updater as upd
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(time_mod, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time_mod, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(upd, "_service_ready", lambda name, ws, cfg: False)
+
+    ready, waited, pending = upd._wait_services_ready(
+        None, None, names=["gateway", "daemon"], timeout=2.0, poll_interval=0.5
+    )
+    assert ready is False
+    assert pending == ["gateway", "daemon"]
+    assert waited >= 2.0
+
+
+def test_update_wait_ready_ok_between_restart_and_access(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """issue #5：等就绪成功 -> waitReady=ok，且排在 restartGateway 之后、accessRefresh 之前。"""
+    caddy_config = config.model_copy(update={"staticGateway": "caddy"})
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: ("gateway 已由自启动重启", True, True),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.is_gateway_running",
+        lambda ws, cfg: True,
+    )
+    import local_webpage_access.updater as upd
+
+    monkeypatch.setattr(upd, "_wait_services_ready", lambda ws, cfg, names: (True, 0.4, []))
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.refresh_network_entries",
+        lambda *a, **k: __import__(
+            "local_webpage_access.access", fromlist=["RefreshReport"]
+        ).RefreshReport(lan_ip="10.0.0.1"),
+    )
+
+    report = run_update(workspace, caddy_config, registry, options=_opts(restart_gateway=True))
+    names = [s.name for s in report.steps]
+    assert names.index("restartGateway") < names.index("waitReady") < names.index("accessRefresh")
+    step = report.step("waitReady")
+    assert step.status == "ok"
+    assert "0.4s" in step.message and "gateway" in step.message
+    assert report.step("accessRefresh").status == "ok"
+
+
+def test_update_wait_ready_timeout_degrades_to_warning(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """issue #5 / L7：等就绪超时只降级 warning，不阻断后续 access 自检。"""
+    caddy_config = config.model_copy(update={"staticGateway": "caddy"})
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: ("gateway 已由自启动重启", True, True),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.is_gateway_running",
+        lambda ws, cfg: True,
+    )
+    import local_webpage_access.updater as upd
+
+    monkeypatch.setattr(
+        upd, "_wait_services_ready", lambda ws, cfg, names: (False, 30.0, list(names))
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.refresh_network_entries",
+        lambda *a, **k: __import__(
+            "local_webpage_access.access", fromlist=["RefreshReport"]
+        ).RefreshReport(lan_ip="10.0.0.1"),
+    )
+
+    report = run_update(workspace, caddy_config, registry, options=_opts(restart_gateway=True))
+    step = report.step("waitReady")
+    assert step is not None
+    assert step.status == "warning"
+    assert "gateway" in step.message and "doctor" in step.message
+    # 等待超时不阻断 access 自检（warning 不算失败）
+    assert report.step("accessRefresh").status == "ok"

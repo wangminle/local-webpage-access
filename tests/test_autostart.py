@@ -785,6 +785,8 @@ def test_migrate_detached_stop_failure_returns_false(tmp_path, monkeypatch) -> N
     root, ws, config = _make_ws(tmp_path)
     import local_webpage_access.daemon as dm
 
+    # issue #3：迁移前先查监管模式；模拟裸进程，避免真实 launchctl/systemd 状态干扰。
+    monkeypatch.setattr(asm, "service_supervision_mode", lambda name, **k: asm.SERVICE_MODE_BARE)
     monkeypatch.setattr(dm, "is_running", lambda workspace: True)
     monkeypatch.setattr(dm, "stop_daemon", lambda workspace: False)
     assert asm._migrate_detached_for_supervision(ws, config, "daemon") is False
@@ -801,6 +803,8 @@ def test_enable_migration_failure_makes_unsuccessful(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(asm, "detect_platform", lambda: "linux")
     monkeypatch.setattr(asm, "systemd_available", lambda: True)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # fake runner 的 is-active 恒成功会让监管模式判为 systemd 而跳过迁移（issue #3）
+    monkeypatch.setattr(asm, "service_supervision_mode", lambda name, **k: asm.SERVICE_MODE_BARE)
     asm.install(ws, config, with_caddy=False, enable=False)
     import local_webpage_access.daemon as dm
 
@@ -1153,7 +1157,7 @@ def test_port_2019_rejects_alive_but_wrong_identity(tmp_path, monkeypatch) -> No
             pass
 
     monkeypatch.setattr("socket.socket", lambda *a, **k: _FakeSock())
-    assert asm._port_2019_foreign(ws) is True
+    assert asm._port_2019_foreign(ws, config) is True
     item = asm._check_caddy(ws, config)
     assert item.status == "fail"
     assert "2019" in item.message
@@ -1508,3 +1512,104 @@ def test_enable_linger_raises_when_user_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(asm.getpass, "getuser", boom)
     with pytest.raises((KeyError, asm.AutostartError)):
         asm.enable_linger(runner=lambda *a, **k: CompletedProcess(args=[], returncode=0))
+
+
+# ---- issue #2/#3/#4：GitHub 实机反馈修复（2026-08-18）------------------------
+
+
+def test_migrate_skips_supervised_service(tmp_path, monkeypatch) -> None:
+    """issue #3：监管模式在管时不 stop（enable 幂等，避免误停 systemd 服务）。"""
+    root, ws, config = _make_ws(tmp_path)
+    import local_webpage_access.daemon as dm
+
+    monkeypatch.setattr(asm, "service_supervision_mode", lambda name, **k: asm.SERVICE_MODE_SYSTEMD)
+    stopped: list[object] = []
+    monkeypatch.setattr(dm, "is_running", lambda workspace: True)
+    monkeypatch.setattr(dm, "stop_daemon", lambda workspace: stopped.append(1) or True)
+    # systemd 在管：即使 is_running() 为真也不得 stop
+    assert asm._migrate_detached_for_supervision(ws, config, "daemon") is True
+    assert stopped == []
+
+
+def test_launchd_bootstrap_retries_transient_error(tmp_path, monkeypatch) -> None:
+    """issue #2 / BUG-549：bootstrap 瞬态 error 5 重试后成功。"""
+    backend = asm.MacLaunchdBackend()
+    path = backend.unit_path("gateway")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"dummy")
+
+    calls = {"bootstrap": 0}
+
+    def runner(cmd, **kwargs):
+        joined = " ".join(cmd)
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            calls["bootstrap"] += 1
+            if calls["bootstrap"] <= 2:
+                return CompletedProcess(args=cmd, returncode=5, stdout="", stderr="Bootstrap failed: 5")
+            return CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "print" in joined and "print-disabled" not in joined:
+            return CompletedProcess(args=cmd, returncode=0, stdout="pid = 1\ndisabled = false\n", stderr="")
+        return CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(asm.time, "sleep", lambda s: None)
+    outcomes, ok = backend.enable("gateway", runner)
+    assert calls["bootstrap"] == 3  # 失败两次后第三次成功
+    assert ok is True
+    bootstraps = [o for o in outcomes if o.cmd[:2] == ["launchctl", "bootstrap"]]
+    assert len(bootstraps) == 1  # outcomes 记录最终一次结果
+
+
+def test_gateway_enable_fail_safe_pulls_up_master(tmp_path, monkeypatch) -> None:
+    """issue #2 / BUG-549：gateway 单元启用失败时兜底 detached 拉起。"""
+    root, ws, config = _make_ws(tmp_path)
+    from local_webpage_access import gateway_service as gs
+
+    gs.write_state(ws, gs.GatewayState(enabled=True, pid=111))
+    started: list[object] = []
+    monkeypatch.setattr(gs, "start_gateway", lambda *a, **k: started.append(1) or 222)
+    note = asm._gateway_enable_fail_safe(ws, config)
+    assert started, "用户意图 enabled 时必须兜底拉起"
+    assert "兜底" in note
+
+
+def test_gateway_enable_fail_safe_respects_disabled_intent(tmp_path, monkeypatch) -> None:
+    """issue #2：用户意图 disabled 时不兜底拉起，只给恢复命令。"""
+    root, ws, config = _make_ws(tmp_path)
+    from local_webpage_access import gateway_service as gs
+
+    gs.write_state(ws, gs.GatewayState(enabled=False))
+    started: list[object] = []
+    monkeypatch.setattr(gs, "start_gateway", lambda *a, **k: started.append(1) or 222)
+    note = asm._gateway_enable_fail_safe(ws, config)
+    assert started == []
+    assert "lwa autostart enable" in note
+
+
+def test_port_2019_uses_live_pidfile_when_json_stale(tmp_path, monkeypatch) -> None:
+    """issue #4：gateway.json pid 陈旧（死 pid）但 live pidfile 指向本工作区 master -> 不误报。"""
+    from local_webpage_access import gateway_service as gs
+    import local_webpage_access.daemon as dm
+
+    root, ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setattr(
+        asm.shutil,
+        "which",
+        lambda c: "/usr/local/bin/caddy" if c == "caddy" else None,
+    )
+    # json 是裸进程时代陈旧记录（pid 已死）
+    gs.write_state(ws, gs.GatewayState(enabled=True, pid=424242))
+    ws.run.mkdir(parents=True, exist_ok=True)
+    (ws.run / "caddy.pid").write_text("999999", encoding="utf-8")
+
+    def _alive(pid: int) -> bool:
+        return pid == 999999  # 仅 live pidfile 的 pid 存活
+
+    def _cmdline(pid: int, *needles: str) -> bool:
+        return pid == 999999
+
+    monkeypatch.setattr(dm, "is_pid_alive", _alive)
+    monkeypatch.setattr(dm, "pid_cmdline_contains", _cmdline)
+    assert asm._port_2019_foreign(ws, config) is False
+    item = asm._check_caddy(ws, config)
+    assert item.status == "ok"

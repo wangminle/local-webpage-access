@@ -272,7 +272,7 @@ lwa autostart status [--json]           # 单元 + 进程 + 运行模式（syste
 要点：
 
 - **停服**：先 `lwa autostart disable`，再 `lwa daemon/manager/gateway off`（`off` 已内置 `coordinated_disable`）。
-- **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长；enabled=false 跳过。均不与 KeepAlive 抢锁。
+- **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长（V0.8.2 起按 live 证据估算：存活 pidfile / systemd `InactiveEnterTimestamp`，陈旧 `run/*.json` 不采信、不确定不虚报）；enabled=false 跳过。均不与 KeepAlive 抢锁。重启后先**等待服务就绪**（`waitReady`，最多约 30s）再进入 access/doctor 收尾，超时降级 warning 并提示稍后 `lwa doctor` 复核（V0.8.2 / issue #5）。
 - **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。
 - **Linux**：systemd user + 建议 `enable-linger`；**WSL** 另需 Windows 登录任务唤醒发行版；**Windows 原生不支持**自启（见 [autostart.md](autostart.md)）。
 
@@ -329,7 +329,7 @@ lwa list                 # 实例清单
 
 ```bash
 lwa access refresh   # 用当前 LAN IP 重算所有实例 lanUrl/routeUrl 并落盘
-lwa update           # 一键升级（V0.8.0 含源码快进）收尾：后台重启后再 refresh（+ 默认轻量 review）
+lwa update           # 一键升级（V0.8.0 含源码快进）收尾：后台重启 -> 等待就绪（V0.8.2）-> refresh（+ 默认轻量 review）
 lwa doctor --access  # 诊断同时复用 access review
 ```
 

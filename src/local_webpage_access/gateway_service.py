@@ -275,6 +275,25 @@ def start_gateway(
                     ),
                 )
                 log.info("网关已在线，补写服务态（pid=%s）", pid if pid else "?")
+            elif pid is not None and pid != state.pid:
+                # issue #4：监督器接管后 gateway.json 可能仍停在旧裸进程记录
+                # （旧 pid），不刷新会让中断时长估算/2019 冲突检查按陈旧记录虚报。
+                # 检测到 live pid 与记录不一致 -> 刷新为当前 master 的事实。
+                write_state(
+                    workspace,
+                    GatewayState(
+                        enabled=True,
+                        pid=pid,
+                        started_at=now_iso(),
+                        port=config.staticGatewayPort,
+                        admin_port=ADMIN_PORT,
+                    ),
+                )
+                log.info(
+                    "网关服务态陈旧（json pid=%s，live pid=%s），已刷新",
+                    state.pid,
+                    pid,
+                )
             else:
                 log.info("网关已在运行（pid=%s），不重复启动", pid if pid else "?")
             # 即使网关已在线，也清理可能残留的 builtin 孤儿（含 pid-less 孤儿，

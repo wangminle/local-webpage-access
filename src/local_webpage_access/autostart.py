@@ -28,6 +28,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -368,7 +369,15 @@ class MacLaunchdBackend(AutostartBackend):
         # 清除历史持久 disable，再清旧实例，最后 bootstrap（登录即随 LaunchAgent 加载）。
         ren = runner(["launchctl", "enable", target], capture_output=True)
         boot = runner(["launchctl", "bootout", target], capture_output=True)
+        # BUG-549 / issue #2：bootout 卸载与 bootstrap 之间存在瞬态竞态，launchctl
+        # 偶发返回 error 5（I/O error，实机 macOS 27 复现），原样重试即过；不重试
+        # 会让 gateway 停在「单元未加载 + 进程已停」的下线窗口。
         bsp = runner(["launchctl", "bootstrap", domain, str(path)], capture_output=True)
+        for _attempt in range(2):
+            if bsp.returncode == 0:
+                break
+            time.sleep(1.0)
+            bsp = runner(["launchctl", "bootstrap", domain, str(path)], capture_output=True)
         outcomes = [
             CmdOutcome(
                 ["launchctl", "enable", target], ren.returncode, ren.stdout or "", ren.stderr or ""
@@ -379,13 +388,15 @@ class MacLaunchdBackend(AutostartBackend):
                 boot.stdout or "",
                 boot.stderr or "",
             ),
+        ]
+        outcomes.append(
             CmdOutcome(
                 ["launchctl", "bootstrap", domain, str(path)],
                 bsp.returncode,
                 bsp.stdout or "",
                 bsp.stderr or "",
-            ),
-        ]
+            )
+        )
         # bootout 对"可能不存在的旧实例"非零属预期；成败看 enable+bootstrap 与
         # 执行后 loaded+enabled（BUG-152）。
         ok = (
@@ -798,7 +809,13 @@ def _prepare_daemon_for_supervision(ws: Workspace) -> None:
         pass
 
 
-def _migrate_detached_for_supervision(ws: Workspace, config: Config, name: str) -> bool:
+def _migrate_detached_for_supervision(
+    ws: Workspace,
+    config: Config,
+    name: str,
+    *,
+    runner: SubprocessRunner = _default_runner,
+) -> bool:
     """受控迁移（BUG-146/147）：停掉 detached 进程，让监管进程持锁/绑端口。
 
     仅在对应 detached 服务确实在跑时停止它——监管单元随后启动的前台入口会抢锁/
@@ -809,6 +826,12 @@ def _migrate_detached_for_supervision(ws: Workspace, config: Config, name: str) 
     """
     if name not in ("daemon", "manager"):
         return True
+    # issue #3（enable 幂等）：先查监管模式--单元已加载/启用说明进程由
+    # systemd/launchd 在管，而 is_running()（enabled+pid+锁+心跳）无法区分监管
+    # 进程与 detached 进程，会误停已监管服务（2-3s 中断 + 能力探针 25-30s 假红）。
+    # 仅裸进程模式才需要受控迁移。
+    if service_supervision_mode(name, runner=runner) != SERVICE_MODE_BARE:
+        return True  # 已由监督器在管：不再 stop（enable 幂等，issue #3）
     try:
         if name == "daemon":
             from local_webpage_access import daemon as daemon_mod
@@ -827,6 +850,39 @@ def _migrate_detached_for_supervision(ws: Workspace, config: Config, name: str) 
         return bool(stop_manager(ws))
     except Exception:  # noqa: BLE001 — 探测/停止异常同样无法保证接管
         return False
+
+
+def _gateway_enable_fail_safe(ws: Workspace, config: Config) -> str:
+    """gateway 单元启用失败时的兜底（BUG-549 / issue #2）。
+
+    launchd enable 的 bootout 已把在跑的 gateway master 停掉，bootstrap 再失败
+    （error 5 等）会留下「别名入口 :8080 下线」窗口。用户意图仍为 enabled 时以
+    detached 方式拉回 master（下次 enable 成功后由监督器接管）；拉不起也给出
+    明确恢复命令，而不是只报失败。返回提示文案，供 notes/结果展示。
+    """
+    from local_webpage_access.service_intent import INTENT_ENABLED, service_intent
+
+    try:
+        if service_intent(ws, config).gateway != INTENT_ENABLED:
+            return (
+                "⚠️ gateway 单元启用失败（进程可能已停）；"
+                "恢复监管请重试 lwa autostart enable"
+            )
+        from local_webpage_access.gateway_service import start_gateway
+
+        try:
+            start_gateway(ws, config)
+            return (
+                "⚠️ gateway 单元启用失败，已兜底以 detached 方式拉起 master"
+                "（admin :2019 在线）；恢复监管请重试 lwa autostart enable"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f"⚠️ gateway 单元启用失败，且兜底拉起失败（{exc}）；"
+                "请手动执行 lwa gateway on"
+            )
+    except Exception:  # noqa: BLE001 - 兜底路径不得抛出
+        return "⚠️ gateway 单元启用失败（进程可能已停）；请重试 lwa autostart enable 或 lwa gateway on"
 
 
 def resolve_with_caddy(config: Config, with_caddy: bool | None) -> bool:
@@ -965,7 +1021,7 @@ def install(
                 continue
             # 受控迁移：停 detached 进程，让监管进程持锁/绑端口并回写自身 pid（BUG-146/147）。
             # 迁移失败（旧进程未停）必须计入失败，且不得再加载单元（BUG-146/159）。
-            if not _migrate_detached_for_supervision(ws, config, name):
+            if not _migrate_detached_for_supervision(ws, config, name, runner=runner):
                 all_ok = False
                 result.enable_outcomes.append(
                     CmdOutcome(
@@ -983,6 +1039,10 @@ def install(
             outs, ok = backend.enable(name, runner)
             result.enable_outcomes.extend(outs)
             all_ok = all_ok and ok
+            if not ok and name == "gateway":
+                # BUG-549 / issue #2：bootout 已停 master，enable 又失败时兜底拉回，
+                # 不留别名入口下线窗口。
+                result.notes.append(_gateway_enable_fail_safe(ws, config))
         result.enable_ok = all_ok
     elif not orphan_ok:
         result.enable_ok = False
@@ -1026,7 +1086,7 @@ def enable(
     if "daemon" in services:
         _prepare_daemon_for_supervision(ws)
     for name in services:
-        if not _migrate_detached_for_supervision(ws, config, name):
+        if not _migrate_detached_for_supervision(ws, config, name, runner=runner):
             all_ok = False
             outcomes.append(
                 CmdOutcome(
@@ -1041,6 +1101,10 @@ def enable(
         outs, ok = backend.enable(name, runner)
         outcomes.extend(outs)
         all_ok = all_ok and ok
+        if not ok and name == "gateway":
+            # BUG-549 / issue #2：bootout 已停 master，enable 又失败时兜底拉回。
+            note = _gateway_enable_fail_safe(ws, config)
+            outcomes.append(CmdOutcome(["(fail-safe)", "gateway"], 1, note, ""))
     return OpResult(outcomes, all_ok and bool(services))
 
 
@@ -1988,12 +2052,17 @@ def run_check(
     return report
 
 
-def _port_2019_foreign(ws: Workspace) -> bool:
+def _port_2019_foreign(ws: Workspace, config: Config) -> bool:
     """:2019 是否被**非本工作区 gateway**的外部进程占用。
 
     本工作区 gateway 持有存活且命令行身份匹配的 pid（含 ``caddy`` + 工作区路径）
     则 :2019 是我们的；仅 PID 存活不够——复用/非 Caddy 进程会假绿（BUG-157）。
     否则若 :2019 仍可连，即为外部 Caddy/测试孤儿占用。
+
+    issue #4：``run/gateway.json`` 的 pid 可能是监督器接管前的陈旧裸进程记录
+    （监督器拉起的 caddy 不经 ``start_gateway`` 全路径回写）；必须兼看 live 证据--
+    ``run/caddy.pid``（caddy start --pidfile 所写）与 admin owner 探测--否则会把
+    自家在跑的 caddy 误判成外部占用，诱导用户杀掉自家网关。
     """
     import socket
 
@@ -2006,6 +2075,28 @@ def _port_2019_foreign(ws: Workspace) -> bool:
             if pid_cmdline_contains(st.pid, "caddy", str(ws.root)):
                 return False  # :2019 由本工作区存活 master 持有
             # PID 存活但身份不匹配 → 继续探端口，可能是陈旧复用
+    except Exception:  # noqa: BLE001
+        pass
+    # live pidfile：caddy start --pidfile 写入的当前 master pid（issue #4）。
+    try:
+        from local_webpage_access.daemon import is_pid_alive, pid_cmdline_contains
+
+        try:
+            live_pid = int((ws.run / "caddy.pid").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            live_pid = None
+        if live_pid is not None and is_pid_alive(live_pid):
+            if pid_cmdline_contains(live_pid, "caddy", str(ws.root)):
+                return False  # 当前 master 由本工作区持有（json 记录陈旧）
+    except Exception:  # noqa: BLE001
+        pass
+    # admin owner：admin :2019 响应时直接问当前 master 的归属（issue #4）。
+    try:
+        from local_webpage_access.static_gateway import StaticGateway
+
+        owner = StaticGateway(ws, config).inspect_caddy_owner()
+        if owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"):
+            return False  # admin 上的 master 属于本工作区
     except Exception:  # noqa: BLE001
         pass
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2050,7 +2141,7 @@ def _check_caddy(ws: Workspace, config: Config) -> CheckItem:
         except Exception:  # noqa: BLE001
             pass
     # 外部 Caddy/进程占用 :2019（本工作区 gateway 未持存活 pid 却探测到端口在线）
-    if _port_2019_foreign(ws):
+    if _port_2019_foreign(ws, config):
         return CheckItem(
             "caddy",
             "caddy_conflict_2019",

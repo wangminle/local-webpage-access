@@ -201,6 +201,14 @@ LWA 的 manager / daemon 继承**启动时**的用户组。刚执行 `usermod -a
 > **差量卸载**不再需要的单元，避免 manifest 外孤儿。迁移 detached 失败时**不会**再
 > `enable`/`bootstrap` 该服务，以免监管抢锁失败形成重启循环。
 
+**幂等与瞬时故障韧性（V0.8.2 / issue #2、#3）**：`install`/`enable` 迁移 detached 进程前先按
+`service_supervision_mode` 判定--监督器（systemd/launchd）已在管的服务**不再误停重迁**，
+重复 enable 保持幂等、零中断窗口。macOS 下 `launchctl bootstrap` 偶发 error 5（bootout 竞态）
+会自动短重试（共 3 次，间隔 1s）；仍失败且 gateway 意图为 enabled 时 **fail-safe 直接拉起**
+gateway 进程（`start_gateway`），拉不起则给出 `lwa gateway on` 恢复指引--enable 失败不再
+留下"单元未加载 + 进程下线"的空窗。另外 `check` 的 `:2019` 占用检查会先核对 live
+`run/caddy.pid` 与 admin owner，自家 caddy 不再误报 `caddy_conflict_2019`（issue #4）。
+
 ## 旧配置迁移
 
 曾按旧文档（`lwa daemon on` 作 `ExecStart`）安装的单元没有崩溃恢复。`lwa autostart check`

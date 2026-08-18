@@ -358,3 +358,79 @@ class _ManagedBackend(_NoUnitBackend):
 
         self.started.append(name)
         return [CmdOutcome(["fake", "start"], 0, "", "")], True
+
+
+# ---- issue #4：gateway 陈旧 gateway.json 不得虚报中断时长 ---------------------
+
+
+def _write_gateway_stale(ws: Workspace, stale_pid: int = 3836952) -> None:
+    """模拟监督器接管场景：gateway.json 停在 8/10 裸进程记录，pid 已死。"""
+    _write_state(
+        ws,
+        "gateway.json",
+        {"enabled": True, "pid": stale_pid, "started_at": "2026-08-10T22:32:00+00:00"},
+    )
+
+
+def test_estimate_gateway_live_master_no_estimate(workspace, monkeypatch) -> None:
+    """issue #4：caddy.pid 的 pid 存活（admin 瞬断）-> 不估算中断时长。"""
+    import local_webpage_access.daemon as dm
+
+    _write_gateway_stale(workspace)
+    (workspace.run / "caddy.pid").write_text("12345", encoding="utf-8")
+    monkeypatch.setattr(dm, "is_pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(dm, "pid_cmdline_contains", lambda pid, *n: True)
+    assert estimate_down_since("gateway", workspace) is None
+
+
+def test_estimate_gateway_pid_mismatch_discards_stale_json(workspace, monkeypatch) -> None:
+    """issue #4：pidfile pid 与 json pid 不一致（换过 master）-> 丢弃陈旧 started_at。"""
+    import local_webpage_access.daemon as dm
+
+    _write_gateway_stale(workspace)
+    (workspace.run / "caddy.pid").write_text("24680", encoding="utf-8")
+    monkeypatch.setattr(dm, "is_pid_alive", lambda pid: False)
+    # 监督器在管（systemd 时间戳不可得时）-> None，而非按 8/10 记录虚报 7.6 天
+    monkeypatch.setattr(
+        "local_webpage_access.autostart.service_supervision_mode",
+        lambda name, **k: "systemd 监管",
+    )
+    assert estimate_down_since("gateway", workspace) is None
+
+
+def test_estimate_gateway_systemd_inactive_timestamp(workspace, monkeypatch) -> None:
+    """issue #4：systemd 在管且单元 inactive -> 用 InactiveEnterTimestamp 作中断起点。"""
+    import local_webpage_access.autostart as asm
+
+    _write_gateway_stale(workspace)
+    # 无 pidfile：监督器路径
+    from datetime import datetime
+
+    class _FakeRes:
+        returncode = 0
+        stdout = "inactive\nTue 2026-08-18 06:00:00 UTC\n"
+
+    def fake_run(cmd, **kwargs):
+        assert "systemctl" in cmd and "InactiveEnterTimestamp" in " ".join(cmd)
+        return _FakeRes()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        asm, "service_supervision_mode", lambda name, **k: asm.SERVICE_MODE_SYSTEMD
+    )
+    ts = estimate_down_since("gateway", workspace)
+    assert ts is not None
+    # 本地时区解释的 2026-08-18 06:00:00（naive astimezone），与直接换算一致
+    expected = datetime.strptime("Tue 2026-08-18 06:00:00", "%a %Y-%m-%d %H:%M:%S")
+    assert abs(ts - expected.astimezone().timestamp()) < 5
+
+
+def test_estimate_gateway_bare_uses_started_at(workspace, monkeypatch) -> None:
+    """裸进程模式（无监督器、无 pidfile）：沿用 json.started_at（原语义不变）。"""
+    import local_webpage_access.autostart as asm
+
+    _write_gateway_stale(workspace)
+    monkeypatch.setattr(asm, "service_supervision_mode", lambda name, **k: asm.SERVICE_MODE_BARE)
+    ts = estimate_down_since("gateway", workspace)
+    # 2026-08-10T22:32:00+00:00 对应 epoch
+    assert ts is not None and abs(ts - 1786401120.0) < 5

@@ -1,7 +1,7 @@
 # 新增功能点计划（202608）— 编号续接 IMP-043
 
-> **状态（2026-08-11）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。**IMP-055**：路径别名兼容性门禁与文档口径见 §12；2026-08-11 评审后明确为「入口 HTML 根绝对资源负向守卫」，不构成整体兼容证明。**IMP-056 / IMP-057 的 MVP、IMP-058 Gate-A 原战术范围与 Gate-B 已落地；Gate-A 修订后 SQLite 安全加固见 IMP-058.A.R01。Gate-C 已具备核心模型、成功谓词、状态机和模拟故障注入，但完整计划执行、事务回滚、副作用采集及真实 Docker 门控仍按 Scanner 文档续接 WBS 收口。** **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。****新立项待实施：IMP-064 服务意图字段去污染（§16，P1；CHK-230 / CHK-232 已修订契约）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
-> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**；**§12 路径别名 × 方案 B（IMP-055，含详细 WBS与评审边界）**；**§13 Scanner 多候选与实证校验（IMP-056～058 摘要）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
+> **状态（2026-08-11）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。**IMP-055**：路径别名兼容性门禁与文档口径见 §12；2026-08-11 评审后明确为「入口 HTML 根绝对资源负向守卫」，不构成整体兼容证明。**IMP-056 / IMP-057 的 MVP、IMP-058 Gate-A 原战术范围与 Gate-B 已落地；Gate-A 修订后 SQLite 安全加固见 IMP-058.A.R01。Gate-C 已具备核心模型、成功谓词、状态机和模拟故障注入，但完整计划执行、事务回滚、副作用采集及真实 Docker 门控仍按 Scanner 文档续接 WBS 收口。** **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。****新立项待实施：IMP-064 服务意图字段去污染（§16，P1；CHK-230 / CHK-232 已修订契约）；IMP-065 GitHub 源一键导入运行（§17，P0；PLN-043；WBS 065.01–28；2026-08-18 按在线调研与 CHK-236 补强契约）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
+> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**；**§12 路径别名 × 方案 B（IMP-055，含详细 WBS与评审边界）**；**§13 Scanner 多候选与实证校验（IMP-056～058 摘要）**；§14～§16（update 事故复盘 IMP-059～062、IMP-063 自更新通道、IMP-064 待实施）；**§17 GitHub 源一键导入运行（IMP-065，P0 · 待实施）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
 
 ---
 
@@ -351,7 +351,7 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 > **状态**：**已落地**（2026-08-06，`DEV-097` / `PLN-035` / `DOC-116`）。属 IMP-047 管理页导入对话框的体验补强。
 > **一句话**：用户不应靠手敲绝对路径；源目录输入框右侧提供「选择文件夹」按钮，唤起本机常见的目录选择器（macOS 访达 / Ubuntu 文件管理器同类控件），选完回填路径。**仅 loopback 启用。**
-> **实现计划**：[`docs/plans/2026-08-06-imp-051-pick-directory.md`](../../docs/plans/2026-08-06-imp-051-pick-directory.md)。
+> **实现计划**：[`2-achievement/2026-08-06-imp-051-pick-directory.md`](../2-achievement/2026-08-06-imp-051-pick-directory.md)。
 
 ### 6.1 需求
 
@@ -658,7 +658,7 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 ## 12. IMP-055 — 路径别名兼容性门禁（承接方案 B / 应用显式 base path）
 
-> **状态**：主体于 2026-08-09 落地；2026-08-10 经 CHK-182～186 多轮复核补齐 BUG-467～469、别名感知 bundle URL、MIME 校验和负向样本；2026-08-11 经 CHK-190 / DOC-129 收紧门禁承诺与证据边界。详细时间线与最终测试矩阵见 [`路径别名兼容性问题发现与修复完整复盘-20260810.md`](./路径别名兼容性问题发现与修复完整复盘-20260810.md)。
+> **状态**：主体于 2026-08-09 落地；2026-08-10 经 CHK-182～186 多轮复核补齐 BUG-467～469、别名感知 bundle URL、MIME 校验和负向样本；2026-08-11 经 CHK-190 / DOC-129 收紧门禁承诺与证据边界。详细时间线与最终测试矩阵见 [`路径别名兼容性问题发现与修复完整复盘-20260810.md`](../2-achievement/路径别名兼容性问题发现与修复完整复盘-20260810.md)。
 > **关联**：CHK-180（别名链路诊断）、CHK-181（home-bookshelf 子路径方案评审）、BUG-465（容器 `/assets` 回退）、BUG-466 / DEV-101（设别名硬拦绝对资源）、BUG-467～469、prd-review vs home-bookshelf 对比。
 
 ### 12.1 结论：方案 B 谁改什么
@@ -1378,12 +1378,262 @@ CHK-232：gateway 前台退出走用户级 `stop_gateway`、`maybe_start_gateway
 | CHK-230（2026-08-18） | 设计复核：补 `finally`、收紧写入契约、修正触点、明示存量不翻回 |
 | CHK-232（2026-08-18） | 再复核：gateway 前台退出、`maybe_start_gateway` 联动、gateway on 失败意图落点；次要（早退清零、手动 on 计入熔断） |
 
+## 17. IMP-065 - GitHub 源一键导入运行：URL → 浅克隆 → 既有识别管线（P0 · 待实施）
+
+> **状态**：**待实施**（2026-08-18 立项，`PLN-043`；同日 CHK-236 复核 + 在线调研补强契约）。依据 2026-08-13 两份竞品调研：[`../1-discussions/自托管PaaS对比分析-20260813.md`](../1-discussions/自托管PaaS对比分析-20260813.md) §三 P0-1（四维评分：用户价值 高 / 实现成本 中 / 运维风险 中 / 跨平台难度 低 → **P0**）与 [`../1-discussions/github同类项目调研-20260813.md`](../1-discussions/github同类项目调研-20260813.md)（Dokku / Piku / Coolify / Dokploy 均以 Git 为主入口）。
+> **一句话**：管理页 / CLI 输入 GitHub 仓库地址 → 宿主机浅克隆到**工作区外**系统临时目录 → `pack_source_dir` 打包后走 zip 识别管线（**不**把 staging 写成文件夹源）；git 源实例「更新」＝ `ls-remote` 探测 → 重克隆 → 原地升级。Webhook / 定时拉取 / 凭据托管 / GitHub App 一律不做。
+
+### 17.1 背景与调研依据
+
+现状导入源三种：zip、本机文件夹（IMP-047）、inbox 守护进程。GitHub 项目需人工 `git clone` 到本机再走文件夹导入——链条断开、来源不可追溯、实例无法回源更新。
+
+#### 17.1.1 立项依据（2026-08-13 两份调研）
+
+| 调研证据 | 出处 |
+| --- | --- |
+| 「Git 导入 / 从 Git 更新」四维评分 **P0**；路线建议「clone（或 fetch）到暂存后走同一识别流水线……Webhook 触发可第二步再做，先做 CLI/管理页的 Git 源」 | 对比分析 §三 P0-1 |
+| 对比矩阵「Git 部署 / webhook 触发」行：Coolify ✅ / Dokploy ✅ / Dokku ✅ / Piku ✅ / Rainbond ◐，**LWA ❌** | 对比分析 §二 |
+| Dokku / Piku / Coolify / Dokploy 的主入口均为 Git；「能吃 zip」不稀缺，稀缺的是 inbox + 识别。Git 源是**第三条进口**，不是替代 zip | github同类项目调研 §四 |
+| Preview Deployments / 公网 git push 当唯一入口 / 多租户：定位不同，不跟 | 对比分析 §四 |
+
+#### 17.1.2 在线补强（2026-08-18）：对标哪条竞品路径
+
+调研说「借鉴 Dokku / Piku / Coolify / Dokploy 的主入口」，但四家主入口并不相同。本 IMP **对标的是「填 URL → 平台去 clone」**，不是 `git push` receive-pack，也不是 GitHub App + webhook：
+
+| 竞品路径 | 与 IMP-065 的关系 |
+| --- | --- |
+| [Coolify Public Repository](https://coolify.io/docs/applications/sources/github/public-repository)：给公开 HTTPS URL 即可部署，**不需要 GitHub App**；私有仓才要 Deploy Key / GitHub App；App 路径才有 push webhook 与 PR Preview | **公开仓 MVP 同构**。私有仓走宿主机 credential helper（比 Deploy Key 更「零托管」）。Webhook / Preview 明确后置 |
+| [Dokku `git:sync`](https://dokku.com/docs/deployment/methods/git/)：从远端 clone/fetch，可选 `--build-if-changes`；主路径仍是 `git push` | **更新语义最近**：无变更不重建。不引入 receive-pack / pre-receive |
+| [Dokku `git:from-archive`](https://dokku.com/docs/deployment/methods/archive)：从 tar/zip URL 灌进内部 git | **不做**。LWA 已有 zip/inbox；本 IMP 吃的是 git 仓库，不是 Release 附件 |
+| [Dokploy GitHub App](https://docs.dokploy.com/docs/core/github) + 可选「任意 Git HTTPS/SSH URL」；子模块默认 `git clone --recurse-submodules --depth 1`；另有 `buildPath` / watch paths | **buildPath ≈ `--subdir`（已有 IMP-057）**。App / 子模块递归 / watch paths 不做 |
+| Piku / Dokku `git push` | **不做**。LWA 不是 git 服务器，不扩大 SSH/`git-http-backend` 攻击面 |
+
+浅克隆策略与 [GitHub 对 CI「克隆完即删」的建议](https://github.blog/open-source/git/get-up-to-speed-with-partial-clone-and-shallow-clone/) 一致：`--depth 1` 适合一次性工作副本，**不适合**当长期缓存再 `fetch`（浅仓后续 fetch 更贵）。这锁死 065.a「不缓存」。
+
+#### 17.1.3 与既有 IMP 的关系
+
+- **IMP-047（§5）**：复用的是 **打包 + zip 识别 + 自动部署护栏**，**不是** `import_from_dir` 整段。047 会写 `sourceKind=folder` + `sourceDirPath`，并把源目录拒绝在工作区内（`validate_source_dir`）。git 源若把 staging 当关联目录，暂存一删更新永久失败，且 `lwa scan` 已有抹掉 `sourceKind` 的前科（`apply_detection_to_manifest` / BUG-441 同类）。红线仍继承：**只读复制、运行必须在 `apps/<id>/`、禁止就地运行**。
+- **IMP-063（§15）**：零托管与零外网夹具同源。063 保护 LWA 自身工作树（ff-only）；本 IMP staging 一次性可弃。`git` 探测复用 `shutil.which("git")`，不要第二套口径。**禁止**对 clone 进程设 `GIT_CONFIG_NOSYSTEM` / 清空 `GIT_CONFIG_GLOBAL`——那会剪掉 credential helper 与 `http.proxy`。
+- **IMP-057（Monorepo）**：`--subdir` 与包分类直接复用。
+- **§15.8「不做 GitHub API / Release 附件」不冲突**：自更新通道与项目导入都只走 git 协议。
+
+### 17.2 需求
+
+1. **导入入口**：CLI `lwa import --from-git <url>`（与 zip 位置参数 / `--from-dir` 维持三源互斥）；管理页导入区新增「从 GitHub 导入」按钮与对话框——仓库地址必填，分支/标签、子目录、实例名、路径别名选填，提交调 `POST /api/import-from-git`。
+2. **克隆语义**：`git clone --depth 1 --single-branch --no-tags`（显式 ref 时 `--branch <ref>`，缺省跟远端 HEAD）到**系统临时目录**（工作区外）；成功后记录 **完整 commit OID + 解析后的真实 ref**；经 `pack_source_dir` 打进 zip（跳过 `.git` 与 symlink），再走 `import_zip`。管理页自动部署对齐 IMP-047 §5.7；pending 勿冒充成功（§6.8）。
+3. **更新**：git 源实例的「更新」＝对 **manifest 里存下的 ref** 做 `git ls-remote` → OID 未变提示「无需更新」（对齐 047.i / Dokku `--build-if-changes`）；有新提交 → 重新浅克隆 → IMP-009 原地升级（保留 id/端口/data/别名）。`--from-git <url> --update <id>` 的 URL 规范化后必须与 manifest 一致，否则拒绝（对齐 047「路径必须等于关联路径」/ BUG-440）。`update-from-dir` **拒绝** git 源实例。
+4. **来源标注**：见 §17.2.1；`lwa status` 与管理页透出 url / ref / 短 SHA / subdir。
+5. **URL 边界**：见 §17.2.2。
+6. **凭据与代理零托管**：私有仓库靠 **LWA 宿主机** 的 git credential helper / `gh auth`（不是浏览器那台机器）；代理靠进程继承的 `https_proxy` / git `http.proxy`——LWA 不配置、不保存、不回显。LAN 从手机导入私有仓会失败，文案须写死。
+7. **失败可诊断**：结构化 errorKind（`invalid_url` / `host_not_allowed` / `userinfo_forbidden` / `git_missing` / `remote_unreachable` / `ref_not_found` / `clone_timeout` / `size_exceeded` / `source_mismatch`）；暂存成功/失败后均清理；不产生半成品实例。
+8. **子目录 / Monorepo**：`--subdir` 选填，复用 IMP-057；缺省交给 Scanner。
+
+#### 17.2.1 git 源身份契约（P0，开工前锁死）
+
+`InstanceManifest` 现有 `sourceKind` 仅 `zip|folder`。本 IMP 新增 `git`，字段如下（名称实施时可微调，语义不得改）：
+
+| 字段 | git 源 | 禁止 |
+| --- | --- | --- |
+| `sourceKind` | `"git"` | 不得写成 `"folder"` |
+| `sourceDirPath` | **恒为 `null`** | 不得写入 staging / 任何本机路径 |
+| `sourceGitUrl` | 规范化后的 `https://github.com/<owner>/<repo>`（无 userinfo / query / fragment；`.git` 后缀剥离后存储） | 不得存原始粘贴串 |
+| `sourceGitRef` | 克隆当时解析出的真实 ref（用户指定的 branch/tag，或默认分支的实际名字，如 `main`） | 不得只存 `"HEAD"` / 空，导致下次 `ls-remote` 再猜 |
+| `sourceGitRefKind` | `branch` / `tag` | 更新时 `ls-remote` 走 `refs/heads/…` 或 `refs/tags/…` |
+| `sourceGitCommit` | 完整 OID（40 hex） | 短 SHA 仅展示 |
+| `sourceSubdir` | 既有字段 | — |
+| `sourceSyncHash` | 可用 OID 充当无变更指纹 | 不要对已删除的 staging 做 `compute_source_hash` |
+
+`apply_detection_to_manifest` / `update_zip` 重建后必须透传上述 git 字段（与 047 透传 `sourceKind`/`sourceDirPath` 同位置加分支）。`import_from_git` **新建**入口，内部 `pack_source_dir` → `_import_zip_locked` → 写 git 字段；**禁止**调用 `import_from_dir`。
+
+#### 17.2.2 URL 解析规则（阶段 A / 065.01–03）
+
+用 `urllib.parse.urlsplit` 解析，**禁止**对原始字符串做 `startswith("https://github.com")` 前缀判断（[webpack userinfo 绕过 allowlist](https://github.com/advisories/GHSA-8fgc-7cc6-rx7x)）。权威段在第一个 `/`、`?`、`#` 之前取 hostname（[Windmill git URL SSRF：`#@github.com` 可把校验 host 与 git 实际拨号拆开](https://github.com/windmill-labs/windmill/issues/10120)）：
+
+| 条件 | 结果 |
+| --- | --- |
+| scheme ≠ `https` | `invalid_url` |
+| `username` / `password` 非空 | `userinfo_forbidden` |
+| query 或 fragment 非空 | `invalid_url`（git remote 不需要 `?`/`#`，拒绝可保证「校验 host = git 拨号 host」） |
+| `hostname.lower() != "github.com"`（精确相等，禁止 `endswith`） | `host_not_allowed`（挡 `github.com.evil.tld`、`www.github.com`、`gist.github.com`） |
+| port 既不是空也不是 443 | `host_not_allowed` |
+| path 不是 `/<owner>/<repo>` 或 `/<owner>/<repo>.git`（可有一个尾斜杠） | `invalid_url` |
+| path 含 `/tree/`、`/blob/`、`/releases`、`/issues`、`/pull`、`/archive` 等网页段 | `invalid_url`，提示改用仓库根地址 + `--ref` / `--subdir` |
+| SCP / `git@` / `ssh://` / `git://` / `file://` | `invalid_url`（MVP 只走 HTTPS；SSH 会绕开 allowlist） |
+
+规范化输出：`https://github.com/<owner>/<repo>`（小写 host；剥离 `.git` 与尾斜杠；owner/repo 保持 GitHub 大小写）。
+
+### 17.3 关键决策（拍板默认）
+
+字母编号是产品拍板；落地包见「WBS」列（§17.5）。实施时不得把未列拍板当成可选项。
+
+| # | 决策 | 依据 | WBS |
+| --- | --- | --- | --- |
+| **065.a** | 每次导入/更新**一次性浅克隆**，不做仓库缓存、不对浅仓做增量 fetch | [GitHub：浅仓适合 CI「克隆完即删」](https://github.blog/open-source/git/get-up-to-speed-with-partial-clone-and-shallow-clone/)。063 保护 LWA 工作树（ff-only）；本 IMP staging 可弃 | 065.05–09 |
+| **065.b** | 更新探测用 `git ls-remote`（不落盘），对 **已存储 ref+kind** 比 OID；相同则「无需更新」 | 对齐 047.i 与 Dokku `--build-if-changes`。缺省分支不得每次再猜 `HEAD`/`main` | 065.15–16 |
+| **065.c** | host allowlist 硬编码 `github.com`（集中常量），仅 https + 443 | allowlist 比 IP 拒内网更贴 LWA（git 自己做 DNS）。夹具注入已解析 target，**不**绕过 065.01–03 | 065.01–03 |
+| **065.d** | 前端入口**不限 loopback** | IMP-051 限制的是「浏览宿主目录」；URL 输入无此攻击面；LAN 已有 IMP-046 token | 065.21–24 |
+| **065.e** | 导入入口缺 git **fail-fast**；doctor `git_available` 为 **WARN/SKIP 不是 FAIL** | zip/文件夹导入仍可用；不假绿也不把整机判死 | 065.04、065.25 |
+| **065.f** | webhook / 定时轮询 / PR preview / GitHub App / Deploy Key 托管 **不做** | 调研攻击面后置；Coolify/Dokploy 的 App 路径才有这些 | 065.26（文档写清） |
+| **065.g** | 实例内**不保留** `.git`；更新不读实例内 git | 与 047「只读复制、运行在 `apps/<id>`」同构 | 065.12、065.14 |
+| **065.h** | git 源身份按 §17.2.1；**禁止**调用 `import_from_dir`；scan/`update_zip` 必须透传 git 字段 | 047 会写 `sourceDirPath`；staging 用完即删；`apply_detection_to_manifest` 抹过 folder 身份 | 065.10–14 |
+| **065.i** | staging = 工作区外 `tempfile`；打包只许 `pack_source_dir`，禁止 `shutil.copytree`；**不要**对 staging 调 `validate_source_dir(..., workspace_root=)` | 该校验拒绝工作区内目录；`pack_source_dir` 已跳过 symlink / `.git` | 065.07、065.11 |
+| **065.j** | URL 用 `urlsplit`；`hostname.lower() == "github.com"` **精确相等**；拒绝 query / fragment / userinfo | 禁止 `startswith` / `endswith`（webpack userinfo、Windmill `#@host`、`github.com.evil.tld`） | 065.01–03 |
+| **065.k** | 克隆后把**真实分支名或 tag** 写入 `sourceGitRef` + `sourceGitRefKind`；OID 写完整 40 hex | `ls-remote` 对 heads 与 tags 写法不同；不能只存 `HEAD` | 065.09、065.15 |
+| **065.l** | `--from-git <url> --update <id>` 规范化 URL 必须与 `sourceGitUrl` 一致，否则 `source_mismatch` | 对齐 047 路径一致性 / BUG-440；禁止用另一仓库覆盖 | 065.18 |
+| **065.m** | clone：空 template + `-c core.hooksPath=/dev/null` + `GIT_LFS_SKIP_SMUDGE=1`；**禁止** `GIT_CONFIG_NOSYSTEM` / 清空 `GIT_CONFIG_GLOBAL` | 落到命令行才算「不新增执行点」。保留用户 config 才能用 credential helper 与 `http.proxy` | 065.06 |
+| **065.n** | 私有仓凭据与代理都在 **LWA 宿主机**；FAQ/失败文案写死「不是浏览器那台机器」；`https_proxy` 是一等运维依赖 | IMP-063 事故机直连 GitHub 常失败。零托管 ≠ 零说明 | 065.24–26 |
+| **065.o** | 并发导入走既有 `import_activity` 闸门；每路独立 tempfile，禁止共享 staging 路径 | 两路同时「从 GitHub 导入」不得互相 `rmtree` | 065.11、065.21 |
+| **065.p** | errorKind **闭集**（§17.2 第 7 条）；未知失败不得降成 `invalid_url`；超时 / 超限 / 远端分码 | 管理页与 CLI 靠 kind 出人话；混码会误导成「地址写错」 | 065.01、065.08、065.23 |
+
+### 17.4 现状触点（复用与禁止误用）
+
+- `cli/importing.py`：zip / `--from-dir` 互斥分流——新增 `--from-git`；`--update` 按 `sourceKind` 分流。
+- `folder_source.py`：**只复用** `pack_source_dir`（跳过 `.git`/symlink）。**不要**对 staging 调 `validate_source_dir(..., workspace_root=self.ws.root)`。
+- `importer.py`：新增 `import_from_git` / `update_from_git`；内部 `pack_source_dir` → `_import_zip_locked` / 既有原地升级；写 §17.2.1 字段。`import_from_dir` / `update_from_dir` 对 `sourceKind=git` **拒绝**。`apply_detection_to_manifest` 透传 git 字段。
+- `models.py`：为 git 字段加显式声明（不要只靠 extra allow，避免 scan 重建丢失）。
+- `manager_api.py`：对称新增 `/api/import-from-git`、`/api/instances/{id}/update-from-git`；`import_activity` 复用（并发两路导入仍走同一闸门；每路独立 tempfile）。
+- `manager_static/app.js` / `helpers.js`：并列 GitHub 入口；实例卡 git 来源；「更新」按 `sourceKind` 分流（folder 走原 API，git 走新 API）。
+- `update_source.py`：复用 `shutil.which("git")` 与超时常量风格；**不要**复用 ff-only / 双锁——那是 LWA 自更新。
+- IMP-057 Monorepo、IMP-009 原地升级、IMP-046 token：直接复用。
+- `tests/test_update_source.py`：临时 bare remote 夹具——065.05 同款（零外网）。clone 层注入已解析 target；URL 拒绝矩阵只在 065.01–03 测，两层分开。
+
+### 17.5 WBS（可执行）
+
+> 规模：S≤0.5d · M≈0.5–1.5d · L≈1.5–3d。git 测试统一用临时 bare remote 夹具，**禁止**外网与真实 GitHub。建议顺序：**A → B → C → D∥E → F → G → H**。全量约 **6.5–9 人日**（相对 9 包粗拆 +0.5d，增量在身份透传、URL 拒绝矩阵、更新分流）。
+>
+> **红线贯穿全程**：staging 不得写成 `sourceDirPath`；不得调用 `import_from_dir`；clone 不得设 `GIT_CONFIG_NOSYSTEM`。
+>
+> 初版粗包 065.01–09 已废弃，对照：01→A 01–04 · 02→B 05–09 · 03→C 10–14 · 04→D 15–18 · 05→E 19–20 · 06→F 21–24 · 07→G 25 · 08→G 26 · 09→H 27–28。实施只按新编号开 DEV。
+
+#### 阶段 A — URL 校验与 git 探测（零网络）
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.01** | errorKind + `ParsedGitTarget` | S | 新建 `git_source.py` | 闭集枚举、dataclass（url/owner/repo/ref 可选）、集中常量 `ALLOWED_GIT_HOSTS=("github.com",)` | — | 未知 kind 不能当 `invalid_url` 用；常量可测注入 | 065.p、c |
+| **065.02** | URL 规范化 happy path | S | `parse_github_url` | `urlsplit`；剥离 `.git`/尾斜杠；输出 `https://github.com/<owner>/<repo>` | 065.01 | `Foo/Bar.git/` → 规范化相等；owner/repo 大小写保持 | 065.j |
+| **065.03** | URL 拒绝矩阵 | S | 同上 | 每条 §17.2.2 条件独立单测 | 065.02 | userinfo、`#@github.com`、query、`www`/`gist`、`github.com.evil.tld`、非 443、`/tree/` `/blob/` `/releases`、SSH/`git@`/`file://`、`endswith` 伪匹配全部拒绝 | 065.j、c |
+| **065.04** | `git` 可执行文件探测 | S | `git_source.py` | 复用 `shutil.which("git")`（与 `update_source` 同口径）；缺则 `git_missing` | 065.01 | 无 git 时导入入口 fail-fast；函数本身不调网络 | 065.e |
+
+#### 阶段 B — 浅克隆护栏（仅本地 bare 夹具）
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.05** | 零外网 clone 夹具 | S | `tests/`（对齐 `test_update_source.py`） | 临时 bare remote + 可推送的提交/tag；clone 层接收已解析 target，**不**绕过 A 的纯函数 | 065.02 | 全套 git 测不触网 | 065.a、c |
+| **065.06** | clone 命令与环境 | M | `clone_github_source` | `--depth 1 --single-branch --no-tags --template=<空目录> -c core.hooksPath=/dev/null`；env **仅附加** `GIT_LFS_SKIP_SMUDGE=1`；不传 `--recurse-submodules`；**断言**未设 `GIT_CONFIG_NOSYSTEM` | 065.04–05 | 单测检查 argv/env；带 hook 的夹具仓 clone 后钩子未跑 | 065.m、a |
+| **065.07** | staging 生命周期 | S | 同上 | `tempfile.TemporaryDirectory`（工作区外）；成功/失败/`finally` 均删除；路径不得落在 `workspace.root` 下 | 065.06 | 失败后目录不存在；并发两路路径不同 | 065.i、o |
+| **065.08** | 超时与体积 | S | 同上 | 超时默认 180s → `clone_timeout`；clone 后 `os.walk(followlinks=False)` 合计 >2GiB → `size_exceeded` 并删 staging（git 无 `--max-size`，不能指望中途掐断体积） | 065.07 | 超限无残留；超时杀子进程 | 065.p |
+| **065.09** | 解析真实 ref + OID | S | 同上 | 返回完整 40 hex OID；`sourceGitRefKind`=`branch`/`tag`；未指定 ref 时写入**实际分支名**（`git symbolic-ref` / 远端 HEAD 解析），禁止存 `HEAD` | 065.06 | 默认分支夹具名非 `main` 时仍记下真名；tag 克隆 kind=`tag` | 065.k |
+
+#### 阶段 C — 身份字段与导入管线
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.10** | Manifest 显式字段 | S | `models.py` | `sourceGitUrl` / `sourceGitRef` / `sourceGitRefKind` / `sourceGitCommit`；旧 JSON 缺字段可加载 | — | 往返序列化；不要只靠 extra allow | 065.h |
+| **065.11** | `import_from_git` | M | `importer.py` | 持 `import_activity` 锁 → clone → **只** `pack_source_dir` → `_import_zip_locked` → 写 §17.2.1；**禁止**调用 `import_from_dir` / 对 staging 调 `validate_source_dir(..., workspace_root=)` | 065.07–10 | 导入后 `sourceKind=="git"` 且 `sourceDirPath is None`；`import_from_git` 体内无 `import_from_dir`（folder 入口保留） | 065.h、i、o |
+| **065.12** | 透传：scan / `update_zip` | S | `apply_detection_to_manifest` 及 update 重建 | folder 透传旁增加 git 四字段；重建后身份不退回 zip | 065.10–11 | `lwa scan` 夹具：git 字段仍在 | 065.h |
+| **065.13** | 自动部署与 pending 文案 | S | `try_auto_start_after_import` / 管理页描述 | 对齐 §5.7 / §6.8；pending 勿冒充成功 | 065.11 | 轻量档自动 start；真未识别才 pending | 047.i/j |
+| **065.14** | 隔离硬断言 | S | tests | 实例树无 `.git`；symlink 未打入 zip；运行根 ∈ `apps/<id>` | 065.11 | 失败即红线违规 | 065.g、i |
+
+#### 阶段 D — git 源更新
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.15** | `ls-remote` 探测 | S | `git_source.py` | 用存储的 ref+kind 组 `refs/heads/…` 或 `refs/tags/…`；返回远端 OID；失败分 `remote_unreachable` / `ref_not_found` | 065.09 | tag 与 branch 夹具分测；不落盘 | 065.b、k |
+| **065.16** | 无变更短路 | S | `update_from_git` | 远端 OID == `sourceGitCommit` → skipped +「无需更新」；不 clone、不 rebuild | 065.11、065.15 | 运行实例零变化 | 065.b |
+| **065.17** | 有变更原地升级 | M | `update_from_git` | 重克隆 → pack → 既有 IMP-009 / `update_zip` 语义；保留 id/端口/data/别名；回写新 OID；失败不影响现 `current/` | 065.16 | 推一个 commit 后 id/端口不变；clone 失败实例仍可访问 | 065.a、g |
+| **065.18** | 更新入口护栏 | S | `update_from_git` / `update_from_dir` | 规范化 URL ≠ `sourceGitUrl` → `source_mismatch`；`sourceKind!=git` 走 git 更新 → 拒绝；`update_from_dir` 对 git 实例拒绝 | 065.11 | 换仓库 `--update` 同 id 被拒；folder 更新 API 不误伤 git 实例 | 065.l、h |
+
+#### 阶段 E — CLI
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.19** | `lwa import --from-git` | S | `cli/importing.py` | 与 zip 位置参数、`--from-dir` **三源互斥**；`--ref` / `--subdir` | 065.11 | 两源同时给 → 拒绝文案；`--subdir` 走 IMP-057 | — |
+| **065.20** | CLI `--update` 分流 | S | 同上 | 读 manifest `sourceKind`：git → `update_from_git`（可省略 URL，用存储 url）；folder 仍走原路径；zip 保持原语义 | 065.17–19 | git 实例 `--from-dir --update` 被拒；git 实例 `--from-git --update` 成功 | 065.l |
+
+#### 阶段 F — API + 管理页
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.21** | `POST /api/import-from-git` | M | `manager_api.py` | body：url / ref / subdir / name / alias；走 `import_activity`；errorKind → HTTP 体 | 065.11、065.13 | 与 CLI 同契约；并发第二路排队而非互删 staging | 065.o、d |
+| **065.22** | `POST /api/instances/{id}/update-from-git` | S | 同上 | 无 body URL 时用 manifest；有 URL 则走 065.18 一致性 | 065.17–18 | skipped / rebuilt 字段对齐 folder 更新 | 065.l |
+| **065.23** | errorKind 人话表 | S | API + `app.js` | 闭集 → 中文；未知 kind 走通用失败，不说「地址无效」 | 065.01、065.21 | `/tree/` 提示改用仓库根 + 分支框 | 065.p |
+| **065.24** | 导入对话框 + 实例卡 + 更新分流 | M | `manager_static/app.js` / `helpers.js` | 「从 GitHub 导入」（不限 loopback）；卡上 url + 短 SHA + ref；「更新」按 `sourceKind` 调 065.22 或原 folder API；私有仓失败点明「凭据在 LWA 宿主机」 | 065.21–23 | LAN + token 走通公开仓；folder 实例更新按钮不打 git API | 065.d、n |
+
+#### 阶段 G — doctor 与文档
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.25** | `git_available` capability | S | `doctor.py` / `capability.py` | 缺 git → WARN/SKIP；JSON 透出；**不**把整份 doctor 打 FAIL | 065.04 | zip 导入场景 doctor 仍可 PASS | 065.e |
+| **065.26** | README / FAQ / known-limitations / 导入 Skill | S | docs + skills | 对标 Coolify 公开仓；`https_proxy`；私有仓宿主机凭据；LFS 指针；不做 webhook/App/`git push`；浅克隆无完整历史 | 065.19–24 | release-checklist 有检查项 | 065.f、n |
+
+#### 阶段 H — 回归与收口
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 | 拍板 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **065.27** | 定向回归矩阵 | M | `tests/test_git_source.py` 等 | A 拒绝矩阵 + B 护栏 + C 身份/scan 透传 + D 无变更/mismatch + E 三源互斥 + F 分流；**全部零外网** | 065.01–26 | 矩阵每格有用例 | 全表 |
+| **065.28** | 全量门禁 | S | pytest / 本节状态 | 全量 pytest 全绿；§17 改「已落地」；开 DEV 项关闭 | 065.27 | 文首状态行同步 | — |
+
+**推荐落地顺序**
+
+```text
+A  065.01 → 065.02 → 065.03 → 065.04
+B  065.05 → 065.06 → 065.07 → 065.08 → 065.09
+C  065.10 → 065.11 → 065.12 → 065.13 → 065.14
+D  065.15 → 065.16 → 065.17 → 065.18
+E  065.19 → 065.20          （可与 D 后半并行，依赖 065.11）
+F  065.21 → 065.22 → 065.23 → 065.24
+G  065.25                   （可与 B 后并行，依赖 065.04）
+   065.26                   （依赖 E+F）
+H  065.27 → 065.28
+```
+
+开工建议：先 065.01–03（纯函数、零依赖、把 URL 边界锁死），再 065.10（字段，不碰 git），再 065.05 夹具。
+
+### 17.6 验收标准
+
+- 公共仓库 `https://github.com/<owner>/<repo>`：CLI 与管理页各完成一次「输入地址 → 运行中实例」；manifest `sourceKind=git`、`sourceDirPath` 为空、含规范化 url / 真实分支名 / 完整 OID。
+- 指定分支与 tag 各一例；缺省分支导入后 `sourceGitRef` 为实际名字（不是 `HEAD`）；`--subdir` 走 IMP-057。
+- 更新：OID 未变 → 「无需更新」零重建；有新提交 → 原地升级保留 id/端口/data/别名；`--from-git` 换另一个仓库 `--update` 同一 id → 拒绝。
+- `lwa scan` 后 git 字段仍在（不得退回 zip/folder）。
+- 失败路径（非 github.com、www/gist、userinfo、query/fragment、`/tree/` `/blob/`、git 缺失、远端不可达、ref 不存在、超时、超大小、source_mismatch）：结构化错误 + staging 清理 + 无半成品实例。
+- 私有仓：仅当 **LWA 宿主机** 已配 credential helper 时成功；manifest/日志无凭据；从 LAN 浏览器导入失败时文案说明原因。
+- 管理页 LAN（非 loopback）+ token 可完成公开仓导入与更新；pending/成功护栏与 §6.8 一致。
+- 全量 pytest 通过；git 相关测试零外网。
+
+### 17.7 明确不做（本 IMP）
+
+- 不做 webhook / 定时轮询 / PR preview / GitHub App / Deploy Key 托管（Coolify/Dokploy 的 App 路径；调研维度二 +「攻击面后置」）。
+- 不做 GitHub API / Release 附件 / `git:from-archive` 式归档 URL（对齐 §15.8；zip 入口已有）。
+- 不做 `git push` receive-pack / 把 LWA 当 git remote（Dokku/Piku 主模型）。
+- 不做凭据 / token / 代理托管（零托管；URL userinfo 拒绝；不设 `GIT_CONFIG_NOSYSTEM`）。
+- 不做仓库缓存与对浅仓做增量 fetch（065.a）。
+- 不做 merge / rebase / 分叉处理。
+- 不递归 submodule（Dokploy 默认可递归；LWA 提示改用文件夹导入）。
+- 不解析 Git LFS 对象（`GIT_LFS_SKIP_SMUDGE=1`；指针文件当普通文本，known-limitations 写明）。
+- MVP 不放开 `github.com` 之外的 host（含 GitHub Enterprise 自建域名、Gitea/GitLab）；常量预留。
+- 不把 git 源纳入 IMP-048 zip↔文件夹转换。
+- 不因 git 源新增执行点：空 template + 禁用 hooks；识别/构建仍走既有流水线（CHK-218：自动 start 仍可能在宿主跑 npm——与 047 同风险，本 IMP 不扩大、也不假装消失）。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-065` / `PLN-043` | 本功能点 / 规划入账 |
+| `DEV-*` | 实施时按 065.01–28 开开发项（阶段 A–H；建议从 065.01 起步） |
+| IMP-047（§5）/ IMP-009 | 复用 **打包 + zip 识别 + 原地升级**；禁止整段 `import_from_dir` |
+| IMP-057（§13 前置文档） | Monorepo `--subdir` ≈ Dokploy `buildPath` |
+| IMP-063（§15） | 零托管与零外网夹具同源；范围互补 |
+| CHK-236（2026-08-18） | 立项复核：身份契约 / staging 不得当地址 / clone 护栏 |
+| 2026-08-13 两份调研 + 2026-08-18 在线补强 | P0 评分、webhook 后置；对标 Coolify 公开仓 URL 与 Dokku `git:sync --build-if-changes` |
+
 ---
 
 ## 变更日志
 
 | 日期 | 变更 |
 | --- | --- |
+| 2026-08-18 | **§17.3/17.5 IMP-065 拍板对表 + WBS 细拆（065.01–28）**：17.3 增「WBS」列并补 065.o（`import_activity` 闸门 + 独立 tempfile）、065.p（errorKind 闭集）。17.5 按 047 体例拆为阶段 A–H 共 28 包（URL 拒绝矩阵 / clone 命令与 staging / 身份透传 / ls-remote 与 mismatch / CLI 分流 / API 与人话表 / doctor+文档 / 回归），每包对应拍板字母。旧 065.01–09 粗包废弃，实施按新编号开 DEV。 |
+| 2026-08-18 | **§17 IMP-065 契约补强（CHK-236 + 在线调研）**：对标 Coolify 公开仓 HTTPS URL（非 GitHub App）与 Dokku `git:sync --build-if-changes`；明确不跟 `git push` / `git:from-archive` / App webhook。补 git 源身份（`sourceKind=git`、禁止 `sourceDirPath`、scan 透传）、`urlsplit` 精确 hostname、query/fragment/userinfo 拒绝、staging 用工作区外 tempfile + `pack_source_dir`、clone 空 template/`hooksPath`/`GIT_LFS_SKIP_SMUDGE=1`、更新用已存储 ref、`--update` URL 一致性。拍板扩为 065.a–n；WBS 完成标准收紧。 |
+| 2026-08-18 | **GitHub issues #2–#5 修复收口 + V0.8.2**：对照 quality-patterns 文档（L1–L8）修复四条实机 issue--#2（BUG-549）macOS bootstrap error 5 自动短重试（共 3 次）+ enable/install 失败且 gateway 意图 enabled 时 fail-safe 直接拉起；#3（BUG-550）`_migrate_detached_for_supervision` 前置 `service_supervision_mode` 判定，监督器在管服务不再误停重迁（enable 幂等）；#4（BUG-551）`estimate_down_since` 改 live 证据链（pidfile 存活/pid 不一致弃陈旧 json/systemd InactiveEnterTimestamp/不确定不虚报），`_port_2019_foreign` 按 live pidfile+owner 识别自家 caddy，`start_gateway` 已在线路径刷新陈旧服务态；#5（BUG-552）update 重启与自检之间插入 `waitReady`（最多 30s 轮询 daemon/gateway，超时降级 warning 提示 doctor 复核）。新增回归 13 例（红绿验证 12 失败->全绿），145 passed / ruff / mypy clean。版本提升 **V0.8.2**（10 处）；README/FAQ/autostart.md/operations-playbook/testing.md 同步。台账 [[CHK-234]]、[[CHK-235]]。 |
+| 2026-08-18 | **§17 立项 IMP-065 GitHub 源一键导入运行（P0，PLN-043）**：依据 2026-08-13 竞品调研（对比分析 §三 P0-1 四维评分 P0、§二矩阵「Git 部署」LWA 空白）。方案：管理页/CLI 输入 `https://github.com/<owner>/<repo>` → `--depth 1` 浅克隆到暂存 → 复用 IMP-047 管线识别部署；git 源实例更新经 `git ls-remote` 无变更探测 → 重克隆走 IMP-009 原地升级。拍板：host allowlist=github.com（仅 https+443）、URL userinfo 拒绝、凭据/代理零托管（对齐 IMP-063）、前端入口不限 loopback、一次性浅克隆不做缓存、webhook/定时拉取/PR preview/GitHub API 通道不做。WBS 065.01–09，待实施。 |
 | 2026-08-18 | **§16 IMP-064 再修订（CHK-232）**：①064.03b 覆盖 `run_gateway_foreground` 退出（不得调用户级 `stop_gateway`）；②`maybe_start_gateway` / `start_manager` 联动前查 `service_intent`，BUG-073 仅 `state is None` 可补写 True；③三服务 `on` 入口统一先断言 `enabled=True`（gateway 失败不再落成「已按意图停用」）。次要：已在运行早退清零计数；手动 on 失败计入熔断但不挡本次 on。规则扩为 10 条；064.02/03b/04/06/08 与验收同步。 |
 | 2026-08-18 | **§16 IMP-064 契约修订（CHK-230）**：补 064.03b（`run_service_main` `finally` 不得写 `enabled=False`，且须先于 064.03 完成）；`enabled` 写入契约改为 False 仅用户级 off、True 允许 on/start 成功断言/监督器入口/autostart 安装期；内部停止改为「写盘只清 pid」而非「完全不写状态」；触点更正 `daemon.py`（删除不存在的 `daemon_service.py`）、标明 gateway `start_*` 失败与 manager `finally` 不同构；熔断仅挡 reconcile、不进 `start_*`、不约束 KeepAlive；明示存量 `enabled=false` 不自动翻回。WBS 现为 064.01–08 + 064.03b。 |
 | 2026-08-18 | **§16 立项 IMP-064 服务意图字段去污染（P1，PLN-042）**：承接 CHK-225 设计裁决项（update 重启失败把 enabled=False 留盘、IMP-059/060 失明）。方案：`enabled` 回归纯用户意图，`lastStartError`/`consecutiveStartFailures` 观测字段承载失败事实；重启路径改内部停止原语不动意图；3 次/24h 熔断防 boot loop；doctor FAIL 文案带失败原因。WBS 064.01-08，待实施。 |

@@ -124,12 +124,84 @@ def _daemon_lock_heartbeat_ts(ws: Workspace) -> float | None:
     return None
 
 
+def _gateway_pidfile_pid(ws: Workspace) -> int | None:
+    """读 ``run/caddy.pid`` 的原始 pid（不判存活）；缺失/非法返回 ``None``。"""
+    try:
+        return int((ws.run / "caddy.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _gateway_supervised_down_since(name: str) -> float | None:
+    """监督器在管时的中断起点；无法判定返回 ``None``（issue #4）。
+
+    * systemd：单元 ``InactiveEnterTimestamp``（上次停止时刻，本地时区）；
+      单元仍 active 说明只是 admin 瞬断，不做估算（``None``）；
+    * launchd：无公开时间戳接口 -> ``None``（宁缺毋假）。
+    """
+    from local_webpage_access.autostart import (
+        SERVICE_MODE_SYSTEMD,
+        service_supervision_mode,
+        systemd_unit_name,
+    )
+
+    mode = service_supervision_mode(name)
+    if mode != SERVICE_MODE_SYSTEMD:
+        return None
+    import subprocess
+    from datetime import datetime
+
+    try:
+        res = subprocess.run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                systemd_unit_name(name),
+                "--value",
+                "-p",
+                "ActiveState",
+                "-p",
+                "InactiveEnterTimestamp",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if res.returncode != 0:
+        return None
+    out_lines = (res.stdout or "").strip().splitlines()
+    if len(out_lines) < 2:
+        return None
+    active_state, ts = out_lines[0].strip(), out_lines[1].strip()
+    if active_state == "active":
+        return None  # 单元在管运行中，admin 瞬断不构成中断
+    if not ts:
+        return None
+    try:
+        # systemd 输出形如 "Tue 2026-08-18 14:03:11 CST"（本地时区）；去掉时区
+        # 缩写后按本地时区解释。
+        dt = datetime.strptime(" ".join(ts.split()[:3]), "%a %Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return dt.astimezone().timestamp()
+
+
 def estimate_down_since(name: str, ws: Workspace) -> float | None:
-    """估算服务"从何时开始不可用"（epoch 秒）；不可得返回 ``None``。
+    """估算服务“从何时开始不可用”（epoch 秒）；不可得返回 ``None``。
 
     * daemon：优先锁文件心跳时间戳（最后一次证明活着的时刻）；
     * manager/gateway：状态文件 ``started_at``（上次启动时刻，中断时长上界）；
-    * 均不可得 → ``None``，调用方只说「意外未运行，已恢复」。
+    * 均不可得 -> ``None``，调用方只说「意外未运行，已恢复」。
+
+    issue #4（live 证据优先）：gateway 的 ``gateway.json`` 在监督器接管期间可能
+    长期未回写，``started_at`` 停在裸进程时代--直接采用会虚报「中断约 N 天」。
+    故 gateway 先看 live 证据：pidfile 的 pid 存活（master 实际在线，admin 瞬断）
+    或 pidfile pid 与 json pid 不一致（已换过 master，json 是陈旧记录）时丢弃
+    json 估算；监督器在管时改用监督器时间戳（systemd）/不估算（launchd）。
     """
     started_at: str | None = None
     if name == "daemon":
@@ -162,6 +234,32 @@ def estimate_down_since(name: str, ws: Workspace) -> float | None:
         except Exception:  # noqa: BLE001
             gateway_state = None
         started_at = gateway_state.started_at if gateway_state else None
+        pidfile_pid = _gateway_pidfile_pid(ws)
+        if pidfile_pid is not None:
+            from local_webpage_access.daemon import is_pid_alive, pid_cmdline_contains
+
+            try:
+                if is_pid_alive(pidfile_pid) and pid_cmdline_contains(
+                    pidfile_pid, "caddy", str(ws.root)
+                ):
+                    return None  # master 实际在线（admin 瞬断）：不虚报中断时长
+            except Exception:  # noqa: BLE001
+                pass
+            if (
+                gateway_state is not None
+                and gateway_state.pid is not None
+                and pidfile_pid != gateway_state.pid
+            ):
+                return None  # 已换过 master：json 是接管前的陈旧记录
+        sup_ts = _gateway_supervised_down_since(name)
+        if sup_ts is not None:
+            return sup_ts
+        # 监督器在管但拿不到监督器时间戳（launchd / 探测失败）时，同样不采信
+        # 可能陈旧的 json.started_at（宁缺毋假，issue #4）。
+        from local_webpage_access.autostart import SERVICE_MODE_BARE, service_supervision_mode
+
+        if service_supervision_mode(name) != SERVICE_MODE_BARE:
+            return None
     else:
         return None
     return _parse_iso(started_at)

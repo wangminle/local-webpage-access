@@ -510,6 +510,54 @@ def _down_since_iso(down_since: float | None) -> str | None:
     return datetime.fromtimestamp(down_since, tz=timezone.utc).isoformat()
 
 
+def _service_ready(name: str, ws: Workspace, config: Config) -> bool:
+    """单个自有服务当前是否就绪（live 探测，issue #5）。"""
+    try:
+        if name == "daemon":
+            from local_webpage_access import daemon as daemon_mod
+
+            return bool(daemon_mod.is_running(ws))
+        if name == "gateway":
+            from local_webpage_access.gateway_service import is_gateway_running
+
+            return bool(is_gateway_running(ws, config))
+        if name == "manager":
+            from local_webpage_access.manager_service import _fetch_health
+
+            data = _fetch_health(config.managerHost, config.managerPort, timeout=0.5)
+            return bool(data and data.get("ok"))
+    except Exception:  # noqa: BLE001 - 探测异常按未就绪处理，交给轮询
+        return False
+    return False
+
+
+def _wait_services_ready(
+    ws: Workspace,
+    config: Config,
+    *,
+    names: list[str],
+    timeout: float = 30.0,
+    poll_interval: float = 0.5,
+) -> tuple[bool, float, list[str]]:
+    """重启后等待服务就绪（issue #5 / L3：禁止 stop->start 后立即探测一次定终身）。
+
+    manager 的 health 在 ``restart_manager`` 内已轮询校验过，一般不需要再等；
+    daemon（锁+心跳）与 gateway（admin :2019 绑定）在监督器重启后需要数百毫秒
+    到数秒才真正就绪。轮询直至全部就绪或超时；返回 (是否就绪, 等待秒数, 未就绪列表)。
+    """
+    import time as time_mod
+
+    deadline = time_mod.monotonic() + timeout
+    pending = list(names)
+    waited_start = time_mod.monotonic()
+    while pending and time_mod.monotonic() <= deadline:
+        pending = [n for n in pending if not _service_ready(n, ws, config)]
+        if pending:
+            time_mod.sleep(poll_interval)
+    waited = time_mod.monotonic() - waited_start
+    return (not pending), waited, pending
+
+
 def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) -> dict[str, Any]:
     """幂等重启管理页：仅当原本 running 时 stop→start（IMP-059 升级为三态）。
 
@@ -1077,6 +1125,30 @@ def _run_runtime_phase(
             )
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("restartInstances", "failed", str(exc)))
+
+    # ---- 9.2 issue #5：重启后等就绪再做 access/doctor 自检 ----
+    # stop->start 后立即探测会把「服务还在绑端口/加载配置」的瞬态当成 FAIL；
+    # 轮询等待（复用实例探针的思路），超时降级为 warning 并提示复检（L3/L7）。
+    wait_names: list[str] = []
+    if options.restart_daemon:
+        wait_names.append("daemon")
+    if options.restart_gateway:
+        wait_names.append("gateway")
+    if wait_names:
+        ready, waited, pending = _wait_services_ready(workspace, config, names=wait_names)
+        if ready:
+            report.steps.append(
+                StepResult("waitReady", "ok", f"等待服务就绪 {waited:.1f}s（{', '.join(wait_names)}）")
+            )
+        else:
+            report.steps.append(
+                StepResult(
+                    "waitReady",
+                    "warning",
+                    f"等待 {waited:.0f}s 后仍未就绪：{', '.join(pending)}；"
+                    "后续 access/doctor 可能报瞬时失败，稍后请 lwa doctor 复核（issue #5）",
+                )
+            )
 
     # ---- 9.5 IMP-038：后台重启后再 refresh（+ 可选 review），避免旧进程回写 ----
     from local_webpage_access.access_workflow import run_access_pass
