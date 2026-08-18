@@ -119,6 +119,20 @@ def test_resolve_target_rejects_sha_and_refs(git_env: GitEnv) -> None:
     assert ei2.value.kind == "invalid_ref"
 
 
+def test_resolve_target_rejects_invalid_remote_name(git_env: GitEnv) -> None:
+    """CHK-225 低危：--remote 含斜杠或前导 - 必须拒绝。
+
+    旧条件 ``startswith("-") or "/" in remote and not remote`` 因 and 优先于
+    or，斜杠检查对非空字符串恒为 False，``origin/main`` 会被当成合法远端名。
+    """
+    with pytest.raises(us.SourceUpdateError) as ei:
+        us.resolve_source_target(git_env.repo, remote="origin/main", ref="main")
+    assert ei.value.kind == "invalid_ref"
+    with pytest.raises(us.SourceUpdateError) as ei2:
+        us.resolve_source_target(git_env.repo, remote="-origin", ref="main")
+    assert ei2.value.kind == "invalid_ref"
+
+
 def test_resolve_target_not_git_repo(tmp_path: Path) -> None:
     with pytest.raises(us.SourceUpdateError) as ei:
         us.resolve_source_target(tmp_path)
@@ -134,6 +148,14 @@ def test_resolve_target_detached(git_env: GitEnv) -> None:
 
 
 # ---- 063.02 互斥锁 -----------------------------------------------------------
+
+
+def test_repo_lock_rejects_non_git_dir(tmp_path: Path) -> None:
+    """CHK-225：非 git 目录取 repo 锁应报错，且不得在用户目录创建 .git/。"""
+    with pytest.raises(us.SourceUpdateError) as ei:
+        us.acquire_repo_lock(tmp_path)
+    assert ei.value.kind == "not_a_git_repo"
+    assert not (tmp_path / ".git").exists()
 
 
 def test_repo_lock_mutual_exclusion(git_env: GitEnv, tmp_path: Path) -> None:
@@ -765,6 +787,26 @@ def test_cli_check_human_output(git_env: GitEnv) -> None:
     assert "已是最新" in result.output
 
 
+def test_cli_check_json_lock_busy_is_json(git_env: GitEnv, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CHK-225 低危：--check --json 锁忙时 stdout 仍须是 JSON，不能只有 secho 文本。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+
+    def busy(_repo, *_a, **_k):
+        raise us.UpdateLockBusy("repo", {"pid": 4242, "argv": ["lwa", "update"]})
+
+    monkeypatch.setattr(us, "acquire_repo_lock", busy)
+    result = CliRunner().invoke(app, ["update", "--check", "--json", "--repo", str(git_env.repo)])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout or result.output)
+    assert payload["status"] == "blocked"
+    assert payload["schemaVersion"] == us.SCHEMA_VERSION
+    assert payload["error"]["kind"] == "lock_busy"
+    assert payload["error"]["scope"] == "repo"
+    assert payload["error"]["holder"]["pid"] == 4242
+
+
 def test_launch_continuation_parses_report_on_failure_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -869,3 +911,94 @@ def test_source_check_behind_by_keeps_true_total(git_env: GitEnv, monkeypatch) -
     assert d["behindBy"] == 5  # rev-list 真实总数，不是截断条数
     assert len(d["behind"]) == 3
     assert d["truncated"] is True
+
+
+# ---- BUG-529 残留：--no-pull / 非 git 路径也须持 workspace 锁 --------------------
+
+
+def test_flow_no_pull_lock_busy_fail_fast(git_env: GitEnv, tmp_path, monkeypatch) -> None:
+    """--no-pull 与持锁 update 并发 → fail-fast，不得 pip/重启（§15.1.9）。"""
+    from local_webpage_access import update_flow
+
+    ws_root = _make_workspace(tmp_path)
+    locks = us.acquire_workspace_only_lock(ws_root)
+    try:
+        monkeypatch.setattr(
+            update_flow, "run_pip_install", lambda repo: pytest.fail("锁忙时不得执行 pip")
+        )
+        from local_webpage_access import updater as updater_mod
+
+        monkeypatch.setattr(
+            updater_mod, "run_pip_install", lambda repo: pytest.fail("锁忙时不得执行 pip")
+        )
+        report = run_update_flow(ws_root, _flow_options(git_env.repo, pull=False))
+        src = report.step("sourceUpdate")
+        assert src.status == "failed"
+        assert "锁" in src.message
+        assert [s.name for s in report.steps] == ["sourceUpdate"]
+    finally:
+        locks.close()
+
+
+def test_flow_non_git_lock_busy_fail_fast(git_env: GitEnv, tmp_path, monkeypatch) -> None:
+    """非 git 安装路径同样取 workspace 锁；忙时 fail-fast 不做 Runtime 变更。"""
+    from local_webpage_access import update_flow
+
+    ws_root = _make_workspace(tmp_path)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "pyproject.toml").write_text(
+        "[project]\nname='local-webpage-access'\n", encoding="utf-8"
+    )
+    locks = us.acquire_workspace_only_lock(ws_root)
+    try:
+        monkeypatch.setattr(
+            update_flow, "run_pip_install", lambda repo: pytest.fail("锁忙时不得执行 pip")
+        )
+        from local_webpage_access import updater as updater_mod
+
+        monkeypatch.setattr(
+            updater_mod, "run_pip_install", lambda repo: pytest.fail("锁忙时不得执行 pip")
+        )
+        report = run_update_flow(ws_root, _flow_options(plain))
+        src = report.step("sourceUpdate")
+        assert src.status == "failed"
+        assert "workspace" in src.message or "锁" in src.message
+        assert [s.name for s in report.steps] == ["sourceUpdate"]
+    finally:
+        locks.close()
+
+
+def test_flow_no_pull_acquires_and_releases_workspace_lock(
+    git_env: GitEnv, tmp_path, monkeypatch
+) -> None:
+    """锁空闲时 --no-pull 正常执行并**在结束时释放**（后续可再取）。"""
+    from local_webpage_access import update_flow
+
+    ws_root = _make_workspace(tmp_path)
+    monkeypatch.setattr(update_flow, "run_pip_install", lambda repo: "pip ok")
+    from local_webpage_access import updater as updater_mod
+
+    monkeypatch.setattr(updater_mod, "run_pip_install", lambda repo: "pip ok")
+    report = run_update_flow(ws_root, _flow_options(git_env.repo, pull=False))
+    assert report.step("sourceUpdate").status == "skipped"
+    assert report.step("pip").status == "ok"
+    # 结束后锁已释放：可再次获取
+    again = us.acquire_workspace_only_lock(ws_root)
+    again.close()
+
+
+# ---- CHK-225 中⑦：--check 不得污染非 git 树 ------------------------------------
+
+
+def test_acquire_repo_lock_rejects_non_git_tree_without_mkdir(tmp_path: Path) -> None:
+    """非 git 树取 repo 锁：结构化拒绝且**不得创建** .git/ 空目录。"""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "pyproject.toml").write_text(
+        "[project]\nname='local-webpage-access'\n", encoding="utf-8"
+    )
+    with pytest.raises(us.SourceUpdateError) as ei:
+        us.acquire_repo_lock(plain)
+    assert ei.value.kind == "not_a_git_repo"
+    assert not (plain / ".git").exists(), "不得创建 .git/ 污染非 git 安装树"

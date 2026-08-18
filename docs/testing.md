@@ -82,7 +82,7 @@ python3 -m pytest tests/test_docker_integration.py
 | — 实证校验（IMP-058 Gate-C） | `test_gate_c_verification.py`、`test_health_status.py`、`test_hosting.py` | 探针发现（GET/HEAD）、2xx/3xx、sourceSubdir 边界、guessed 不得满足 servesApi |
 | — 子目录识别（BUG-495～503） | `test_scanner.py`、`test_hosting.py`、`test_importer.py`、`test_paths.py` | frontend/server 子目录、Poetry 依赖、预检 REJECTED、npm cwd |
 | — 服务期望态 reconcile（IMP-059） | `test_service_intent.py` | 意图判定（enabled/disabled/n.a.、交叉校验）、三态重启决策、监督器拉起无双进程、中断时长估算、`--no-reconcile` |
-| — doctor 服务韧性（IMP-060） | `test_doctor_service_checks.py` | `service_runtime_state` FAIL 矩阵、`restart_resilience` 四类 WARN、接入主报告 |
+| - doctor 服务韧性（IMP-060） | `test_doctor_service_checks.py`（19 用例） | `service_runtime_state` FAIL 矩阵与反向不一致（残留进程 WARN）、`restart_resilience` 四类 WARN（自启单元逐项差集/未启用/无 linger/容器策略）、runner 解耦（CHK-225 高③④）、接入主报告 |
 | — 自启缺省安全（IMP-061） | `test_autostart_defaults.py` | with_caddy/linger 三态缺省、旧旗标兼容、init/setup 引导（TTY/非 TTY/已装跳过）、运行模式标注 |
 | — 一键更新通道（IMP-063） | `test_update_source.py` | 目标解析（upstream/显式/拒绝 SHA）、双锁互斥、九态关系（含 shallow→unknown）、SourceCheckReport v1 与退出码、固定 OID 快进、skip-pip 门控、bootstrap/接力门控（HEAD 变化不跑旧进程 Runtime）、fetch warning 离线降级、dry-run 零写入、CLI `--check`/互斥；全部基于临时 bare remote 夹具，**零外网** |
 

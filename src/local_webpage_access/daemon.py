@@ -903,8 +903,8 @@ def reconcile(
         # 陈旧失败（updated_at 早于退避窗口，如宿主机重启前）保持立即自愈。
         if registry_status == "failed" and failure_state is None:
             try:
-                failed_at = datetime.fromisoformat(row.get("updated_at") or "").timestamp()
-            except ValueError:
+                failed_at = datetime.fromisoformat(str(row.get("updated_at") or "")).timestamp()
+            except (ValueError, TypeError):
                 failed_at = 0.0
             if failed_at and time.time() - failed_at < RECONCILE_BACKOFF_BASE_SECONDS:
                 _reconcile_failures[failure_key] = (

@@ -146,6 +146,26 @@ def test_python_fastapi_dockerfile(workspace: Workspace) -> None:
     assert '["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]' in content
 
 
+def test_python_zero_dependency_skips_pip_layer(workspace: Workspace) -> None:
+    """CHK-225：install=None（stdlib 零依赖）不得兜底 requirements.txt。
+
+    旧实现用 "pip install -r requirements.txt" 兜底会 COPY 不存在的文件，
+    docker build 必失败，而 CHK-V01 恰好豁免 install=None，端到端无拦截。
+    """
+    m = _mk_manifest(
+        kind=Kind.PYTHON,
+        stack=["stdlib-http"],
+        install=None,
+        start="python server.py",
+        internal_port=8000,
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "pip install" not in content
+    assert "requirements.txt" not in content
+    assert "uv sync" not in content
+    assert 'CMD ["python", "server.py"]' in content
+
+
 def test_python_flask_dockerfile(workspace: Workspace) -> None:
     m = _mk_manifest(
         kind=Kind.PYTHON,

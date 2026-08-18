@@ -414,6 +414,36 @@ def test_detect_stdlib_http_syntax_error_file_not_matched(tmp_path: Path) -> Non
     assert result.pending is True
 
 
+def test_detect_stdlib_http_with_sqlite_is_fullstack(tmp_path: Path) -> None:
+    """CHK-225 低危：stdlib-http + SQLite 文件应升 fullstack-sqlite，不得硬编码 backend-container。"""
+    (tmp_path / "server.py").write_text(
+        "import http.server\nimport sqlite3\nhttp.server.test()\n"
+    )
+    (tmp_path / "app.db").write_bytes(b"")
+    result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.stack == ["stdlib-http"]
+    assert result.hasDatabase is True
+    assert result.form == "fullstack-sqlite"
+    assert result.database is not None
+    assert result.database.type == "sqlite"
+
+
+def test_stdlib_http_yields_to_static_index(tmp_path: Path) -> None:
+    """CHK-225：index.html + import http.server 预览脚本应保持 static 高置信度。
+
+    stdlib 弱信号不得抢占更强的静态站信号（否则 high 置信度静态站被降级为
+    medium 置信度容器应用，且零依赖场景构建会失败）。
+    """
+    (tmp_path / "index.html").write_text("<html></html>")
+    (tmp_path / "server.py").write_text("import http.server\nhttp.server.test()\n")
+    result = Scanner().detect(tmp_path)
+    assert result.kind == Kind.STATIC
+    assert result.form == "static"
+    assert result.confidence == "high"
+    assert "stdlib-http" not in (result.stack or [])
+
+
 def test_detect_python_uv_lock_uses_uv_sync(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("fastapi\n")
     (tmp_path / "uv.lock").write_text("")

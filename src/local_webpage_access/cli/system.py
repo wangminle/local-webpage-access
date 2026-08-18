@@ -615,11 +615,49 @@ def update_cmd(
             )
             source_report = us.run_source_check(repo_path, remote=remote, ref=ref)
         except us.UpdateLockBusy as exc:
-            typer.secho(
-                f"更新锁被占用，已有 update/check 在执行：{exc}",
-                fg=typer.colors.RED,
-                err=True,
-            )
+            msg = f"更新锁被占用，已有 update/check 在执行：{exc}"
+            if json_output:
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "schemaVersion": us.SCHEMA_VERSION,
+                            "status": "blocked",
+                            "repo": str(repo_path) if repo_path else None,
+                            "error": {
+                                "kind": "lock_busy",
+                                "message": msg,
+                                "action": None,
+                                "scope": exc.scope,
+                                "holder": exc.holder,
+                            },
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                typer.secho(msg, fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except us.SourceUpdateError as exc:
+            # CHK-225 中危7：repo 非 git 克隆等结构化错误（acquire_repo_lock /
+            # run_source_check 抛出），按 blocked 输出而非裸 traceback。
+            if json_output:
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "schemaVersion": us.SCHEMA_VERSION,
+                            "status": "blocked",
+                            "repo": str(repo_path),
+                            "error": exc.to_dict(),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                if exc.action:
+                    typer.secho(f"建议：{exc.action}", fg=typer.colors.YELLOW, err=True)
             raise typer.Exit(code=1)
         finally:
             if locks is not None:

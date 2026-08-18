@@ -319,7 +319,9 @@ def _audit_volume(
         return  # 命名卷
 
     # 宿主敏感目录
-    src_abs = src_norm if src.startswith("/") else None
+    # CHK-225 高危5：先做 normpath 归一化，否则 /home//<user>、/home/./<user>、
+    # /Users/<user>/../<user> 等等价于整家目录的挂载会绕过下方判定被静默放行。
+    src_abs = posixpath.normpath(src_norm) if src.startswith("/") else None
     if src_abs:
         # issue#1：家目录整体挂载 critical（/home、/Users、以及某用户的整个
         # 家目录 /home/<user>——后者含 .ssh/.aws 等全部凭据，等价于 /home）；

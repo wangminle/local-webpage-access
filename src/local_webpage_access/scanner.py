@@ -539,16 +539,21 @@ class Scanner:
             or summary.has_pipfile
         )
         # issue#1：零依赖 stdlib HTTP 服务（仅 server.py/app.py/main.py + http.server）
-        # 无任何 Python 工程文件，也路由到 Python 分支做弱信号识别。
+        # 无任何 Python 工程文件时路由到 Python 分支做弱信号识别。
+        # CHK-225 高危2：stdlib 弱信号必须让位于更强的静态站信号--
+        # index.html + 一行 import http.server 预览辅助脚本（极常见）应保持
+        # high 置信度 static，而非降级为 medium 置信度容器应用。
         if summary.has_package_json and self._is_real_node(summary):
             self._detect_node(summary, result)
-        elif has_python_signal or _stdlib_http_entry(summary) is not None:
+        elif has_python_signal:
             self._detect_python(summary, result)
-        elif summary.has_package_json and not has_python_signal:
+        elif summary.has_package_json:
             # package.json 存在但既非真 Node 也无 Python 工程文件：仍按 Node 兜底尝试
             self._detect_node(summary, result)
         elif summary.has_index_html or summary.has_html:
             self._detect_static(summary, result)
+        elif _stdlib_http_entry(summary) is not None:
+            self._detect_python(summary, result)
         else:
             # 兜底：子目录 index.html，或任意可打开的 .html
             if _has_index_anywhere(project_dir) or _has_html_anywhere(project_dir):
@@ -807,7 +812,7 @@ class Scanner:
             if stdlib_entry is not None:
                 result.runtime = Runtime.DOCKER_COMPOSE
                 result.servingMode = ServingMode.CONTAINER
-                result.form = "backend-container"
+                result.form = "fullstack-sqlite" if result.hasDatabase else "backend-container"
                 result.stack = ["stdlib-http"]
                 result.resourceProfile = ResourceProfile.TINY
                 result.confidence = "medium"

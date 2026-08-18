@@ -72,4 +72,12 @@ desktop.ini
 CLAUDE.md
 .claude/
 .codex/
+.zcode/
 AGENTS.md
+
+# 代码审查报告（本地生成）
+_review_reports/
+
+# ---- design 本地目录（issues/reviews 不同步到 GitHub）------------------------
+design/4-issues/
+design/5-reviews/

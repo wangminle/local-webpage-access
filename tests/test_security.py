@@ -152,6 +152,21 @@ def test_audit_compose_user_home_root_macos_is_critical() -> None:
     assert "host_sensitive_mount" in _critical_codes(findings)
 
 
+def test_audit_compose_user_home_normpath_bypass_is_critical() -> None:
+    """CHK-225：/home//<user>、/home/./<user> 等等价路径不得绕过整家目录判定。"""
+    for src in (
+        "/home//alice:/host-home",
+        "/home/./alice:/host-home:ro",
+        "/Users/alice/../alice:/host-home",
+    ):
+        text = _CLEAN_COMPOSE.replace(
+            "      - ../data:/app/data",
+            f"      - ../data:/app/data\n      - {src}",
+        )
+        findings = audit_compose(text)
+        assert "host_sensitive_mount" in _critical_codes(findings), src
+
+
 def test_audit_compose_home_subpath_nonsensitive_allowed() -> None:
     """issue#1：家目录下的普通业务目录（extraVolumes 场景）放行。"""
     text = _CLEAN_COMPOSE.replace(

@@ -243,8 +243,15 @@ V1 要求 Docker Compose 插件（`docker compose` 子命令）。安装 `docker
 
 纯标准库 `http.server` 服务（无任何第三方依赖）会被 scanner 弱信号识别为
 `backend-container`（stack=`stdlib-http`，置信度 medium）：顶层 `server.py` /
-`app.py` / `main.py` 任一文件 import 了 `http.server` 或 `socketserver` 即命中，
-启动命令为 `python <入口文件>`。无需再"伪造"框架依赖绕过。
+`app.py` / `main.py` 任一文件的 **import 语句**（AST 解析，非字符串包含，BUG-534）
+import 了 `http.server` 或 `socketserver` 即命中，启动命令为
+`python <入口文件>`，且零依赖项目不落任何 pip 依赖层（BUG-540）。无需再
+"伪造"框架依赖绕过。
+
+**弱信号优先级最低**：若源码根存在 `index.html` 或其他 HTML 静态证据，会优先
+识别为 `static`（BUG-541）--stdlib 信号只在无静态证据、无 Python 工程文件
+（`requirements.txt` / `pyproject.toml` 等）时才作为兜底生效。带预览脚本的
+静态站不会因此被降级为容器应用。
 
 注意：应用应从 **`PORT` 环境变量**读监听端口（compose 已统一注入
 `PORT=${INTERNAL_PORT}`，默认 8000），否则探针探测的端口与应用实际监听端口

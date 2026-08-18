@@ -198,58 +198,24 @@ def run_update_flow(
         report.steps.append(_dry_run_source_step(repo, options))
         return _inline_tail(workspace_root, options, report.steps, report)
 
-    # ---- --no-pull / 非 git 安装：源码阶段 skipped，旧路径内联 ----
-    if not options.pull:
-        report.steps.append(
-            StepResult(
-                "sourceUpdate",
-                "skipped",
-                "--no-pull：不联网，仅用本地代码刷新 Runtime",
-            )
-        )
-        return _inline_tail(workspace_root, options, report.steps, report)
-    if repo is None:
-        if repo_error:
-            report.steps.append(StepResult("sourceUpdate", "failed", repo_error))
-        else:
-            report.steps.append(
-                StepResult(
-                    "sourceUpdate",
-                    "skipped",
-                    "未识别到 lwa 源码根，跳过源码更新（如已手动装过可用 --skip-pip）",
-                )
-            )
-        return _inline_tail(workspace_root, options, report.steps, report)
-    if not us.git_available():
-        report.steps.append(
-            StepResult(
-                "sourceUpdate",
-                "failed",
-                "git 不可执行，无法做源码更新（.git 存在）",
-                extra={"errorKind": "git_unavailable"},
-            )
-        )
-        return _inline_tail(workspace_root, options, report.steps, report)
-    if not us.is_git_repo(repo):
-        report.steps.append(
-            StepResult(
-                "sourceUpdate",
-                "skipped",
-                "非 git 克隆安装（无 .git）：源码更新不适用；"
-                "建议迁移到 clone + pip install -e . 安装",
-            )
-        )
-        return _inline_tail(workspace_root, options, report.steps, report)
-
-    # ---- git 安装：锁 → 目标解析 → fetch → 门禁 → 快进 ----
+    # ---- 以下均为可变更 update：workspace 锁全程持有（§15.1.9）----
+    # BUG-529 残留收口：--no-pull / 非 git / 未识别 repo / git 不可用路径
+    # 同样会 pip/迁移/重启（Runtime 变更），必须与其它 update 互斥；
+    # 仅源码阶段（会 fetch/改 .git）才需要 repo 锁，锁序保持 repo → workspace。
     locks: us.UpdateLocks | None = None
     try:
+        source_stage = bool(
+            options.pull and repo is not None and us.git_available() and us.is_git_repo(repo)
+        )
         try:
-            locks = us.acquire_update_locks(repo, ws.root)
+            if source_stage and repo is not None:
+                locks = us.acquire_update_locks(repo, ws.root)
+            else:
+                locks = us.acquire_workspace_only_lock(ws.root)
         except us.UpdateLockBusy as exc:
             # BUG-529：锁忙说明已有 update 持锁执行中（可能正在 pip/迁移/重启
-            # 服务），此时绝不能再跑 Runtime 后半段，否则与持锁更新并发。
-            # 立即失败返回，不进 _inline_tail。
+            # 服务），此时绝不能再跑 Runtime 后半段。立即失败返回，不进
+            # _inline_tail。
             report.steps.append(
                 StepResult(
                     "sourceUpdate",
@@ -260,6 +226,50 @@ def run_update_flow(
             report.version_after = resolve_version()
             return report
 
+        # ---- --no-pull / 非 git 安装：源码阶段 skipped，旧路径内联 ----
+        if not options.pull:
+            report.steps.append(
+                StepResult(
+                    "sourceUpdate",
+                    "skipped",
+                    "--no-pull：不联网，仅用本地代码刷新 Runtime",
+                )
+            )
+            return _inline_tail(workspace_root, options, report.steps, report)
+        if repo is None:
+            if repo_error:
+                report.steps.append(StepResult("sourceUpdate", "failed", repo_error))
+            else:
+                report.steps.append(
+                    StepResult(
+                        "sourceUpdate",
+                        "skipped",
+                        "未识别到 lwa 源码根，跳过源码更新（如已手动装过可用 --skip-pip）",
+                    )
+                )
+            return _inline_tail(workspace_root, options, report.steps, report)
+        if not us.git_available():
+            report.steps.append(
+                StepResult(
+                    "sourceUpdate",
+                    "failed",
+                    "git 不可执行，无法做源码更新（.git 存在）",
+                    extra={"errorKind": "git_unavailable"},
+                )
+            )
+            return _inline_tail(workspace_root, options, report.steps, report)
+        if not us.is_git_repo(repo):
+            report.steps.append(
+                StepResult(
+                    "sourceUpdate",
+                    "skipped",
+                    "非 git 克隆安装（无 .git）：源码更新不适用；"
+                    "建议迁移到 clone + pip install -e . 安装",
+                )
+            )
+            return _inline_tail(workspace_root, options, report.steps, report)
+
+        # ---- git 安装：目标解析 → fetch → 门禁 → 快进（锁已持有）----
         target: us.SourceTarget | None = None
         status: us.RepoStatus | None = None
         candidate: str | None = None

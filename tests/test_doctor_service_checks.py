@@ -175,7 +175,8 @@ def test_resilience_no_units_warns_with_full_command(
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: False)
 
-    result = check_restart_resilience(workspace, config, runner=_docker_runner())
+    monkeypatch.setattr("local_webpage_access.doctor._default_runner", _docker_runner())
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
     assert "lwa autostart install --with-caddy --linger" in (result.suggestion or "")
 
@@ -189,7 +190,8 @@ def test_resilience_gateway_unit_missing_warns(workspace, config, monkeypatch, t
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: True)
 
-    result = check_restart_resilience(workspace, config, runner=_docker_runner())
+    monkeypatch.setattr("local_webpage_access.doctor._default_runner", _docker_runner())
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
     assert "--with-caddy" in (result.suggestion or "")
     # CHK-224#1：逐项差集文案，缺 gateway 单元时点名 gateway + 别名入口失效
@@ -204,7 +206,8 @@ def test_resilience_no_linger_warns(workspace, config, monkeypatch, tmp_path) ->
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: False)
 
-    result = check_restart_resilience(workspace, config, runner=_docker_runner())
+    monkeypatch.setattr("local_webpage_access.doctor._default_runner", _docker_runner())
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
     assert "enable-linger" in (result.suggestion or "")
 
@@ -218,8 +221,11 @@ def test_resilience_container_policy_mismatch_warns(
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: True)
 
-    runner = _docker_runner({"lwa-v1": "no", "lwa-ok": "unless-stopped"})
-    result = check_restart_resilience(workspace, config, runner=runner)
+    monkeypatch.setattr(
+        "local_webpage_access.doctor._default_runner",
+        _docker_runner({"lwa-v1": "no", "lwa-ok": "unless-stopped"}),
+    )
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
     assert "lwa-v1" in (result.detail or "")
 
@@ -234,8 +240,10 @@ def test_resilience_all_green_no_warn(workspace, config, monkeypatch, tmp_path) 
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: True)
 
-    runner = _docker_runner({"lwa-v1": "unless-stopped"})
-    result = check_restart_resilience(workspace, config, runner=runner)
+    monkeypatch.setattr(
+        "local_webpage_access.doctor._default_runner", _docker_runner({"lwa-v1": "unless-stopped"})
+    )
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_OK
 
 
@@ -252,8 +260,10 @@ def test_resilience_unit_installed_but_disabled_warns(
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: True)
 
-    runner = _docker_runner({"lwa-v1": "unless-stopped"})
-    result = check_restart_resilience(workspace, config, runner=runner)
+    monkeypatch.setattr(
+        "local_webpage_access.doctor._default_runner", _docker_runner({"lwa-v1": "unless-stopped"})
+    )
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
     assert "未被服务管理器启用" in (result.detail or "")
     assert "lwa autostart enable" in (result.suggestion or "")
@@ -268,7 +278,8 @@ def test_resilience_bare_process_stays_warn_not_fail(
     monkeypatch.setattr(asm, "detect_platform", lambda: asm.PLATFORM_LINUX)
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
 
-    result = check_restart_resilience(workspace, config, runner=_docker_runner())
+    monkeypatch.setattr("local_webpage_access.doctor._default_runner", _docker_runner())
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
 
 
@@ -305,7 +316,8 @@ def test_resilience_partial_install_warns_missing_manager(
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: True)
 
-    result = check_restart_resilience(workspace, config, runner=_docker_runner())
+    monkeypatch.setattr("local_webpage_access.doctor._default_runner", _docker_runner())
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
     assert "manager" in (result.detail or "")
     assert "缺自启单元" in (result.detail or "")
@@ -323,7 +335,8 @@ def test_resilience_missing_daemon_unit_warns_even_if_gateway_present(
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
     monkeypatch.setattr(asm, "linger_enabled", lambda **k: True)
 
-    result = check_restart_resilience(workspace, config, runner=_docker_runner())
+    monkeypatch.setattr("local_webpage_access.doctor._default_runner", _docker_runner())
+    result = check_restart_resilience(workspace, config)
     assert result.status == STATUS_WARN
     assert "daemon" in (result.detail or "")
 
@@ -372,3 +385,36 @@ def test_runtime_state_fail_takes_precedence_over_residual(workspace, config, mo
     assert result.status == STATUS_FAIL
     assert "manager" in result.message
     assert "残留" in (result.detail or "")
+
+
+# ---- CHK-225（外部复核）修复回归 ---------------------------------------------
+
+
+def test_restart_resilience_decoupled_from_injected_runner() -> None:
+    """CHK-225 高③④：check_restart_resilience 不再接收注入 runner。
+
+    doctor 侧注入 runner 约定为单参数签名；autostart 后端/linger/docker 探测
+    需要 kwargs（capture_output 等）。透传会让 TypeError 被兜底 except 吞掉，
+    检查退化为死代码或恒定 WARN。此测试锁定解耦契约，防回归。
+    """
+    import inspect
+
+    params = inspect.signature(check_restart_resilience).parameters
+    assert "runner" not in params, "不得重新引入 runner 透传（单参签名不兼容 kwargs 探测）"
+
+
+def test_run_doctor_with_single_arg_runner_keeps_resilience_alive(
+    workspace, config, monkeypatch
+) -> None:
+    """单参数注入 runner（test_doctor 既有约定）下 run_doctor 不炸、韧性检查在。"""
+    from local_webpage_access.doctor import run_doctor
+
+    def single_arg_runner(args):
+        import subprocess as sp
+
+        return sp.CompletedProcess(args=args, returncode=127, stdout="", stderr="not found")
+
+    report = run_doctor(workspace, config, runner=single_arg_runner)
+    names = [c.name for c in report.checks]
+    assert "restart_resilience" in names
+    assert "service_runtime_state" in names

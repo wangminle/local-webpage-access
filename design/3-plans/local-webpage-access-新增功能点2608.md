@@ -1,6 +1,6 @@
 # 新增功能点计划（202608）— 编号续接 IMP-043
 
-> **状态（2026-08-11）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。**IMP-055**：路径别名兼容性门禁与文档口径见 §12；2026-08-11 评审后明确为「入口 HTML 根绝对资源负向守卫」，不构成整体兼容证明。**IMP-056 / IMP-057 的 MVP、IMP-058 Gate-A 原战术范围与 Gate-B 已落地；Gate-A 修订后 SQLite 安全加固见 IMP-058.A.R01。Gate-C 已具备核心模型、成功谓词、状态机和模拟故障注入，但完整计划执行、事务回滚、副作用采集及真实 Docker 门控仍按 Scanner 文档续接 WBS 收口。** **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
+> **状态（2026-08-11）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。**IMP-055**：路径别名兼容性门禁与文档口径见 §12；2026-08-11 评审后明确为「入口 HTML 根绝对资源负向守卫」，不构成整体兼容证明。**IMP-056 / IMP-057 的 MVP、IMP-058 Gate-A 原战术范围与 Gate-B 已落地；Gate-A 修订后 SQLite 安全加固见 IMP-058.A.R01。Gate-C 已具备核心模型、成功谓词、状态机和模拟故障注入，但完整计划执行、事务回滚、副作用采集及真实 Docker 门控仍按 Scanner 文档续接 WBS 收口。** **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。****新立项待实施：IMP-064 服务意图字段去污染（§16，P1；CHK-230 / CHK-232 已修订契约）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
 > **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**；**§12 路径别名 × 方案 B（IMP-055，含详细 WBS与评审边界）**；**§13 Scanner 多候选与实证校验（IMP-056～058 摘要）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
 
 ---
@@ -948,7 +948,7 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 > **落地后修订（2026-08-18，CHK-224）**：060.02 场景 2 由「只查 gateway 单元缺失」泛化为
 > **enabled_services 与 installed_services 逐项差集**（daemon/manager/gateway 任一缺失均 WARN，
 > 部分安装不再误报 OK）；`service_runtime_state` 新增**反向不一致**检查（已停用但进程残留 → WARN，
-> 建议 `lwa X off`，不假绿）；另按 CHK-223 增补单元「已装未启用」检查（BUG-533）。**一句话**：让「服务断了」和「重启后会断」在 `lwa doctor` 里自己浮出水面。实现触点：`doctor.check_service_runtime_state`（FAIL 级）与 `check_restart_resilience`（四类 WARN：无单元 / 缺 gateway 单元 / 无 linger / 容器 restart 策略不符，复用 `autostart.linger_enabled`）；已接入 `run_doctor` 主报告与 `--json`。测试：`tests/test_doctor_service_checks.py`（11 用例）。
+> 建议 `lwa X off`，不假绿）；另按 CHK-223 增补单元「已装未启用」检查（BUG-533）。**一句话**：让「服务断了」和「重启后会断」在 `lwa doctor` 里自己浮出水面。实现触点：`doctor.check_service_runtime_state`（FAIL 级）与 `check_restart_resilience`（四类 WARN：无单元 / 任一 enabled 服务缺自启单元（逐项差集）/ 无 linger / 容器 restart 策略不符，复用 `autostart.linger_enabled`；内部探测不接收注入 runner，见 CHK-225 高③④/BUG-544）；已接入 `run_doctor` 主报告与 `--json`。测试：`tests/test_doctor_service_checks.py`（19 用例，含 CHK-224 差集/残留与 CHK-225 runner 解耦回归）。
 
 **需求**
 
@@ -1057,7 +1057,7 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 ## 15. IMP-063 — `lwa update` 一键 GitHub 更新通道（fetch → 安全拉取 → 升级）
 
 > **状态**：**已落地**（2026-08-17，DEV-119；063.01-12 完成，063.13 实机「需代理环境一键 V0.7.x→V0.7.y」待下一发布周期真机执行）。**一句话**：把「人工 `git pull`（可能要走代理）+ `lwa update`」两步收敛为 `lwa update` 一步，并让远端版本探测成为 update 的内置能力。实现触点：`update_source.py`（目标解析/双锁/九态/SourceCheckReport v1/固定 OID fetch/ff-only/恢复链）、`update_flow.py`（bootstrap 编排 + handoff v1 + pass_fds 锁继承）、`update_continuation.py`（新解释器 Runtime 后半段，缺 FD/协议/代码不符在任何写入前拒绝 exit 3）、`cli/system.py`（`--check/--no-pull/--remote/--ref` 与互斥分流）、`updater`（warning/hasWarnings、Runtime 后半段抽取共用）。测试：`tests/test_update_source.py`（41 用例，全部基于临时 bare remote 夹具，零外网）；全量 2143 passed。
-> **落地后修订（2026-08-18，CHK-223/224）**：BUG-529～536 收口——锁忙不再进 Runtime 后半段；dry-run 不落 Registry；continuation 非零退出仍回传完整子报告（恢复链仅限升级关键失败）；behindBy 改用 rev-list 真实总数（截断只影响列表）。
+> **落地后修订（2026-08-18，CHK-223/224/225/226）**：BUG-529～536 与 CHK-225 关联项（BUG-540～544）全部收口——锁忙不再进 Runtime 后半段且 **--no-pull / 非 git 路径全程持 workspace 锁**（§15.1.9，`acquire_workspace_only_lock`）；dry-run 不落 Registry；continuation 非零退出仍回传完整子报告（恢复链仅限真崩溃/超时/refused）；behindBy 改用 rev-list 真实总数；--check 对非 git 树结构化拒绝且不创建 .git/；doctor 韧性检查与单参注入 runner 解耦。
 > **重开说明**：原 IMP-040 `update --pull` 曾于 2026-07-20 以「价值偏低 / 非刚需」从 2607 删除（DEV-085 关闭，编号已复用于 LAN 新鲜度）。**§14 事故实证推翻该判断**：事故机落后两个版本无人知晓（版本滞后不可见）、更新需人工记忆「先 pull 再 update」且 pull 需处理代理环境（TLS 直连失败、走 mihomo 才通）——这些摩擦与盲区正应由工具吸收，本 IMP 以新编号 063 重开，非恢复旧案。
 > **规划入账**：`PLN-041`。
 
@@ -1240,10 +1240,154 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 
 ---
 
+## 16. IMP-064 - 服务意图字段去污染：`enabled` 只表用户意图，启动失败进独立字段（P1 · 待实施）
+
+> **状态**：**待实施**（2026-08-18 立项；CHK-230 / CHK-232 修订契约）。承接 CHK-225 设计裁决项「update 重启失败把 enabled=False 留盘、之后不再自愈」。
+> **一句话**：`run/*.json` 的 `enabled` 回归纯用户意图；失败与进程退出只更新运行观测与 `lastStartError`；熔断只挡 IMP-059 的自动拉起，不挡手动 `on`、不改监督器。
+
+### 16.1 背景与问题
+
+`enabled` 同时承担了「用户意图」与「启动成功 / 进程还在」两个职责，而 IMP-059/060 恰好以意图字段为安全网。失败路径一旦把 `enabled` 写成 false，安全网失明。
+
+**已核实的污染路径（2026-08-18 工作树，行号随改动会漂，实施以符号名为准）：**
+
+| 路径 | 文件 | 行为 | 三服务是否同构 |
+| --- | --- | --- | --- |
+| `start_*` 健康检查 / 子进程握手失败 | `manager_service.py` `start_manager`（先写 `enabled=True` 再失败写回 False）；`daemon.py` `start_daemon` 同构 | 意图被改成关 | **gateway 不同构（反方向）**：`start_gateway` 在 `caddy_start` 失败时直接抛错（约 318–325 行），失败发生在首次 `write_state` **之前**，`enabled` 仍是 False——用户已 `on`，doctor 却报「已按意图停用」 |
+| 用户级 `stop_*` | `stop_manager` / `stop_daemon` / `stop_gateway` | 成功停止即写 `enabled=False` | 同构。`stop_daemon` **先**写 False，再靠 watcher 读到 disabled 自退 |
+| `updater.restart_*` 无自启动托管 | `updater.py` `restart_manager/daemon/gateway` | 走用户级 `stop_*` → `start_*`；另有版本不一致时的**二次** `stop_manager`（约 571 / 624 行） | 同构结构；manager 多一条版本校验 stop |
+| 管理页子进程退出 | `manager_service.run_service_main` 的 `finally`（约 651–664 行） | SIGTERM / uvicorn 正常返回后，若 `state.pid == os.getpid()` 则写 **`enabled=False`** | daemon `_main` 退出**不**翻 `enabled` |
+| 网关前台监管退出 | `run_gateway_foreground`（约 579–581 行）调用用户级 `stop_gateway`（约 446 行写 False） | 监督器 SIGTERM / 机器关机 → 优雅退出 → **`enabled=False`** | **CHK-232**：与 manager `finally` 同类污染；初版「gateway 无对等 finally」不成立，064.03b 必须覆盖 |
+| `maybe_start_gateway` 联动 | 只看 `backend==caddy`（约 499–504 行），**不看** `enabled`；`start_manager`（约 451 行）无条件调用 | 用户已 `gateway off` 时，`lwa manager on` 仍会拉起 Caddy | 叠加 `start_gateway` BUG-073（约 267 行）：在线但 `enabled=False` 时补写 True |
+
+后果：
+
+- **stop 成功 + start 失败**（含内部杀进程后子进程 `finally` 抢写）后，`enabled=false` 留盘；
+- IMP-059 `service_intent` 看到 false → 永久跳过拉起（「原本未运行」）；
+- IMP-060 `check_service_runtime_state` 看到 false → 「已按意图停用」，**PASS 假绿**；
+- 无法区分「用户主动 off」与「上次 update 重启失败遗留」，除非当次看到报错并手动 `lwa <svc> on`。
+
+CHK-230：只改 `start_*` 失败分支、或只加「不写状态文件的 `_stop_process`」，**不够**——manager 子进程 `finally` 会把内部停止原语架空。
+CHK-232：gateway 前台退出走用户级 `stop_gateway`、`maybe_start_gateway` 不查意图、gateway `on` 失败不落意图——三条与 manager/daemon 对称缺口，须写入规则与 064.03b / 064.02 / 064.06。
+
+### 16.2 字段定义（`run/{manager,daemon,gateway}.json`）
+
+```json
+{
+  "enabled": true,
+  "pid": null,
+  "lastStartError": {
+    "message": "管理页子进程启动失败或健康检查超时（port=8443）",
+    "at": "2026-08-18T04:12:33Z",
+    "source": "update-restart"
+  },
+  "consecutiveStartFailures": 2
+}
+```
+
+| 字段 | 语义 | 写入方 |
+| --- | --- | --- |
+| `enabled` | **仅**用户意图（「我要它开/关」）；旧文件兼容读 | 见下方写入契约；**禁止**失败路径与进程退出写 False |
+| `pid` / `started_at` 等 | 运行观测 | `start_*` 成功、监督器入口回写自身 pid、内部停止清 pid |
+| `lastStartError` | 最近一次启动失败的观测；`source` 取 `manual` / `update-restart` / `reconcile` / `autostart` | 任意 `start_*` 失败路径 |
+| `consecutiveStartFailures` | 连续启动失败计数；**启动成功清零**（含已在运行早退），用户级 `off` 时重置 | `start_*` 失败路径 + `on` 成功 / 早退 + `off` |
+
+**`enabled` 写入契约（CHK-230：初版「只允许 on/off 写」过严，会与现码冲突）：**
+
+| 动作 | 允许 | 禁止 |
+| --- | --- | --- |
+| 写 `enabled=True` | 用户级 `lwa <svc> on`（三服务 `on` 入口**先断言 True 再启动**，见规则 1）；监督器前台入口回写自身 pid（`run_service_main` / `daemon._main` / `run_gateway_foreground` 启动成功后）；`autostart._prepare_*` 等安装期「置意图为开」 | 用「失败后再写 True」补救被污染的意图；**`maybe_start_gateway` / `start_manager` 联动**；BUG-073 在 `enabled=False` 且 Caddy 在线时补写 True |
+| 写 `enabled=False` | **仅**用户级 `off`（`lwa <svc> off` → `stop_*`；`autostart disable` 成功后连带的 `stop_*`） | `start_*` 失败；内部停止原语；manager `finally`；**gateway 前台退出**；update restart / reconcile；版本不一致二次 stop |
+
+旧状态文件无新字段：读侧默认 `lastStartError=None`、计数 0，**不做 schema 迁移**。
+
+**存量污染（明示，不自动翻回）：** 本 IMP 落地前已写成 `enabled=false` 且无 `lastStartError` 的文件，与真·用户 off **无法区分**，064 **不会**自动改回 true。恢复靠用户 `lwa <svc> on`；FAQ / known-limitations 写清。禁止用启发式（「有 pid 残留就当失败」）翻意图。
+
+### 16.3 业务规则
+
+1. **on 入口先断言意图，start 失败不把意图改回关**：三服务用户级 `on`（及直接调用的 `start_*` 作为 on 实现）**先写 `enabled=True` 再执行启动**。健康检查超时 / 子进程握手失败 / `caddy_start` 失败——杀残留进程、**清 pid**、写 `lastStartError`、计数 +1、抛原异常；**不写 `enabled=False`**。gateway 现状是失败发生在首次 `write_state` 之前（CHK-232 遗漏 3），须与 manager/daemon 对齐，否则 `lwa gateway on` 失败后 doctor 仍说「已按意图停用」。
+2. **内部停止 ≠ 用户级 stop**：三服务各有内部原语（如 `_stop_process`）——发信号结束进程（daemon/gateway 含停 Caddy master），写盘**只更新运行观测**（`pid=null`，保留 `enabled`）。**禁止**「完全不写状态文件」：留下 stale pid 会让 `is_running` / 子进程 `finally` 的 pid 匹配判断出错。
+3. **内部停止的调用方必须换干净**：`updater.restart_*` 的主序列 **以及** 版本不一致时的二次 `stop_manager` / `stop_daemon` / `stop_gateway` 全部改内部原语。用户级 `off` 仍走 `stop_*`（写 `enabled=False` 并重置失败记录）。
+4. **子进程 / 前台监管退出不得写意图（064.03b，否则规则 2 被架空）**：
+   - manager：`run_service_main` 的 `finally` 在 `state.pid == os.getpid()` 时只清运行观测（pid / 能力缓存），**不得**写 `enabled=False`。
+   - daemon：`_main` 现状不翻 `enabled`，加回归锁住、禁止向 manager 看齐写 False。内部停止必须 SIGTERM，不能再靠先写 False 赶 watcher。
+   - gateway（CHK-232 遗漏 1）：`run_gateway_foreground` 退出**不得**调用户级 `stop_gateway`。改为内部停止（可先内联 `caddy_stop` + 清 pid、保留 enabled；064.03 再抽成共用原语）。监督器 SIGTERM / 关机后意图仍为开，与「用户没 off」一致。
+   - pid 已被新进程覆盖时，旧进程 `finally` 仍靠现有 pid 匹配跳过。
+5. **熔断只挡 IMP-059 自动拉起**：`updater.restart_*` 在 **reconcile 拉起前**（`enabled=true` 且未运行）判定 `consecutiveStartFailures >= 3` 且 `lastStartError.at` 距今 ≤ 24h → 跳过自动拉起，报告「连续失败 N 次，已暂停自动拉起，请 `lwa <svc> on`」。冷却过期（>24h）允许再试一次（计数保留；若再失败则按新 `at` 重新熔断）。**禁止**把熔断塞进 `start_*` 本身，否则手动 `on` 会被误伤。**不约束** systemd/launchd KeepAlive/JobRestart。**明示（CHK-232 次要）**：手动 `lwa <svc> on` 失败同样计入 `consecutiveStartFailures`（失败就是失败）；熔断只决定 update 是否自动拉起，不挡住这次手动 `on`。
+6. **doctor 消费**：`enabled=true` 且未运行 → FAIL，文案追加 `lastStartError.message`（若有）并在熔断时明示。`enabled=false` → 「已按意图停用」（去污染后该判定才语义真实；存量污染仍可能假绿，见 16.2）。
+7. **status 暴露**：`lwa status` / `--json` 与管理页服务面板透出 `lastStartError` 与 `consecutiveStartFailures`。
+8. **三服务同步改、不假装已经同构**：manager 改 `start_*` + `stop_*` 调用方 + `finally`；daemon 改 `start_*` + 内部 SIGTERM 停止；gateway 改 `on` 先断言、`start_gateway` 失败不写 False、前台退出走内部停止、联动查意图。gateway 保留 `staticGateway != caddy` 的 n.a.。
+9. **联动启动不得翻他人意图（CHK-232 遗漏 2）**：`maybe_start_gateway`（含 `start_manager` / `lwa init` 调用）在 `backend==caddy` 之后还须查 `service_intent`：gateway 为 disabled / n.a. 则**跳过**，不调 `start_gateway`。`start_gateway` 已在线分支（BUG-073）仅允许在**状态文件缺失**（`state is None`）时补写恢复态；**`enabled=False` 且 Caddy 在线视为残留进程，不把意图翻回 True**（与 IMP-060 residual WARN 同向）。
+10. **「on 成功清零」含已在运行早退（CHK-232 次要）**：`start_*` 在「已在运行」早退（如 `manager_service.py` 约 400–403 行）也须将 `consecutiveStartFailures` 清零。否则 064.06 只覆盖「本次新拉起成功」，熔断计数会在健康重启场景残留。
+
+### 16.4 现状触点
+
+- `manager_service.py`：`start_manager` 失败写 False；约 400–403 行已在运行早退；约 451 行无条件 `maybe_start_gateway`；`stop_manager` 写 False；`run_service_main` 入口写 True、`finally` 写 False。
+- `daemon.py`（**不是** `daemon_service.py`）：`start_daemon` 失败写 False；`stop_daemon` 先写 False；`_main` 抢锁后写 True，退出不翻 `enabled`；watcher 以 `enabled=False` 为外部 off 退出条件——内部停止必须 SIGTERM。
+- `gateway_service.py`：`stop_gateway` 写 False；`start_gateway` 失败在首次 `write_state` 之前（on 不落意图）；BUG-073 已在线且 `enabled=False` 时补写 True；`maybe_start_gateway` 只看 backend；`run_gateway_foreground` 退出调用户级 `stop_gateway`。
+- `updater.py` `restart_manager/daemon/gateway`：无托管时 `stop_*`→`start_*`；manager 版本不一致二次 `stop_manager`。
+- `autostart.py` `_prepare_daemon_for_supervision`：安装期写 `enabled=True`（合法，属意图断言）。
+- `cli/manager.py`·daemon/gateway：`on` → `start_*`，`off` → `coordinated_autostart_disable` + `stop_*`。
+- `service_intent.py`、`doctor.py` `check_service_runtime_state`：消费方。
+- 测试：`tests/test_service_intent.py`、`tests/test_doctor_service_checks.py`、`tests/test_updater*.py`、`tests/test_manager_service.py`、`tests/test_daemon.py`、`tests/test_gateway_service.py`。
+
+### 16.5 WBS（可执行）
+
+| ID | 工作包 | 规模 | 触点 | 交付物 | 依赖 | 完成标准 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **064.01** | 状态模型扩展 | S | 三服务 state dataclass + 读写 | `lastStartError` / `consecutiveStartFailures`；旧文件容错读 | — | 缺字段读为默认值，不迁移 |
+| **064.02** | start 失败去污染 + on 先断言（×3） | M | `start_manager` / `start_daemon` / `start_gateway` | 不写 `enabled=False`；清 pid；写失败记录；**三服务 on/`start_*` 入口先断言 True**；BUG-073 仅 `state is None` 可补写 True | 064.01 | `caddy_start` 失败后 `enabled` 为 true（与 manager/daemon 对齐）；`enabled=False` 且 Caddy 在线时调用 `start_gateway` 不把意图翻 True |
+| **064.03b** | 子进程 / 前台退出去污染 | M | `run_service_main` `finally`；`run_gateway_foreground` 退出；核验 `daemon._main` | manager `finally` 只清观测；gateway 退出改内部停止（可先内联 caddy_stop+清 pid）；daemon 加回归禁止写 False | 064.01 | 对运行中 manager **或** gateway 前台发 SIGTERM 后 `enabled` 仍为 true、pid 已清 |
+| **064.03** | 内部停止原语（×3） | M | 新增 `_stop_process`（或等价）；`updater.restart_*` 主序列 **与** 版本不一致二次 stop 全部换用 | 写盘只清 pid、不改 `enabled`；用户级 `off` 仍走 `stop_*`；抽合 064.03b 的 gateway 内联停止 | 064.01、064.03b | 内部 stop+start 失败后 `enabled` 未变；二次 stop 路径同样不写 False |
+| **064.04** | 熔断器 | M | 纯函数 + **仅** `updater` reconcile 拉起前 | `>=3 次且 24h 内` 跳过自动拉起并明示；冷却过期放行一次；`on` 成功清零。**不**接入 `start_*`，**不**改 KeepAlive。手动 on 失败计入计数但不挡本次 on | 064.02 | 熔断/冷却/恢复 +「手动 on 不被熔断挡住」+「手动 on 失败会 +1」有单测 |
+| **064.05** | doctor / status 消费 | S | `check_service_runtime_state`、status/--json | FAIL 含失败原因与熔断；JSON 透出新字段 | 064.01 | doctor 输出含 `lastStartError.message` |
+| **064.06** | on/off / 联动语义收口 | S | 三服务 CLI、`stop_*`、`maybe_start_gateway`、`start_*` 已在运行早退 | `off` 重置失败记录；`on` 成功与**已在运行早退**均清零；联动前查 `service_intent`，disabled/n.a. 跳过 | 064.02 | `gateway off` 后 `lwa manager on` 不把 gateway 翻回 True；早退后 `consecutiveStartFailures == 0` |
+| **064.07** | 文档同步 | S | FAQ / known-limitations / runtime-workspace / operations-playbook | 写入契约、熔断范围、**存量污染需手动 on**、失败自愈路径 | 064.01–06、064.03b | release-checklist 检查项更新 |
+| **064.08** | 回归与收口 | M | tests/ | 失败→自愈 / manager `finally` 与 gateway 前台退出不翻意图 / 联动不翻 gateway off / gateway on 失败仍 enabled=true / 熔断 / 冷却 / 手动恢复 / 版本不一致二次 stop / 已在运行早退清零 | 064.01–07、064.03b | 定向 + 全量 pytest 全绿；本节改「已落地」 |
+
+### 16.6 验收标准
+
+- 模拟内部停止成功 + `start_*` 健康检查失败 → `enabled` 保持 `true`，带 `lastStartError`，pid 已清；下一次 `lwa update` reconcile（未熔断时）自动拉起并标注「意外未运行，已恢复」。
+- 对 manager：给运行中的管理页发 SIGTERM，在新进程未能起来前读状态文件 → `enabled` 仍为 true（覆盖 `finally` 旧行为）。
+- 对 gateway：给运行中的前台监管发 SIGTERM → Caddy 已停、pid 已清、`enabled` 仍为 true（覆盖 `run_gateway_foreground` 调用户级 `stop_gateway` 的旧行为）。
+- `lwa gateway on` 在 `caddy_start` 失败后 → `enabled` 为 true 且带 `lastStartError`（与 manager/daemon 对齐）；doctor 报 FAIL 而非「已按意图停用」。
+- `lwa gateway off` 后执行 `lwa manager on` → gateway `enabled` 仍为 false，Caddy 不被联动拉起。
+- `updater` 版本不一致触发的二次 stop 之后 start 再失败 → `enabled` 仍为 true。
+- 连续 3 次 **reconcile 拉起**失败（24h 内）→ 第 4 次 update **跳过自动拉起**并明示熔断与 `lwa <svc> on`；同窗口内 `lwa <svc> on` 仍可调用 `start_*` 且不被熔断拦截（失败会计入计数）；`on` 成功或已在运行早退后计数清零。
+- 监督器 KeepAlive 在熔断状态下仍可按既有语义拉起（本 IMP 不改单元文件 / 不插入熔断）。
+- `lwa doctor`：`enabled=true` 未运行 → FAIL 且文案含上次失败原因；用户主动 `off` → 「已按意图停用」。
+- 旧状态文件（无新字段）读写正常；**已是 `enabled=false` 且无失败记录的存量不自动翻回**；全量 pytest 通过。
+
+### 16.7 明确不做（本 IMP）
+
+- 不做定时自动重试调度（拉起时机仍限 update / doctor 等既有触发点，不新增后台重试循环）。
+- 不做指数退避（固定阈值 3 次 + 24h 冷却窗口，参数集中常量、实机可调）。
+- 不改 autostart 监督器（KeepAlive / JobRestart）自身的重启语义；熔断不约束监督器。
+- 不把熔断判断放进 `start_*`（避免挡住手动 `on`）。
+- 不把 BUG-073「Caddy 在线即补写 `enabled=True`」保留为普遍规则（仅状态文件缺失可恢复）。
+- `maybe_start_gateway` 不在「用户未表达 gateway on」时写意图或拉起。
+- 不引入状态机框架；不做状态文件版本迁移；**不自动翻回存量 `enabled=false`**。
+- 不用「失败路径再写 `enabled=True`」替代本 IMP（会把真 off 与失败搅在一起）。
+
+| ID | 关系 |
+| --- | --- |
+| `IMP-064` / `PLN-042` | 本功能点 / 规划入账 |
+| `DEV-*` | 实施时按 064.01–08 + **064.03b** 开发项 |
+| `IMP-059`（§14.3）/ `IMP-060`（§14.4） | 失明问题的受害方；本 IMP 落地后其安全网在失败场景生效 |
+| CHK-225 设计裁决项（2026-08-18） | 立项来源 |
+| CHK-230（2026-08-18） | 设计复核：补 `finally`、收紧写入契约、修正触点、明示存量不翻回 |
+| CHK-232（2026-08-18） | 再复核：gateway 前台退出、`maybe_start_gateway` 联动、gateway on 失败意图落点；次要（早退清零、手动 on 计入熔断） |
+
+---
+
 ## 变更日志
 
 | 日期 | 变更 |
 | --- | --- |
+| 2026-08-18 | **§16 IMP-064 再修订（CHK-232）**：①064.03b 覆盖 `run_gateway_foreground` 退出（不得调用户级 `stop_gateway`）；②`maybe_start_gateway` / `start_manager` 联动前查 `service_intent`，BUG-073 仅 `state is None` 可补写 True；③三服务 `on` 入口统一先断言 `enabled=True`（gateway 失败不再落成「已按意图停用」）。次要：已在运行早退清零计数；手动 on 失败计入熔断但不挡本次 on。规则扩为 10 条；064.02/03b/04/06/08 与验收同步。 |
+| 2026-08-18 | **§16 IMP-064 契约修订（CHK-230）**：补 064.03b（`run_service_main` `finally` 不得写 `enabled=False`，且须先于 064.03 完成）；`enabled` 写入契约改为 False 仅用户级 off、True 允许 on/start 成功断言/监督器入口/autostart 安装期；内部停止改为「写盘只清 pid」而非「完全不写状态」；触点更正 `daemon.py`（删除不存在的 `daemon_service.py`）、标明 gateway `start_*` 失败与 manager `finally` 不同构；熔断仅挡 reconcile、不进 `start_*`、不约束 KeepAlive；明示存量 `enabled=false` 不自动翻回。WBS 现为 064.01–08 + 064.03b。 |
+| 2026-08-18 | **§16 立项 IMP-064 服务意图字段去污染（P1，PLN-042）**：承接 CHK-225 设计裁决项（update 重启失败把 enabled=False 留盘、IMP-059/060 失明）。方案：`enabled` 回归纯用户意图，`lastStartError`/`consecutiveStartFailures` 观测字段承载失败事实；重启路径改内部停止原语不动意图；3 次/24h 熔断防 boot loop；doctor FAIL 文案带失败原因。WBS 064.01-08，待实施。 |
+| 2026-08-18 | **CHK-225/226/227 复审收口 + V0.8.1**：CHK-225 审查发现 5 高 5 中若干低，其中 6 项为 CHK-223/224 已修项的旧线索（BUG-533/529+收口/531/538/537），4 项新修--BUG-540（stdlib install=None 被模板兜底回 pip 层、构建必失败）、BUG-541（stdlib 弱信号抢占 static 降级）、BUG-542（家目录挂载 normpath 绕过）、BUG-543（非 git 目录误建 .git/lwa-update.lock）；BUG-544（restart_resilience 注入 runner 签名不匹配致容器策略死代码，移除 runner 注入解耦）。CHK-226/227 核验 BUG-529~539 均已落地。版本提升 **V0.8.1**（OPS-114，10 处修改）；README/FAQ/testing.md 补 stdlib 弱信号与识别优先级口径。 |
 | 2026-08-18 | **CHK-223/224 复审收口**：BUG-529～534 由复审会话修复、BUG-535 随 V0.8.0 版本提升（OPS-113）关闭、BUG-536（behindBy 截断）本会话修复；CHK-224 三项（restart_resilience 逐项差集 / init 引导异常兜底 / service_runtime_state 反向不一致）落地为 BUG-537～539 并修复；新增回归 16 例，全量 2159 passed。 |
 | 2026-08-17 | **§14/§15 全量落地（DEV-118/119）**：IMP-059 update 三态 reconcile（service_intent.py + coordinated_start + --no-reconcile）；IMP-060 doctor service_runtime_state/restart_resilience 两检查入主报告；IMP-061 autostart 缺省反转（with_caddy/linger 三态）+ init/setup 首次引导 + 运行模式标注（status/autostart status --json）；IMP-063 一键 GitHub 更新通道（update_source/update_flow/update_continuation + --check/--dry-run/--no-pull/--remote/--ref + handoff v1 新解释器接力 + repo/workspace 双锁 + SourceCheckReport v1 + skip-pip 门控 + 恢复链）；README/FAQ/autostart.md/lwa-update-runtime skill 同步；新增测试 87 例（059:18 + 060:11 + 061:17 + 063:41），全量 2143 passed。063.13 实机验收（需代理环境一键升级）待下一发布周期。 |
 | 2026-08-17 | **§15 IMP-063 `lwa update` 一键 GitHub 更新通道（P0，准备开工）**：事故实证重开原 IMP-040 后，根据 CHK-220 将方案加固为「upstream/显式 remote+ref 解析 → 单次 fetch 固定 OID → ff-only 快进 → pip → 新解释器 handoff → Runtime 后半段」；拍板 check/dry-run 副作用边界、warning/独立 SourceCheckReport v1/退出码、`--skip-pip` 冲突门禁、repo+workspace 锁 FD 继承、关键失败恢复链；WBS 扩为 063.01-13 并消除依赖环；`PLN-041`。 |

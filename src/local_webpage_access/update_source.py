@@ -210,8 +210,15 @@ def resolve_source_target(
             f"--ref 只接受分支名：{final_branch}",
             action="传分支名（如 main）",
         )
-    if final_remote.startswith("-") or "/" in final_remote and not final_remote:
-        raise SourceUpdateError("invalid_ref", f"--remote 非法：{final_remote}")
+    # 远端名不得为空、不得像 flag（前导 -）、不得含 /（会与 refs/remotes/a/b 混淆）。
+    # 括号必要：and 优先于 or，旧写法 ``startswith("-") or "/" in x and not x``
+    # 使斜杠检查对非空字符串恒死。
+    if (not final_remote) or final_remote.startswith("-") or "/" in final_remote:
+        raise SourceUpdateError(
+            "invalid_ref",
+            f"--remote 非法：{final_remote or '(空)'}",
+            action="传远端名（如 origin），不要带斜杠或前导 -",
+        )
 
     return SourceTarget(
         repo=repo,
@@ -326,6 +333,15 @@ def acquire_repo_lock(repo: Path, workspace: Path | None = None) -> int:
     """取 git common-dir 下的 repo 锁，返回可继承 FD。"""
     from local_webpage_access.file_lock import ensure_lockable, try_acquire_exclusive
 
+    if not is_git_repo(repo):
+        # CHK-225 中危7：非 git 目录绝不取 repo 锁。旧实现的 _git_common_dir
+        # 回退 ``repo/.git`` 并 mkdir + O_CREAT，会在用户目录里留下
+        # .git/lwa-update.lock，此后 is_git_repo() 恒 True 误导后续判定。
+        raise SourceUpdateError(
+            "not_a_git_repo",
+            f"{repo} 不是 git 克隆（无 .git），不取 repo 锁",
+            action="确认 --repo 指向 git 克隆的源码根",
+        )
     path = _git_common_dir(repo) / REPO_LOCK_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -378,6 +394,22 @@ def acquire_update_locks(repo: Path, workspace: Path) -> UpdateLocks:
     return UpdateLocks(
         repo_fd,
         _git_common_dir(repo) / REPO_LOCK_FILENAME,
+        ws_fd,
+        workspace / "run" / WORKSPACE_LOCK_FILENAME,
+    )
+
+
+def acquire_workspace_only_lock(workspace: Path) -> UpdateLocks:
+    """仅取 workspace 锁（§15.1.9：可变更的 update 全程须持 workspace 锁）。
+
+    用于无源码阶段的路径（``--no-pull`` / 非 git 安装 / 未识别 repo /
+    git 不可用）——它们不改 ``.git``，无需 repo 锁，但 Runtime 变更仍须
+    与其它 update 互斥。repo FD 置 -1（:class:`UpdateLocks` 已兼容）。
+    """
+    ws_fd = acquire_workspace_lock(workspace)
+    return UpdateLocks(
+        -1,
+        Path("/nonexistent") / REPO_LOCK_FILENAME,
         ws_fd,
         workspace / "run" / WORKSPACE_LOCK_FILENAME,
     )
@@ -892,6 +924,7 @@ __all__ = [
     "acquire_repo_lock",
     "acquire_workspace_lock",
     "acquire_update_locks",
+    "acquire_workspace_only_lock",
     "RepoStatus",
     "inspect_repo",
     "CommitDescriptor",

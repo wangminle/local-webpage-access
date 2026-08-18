@@ -418,22 +418,28 @@ def _render_python(
     *,
     mirrors: BuildMirrors | None = None,
 ) -> str:
-    install = (manifest.entry.install or "pip install -r requirements.txt").strip()
+    install = (manifest.entry.install or "").strip()
     start = (manifest.entry.start or _PYTHON_DEFAULT_START).strip()
     header = _HEADER.format(
         kind="python",
         internal_port=internal_port,
-        install=install,
+        install=install or "（零依赖，跳过依赖安装）",
         start=start,
         database=_database_label(manifest),
     )
 
     cpfx = _copy_prefix(manifest)
-    uses_uv = install.startswith("uv sync") or "uv sync" in install
+    uses_uv = bool(install) and "uv sync" in install
     # ``pip install .`` 需要完整源码，无法把依赖层与源码层完全拆开。
     needs_early_full_copy = False
 
-    if uses_uv:
+    if not install:
+        # CHK-225 高危1：stdlib 零依赖项目（scanner 置 install=None）不落任何
+        # 依赖层。旧的 "pip install -r requirements.txt" 兜底会 COPY 不存在的
+        # requirements.txt，docker build 必失败，而 CHK-V01 又恰好豁免 install=None，
+        # 端到端无拦截。
+        deps_block = ""
+    elif uses_uv:
         # BUG-185：uv sync 默认会构建并安装项目本体，需要完整源码；但依赖层只 COPY 了
         # uv.lock+pyproject.toml，带 [build-system] 的 packaged 项目必然构建失败。
         # --no-install-project 只装依赖、不构建项目本体，源码在后续 final_copy 拷入，

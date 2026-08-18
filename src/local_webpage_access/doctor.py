@@ -1636,16 +1636,14 @@ def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
     )
 
 
-def _container_restart_policy_mismatch(
-    runner: SubprocessRunner,
-) -> tuple[list[str], str | None]:
+def _container_restart_policy_mismatch() -> tuple[list[str], str | None]:
     """运行中的 ``lwa-<id>`` 容器 restart 策略与模板期望 ``unless-stopped`` 对照。
 
     返回 ``(不匹配的容器名列表, 错误信息)``；docker 不可用时返回 ``([], None)``——
     韧性子项不因 docker 缺席而告警（check_docker 已负责报 docker 本身）。
     """
     try:
-        res = runner(
+        res = _default_runner(
             ["docker", "ps", "--no-trunc", "--format", "{{.Names}}"],
             capture_output=True,
         )
@@ -1657,7 +1655,7 @@ def _container_restart_policy_mismatch(
     mismatched: list[str] = []
     for name in names:
         try:
-            probe = runner(
+            probe = _default_runner(
                 [
                     "docker",
                     "inspect",
@@ -1677,24 +1675,24 @@ def _container_restart_policy_mismatch(
     return mismatched, None
 
 
-def check_restart_resilience(
-    ws: Workspace,
-    config: Config,
-    *,
-    runner: SubprocessRunner = _default_runner,
-) -> CheckResult:
+def check_restart_resilience(ws: Workspace, config: Config) -> CheckResult:
     """IMP-060.02：评估「机器重启后自有服务能否自动恢复」（WARN 级）。
 
     四类场景：
 
     1. 存在 enabled 服务但未装任何自启单元 → WARN（本次事故形态）；
-    2. gateway 意图 enabled（caddy 在用）但 gateway 单元缺失 → WARN 指明
-       ``--with-caddy``；
+    2. 任一 enabled 服务缺自启单元（逐项差集，CHK-224#1）→ WARN；
     3. Linux/WSL 已装单元但未 linger → WARN（复用 ``autostart.linger_enabled``）；
     4. 运行中容器 restart policy ≠ ``unless-stopped`` → WARN 列实例 ID。
 
     裸进程是合法模式（开发/临时用途），只 WARN 不 FAIL；韧性检查不做网络探测
     （只读本地文件与 systemctl/launchctl/docker 本地查询）。
+
+    CHK-225 高③④：本检查**不接收注入 runner**——doctor 侧注入 runner 约定为
+    单参数签名，而 autostart 后端 / linger / docker 探测需要 kwargs
+    （``capture_output`` 等）；透传会让 TypeError 被兜底 except 吞掉，产出
+    死代码或恒定 WARN。内部探测一律用各模块自带 kwargs runner；测试侧以
+    monkeypatch（``asm.linger_enabled`` 等）注入。
     """
     from local_webpage_access import autostart as asm
     from local_webpage_access.service_intent import (
@@ -1736,7 +1734,7 @@ def check_restart_resilience(
     disabled_units: list[str] = []
     for name in installed:
         try:
-            if not backend.is_enabled(name, runner):
+            if not backend.is_enabled(name, asm._default_runner):
                 disabled_units.append(name)
         except Exception:  # noqa: BLE001 — 查询失败不误判，仅记录
             log.debug("restart_resilience：查询单元 %s enabled 状态失败", name)
@@ -1767,16 +1765,12 @@ def check_restart_resilience(
         )
         fixes.append(install_cmd)
 
-    if (
-        installed
-        and plat in (asm.PLATFORM_LINUX, asm.PLATFORM_WSL)
-        and not asm.linger_enabled(runner=runner)
-    ):
+    if installed and plat in (asm.PLATFORM_LINUX, asm.PLATFORM_WSL) and not asm.linger_enabled():
         # 场景 3：user 单元未 linger，登出后即停止（复用 autostart.run_check 判定）
         warns.append("未 enable-linger，登出后 systemd user 单元会全部停止")
         fixes.append("sudo loginctl enable-linger $USER")
 
-    mismatched, _err = _container_restart_policy_mismatch(runner)
+    mismatched, _err = _container_restart_policy_mismatch()
     if mismatched:
         # 场景 4：模板期望 unless-stopped（compose.py），不符的实例重启后不自愈
         warns.append(
@@ -1848,7 +1842,7 @@ def run_doctor(
             check_static_gateway(ws),
             # IMP-060：自有服务运行态（FAIL 级）+ 重启韧性（WARN 级）
             check_service_runtime_state(ws, config),
-            check_restart_resilience(ws, config, runner=runner),
+            check_restart_resilience(ws, config),
             check_caddy_health(ws, config, runner=runner, registry=caddy_probe_registry),
             check_lan_url_stale(ws, config, caddy_probe_registry)
             if caddy_probe_registry is not None

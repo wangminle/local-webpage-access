@@ -1110,6 +1110,34 @@ def test_reconcile_restarts_desired_running_offline(
     assert registry.list_events("a", limit=1)[0]["event_type"] == "reconcile"
 
 
+def test_reconcile_non_str_updated_at_does_not_abort_round(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """CHK-225 低危：failed 行 updated_at 非 str 时 fromisoformat 抛 TypeError，
+    不得击穿整轮 reconcile（后续实例仍应自愈）。"""
+    _seed_instance(registry, workspace, "bad", desired="running", status="failed")
+    _seed_instance(registry, workspace, "good", desired="running", status="stopped")
+    orig = registry.list_instances
+
+    def with_int_updated_at():
+        rows = orig()
+        for row in rows:
+            if row["id"] == "bad":
+                row["updated_at"] = 1_710_000_000
+        return rows
+
+    monkeypatch.setattr(registry, "list_instances", with_int_updated_at)
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert "good" in restarted
+    assert "bad" in restarted
+
+
 def test_reconcile_backs_off_just_failed(
     workspace: Workspace, config: Config, registry: Registry
 ) -> None:
