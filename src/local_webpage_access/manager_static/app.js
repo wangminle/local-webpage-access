@@ -91,6 +91,9 @@
           if (storage) storage.removeItem(TOKEN_KEY);
           // IMP-046：提示可能因 token 自动轮换导致旧 token 失效
           self.toast("token 无效或已过期（可能已自动轮换），请重新输入", "error");
+          // 评审-组9#3：401 后停轮询，避免 15s×3 重复 401/toast 刷屏；
+          // submitToken 成功后 bootstrap 会重建定时器。
+          if (self._timer) { clearIntervalFn(self._timer); self._timer = null; }
           setTimeoutFn(function () {
             self.requireToken();
           }, 800);
@@ -636,17 +639,23 @@
         // ---- 刷新 ----
         refresh: function () {
           var self = this;
+          // 评审-组9#4：三个并行请求跨轮次乱序时旧响应可覆盖新数据；
+          // 与详情/浏览量一致加递增令牌，只应用最新一轮的响应。
+          var myReq = (this._refreshReq = (this._refreshReq || 0) + 1);
           apiFetch(this, "/api/stats").then(function (data) {
+            if (self._refreshReq !== myReq) return;
             self.stats = data;
-          }).catch(function (e) { self.noteLoadError(e); });
+          }).catch(function (e) { if (self._refreshReq === myReq) self.noteLoadError(e); });
           apiFetch(this, "/api/pageviews").then(function (data) {
+            if (self._refreshReq !== myReq) return;
             self.pageviewMap = (data && data.instances) || {};
-          }).catch(function (e) { self.noteLoadError(e); });
+          }).catch(function (e) { if (self._refreshReq === myReq) self.noteLoadError(e); });
           apiFetch(this, "/api/instances").then(function (data) {
+            if (self._refreshReq !== myReq) return;
             self.instances = data.instances || [];
             self.loadError = "";
             if (self.currentDetailId) self.openDetail(self.currentDetailId);
-          }).catch(function (e) { self.noteLoadError(e); });
+          }).catch(function (e) { if (self._refreshReq === myReq) self.noteLoadError(e); });
         },
 
         // BUG-289：401 由 apiFetch 处理；其余失败必须让用户看见，且只在状态
@@ -734,11 +743,10 @@
                 return;
               }
               if (op === "cancel-build") {
+                // 评审-组9#7：cancel_failed 后端直接 409（走 catch），此分支不可达，已删
                 var outcome = (data && data.outcome) || "";
                 if (outcome === "cancelled") {
                   self.toast("构建已取消", "success");
-                } else if (outcome === "cancel_failed") {
-                  self.toast("取消失败：" + ((data && data.message) || "超时"), "error");
                 } else if (outcome === "already_done" || outcome === "noop") {
                   self.toast((data && data.message) || "无活动构建", "info");
                 } else {
@@ -1032,10 +1040,18 @@
         },
         fetchLogs: function (id, category) {
           var self = this;
+          // 评审-组9#5：快速切换类别时旧请求后到会覆盖新内容，加请求令牌
+          var myReq = (this._logsReq = (this._logsReq || 0) + 1);
           apiFetch(this, "/api/instances/" + encodeURIComponent(id) +
             "/logs?category=" + encodeURIComponent(category) + "&tail=300")
-            .then(function (data) { self.logs.content = data.content || "（日志为空）"; })
-            .catch(function (e) { self.logs.content = "加载失败：" + e.message; });
+            .then(function (data) {
+              if (self._logsReq !== myReq) return;
+              self.logs.content = data.content || "（日志为空）";
+            })
+            .catch(function (e) {
+              if (self._logsReq !== myReq) return;
+              self.logs.content = "加载失败：" + e.message;
+            });
         },
         onLogsCategoryChange: function () {
           this.fetchLogs(this.logs.instanceId, this.logs.category);
@@ -1269,6 +1285,7 @@
           if (e.key !== "Escape") return;
           if (this.removeDialog.open) this.closeRemoveDialog();
           else if (this.folderImport.open) this.closeFolderImport();
+          else if (this.fallbackDialog.open) this.cancelFallback();
           else if (this.gitImport.open) this.closeGitImport();
           else if (this.pageview.open) this.closePageview();
           else if (this.pathAlias.open) this.closePathAlias();

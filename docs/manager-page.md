@@ -35,7 +35,7 @@ lwa manager off         # 停止
 
 * 所有 `/api/*` 路由（`/api/health` 除外）默认要求请求头 `Authorization: Bearer <token>`（WBS-22.12）。
 * 另支持 `X-LWA-Token` 头，以及查询参数 `?token=`（管理页打开新标签等场景；见下方泄漏面说明）。
-* **本机调试例外（IMP-003 / BUG-295）**：从 `127.0.0.1` / `localhost` / `::1` 访问时，**读请求**（GET/HEAD/OPTIONS）免 token；**写请求**无有效 token 时须 `Sec-Fetch-Site: same-origin` 或 `Origin` 与请求 host 一致，否则 **403 `csrf_forbidden`**。浏览器打开同源管理页仍可正常操作；裸 `curl`/跨站脚本对本机写 API 须带 token。局域网 IP 访问仍须 token。
+* **本机调试例外（IMP-003 / BUG-295）**：从 `127.0.0.1` / `localhost` / `::1` 访问时，**读请求**（GET/HEAD/OPTIONS）免 token；**写请求**无有效 token 时须 `Sec-Fetch-Site: same-origin` 或 `Origin` 与请求 host 一致，否则 **403 `csrf_forbidden`**。浏览器打开同源管理页仍可正常操作；裸 `curl`/跨站脚本对本机写 API 须带 token。局域网 IP 访问仍须 token。loopback 免鉴权还要求 **Host 头主机名为 `127.0.0.1` / `localhost` / `::1`**（BUG-576 DNS rebinding 加固：外部域名解析到 127.0.0.1 冒充同源的请求一律按非本机处理）。
 * `/api/health` **无需 token 即可探活**；但完整 CapabilityReport（`capabilities` / `action` 等）仅对本机客户端或**携带有效 token** 的局域网请求返回（BUG-236）。未鉴权 LAN 仅见 `profile` / `overall`；`workspaceRoot` 仍仅本机可见（BUG-169）。
 * 缺失或错误 token 返回 `401`，统一错误格式 `{"error": {"code": "unauthorized", "message": "..."}}`。
 * token 为一次性生成的随机串，仅在本工作区有效；重置方式：删除 `run/` 下的 token 文件后重启管理页。
@@ -76,7 +76,8 @@ lwa manager off         # 停止
 | GET | `/api/instances/{id}` | 实例详情：状态快照 + manifest + 构建/事件/资源记录 |
 | GET | `/api/instances/{id}/logs?category=&tail=` | 日志内容（build/run/gateway/import/scan） |
 | GET | `/api/instances/{id}/resources` | 实例级资源占用 |
-| POST | `/api/instances/{id}/start` | 启动实例；容器在 Docker 能力降级时返回 `409 capability_denied`（BUG-237） |
+| POST | `/api/instances/{id}/start` | 启动实例（`?fallback_policy=confirm\|auto-equivalent\|disabled`，非法值 400，C.R03；top-1 失败且有等价候选时默认返回 `pendingConfirmation` 结构，前端弹窗确认降级后调用 confirm-fallback）；容器在 Docker 能力降级时返回 `409 capability_denied`（BUG-237） |
+| POST | `/api/instances/{id}/confirm-fallback` | Gate-C 降级确认（C.R03）：降级弹窗确认后调用，以 `auto-equivalent` 策略重试启动；幂等--实例已在 fallback 后运行则直接返回当前状态 |
 | POST | `/api/instances/{id}/stop` | 停止实例（同上） |
 | POST | `/api/instances/{id}/restart` | 重启实例（同上） |
 | POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上） |

@@ -361,9 +361,17 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
                 start = i
                 flow_style = False
                 break
+            # 评审-组6：`portPool:  # 端口池` 行尾注释此前精确匹配失败 → 嵌套
+            # 缺省子键静默不补；先剥行尾注释再匹配
+            comment_stripped = stripped.split("#", 1)[0].rstrip()
+            if comment_stripped == key_prefix:
+                start = i
+                flow_style = False
+                break
             # flow-style：`portPool: {start: 19000}`（允许 key 后空白）
-            if stripped.startswith(key_prefix):
-                remainder = stripped[len(key_prefix) :].lstrip()
+            probe = comment_stripped or stripped
+            if probe.startswith(key_prefix):
+                remainder = probe[len(key_prefix) :].lstrip()
                 if remainder.startswith("{"):
                     start = i
                     flow_style = True

@@ -605,7 +605,9 @@ def test_api_rejects_missing_token(manager_env: EnvBundle) -> None:
 
 def test_loopback_rejects_cross_site_unsafe_request(manager_env: EnvBundle) -> None:
     """BUG-295：回环免 token 不能放行浏览器跨站 POST。"""
-    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/remove",
             headers={
@@ -622,7 +624,9 @@ def test_loopback_rejects_form_post_without_csrf_headers(
     manager_env: EnvBundle,
 ) -> None:
     """BUG-295：简单跨站 form POST（无自定义头）在回环亦须拒绝。"""
-    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/remove",
         )
@@ -634,7 +638,9 @@ def test_loopback_rejects_form_post_without_csrf_headers(
 
 def test_loopback_allows_mutating_with_x_lwa_token(manager_env: EnvBundle) -> None:
     """BUG-295：管理页经 X-LWA-Token 发起的写请求仍可通过。"""
-    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/stop",
             headers={"X-LWA-Token": manager_env.token},
@@ -645,7 +651,9 @@ def test_loopback_allows_mutating_with_x_lwa_token(manager_env: EnvBundle) -> No
 
 def test_loopback_allows_same_origin_mutating(manager_env: EnvBundle) -> None:
     """BUG-295：Sec-Fetch-Site=same-origin 的回环写请求可放行。"""
-    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as local_client:
         resp = local_client.post(
             f"/api/instances/{manager_env.instance_id}/stop",
             headers={"Sec-Fetch-Site": "same-origin"},
@@ -666,6 +674,7 @@ def test_api_localhost_bypass_without_token(manager_env: EnvBundle) -> None:
         request = Mock()
         request.client = Mock(host=host)
         request.method = "GET"
+        request.headers = {"host": "127.0.0.1"}  # 评审-组4：loopback 判定含 Host 校验
         assert _is_localhost_client(request) is True
         require_token(request)  # 不应抛错
 
@@ -781,6 +790,7 @@ def test_is_localhost_client_recognizes_mapped_loopback() -> None:
 
     request = Mock()
     request.client = Mock(host="::ffff:127.0.0.1")
+    request.headers = {"host": "127.0.0.1"}
     assert _is_localhost_client(request) is True
 
 
@@ -808,7 +818,9 @@ def test_is_self_connection_matches_lan_bind_host() -> None:
 
 def test_health_workspace_root_only_for_localhost(manager_env: EnvBundle) -> None:
     """BUG-169：仅本机回环客户端可见 workspaceRoot。"""
-    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local_client:
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as local_client:
         body = local_client.get("/api/health").json()
         assert body["ok"] is True
         assert body["workspaceRoot"] == str(manager_env.workspace.root.resolve())
@@ -2795,6 +2807,44 @@ def test_post_gateway_switch_dry_run(manager_env: EnvBundle, monkeypatch) -> Non
     assert body["fromBackend"] == "builtin"
 
 
+def test_body_bool_strict_rejects_non_bool() -> None:
+    """评审-P1：body 布尔字段键存在但非 bool 时必须 400，不得回落默认值。
+
+    回落 default 会在两个方向静默反转语义：default=True 的字段（restart/
+    keepData/review）收到 "false" 仍为 True；default=False 的字段（dryRun）
+    收到 "true" 仍为 False——后者让请求方明确要求的演练变成真实切换。
+    """
+    from fastapi import HTTPException
+
+    from local_webpage_access.manager_api import _body_bool
+
+    # 键缺失 → 默认值
+    assert _body_bool({}, "dryRun", False) is False
+    assert _body_bool({}, "restart", True) is True
+    # 真 bool → 原样透传（default 相反方向也透传）
+    assert _body_bool({"dryRun": True}, "dryRun", False) is True
+    assert _body_bool({"restart": False}, "restart", True) is False
+    # 非 bool（含字符串 "true"/"false"）→ 400
+    for bad in ("true", "false", "", 1, 0, None, [True]):
+        with pytest.raises(HTTPException) as exc_info:
+            _body_bool({"dryRun": bad}, "dryRun", False)
+        assert exc_info.value.status_code == 400
+        with pytest.raises(HTTPException) as exc_info:
+            _body_bool({"restart": bad}, "restart", True)
+        assert exc_info.value.status_code == 400
+
+
+def test_post_gateway_switch_rejects_non_bool_body_values(manager_env: EnvBundle) -> None:
+    """评审-P1：/api/gateway/switch 收到字符串布尔时返回 400 而非回落默认。"""
+    resp = manager_env.client.post(
+        "/api/gateway/switch",
+        headers=manager_env.auth_headers(),
+        json={"backend": "caddy", "dryRun": "true", "review": "false"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+
+
 def test_post_gateway_switch_error_uses_unified_error_shape(
     manager_env: EnvBundle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2931,7 +2981,9 @@ def test_pick_directory_loopback_returns_path(
         "local_webpage_access.directory_picker.pick_directory",
         lambda **kwargs: "/Users/me/demo-site",
     )
-    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local:
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as local:
         resp = local.post(
             "/api/pick-directory",
             headers=manager_env.auth_headers(),
@@ -2970,7 +3022,9 @@ def test_pick_directory_cancelled_returns_400(
         raise DirectoryPickerError("已取消选择", code="cancelled")
 
     monkeypatch.setattr("local_webpage_access.directory_picker.pick_directory", cancel)
-    with TestClient(manager_env.app, client=("127.0.0.1", 50000)) as local:
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as local:
         resp = local.post(
             "/api/pick-directory",
             headers=manager_env.auth_headers(),

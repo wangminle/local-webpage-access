@@ -12,6 +12,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import sys
+
 import pytest
 
 from local_webpage_access.config import Config
@@ -645,6 +647,7 @@ def test_stop_builtin_clears_pid_when_kill_succeeds(
     assert gateway._read_pid("demo") is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="评审-组3：Windows os 无 killpg，打桩即 AttributeError")
 def test_stop_builtin_refuses_foreign_reused_pid(gateway: StaticGateway, monkeypatch) -> None:
     """BUG-125：孤儿 PID 身份不匹配时清 pidfile，但绝不 killpg。"""
     gateway._write_pid("demo", 4242)

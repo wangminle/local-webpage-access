@@ -246,7 +246,15 @@ def parse_caddy_json_line(line: str) -> AccessHit | None:
     except (ValueError, TypeError):
         status_int = 0
     ts = obj.get("ts")
-    iso_ts = _unix_to_iso(ts) if isinstance(ts, (int, float)) else now_iso()
+    # 评审-组8：字符串时间戳此前直接回退 now_iso（归档补读时全桶漂到"今天"）；
+    # 先尽力解析 RFC3339/数字字符串，失败才用当前时刻。
+    if isinstance(ts, (int, float)):
+        iso_ts = _unix_to_iso(ts)
+    elif isinstance(ts, str):
+        parsed_iso = _parse_ts_string(ts)
+        iso_ts = parsed_iso or now_iso()
+    else:
+        iso_ts = now_iso()
     return AccessHit(
         ts=iso_ts, method=method, path=uri, status=status_int, remote=remote, host=host
     )
@@ -284,6 +292,23 @@ def parse_container_log_line(line: str) -> AccessHit | None:
         # 正则会误匹配出 path='healthcheck'）——容器 access 行的 path 必以 / 开头（BUG-092）
         return None
     return AccessHit(ts=now_iso(), method=method, path=path, status=status, remote="")
+
+
+def _parse_ts_string(text: str) -> str | None:
+    """尽力把字符串时间戳（RFC3339 / 纯数字秒·毫秒）解析为 ISO 时间。"""
+    t = text.strip()
+    if not t:
+        return None
+    if t.isdigit():
+        num = int(t)
+        num_float = num / 1000.0 if num > 10**12 else float(num)  # 毫秒→秒
+        return _unix_to_iso(num_float)
+        return _unix_to_iso(num)
+    try:
+        dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.isoformat()
 
 
 def _unix_to_iso(ts: float) -> str:
@@ -892,47 +917,20 @@ class PageviewStore:
         conn.execute("DELETE FROM pageview_ips WHERE instance_id=?", (instance_id,))
         conn.execute("DELETE FROM pageview_ip_stats WHERE instance_id=?", (instance_id,))
         conn.execute("DELETE FROM container_seen WHERE instance_id=?", (instance_id,))
+        # 评审-组8：LIKE 段的 `_`/`%` 是通配符（demo_1 会误删 demoX1 的游标）；
+        # 改为取全表后按前缀精确过滤删除。
+        _rows = conn.execute("SELECT source_key FROM ingest_cursor").fetchall()
+        for _r in _rows:
+            _key = _r["source_key"] if not isinstance(_r, tuple) else _r[0]
+            if str(_key).startswith(f"builtin:{instance_id}:"):
+                conn.execute("DELETE FROM ingest_cursor WHERE source_key=?", (_key,))
         conn.execute(
-            "DELETE FROM ingest_cursor WHERE source_key=? OR source_key=? OR source_key LIKE ?",
+            "DELETE FROM ingest_cursor WHERE source_key=? OR source_key=?",
             (
                 f"container:{instance_id}",
                 builtin_cursor_key(instance_id),
-                f"builtin:{instance_id}:%",
             ),
         )
-
-    def filter_new_container_lines(self, instance_id: str, line_hashes: list[str]) -> list[int]:
-        """返回 ``line_hashes`` 中"首次见到"的下标，并把它们标记为已见（含裁剪）。
-
-        用 ``INSERT OR IGNORE`` + ``rowcount`` 判定是否新插入；新插入即"之前没见过"。
-        容器日志无可靠 per-request 唯一键，按原始行哈希去重可保证至多一次计数
-        （BUG-088），代价是无时间戳的重复行（如 uvicorn 默认 access）会被保守
-        去重——下溢优于上溢（管理页数字不会随刷新膨胀）。
-        """
-        if not line_hashes:
-            return []
-        conn = self._conn_or_open()
-        new_idx: list[int] = []
-        with self._lock:
-            for i, lh in enumerate(line_hashes):
-                cur = conn.execute(
-                    "INSERT OR IGNORE INTO container_seen(instance_id, line_hash) VALUES(?,?)",
-                    (instance_id, lh),
-                )
-                if cur.rowcount > 0:
-                    new_idx.append(i)
-            conn.execute(
-                "DELETE FROM container_seen WHERE instance_id=? AND rowid NOT IN "
-                "(SELECT rowid FROM container_seen WHERE instance_id=? "
-                "ORDER BY rowid DESC LIMIT ?)",
-                (instance_id, instance_id, _CONTAINER_SEEN_RETAIN),
-            )
-            conn.commit()
-        return new_idx
-
-
-# ---- 摄入编排 ----------------------------------------------------------------
-
 
 @dataclass
 class _InstanceSource:
@@ -1172,6 +1170,10 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
                 if arch == pivot and offset > 0 and len(raw) >= offset:
                     archived_lines.extend(_decode_archive_chunk(raw[offset:]))
                 else:
+                    # 评审-组8（复核后撤销）：原疑点"非 pivot 短归档全量重读双计"
+                    # 不成立——归档是否已消费由 consumed 指纹集合判定（CHK-158），
+                    # "短于 offset" ≠ "已消费"；test_read_new_lines_defers_catchup
+                    # 实测短归档是未消费的新代际，跳过反而漏计。维持原语义。
                     archived_lines.extend(_decode_archive_chunk(raw))
                 processed.add(_archive_fingerprint(arch))
         # CHK-158：仅当本轮全部待读归档均成功解压，才重置游标、记录指纹并
@@ -1184,6 +1186,14 @@ def _read_new_lines(path: Path, cursor_key: str, store: PageviewStore) -> _TailB
             new_meta = _format_consumed_archives(consumed | processed)
         else:
             return _TailBatch([], offset, meta)
+    elif size < offset:
+        # 评审-组8：文件被无归档方式原地截断（logrotate copytruncate 等）——
+        # 游标越过 EOF 后旧实现恒读空批且 offset 不动，截断后新内容永久漏计；
+        # 重置游标从头读（配合下方半行保护，最多重读一小段，不双计已摄入行
+        # 之外的语义变化：截断本身意味着代际更替）。
+        log.warning("游标 %d 越过当前文件大小 %d（疑被原地截断），重置游标重读：%s",
+                    offset, size, cursor_key)
+        offset = 0
     with path.open("rb") as fh:
         fh.seek(offset)
         new_bytes = fh.read()
@@ -1408,8 +1418,11 @@ def _ingest_caddy_shared(
             continue
         matched_id: str | None = None
         stripped = hit.path
+        # 评审-组8：`/demo?x=1`（根路径带 query）此前不等于 /demo 也不以 /demo/
+        # 开头而丢弃；归属判定用剥 query 的路径，前缀剥除仍用原 path。
+        path_no_query = hit.path.split("?", 1)[0]
         for pfx in prefixes:
-            if hit.path == pfx or hit.path.startswith(pfx + "/"):
+            if path_no_query == pfx or path_no_query.startswith(pfx + "/"):
                 # IMP-027：剥掉 /<alias> 前缀（query 保留），分类器看到 app 相对路径；
                 # 否则 /alias/api/data 不命中裸 /api/ 规则、又无扩展名 → 误算为 page。
                 stripped = hit.path[len(pfx) :] or "/"

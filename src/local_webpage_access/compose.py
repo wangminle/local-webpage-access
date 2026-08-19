@@ -117,6 +117,13 @@ def generate_compose(
         raise ValueError(f"实例 {manifest.id} 缺少 container 配置，无法生成 compose.yaml")
     limits = container.resourceLimits
 
+    # 评审-组3：projectName 来自源项目元数据（用户可控），含 `: `/`#`/`[` 等
+    # YAML 特殊字符会改变 compose 结构或直接非法；按 Compose project 名规则
+    # 白名单校验，非法时回落实例 id（slug 恒合法）。
+    project_name = container.projectName
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", project_name or ""):
+        project_name = manifest.id
+
     source_dir = workspace.app_current(manifest.id)
     env_lines: list[str] = []
     # FastAPI 常见 src/ 布局：不重建镜像时也要能找到 main（与 Dockerfile ENV 对齐）。
@@ -149,7 +156,7 @@ def generate_compose(
     volumes_block = "    volumes:\n" + "".join(f"      - {v}\n" for v in volumes)
 
     content = _COMPOSE_TEMPLATE.format(
-        project_name=container.projectName,
+        project_name=project_name,
         instance_id=manifest.id,
         service=_SERVICE_NAME,
         host_port=host_port,

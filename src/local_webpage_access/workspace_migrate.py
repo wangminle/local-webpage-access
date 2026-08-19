@@ -595,14 +595,18 @@ def rewrite_manifest_paths(manifest_path: Path, old: str, new: str) -> bool:
     if isinstance(container, dict) and container.get("containerId"):
         container["containerId"] = None
         container["imageId"] = None
-    if rewritten == data and data.get("container", {}).get("containerId") is None:
-        # still may need clear when paths unchanged but id present — handled above
-        pass
-    text = json.dumps(rewritten, ensure_ascii=False, indent=2) + "\n"
-    tmp = manifest_path.with_suffix(".json.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, manifest_path)
-    return True
+    changed = rewritten != data
+    # 评审-组6：返回真实变更标志（原恒 True 与 docstring 不符），死分支已删；
+    # 容器身份清空也计为变更
+    orig_container = data.get("container") or {}
+    if orig_container.get("containerId") is not None:
+        changed = True
+    if changed:
+        text = json.dumps(rewritten, ensure_ascii=False, indent=2) + "\n"
+        tmp = manifest_path.with_suffix(".json.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, manifest_path)
+    return changed
 
 
 def rewrite_registry_paths(db_path: Path, old: str, new: str) -> None:
@@ -762,7 +766,12 @@ def quiesce_workspace(
         except Exception as exc:  # noqa: BLE001
             log.warning("compose down %s 失败（继续）：%s", iid, exc)
 
+    # 评审-组6：动作清单须在 dry-run 下也完整（原三个 stop 只在执行分支里
+    # append，预演计划漏列）；执行仍受 not dry_run 保护。
     actions.append("autostart_disable")
+    actions.append("stop:daemon")
+    actions.append("stop:manager")  # 评审-组6：清单在 dry-run 也完整
+    actions.append("stop:gateway")
     if not dry_run:
         try:
             from local_webpage_access import autostart as asm
@@ -777,7 +786,6 @@ def quiesce_workspace(
 
             with contextlib.suppress(Exception):
                 stop_daemon(workspace)
-            actions.append("stop:daemon")
         except Exception as exc:  # noqa: BLE001
             log.warning("stop daemon 失败（继续）：%s", exc)
 
@@ -786,7 +794,6 @@ def quiesce_workspace(
 
             with contextlib.suppress(Exception):
                 stop_manager(workspace)
-            actions.append("stop:manager")
         except Exception as exc:  # noqa: BLE001
             log.warning("stop manager 失败（继续）：%s", exc)
 
@@ -795,7 +802,6 @@ def quiesce_workspace(
 
             with contextlib.suppress(Exception):
                 stop_gateway(workspace, config)
-            actions.append("stop:gateway")
         except Exception as exc:  # noqa: BLE001
             log.warning("stop gateway 失败（继续）：%s", exc)
 
@@ -1113,6 +1119,8 @@ def run_migrate(
 
     lock_ws = ws if ws.root.exists() else Workspace(old_r)
     with migrate_lock(lock_ws) as lock_holder:
+        # 评审-组6：rollback 把目录搬回 OLD 后，锁释放路径也要跟回 OLD
+        _rollback_lock_moved_cb.append(lambda old_ws: lock_holder.__setitem__(0, lock_path(Workspace(old_ws))))
         return _run_migrate_locked(
             old_r,
             new_r,
@@ -1359,6 +1367,16 @@ def _run_migrate_locked(
                 reg.close()
 
 
+
+# 评审-组6：_rollback_migrate 无 lock_holder 引用，用模块级回调通知路径变化
+_rollback_lock_moved_cb: list = []
+
+
+def _rollback_notify_lock_moved(old: Path) -> None:
+    for cb in _rollback_lock_moved_cb:
+        with contextlib.suppress(Exception):
+            cb(old)
+
 def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
     """v1 回滚：rename 回 OLD，并反向改写路径 / 重生配置（BUG-386）。"""
     old_r, new_r = old.resolve(), new.resolve()
@@ -1388,6 +1406,9 @@ def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
         except Exception as exc:  # noqa: BLE001
             log.warning("回滚前停服失败：%s", exc)
         move_workspace_root(j_new, j_old)
+        # 评审-组6：目录树已搬回 OLD，锁文件随之回到 OLD/run/；通知外层
+        # migrate_lock 的 finally 按 OLD 路径释放（原按 NEW 删、静默失败留残留）
+        _rollback_notify_lock_moved(j_old)
 
         # 反向改写：NEW → OLD（REBIND 的逆操作）
         ws = Workspace(j_old)

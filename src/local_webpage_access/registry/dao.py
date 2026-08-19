@@ -135,6 +135,9 @@ class Registry:
 
         ``row`` 应包含 instances 表的所有列（id 必填）。
         """
+        # 评审-组7：空 dict 会拼出 `INSERT INTO instances () VALUES ()` 非法 SQL
+        if not row:
+            raise RegistryError("upsert_instance 收到空行，拒绝生成非法 SQL")
         cols = ", ".join(row.keys())
         placeholders = ", ".join(["?"] * len(row))
         updates = ", ".join(f"{c}=excluded.{c}" for c in row if c != "id")

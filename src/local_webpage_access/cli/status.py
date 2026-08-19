@@ -184,7 +184,7 @@ def pageviews(
 
     if limit < 1 or limit > 500:
         typer.secho("--limit 须在 1–500", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # 评审-组8：参数校验与其余 CLI 对齐 exit 2
 
     try:
         ws, config, reg = open_workspace_registry()

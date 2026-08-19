@@ -142,6 +142,8 @@ Use `lwa <command> --help` for flags. Global `-v` turns on DEBUG logs.
 | --- | --- |
 | `lwa doctor [ID] [--json] [--profile default\|full] [--access]` | Environment / instance checks; exit 1 on fail. `--access` reviews URLs |
 | `lwa capabilities [--json]` | Workspace CapabilityReport |
+| `lwa registry check [--json]` | Scan registry sub-tables for orphan rows (read-only, BUG-473) |
+| `lwa registry repair [-y]` | Delete orphan rows (destructive; interactive confirm, `--yes` required non-TTY) |
 
 ## Configuration
 
@@ -355,6 +357,8 @@ lwa status
 | --- | --- |
 | `lwa doctor [ID] [--json] [--profile default\|full] [--access]` | 环境/实例检查；有 fail 则退出码 1。`--access` 复核 URL |
 | `lwa capabilities [--json]` | 工作区 CapabilityReport |
+| `lwa registry check [--json]` | 只读扫描 registry 子表孤儿行（BUG-473） |
+| `lwa registry repair [-y]` | 删除孤儿行（破坏性；默认交互确认，非 TTY 须 `--yes`） |
 
 ## 配置
 

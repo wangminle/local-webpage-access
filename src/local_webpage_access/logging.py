@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
@@ -48,9 +49,12 @@ def setup_logging(
     if _CONFIGURED and not force:
         return root
 
-    # 清理旧 handler（force 或首次配置时）
+    # 清理旧 handler（force 或首次配置时）；评审-组7：同时 close，
+    # 避免长驻进程反复 force 重配累积打开的文件描述符。
     for handler in list(root.handlers):
         root.removeHandler(handler)
+        with contextlib.suppress(Exception):
+            handler.close()
 
     console = RichHandler(
         console=Console(stderr=True),

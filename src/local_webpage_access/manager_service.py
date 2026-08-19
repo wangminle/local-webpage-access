@@ -356,9 +356,15 @@ def manager_instance_lock(workspace: Workspace) -> Iterator[None]:
         if stale:
             with contextlib.suppress(FileNotFoundError, PermissionError):
                 path.unlink()
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            acquired = True
-            os.write(fd, f"{os.getpid()}\n".encode())
+            # 评审-组4：两进程同时回收陈旧锁时，另一方可能已抢先重建——二次
+            # O_EXCL open 的 FileExistsError 转干净的"已有实例"退出，不带
+            # traceback 冒泡到子进程入口。
+            try:
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                acquired = True
+                os.write(fd, f"{os.getpid()}\n".encode())
+            except FileExistsError:
+                raise LifecycleError("管理页已有实例在运行") from None
         else:
             raise LifecycleError("管理页已有实例在运行")
     try:

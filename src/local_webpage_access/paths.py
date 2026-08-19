@@ -14,7 +14,8 @@ REGISTRY_DB_FILENAME = "local-web.db"
 
 # 合法实例 ID 即 importer.slugify 的输出：``[a-z0-9]+(-[a-z0-9]+)*``。
 # 不含 ``.`` / ``/`` / ``\\``，杜绝 ``..``、绝对路径等穿越片段（BUG-025）。
-_INSTANCE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# 评审-组7：`$` 会匹配结尾换行之前（"abc\n" 通过校验），改用 `\Z` 严格结尾
+_INSTANCE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
 
 # IMP-006：路径别名 slug 与实例 ID 同形（小写字母 / 数字 / 连字符）。
 _PATH_ALIAS_RE = _INSTANCE_ID_RE

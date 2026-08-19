@@ -453,6 +453,14 @@ def _restore_snapshot(
     aliases.mkdir(parents=True, exist_ok=True)
     for name, text in snap.alias_confs.items():
         (aliases / name).write_text(text, encoding="utf-8")
+    # 评审-组4：删除"快照中不存在、但本次事务新建"的片段——builtin→caddy 切换
+    # 中途失败回滚时快照 aliases 为空，新建的 conf 若残留，下次切 caddy 会加载
+    # 成陈旧别名路由。
+    for directory, keep in ((sites, snap.site_confs), (aliases, snap.alias_confs)):
+        for conf in directory.glob("*.conf"):
+            if conf.name not in keep:
+                with contextlib.suppress(OSError):
+                    conf.unlink()
     # BUG-515：还原 manifest 文件与 registry static_sites 行，避免回滚后矛盾状态。
     for iid, text in snap.manifests.items():
         path = workspace.app_manifest_path(iid)
@@ -565,7 +573,7 @@ def switch_gateway(
             ok=False,
             from_backend=(config.staticGateway or ""),
             to_backend=_normalize_target(target)
-            if target.strip().lower() in _ALLOWED_BACKENDS
+            if str(target or "").strip().lower() in _ALLOWED_BACKENDS
             else target,
             error=str(exc),
             stages=[{"stage": "precheck", "ok": False, "error": str(exc)}],

@@ -692,13 +692,25 @@ def _extract_js_bundle_paths(html: str, *, limit: int = 4) -> list[str]:
 
 
 def _normalize_script_src(src: str) -> str:
-    """把 script src 规范为以 ``/`` 开头的路径（去掉 ``./``）。"""
+    """把 script src 规范为以 ``/`` 开头的路径（去掉 ``./``、折叠 ``../``）。
+
+    评审-组8：``../assets/x.js`` 此前变成 ``/../assets/x.js`` 探测必 404，
+    该 bundle 的 API 路径抽不到；按站点根折叠 ``..`` 段。
+    """
     clean = src.strip()
     if clean.startswith("./"):
         clean = clean[2:]
     if not clean.startswith("/"):
         clean = "/" + clean
-    return clean
+    # 折叠路径中的 ".." 段（相对入口目录的上级引用一律回站点根）
+    parts: list[str] = []
+    for seg in clean.split("/"):
+        if seg == "..":
+            if parts:
+                parts.pop()
+        elif seg not in ("", "."):
+            parts.append(seg)
+    return "/" + "/".join(parts)
 
 
 def _resolve_alias_aware_script_urls(src: str, *, path_alias: str | None) -> tuple[str, str | None]:
@@ -1085,9 +1097,14 @@ def _review_instance(
                 f"routeUrl {route_target} 探活失败（{route_probe.note or '非 2xx'}）"
             )
         elif route_probe.content_length and route_probe.content_length > 0:
-            _check_subresources(rep, config, path_alias, route_probe)
+            _check_subresources(rep, config, path_alias)
             # IMP-055：对照绝对 API 路径在别名入口根 vs 带前缀
-            entry_html = _fetch_text(f"http://127.0.0.1:{config.staticGatewayPort}/{path_alias}/")
+            # 评审-组8：staticGatewayPort=None 时不再拼 :None URL（死路径）
+            entry_html = (
+                _fetch_text(f"http://127.0.0.1:{config.staticGatewayPort}/{path_alias}/")
+                if config.staticGatewayPort is not None
+                else None
+            )
             # BUG-467：内部从别名入口前缀 fetch JS bundle 抽取 API 路径
             _check_api_paths(rep, config, path_alias, entry_html, host_port=host_port)
 
@@ -1118,13 +1135,11 @@ def _check_subresources(
     rep: InstanceAccessReport,
     config: Config,
     path_alias: str,
-    route_probe: UrlProbe,
 ) -> None:
     """解析别名入口 HTML，对照绝对路径 vs 带前缀子资源（IMP-023 / BUG-381）。"""
     entry_port = config.staticGatewayPort
     if entry_port is None:
         return
-    # 重新拉一份 HTML 文本用于解析（route_probe 只存了 length）。
     html = _fetch_text(f"http://127.0.0.1:{entry_port}/{path_alias}/")
     if not html:
         return

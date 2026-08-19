@@ -357,7 +357,11 @@ def _parse_size(text: str) -> int | None:
             return int(float(text))
         except ValueError:
             return None
-    num = float(m.group(1))
+    # 评审-组8：`1.5.2MiB` 这类畸形数字 float() 抛 ValueError，移入 try
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return None
     unit = m.group(2).lower()
     if unit not in units:
         return None

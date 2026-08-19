@@ -389,13 +389,21 @@ class StaticGateway:
     def generate_site_config(self, instance_id: str, host_port: int, root: Path) -> Path:
         """渲染并写入 ``static-gateway/sites/<id>.conf``（WBS-09.03）。"""
         template = self._load_template()
-        content = template.format(
+        # 评审-组3：用户改过的模板含多余 {} 时 str.format 抛裸异常，
+        # 统一转 GatewayError 并带实例上下文
+        try:
+            content = template.format(
             host_port=host_port,
             root=_caddy_quote(str(root).replace("\\", "/")),
             site_id=instance_id,
             rate_limit_block=self._rate_limit_directive(instance_id),
             access_log=_caddy_quote(str(self.ws.logs / "static-access.log").replace("\\", "/")),
         )
+        except (KeyError, ValueError, IndexError) as exc:
+            raise GatewayError(
+                f"站点模板渲染失败（检查模板占位符）：{exc}",
+                instance_id=instance_id,
+            ) from exc
         path = self.site_config_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -1526,7 +1534,12 @@ class StaticGateway:
             else:
                 try:
                     pgid = os.getpgid(pid)
-                    os.killpg(pgid, signal.SIGTERM)
+                    # 评审-组3：pid 文件被人工写入指向同组无关进程时，防止连
+                    # 本网关自身进程组一起 TERM
+                    if pgid == os.getpgrp():
+                        log.warning("拒绝 killpg：目标 pgid 等于本进程组（pid=%s）", pid)
+                    else:
+                        os.killpg(pgid, signal.SIGTERM)
                 except (ProcessLookupError, OverflowError):
                     # 进程已不存在，或 pid 超出 pid_t 范围（不可能存活）→ 视为成功
                     return True

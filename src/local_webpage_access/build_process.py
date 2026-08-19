@@ -7,6 +7,7 @@ worker_pid / pgid + 身份指纹，避免 PID 复用误杀无关进程。
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -177,12 +178,15 @@ def kill_process_tree(
             except ProcessLookupError:
                 return
             except PermissionError:
+                # 评审-组3：跨用户权限边界时 break 会连 SIGKILL/proc.kill 兜底都
+                # 跳过；改为尽力后仍走外层 proc.kill 兜底
                 break
             try:
                 proc.wait(timeout=wait_s)
                 return
             except subprocess.TimeoutExpired:
                 continue
+        # killpg 未能确认终止（含 PermissionError break）：兜底单点 kill
     except Exception:  # noqa: BLE001 — best-effort
         try:
             proc.kill()
@@ -214,6 +218,10 @@ def kill_pid_tree_if_matches(
             actual_pgid = os.getpgid(pid)
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # 评审-组3：跨用户边界时 getpgid 抛 PermissionError，此前会向上传播
+            log.warning("跳过终止 PID %s：getpgid 权限不足", pid)
+            return False
         if actual_pgid != expected_pgid:
             log.warning(
                 "跳过终止 PID %s：pgid 不匹配（期望 %s，实际 %s）",
@@ -234,6 +242,10 @@ def kill_pid_tree_if_matches(
                 return False
             deadline = time.monotonic() + wait_s
             while time.monotonic() < deadline:
+                # 评审-组3：已退出但未回收的僵尸对 os.kill(pid,0) 恒存活 →
+                # 误报未杀死并补 SIGKILL；先尽力 waitpid 回收（非子进程忽略）
+                with contextlib.suppress(ChildProcessError, PermissionError, OSError):
+                    os.waitpid(pid, os.WNOHANG)
                 if not _pid_alive(pid):
                     return True
                 time.sleep(0.05)

@@ -36,11 +36,26 @@ def _compare(a: tuple[int, ...], b: tuple[int, ...]) -> int:
     return 0
 
 
+_PRERELEASE_SUFFIX = re.compile(r"^[vV]?\d+(?:\.\d+)*[-+][A-Za-z0-9.+-]*$")
+
+
+def _is_prerelease(raw: str) -> bool:
+    """是否带预发布/构建后缀（``2.40.2-rc1`` / ``1.0.0+build``）。"""
+    return bool(_PRERELEASE_SUFFIX.match((raw or "").strip()))
+
+
 def version_ge(raw: str, minimum: str) -> bool:
-    """``raw`` 版本是否 ≥ ``minimum``。"""
+    """``raw`` 版本是否 ≥ ``minimum``。
+
+    评审-组6：semver 预发布（``-rc``/``-alpha``/``+build``）小于同号正式版——
+    主版本相等且 raw 为预发布、minimum 为正式版时不满足门禁（原判等放行）。
+    minimum 自身带后缀时保持旧比较（自定的最低线语义）。
+    """
     parsed = parse_version_string(raw)
     required = parse_version_string(minimum)
     if not parsed or not required:
+        return False
+    if _compare(parsed, required) == 0 and _is_prerelease(raw) and not _is_prerelease(minimum):
         return False
     return _compare(parsed, required) >= 0
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -28,7 +27,9 @@ from local_webpage_access.models import Status
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 
-log = logging.getLogger("lwa.status")
+from local_webpage_access.logging import get_logger  # 评审-组7：原 "lwa.status" 不在命名空间，告警不落日志文件
+
+log = get_logger("status")
 
 # 孤儿 building 回收阈值（BUG-048）：构建进程崩溃后实例可能永久卡在 building。
 # build_queue 默认 wait_timeout=1800s，Docker build 本身可能更长，故阈值取
@@ -618,7 +619,13 @@ def _resolve_network_urls(
         route_url = persisted_route if route_mode_name else None
         current_ip = None
 
-    stale = bool(persisted_lan and current_ip and persisted_lan not in (current_ip, "127.0.0.1"))
+    # 评审-组7：IPv6 zone-id（fe80::1%eth0）与 IPv4-mapped（::ffff:1.2.3.4）
+    # 先归一化再比较，否则恒 stale；非法/主机名形式保持原比较语义。
+    from local_webpage_access.ports import _normalize_ip
+
+    _pl = _normalize_ip(persisted_lan or "") or persisted_lan
+    _ci = _normalize_ip(current_ip or "") or current_ip
+    stale = bool(persisted_lan and current_ip and _pl not in (_ci, "127.0.0.1"))
     return {
         "lan_url": lan_url,
         "route_host": route_host if route_mode_name else None,

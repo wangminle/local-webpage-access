@@ -257,6 +257,17 @@ class Config(BaseModel):
                 f"配置文件顶层必须是映射/字典，得到 {type(raw).__name__}",
                 path=str(path),
             )
+        # 评审-组7：未知顶层键此前被静默忽略并回退默认值（拼写错误难发现）。
+        # 保持向后兼容不 fail，但记录 warning 提示。
+        known = set(cls.model_fields.keys())
+        unknown = [k for k in raw if k not in known]
+        if unknown:
+            import logging
+
+            logging.getLogger("local_webpage_access.config").warning(
+                "配置文件含未知键（已忽略）：%s；已知键见 example_config_text",
+                ", ".join(sorted(unknown)),
+            )
         return cls.from_dict(raw)
 
     def to_yaml(self) -> str:

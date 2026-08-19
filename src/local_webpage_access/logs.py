@@ -87,10 +87,14 @@ def tail_text_file(path: Path, n: int, *, encoding: str = "utf-8") -> str:
 
     ``n <= 0`` 时返回全文。文件不存在返回空串。
     """
-    if not path.is_file():
+    # 评审-组7：stat 与 open 之间文件可能被滚动/删除，统一按空文件处理
+    try:
+        if not path.is_file():
+            return ""
+        if n is None or n <= 0:
+            return path.read_text(encoding=encoding, errors="replace")
+    except OSError:
         return ""
-    if n is None or n <= 0:
-        return path.read_text(encoding=encoding, errors="replace")
 
     # 从末尾按块回读，直到凑够 n+1 个换行（或到文件头）
     size = path.stat().st_size

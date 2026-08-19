@@ -33,7 +33,6 @@ from typing import Any, Callable, Protocol
 from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
-from local_webpage_access.ports import is_port_in_use
 from local_webpage_access.registry import Registry
 from local_webpage_access.version_requirements import (
     MIN_CADDY_VERSION,
@@ -156,16 +155,25 @@ def _default_runner(cmd: list[str], **kwargs: Any) -> "subprocess.CompletedProce
         return subprocess.CompletedProcess(
             args=list(cmd), returncode=124, stdout="", stderr="timeout"
         )
+    except OSError as exc:
+        # 评审-组5：可执行文件存在但不可执行/损坏（PermissionError）时，
+        # 统一映射为非零返回而非炸穿 run_doctor（与 FileNotFoundError 同路径）
+        return subprocess.CompletedProcess(
+            args=list(cmd), returncode=127, stdout="", stderr=str(exc)
+        )
 
 
 def _default_port_in_use(port: int) -> bool:
-    """默认端口占用探测：委托给 :func:`is_port_in_use`（独占 bind，无 SO_REUSEADDR）。
+    """默认端口占用探测：与分配器口径一致（BUG-364：以是否有**活跃监听者**为准）。
 
-    此前本函数自行 ``setsockopt(SO_REUSEADDR)``，在 Windows 上允许多个套接字
-    绑定同一端口，会把"已有进程监听"误判为"空闲"（BUG-002 的回归，BUG-029）。
-    直接复用端口分配器使用的探测实现，保证 doctor 与分配器口径一致。
+    历史沿革：BUG-002/029 时代与分配器同用独占 bind；BUG-364 把分配器改为
+    ``is_port_listening``（connect 探测，TIME_WAIT 残留不算占用）后，doctor 仍
+    用 bind 探测——刚停止的实例端口在 TIME_WAIT 窗口（约 60~240s）内被误报
+    FAIL"外部占用"（评审-组5）。现改委托 ``is_port_listening`` 恢复同口径。
     """
-    return is_port_in_use(port)
+    from local_webpage_access.ports import is_port_listening
+
+    return is_port_listening(port)
 
 
 # ---- 环境检查（WBS-26.02~09）-----------------------------------------------
@@ -336,6 +344,14 @@ def check_caddy(config: Config, runner: SubprocessRunner = _default_runner) -> C
     version_line = ((result.stdout or "") + (result.stderr or "")).strip().splitlines()
     version = version_line[0] if version_line else ""
     if not version_ge(version, MIN_CADDY_VERSION):
+        if not version.strip():
+            # 评审-组5：空版本原产出"Caddy  不满足…"双空格消息
+            return CheckResult(
+                "caddy",
+                STATUS_FAIL,
+                "无法解析 Caddy 版本（命令无输出）",
+                suggestion=f"确认 caddy 可执行且版本 ≥ {MIN_CADDY_VERSION}",
+            )
         return CheckResult(
             "caddy",
             STATUS_FAIL,
@@ -598,14 +614,16 @@ def check_caddy_health(
         entry_port = config.staticGatewayPort
         if aliases and entry_port is not None:
             # BUG-080：入口根路径 / 无路由（仅 /<alias>/ 有），必须探别名子路径，
-            # 否则恒 404 误报 WARN。取任一别名的 /<alias>/ 探测。
-            probe_alias = next(iter(aliases))
-            if not gateway.health_check(int(entry_port), path=f"/{probe_alias}/"):
-                entry_unreachable = True
-                findings.append(
-                    f"别名入口 :{entry_port}/{probe_alias}/ 不可达"
-                    f"（已配置 {len(aliases)} 个别名，入口未就绪或 reload 未生效）"
-                )
+            # 否则恒 404 误报 WARN。
+            # 评审-组5：原只探首别名，部分别名 404（reload 未生效/片段缺失）会漏报；
+            # 改为全量探测（别名多于 5 个时截断，防探测成本失控）。
+            for probe_alias in list(aliases)[:5]:
+                if not gateway.health_check(int(entry_port), path=f"/{probe_alias}/"):
+                    entry_unreachable = True
+                    findings.append(
+                        f"别名入口 :{entry_port}/{probe_alias}/ 不可达"
+                        f"（入口未就绪或该别名 reload 未生效）"
+                    )
         # 各 enabled 静态站点 hostPort
         try:
             rows = registry.list_instances()
@@ -1014,6 +1032,13 @@ def check_workspace_path_consistency(
             expected_src = ws.app_data(iid).resolve()
             destinations = set(container_data_paths(ws.app_current(iid), manifest))
             managed = [m for m in mounts if m.destination in destinations]
+            # 评审-组5：data bind mount 整体缺失（volume 丢失/未挂载）此前静默
+            # OK；destinations 非空而 managed 为空时显式告警
+            if destinations and not managed:
+                findings.append(
+                    f"{iid} dataMount: 期望的 data 挂载（{'、'.join(sorted(destinations))}）"
+                    f"在容器观测中整体缺失——数据库可能指向容器内临时层，重建会丢数据"
+                )
             for mount in managed:
                 actual = Path(mount.source).resolve() if mount.source else None
                 if actual != expected_src:
@@ -1348,8 +1373,18 @@ def check_memory() -> CheckResult:
             for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
                 key, _, rest = line.partition(":")
                 info[key.strip()] = int(rest.strip().split()[0]) * 1024
-            avail = info.get("MemAvailable", 0)
+            # 评审-组5：内核 <3.14/精简容器无 MemAvailable，原直接得 0 误报
+            # FAIL"可用内存 0.00GB"；回退 MemFree，仍缺失走 SKIP 分支
+            avail = info.get("MemAvailable") or info.get("MemFree") or 0
             total = info.get("MemTotal", 0)
+            if not avail:
+                # 评审-组5：MemAvailable 与 MemFree 均缺失（极端精简内核）时
+                # 无法判定，SKIP 而非按 0GB 误报 FAIL
+                return CheckResult(
+                    "memory",
+                    STATUS_SKIP,
+                    "/proc/meminfo 缺少 MemAvailable/MemFree，跳过内存检查",
+                )
             avail_gb = avail / 1024**3
             total_gb = total / 1024**3
             if avail_gb < 0.2:
@@ -1912,9 +1947,19 @@ def run_doctor(
                 caddy_probe_registry.close()
     if instance_id:
         report.instance_id = instance_id
+        if not ws.db_path.is_file():
+            # 评审-组5：reg.open() 缺库时会创建空 DB，违背诊断只读承诺
+            report.instance_checks = [
+                CheckResult(
+                    f"instance:{instance_id}",
+                    STATUS_FAIL,
+                    f"registry 不存在：{ws.db_path}（实例诊断不创建数据库）",
+                )
+            ]
+            return report
         try:
             reg = Registry(ws.db_path)
-            reg.open()
+            reg.open_readonly()
             try:
                 report.instance_checks = diagnose_instance(ws, reg, instance_id)
             finally:

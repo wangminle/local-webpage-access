@@ -357,7 +357,10 @@ class MacLaunchdBackend(AutostartBackend):
         return is_legacy_program_arguments(list(data.get("ProgramArguments", [])))
 
     def _domain(self) -> str:
-        return f"gui/{os.getuid()}"
+        # 评审-组5：os.getuid 仅 Unix；守卫在构造处而非调用处，直接构造/测试
+        # 路径不再 AttributeError（生产由 select_backend 平台门禁拦截）
+        uid = getattr(os, "getuid", lambda: 0)()
+        return f"gui/{uid}"
 
     def _target(self, name: str) -> str:
         return f"{self._domain()}/{launchd_label(name)}"
@@ -1627,6 +1630,14 @@ def _python_version_ok(python_exe: str) -> tuple[bool, str]:
     return True, f"Python {major}.{minor}，可 import lwa"
 
 
+
+def _unescape_systemd_args(args: list[str]) -> list[str]:
+    """评审-组5：systemd 单元写侧把 ``%`` 转成 ``%%``（BUG-338），读侧原先不
+    反转义——工作区路径含 ``%`` 时 check 误报"单元工作区≠当前工作区"。
+    ExecStart 各参数按 systemd 规范还原 ``%%``→``%``。
+    """
+    return [a.replace("%%", "%") for a in args]
+
 def _extract_workspace_from_unit(name: str, plat: str) -> str | None:
     """从已写单元文件解析 --workspace 的值。"""
     try:
@@ -1640,7 +1651,7 @@ def _extract_workspace_from_unit(name: str, plat: str) -> str | None:
             data = plistlib.loads(path.read_bytes())
             args = list(data.get("ProgramArguments", []))
         else:
-            args = shlex.split(_grep_exec_start(path) or "")
+            args = _unescape_systemd_args(shlex.split(_grep_exec_start(path) or ""))
         if "--workspace" in args:
             i = args.index("--workspace")
             if i + 1 < len(args):
@@ -1672,7 +1683,8 @@ def _unit_python(name: str, plat: str) -> str | None:
             return args[0] if args else None
         es = _grep_exec_start(path)
         if es:
-            return shlex.split(es)[0] if shlex.split(es) else None
+            parts = _unescape_systemd_args(shlex.split(es))
+            return parts[0] if parts else None
     except Exception:  # noqa: BLE001
         return None
     return None
@@ -1690,7 +1702,7 @@ def _unit_args(name: str, plat: str) -> list[str]:
 
             return list(plistlib.loads(path.read_bytes()).get("ProgramArguments", []))
         es = _grep_exec_start(path)
-        return shlex.split(es) if es else []
+        return _unescape_systemd_args(shlex.split(es)) if es else []
     except Exception:  # noqa: BLE001
         return []
 
@@ -2185,7 +2197,15 @@ def _check_docker(ws: Workspace) -> CheckItem:
             )
         finally:
             reg.close()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 评审-组5：库不存在=正常跳过；存在但读取失败（损坏/被锁）不得装作通过
+        if ws.db_path.is_file():
+            return CheckItem(
+                "docker",
+                "docker",
+                STATUS_WARN,
+                f"registry 读取失败，Docker 检查未完成：{exc}",
+            )
         return CheckItem("docker", "docker", STATUS_OK, "无 registry，跳过")
     if not has_container:
         return CheckItem("docker", "docker", STATUS_OK, "无容器实例，跳过")

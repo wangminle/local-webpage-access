@@ -294,7 +294,14 @@ def _audit_volume(
 
     # BUG-184：~ / ${VAR} 形式的 source 经 docker compose 渲染为 bind 挂载，
     # 不得按"命名卷"放行。无法静态展开：命中已知敏感名片段 → critical；其余 → warn。
-    if src.startswith("~") or src.startswith("$"):
+    # 评审-组7：`./${HOME}` 这类"相对路径内嵌变量"同样无法静态展开，一并纳入
+    # （此前只查 startswith，前缀带 ./ 的变量路径按普通相对路径放行）。
+    _unexpandable = src.startswith("~") or src.startswith("$") or (
+        not src.startswith("/")
+        and not is_windows_abs
+        and ("$" in src or "~" in src)
+    )
+    if _unexpandable:
         if any(frag in src_lower for frag in _SENSITIVE_HOME_FRAGMENTS):
             out.append(
                 SecurityFinding(
@@ -481,7 +488,8 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
                         "Dockerfile 显式以 root 运行",
                     )
                 )
-        elif upper.startswith("ADD ") and ("http://" in line or "https://" in line):
+        # 评审-组7：指令与 URL scheme 均大小写不敏感，ADD HTTPS:// 此前可绕过检测
+        elif upper.startswith("ADD ") and ("HTTP://" in upper or "HTTPS://" in upper):
             findings.append(
                 SecurityFinding(
                     LEVEL_CRITICAL,

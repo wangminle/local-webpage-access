@@ -562,11 +562,12 @@ def is_file_stable(
         return False, current
     if current.mtime != previous.mtime or current.size != previous.size:
         return False, current
-    # mtime 未变，但若文件刚出现仍可能未刷盘；要求距上次观测足够久
-    stable = (now_ts - previous.mtime) >= stable_seconds or (
-        now_ts - current.mtime
-    ) >= stable_seconds
-    return stable, current
+    # mtime 未变，但若文件刚出现仍可能未刷盘；要求距上次观测足够久。
+    # 评审-组4：mtime 在未来（时钟偏移 / cp -p 保留未来时间戳）时差值恒负、
+    # 永不稳定——钳制为 0（视为已过稳定期）；mtime 相等时两分支恒等，化简。
+    age = now_ts - current.mtime
+    # age<0（mtime 在未来）视为已过稳定期：mtime 与上次观测一致，文件未变
+    return age >= stable_seconds or age < 0, current
 
 
 # ---- 导入与自动启动决策（WBS-21.07/08/09）---------------------------------
@@ -918,6 +919,14 @@ def reconcile(
                 )
                 continue
         try:
+            # 评审-组4：从读取快照到此处可能已过 observe/backoff 多步；期间用户
+            # 可能恰好 `lwa stop`（desired→stopped）。拉起前复核最新期望态，
+            # 避免把刚停的实例又拉起来（下次 tick 才再停，违背用户意图）。
+            fresh = registry.get_instance(iid) or {}
+            if str(fresh.get("desired_state") or "") != "running":
+                log.info("daemon reconcile: 实例 %s 期望态已变为 %s，跳过拉起",
+                         iid, fresh.get("desired_state"))
+                continue
             do_restart(workspace, config, registry, iid)
             _reconcile_failures.pop(failure_key, None)
             restarted.append(iid)

@@ -12,11 +12,13 @@
 
   LWA.esc = function (s) {
     if (s == null) return "";
+    // 评审-组9#8：补单引号转义（当前数据源受后端枚举约束，属防御性补全）
     return String(s)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   };
 
   LWA.pad2 = function (n) {

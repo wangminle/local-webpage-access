@@ -388,12 +388,55 @@ def _is_self_connection(request: Request, config: Config) -> bool:
     return _normalize_client_host(client.host) == _normalize_client_host(bind)
 
 
+def _body_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
+    """评审-组4：body 布尔字段严格解析。
+
+    ``bool(payload.get(...))`` 会把字符串 ``"false"`` 判为 True（畸形输入静默
+    反转语义，如 restart/dryRun）。键缺失时取默认值；键存在但类型不是 bool
+    时直接 400，绝不回落默认值——否则 default=True 的字段（restart/keepData）
+    收到字符串 "false" 仍是 True，default=False 的字段（dryRun）收到 "true"
+    仍是 False，语义在两个方向都会被静默反转。
+    """
+    if key not in payload:
+        return default
+    value = payload[key]
+    if isinstance(value, bool):
+        return value
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={
+            "error": {
+                "code": "bad_request",
+                "message": f"{key} 必须是布尔值（true/false），实际为 {type(value).__name__}",
+            }
+        },
+    )
+
+
+def _host_header_is_local(request: Request) -> bool:
+    """评审-组4：Host 头主机名是否为本机（DNS rebinding 加固）。
+
+    rebinding 场景：攻击者域名解析到 127.0.0.1，浏览器视为同源（sec-fetch-site
+    == same-origin）即可免 token 写。对 loopback 免鉴权路径追加 Host 校验，
+    仅接受 127.0.0.1 / localhost / ::1（缺 Host 头的非浏览器客户端放行）。
+    """
+    host = (request.headers.get("host") or "").strip()
+    if not host:
+        return True
+    hostname = host.split(":", 1)[0].strip("[]").lower()
+    return hostname in {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
 def _is_localhost_client(request: Request) -> bool:
-    """请求是否来自本机 loopback（IMP-003：本机免 token）。"""
+    """请求是否来自本机 loopback（IMP-003：本机免 token）。
+
+    评审-组4：client 地址是 loopback **且** Host 头也是本机名——后者挡 DNS
+    rebinding（外部域名解析到 127.0.0.1 冒充同源）。
+    """
     client = request.client
     if client is None:
         return False
-    return _is_loopback_host(client.host)
+    return _is_loopback_host(client.host) and _host_header_is_local(request)
 
 
 def require_token(request: Request) -> None:
@@ -838,8 +881,8 @@ def _register_routes(app: FastAPI) -> None:
                     }
                 },
             )
-        dry_run = bool(payload.get("dryRun", False))
-        review = bool(payload.get("review", True))
+        dry_run = _body_bool(payload, "dryRun", False)
+        review = _body_bool(payload, "review", True)
         result = switch_gateway(
             ctx.workspace,
             ctx.config,
@@ -927,9 +970,12 @@ def _register_routes(app: FastAPI) -> None:
         serving = str(row.get("serving_mode") or row.get("servingMode") or "")
         is_container = runtime in ("docker-compose", "container") or serving == "container"
         if not is_container:
-            # 再看 registry runtime_access：若曾观测到权限失败，仍阻断容器类操作
-            # 但静态站点不走此路径
+            # 静态站点不受 Docker 权限影响
             return None
+        # 评审-组4：原注释宣称"再看 registry runtime_access"，与实现不符。实测口径
+        # （test_container_lifecycle_ignores_stale_instance_permission_when_live_ready）
+        # 是**有意的**：陈旧 permission_denied 观测不阻断，以实时能力探测为准，
+        # 避免历史观测把已修复的权限问题永久锁死容器操作。修正注释而非行为。
         try:
             from local_webpage_access.capability import collect_capability_report
 
@@ -1009,6 +1055,22 @@ def _register_routes(app: FastAPI) -> None:
             FallbackConfirmationRequired,
             start_instance,
         )
+
+        # 评审-组4：fallback_policy 是自由字符串，typo 会静默落入 auto-equivalent
+        # 分支（自动降级）；非法值直接 400。
+        if fallback_policy not in {"confirm", "auto-equivalent", "disabled"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "bad_request",
+                        "message": (
+                            f"fallback_policy 仅支持 confirm / auto-equivalent / disabled，"
+                            f"收到 {fallback_policy!r}"
+                        ),
+                    }
+                },
+            )
 
         try:
             return _lifecycle_op(
@@ -1257,9 +1319,9 @@ def _register_routes(app: FastAPI) -> None:
                 inbox=str(inbox_root),
             ) from exc
 
-        restart = bool(payload.get("restart", True))
-        keep_data = bool(payload.get("keepData", True))
-        force_kind_change = bool(payload.get("forceKindChange", False))
+        restart = _body_bool(payload, "restart", True)
+        keep_data = _body_bool(payload, "keepData", True)
+        force_kind_change = _body_bool(payload, "forceKindChange", False)
 
         importer = Importer(ctx.workspace, ctx.config, ctx.registry)
         result = importer.update_zip(
@@ -1330,9 +1392,9 @@ def _register_routes(app: FastAPI) -> None:
                 },
             )
 
-        restart = bool(payload.get("restart", True))
-        keep_data = bool(payload.get("keepData", True))
-        force_kind_change = bool(payload.get("forceKindChange", False))
+        restart = _body_bool(payload, "restart", True)
+        keep_data = _body_bool(payload, "keepData", True)
+        force_kind_change = _body_bool(payload, "forceKindChange", False)
 
         importer = Importer(ctx.workspace, ctx.config, ctx.registry)
         result = importer.update_from_dir(
@@ -1541,9 +1603,9 @@ def _register_routes(app: FastAPI) -> None:
             )
 
         url = (str(payload.get("url") or "").strip() or None) if payload.get("url") else None
-        restart = bool(payload.get("restart", True))
-        keep_data = bool(payload.get("keepData", True))
-        force_kind_change = bool(payload.get("forceKindChange", False))
+        restart = _body_bool(payload, "restart", True)
+        keep_data = _body_bool(payload, "keepData", True)
+        force_kind_change = _body_bool(payload, "forceKindChange", False)
 
         importer = Importer(ctx.workspace, ctx.config, ctx.registry)
         result = importer.update_from_git(
@@ -1763,11 +1825,28 @@ def _register_routes(app: FastAPI) -> None:
     def remove_redundant_op(
         purge: bool = Query(False, description="同时删除实例磁盘数据"),
         force: bool = Query(False, description="强制移除（跳过 data/ 非空检查）"),
+        confirm: bool = Query(
+            False, description="purge/force 时必须显式传 true（对齐单实例 confirmId 门禁）"
+        ),
     ) -> dict[str, Any]:
-        """IMP-019：批量移除冗余实例（保留每组最早者），返回被移除的 id 列表。"""
+        """IMP-019：批量移除冗余实例（保留每组最早者），返回被移除的 id 列表。
+
+        评审-组4：``purge``/``force`` 涉及删盘，与单实例 remove 的 confirmId
+        契约对齐——必须显式 ``confirm=true``，否则 409。
+        """
         from local_webpage_access.lifecycle import remove_redundant
 
         ctx = _Ctx(app)
+        if (purge or force) and not confirm:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "confirmation_required",
+                        "message": "批量 purge/force 删除须显式传 confirm=true",
+                    }
+                },
+            )
         try:
             removed = remove_redundant(
                 ctx.workspace,

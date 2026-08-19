@@ -196,6 +196,12 @@ def _apply_manifest_alias(
         manifest.network = NetworkConfig(**entry)
         return
 
+    # 评审-组8：无 hostPort 且 network 为 None 的最小化 manifest 此前直接
+    # AttributeError（非 LwaError，CLI 打裸 traceback）
+    if manifest.network is None:
+        from local_webpage_access.models import NetworkConfig as _NC
+
+        manifest.network = _NC()
     if alias is None:
         manifest.network = manifest.network.model_copy(
             update={
@@ -299,13 +305,6 @@ def _apply_gateway_alias(
 
 def _alias_lock_path(workspace: Workspace):
     return workspace.run / "path-alias.lock"
-
-
-def _alias_lock_is_stale(lock_path) -> bool:
-    """别名锁是否可回收（进程已死或超时）。"""
-    from local_webpage_access.lifecycle import _lock_is_stale
-
-    return _lock_is_stale(lock_path)
 
 
 @contextlib.contextmanager

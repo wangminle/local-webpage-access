@@ -200,6 +200,9 @@ def _execute_captured(
             "docker 命令未找到：请确认 Docker 已安装且 docker 在 PATH 中",
             command=list(args),
         ) from exc
+    except OSError as exc:
+        # 评审-组3：与流式执行器对齐，OSError 统一转 DockerError
+        raise DockerError(f"docker 命令执行失败：{exc}", command=list(args)) from exc
     except subprocess.TimeoutExpired as exc:
         raise DockerError(
             f"命令超时（{timeout}s）：{' '.join(args)}",
@@ -278,6 +281,12 @@ def _execute_streaming(
             except FileNotFoundError as exc:
                 raise DockerError(
                     "docker 命令未找到：请确认 Docker 已安装且 docker 在 PATH 中",
+                    command=list(args),
+                ) from exc
+            except OSError as exc:
+                # 评审-组3：PermissionError 等 OSError 也按 Docker 执行失败统一包装
+                raise DockerError(
+                    f"docker 命令执行失败：{exc}",
                     command=list(args),
                 ) from exc
 
@@ -542,6 +551,14 @@ class DockerRuntime:
                         error_summary=str(exc)[:500],
                     )
                 self._event(instance_id, "build_cancel", "镜像构建已取消")
+            elif build_id is not None and self.registry is not None:
+                # 评审-组3：超时（DockerError）等异常此前不收尾 builds 行，
+                # 管理页该构建永久显示"进行中"；统一 finish failed。
+                self.registry.finish_build(
+                    build_id,
+                    status="failed",
+                    error_summary=str(exc)[:500],
+                )
             raise
         if build_id is not None and self.registry is not None:
             if result.ok:

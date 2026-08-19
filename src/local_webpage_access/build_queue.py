@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
@@ -182,6 +183,7 @@ class CrossProcessBuildGate:
         self.concurrency = max(1, concurrency)
         self.poll_interval = poll_interval
         self._lock = threading.RLock()
+        self._pending_kills: list[tuple[int, int | None, str]] = []  # 评审-组3
         self._conn: sqlite3.Connection | None = None
         self._closed = False
         self._init_schema()
@@ -246,16 +248,33 @@ class CrossProcessBuildGate:
                     (slot, instance_id, os.getpid(), time.time()),
                 )
                 conn.execute("COMMIT")
+                self._drain_pending_kills()
                 return slot
+            except sqlite3.OperationalError:
+                # 评审-组3：database is locked 等瞬态冲突不直接上抛（否则 run()
+                # 把任务误标 failed）；回滚后交 acquire 轮询重试
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                self._drain_pending_kills()
+                return None
             except Exception:
                 try:
                     conn.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
+                self._drain_pending_kills()
                 raise
 
     def _reclaim_dead(self, conn: sqlite3.Connection) -> None:
-        """回收持有者进程已死的槽位（崩溃残留）。"""
+        """回收持有者进程已死的槽位（崩溃残留）。
+
+        评审-组3：进程终止（TERM 5s + KILL 5s）**移出** BEGIN IMMEDIATE 写事务
+        ——此前在事务内 kill，build-locks.db 写锁可被长期持有，其它进程
+        busy_timeout 30s 后抛 OperationalError 并把任务误标 failed。现改为：
+        事务内只收集/改库，进程杀放到事务外（下次 acquire 前统一执行）。
+        """
         rows = conn.execute("SELECT slot, pid FROM build_slots").fetchall()
         for slot, pid in rows:
             if not _pid_alive(int(pid)):
@@ -277,10 +296,14 @@ class CrossProcessBuildGate:
         ) in task_rows:
             if not _pid_alive(int(owner_pid)):
                 if worker_pid is not None:
-                    kill_pid_tree_if_matches(
-                        int(worker_pid),
-                        expected_pgid=int(worker_pgid) if worker_pgid is not None else None,
-                        expected_identity=str(worker_identity or ""),
+                    # 事务外异步终止：身份三元组已从库行取出，杀错/杀漏由
+                    # expected_pgid/expected_identity 校验兜底
+                    self._pending_kills.append(
+                        (
+                            int(worker_pid),
+                            int(worker_pgid) if worker_pgid is not None else None,
+                            str(worker_identity or ""),
+                        )
                     )
                 conn.execute(
                     "UPDATE build_tasks SET status=?, "
@@ -288,6 +311,17 @@ class CrossProcessBuildGate:
                     "worker_pid=NULL, worker_pgid=NULL, worker_identity=NULL, "
                     "updated_at=? WHERE instance_id=?",
                     ("cancelled", now, now, iid),
+                )
+
+    def _drain_pending_kills(self) -> None:
+        """执行 _reclaim_dead 收集的进程终止（在写事务外调用）。"""
+        while self._pending_kills:
+            worker_pid, expected_pgid, expected_identity = self._pending_kills.pop(0)
+            with contextlib.suppress(Exception):  # noqa: BLE001 — best-effort
+                kill_pid_tree_if_matches(
+                    worker_pid,
+                    expected_pgid=expected_pgid,
+                    expected_identity=expected_identity,
                 )
 
     def acquire(
@@ -620,7 +654,7 @@ class BuildQueue:
                     )
                 task.status = "building"
             task.started_at = time.time()
-            if self._persist_task(task, status="building") is False:
+            if self._persist_task(task, status="building") is not True:  # 评审-组3：持久化异常返回 None 也不得放行
                 with self._guard:
                     self._cancel_pending(task, instance_id)
                     self._finish_task_local(task, "cancelled")
@@ -647,7 +681,7 @@ class BuildQueue:
                     )
                 task.status = "success"
                 task.finished_at = time.time()
-            if self._persist_task(task, status="success") is False:
+            if self._persist_task(task, status="success") is not True:  # 评审-组3：持久化异常返回 None 也不得放行
                 with self._guard:
                     self._cancel_pending(task, instance_id)
                     self._finish_task_local(task, "cancelled")

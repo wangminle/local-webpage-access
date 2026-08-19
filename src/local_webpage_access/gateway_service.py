@@ -50,7 +50,7 @@ START_LOCK_FILENAME = "gateway-start.lock"
 GATEWAY_START_LOCK_TIMEOUT = 5.0
 # BUG-175：启动锁陈旧回收阈值——持锁进程被 SIGKILL 后锁文件残留，超过该秒数或
 # holder pid 已死即回收，避免网关从此无法启动只能人工删文件（对齐 manager_start_lock）。
-GATEWAY_START_LOCK_STALE_SECONDS = 60.0
+# 评审-组4：GATEWAY_START_LOCK_STALE_SECONDS 从未使用（flock 随进程死亡由内核释放），已删
 
 # Caddy admin API 固定监听 IPv4 loopback（reload/stop 走它，BUG-068 显式 127.0.0.1）。
 ADMIN_PORT = 2019
@@ -491,6 +491,13 @@ def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
     admin_alive = gateway._admin_alive()
     running = admin_alive
     orphan_master = running and backend != "caddy"
+    # 评审-组4：backend==caddy 但 :2019 是其它工作区/外部 master 时，此前也
+    # 报 running 且无提示（掩盖端口被抢）；补 foreignMaster 标注。
+    foreign_master = False
+    if running and not orphan_master:
+        with contextlib.suppress(Exception):
+            owner = gateway.inspect_caddy_owner()
+            foreign_master = not bool(owner.get("workspace_match"))
     pid = state.pid if state else None
     if running and pid is None:
         # 服务态缺失但 master 在线：补读 caddy.pid 便于展示。
@@ -506,6 +513,7 @@ def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
         "port": (state.port if state and state.port is not None else configured_port),
         "adminPort": ADMIN_PORT,
         "orphanMaster": orphan_master,
+        "foreignMaster": foreign_master,
     }
 
 

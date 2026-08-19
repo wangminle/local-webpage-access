@@ -102,7 +102,8 @@ def gateway_on(
             try:
                 from local_webpage_access.access_workflow import run_access_pass
 
-                # finalize 已 refresh；此处只跑 review（refresh 幂等再跑一次亦可，
+                # 评审-组8：run_access_pass(review=True) 先幂等 refresh 再 review
+# （写盘幂等无害）；如需严格免 refresh 可改走 review-only 入口。
                 # 但共享编排 review=True 会再 refresh——gateway on 路径 finalize
                 # 已写盘，这里仅 review 避免重复写）。
                 pass_result = run_access_pass(ws, config, reg, review=True, dry_run=False)

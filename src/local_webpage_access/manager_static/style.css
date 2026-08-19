@@ -608,8 +608,35 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-mono);
+  font-family: var(--monospace); /* 评审-组9#2：原引用未定义的 --font-mono */
 }
+/* 评审-组9#1（CHK-245）：C.R03 降级确认弹窗的类名此前无任何样式，
+   内容直接压在遮罩上几乎不可读。与 .modal-inner 同规格补齐。 */
+.modal-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 560px;
+  width: min(560px, calc(100vw - 48px));
+  padding: 16px 18px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.modal-header h2 { margin: 0; font-size: 16px; }
+.modal-body { margin: 8px 0 4px; }
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
 /* IMP-051：路径 + 浏览按钮同一行 */
 .path-with-browse {
   display: flex;

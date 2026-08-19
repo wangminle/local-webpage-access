@@ -16,7 +16,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
-import re
 import shutil
 import sys
 import threading
@@ -73,16 +72,21 @@ def _get_thread_lock(instance_id: str) -> threading.RLock:
 # ---- 并发锁（WBS-17.12）-----------------------------------------------------
 
 
-def _touch_lock_heartbeat(lock_path: Path) -> None:
+def _touch_lock_heartbeat(
+    lock_path: Path, stop: "threading.Event | None" = None
+) -> None:
     """刷新锁文件的心跳时间戳（BUG-046）。
 
     原地改写同一 inode（不得 ``os.replace`` / unlink），以免打断持有者的文件锁。
     锁文件不存在或不可读时为空操作（仅在已持锁时调用，故不应发生）。
     """
+    if stop is not None and stop.is_set():
+        return  # 评审-组2：锁已（或即将）释放，不再写心跳
     try:
         with open(lock_path, "r+", encoding="utf-8") as fh:
             content = fh.read().strip().splitlines()
             pid_line = content[0] if content else str(os.getpid())
+            # 评审-组2：join(5s) 超时后锁可能已释放；写前由调用方传入 stop 复查
             fh.seek(0)
             fh.truncate()
             fh.write(f"{pid_line}\n{time.time():.3f}\n")
@@ -172,7 +176,7 @@ def instance_lock(
 
         def _heartbeat_loop() -> None:
             while not heartbeat_stop.wait(_LOCK_HEARTBEAT_INTERVAL):
-                _touch_lock_heartbeat(lock_path)
+                _touch_lock_heartbeat(lock_path, heartbeat_stop)
 
         heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
@@ -188,6 +192,13 @@ def instance_lock(
                 heartbeat_stop.set()
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=5.0)
+                if heartbeat_thread.is_alive():
+                    # 评审-组2：心跳线程卡在慢速 FS 写上，锁释放后其 stop 复查
+                    # 会拦截绝大多数迟到写；仍存活时告警供诊断（不阻塞释放）。
+                    log.warning(
+                        "实例 %s 锁心跳线程 5s 未退出（可能有迟到写，仅影响陈旧观测）",
+                        instance_id,
+                    )
             if file_acquired and fd is not None:
                 release_exclusive(fd)
                 # BUG-213：释放后不 unlink，保持同一 inode 供后续竞争者复用
@@ -645,8 +656,10 @@ def _try_host_with_fallback(
                     plan_dict,
                     host_fn,
                 )
-            except (HostingError, DockerError) as fallback_exc:
-                # CHK-192/P1：fallback 候选的 DockerError 同样需要捕获
+            except Exception as fallback_exc:  # noqa: BLE001
+                # CHK-192/P1：fallback 候选的 DockerError 同样需要捕获；
+                # 评审-组2：OSError/sqlite/pydantic 等非业务异常也不得炸穿
+                # 整条降级链（否则剩余候选不再尝试、Layer-4 诊断不写）。
                 log.warning(
                     "实例 %s fallback 候选 %d 失败：%s",
                     instance_id,
@@ -1103,6 +1116,10 @@ def _rollback_attempt(
             log.warning("实例 %s 回滚容器失败（容器在运行但无法停止）：%s", instance_id, exc)
             residuals.append(f"container（down 失败：{exc}）")
         else:
+            # 评审-组2（复核后不修）：is_running 抛错（Docker 不可用）时无可靠
+            # 判据区分「容器在跑但探测失败」与「docker 不可用且容器从未启动」；
+            # 一律保守记残留会误禁构建期失败后的合法跨形态自动降级
+            # （Gate-C 测试锁定的行为），误伤大于收益。维持原语义，仅记日志。
             log.debug("实例 %s 回滚容器跳过（Docker 不可用或容器未运行）：%s", instance_id, exc)
 
     # 2. 回滚端口（仅释放本次 attempt 新分配的，BUG-510）
@@ -1194,7 +1211,12 @@ def _has_active_resources(
     registry: Registry,
     instance_id: str,
 ) -> bool:
-    """检查实例是否有活跃的容器或端口登记。"""
+    """检查实例是否有活跃容器。
+
+    评审-组2：docstring 原写"容器或端口登记"与实现不符——**有意**只查容器：
+    端口登记在 stop 后按 BUG-045 语义保留（供复用），若计入会把绝大多数
+    回滚判为"仍有活跃资源"而永久禁止 auto-equivalent 降级。修正文档而非行为。
+    """
     try:
         from local_webpage_access.docker_runtime import DockerRuntime
 
@@ -1529,7 +1551,6 @@ def _apply_candidate_and_host(
     candidate_kind = candidate_dict.get("kind")
     candidate_runtime = candidate_dict.get("runtime", "").replace("-", "_")
     candidate_entry = candidate_dict.get("entry", {})
-    candidate_subdir = candidate_dict.get("sourceSubdir")
 
     if candidate_kind:
         try:
@@ -1547,8 +1568,10 @@ def _apply_candidate_and_host(
             pass
     if candidate_entry:
         manifest.entry = EntryConfig(**candidate_entry)
-    if candidate_subdir:
-        manifest.sourceSubdir = candidate_subdir
+    if "sourceSubdir" in candidate_dict:
+        # 评审-组2：仅当候选带子目录时才覆盖，会保留旧值而无法清回 None；
+        # 改为显式键存在性判定（含 None 赋值）。
+        manifest.sourceSubdir = candidate_dict.get("sourceSubdir")
 
     manifest.touch()
     manifest.save(workspace.app_manifest_path(instance_id))
@@ -2248,8 +2271,9 @@ def _sync_alias_port(
             text = conf_path.read_text(encoding="utf-8")
         except OSError:
             text = ""
-        m = re.search(r"127\.0\.0\.1:(\d+)", text)
-        if m and int(m.group(1)) == host_port:
+        # 评审-组2：原取首个 127.0.0.1:PORT 匹配比较，多代理合片时首项可能
+        # 不是本实例端口而误判漂移；改为直接判定本实例端口是否存在。
+        if f"127.0.0.1:{host_port}" in text:
             return False  # 端口未漂移，别名片段仍有效
     try:
         gateway.generate_alias_config(instance_id, alias, host_port, runtime=manifest.runtime.value)

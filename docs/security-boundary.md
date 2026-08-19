@@ -94,6 +94,7 @@
 * API 传 token 支持 `Authorization: Bearer`、`X-LWA-Token`，以及 `?token=` 查询参数
   （管理页新标签等）；**查询参数会进入浏览器历史 / Referer / 反代 access log**，属有意保留的便利通道，日常优先用 Header。详见 [管理页鉴权](manager-page.md#鉴权)。
 * **回环写请求 CSRF（BUG-295）**：本机 `GET`/`HEAD`/`OPTIONS` 仍可免 token；无有效 token 的写请求须 `Sec-Fetch-Site: same-origin` 或匹配的 `Origin`，否则 403 `csrf_forbidden`。
+* **DNS rebinding Host 校验（BUG-576）**：loopback 免鉴权判定 = 客户端地址为回环 **且** Host 头主机名属于 `127.0.0.1` / `localhost` / `::1`；攻击者域名解析到 127.0.0.1 时浏览器虽视为同源，也无法借免 token 路径发起写操作（缺 Host 头的非浏览器客户端放行）。
 * **原生目录选择（IMP-051）**：`POST /api/pick-directory` **仅 loopback** 客户端可用（即使持有有效 token，局域网也 403 `loopback_required`），防止远程触发宿主机 GUI 对话框。
 
 ## 默认资源限制

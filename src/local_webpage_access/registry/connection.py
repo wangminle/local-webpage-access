@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -180,7 +181,10 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
             yield conn
             conn.execute("COMMIT")
         except Exception:
-            conn.execute("ROLLBACK")
+            # 评审-组7：COMMIT 失败后事务可能已不存在，裸 ROLLBACK 再抛会
+            # 掩盖原始异常（磁盘 I/O 等）；抑制回滚失败、保留原错误上抛。
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
             raise
 
 
@@ -266,6 +270,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         migrate(conn)
     except (OSError, sqlite3.Error) as exc:
         if conn is not None:
+            release_connection_lock(conn)  # 评审-组7：与 Registry.close 对齐，防 _LOCKS 泄漏
             conn.close()
         # BUG-316：包装原生 sqlite3/OSError，附路径与排查建议，避免 traceback 直抛用户。
         raise RegistryError(

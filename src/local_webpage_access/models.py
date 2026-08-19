@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -712,13 +713,21 @@ class InstanceManifest(BaseModel):
     # ---- IO ----------------------------------------------------------------
 
     def save(self, path: Path) -> None:
-        """写入 ``local-web.json``（美化格式）。"""
-        path.parent.mkdir(parents=True, exist_ok=True)
+        """写入 ``local-web.json``（美化格式）。
+
+        评审-组7：临时文件 + ``os.replace`` 原子替换——中途崩溃不再留下
+        损坏的 manifest（后续 load 抛 SchemaError 会让实例不可读）。
+        """
         data = self.to_dict()
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+        if isinstance(path, Path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        else:
+            # 非 Path（测试桩 / PathLike 以外）：保持直写
+            path.write_text(text, encoding="utf-8")
 
     @classmethod
     def load(cls, path: Path) -> InstanceManifest:

@@ -480,6 +480,7 @@ def host_container(
     registry.update_status(instance_id, Status.BUILDING.value)
     build_log = workspace.app_logs(instance_id) / "build.log"
     build_id = registry.add_build(instance_id, status="running", log_path=str(build_log))
+    _up_completed = False  # 评审-组2
     fresh_port = False
 
     def _stage(name: str) -> None:
@@ -526,6 +527,7 @@ def host_container(
         _stage("compose_build_done")
         _stage("compose_up_start")
         runtime.up(instance_id)
+        _up_completed = True  # 评审-组2：up 后写失败须回滚停容器
         _stage("compose_up_done")
     except BuildCancelled as exc:
         if fresh_port:
@@ -563,6 +565,12 @@ def host_container(
                 registry.finish_build(build_id, status="failed", error_summary=str(exc)[:500])
         except Exception:  # noqa: BLE001
             log.exception("兜底 finish build 失败")
+        # 评审-组2：up 成功后的写盘/DB 失败会留孤儿运行容器（实例标 FAILED 但
+        # 容器在跑）；best-effort down，与 _liveness_failed_rollback 对称。
+        if _up_completed:
+            with contextlib.suppress(Exception):
+                runtime.down(instance_id)
+                log.info("实例 %s 部署后置写失败，已回滚停掉容器", instance_id)
         _mark_failed(workspace, registry, instance_id, manifest, exc)
         raise
 
@@ -1186,7 +1194,7 @@ def _collect_side_effect_records(
         )
         # 如果存活探针未通过，迁移可能已执行但应用未启动
         # 如果存活探针通过且 guard 后有命令，迁移已成功
-        result = "succeeded" if migration_succeeded else ("unknown" if liveness_ok else "unknown")
+        result = "succeeded" if migration_succeeded else "unknown"  # 评审-组2：两分支恒等，化简
         records.append(
             SideEffectRecord(
                 kind="migration",
@@ -1617,8 +1625,11 @@ def sync_dir(
 ) -> None:
     """把 src/ 的内容整体复制到 dst/（先清空 dst）。"""
     skip = skip or set()
-    if dst.exists():
+    # 评审-组2：dst 被外部破坏成普通文件时 rmtree 抛 NotADirectoryError，无自愈
+    if dst.is_dir():
         shutil.rmtree(dst)
+    elif dst.exists():
+        dst.unlink()
     dst.mkdir(parents=True)
     for item in src.iterdir():
         if item.name in skip:
