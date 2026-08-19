@@ -6,7 +6,7 @@
 "判断不准"或"需要修复"的环节。每个 skill 只负责**判断、生成、修复配置**，
 最终执行（构建、启动、停端口）仍由 `lwa` 完成（设计 §18）。
 
-**命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 **19** 个），避免与其他项目的 skill 撞名。
+**命名约定**：目录与 skill 名统一使用 `lwa-` 前缀（共 **20** 个），避免与其他项目的 skill 撞名。
 
 日常运维（网关选型、冗余清理、容器别名、浏览量）见仓库 [`docs/operations-playbook.md`](../../../docs/operations-playbook.md)。
 
@@ -16,6 +16,7 @@
 | --- | --- | --- |
 | [`lwa-import-zip`](lwa-import-zip/SKILL.md) | 拿到 zip 要部署 / 同项目出新版本 | 判断 import vs `--update`，避免重复新建 |
 | [`lwa-import-folder`](lwa-import-folder/SKILL.md) | 本机目录导入 / `--from-dir` 更新 | 只读复制进工作区；禁止就地运行；路径须绝对且与关联一致；管理页选目录仅 loopback（IMP-051） |
+| [`lwa-import-git`](lwa-import-git/SKILL.md) | GitHub 仓库一键导入与更新（IMP-065：浅克隆 staging + ls-remote 无变更探测） | 工作区外浅克隆后走 zip 管线；管理页 GitHub 导入不限 loopback（065.d，LAN + token） |
 | [`lwa-update-runtime`](lwa-update-runtime/SKILL.md) | 代码升级后刷新 runtime | `lwa update` 一键（V0.8.0 起含源码快进 + 新解释器接力，无需先 git pull）；手动兜底重启 manager/daemon |
 | [`lwa-relocate-workspace`](lwa-relocate-workspace/SKILL.md) | 同卷改名/迁移 Runtime 工作区 | 只调 `lwa workspace relocate`；禁 sed/mv/删 daemon-processed |
 | [`lwa-review-access-urls`](lwa-review-access-urls/SKILL.md) | 换网 / 升级后访问地址失效或别名白屏 | refresh → review → 分层排障；rebuild 须显式确认 |

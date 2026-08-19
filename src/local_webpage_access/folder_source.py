@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -38,6 +39,11 @@ _SKIP_DIRS = {
     ".ruff_cache",
 }
 _SKIP_FILES = {".DS_Store", "Thumbs.db"}
+
+#: 确定性 zip 时间戳（zip 纪元 1980-01-01）。若用源文件 mtime，同一内容在
+#: 不同时刻打包会产生不同 zip 字节流 → compute_zip_hash 抖动，「打包内容
+#: 未变」的 skipped 判定退化为 2 秒 DOS 时间窗内的运气（CHK-239）。
+_ZIP_FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 def validate_source_dir(
@@ -158,10 +164,15 @@ def pack_source_dir(
                     continue
                 if not fpath.is_file():
                     continue
-                # arcname 相对于源目录根
+                # arcname 相对于源目录根。用固定时间戳的 ZipInfo 流式写入，
+                # 保证「同内容 → 同 zip 字节流 → 同 hash」（大文件不进内存）。
                 arcname = str(fpath.relative_to(source_dir))
                 try:
-                    zf.write(fpath, arcname)
+                    zi = zipfile.ZipInfo(arcname, date_time=_ZIP_FIXED_DATE)
+                    zi.compress_type = zipfile.ZIP_DEFLATED
+                    zi.external_attr = (fpath.stat().st_mode & 0xFFFF) << 16
+                    with fpath.open("rb") as src_fh, zf.open(zi, "w") as dst_fh:
+                        shutil.copyfileobj(src_fh, dst_fh, length=1024 * 1024)
                     file_count += 1
                 except OSError as exc:
                     log.warning("打包时跳过文件 %s：%s", fpath, exc)

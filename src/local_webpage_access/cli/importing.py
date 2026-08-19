@@ -5,6 +5,7 @@ DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import typer
@@ -14,7 +15,9 @@ from local_webpage_access.errors import LwaError
 
 
 def import_cmd(
-    zip_path: str = typer.Argument(None, help="要导入的 zip 文件路径（与 --from-dir 互斥）"),
+    zip_path: str = typer.Argument(
+        None, help="要导入的 zip 文件路径（与 --from-dir / --from-git 互斥）"
+    ),
     name: str = typer.Option(None, "--name", "-n", help="实例显示名称（默认从文件名推导）"),
     path_alias: str = typer.Option(
         None,
@@ -32,6 +35,23 @@ def import_cmd(
         "--from-dir",
         help="IMP-047：从本机文件夹源导入（复制进工作区，非就地运行）。"
         "与 zip_path 互斥；加 --update <id> 时从关联源目录更新。",
+    ),
+    from_git: str = typer.Option(
+        None,
+        "--from-git",
+        help="IMP-065：从 GitHub 仓库导入（https://github.com/<owner>/<repo>，"
+        "浅克隆后复制进工作区）。与 zip_path / --from-dir 互斥；"
+        "加 --update <id> 时对该实例做远端探测更新。",
+    ),
+    ref: str = typer.Option(
+        None,
+        "--ref",
+        help="IMP-065：GitHub 分支或标签名；缺省跟仓库默认分支（仅 --from-git 时可用）",
+    ),
+    subdir: str = typer.Option(
+        None,
+        "--subdir",
+        help="IMP-065：仓库内子目录（monorepo 场景只打包该目录；仅 --from-git 时可用）",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="非交互确认（CI / daemon 调用）"),
     dry_run: bool = typer.Option(
@@ -53,7 +73,7 @@ def import_cmd(
         help="允许新 zip 的 kind/runtime 与原实例不同（默认拒绝；确认迁移时仍保留 hostPort 登记）",
     ),
 ) -> None:
-    """导入一个 zip 包或本机文件夹源：解压、识别、登记实例。
+    """导入一个 zip 包、本机文件夹源或 GitHub 仓库：解压、识别、登记实例。
 
     加 ``--update <id>``（IMP-009）则改为原地更新已有实例：保留 instance_id、
     hostPort、data/、desiredState 与路径别名，仅覆盖业务源码并按需 restart。
@@ -61,21 +81,40 @@ def import_cmd(
     加 ``--from-dir <path>``（IMP-047）则从本机文件夹源导入：复制源目录内容
     进入工作区实例目录，而非就地运行关联目录。加 ``--update <id>`` 时
     从该实例的关联源目录更新。
+
+    加 ``--from-git <url>``（IMP-065）则从 GitHub 仓库导入：一次性浅克隆到
+    工作区外临时目录后复制进工作区；``--ref`` 指定分支/标签（缺省跟默认
+    分支）、``--subdir`` 指定仓库子目录。加 ``--update <id>`` 时对已关联
+    仓库做 ``ls-remote`` 无变更探测后原地升级。
     """
     from local_webpage_access.importer import Importer
 
     try:
-        # --from-dir 与 zip_path 互斥
-        if from_dir is not None and zip_path is not None:
+        # 三源互斥（065.19）：zip 位置参数 / --from-dir / --from-git 恰选其一
+        sources = [
+            ("zip_path", zip_path),
+            ("--from-dir", from_dir),
+            ("--from-git", from_git),
+        ]
+        provided = [label for label, value in sources if value is not None]
+        if len(provided) > 1:
             typer.secho(
-                "--from-dir 与位置参数 zip_path 互斥，请只指定一个",
+                f"导入来源互斥（{'、'.join(provided)}），请只指定一个",
                 fg=typer.colors.RED,
                 err=True,
             )
             raise typer.Exit(code=2)
-        if from_dir is None and zip_path is None:
+        if not provided:
             typer.secho(
-                "请提供 zip 文件路径或 --from-dir <目录>",
+                "请提供 zip 文件路径、--from-dir <目录> 或 --from-git <仓库地址>",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        if from_git is None and (ref is not None or subdir is not None):
+            typer.secho(
+                "--ref / --subdir 仅可与 --from-git 同时使用",
                 fg=typer.colors.RED,
                 err=True,
             )
@@ -91,7 +130,45 @@ def import_cmd(
         ws, config, reg = open_workspace_registry()
         try:
             importer = Importer(ws, config, reg)
-            if from_dir is not None:
+            if from_git is not None:
+                # IMP-065：GitHub 源
+                if update is not None:
+                    # BUG-556：更新按实例已记录的 ref/打包子目录进行；
+                    # 显式传 --ref/--subdir 会被静默丢弃，须直接拒绝。
+                    if ref is not None or subdir is not None:
+                        typer.secho(
+                            "--ref / --subdir 不能与 --from-git --update 同时使用："
+                            "更新按实例导入时记录的分支与子目录进行；"
+                            "如需更换，请删除实例后用新参数重新导入。",
+                            fg=typer.colors.RED,
+                            err=True,
+                        )
+                        raise typer.Exit(code=2)
+                    _do_update_from_git(
+                        importer,
+                        ws,
+                        config,
+                        reg,
+                        instance_id=update,
+                        url=from_git,
+                        restart=not no_restart,
+                        keep_data=not no_keep_data,
+                        yes=yes,
+                        dry_run=dry_run,
+                        force_kind_change=force_kind_change,
+                    )
+                else:
+                    result = importer.import_from_git(
+                        from_git,
+                        ref=ref,
+                        subdir=subdir,
+                        name=name,
+                        path_alias=path_alias,
+                        on_conflict="error",
+                    )
+                    _print_import_result(result, config)
+                    _print_git_source_note(result, importer)
+            elif from_dir is not None:
                 # IMP-047：文件夹源路径
                 if update is not None:
                     _do_update_from_dir(
@@ -239,6 +316,152 @@ def _print_folder_source_note(result, importer) -> None:
                 f"  更新：lwa import --from-dir <目录> --update {result.instance_id}",
                 fg=typer.colors.CYAN,
             )
+
+
+def _print_git_source_note(result, importer) -> None:
+    """IMP-065：GitHub 源导入成功后的补充提示（url / ref / 短 SHA）。"""
+    from local_webpage_access.models import InstanceManifest
+
+    manifest_path = importer.ws.app_manifest_path(result.instance_id)
+    if not manifest_path.is_file():
+        return
+    manifest = InstanceManifest.load(manifest_path)
+    url = getattr(manifest, "sourceGitUrl", None)
+    ref = getattr(manifest, "sourceGitRef", None)
+    ref_kind = getattr(manifest, "sourceGitRefKind", None)
+    commit = getattr(manifest, "sourceGitCommit", None)
+    if not url:
+        return
+    ref_label = f"{ref_kind} {ref}" if ref else "默认分支"
+    short_sha = (commit or "")[:8]
+    typer.secho(
+        f"  来源类型：GitHub（{url}，{ref_label} @ {short_sha or '未知 OID'}）",
+        fg=typer.colors.CYAN,
+    )
+    typer.secho(
+        f"  更新：lwa import --from-git {url} --update {result.instance_id}",
+        fg=typer.colors.CYAN,
+    )
+
+
+def _do_update_from_git(
+    importer,
+    ws,
+    config,
+    reg,
+    *,
+    instance_id: str,
+    url: str,
+    restart: bool,
+    keep_data: bool,
+    yes: bool,
+    dry_run: bool,
+    force_kind_change: bool,
+) -> None:
+    """IMP-065：``lwa import --from-git <url> --update <id>`` 的编排。
+
+    传入 URL 经规范化后须与 manifest 的 ``sourceGitUrl`` 一致，否则
+    ``source_mismatch``（在 ``update_from_git`` 内判定，禁止用另一仓库覆盖）。
+    """
+    # BUG-553：旧侧 OID 从更新前的 manifest 读取——UpdateResult.prev_hash 在
+    # 真正升级后是打包 zip 的 sha256，与 commit 不是同一单位，不能混排展示。
+    from local_webpage_access import git_source
+    from local_webpage_access.models import InstanceManifest
+
+    prev_commit = None
+    stored_url: str | None = None
+    manifest_path = ws.app_manifest_path(instance_id)
+    if manifest_path.is_file():
+        with contextlib.suppress(Exception):
+            _manifest = InstanceManifest.load(manifest_path)
+            prev_commit = getattr(_manifest, "sourceGitCommit", None)
+            stored_url = getattr(_manifest, "sourceGitUrl", None)
+
+    # 换源拒绝在 CLI 层前置为 exit 2（CHK-239 low-1：与 folder 的 BUG-440
+    # 目录一致性预检同档；importer 的 source_mismatch 判定保留作 API 兜底）。
+    if stored_url:
+        try:
+            provided_url = git_source.parse_github_url(url).url
+        except LwaError:
+            provided_url = None  # 非法 URL 交给 update_from_git 出结构化 errorKind
+        if provided_url is not None and provided_url != stored_url:
+            typer.secho(
+                f"传入的仓库 {provided_url} 与实例 {instance_id} 关联的 {stored_url} 不一致。\n"
+                "如需更换来源，请先删除实例再用新仓库重新导入。",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+    result = importer.update_from_git(
+        instance_id,
+        url=url,
+        restart=restart,
+        keep_data=keep_data,
+        yes=yes,
+        dry_run=dry_run,
+        force_kind_change=force_kind_change,
+    )
+
+    prev_oid = (prev_commit or "")[:12] or "∅"
+    new_oid = (getattr(result.manifest, "sourceGitCommit", None) or "")[:12]
+
+    if result.skipped:
+        typer.secho(
+            f"实例 {instance_id} 的远端 git 源无变更（{new_oid or 'OID 未知'}），已跳过更新。",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    if result.dry_run:
+        typer.secho(
+            f"[dry-run] 实例 {instance_id}：远端有新提交，将重新克隆打包并原地更新",
+            fg=typer.colors.CYAN,
+        )
+        # dry-run 只能拿到打包 zip 的内容指纹（新旧 current 逻辑内容对比），
+        # 不冒充 commit OID（BUG-553：单位不同不得混标）
+        typer.echo(
+            f"  打包内容指纹：{(result.prev_hash or '')[:12] or '∅'} -> "
+            f"{(result.zip_hash or '')[:12]}"
+        )
+        if result.detection is not None:
+            typer.echo(f"  新形态：{result.detection.form}")
+        if result.kind_changed:
+            typer.secho(
+                "  ⚠ 形态将变化，需 --force-kind-change 才能实际更新",
+                fg=typer.colors.YELLOW,
+            )
+        return
+
+    typer.secho(f"已从 GitHub 源更新实例：{instance_id}", fg=typer.colors.GREEN)
+    # 远端 OID 用更新前后 manifest 的 commit（result.manifest 已由
+    # update_from_git 同步磁盘身份）；zip_hash 是打包内容指纹，单位不同，
+    # 单独一行展示，不得混标（BUG-553）。
+    typer.echo(f"  远端 OID：{prev_oid} -> {new_oid or '未知'}")
+    typer.echo(
+        f"  打包内容指纹：{(result.prev_hash or '')[:12] or '∅'} -> "
+        f"{(result.zip_hash or '')[:12]}"
+    )
+    if result.detection is not None:
+        typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
+    typer.echo(f"  目录：{result.app_dir}")
+
+    # DEV-067 / BUG-112：容器源码已换 -> rebuild 镜像；静态/前端 -> restart。
+    if result.needs_rebuild:
+        from local_webpage_access.lifecycle import rebuild_instance
+
+        typer.secho(
+            "  正在 rebuild（容器源码已更新，须重建镜像）…",
+            fg=typer.colors.CYAN,
+        )
+        rebuild_instance(ws, config, reg, instance_id)
+        typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
+    elif result.needs_restart:
+        from local_webpage_access.lifecycle import restart_instance
+
+        typer.secho("  正在 restart…", fg=typer.colors.CYAN)
+        restart_instance(ws, config, reg, instance_id)
+        typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
 
 
 def _do_update_from_dir(

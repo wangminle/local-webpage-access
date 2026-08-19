@@ -97,6 +97,12 @@ class InstanceStatus:
     # IMP-047：来源类型与关联路径
     source_kind: str = "zip"
     source_dir_path: str | None = None
+    # IMP-065：git 源身份（url / 真实 ref / ref 类型 / 完整 OID / 打包子目录）
+    source_git_url: str | None = None
+    source_git_ref: str | None = None
+    source_git_ref_kind: str | None = None
+    source_git_commit: str | None = None
+    source_git_subdir: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -163,6 +169,12 @@ class InstanceStatus:
             # IMP-047：来源类型与关联路径
             "sourceKind": self.source_kind,
             "sourceDirPath": self.source_dir_path,
+            # IMP-065：git 源身份（refKind 供前端区分 分支/tag 展示）
+            "sourceGitUrl": self.source_git_url,
+            "sourceGitRef": self.source_git_ref,
+            "sourceGitRefKind": self.source_git_ref_kind,
+            "sourceGitCommit": self.source_git_commit,
+            "sourceGitSubdir": self.source_git_subdir,
             **self.extra,
         }
 
@@ -187,6 +199,12 @@ def instance_status(
     # IMP-047：从 manifest 读取来源类型与关联路径
     source_kind = "zip"
     source_dir_path: str | None = None
+    # IMP-065：git 源身份
+    source_git_url: str | None = None
+    source_git_ref: str | None = None
+    source_git_ref_kind: str | None = None
+    source_git_commit: str | None = None
+    source_git_subdir: str | None = None
     manifest_path = workspace.app_manifest_path(instance_id)
     if manifest_path.is_file():
         try:
@@ -195,6 +213,11 @@ def instance_status(
             manifest = InstanceManifest.load(manifest_path)
             source_kind = getattr(manifest, "sourceKind", "zip") or "zip"
             source_dir_path = getattr(manifest, "sourceDirPath", None)
+            source_git_url = getattr(manifest, "sourceGitUrl", None)
+            source_git_ref = getattr(manifest, "sourceGitRef", None)
+            source_git_ref_kind = getattr(manifest, "sourceGitRefKind", None)
+            source_git_commit = getattr(manifest, "sourceGitCommit", None)
+            source_git_subdir = getattr(manifest, "sourceGitSubdir", None)
         except Exception:  # noqa: BLE001 - manifest 读取失败不阻断状态
             pass
 
@@ -235,6 +258,11 @@ def instance_status(
         runtime_access=row.get("runtime_access"),
         source_kind=source_kind,
         source_dir_path=source_dir_path,
+        source_git_url=source_git_url,
+        source_git_ref=source_git_ref,
+        source_git_ref_kind=source_git_ref_kind,
+        source_git_commit=source_git_commit,
+        source_git_subdir=source_git_subdir,
     )
 
 

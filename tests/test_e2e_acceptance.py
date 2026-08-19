@@ -95,7 +95,7 @@ def test_e2e_init_creates_clean_workspace(tmp_path: Path) -> None:
     assert ws.inbox.is_dir()
     assert ws.apps.is_dir()
     assert ws.skills.is_dir()
-    assert len(list(ws.skills.rglob("SKILL.md"))) == 19
+    assert len(list(ws.skills.rglob("SKILL.md"))) == 20
 
 
 # ---- WBS-29.02~04 静态 HTML 全链路 ----------------------------------------

@@ -95,6 +95,20 @@ class DirectoryPickerError(LwaError):
     code = "DIRECTORY_PICKER_ERROR"
 
 
+class GitSourceError(LwaError):
+    """GitHub 源校验、克隆或更新失败（IMP-065）。
+
+    ``context["kind"]`` 携带结构化 errorKind（闭集见
+    ``git_source.ERROR_KINDS``：``invalid_url`` / ``host_not_allowed`` /
+    ``userinfo_forbidden`` / ``git_missing`` / ``remote_unreachable`` /
+    ``ref_not_found`` / ``clone_timeout`` / ``size_exceeded`` /
+    ``source_mismatch``）。CLI / 管理页据此输出人话提示，未知 kind 走
+    通用失败文案，不得降成「地址无效」。
+    """
+
+    code = "GIT_SOURCE_ERROR"
+
+
 # ---- 识别 ------------------------------------------------------------------
 
 
@@ -178,6 +192,7 @@ __all__ = [
     "ZipImportError",
     "FolderSourceError",
     "DirectoryPickerError",
+    "GitSourceError",
     "RecognitionError",
     "GatewayError",
     "BuildError",

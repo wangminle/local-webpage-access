@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import LwaError, RecognitionError, ZipImportError
+from local_webpage_access.errors import GitSourceError, LwaError, RecognitionError, ZipImportError
 from local_webpage_access.import_activity import import_activity_lock
 from local_webpage_access.logging import get_logger
 from local_webpage_access.security import ZipSanitizeResult
@@ -157,6 +157,33 @@ def slug_basis_for_id(*, name: str | None, path_stem: str) -> str:
 def titleize(slug: str) -> str:
     """把 slug 转成人类可读名称：``my-demo`` → ``My Demo``。"""
     return " ".join(part.capitalize() for part in slug.split("-") if part) or "Instance"
+
+
+def _resolve_git_pack_root(staging_root: Path, subdir: str) -> Path:
+    """把 git 源子目录解析为 staging 内的安全绝对路径（IMP-065 / BUG-557）。
+
+    先过 :func:`local_webpage_access.paths.validate_source_subdir`（拒绝绝对
+    路径 / 盘符 / ``..``，与 BUG-507 同规），再 ``resolve()`` 后断言仍在
+    staging 内（挡 symlink 逃逸到仓库外）。返回路径不保证存在，由调用方
+    给出「子目录不存在」的业务错误。
+    """
+    from local_webpage_access.paths import validate_source_subdir
+
+    try:
+        normalized = validate_source_subdir(subdir)
+    except LwaError as exc:
+        raise ZipImportError(
+            f"子目录必须是仓库相对路径（不接受绝对路径或 ``..``）：{subdir}",
+        ) from exc
+    if normalized is None:  # pragma: no cover - 空白输入在调用方已归一为 None
+        return staging_root
+    root = (staging_root / normalized).resolve()
+    staging_resolved = staging_root.resolve()
+    if root != staging_resolved and staging_resolved not in root.parents:
+        raise ZipImportError(
+            f"子目录越出仓库范围：{subdir}",
+        )
+    return root
 
 
 _TITLE_RE = re.compile(r"<title\b[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -645,9 +672,23 @@ class Importer:
         :func:`lifecycle.restart_instance`。hostPort 由 hosting 在重启时复用。
 
         Raises:
-            ZipImportError: zip 非法 / 实例不存在 / 形态变化被拒绝 / 解压失败。
+            ZipImportError: zip 非法 / 实例不存在 / 形态变化被拒绝 / 解压失败 /
+                git 源实例用 zip 更新（IMP-065 065.18）。
         """
         with import_activity_lock(self.ws):
+            # IMP-065（065.18）：git 源实例禁止用 zip 覆盖更新——否则内容来自
+            # 本地 zip 而身份仍指向远端，下次 update-from-git 的无变更探测会
+            # 与磁盘内容脱节。folder 源不受影响（update_from_dir 走
+            # _update_zip_locked）。
+            guard_manifest_path = self.ws.app_manifest_path(instance_id)
+            if guard_manifest_path.is_file():
+                existing = InstanceManifest.load(guard_manifest_path)
+                if getattr(existing, "sourceKind", "zip") == "git":
+                    raise ZipImportError(
+                        f"实例 {instance_id} 是 GitHub 源实例（sourceKind='git'），"
+                        f"请用 lwa import --from-git --update {instance_id} 从远端更新",
+                        instance_id=instance_id,
+                    )
             return self._update_zip_locked(
                 zip_path,
                 instance_id,
@@ -690,14 +731,15 @@ class Importer:
         was_running = old_manifest.desiredState == DesiredState.RUNNING
         app_dir = self.ws.app_dir(instance_id)
 
-        # 2. hash 未变化 → 跳过
+        # 2. hash 未变化 → 跳过（dry-run 零写入：连事件也不记，CHK-239）
         if new_hash == old_hash:
             log.info("实例 %s 的 zip 未变化（sha256=%s），跳过更新", instance_id, new_hash[:12])
-            self.registry.add_event(
-                instance_id,
-                "update",
-                f"zip 未变化（sha256={new_hash[:12]}），跳过更新",
-            )
+            if not dry_run:
+                self.registry.add_event(
+                    instance_id,
+                    "update",
+                    f"zip 未变化（sha256={new_hash[:12]}），跳过更新",
+                )
             return UpdateResult(
                 instance_id=instance_id,
                 manifest=old_manifest,
@@ -706,6 +748,9 @@ class Importer:
                 zip_hash=new_hash,
                 prev_hash=old_hash,
                 skipped=True,
+                # CHK-239：dry-run 模式下跳过也须回传 dry_run=True，否则
+                # git update 的写回段据 result.dry_run 误判会写盘/记事件
+                dry_run=dry_run,
                 was_running=was_running,
                 needs_restart=False,
             )
@@ -1125,9 +1170,13 @@ class Importer:
         source_kind = getattr(old_manifest, "sourceKind", "zip")
         source_dir_str = getattr(old_manifest, "sourceDirPath", None)
         if source_kind != "folder" or not source_dir_str:
+            if source_kind == "git":
+                hint = "请用 lwa import --from-git <url> --update 从远端更新"
+            else:
+                hint = "请用 lwa import --update 加 zip"
             raise ZipImportError(
                 f"实例 {instance_id} 不是文件夹源实例（sourceKind={source_kind!r}），"
-                f"无法用 update-from-dir 更新；请用 lwa import --update 加 zip。",
+                f"无法用 update-from-dir 更新；{hint}。",
                 instance_id=instance_id,
             )
 
@@ -1206,6 +1255,347 @@ class Importer:
             updated_manifest.touch()
             updated_manifest.save(manifest_path)
 
+        return result
+
+    # ---- GitHub 源导入与更新（IMP-065）---------------------------------------
+
+    def import_from_git(
+        self,
+        url: str,
+        *,
+        ref: str | None = None,
+        subdir: str | None = None,
+        name: str | None = None,
+        path_alias: str | None = None,
+        on_conflict: str = "error",
+        clone_url: str | None = None,
+    ) -> ImportResult:
+        """从 GitHub 仓库一键导入实例（IMP-065 §17.2）。
+
+        红线流程：
+        1. :func:`git_source.parse_github_url` 校验并规范化 URL（闭集 errorKind）。
+        2. :func:`git_source.stage_git_clone` 一次性浅克隆到**工作区外**临时
+           目录（成功/失败后均删除）。
+        3. 只用 :func:`folder_source.pack_source_dir` 打包（跳过 ``.git`` 与
+           symlink），复用 ``_import_zip_locked`` 完成解压、扫描、registry 登记。
+        4. 写回 §17.2.1 git 身份（``sourceKind="git"``、``sourceDirPath=None``、
+           规范化 url / 真实 ref / 完整 OID / 打包子目录）。
+
+        禁止：调用 ``import_from_dir``；把 staging 写成 ``sourceDirPath``；
+        对 staging 调 ``validate_source_dir``（该校验拒绝工作区内目录，
+        staging 语义与之无关，065.i）。
+
+        ``clone_url`` 仅供零外网测试注入本地 bare remote（065.05）；生产
+        调用方不得传。
+
+        Raises:
+            GitSourceError: URL / git / 克隆类闭集 errorKind。
+            ZipImportError: 子目录不存在等导入管线错误。
+        """
+        with import_activity_lock(self.ws):
+            return self._import_from_git_locked(
+                url,
+                ref=ref,
+                subdir=subdir,
+                name=name,
+                path_alias=path_alias,
+                on_conflict=on_conflict,
+                clone_url=clone_url,
+            )
+
+    def _import_from_git_locked(
+        self,
+        url: str,
+        *,
+        ref: str | None = None,
+        subdir: str | None = None,
+        name: str | None = None,
+        path_alias: str | None = None,
+        on_conflict: str = "error",
+        clone_url: str | None = None,
+    ) -> ImportResult:
+        from local_webpage_access import git_source
+        from local_webpage_access.folder_source import pack_source_dir
+        from local_webpage_access.paths import validate_source_subdir
+
+        target = git_source.parse_github_url(url)
+        subdir = (subdir or "").strip() or None
+        if subdir:
+            try:
+                validate_source_subdir(subdir)
+            except LwaError as exc:
+                raise ZipImportError(
+                    f"--subdir 必须是仓库相对子目录（不接受绝对路径或 ``..``）：{subdir}",
+                ) from exc
+        log.info(
+            "GitHub 源导入：%s（ref=%s，subdir=%s）",
+            target.url,
+            ref or "默认分支",
+            subdir or "仓库根",
+        )
+
+        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-git-import-")
+        os.close(fd)
+        tmp_zip = Path(tmp_zip_path)
+        try:
+            with git_source.stage_git_clone(target, ref=ref, clone_url=clone_url) as clone:
+                pack_root = clone.directory
+                if subdir:
+                    pack_root = _resolve_git_pack_root(clone.directory, subdir)
+                    if not pack_root.is_dir():
+                        raise ZipImportError(
+                            f"仓库 {target.url} 中不存在子目录 {subdir!r}；请核对 --subdir",
+                        )
+                pack_source_dir(pack_root, dest_zip=tmp_zip)
+                result = self._import_zip_locked(
+                    tmp_zip,
+                    name=name or target.repo,
+                    path_alias=path_alias,
+                    on_conflict=on_conflict,
+                    id_basis=target.repo,
+                )
+
+                # 写回 git 身份（§17.2.1：staging 恒不落 sourceDirPath）。
+                # zip 导入此时已落盘；写回失败必须补偿删除，否则留下
+                # sourceKind=zip 的半成品，违反 §17.6（CHK-240 / BUG-572）。
+                try:
+                    manifest_path = self.ws.app_manifest_path(result.instance_id)
+                    manifest = InstanceManifest.load(manifest_path)
+                    manifest.sourceKind = "git"
+                    manifest.sourceDirPath = None
+                    manifest.sourceGitUrl = target.url
+                    manifest.sourceGitRef = clone.ref
+                    manifest.sourceGitRefKind = clone.ref_kind
+                    manifest.sourceGitCommit = clone.commit
+                    manifest.sourceGitSubdir = subdir
+                    manifest.touch()
+                    manifest.save(manifest_path)
+                    # 内存结果与磁盘身份保持一致（folder 路径的历史行为是留旧的
+                    # in-memory manifest；git 路径消费方更多，不留陈旧对象）
+                    result.manifest = manifest
+                    identity = (
+                        f"{target.url}（{clone.ref_kind} {clone.ref}"
+                        f" @ {clone.commit[:12]}）"
+                    )
+                except Exception as exc:
+                    log.error(
+                        "写回 git 身份失败，回滚实例 %s：%s", result.instance_id, exc
+                    )
+                    self._cleanup_failed(result.instance_id)
+                    raise ZipImportError(
+                        f"GitHub 源身份写回失败，已清理半成品：{exc}"
+                    ) from exc
+                except BaseException:
+                    log.error("写回 git 身份被中断，回滚实例 %s", result.instance_id)
+                    self._cleanup_failed(result.instance_id)
+                    raise
+        finally:
+            with contextlib.suppress(OSError):
+                tmp_zip.unlink(missing_ok=True)
+
+        self.registry.add_event(result.instance_id, "import", f"GitHub 源导入：{identity}")
+        log.info("GitHub 源导入成功：%s（%s）", result.instance_id, identity)
+        return result
+
+    def update_from_git(
+        self,
+        instance_id: str,
+        *,
+        url: str | None = None,
+        restart: bool = True,
+        keep_data: bool = True,
+        yes: bool = False,  # noqa: ARG002 - 交互确认由 CLI 层处理
+        dry_run: bool = False,
+        force_kind_change: bool = False,
+        clone_url: str | None = None,
+    ) -> UpdateResult:
+        """从 GitHub 远端更新 git 源实例（IMP-065 §17.2.3 / 065.15–18）。
+
+        流程：
+        1. 实例存在且 ``sourceKind=="git"``；传入 ``url`` 时规范化后必须与
+           ``sourceGitUrl`` 一致，否则 ``source_mismatch``（065.l）。
+        2. ``git ls-remote`` 对**已存储** ref+kind 探测远端 OID（不落盘，
+           缺省分支不得每次再猜 HEAD）。
+        3. OID 未变 → ``skipped=True``「无需更新」，零 clone / 零 rebuild。
+        4. 有新提交 → 重新浅克隆 → pack（同一打包子目录）→ 既有
+           ``_update_zip_locked`` 原地升级（保留 id/端口/data/别名）→ 写回
+           新 ref/OID。克隆失败不影响现 ``current/``。
+
+        ``clone_url`` 仅供零外网测试注入（同 :meth:`import_from_git`）。
+
+        Raises:
+            ZipImportError: 实例不存在 / 非 git 源 / 子目录缺失 / 升级失败。
+            GitSourceError: ``source_mismatch`` 及 URL / git / 网络类 errorKind。
+        """
+        with import_activity_lock(self.ws):
+            return self._update_from_git_locked(
+                instance_id,
+                url=url,
+                restart=restart,
+                keep_data=keep_data,
+                yes=yes,
+                dry_run=dry_run,
+                force_kind_change=force_kind_change,
+                clone_url=clone_url,
+            )
+
+    def _update_from_git_locked(
+        self,
+        instance_id: str,
+        *,
+        url: str | None = None,
+        restart: bool = True,
+        keep_data: bool = True,
+        yes: bool = False,
+        dry_run: bool = False,
+        force_kind_change: bool = False,
+        clone_url: str | None = None,
+    ) -> UpdateResult:
+        from local_webpage_access import git_source
+        from local_webpage_access.folder_source import pack_source_dir
+
+        if not self.registry.instance_exists(instance_id):
+            raise ZipImportError(
+                f"实例 {instance_id} 不存在，无法更新",
+                instance_id=instance_id,
+            )
+        manifest_path = self.ws.app_manifest_path(instance_id)
+        if not manifest_path.is_file():
+            raise ZipImportError(
+                f"实例 {instance_id} 缺少 local-web.json，无法更新",
+                instance_id=instance_id,
+            )
+        old_manifest = InstanceManifest.load(manifest_path)
+
+        source_kind = getattr(old_manifest, "sourceKind", "zip")
+        stored_url = getattr(old_manifest, "sourceGitUrl", None)
+        stored_ref = getattr(old_manifest, "sourceGitRef", None)
+        stored_kind = getattr(old_manifest, "sourceGitRefKind", None)
+        stored_commit = getattr(old_manifest, "sourceGitCommit", None)
+        stored_subdir = getattr(old_manifest, "sourceGitSubdir", None)
+        if source_kind != "git" or not (stored_url and stored_ref and stored_kind and stored_commit):
+            raise ZipImportError(
+                f"实例 {instance_id} 不是 git 源实例（sourceKind={source_kind!r}）"
+                f"或 git 身份字段缺失，无法用 update-from-git 更新；"
+                f"zip 源请用 lwa import --update，文件夹源请用 --from-dir --update。",
+                instance_id=instance_id,
+            )
+
+        target = git_source.parse_github_url(url) if url is not None else None
+        if target is not None and target.url != stored_url:
+            raise GitSourceError(
+                f"传入的仓库 {target.url} 与实例 {instance_id} 关联的 {stored_url} 不一致；"
+                f"如需更换来源，请先删除实例再重新导入",
+                kind="source_mismatch",
+                instance_id=instance_id,
+            )
+        if target is None:
+            target = git_source.parse_github_url(stored_url)
+
+        remote_oid = git_source.probe_remote_commit(
+            clone_url or stored_url,
+            ref=stored_ref,
+            ref_kind=stored_kind,
+        )
+
+        # 无变更短路（065.b / 065.16）：OID 相同 → 无需更新，不 clone 不 rebuild
+        if remote_oid == stored_commit:
+            log.info(
+                "实例 %s 的 git 源无变更（%s %s @ %s），跳过更新",
+                instance_id,
+                stored_kind,
+                stored_ref,
+                stored_commit[:12],
+            )
+            if not dry_run:
+                self.registry.add_event(
+                    instance_id,
+                    "update",
+                    f"git 源无变更（{stored_kind} {stored_ref} @ {stored_commit[:12]}），跳过更新",
+                )
+            return UpdateResult(
+                instance_id=instance_id,
+                manifest=old_manifest,
+                detection=None,
+                app_dir=self.ws.app_dir(instance_id),
+                zip_hash=stored_commit,
+                prev_hash=stored_commit,
+                skipped=True,
+                dry_run=dry_run,
+                was_running=old_manifest.desiredState == DesiredState.RUNNING,
+                needs_restart=False,
+            )
+
+        log.info(
+            "实例 %s 的 git 源有新提交（%s %s：%s -> %s）",
+            instance_id,
+            stored_kind,
+            stored_ref,
+            stored_commit[:12],
+            remote_oid[:12],
+        )
+
+        fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-git-update-")
+        os.close(fd)
+        tmp_zip = Path(tmp_zip_path)
+        try:
+            with git_source.stage_git_clone(
+                target, ref=stored_ref, clone_url=clone_url
+            ) as clone:
+                pack_root = clone.directory
+                if stored_subdir:
+                    # BUG-557：存量 manifest 可能被手改，join 前过安全解析
+                    pack_root = _resolve_git_pack_root(clone.directory, stored_subdir)
+                    if not pack_root.is_dir():
+                        raise ZipImportError(
+                            f"仓库 {target.url} 中已不存在子目录 {stored_subdir!r}，"
+                            f"无法按原打包范围更新",
+                            instance_id=instance_id,
+                        )
+                pack_source_dir(pack_root, dest_zip=tmp_zip)
+                result = self._update_zip_locked(
+                    tmp_zip,
+                    instance_id,
+                    restart=restart,
+                    keep_data=keep_data,
+                    yes=yes,
+                    dry_run=dry_run,
+                    force_kind_change=force_kind_change,
+                )
+                new_ref, new_kind, new_commit = clone.ref, clone.ref_kind, clone.commit
+        finally:
+            with contextlib.suppress(OSError):
+                tmp_zip.unlink(missing_ok=True)
+
+        # 写回 git 身份。按本函数 dry_run 形参判定（不得用 result.dry_run：
+        # 历史缺口是 hash 相同跳过分支曾恒为 False）。非 dry-run 一律执行
+        # （含 packed zip hash 未变的 skipped：远端 commit 已前进，刷新 OID
+        # 让下次探测短路）；_update_zip_locked 重建 manifest 时
+        # apply_detection_to_manifest 已透传旧身份，但 commit 仍是旧值，
+        # 必须在此刷新（065.17）。
+        if not dry_run:
+            updated = InstanceManifest.load(manifest_path)
+            updated.sourceKind = "git"
+            updated.sourceDirPath = None
+            updated.sourceGitUrl = stored_url
+            updated.sourceGitRef = new_ref
+            updated.sourceGitRefKind = new_kind
+            updated.sourceGitCommit = new_commit
+            updated.sourceGitSubdir = stored_subdir
+            updated.touch()
+            updated.save(manifest_path)
+            # 内存结果与磁盘身份保持一致（与 import_from_git 同约定：git 路径
+            # 消费方多，不留陈旧 commit/ref 的 in-memory manifest）。_update_zip_locked
+            # 返回的 manifest 在 apply_detection_to_manifest 透传的仍是旧 commit。
+            result.manifest = updated
+            # dry-run 不落盘，不得记「已更新」事件；zip 内容未变的 skipped 已由
+            # _update_zip_locked 记「zip 未变化…跳过更新」，不再叠加双事件。
+            if not result.skipped:
+                self.registry.add_event(
+                    instance_id,
+                    "update",
+                    f"git 源更新：{stored_url}（{new_kind} {new_ref} @ {new_commit[:12]}）",
+                )
         return result
 
     @staticmethod
@@ -1685,6 +2075,14 @@ def apply_detection_to_manifest(
     fresh.sourceKind = getattr(manifest, "sourceKind", "zip") or "zip"
     fresh.sourceDirPath = getattr(manifest, "sourceDirPath", None)
     fresh.sourceSyncHash = getattr(manifest, "sourceSyncHash", None)
+    # IMP-065（065.12）：git 源身份同位置透传——否则 ``lwa scan`` /
+    # ``update_zip`` 重建会把 git 实例静默退回 zip 身份（与 folder 透传
+    # 同源的 BUG-441 类缺陷）。update_from_git 在此之后另行刷新新 commit。
+    fresh.sourceGitUrl = getattr(manifest, "sourceGitUrl", None)
+    fresh.sourceGitRef = getattr(manifest, "sourceGitRef", None)
+    fresh.sourceGitRefKind = getattr(manifest, "sourceGitRefKind", None)
+    fresh.sourceGitCommit = getattr(manifest, "sourceGitCommit", None)
+    fresh.sourceGitSubdir = getattr(manifest, "sourceGitSubdir", None)
     # CHK-178/P2：路径别名是用户/CLI 选择，不从 zip 推导，重扫不得清空。
     # ``build_manifest_from_detection`` 默认 ``path_alias=None``，不透传会把
     # static/container 的 routeMode=name、routeHost 重置为 port/None，导致

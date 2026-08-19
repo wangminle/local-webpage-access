@@ -156,3 +156,134 @@ def test_manual_strategy_does_not_auto_refresh(env, monkeypatch) -> None:
     )
     assert aw.maybe_throttled_lan_refresh(ws, cfg, reg) is None
     assert calls["n"] == 0
+
+
+# ---- DEV-114：access review 防抖重试 ------------------------------------------
+
+
+class TestReviewAccessDebounce:
+    """update 重启后的启动窗口误报 FAIL：0.5/1/2/4s 防抖重试。"""
+
+    @staticmethod
+    def _report(*statuses: str):
+        from local_webpage_access.access import AccessReviewReport, InstanceAccessReport
+
+        return AccessReviewReport(
+            instances=[
+                InstanceAccessReport(instance_id=f"i{n}", status=s)
+                for n, s in enumerate(statuses)
+            ]
+        )
+
+    @pytest.fixture()
+    def deb_env(self, env, monkeypatch: pytest.MonkeyPatch):
+        """env + 记录 sleep 的防抖环境（真实 sleep 被替换为记录器）。"""
+        import local_webpage_access.access_workflow as aw
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(aw.time, "sleep", lambda s: sleeps.append(s))
+        ws, cfg, reg = env
+        return ws, cfg, reg, aw, sleeps
+
+    def test_default_schedule_is_user_specified(self) -> None:
+        from local_webpage_access.access_workflow import ACCESS_REVIEW_DEBOUNCE_DELAYS
+
+        assert ACCESS_REVIEW_DEBOUNCE_DELAYS == (0.5, 1.0, 2.0, 4.0)
+
+    def test_first_pass_ok_no_retry(self, deb_env) -> None:
+        ws, cfg, reg, aw, sleeps = deb_env
+        calls: list[int] = []
+        monkeypatch_holder = pytest.MonkeyPatch()
+        monkeypatch_holder.setattr(
+            aw, "review_access", lambda *a, **k: (calls.append(1), self._report("ok"))[1]
+        )
+        try:
+            result = aw.review_access_with_debounce(ws, cfg, reg)
+        finally:
+            monkeypatch_holder.undo()
+        assert result.attempts == 1
+        assert result.passed_on_attempt == 1
+        assert result.review_error is None
+        assert sleeps == []  # 通过即返回，不等待
+        assert len(calls) == 1
+
+    def test_fail_fail_then_ok_passes_on_third_attempt(self, deb_env) -> None:
+        ws, cfg, reg, aw, sleeps = deb_env
+        outcomes = iter(
+            [self._report("fail"), self._report("fail"), self._report("ok")]
+        )
+        holder = pytest.MonkeyPatch()
+        holder.setattr(aw, "review_access", lambda *a, **k: next(outcomes))
+        try:
+            result = aw.review_access_with_debounce(ws, cfg, reg)
+        finally:
+            holder.undo()
+        assert result.attempts == 3
+        assert result.passed_on_attempt == 3
+        assert sleeps == [0.5, 1.0]  # 第 2、3 次前的防抖间隔
+        assert result.review_error is None
+
+    def test_all_fail_returns_last_after_full_schedule(self, deb_env) -> None:
+        ws, cfg, reg, aw, sleeps = deb_env
+        n = [0]
+
+        def always_fail(*a, **k):
+            n[0] += 1
+            return self._report("fail")
+
+        holder = pytest.MonkeyPatch()
+        holder.setattr(aw, "review_access", always_fail)
+        try:
+            result = aw.review_access_with_debounce(ws, cfg, reg)
+        finally:
+            holder.undo()
+        assert result.attempts == 5  # 1 次立即 + 4 次防抖
+        assert result.passed_on_attempt is None
+        assert result.review is not None and result.review.has_failures
+        assert sleeps == [0.5, 1.0, 2.0, 4.0]
+
+    def test_probe_error_is_retryable_then_passes(self, deb_env) -> None:
+        ws, cfg, reg, aw, sleeps = deb_env
+        state = [0]
+
+        def flaky(*a, **k):
+            state[0] += 1
+            if state[0] == 1:
+                raise RuntimeError("probe refused（启动窗口）")
+            return self._report("ok")
+
+        holder = pytest.MonkeyPatch()
+        holder.setattr(aw, "review_access", flaky)
+        try:
+            result = aw.review_access_with_debounce(ws, cfg, reg)
+        finally:
+            holder.undo()
+        assert result.passed_on_attempt == 2
+        assert result.review_error is None  # 通过后不携带旧的异常
+
+    def test_warn_is_real_finding_no_retry(self, deb_env) -> None:
+        """WARN（LAN 漂移/别名错位）不是启动噪声，不重试洗白。"""
+        ws, cfg, reg, aw, sleeps = deb_env
+        holder = pytest.MonkeyPatch()
+        holder.setattr(aw, "review_access", lambda *a, **k: self._report("warn"))
+        try:
+            result = aw.review_access_with_debounce(ws, cfg, reg)
+        finally:
+            holder.undo()
+        assert result.attempts == 1
+        assert result.passed_on_attempt == 1
+        assert sleeps == []
+
+    def test_custom_delays_injected(self, deb_env) -> None:
+        ws, cfg, reg, aw, sleeps = deb_env
+        outcomes = iter([self._report("fail"), self._report("fail")])
+        holder = pytest.MonkeyPatch()
+        holder.setattr(aw, "review_access", lambda *a, **k: next(outcomes))
+        try:
+            result = aw.review_access_with_debounce(
+                ws, cfg, reg, delays=(0.0, 0.0, 0.0)
+            )
+        finally:
+            holder.undo()
+        assert result.attempts == 4
+        assert sleeps == [0.0, 0.0, 0.0]

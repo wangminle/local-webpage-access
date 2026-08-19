@@ -591,6 +591,18 @@ class InstanceManifest(BaseModel):
     sourceDirPath: str | None = None
     # IMP-047：文件夹源上次同步的内容指纹（compute_source_hash），供无变更短路。
     sourceSyncHash: str | None = None
+    # IMP-065（§17.2.1）：git 源身份。sourceKind="git" 时 sourceDirPath 恒为 None
+    # （staging 一次性可弃，禁止写成本机路径）；URL 存规范化后的
+    # https://github.com/<owner>/<repo>；ref 存克隆当时解析出的真实分支/tag 名
+    # （禁止存 "HEAD"）；commit 存完整 OID（短 SHA 仅展示）。
+    sourceGitUrl: str | None = None
+    sourceGitRef: str | None = None
+    sourceGitRefKind: str | None = None  # "branch" | "tag"
+    sourceGitCommit: str | None = None
+    # git 源打包根（仓库相对子目录；None = 整仓打包）。与 scanner 的
+    # sourceSubdir（识别/构建上下文）是两个字段：本字段决定 update 重打包范围，
+    # 使更新后的 current/ 与导入时结构一致。
+    sourceGitSubdir: str | None = None
     # sourceZipHash 通过 extra="allow" 存储（未显式声明），保持向后兼容。
     sourceZipPath: str | None = None
     appPath: str | None = None
@@ -630,6 +642,20 @@ class InstanceManifest(BaseModel):
     @classmethod
     def _check_source_subdir(cls, v: Any) -> Any:
         """BUG-507：写入/加载入口拒绝绝对路径与 ``..`` 穿越。"""
+        from local_webpage_access.paths import validate_source_subdir
+
+        if v is None:
+            return None
+        try:
+            return validate_source_subdir(v)
+        except PathError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("sourceGitSubdir")
+    @classmethod
+    def _check_source_git_subdir(cls, v: Any) -> Any:
+        """IMP-065（BUG-557）：git 源打包根与 sourceSubdir 同规——拒绝绝对
+        路径与 ``..`` 穿越；否则手改 local-web.json 可让 update 打到仓库外。"""
         from local_webpage_access.paths import validate_source_subdir
 
         if v is None:

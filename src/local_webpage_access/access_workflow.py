@@ -31,6 +31,12 @@ DEFAULT_LAN_REFRESH_INTERVAL = 60.0
 # resolve_lan_ip 短 TTL 缓存，避免列表接口每请求 UDP 探测
 _LAN_IP_CACHE_TTL = 10.0
 
+#: DEV-114：update 后台重启后的 access review 防抖重试间隔（秒）。
+#: 容器/静态服务重启后有启动窗口，立即探活会把「还没就绪」误报成 FAIL
+#: （实测第二次手动 review 即通过）；首次立即检查后，在 0.5/1/2/4s 各
+#: 复查一次，任一次通过即算通过（指数退避式防抖，总窗口 ≤7.5s）。
+ACCESS_REVIEW_DEBOUNCE_DELAYS: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0)
+
 _throttle_lock = threading.Lock()
 _inflight = False
 _last_refresh_mono: float = 0.0
@@ -117,6 +123,89 @@ def run_access_pass(
     return result
 
 
+@dataclass
+class DebouncedReviewResult:
+    """防抖 review 的结果：最终报告 + 尝试过程（供 update 报告展示）。
+
+    ``passed_on_attempt`` 为 ``None`` 表示全部尝试仍存在 FAIL/异常——
+    返回的是**最后一次**结果，由调用方按原语义报 FAIL（不掩盖真故障）。
+    """
+
+    review: AccessReviewReport | None = None
+    review_error: str | None = None
+    attempts: int = 0
+    passed_on_attempt: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempts": self.attempts,
+            "passedOnAttempt": self.passed_on_attempt,
+            "review": self.review.to_dict() if self.review is not None else None,
+            "reviewError": self.review_error,
+        }
+
+
+def _review_needs_debounce_retry(
+    review: AccessReviewReport | None, error: str | None
+) -> bool:
+    """是否值得防抖重试（DEV-114）：探测**异常**或存在 **FAIL**。
+
+    WARN（LAN 漂移 / IMP-023 别名资源错位等）是真实发现，不是启动窗口
+    噪声，重试只会浪费时间——不靠重试洗白。
+    """
+    if error is not None:
+        return True
+    return review is not None and review.has_failures
+
+
+def review_access_with_debounce(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    *,
+    delays: tuple[float, ...] = ACCESS_REVIEW_DEBOUNCE_DELAYS,
+) -> DebouncedReviewResult:
+    """立即执行一次 access review；存在 FAIL/异常时按 ``delays`` 防抖重试。
+
+    共 ``1 + len(delays)`` 次尝试（首次立即，其后按 0.5/1/2/4s 间隔）。
+    任一次「无 FAIL 且无异常」即通过并返回该次报告；全部失败返回最后
+    一次（``passed_on_attempt=None``）。单次探测异常视为可重试的瞬时失败。
+    """
+    result = DebouncedReviewResult()
+    for index in range(len(delays) + 1):
+        if index:
+            time.sleep(delays[index - 1])
+        review: AccessReviewReport | None = None
+        error: str | None = None
+        try:
+            review = review_access(workspace, config, registry)
+        except Exception as exc:  # noqa: BLE001 — 单次探测异常可重试
+            error = str(exc)
+            log.warning("access review 第 %d 次尝试异常：%s", index + 1, exc)
+        if not _review_needs_debounce_retry(review, error):
+            return DebouncedReviewResult(
+                review=review,
+                review_error=None,
+                attempts=index + 1,
+                passed_on_attempt=index + 1,
+            )
+        result = DebouncedReviewResult(
+            review=review, review_error=error, attempts=index + 1
+        )
+        if index < len(delays):
+            log.info(
+                "access review 第 %d/%d 次仍有 FAIL，%.1fs 后防抖重试（DEV-114 启动窗口）",
+                index + 1,
+                len(delays) + 1,
+                delays[index],
+            )
+    log.warning(
+        "access review 防抖重试 %d 次后仍失败（非启动窗口瞬时问题，请 lwa doctor 复核）",
+        result.attempts,
+    )
+    return result
+
+
 def _persisted_lan_hosts_differ(workspace: Workspace, registry: Registry, lan_ip: str) -> bool:
     """任一实例落盘 lanUrl host 与 ``lan_ip`` 不一致则视为漂移。"""
     from local_webpage_access.models import InstanceManifest
@@ -195,11 +284,14 @@ def maybe_throttled_lan_refresh(
 
 __all__ = [
     "AccessPassResult",
+    "ACCESS_REVIEW_DEBOUNCE_DELAYS",
+    "DebouncedReviewResult",
     "DEFAULT_LAN_REFRESH_INTERVAL",
     "cached_resolve_lan_ip",
     "maybe_throttled_lan_refresh",
     "refresh_network_entries",
     "reset_lan_refresh_throttle_state",
     "review_access",
+    "review_access_with_debounce",
     "run_access_pass",
 ]

@@ -136,7 +136,7 @@ def test_init_copies_skills(tmp_path: Path) -> None:
     init_workspace(root)
     ws = Workspace(root)
     skill_docs = list(ws.skills.rglob("SKILL.md"))
-    assert len(skill_docs) == 19  # V0.7.0 新增 lwa-import-folder
+    assert len(skill_docs) == 20  # V0.8 IMP-065 新增 lwa-import-git
     # 索引 README 也应存在
     assert (ws.skills / "README.md").is_file()
     # 关键 skill 应在列
@@ -162,7 +162,7 @@ def test_bundled_skills_have_discoverable_frontmatter() -> None:
     """内置 Skill 必须提供 Agent Skills 可发现的最小 YAML 元数据。"""
     skills_root = Path(__file__).parents[1] / "src/local_webpage_access/skills"
     skill_docs = sorted(skills_root.glob("lwa-*/SKILL.md"))
-    assert len(skill_docs) == 19
+    assert len(skill_docs) == 20
 
     for skill_doc in skill_docs:
         text = skill_doc.read_text(encoding="utf-8")

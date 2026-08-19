@@ -1251,3 +1251,135 @@ def test_update_wait_ready_timeout_degrades_to_warning(
     assert "gateway" in step.message and "doctor" in step.message
     # 等待超时不阻断 access 自检（warning 不算失败）
     assert report.step("accessRefresh").status == "ok"
+
+
+def test_update_access_review_debounce_absorbs_startup_window(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEV-114：重启后 review 首查 FAIL（容器启动窗口），防抖重试后通过。
+
+    期望：accessReview 步骤 ok、消息注明第 N 次防抖通过；refresh/review 顺序
+    不变；真实 sleep 被替换（测试不等待 7.5s）。
+    """
+    from local_webpage_access.access import AccessReviewReport, InstanceAccessReport
+    from local_webpage_access import access_workflow as aw
+    from local_webpage_access.updater import run_update
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.start_manager", lambda ws, cfg: 4242
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.updater.verify_manager_version",
+        lambda *a, **k: (True, "V0.8.2"),
+    )
+
+    def fake_refresh(ws, cfg, reg):
+        order.append("accessRefresh")
+        from local_webpage_access.access import RefreshReport
+
+        return RefreshReport(lan_ip="192.168.1.50")
+
+    monkeypatch.setattr(aw, "refresh_network_entries", fake_refresh)
+
+    def fail_report() -> AccessReviewReport:
+        return AccessReviewReport(
+            instances=[InstanceAccessReport(instance_id="booting", status="fail")]
+        )
+
+    def ok_report() -> AccessReviewReport:
+        return AccessReviewReport(
+            instances=[InstanceAccessReport(instance_id="booting", status="ok")]
+        )
+
+    outcomes = iter([fail_report(), fail_report(), ok_report()])
+    review_calls: list[int] = []
+    monkeypatch.setattr(
+        aw, "review_access", lambda *a, **k: (review_calls.append(1), next(outcomes))[1]
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(aw.time, "sleep", lambda s: sleeps.append(s))
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=_opts(restart_manager=True, restart_daemon=False, review_access=True),
+    )
+
+    step = report.step("accessReview")
+    assert step is not None
+    assert step.status == "ok"
+    assert "总体：OK" in step.message
+    assert "第 3 次防抖重试后通过" in step.message
+    assert step.extra is not None
+    assert step.extra.get("accessReviewAttempts") == 3
+    assert step.extra.get("accessReviewPassedOnAttempt") == 3
+    assert len(review_calls) == 3
+    assert sleeps == [0.5, 1.0]
+    assert order.index("accessRefresh") == 0  # refresh 先行且仅一次
+
+
+def test_update_access_review_debounce_reports_persistent_failure(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEV-114 反向：防抖重试耗尽仍 FAIL → 如实报告并提示 doctor 复核。"""
+    from local_webpage_access.access import AccessReviewReport, InstanceAccessReport
+    from local_webpage_access import access_workflow as aw
+    from local_webpage_access.updater import run_update
+
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_running", lambda ws, cfg: True
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.start_manager", lambda ws, cfg: 4242
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.updater.verify_manager_version",
+        lambda *a, **k: (True, "V0.8.2"),
+    )
+    monkeypatch.setattr(aw, "refresh_network_entries", lambda *a, **k: None)
+
+    def always_fail(*a, **k):
+        return AccessReviewReport(
+            instances=[InstanceAccessReport(instance_id="dead", status="fail")]
+        )
+
+    monkeypatch.setattr(aw, "review_access", always_fail)
+    monkeypatch.setattr(aw.time, "sleep", lambda s: None)
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=_opts(restart_manager=True, restart_daemon=False, review_access=True),
+    )
+    step = report.step("accessReview")
+    assert step is not None
+    # review 已执行 → 步骤 ok（原语义），但消息如实给出 FAIL 与重试次数
+    assert step.status == "ok"
+    assert "总体：FAIL" in step.message
+    assert "防抖重试 5 次后仍失败" in step.message
+    assert "lwa doctor" in step.message
+    assert step.extra is not None
+    assert step.extra.get("accessReviewAttempts") == 5
+    assert step.extra.get("accessReviewPassedOnAttempt") is None

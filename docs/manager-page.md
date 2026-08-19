@@ -85,6 +85,8 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
 | POST | `/api/instances/{id}/update-from-dir` | 从关联文件夹源同步更新实例（IMP-047；仅 sourceKind=folder） |
 | POST | `/api/import-from-dir` | 从本机文件夹导入新实例（IMP-047） |
+| POST | `/api/import-from-git` | 从 GitHub 仓库一键导入新实例（IMP-065；不限 loopback，LAN + token 可用；body：`url`/`ref`/`subdir`/`name`/`pathAlias`） |
+| POST | `/api/instances/{id}/update-from-git` | 从 GitHub 远端更新 git 源实例（IMP-065；`ls-remote` 无变更探测，OID 未变返回 `skipped=true`；仅 sourceKind=git） |
 | POST | `/api/pick-directory` | 在 **LWA 宿主机**打开原生目录选择器（IMP-051）；**仅 loopback** 客户端可用，成功返回 `{path}`；局域网即使有 token 也 403 `loopback_required` |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
@@ -194,6 +196,51 @@ Content-Type: application/json
   自动跳过（`skipped=true`），不 rebuild / restart。
 * 源目录不存在时返回错误（不会回退到 mount 模式）。
 * 与 CLI `lwa import --from-dir <path> --update <id>` 共用 `importer.update_from_dir` 代码路径。
+
+### GitHub 源导入与更新（IMP-065）
+
+#### 从 GitHub 导入
+
+```http
+POST /api/import-from-git
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"url": "https://github.com/<owner>/<repo>", "ref": "可选分支/标签",
+ "subdir": "可选子目录", "name": "可选", "pathAlias": "可选"}
+```
+
+* 仅支持 `https://github.com/<owner>/<repo>`（精确 host、仅 443；拒绝 userinfo /
+  query / fragment / `/tree/` 等网页段——网页地址请改用 `ref` + `subdir` 字段）。
+* LWA 在**宿主机**一次性浅克隆（`--depth 1`，空 template + 禁 hooks +
+  `GIT_LFS_SKIP_SMUDGE=1`）到工作区外临时目录，打包（跳过 `.git` 与 symlink）后
+  走与 zip 完全相同的识别管线；**不限 loopback**（LAN + token 可用）。
+* 成功体含 `autoStart`（对齐 import-from-dir：识别成功且 tiny/small 自动启动；
+  `status=pending` 才是真·未识别，前端会报错并保持对话框）。
+* 失败体 `error.detail.kind` 携带闭集 errorKind：`invalid_url` /
+  `host_not_allowed` / `userinfo_forbidden` / `git_missing` /
+  `remote_unreachable` / `ref_not_found` / `clone_timeout` / `size_exceeded`。
+* 并发导入经 `import_activity` 闸门排队；staging 每路独立 tempfile，用完即删。
+* 私有仓凭据与代理（`https_proxy`）都配置在 **LWA 宿主机**（不是浏览器所在
+  机器）；LWA 不保存、不回显凭据。
+
+#### 从 GitHub 更新
+
+```http
+POST /api/instances/{id}/update-from-git
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"url": "可选（规范化后须与实例记录一致）", "restart": true, "keepData": true}
+```
+
+* 仅适用于 `sourceKind=git` 的实例；无 `url` 时用 manifest 存储的仓库地址与
+  ref/tag 类型做 `git ls-remote` 探测。
+* 远端 OID 未变 → `skipped=true`（「无需更新」，零克隆零重建）；有新提交 →
+  重新浅克隆 → 既有原地升级（保留 id / 端口 / data / 别名）。
+* 传入 `url` 与实例 `sourceGitUrl` 不一致 → 400（`source_mismatch`）；换源请先
+  删除实例再导入。
+* git 源实例不能用 zip `update` / `update-from-dir` 更新（会被拒绝）。
 
 ### 路径别名（IMP-006 / IMP-014 / IMP-022）
 

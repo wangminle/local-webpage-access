@@ -150,6 +150,12 @@ swap=4GB
 * **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。**V0.6.13** 起 Caddy `-size.log.gz` 多轮转/旧游标迁移/归档暂时不可读时的补读逻辑已加固（避免双计或永久漏计）。
 * **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），**V0.6.13** 起容器查询失败禁止绕过挂载 fail-safe、registry 不可读时一致性检查 SKIP，但仍不能替代正式 relocate 事务。
 * **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>` 或管理页「从源更新」同步。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。`sourceKind=zip` 的实例不能用 `--from-dir --update`。请选项目根或 `dist/`，不要只选 `src/`。
+* **GitHub 源导入的锁语义（IMP-065 / CHK-239）**：git 导入/更新在
+  `import_activity` 全局锁内完成探测（ls-remote ≤30s）与克隆（≤180s）——设计取舍：
+  并发导入按既有闸门排队、staging 互不干扰。窗口内其它导入（zip/文件夹）会等待；
+  `lwa update` 重启 manager/daemon 前等待导入空闲（约 180s），若克隆恰在此时进行，
+  超时后跳过重启并提示 doctor 复核（不会打断导入）。长克隆期间管理页「克隆中…」属预期。
+* **GitHub 源导入（IMP-065）**：仅支持 `https://github.com`（精确 host、仅 443；MVP 不放开 GitHub Enterprise / Gitea / GitLab，常量预留）。一次性浅克隆（`--depth 1`）不做仓库缓存与增量 fetch；实例内不保留 `.git`；不递归 submodule；Git LFS 对象只保留指针文件（`GIT_LFS_SKIP_SMUDGE=1`）。克隆超 180s 或源码 >2 GiB 拒绝导入。凭据与代理零托管：私有仓靠 LWA 宿主机的 credential helper，代理靠 `https_proxy` / git `http.proxy`；从 LAN 浏览器导入私有仓失败属预期。git 源实例不能用 zip `--update` / `--from-dir --update` 更新；`--from-git --update` 传入的仓库必须与实例记录一致。git 导入/更新全程持全局导入锁（含约 30s 探测 + 最长 180s 克隆的网络等待），期间 `lwa update` 会等待导入空闲（最多 180s）。webhook / 定时拉取 / PR preview / GitHub App / `git push` receive-pack 一律不做。
 * **选择文件夹（IMP-051 / V0.7.1）**：管理页原生目录对话框仅 **loopback** 可用；局域网即使持有 token 也不能远程弹窗，须手输宿主机绝对路径。
 * **升级与导入互斥（V0.7.1）**：`lwa update` 重启 manager/daemon 前会等待导入空闲（约 180s）；超时跳过重启，避免打断进行中的导入。
 * **多工作区（IMP-053）**：默认端口（`managerPort=17800` / `staticGatewayPort` / `portPool`）按**一机一工作区**设计。`lwa init` 在默认端口已有其它工作区管理页运行时，会输出黄色软提示建议复用既有工作区（不阻断）。确需第二工作区，须改全三段端口，否则会抢同一端口、实例列表分裂。

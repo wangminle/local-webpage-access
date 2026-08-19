@@ -102,6 +102,8 @@
               var raw = extractApiErrorMessage(body, resp.statusText);
               var err = new Error(LWA.friendlyApiMessage(raw));
               err.code = (body && body.error && body.error.code) || "";
+              // IMP-065：透出 error.detail（git 源闭集 errorKind 在 detail.kind）
+              err.detail = (body && body.error && body.error.detail) || null;
               err.status = resp.status;
               throw err;
             },
@@ -178,6 +180,31 @@
     }
 
     function sourceInfoHtml(inst) {
+      if (inst.sourceKind === "git") {
+        var html = '<dl class="detail-kv">';
+        html += "<dt>来源类型</dt><dd>GitHub 仓库</dd>";
+        if (inst.sourceGitUrl) {
+          html += '<dt>仓库地址</dt><dd class="detail-path" title="' +
+            LWA.esc(inst.sourceGitUrl) + '">' +
+            LWA.esc(inst.sourceGitUrl) + "</dd>";
+        }
+        var refParts = [];
+        if (inst.sourceGitRef) {
+          // CHK-239 low-3：refKind 区分 分支/tag 展示
+          var kindLabel = inst.sourceGitRefKind === "tag" ? "tag " : "";
+          refParts.push(kindLabel + LWA.esc(inst.sourceGitRef));
+        }
+        if (inst.sourceGitCommit) {
+          refParts.push("@" + LWA.esc(String(inst.sourceGitCommit).slice(0, 8)));
+        }
+        if (refParts.length) {
+          html += "<dt>分支/标签</dt><dd>" + refParts.join(" ") + "</dd>";
+        }
+        if (inst.sourceGitSubdir) {
+          html += "<dt>子目录</dt><dd>" + LWA.esc(inst.sourceGitSubdir) + "</dd>";
+        }
+        return html + "</dl>";
+      }
       if (inst.sourceKind !== "folder") return "";
       var html = '<dl class="detail-kv">';
       html += "<dt>来源类型</dt><dd>本机文件夹</dd>";
@@ -413,6 +440,8 @@
           // IMP-047：文件夹源导入弹窗
           // IMP-051：picking 防连点；canPickFolder 仅 loopback
           folderImport: { open: false, sourceDir: "", name: "", pathAlias: "", error: "", submitting: false, picking: false },
+          // IMP-065：GitHub 源导入弹窗（不限 loopback，065.d）
+          gitImport: { open: false, url: "", ref: "", subdir: "", name: "", pathAlias: "", error: "", submitting: false },
           pageview: { open: false, title: "", body: "", instanceId: null },
           // IMP-035：双阶段删除模态（step 1 选范围 → step 2 输 ID；needForce 再确认）
           removeDialog: {
@@ -660,7 +689,8 @@
             if (op === "path-alias") { this.openPathAlias(id); return; }
             if (op === "remove") { this.openRemoveDialog(id); return; }
             if (op === "pageview") { this.openPageview(id); return; }
-            if (op === "update-from-dir") { this.doUpdateFromDir(id); return; }
+              if (op === "update-from-dir") { this.doUpdateFromDir(id); return; }
+              if (op === "update-from-git") { this.doUpdateFromGit(id); return; }
             this.doOperation(id, op);
             return;
           }
@@ -778,6 +808,28 @@
               self.refresh();
             })
             .catch(function (e) { self.toast("从文件夹源更新失败：" + e.message, "error"); });
+        },
+
+        // IMP-065：从 GitHub 远端更新 git 源实例（先 ls-remote 探测，
+        // 无变更零重建；失败经 errorKind 人话表提示）
+        doUpdateFromGit: function (id) {
+          var self = this;
+          this.toast("正在探测 GitHub 远端…");
+          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/update-from-git", {
+            method: "POST",
+            body: JSON.stringify({ restart: true, keepData: true }),
+          })
+            .then(function (data) {
+              if (data.skipped) {
+                self.toast("远端无新提交，无需更新", "info");
+              } else {
+                self.toast("已从 GitHub 更新", "success");
+              }
+              self.refresh();
+            })
+            .catch(function (e) {
+              self.toast("从 GitHub 更新失败：" + LWA.describeGitError(e), "error");
+            });
         },
 
         // ---- IMP-035：双阶段安全删除 ----
@@ -1078,6 +1130,9 @@
             });
         },
         doFolderImport: function () {
+          // CHK-239 low-2：输入框 Enter 可在 submitting 期间重复触发提交，
+          // 克隆窗口长（git 最长 180s），必须在入口防连点（按钮 disabled 之外）。
+          if (this.folderImport.submitting || this.folderImport.picking) return;
           var dir = this.folderImport.sourceDir.trim();
           if (!dir) {
             this.folderImport.error = "请输入源目录的绝对路径";
@@ -1118,6 +1173,70 @@
             });
         },
 
+        // ---- IMP-065：GitHub 源导入（不限 loopback，LAN + token 可用） ----
+        openGitImport: function () {
+          this.gitImport.url = "";
+          this.gitImport.ref = "";
+          this.gitImport.subdir = "";
+          this.gitImport.name = "";
+          this.gitImport.pathAlias = "";
+          this.gitImport.error = "";
+          this.gitImport.submitting = false;
+          this.gitImport.open = true;
+        },
+        closeGitImport: function () {
+          this.gitImport.open = false;
+          this.gitImport.error = "";
+        },
+        doGitImport: function () {
+          // CHK-239 low-2：Enter 在克隆进行中（最长 180s）不得重复提交
+          if (this.gitImport.submitting) return;
+          var url = this.gitImport.url.trim();
+          if (!url) {
+            this.gitImport.error = "请输入 GitHub 仓库地址";
+            return;
+          }
+          if (url.indexOf("https://github.com/") !== 0) {
+            this.gitImport.error =
+              "仓库地址必须形如 https://github.com/<owner>/<repo>（MVP 不支持 SSH / 其他平台）";
+            return;
+          }
+          var self = this;
+          this.gitImport.error = "";
+          this.gitImport.submitting = true;
+          var body = { url: url };
+          var ref = this.gitImport.ref.trim();
+          if (ref) body.ref = ref;
+          var subdir = this.gitImport.subdir.trim();
+          if (subdir) body.subdir = subdir;
+          var name = this.gitImport.name.trim();
+          if (name) body.name = name;
+          var alias = this.gitImport.pathAlias.trim();
+          if (alias) body.pathAlias = alias;
+          apiFetch(this, "/api/import-from-git", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          })
+            .then(function (data) {
+              self.gitImport.submitting = false;
+              var outcome = LWA.describeGitImportOutcome(data);
+              self.toast(outcome.toast, outcome.toastKind);
+              self.refresh();
+              if (outcome.keepOpen) {
+                self.gitImport.error = outcome.error;
+                return;
+              }
+              self.gitImport.open = false;
+              self.gitImport.error = "";
+            })
+            .catch(function (e) {
+              self.gitImport.submitting = false;
+              // 065.23：闭集 errorKind 出人话；未知 kind 走通用失败
+              self.gitImport.error = LWA.describeGitError(e);
+            });
+        },
+
         // ---- 浏览量详情 ----
         openPageview: function (id) {
           var self = this;
@@ -1150,6 +1269,7 @@
           if (e.key !== "Escape") return;
           if (this.removeDialog.open) this.closeRemoveDialog();
           else if (this.folderImport.open) this.closeFolderImport();
+          else if (this.gitImport.open) this.closeGitImport();
           else if (this.pageview.open) this.closePageview();
           else if (this.pathAlias.open) this.closePathAlias();
           else if (this.logs.open) this.closeLogs();
@@ -1268,6 +1388,7 @@
     '      <label><input type="checkbox" v-model="filters.redundant" /> 仅冗余</label>',
     '      <button class="btn btn-sm btn-warn" title="移除同包重复导入的冗余实例（保留每组最早者），不删最早者与唯一实例" @click="removeRedundant">批量删除冗余</button>',
     '      <button class="btn btn-sm" title="从本机文件夹导入（复制进工作区，非就地运行）" @click="openFolderImport">导入文件夹</button>',
+    '      <button class="btn btn-sm" title="从 GitHub 仓库导入（浅克隆后复制进工作区；本机与局域网均可）" @click="openGitImport">从 GitHub 导入</button>',
     "    </div>",
     "  </div>",
     '  <div class="table-wrap">',
@@ -1357,6 +1478,28 @@
     '      <div class="path-alias-actions-main">',
     '        <button class="btn btn-ghost" type="button" @click="closeFolderImport">取消</button>',
     '        <button class="btn btn-primary" type="button" :disabled="folderImport.submitting || folderImport.picking" @click="doFolderImport">{{ folderImport.submitting ? "导入中…" : "导入" }}</button>',
+    "      </div></div></div></div>",
+    // IMP-065：GitHub 源导入（不限 loopback）
+    '<div class="modal" :hidden="!gitImport.open">',
+    '  <div class="modal-inner path-alias-box"><div class="modal-head">',
+    '    <h2>从 GitHub 导入</h2>',
+    '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭" @click="closeGitImport">✕</button></div>',
+    '    <p class="path-alias-hint">填写<strong>公开</strong> GitHub 仓库地址（形如 <code>https://github.com/&lt;owner&gt;/&lt;repo&gt;</code>），LWA 会在宿主机<strong>浅克隆</strong>后复制进工作区运行。私有仓需要在 <strong>LWA 所在机器</strong>上配置好 git 凭据（credential helper / gh auth）；代理同样配置在宿主机（<code>https_proxy</code>）。本机与局域网（带 token）均可操作。</p>',
+    '    <label class="path-alias-field"><span>仓库地址（必填）</span>',
+    '      <input type="text" placeholder="https://github.com/owner/repo" autocomplete="off" spellcheck="false" v-model="gitImport.url" @keydown.enter="doGitImport" /></label>',
+    '    <label class="path-alias-field"><span>分支 / 标签（可选）</span>',
+    '      <input type="text" placeholder="留空跟默认分支" autocomplete="off" spellcheck="false" v-model="gitImport.ref" @keydown.enter="doGitImport" /></label>',
+    '    <label class="path-alias-field"><span>子目录（可选，monorepo）</span>',
+    '      <input type="text" placeholder="如 frontend（留空扫整仓）" autocomplete="off" spellcheck="false" v-model="gitImport.subdir" @keydown.enter="doGitImport" /></label>',
+    '    <label class="path-alias-field"><span>实例名称（可选）</span>',
+    '      <input type="text" placeholder="留空则用仓库名" autocomplete="off" spellcheck="false" v-model="gitImport.name" @keydown.enter="doGitImport" /></label>',
+    '    <label class="path-alias-field"><span>路径别名（可选）</span>',
+    '      <input type="text" placeholder="my-slug" autocomplete="off" spellcheck="false" v-model="gitImport.pathAlias" @keydown.enter="doGitImport" /></label>',
+    '    <p class="path-alias-error" :hidden="!gitImport.error">{{ gitImport.error }}</p>',
+    '    <div class="path-alias-actions">',
+    '      <div class="path-alias-actions-main">',
+    '        <button class="btn btn-ghost" type="button" @click="closeGitImport">取消</button>',
+    '        <button class="btn btn-primary" type="button" :disabled="gitImport.submitting" @click="doGitImport">{{ gitImport.submitting ? "克隆中…" : "导入" }}</button>',
     "      </div></div></div></div>",
     '<div class="modal" :hidden="!pageview.open">',
     '  <div class="modal-inner pageview-box"><div class="modal-head">',

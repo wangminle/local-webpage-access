@@ -72,6 +72,50 @@ def test_capability_report_to_health_fragment() -> None:
     assert frag["capabilities"]["sessionRefreshRequired"] is True
 
 
+def test_git_available_in_health_fragment_and_does_not_fail_overall() -> None:
+    """BUG-570 / 065.25：health 片段透出 gitAvailable；缺 git 不得把 overall 打 unready。"""
+    ready = CapabilityReport(profile="default", git_available="ready", docker_access="ready")
+    missing = CapabilityReport(
+        profile="default", git_available="unavailable", docker_access="ready"
+    )
+    assert ready.to_dict()["capabilities"]["gitAvailable"] == "ready"
+    assert missing.to_health_fragment()["capabilities"]["gitAvailable"] == "unavailable"
+    assert _compute_overall(missing) == "ready"
+    full_missing = CapabilityReport(
+        profile="full",
+        git_available="unavailable",
+        docker_engine="ready",
+        docker_compose="ready",
+        docker_access="ready",
+        cli_docker_access="ready",
+        manager_docker_access="ready",
+        daemon_docker_access="ready",
+        caddy_binary="ready",
+        caddy_runtime="ready",
+        caddy_owner="lwa_service_user",
+        caddy_workspace_access="ready",
+        gateway_access="ready",
+        details={"role": "cli"},
+    )
+    assert _compute_overall(full_missing) == "ready"
+
+
+def test_collect_capability_report_probes_git(monkeypatch, tmp_path: Path) -> None:
+    """BUG-570：collect_capability_report 必须探测 git，不得永远 unknown。"""
+    monkeypatch.setattr(
+        "local_webpage_access.git_source.git_binary_available", lambda: False
+    )
+    report = collect_capability_report(workspace_root=tmp_path, role="cli")
+    assert report.git_available == "unavailable"
+    assert report.to_health_fragment()["capabilities"]["gitAvailable"] == "unavailable"
+
+    monkeypatch.setattr(
+        "local_webpage_access.git_source.git_binary_available", lambda: True
+    )
+    report = collect_capability_report(workspace_root=tmp_path, role="cli")
+    assert report.git_available == "ready"
+
+
 def test_full_overall_requires_caddy_gateway_and_backends() -> None:
     """BUG-233：Full 在 Caddy/gateway/后台 Docker 未证明 ready 时不得 overall=ready。"""
     almost = CapabilityReport(

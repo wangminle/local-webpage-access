@@ -270,6 +270,41 @@ def check_docker_compose(runner: SubprocessRunner = _default_runner) -> CheckRes
     )
 
 
+def check_git(runner: SubprocessRunner = _default_runner) -> CheckResult:
+    """IMP-065（065.25）：git 可执行探测。
+
+    缺 git 只影响 GitHub 源导入（``lwa import --from-git`` / 管理页同名入口），
+    zip 与本机文件夹导入不受影响——因此是 **WARN** 而非 FAIL，不把整份
+    doctor 打红。
+    """
+    if not shutil.which("git"):
+        return CheckResult(
+            "git",
+            STATUS_WARN,
+            "未检测到 git 可执行文件",
+            detail="GitHub 源导入（IMP-065）不可用；zip / 本机文件夹导入不受影响",
+            suggestion=(
+                "安装 git（Ubuntu：sudo apt install git；"
+                "macOS：xcode-select --install）后即可使用 GitHub 源导入"
+            ),
+        )
+    result = runner(["git", "--version"])
+    if result.returncode != 0:
+        return CheckResult(
+            "git",
+            STATUS_WARN,
+            "git 可执行但无法获取版本",
+            detail=(result.stderr or "").strip()[:200] or None,
+        )
+    version = (result.stdout or "").strip().splitlines()
+    version_line = version[0] if version else "git"
+    return CheckResult(
+        "git",
+        STATUS_OK,
+        f"git 可用（{version_line}；GitHub 源导入可用）",
+    )
+
+
 def check_caddy(config: Config, runner: SubprocessRunner = _default_runner) -> CheckResult:
     """Caddy 版本检查：缺失时与运行时一致，降级 builtin 并告警。"""
     if config.staticGateway != "caddy":
@@ -1837,6 +1872,8 @@ def run_doctor(
             check_docker(runner=runner),
             check_docker_compose(runner=runner),
             check_caddy(config, runner=runner),
+            # IMP-065：git 可执行（缺失仅 WARN，不影响 zip/文件夹导入）
+            check_git(runner=runner),
             check_port_pool(config, port_in_use=port_in_use, allocated_ports=allocated_ports),
             check_registry(ws),
             check_static_gateway(ws),
@@ -1948,6 +1985,7 @@ __all__ = [
     "check_docker",
     "check_docker_compose",
     "check_caddy",
+    "check_git",
     "check_port_pool",
     "check_registry",
     "check_static_gateway",

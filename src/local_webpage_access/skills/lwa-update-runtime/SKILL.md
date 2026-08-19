@@ -22,7 +22,7 @@ description: >-
 | `lwa init` | **首次**创建工作区（目录、registry、配置） |
 | **`lwa update`（V0.4.0 起）** | 已有工作区 + **lwa 包升级** + skills/config 同步 + 重启 manager/daemon |
 
-当前已实现 `lwa update` CLI（**V0.8.2** 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
+当前已实现 `lwa update` CLI（**V0.8.3** 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
 执行失败、需要定位具体步骤，或用户明确要求手动处理时，才使用下方手动兜底步骤。
 
 ## 输入
@@ -98,7 +98,7 @@ lwa update --no-restart-gateway
   enabled=false → 跳过（`--no-reconcile` 可关掉拉起语义，仅排障用）；
 - **自启单元在管时**由监督器重启/拉起（`kickstart -k` / `systemctl restart`），不 stop+detached spawn，避免与 KeepAlive 抢锁；
 - 默认不重启业务实例，除非显式传 `--restart-instances`；
-- **升级收尾（IMP-038）**：后台重启后自动 **access refresh**，并默认跑一次轻量 **access review**（`--no-review-access` 可跳过 review）；Full Profile 收尾额外验收合并后的能力缓存；访问复核细节见 Skill [`lwa-review-access-urls`](../lwa-review-access-urls/SKILL.md)。
+- **升级收尾（IMP-038）**：后台重启后自动 **access refresh**，并默认跑一次轻量 **access review**（`--no-review-access` 可跳过 review）。review 带 **DEV-114 防抖**：存在 FAIL 时在 0.5/1/2/4s 各复查一次（吸收容器启动窗口的瞬时误报），任一次通过即算通过；全部失败才报 FAIL 并提示 `lwa doctor` 复核。Full Profile 收尾额外验收合并后的能力缓存；访问复核细节见 Skill [`lwa-review-access-urls`](../lwa-review-access-urls/SKILL.md)。
 
 > 非 git 克隆安装（如 release zip 解包）：`sourceUpdate skipped` 并提示迁移到
 > clone + `pip install -e .`；不会自动 clone。

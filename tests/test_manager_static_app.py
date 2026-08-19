@@ -1040,3 +1040,147 @@ assert.strictEqual(
 assert.ok(captured.opts.body && captured.opts.body.indexOf("keepData") !== -1);
 """
     )
+
+
+def test_opshtml_git_source_uses_update_from_git_endpoint() -> None:
+    """IMP-065（065.24）：git 源实例「从源更新」打 update-from-git，folder 不打 git 端点。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const opsHtml = context.window.__LWA_TEST_HOOKS__.opsHtml;
+
+var gitInst = opsHtml({{
+  id: "gs", name: "gs", status: "running",
+  runtime: "shared-static", servingMode: "shared-static", stack: [],
+  redundant: false, sourceKind: "git"
+}});
+assert.ok(gitInst.indexOf('data-op="update-from-git"') !== -1, "git 实例须有 update-from-git 按钮");
+assert.ok(gitInst.indexOf('data-op="update-from-dir"') === -1, "git 实例不得出现 update-from-dir");
+
+var folderInst = opsHtml({{
+  id: "fs", name: "fs", status: "running",
+  runtime: "shared-static", servingMode: "shared-static", stack: [],
+  redundant: false, sourceKind: "folder"
+}});
+assert.ok(folderInst.indexOf('data-op="update-from-dir"') !== -1);
+assert.ok(folderInst.indexOf('data-op="update-from-git"') === -1, "folder 实例不得打 git 端点");
+
+var zipInst = opsHtml({{
+  id: "zs", name: "zs", status: "running",
+  runtime: "shared-static", servingMode: "shared-static", stack: [],
+  redundant: false, sourceKind: "zip"
+}});
+assert.ok(zipInst.indexOf('data-op="update-from-git"') === -1);
+assert.ok(zipInst.indexOf('data-op="update-from-dir"') === -1);
+"""
+    )
+
+
+def test_describe_git_import_outcome_pending_and_medium() -> None:
+    """IMP-065（065.24）：与 folder 同一护栏——pending 才失败；medium 档是成功。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const describe = context.window.__LWA_TEST_HOOKS__.describeGitImportOutcome;
+
+var pending = describe({{
+  instanceId: "repo1",
+  autoStart: {{ action: "pending", note: "未识别（无法识别项目类型）" }},
+  instance: {{ id: "repo1", status: "pending" }},
+}});
+assert.strictEqual(pending.ok, false);
+assert.strictEqual(pending.keepOpen, true);
+assert.strictEqual(pending.toastKind, "error");
+assert.ok(pending.toast.indexOf("未能识别") !== -1, pending.toast);
+assert.ok(pending.error.indexOf("仓库") !== -1, pending.error);
+
+var medium = describe({{
+  instanceId: "repo2",
+  autoStart: {{ action: "pending", note: "资源档位 medium，不自动启动" }},
+  instance: {{ id: "repo2", status: "stopped" }},
+}});
+assert.strictEqual(medium.ok, true);
+assert.strictEqual(medium.toastKind, "success");
+assert.ok(medium.toast.indexOf("已从 GitHub 导入") !== -1, medium.toast);
+
+var started = describe({{
+  instanceId: "repo3",
+  autoStart: {{ action: "started" }},
+  instance: {{ id: "repo3", status: "running" }},
+}});
+assert.strictEqual(started.ok, true);
+assert.ok(started.toast.indexOf("已从 GitHub 导入：repo3") !== -1, started.toast);
+"""
+    )
+
+
+def test_describe_git_error_closed_set_and_unknown_fallback() -> None:
+    """IMP-065（065.23）：闭集 errorKind 出人话；未知 kind 走通用失败，不说「地址无效」。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const LWA = context.window.LWA;
+const describe = context.window.__LWA_TEST_HOOKS__.describeGitError;
+
+var kinds = ["invalid_url", "host_not_allowed", "userinfo_forbidden", "git_missing",
+  "remote_unreachable", "ref_not_found", "clone_timeout", "size_exceeded", "source_mismatch"];
+kinds.forEach(function (k) {{
+  var msg = describe({{ detail: {{ kind: k }}, message: "raw " + k }});
+  assert.ok(msg && msg.length > 4, k + " 须有人话提示");
+}});
+
+// /tree/ 网页地址提示改用仓库根 + 分支框
+assert.ok(describe({{ detail: {{ kind: "invalid_url" }} }}).indexOf("仓库根") !== -1);
+
+// 未知 kind：通用失败，不冒充地址无效
+var unknown = describe({{ detail: {{ kind: "totally_new_kind" }}, message: "克隆异常" }});
+assert.ok(unknown.indexOf("克隆异常") !== -1, unknown);
+assert.ok(unknown.indexOf("地址无效") === -1, unknown);
+"""
+    )
+
+
+def test_git_import_dialog_and_methods_wired() -> None:
+    """IMP-065（065.24）：GitHub 导入对话框、方法与 apiFetch detail 透出齐备。"""
+    app_js = APP_JS.read_text(encoding="utf-8")
+    assert "openGitImport" in app_js
+    assert "doGitImport" in app_js
+    assert "closeGitImport" in app_js
+    assert "doUpdateFromGit" in app_js
+    assert "/api/import-from-git" in app_js
+    assert "/api/instances/" in app_js and "update-from-git" in app_js
+    assert "从 GitHub 导入" in app_js
+    # apiFetch 透出 error.detail（errorKind 所在）
+    assert "err.detail = (body && body.error && body.error.detail) || null;" in app_js
+    # Esc 链包含 gitImport
+    assert "this.gitImport.open) this.closeGitImport()" in app_js
+    helpers_js = (STATIC / "helpers.js").read_text(encoding="utf-8")
+    assert "describeGitImportOutcome" in helpers_js
+    assert "gitErrorKindMessages" in helpers_js
+
+
+def test_git_import_url_prefix_check_matches_message() -> None:
+    """CHK-238 P3：前端前缀校验与文案一致——按 https://github.com/ 校验。"""
+    app_js = APP_JS.read_text(encoding="utf-8")
+    assert 'url.indexOf("https://github.com/") !== 0' in app_js
+    # 不再存在只查 https:// 的宽校验
+    assert 'url.indexOf("https://") !== 0' not in app_js
+
+
+def test_import_dialogs_guard_enter_while_submitting() -> None:
+    """CHK-239 low-2：Enter 在 submitting 期间不得重复提交（git 克隆窗最长 180s）。"""
+    app_js = APP_JS.read_text(encoding="utf-8")
+    assert "if (this.gitImport.submitting) return;" in app_js
+    assert "if (this.folderImport.submitting || this.folderImport.picking) return;" in app_js
+
+
+def test_source_info_labels_tag_vs_branch() -> None:
+    """CHK-239 low-3：详情抽屉按 sourceGitRefKind 区分 tag/分支展示。"""
+    app_js = APP_JS.read_text(encoding="utf-8")
+    assert 'inst.sourceGitRefKind === "tag" ? "tag "' in app_js

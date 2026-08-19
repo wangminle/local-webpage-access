@@ -342,6 +342,34 @@ lwa import --from-dir /abs/path/to/my-site --update <id>
 * 纯中文显示名时，实例 ID 优先取文件夹名（避免多次撞成 `instance`）。
 * 导入进行中不要立刻 `lwa update`：升级会先等待导入空闲（约 180s），超时则跳过重启 manager/daemon。
 
+### GitHub 源导入（IMP-065）
+
+```bash
+lwa import --from-git https://github.com/<owner>/<repo>
+lwa import --from-git https://github.com/<owner>/<repo> --ref dev --subdir frontend
+lwa import --from-git https://github.com/<owner>/<repo> --update <id>
+```
+
+* **仅支持 `https://github.com`**（MVP；SSH / `git@` / gitlab / gitea / 带
+  userinfo 或 `?`/`#` 的地址一律拒绝）。`/tree/<branch>/...` 网页地址请改用
+  仓库根地址 + `--ref` + `--subdir`。
+* LWA 在宿主机**一次性浅克隆**到工作区外临时目录后复制进工作区（与 zip 同
+  管线）；实例内不保留 `.git`，不缓存仓库。
+* **更新**＝ `git ls-remote` 探测远端：无新提交提示「无需更新」（零重建）；
+  有新提交重新克隆并原地升级（保留 id / 端口 / data / 别名）。`--update` 传入
+  的仓库必须与实例记录一致（换仓库先删除再导入）。
+* **无凭据快速失败**：git 子进程带 `GIT_TERMINAL_PROMPT=0` 且关闭 stdin——私有仓 401 时不会在后台等终端输入直到超时，而是立即失败（credential helper
+是非交互的，不受影响；克隆超时杀整个进程组，不残留 `git-remote-https`）。
+* **私有仓 / 代理**：凭据（credential helper / `gh auth`）与 `https_proxy` 都
+  配置在 **LWA 所在机器**上——从手机/其他电脑的浏览器导入私有仓时，用的是
+  LWA 机器的凭据，不是浏览器那台机器的。LWA 不托管任何凭据。
+* 仓库过大（>2 GiB 或克隆超 180s）会拒绝导入；Git LFS 对象只保留指针文件；
+  submodule 不递归（需要时改用文件夹导入）。
+* 管理页「从 GitHub 导入」对话框**不限本机**（LAN + token 可用）；git 实例
+  卡片展示仓库地址 / 分支 / 短 SHA，「从源更新」按来源类型自动分流。
+* 缺 git 可执行时：导入入口直接报错（`git_missing`），`lwa doctor` 出 WARN
+  （不影响 zip / 文件夹导入）。详见 Skill `lwa-import-git`。
+
 ## 容器类问题
 
 ### 容器需要额外挂载宿主目录（extraVolumes，issue#1）

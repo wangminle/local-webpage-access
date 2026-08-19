@@ -13,6 +13,32 @@ from local_webpage_access.cli._common import fmt_bytes, log, open_workspace_regi
 from local_webpage_access.errors import LwaError
 
 
+def git_source_label(status: object) -> str:
+    """GitHub 源一行文案（``status`` / ``list`` 共用，BUG-571）。"""
+    kind_prefix = "tag " if getattr(status, "source_git_ref_kind", None) == "tag" else ""
+    bits = [
+        getattr(status, "source_git_url", None) or "",
+        f"{kind_prefix}{getattr(status, 'source_git_ref', None) or '?'}@"
+        f"{(getattr(status, 'source_git_commit', None) or '')[:8]}",
+    ]
+    subdir = getattr(status, "source_git_subdir", None)
+    if subdir:
+        bits.append(f"子目录 {subdir}")
+    return "GitHub " + " ".join(b for b in bits if b)
+
+
+def _echo_source_lines(status: object) -> None:
+    """端口映射 + 来源行（folder / git）。"""
+    mapping = getattr(status, "port_mapping_label", None)
+    if mapping:
+        typer.echo(f"  ↳ 映射：{mapping}")
+    source_kind = getattr(status, "source_kind", None)
+    if source_kind == "folder":
+        typer.echo(f"  ↳ 来源：本机文件夹 {getattr(status, 'source_dir_path', None) or ''}")
+    elif source_kind == "git":
+        typer.echo(f"  ↳ 来源：{git_source_label(status)}")
+
+
 def status(
     instance_id: str = typer.Argument(None, help="实例 ID（省略则显示全部）"),
 ) -> None:
@@ -43,12 +69,7 @@ def status(
                 f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} "
                 f"{s.status:10} {s.desired_state:10} {port:6} {s.name}"
             )
-            # IMP-007：容器实例展示端口映射（internalPort→hostPort）
-            if s.port_mapping_label:
-                typer.echo(f"  ↳ 映射：{s.port_mapping_label}")
-            # IMP-047：文件夹源标识
-            if s.source_kind == "folder":
-                typer.echo(f"  ↳ 来源：本机文件夹 {s.source_dir_path or ''}")
+            _echo_source_lines(s)
             # IMP-006：路径别名入口 URL
             if s.route_url:
                 typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
@@ -147,12 +168,7 @@ def list_cmd() -> None:
         for s in statuses:
             port = str(s.host_port) if s.host_port else "-"
             typer.echo(f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} {s.status:10} {port:6} {s.name}")
-            # IMP-007：容器实例展示端口映射（internalPort→hostPort）
-            if s.port_mapping_label:
-                typer.echo(f"  ↳ 映射：{s.port_mapping_label}")
-            # IMP-047：文件夹源标识
-            if s.source_kind == "folder":
-                typer.echo(f"  ↳ 来源：本机文件夹 {s.source_dir_path or ''}")
+            _echo_source_lines(s)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

@@ -321,6 +321,23 @@
         updateBusy ? "实例正在构建/流转，暂时不能更新" : "从关联文件夹源同步更新"
       );
     }
+    // IMP-065：git 源实例显示「从源更新」（走 update-from-git API；
+    // 与 folder 分流，folder 实例不会打到 git 端点）
+    if (i.sourceKind === "git") {
+      var gitUpdateBusy =
+        i.status === "building" ||
+        i.status === "cancelling" ||
+        i.status === "queued";
+      html += LWA.opBtn(
+        id,
+        "update-from-git",
+        "从源更新",
+        gitUpdateBusy,
+        gitUpdateBusy
+          ? "实例正在构建/流转，暂时不能更新"
+          : "探测 GitHub 远端，有新提交时原地更新（无变更不重建）"
+      );
+    }
     if (canCancelBuild || i.status === "cancelling") {
       html += LWA.opBtn(
         id,
@@ -428,6 +445,32 @@
 
   // IMP-051.b：文件夹导入结果文案（识别失败勿冒充成功）
   LWA.describeFolderImportOutcome = function (data) {
+    return LWA._describeImportOutcome(data, {
+      successPrefix: "已从文件夹导入：",
+      pendingToast: "未能识别为可部署项目：",
+      pendingHint:
+        "常见原因：只选了 src/ 源码子目录——请改选项目根或 dist/，并删除待识别实例后重试。",
+      pendingError:
+        "未能识别该目录。请选择含 index.html / package.json / dist 的目录（不要只选 src/）。已创建的待识别实例可在列表中删除。",
+    });
+  };
+
+  // IMP-065（065.24）：GitHub 导入结果文案（与 folder 同一 pending/成功护栏：
+  // 真·未识别 status=pending 才报错；autoStart.action=pending 是成功——
+  // 识别成功但档位 medium/heavy 不自动启动，不得误报「未能识别」）
+  LWA.describeGitImportOutcome = function (data) {
+    return LWA._describeImportOutcome(data, {
+      successPrefix: "已从 GitHub 导入：",
+      pendingToast: "未能识别为可部署项目：",
+      pendingHint:
+        "常见原因：仓库根没有可部署内容（只有文档/脚本），或 --subdir 指到了源码子目录（如 src/）。请删除待识别实例后，改用项目根目录或正确子目录重试。",
+      pendingError:
+        "未能识别该仓库。请确认仓库含 index.html / package.json / 可构建前端（子目录用「子目录」字段指定，不要指向 src/）。已创建的待识别实例可在列表中删除。",
+    });
+  };
+
+  // 两种导入对话框共用的结果判定（BUG-449：仅 status=pending 才算未识别）
+  LWA._describeImportOutcome = function (data, labels) {
     data = data || {};
     var id =
       data.instanceId ||
@@ -443,15 +486,9 @@
       return {
         ok: false,
         toastKind: "error",
-        toast:
-          "未能识别为可部署项目：" +
-          note +
-          "（实例 " +
-          id +
-          " 为待识别，无法启动）。常见原因：只选了 src/ 源码子目录——请改选项目根或 dist/，并删除待识别实例后重试。",
+        toast: labels.pendingToast + note + "（实例 " + id + " 为待识别，无法启动）。" + labels.pendingHint,
         keepOpen: true,
-        error:
-          "未能识别该目录。请选择含 index.html / package.json / dist 的目录（不要只选 src/）。已创建的待识别实例可在列表中删除。",
+        error: labels.pendingError,
       };
     }
     if (auto.action === "pending") {
@@ -460,7 +497,7 @@
         ok: true,
         toastKind: "success",
         toast:
-          "已从文件夹导入：" + id + "（" +
+          labels.successPrefix + id + "（" +
           (auto.note || "未自动启动，可在列表中手动启动") +
           "）",
         keepOpen: false,
@@ -470,10 +507,41 @@
     return {
       ok: true,
       toastKind: "success",
-      toast: "已从文件夹导入：" + id,
+      toast: labels.successPrefix + id,
       keepOpen: false,
       error: "",
     };
+  };
+
+  // IMP-065（065.23）：git 源 errorKind 闭集 → 人话提示。
+  // 未知 kind 走通用失败文案，不说「地址无效」（065.p）。
+  LWA.gitErrorKindMessages = {
+    invalid_url:
+      "仓库地址无效：请使用 https://github.com/<owner>/<repo> 形式的仓库根地址（网页地址 /tree/、/blob/ 需改用「分支/标签」与「子目录」字段）",
+    host_not_allowed:
+      "仅支持 GitHub（github.com）仓库：请检查地址是否为 github.com 本站，且未带非 443 端口",
+    userinfo_forbidden:
+      "地址不能包含用户名/密码：私有仓凭据请配置在 LWA 宿主机的 git credential helper（不是这台浏览器所在的机器）",
+    git_missing:
+      "LWA 所在机器未安装 git：请在宿主机安装 git 后重试（zip / 文件夹导入不受影响）",
+    remote_unreachable:
+      "远端仓库不可达：请检查网络/代理（如需代理，在 LWA 宿主机配置 https_proxy 或 git http.proxy）；私有仓需宿主机已配置访问凭据",
+    ref_not_found: "远端不存在该分支/标签：请核对「分支/标签」填写",
+    clone_timeout: "克隆超时：仓库过大或网络过慢，请稍后重试",
+    size_exceeded: "仓库超过 2 GiB 体积上限，无法导入",
+    source_mismatch:
+      "传入的仓库与该实例关联的仓库不一致：如需更换来源，请删除实例后重新导入",
+  };
+
+  LWA.describeGitError = function (err) {
+    if (!err) return "";
+    var kind =
+      (err.detail && err.detail.kind) || err.kind || "";
+    if (kind && LWA.gitErrorKindMessages[kind]) {
+      return LWA.gitErrorKindMessages[kind];
+    }
+    // 未知 kind：通用失败，不冒充「地址无效」
+    return err.message || "GitHub 导入失败，请稍后重试";
   };
 
   // ---- 导出 ----
@@ -495,6 +563,9 @@
       window.__LWA_TEST_HOOKS__.buildRemoveQuery = LWA.buildRemoveQuery;
       window.__LWA_TEST_HOOKS__.describeFolderImportOutcome =
         LWA.describeFolderImportOutcome;
+      window.__LWA_TEST_HOOKS__.describeGitImportOutcome =
+        LWA.describeGitImportOutcome;
+      window.__LWA_TEST_HOOKS__.describeGitError = LWA.describeGitError;
       window.__LWA_TEST_HOOKS__.friendlyApiMessage = LWA.friendlyApiMessage;
     }
   }

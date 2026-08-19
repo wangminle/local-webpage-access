@@ -212,6 +212,28 @@ lwa import --from-dir /home/user/my-site --update my-app --dry-run
 - 导入进行中勿立刻 `lwa update`（会等待或跳过重启，避免打断导入）。
 - Agent 协作见 Skill `lwa-import-folder`。
 
+### GitHub 源导入与更新（IMP-065）
+
+从 GitHub 仓库一键导入与更新（仅 `https://github.com`、443 端口；私有仓凭据请配在 LWA 宿主机的 git credential helper，不是浏览器所在机器）：
+
+```bash
+# 从 GitHub 仓库导入
+lwa import --from-git https://github.com/<owner>/<repo>
+lwa import --from-git https://github.com/<owner>/<repo> --ref dev --subdir frontend
+lwa import --from-git https://github.com/<owner>/<repo> --name "My App" --path-alias myapp
+
+# 从 GitHub 远端更新（ls-remote 无变更探测，远端 OID 未变则零操作跳过）
+lwa import --from-git https://github.com/<owner>/<repo> --update my-app
+```
+
+管理页也可：实例列表顶部「从 GitHub 导入」（LAN + token 可用，不限 loopback）；`sourceKind=git` 实例行内「从 GitHub 更新」按钮。
+
+注意事项：
+- 一次性浅克隆进临时 staging（克隆超 180s 或源码 >2 GiB 拒绝导入），实例内不保留 `.git`。
+- `--update` 传入的仓库须与实例记录一致（Exit 2，换源请删实例重导）；git 源实例不能用 zip `--update` / `--from-dir --update` 更新。
+- **导入/更新全程持有全局导入锁**（含 `ls-remote` 探测约 30s + 浅克隆最长 180s 的网络等待）。期间 `lwa update` 会等待导入空闲（最多 180s）再决定重启或跳过--慢网络下表现为 update 等待，属预期；确需立即升级可等导入完成后重跑 `lwa update`。
+- Agent 协作见 Skill `lwa-import-git`。
+
 ---
 
 ## 三、容器实例路径别名（IMP-014）

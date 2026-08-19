@@ -69,6 +69,7 @@ class CapabilityReport:
     manager_docker_access: ComponentState = "unknown"
     daemon_docker_access: ComponentState = "unknown"
     gateway_access: ComponentState = "unknown"
+    git_available: ComponentState = "unknown"
     session_refresh_required: bool = False
     action: str | None = None
     checked_at: str = field(default_factory=now_iso)
@@ -94,6 +95,7 @@ class CapabilityReport:
                 "caddyProcessUser": self.caddy_process_user,
                 "caddyWorkspaceAccess": self.caddy_workspace_access,
                 "gatewayAccess": self.gateway_access,
+                "gitAvailable": self.git_available,
                 "sessionRefreshRequired": self.session_refresh_required,
             },
             "action": self.action,
@@ -202,6 +204,17 @@ def probe_caddy_binary_state() -> ComponentState:
     if not version_ge(version, MIN_CADDY_VERSION):
         return "version_unsupported"
     return "ready"
+
+
+def probe_git_available() -> ComponentState:
+    """GitHub 源导入所需 git 二进制（065.25 / BUG-570）。
+
+    缺 git 返回 ``unavailable``；**不得**据此把 overall 打成 unready
+    （zip / 文件夹导入仍可用，对齐 doctor ``check_git`` 的 WARN/SKIP）。
+    """
+    from local_webpage_access.git_source import git_binary_available
+
+    return "ready" if git_binary_available() else "unavailable"
 
 
 def probe_caddy_runtime_fields(
@@ -401,6 +414,7 @@ def collect_capability_report(
         caddy_owner=caddy_owner,
         caddy_process_user=caddy_process_user,
         caddy_workspace_access=caddy_workspace_access,
+        git_available=probe_git_available(),
         session_refresh_required=bool(state.get("sessionRefreshRequired")),
         action=state.get("action"),
         details={"role": role, "stateFile": bool(state)},
@@ -705,6 +719,7 @@ def _refresh_overall_in_health_fragment(fragment: dict[str, Any]) -> None:
         manager_docker_access=str(caps.get("managerDockerAccess") or "unknown"),  # type: ignore[arg-type]
         daemon_docker_access=str(caps.get("daemonDockerAccess") or "unknown"),  # type: ignore[arg-type]
         gateway_access=str(caps.get("gatewayAccess") or "unknown"),  # type: ignore[arg-type]
+        git_available=str(caps.get("gitAvailable") or "unknown"),  # type: ignore[arg-type]
         session_refresh_required=bool(caps.get("sessionRefreshRequired")),
         details={"role": "manager"},
     )

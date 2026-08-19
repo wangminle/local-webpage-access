@@ -53,6 +53,7 @@ from local_webpage_access.errors import (
     DockerError,
     FolderSourceError,
     GatewayError,
+    GitSourceError,
     HostingError,
     LifecycleError,
     LwaError,
@@ -1442,6 +1443,148 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post(
+        "/api/import-from-git",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def import_from_git_op(
+        payload: dict[str, Any] = Body(default={}),
+    ) -> dict[str, Any]:
+        """IMP-065：从 GitHub 仓库一键导入新实例。
+
+        Body: ``{"url": "https://github.com/<owner>/<repo>", "ref": "可选分支/标签",
+        "subdir": "可选子目录", "name": "可选名", "pathAlias": "可选别名"}``。
+
+        错误体 ``error.detail.kind`` 携带闭集 errorKind（``invalid_url`` /
+        ``host_not_allowed`` / ``userinfo_forbidden`` / ``git_missing`` /
+        ``remote_unreachable`` / ``ref_not_found`` / ``clone_timeout`` /
+        ``size_exceeded``）；与 CLI 同契约。并发导入经 ``import_activity``
+        闸门排队，每路独立 tempfile staging。**不限 loopback**（065.d）：
+        URL 输入无宿主目录浏览攻击面，LAN 侧由 manager token 把关。
+        """
+        from local_webpage_access.importer import Importer
+
+        ctx = _Ctx(app)
+
+        url = str(payload.get("url") or "").strip()
+        # 空 url 交给 parse_github_url → invalid_url；错误体走 LwaError 处理器
+        # 的 error.detail.kind（禁止手工 HTTPException 把 kind 放错层）。
+
+        ref = (str(payload.get("ref") or "").strip() or None) if payload.get("ref") else None
+        subdir = (str(payload.get("subdir") or "").strip() or None) if payload.get("subdir") else None
+        name = payload.get("name") or None
+        path_alias = payload.get("pathAlias") or None
+        if path_alias is not None:
+            path_alias = str(path_alias).strip() or None
+
+        importer = Importer(ctx.workspace, ctx.config, ctx.registry)
+        # GitSourceError / ZipImportError 等经全局 LwaError 处理器出统一错误体
+        # （error.detail.kind 为闭集 errorKind，前端据此出人话提示）
+        result = importer.import_from_git(
+            url,
+            ref=ref,
+            subdir=subdir,
+            name=name,
+            path_alias=path_alias,
+            on_conflict="error",
+        )
+
+        # 对齐 daemon / import-from-dir：识别成功且档位轻量则自动部署（065.13）
+        from local_webpage_access.daemon import try_auto_start_after_import
+
+        auto_start = try_auto_start_after_import(
+            ctx.workspace,
+            ctx.config,
+            ctx.registry,
+            result,
+            log_prefix="import-from-git",
+        )
+
+        sync_status(ctx.workspace, ctx.config, ctx.registry, result.instance_id)
+        snap = instance_status(ctx.workspace, ctx.config, ctx.registry, result.instance_id)
+        return {
+            "instanceId": result.instance_id,
+            "action": "import-from-git",
+            "autoStart": auto_start,
+            "instance": snap.to_dict(),
+        }
+
+    @app.post(
+        "/api/instances/{instance_id}/update-from-git",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def update_from_git_op(
+        instance_id: str, payload: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        """IMP-065：从 GitHub 远端更新 git 源实例。
+
+        Body: ``{"url": "可选（须与 manifest 一致）", "restart": true,
+        "keepData": true, "forceKindChange": false}``。仅对 ``sourceKind=git``
+        的实例有效；无 ``url`` 时用 manifest 存储的仓库地址。远端 OID 未变时
+        返回 ``skipped=true``（无需更新，零重建）。
+        """
+        from local_webpage_access.importer import Importer
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+        row = ctx.registry.get_instance(instance_id) or {}
+        if row.get("status") == Status.CANCELLING.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": {
+                        "code": "cancelling",
+                        "message": "实例正在取消构建，暂时不能 update",
+                    }
+                },
+            )
+
+        url = (str(payload.get("url") or "").strip() or None) if payload.get("url") else None
+        restart = bool(payload.get("restart", True))
+        keep_data = bool(payload.get("keepData", True))
+        force_kind_change = bool(payload.get("forceKindChange", False))
+
+        importer = Importer(ctx.workspace, ctx.config, ctx.registry)
+        result = importer.update_from_git(
+            instance_id,
+            url=url,
+            restart=restart,
+            keep_data=keep_data,
+            yes=True,
+            dry_run=False,
+            force_kind_change=force_kind_change,
+        )
+
+        restarted = False
+        rebuilt_runtime = False
+        if result.needs_rebuild:
+            from local_webpage_access.lifecycle import rebuild_instance
+
+            rebuild_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            rebuilt_runtime = True
+        elif result.needs_restart:
+            from local_webpage_access.lifecycle import restart_instance
+
+            restart_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            restarted = True
+
+        sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        return {
+            "instanceId": instance_id,
+            "action": "update-from-git",
+            "skipped": result.skipped,
+            "rebuilt": result.rebuilt,
+            "restarted": restarted,
+            "rebuiltRuntime": rebuilt_runtime,
+            "needsRebuild": result.needs_rebuild,
+            "prevHash": result.prev_hash,
+            "zipHash": result.zip_hash,
+            "instance": snap.to_dict(),
+        }
+
+    @app.post(
         "/api/pick-directory",
         dependencies=[api],
         tags=["instances"],
@@ -1742,6 +1885,7 @@ _LWA_ERROR_CODE_BY_CLASS: dict[type[LwaError], str] = {
     ZipImportError: "bad_request",
     RecognitionError: "bad_request",
     FolderSourceError: "bad_request",
+    GitSourceError: "bad_request",
     # 服务端依赖不可用（端口池耗尽 / Docker 不可用）→ 503
     PortError: "service_unavailable",
     DockerError: "service_unavailable",

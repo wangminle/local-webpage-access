@@ -1150,14 +1150,14 @@ def _run_runtime_phase(
                 )
             )
 
-    # ---- 9.5 IMP-038：后台重启后再 refresh（+ 可选 review），避免旧进程回写 ----
-    from local_webpage_access.access_workflow import run_access_pass
+    # ---- 9.5 IMP-038：后台重启后再 refresh；review 单独走防抖（DEV-114）----
+    from local_webpage_access.access_workflow import review_access_with_debounce, run_access_pass
 
     access = run_access_pass(
         workspace,
         config,
         registry,
-        review=options.review_access,
+        review=False,
         dry_run=False,
     )
     if access.refresh_error:
@@ -1176,16 +1176,47 @@ def _run_runtime_phase(
     else:
         report.steps.append(StepResult("accessRefresh", "skipped", "未执行访问地址刷新"))
 
+    # DEV-114：重启后实例有启动窗口，立即探活会把「还没就绪」误报 FAIL。
+    # review 在 0.5/1/2/4s 防抖重试（ACCESS_REVIEW_DEBOUNCE_DELAYS），任一次
+    # 通过即算通过；全部失败按原语义报 FAIL（不掩盖真故障）。
+    debounced_review = None
     if options.review_access:
-        if access.review_error:
-            report.steps.append(StepResult("accessReview", "failed", access.review_error))
-        elif access.review is not None:
+        debounced_review = review_access_with_debounce(workspace, config, registry)
+        access.review = debounced_review.review
+        access.review_error = debounced_review.review_error
+
+    if options.review_access:
+        if debounced_review is None or debounced_review.review_error:
+            err = debounced_review.review_error if debounced_review else None
+            report.steps.append(
+                StepResult("accessReview", "failed", err or "未执行访问复核")
+            )
+        elif debounced_review.review is not None:
+            overall = debounced_review.review.overall.upper()
+            passed = debounced_review.passed_on_attempt
+            if passed is not None and passed > 1:
+                message = (
+                    f"总体：{overall}"
+                    f"（第 {passed} 次防抖重试后通过，启动窗口已吸收）"
+                )
+            elif passed is None:
+                message = (
+                    f"总体：{overall}"
+                    f"（防抖重试 {debounced_review.attempts} 次后仍失败，"
+                    f"请 lwa doctor 复核）"
+                )
+            else:
+                message = f"总体：{overall}"
             report.steps.append(
                 StepResult(
                     "accessReview",
                     "ok",
-                    f"总体：{access.review.overall.upper()}",
-                    extra={"accessReview": access.review.to_dict()},
+                    message,
+                    extra={
+                        "accessReview": debounced_review.review.to_dict(),
+                        "accessReviewAttempts": debounced_review.attempts,
+                        "accessReviewPassedOnAttempt": passed,
+                    },
                 )
             )
         else:
