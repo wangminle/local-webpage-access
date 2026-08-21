@@ -149,7 +149,7 @@ swap=4GB
 
 * **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。**V0.6.13** 起 Caddy `-size.log.gz` 多轮转/旧游标迁移/归档暂时不可读时的补读逻辑已加固（避免双计或永久漏计）。
 * **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），**V0.6.13** 起容器查询失败禁止绕过挂载 fail-safe、registry 不可读时一致性检查 SKIP，但仍不能替代正式 relocate 事务。
-* **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>` 或管理页「从源更新」同步。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。`sourceKind=zip` 的实例不能用 `--from-dir --update`。请选项目根或 `dist/`，不要只选 `src/`。
+* **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>`、`lwa rebuild --sync <id>`（V0.8.5，先同步源码再重建）或管理页「从源更新」同步；`lwa rebuild` 与 `lwa doctor`（`source_freshness` 检查，WARN 级纯离线）会提示源码已漂移的实例。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。`sourceKind=zip` 的实例不能用 `--from-dir --update`（`rebuild --sync` 同样仅支持 folder/git 源）。请选项目根或 `dist/`，不要只选 `src/`。
 * **GitHub 源导入的锁语义（IMP-065 / CHK-239）**：git 导入/更新在
   `import_activity` 全局锁内完成探测（ls-remote ≤30s）与克隆（≤180s）——设计取舍：
   并发导入按既有闸门排队、staging 互不干扰。窗口内其它导入（zip/文件夹）会等待；
@@ -164,6 +164,9 @@ swap=4GB
 ## 管理页与 API
 
 * **鉴权**：单一 API token；**每 168h（可配 `managerTokenRotateHours`）自动轮换**（IMP-046），旧 token 立即失效；本机 loopback 免 token，LAN 须带有效 token。查询/取新 token：`lwa manager token`（含 `--json`）。不做多 token 宽限期、无角色分级。多用户场景不适用。
+* **构建钩子与 .dockerignore 口径（V0.8.5 / issue #6·#7）**：manifest 可声明 `buildHooks`（镜像构建期 RUN 层）与 `preStart`（启动前命令，CMD 走 `sh -c "<preStart> && exec <start>"`），仍受 `audit_dockerfile` 把关（如 `curl|sh` 拒绝）。生成 `.dockerignore` **只排除构建上下文根级的 `current/dist`、`current/build`**（BUG-581 收窄），应用自带的嵌套产物目录（如 `dist/skills`）会进入上下文并可用--此前全局 `**/dist` 排除曾致 home-bookshelf skills zip 404。
+* **rebuild 源码陈旧检测（V0.8.5 / issue #8）**：`lwa rebuild` 前自动检测（folder 比对内容指纹、git 短超时 `ls-remote`；检出打印警告并写 `source_stale` 事件，不阻断；git 离线静默）。管理页 rebuild API 响应已带 `sourceStaleWarnings`，但**前端暂未消费展示**，目前仅 CLI 可见。
+* **别名转发头（V0.8.5 / issue #9）**：Caddy 别名片段显式注入 `X-Real-IP {remote_host}`（XFF 系为 Caddy 默认）；**存量运行中实例需重新 `alias set`（或 rebuild 别名）才生效**。转发头仅用于来源展示，不可作鉴权依据（无 HMAC 签名头）。
 * **实例显示名（IMP-043）**：导入优先显式 `--name`，其次主页 `<title>`（含托管入口 `dist/`/`build/`/`out/` 等产物目录的 `index.html`；HTML 实体按浏览器语义解码），否则 slug 美化；管理页名称列随内容自然分配宽度（V0.6.9 `table-layout: auto`，名称最多两行省略）。旧 slug 美化名会在拉列表时一次性回填（不会覆盖用户手工名；**V0.6.13** 起回填持实例锁并重读 manifest，避免覆盖并发 start/stop 状态）。
 * **`?token=` 查询参数**：有意保留以便新标签带入鉴权；会进入浏览器历史 / Referer / 反代 access log。日常 API 请优先用 Header。详见 [管理页](manager-page.md#鉴权)。
 * **并发写入**：registry 用 SQLite WAL + 连接级锁，适合单机管理页并发；

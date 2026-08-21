@@ -757,6 +757,8 @@ def test_check_docker_uses_runtime_field(tmp_path, monkeypatch) -> None:
 
 def test_systemd_uninstall_reload_failure_fails(tmp_path, monkeypatch) -> None:
     """systemd uninstall 的 daemon-reload 失败应计入成败并收集其结果（BUG-144）。"""
+    # BUG-579：unit_path 跟随 HOME，须指到 tmp，避免写真实 ~/.config/systemd/user/。
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     backend = asm.SystemdUserBackend()
     # 需有单元文件；disable 成功后才会删文件并 reload
     path = backend.unit_path("daemon")
@@ -1533,6 +1535,10 @@ def test_migrate_skips_supervised_service(tmp_path, monkeypatch) -> None:
 
 def test_launchd_bootstrap_retries_transient_error(tmp_path, monkeypatch) -> None:
     """issue #2 / BUG-549：bootstrap 瞬态 error 5 重试后成功。"""
+    # BUG-579：unit_path 跟随 Path.home()（HOME 环境变量），必须指到 tmp，
+    # 否则 write_bytes 会写穿真实 ~/Library/LaunchAgents/com.fenix.lwa.gateway.plist，
+    # 重启后网关无法自启（2026-08-19 实发事故）。
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     backend = asm.MacLaunchdBackend()
     path = backend.unit_path("gateway")
     path.parent.mkdir(parents=True, exist_ok=True)

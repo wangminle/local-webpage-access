@@ -1665,7 +1665,8 @@ def test_rebuild_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
         called: list[str] = []
         mp.setattr(
             "local_webpage_access.lifecycle.rebuild_instance",
-            lambda ws, cfg, reg, iid: called.append(iid),
+            # issue #8：rebuild_instance 新增可选 out 参数透出源码陈旧警告
+            lambda ws, cfg, reg, iid, out=None: called.append(iid),
         )
         resp = manager_env.client.post(
             f"/api/instances/{manager_env.instance_id}/rebuild",
@@ -1673,6 +1674,28 @@ def test_rebuild_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
         )
     assert resp.status_code == 200
     assert called == [manager_env.instance_id]
+    assert "sourceStaleWarnings" not in resp.json()
+
+
+def test_rebuild_operation_surfaces_staleness_warnings(manager_env: EnvBundle) -> None:
+    """issue #8：rebuild 响应携带源码陈旧警告字段（不阻断重建）。"""
+
+    def _fake_rebuild(ws, cfg, reg, iid, out=None):
+        if out is not None:
+            out.append("源码目录与 current/ 不一致（上次同步后源码已变更）")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "local_webpage_access.lifecycle.rebuild_instance", _fake_rebuild
+        )
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/rebuild",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 200
+    assert resp.json()["sourceStaleWarnings"] == [
+        "源码目录与 current/ 不一致（上次同步后源码已变更）"
+    ]
 
 
 def test_cancel_build_operation_returns_outcome(manager_env: EnvBundle) -> None:

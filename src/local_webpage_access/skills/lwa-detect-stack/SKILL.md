@@ -34,6 +34,8 @@ description: >-
 - `stack`：数组，如 `["React", "Vite", "FastAPI", "SQLite"]`。
 - `resourceProfile`：`tiny` / `small` / `medium` / `heavy`。
 - `database.type`：`none` / `sqlite` / `postgres` / `mysql` / `redis` / `unknown`。
+- `buildHooks`（issue#7）：构建钩子命令数组，镜像构建期在依赖安装后逐条执行（如 `["python scripts/build_skills_bundle.py"]`）；仅在有明确构建期脚本证据时填写，值不得含换行。
+- `preStart`（issue#7）：启动前命令，容器启动时先于 `entry.start` 执行（如 `"alembic upgrade head"`）；仅在项目声明了启动前迁移/初始化步骤时填写，值不得含换行。
 
 ## 可修改文件
 

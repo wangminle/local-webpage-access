@@ -86,6 +86,8 @@ python3 -m pytest tests/test_docker_integration.py
 | — 自启缺省安全（IMP-061） | `test_autostart_defaults.py` | with_caddy/linger 三态缺省、旧旗标兼容、init/setup 引导（TTY/非 TTY/已装跳过）、运行模式标注 |
 | — 一键更新通道（IMP-063） | `test_update_source.py` | 目标解析（upstream/显式/拒绝 SHA）、双锁互斥、九态关系（含 shallow→unknown）、SourceCheckReport v1 与退出码、固定 OID 快进、skip-pip 门控、bootstrap/接力门控（HEAD 变化不跑旧进程 Runtime）、fetch warning 离线降级、dry-run 零写入、CLI `--check`/互斥；全部基于临时 bare remote 夹具，**零外网** |
 | - GitHub 源导入与更新（IMP-065） | `test_git_source.py` | URL 解析（https/短路径/subdir）、clone 暂存与守卫、`ls-remote` 探测、导入/更新工作流（dry-run/事件/manifest git 字段）、CLI `lwa import git` 守卫、manager API 导入/更新端点、doctor git 检查、非交互与进程组；基于本地 bare remote 夹具，**零外网** |
+| - 源码陈旧检测（V0.8.5 / issue #8，DEV-122） | `test_source_staleness.py`（22 用例） | folder 指纹比对（含旧 manifest 退化比对 `current/`）、git `ls-remote` OID 比对与离线静默、`rebuild --sync` 复用更新管线（zip+`--sync` exit 2）、doctor `source_freshness` WARN 纯离线、manager API `sourceStaleWarnings` 透出 |
+| - 构建钩子（V0.8.5 / issue #7，DEV-121） | `test_dockerfile_templates.py`、`test_models.py` | `buildHooks`/`preStart` 换行符校验防注入、三渲染器 RUN 层与 `sh -c` CMD 拼接、旧 manifest 兼容、`audit_dockerfile` 钩子把关（`curl\|sh` 拒绝）、`.dockerignore` 根级收窄（嵌套 dist 保留） |
 | - 评审修复回归（CHK-245，BUG-574～578） | `test_chk245_review_fixes.py` | 安全审计、数据层原子写/回滚、版本门禁、API 校验（`fallback_policy` 枚举 400、DNS rebinding Host 校验）、daemon 文件稳定性、doctor 修复、pageviews/access/autostart systemd 反转义/统计解析/迁移等修复的回归锁定 |
 
 ## 常见问题

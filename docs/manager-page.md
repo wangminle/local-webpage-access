@@ -80,7 +80,7 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/confirm-fallback` | Gate-C 降级确认（C.R03）：降级弹窗确认后调用，以 `auto-equivalent` 策略重试启动；幂等--实例已在 fallback 后运行则直接返回当前状态 |
 | POST | `/api/instances/{id}/stop` | 停止实例（同上） |
 | POST | `/api/instances/{id}/restart` | 重启实例（同上） |
-| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上） |
+| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上）。V0.8.5 起响应带 `sourceStaleWarnings`（关联 folder/git 源已漂移的提示，前端暂未展示） |
 | POST | `/api/instances/{id}/cancel-build` | 取消排队中或进行中的构建（IMP-039）；返回 `outcome`：`cancelled` / `cancel_failed` / `noop` / `already_done`；`cancel_failed` 为 **409**；不删缓存/镜像/用户数据；`cancelling` 期间其它生命周期操作返回 409 |
 | POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁；CLI：`lwa recover <id>` |
 | POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |

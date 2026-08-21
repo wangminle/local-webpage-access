@@ -217,21 +217,74 @@ def recover(instance_id: str = typer.Argument(..., help="要恢复的实例 ID")
         raise typer.Exit(code=1)
 
 
-def rebuild(instance_id: str = typer.Argument(..., help="要重建的实例 ID")) -> None:
-    """重建实例（强制重新构建镜像 / 产物，经构建队列限流）。"""
+def rebuild(
+    instance_id: str = typer.Argument(..., help="要重建的实例 ID"),
+    sync: bool = typer.Option(
+        False,
+        "--sync",
+        help="issue #8：重建前先同步上游源码（folder 源走 --from-dir 更新管线，git 源走 --from-git 更新管线）",
+    ),
+) -> None:
+    """重建实例（强制重新构建镜像 / 产物，经构建队列限流）。
+
+    issue #8：重建前检测上游源码是否已变更——默认只打印醒目警告不阻断；
+    ``--sync`` 时先走更新管线同步源码再重建（zip / 无源实例不支持）。
+    """
     from local_webpage_access.lifecycle import rebuild_instance
 
     try:
         ws, config, reg = open_workspace_registry()
         try:
-            rebuild_instance(ws, config, reg, instance_id)
+            if sync:
+                _sync_source_before_rebuild(ws, config, reg, instance_id)
+            stale_warnings: list[str] = []
+            rebuild_instance(ws, config, reg, instance_id, out=stale_warnings)
         finally:
             reg.close()
+        for warning in stale_warnings:
+            typer.secho(f"⚠ 源码陈旧：{warning}", fg=typer.colors.YELLOW)
         typer.secho(f"已重建实例：{instance_id}", fg=typer.colors.GREEN)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _sync_source_before_rebuild(ws: Any, config: Any, reg: Any, instance_id: str) -> None:
+    """issue #8：``lwa rebuild --sync`` 的前置源码同步。
+
+    按 manifest 的 ``sourceKind`` 复用导入更新管线（与
+    ``lwa import --from-dir/--from-git --update`` 同一路径，不重写）：
+    folder → ``Importer.update_from_dir``；git → ``Importer.update_from_git``。
+    更新管线自带无变更短路；这里 ``restart=False``，由随后的 rebuild 统一重建。
+    zip / 无源实例不支持 --sync，直接报错退出（exit 2）。
+    """
+    from local_webpage_access.importer import Importer
+    from local_webpage_access.models import InstanceManifest
+
+    manifest_path = ws.app_manifest_path(instance_id)
+    if not manifest_path.is_file():
+        return  # 实例不存在：交给 rebuild_instance 出标准错误
+    source_kind = getattr(InstanceManifest.load(manifest_path), "sourceKind", "zip")
+    importer = Importer(ws, config, reg)
+    if source_kind == "folder":
+        typer.secho(f"正在从关联源码目录同步：{instance_id} …", fg=typer.colors.CYAN)
+        result = importer.update_from_dir(instance_id, restart=False, keep_data=True, yes=True)
+    elif source_kind == "git":
+        typer.secho(f"正在从 GitHub 远端同步：{instance_id} …", fg=typer.colors.CYAN)
+        result = importer.update_from_git(instance_id, restart=False, keep_data=True, yes=True)
+    else:
+        typer.secho(
+            f"实例 {instance_id} 无上游源码（sourceKind={source_kind!r}），"
+            "--sync 仅支持 folder/git 源实例；zip 实例请用 lwa import --update 加新 zip。",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if getattr(result, "skipped", False):
+        typer.echo("  源码无变更，直接重建。")
+    else:
+        typer.secho("  源码已同步，继续重建。", fg=typer.colors.GREEN)
 
 
 def cancel_build(

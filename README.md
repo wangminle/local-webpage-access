@@ -31,9 +31,9 @@ CLI, web manager, inbox auto-import, import-time security checks, and `lwa docto
 
 - **Import a zip, a local folder, or drop files into `inbox/`** — zip-slip protection, content fingerprints, read-only copy into the workspace (never run from your source tree).
 - **Detects how to run it** — `static` / Node / Python, with or without SQLite; unknown projects stay `pending` until you rescan.
-- **Port pool + optional path aliases** — stable `lanUrl`; `/{slug}/` via Caddy, refused if the SPA’s absolute paths would break.
-- **Static and container hosting** — Caddy or builtin for static; generated non-root Dockerfile/Compose with SQLite `data/` mounts for apps.
-- **Lifecycle on a small host** — start / stop / recover / rebuild / cancel-build; default build concurrency 1; instance ports stay put.
+- **Port pool + optional path aliases** — stable `lanUrl`; `/{slug}/` via Caddy, refused if the SPA’s absolute paths would break. Alias entries inject `X-Real-IP` for the backend.
+- **Static and container hosting** — Caddy or builtin for static; generated non-root Dockerfile/Compose with SQLite `data/` mounts for apps. Optional manifest `buildHooks` / `preStart` hooks (issue #7).
+- **Lifecycle on a small host** — start / stop / recover / rebuild / cancel-build; default build concurrency 1; instance ports stay put. `rebuild` warns when the linked folder/git source has drifted (`--sync` refreshes it first; doctor `source_freshness` audits all instances).
 - **Web manager + inbox daemon** — Vue UI on `:17800` (loopback reads are token-free; LAN needs a rotating token). The daemon imports zips and heals dropped lightweight instances.
 - **Won’t silently write dangerous images** — generated Compose/Dockerfile audited before write; zip traversal / symlinks / bombs rejected.
 - **`lwa doctor` does not fake green** — Python / Docker / Compose / ports / disk, plus service runtime and autostart resilience. `--json` works even before `init`.
@@ -104,7 +104,7 @@ Use `lwa <command> --help` for flags. Global `-v` turns on DEBUG logs.
 | --- | --- |
 | `lwa start` / `stop` / `restart` `<ID>` | Start, stop, or restart (containers reuse the registered port) |
 | `lwa recover <ID>` | One-shot recovery (pulls Caddy up if needed, then restart) |
-| `lwa rebuild <ID>` | Force-rebuild through the build queue |
+| `lwa rebuild [--sync] <ID>` | Force-rebuild through the build queue; `--sync` refreshes folder/git sources first (stale sources are detected and warned) |
 | `lwa cancel-build <ID>` | Cancel a queued or running build (keeps caches / images / data) |
 | `lwa remove <ID> [--purge] [--force]` | Remove instance; `--purge` deletes disk (non-empty `data/` needs `--force`) |
 | `lwa remove --redundant [--purge]` | Drop duplicate zips, keep the earliest |
@@ -246,9 +246,9 @@ CLI、管理页、inbox 自动导入、导入期安全检查、`lwa doctor` 均�
 
 - **zip、本机文件夹、或丢进 `inbox/`** — zip-slip 防护、内容指纹；只读复制进工作区，禁止在你的源码树里就地运行。
 - **自动识别运行形态** — `static` / Node / Python，是否带 SQLite；认不出的标 `pending`，可再 `scan`。
-- **端口池 + 可选路径别名** — `lanUrl` 稳定；Caddy 下 `/{slug}/`，SPA 绝对路径会打坏时直接拒绝。
-- **静态与容器托管** — 静态走 Caddy 或内置服务；应用生成非 root Dockerfile/Compose，SQLite 挂 `data/`。
-- **小主机上的生命周期** — start / stop / recover / rebuild / cancel-build；默认构建并发 1；端口不漂移。
+- **端口池 + 可选路径别名** — `lanUrl` 稳定；Caddy 下 `/{slug}/`，SPA 绝对路径会打坏时直接拒绝。 别名入口为后端注入 `X-Real-IP`。
+- **静态与容器托管** — 静态走 Caddy 或内置服务；应用生成非 root Dockerfile/Compose，SQLite 挂 `data/`。 支持 manifest 声明式 `buildHooks` / `preStart` 构建钩子（issue #7）。
+- **小主机上的生命周期** — start / stop / recover / rebuild / cancel-build；默认构建并发 1；端口不漂移。 `rebuild` 检出关联 folder/git 源码漂移时警告（`--sync` 先同步再重建；doctor `source_freshness` 批量审计）。
 - **管理页 + inbox 守护进程** — `:17800` 的 Vue 界面（本机读免 token，局域网用自动轮换的 token）。daemon 导入 zip 并拉起掉线的轻量实例。
 - **危险镜像不会默写出** — 生成的 Compose/Dockerfile 写出前审计；zip 穿越 / 符号链接 / 炸弹拒绝导入。
 - **`lwa doctor` 不假绿** — Python / Docker / Compose / 端口 / 磁盘，以及服务是否在跑、自启是否装好。未 `init` 也可用 `--json`。
@@ -319,7 +319,7 @@ lwa status
 | --- | --- |
 | `lwa start` / `stop` / `restart` `<ID>` | 启动、停止、重启（容器复用已登记端口） |
 | `lwa recover <ID>` | 一键恢复（必要时先拉起 Caddy） |
-| `lwa rebuild <ID>` | 经构建队列强制重建 |
+| `lwa rebuild [--sync] <ID>` | 经构建队列强制重建；`--sync` 先同步 folder/git 源码（漂移时自动警告） |
 | `lwa cancel-build <ID>` | 取消排队/进行中的构建（不删缓存/镜像/数据） |
 | `lwa remove <ID> [--purge] [--force]` | 移除实例；`--purge` 删磁盘（非空 `data/` 需 `--force`） |
 | `lwa remove --redundant [--purge]` | 按 zip 指纹去重，保留最早者 |

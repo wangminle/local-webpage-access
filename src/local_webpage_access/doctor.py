@@ -1164,6 +1164,65 @@ def _collect_lan_drifted_ids(
     return drifted, skipped
 
 
+def check_source_freshness(ws: Workspace) -> CheckResult:
+    """issue #8：源码新鲜度检查（WARN 级，纯离线）。
+
+    * folder 源：复用 :func:`lifecycle.check_folder_source_staleness` 比对
+      源目录指纹与上次同步指纹，漂移 / 源目录丢失 → WARN；
+    * git 源：doctor 不触网，SKIP 并提示用 ``lwa rebuild <id>`` 触发在线检测；
+    * zip 源：无上游，不参与。
+    """
+    from local_webpage_access.lifecycle import check_folder_source_staleness
+    from local_webpage_access.models import InstanceManifest
+
+    apps_root = ws.apps
+    if not apps_root.is_dir():
+        return CheckResult("source_freshness", STATUS_SKIP, "无实例目录")
+    stale: list[str] = []
+    missing: list[str] = []
+    git_count = 0
+    for manifest_path in sorted(apps_root.glob("*/local-web.json")):
+        try:
+            manifest = InstanceManifest.load(manifest_path)
+        except Exception:  # noqa: BLE001 — 损坏 manifest 由其它检查报告
+            continue
+        source_kind = getattr(manifest, "sourceKind", "zip")
+        if source_kind == "git":
+            git_count += 1
+            continue
+        if source_kind != "folder":
+            continue
+        if check_folder_source_staleness(manifest) is None:
+            continue
+        source_dir = getattr(manifest, "sourceDirPath", None)
+        if source_dir and not Path(source_dir).is_dir():
+            missing.append(manifest.id)
+        else:
+            stale.append(manifest.id)
+    problems = [f"{iid}（源码已变更）" for iid in stale] + [
+        f"{iid}（源目录丢失）" for iid in missing
+    ]
+    if problems:
+        return CheckResult(
+            "source_freshness",
+            STATUS_WARN,
+            f"{len(problems)} 个 folder 源实例的源码与 current/ 不一致",
+            detail="陈旧实例：" + ", ".join(problems[:8]),
+            suggestion="运行 `lwa rebuild --sync <id>` 或 `lwa import --from-dir --update <id>` 同步源码后重建",
+        )
+    if git_count:
+        return CheckResult(
+            "source_freshness",
+            STATUS_SKIP,
+            f"{git_count} 个 git 源实例不做离线探测（运行 `lwa rebuild <id>` 时会在线检测并警告）",
+        )
+    return CheckResult(
+        "source_freshness",
+        STATUS_OK,
+        "folder 源实例源码与 current/ 一致（zip 源无上游，不参与）",
+    )
+
+
 def check_backend_handoff(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
     """建议 F / G3：检测 builtin 与 caddy 在同一 hostPort 上双开（切换残留）。
 
@@ -1920,6 +1979,8 @@ def run_doctor(
             if caddy_probe_registry is not None
             else CheckResult("lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"),
             check_workspace_path_consistency(ws, config, registry=caddy_probe_registry),
+            # issue #8：源码新鲜度（WARN 级，纯离线；git 源不触网）
+            check_source_freshness(ws),
             check_backend_handoff(ws, config, caddy_probe_registry)
             if caddy_probe_registry is not None
             else CheckResult("backend_handoff", STATUS_SKIP, "registry 不可用，跳过后端交接检测"),
@@ -2039,6 +2100,7 @@ __all__ = [
     "check_caddy_health",
     "check_workspace_path_consistency",
     "check_lan_url_stale",
+    "check_source_freshness",
     "check_backend_handoff",
     "check_port_contention",
     "check_disk_space",

@@ -164,9 +164,12 @@ source/
 
 # 仅当 Dockerfile 含构建步骤时追加：构建期会重新生成产物。
 # 无 build 命令时保留 dist/build，避免丢掉预构建入口（BUG-128）。
+# issue#6：模式相对构建上下文根 apps/<id>/，只排除源码树根级
+# ``current/dist`` / ``current/build``；嵌套产物目录（如 current/backend/dist、
+# current/skills/dist 等运行时产物）不再排除，避免破坏镜像内构建产物。
 _DOCKERIGNORE_BUILD_ARTIFACTS = """\
-**/dist
-**/build
+current/dist
+current/build
 """
 
 
@@ -208,6 +211,8 @@ def _render_node(
     build_step = ""
     if manifest.entry.build:
         build_step = f"RUN {manifest.entry.build}\n"
+    # issue#7：构建钩子在依赖安装/构建层之后、CMD 之前逐条执行（WORKDIR=/app）。
+    hooks_block = _build_hooks_block(manifest)
     cpfx = _copy_prefix(manifest)
     dependency_copy = _node_dependency_copy_block(install, source_dir=source_dir, copy_prefix=cpfx)
     install_run = _with_npm_registry(install, mirrors)
@@ -222,11 +227,12 @@ def _render_node(
         f"RUN {install_run}",
         f"COPY {cpfx} ./",
         build_step,
+        hooks_block,
         "ENV NODE_ENV=production",
         "ENV HOST=0.0.0.0",
         f"ENV PORT={internal_port}",
         f"EXPOSE {internal_port}",
-        f"CMD {_to_exec_form(start)}",
+        f"CMD {_cmd_line(manifest, start)}",
     ]
     return "\n".join(line for line in lines if line) + "\n"
 
@@ -554,6 +560,9 @@ def _render_python(
 
     # 分层顺序：系统库 -> Node 工具链（最稳）-> Python 依赖 -> npm 依赖 -> 完整源码。
     final_copy = "" if needs_early_full_copy else f"COPY {cpfx} ./\n"
+    # issue#7：构建钩子在依赖安装层之后、CMD 之前逐条执行（WORKDIR=/app，
+    # 源码已由 final_copy / 早期整包 COPY 就位）。
+    hooks_block = _build_hooks_block(manifest)
 
     lines = [
         header,
@@ -565,11 +574,12 @@ def _render_python(
         npm_block,
         final_copy,
         sqlite_mkdir,
+        hooks_block,
         pythonpath_env,
         "ENV HOST=0.0.0.0",
         f"ENV PORT={internal_port}",
         f"EXPOSE {internal_port}",
-        f"CMD {_to_exec_form(start)}",
+        f"CMD {_cmd_line(manifest, start)}",
     ]
     return "\n".join(line for line in lines if line) + "\n"
 
@@ -615,10 +625,12 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
         f"FROM {_PYTHON_IMAGE}",
         "WORKDIR /app",
         f"COPY {_copy_prefix(manifest)} ./",
+        # issue#7：与 node/python 渲染器对齐，支持构建钩子与启动前命令。
+        _build_hooks_block(manifest),
         f"EXPOSE {internal_port}",
-        f"CMD {_to_exec_form(start)}",
+        f"CMD {_cmd_line(manifest, start)}",
     ]
-    return "\n".join(lines) + "\n"
+    return "\n".join(line for line in lines if line) + "\n"
 
 
 # ---- 辅助 --------------------------------------------------------------------
@@ -635,6 +647,28 @@ _SHELL_OPERATOR_RE = re.compile(r"&&|\|\||;|\$\(|`|\(|\)")
 def _has_shell_operators(cmd: str) -> bool:
     """命令是否含 shell 操作符（需要通过 ``sh -c`` 执行）。"""
     return bool(_SHELL_OPERATOR_RE.search(cmd))
+
+
+def _build_hooks_block(manifest: InstanceManifest) -> str:
+    """issue#7：把 ``manifest.buildHooks`` 逐条渲染为 ``RUN <hook>``。
+
+    钩子声明在 ``apps/<id>/local-web.json``，rebuild 重生成 Dockerfile 时保留
+    （手工改 Dockerfile 会被抹掉）。换行符在 manifest 校验阶段已拒绝；含
+    ``curl|sh`` 等供应链风险指令会被 ``audit_dockerfile`` 拒绝落盘。
+    """
+    return "".join(f"RUN {hook.strip()}\n" for hook in manifest.buildHooks if hook.strip())
+
+
+def _cmd_line(manifest: InstanceManifest, start: str) -> str:
+    """issue#7：渲染 CMD。声明了 ``preStart`` 时走 shell 形式
+    ``sh -c "<preStart> && exec <start>"``（启动前命令失败则容器退出，``exec``
+    保证主进程仍是 PID 1、信号传递正常）；未声明时保持 ``_to_exec_form``
+    原逻辑（含 BUG-471 的 shell 操作符处理）不变。
+    """
+    pre_start = (manifest.preStart or "").strip()
+    if pre_start:
+        return json.dumps(["sh", "-c", f"{pre_start} && exec {start}"])
+    return _to_exec_form(start)
 
 
 def _to_exec_form(shell_cmd: str) -> str:

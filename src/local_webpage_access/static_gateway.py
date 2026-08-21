@@ -461,8 +461,12 @@ class StaticGateway:
         content = (
             f"# IMP-006 路径别名：/{alias}/ → 127.0.0.1:{host_port}"
             f"（实例 {instance_id}，handle_path 去前缀）\n"
+            # issue #9：显式注入 X-Real-IP，读该头的应用可拿到真实客户端 IP；
+            # X-Forwarded-For/Proto/Host 保持 Caddy reverse_proxy 默认注入行为。
             f"handle_path /{alias}/* {{\n"
-            f"\treverse_proxy 127.0.0.1:{host_port}\n"
+            f"\treverse_proxy 127.0.0.1:{host_port} {{\n"
+            f"\t\theader_up X-Real-IP {{remote_host}}\n"
+            f"\t}}\n"
             f"}}\n"
             f"handle /{alias} {{\n"
             f"\tredir /{alias}/ permanent\n"
@@ -477,7 +481,9 @@ class StaticGateway:
                 f"# BUG-465 SPA 绝对路径资源回退（逃生舱）：/assets/* /favicon.* -> {host_port}\n"
                 f"{matcher} path /assets/* /favicon.ico /favicon.svg\n"
                 f"handle {matcher} {{\n"
-                f"\treverse_proxy 127.0.0.1:{host_port}\n"
+                f"\treverse_proxy 127.0.0.1:{host_port} {{\n"
+                f"\t\theader_up X-Real-IP {{remote_host}}\n"
+                f"\t}}\n"
                 f"}}\n"
             )
         path = self.ws.app_alias_config(instance_id)

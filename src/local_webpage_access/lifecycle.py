@@ -1734,11 +1734,96 @@ def recover_instance(
         return _restart_instance_locked(workspace, config, registry, instance_id)
 
 
+# ---- issue #8：源码陈旧检测 --------------------------------------------------
+
+
+def check_folder_source_staleness(manifest: InstanceManifest) -> str | None:
+    """issue #8：folder 源的离线陈旧检测（不触网）。
+
+    比对关联源码目录指纹与上次同步时记录的 ``sourceSyncHash``（缺失时退化
+    比对 ``current/`` 内容指纹，尽力而为）。返回人话警告或 ``None``。
+    """
+    from local_webpage_access.folder_source import compute_source_hash
+
+    source_dir_str = getattr(manifest, "sourceDirPath", None)
+    if not source_dir_str:
+        return None
+    source_dir = Path(source_dir_str)
+    if not source_dir.is_dir():
+        return (
+            f"关联源码目录已丢失：{source_dir_str}（rebuild 只能重建 current/ 中的旧产物；"
+            "如需换源请重新 lwa import --from-dir <目录> --update）"
+        )
+    sync_hash = getattr(manifest, "sourceSyncHash", None)
+    if sync_hash:
+        stale = compute_source_hash(source_dir) != sync_hash
+    else:
+        # 旧 manifest 无 sourceSyncHash：退化为与 current/ 指纹比对（尽力而为）
+        app_path: str | None = getattr(manifest, "appPath", None)
+        stale = bool(app_path) and compute_source_hash(source_dir) != compute_source_hash(
+            Path(str(app_path))
+        )
+    if stale:
+        return (
+            "源码目录与 current/ 不一致（上次同步后源码已变更），"
+            "建议 lwa import --from-dir --update 或 lwa rebuild --sync"
+        )
+    return None
+
+
+def _check_git_source_staleness(manifest: InstanceManifest) -> str | None:
+    """issue #8：git 源的在线陈旧检测（短超时 ls-remote）。
+
+    远端 OID 比 ``sourceGitCommit`` 前进 → 警告建议更新。网络 / git 失败
+    一律返回 ``None``（记 debug）——绝不把网络问题变成 rebuild 阻断。
+    """
+    url = getattr(manifest, "sourceGitUrl", None)
+    ref = getattr(manifest, "sourceGitRef", None)
+    ref_kind = getattr(manifest, "sourceGitRefKind", None)
+    stored_commit = getattr(manifest, "sourceGitCommit", None)
+    if not (url and ref and ref_kind and stored_commit):
+        return None  # 身份字段不全（旧 manifest / ref 未解析）→ 无法探测
+    from local_webpage_access import git_source
+
+    try:
+        remote_oid = git_source.probe_remote_commit(url, ref=ref, ref_kind=ref_kind)
+    except Exception as exc:  # noqa: BLE001 — 网络/git 问题不阻断 rebuild
+        log.debug("git 源 %s 远端探测失败（忽略）：%s", url, exc)
+        return None
+    if remote_oid.lower() != stored_commit.lower():
+        return (
+            f"远端仓库有新提交（{stored_commit[:8]} -> {remote_oid[:8]}），"
+            "建议 lwa import --from-git --update 或 lwa rebuild --sync"
+        )
+    return None
+
+
+def check_source_staleness(
+    workspace: Workspace,  # noqa: ARG001 — 统一签名；检测本身只依赖 manifest
+    config: Config,  # noqa: ARG001 — 预留给将来按配置调整探测超时
+    manifest: InstanceManifest,
+) -> str | None:
+    """issue #8：检测实例上游源码是否已比 current/ 更新（源码陈旧检测）。
+
+    Returns:
+        人话警告字符串；无陈旧 / 无法判定（zip 源、git 离线等）返回 ``None``。
+        纯只读，不抛异常——任何探测失败都降级为 ``None``。
+    """
+    source_kind = getattr(manifest, "sourceKind", "zip")
+    if source_kind == "folder":
+        return check_folder_source_staleness(manifest)
+    if source_kind == "git":
+        return _check_git_source_staleness(manifest)
+    return None  # zip / 无源实例没有上游，不参与
+
+
 def rebuild_instance(
     workspace: Workspace,
     config: Config,
     registry: Registry,
     instance_id: str,
+    *,
+    out: list[str] | None = None,
 ) -> InstanceManifest:
     """重建实例（WBS-17.04）：强制重新构建。
 
@@ -1751,12 +1836,24 @@ def rebuild_instance(
 
     队列取进程内单例（:func:`~local_webpage_access.build_queue.get_build_queue`，
     BUG-022），否则每次 rebuild 各建独立信号量，并发上限失效。
+
+    issue #8：重建前调用 :func:`check_source_staleness` 做源码陈旧检测——
+    只警告不阻断：log.warning + registry ``source_stale`` 事件；传入 ``out``
+    列表时警告同时追加进去，供 CLI / 管理页透出。
     """
     from local_webpage_access.build_queue import get_build_queue
     from local_webpage_access.hosting import host_container, host_instance
 
     with instance_lock(workspace, instance_id):
         manifest = _load(workspace, instance_id)
+        # issue #8：源码陈旧警告不阻断重建
+        warning = check_source_staleness(workspace, config, manifest)
+        if warning:
+            log.warning("rebuild %s：%s", instance_id, warning)
+            with contextlib.suppress(Exception):
+                registry.add_event(instance_id, "source_stale", warning)
+            if out is not None:
+                out.append(warning)
         is_container = manifest.runtime.value == "docker-compose"
 
         def _builder(iid: str) -> InstanceManifest:

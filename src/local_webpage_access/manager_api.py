@@ -1134,7 +1134,14 @@ def _register_routes(app: FastAPI) -> None:
     def rebuild_op(instance_id: str) -> dict[str, Any]:
         from local_webpage_access.lifecycle import rebuild_instance
 
-        return _lifecycle_op(instance_id, rebuild_instance, label="rebuild")
+        # issue #8：把 rebuild 前的源码陈旧警告透出到响应（不阻断重建）
+        stale_warnings: list[str] = []
+        result = _lifecycle_op(
+            instance_id, rebuild_instance, label="rebuild", out=stale_warnings
+        )
+        if stale_warnings:
+            result["sourceStaleWarnings"] = stale_warnings
+        return result
 
     @app.post(
         "/api/instances/{instance_id}/cancel-build",

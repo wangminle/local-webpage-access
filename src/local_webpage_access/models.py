@@ -587,6 +587,11 @@ class InstanceManifest(BaseModel):
     container: ContainerConfig | None = None
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
+    # issue#7：构建钩子与启动前命令（持久化在 manifest，rebuild 重生成 Dockerfile
+    # 时保留，不再被抹掉）。buildHooks 在依赖安装层之后逐条生成 RUN；preStart
+    # 使 CMD 变为 ``sh -c "<preStart> && exec <start>"``。均拒绝换行符（防注入）。
+    buildHooks: list[str] = Field(default_factory=list)
+    preStart: str | None = None
     # IMP-047：来源类型与关联路径。旧实例默认 "zip"（迁移时由 from_dict extra 兜底）。
     sourceKind: str = "zip"
     sourceDirPath: str | None = None
@@ -637,6 +642,17 @@ class InstanceManifest(BaseModel):
     @field_validator("kind", "runtime", "servingMode", "resourceProfile", "desiredState", "status")
     @classmethod
     def _coerce_enum(cls, v: Any) -> Any:
+        return v
+
+    @field_validator("buildHooks", "preStart")
+    @classmethod
+    def _check_hooks_no_newline(cls, v: Any) -> Any:
+        """issue#7：buildHooks/preStart 会内插进生成的 Dockerfile（RUN / CMD），
+        拒绝换行符，防止手改 local-web.json 注入额外 Dockerfile 指令。"""
+        values = v if isinstance(v, list) else [v]
+        for item in values:
+            if isinstance(item, str) and ("\n" in item or "\r" in item):
+                raise ValueError(f"buildHooks/preStart 不允许包含换行符：{item!r}")
         return v
 
     @field_validator("sourceSubdir")

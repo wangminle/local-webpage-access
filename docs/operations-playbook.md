@@ -234,6 +234,28 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 - **导入/更新全程持有全局导入锁**（含 `ls-remote` 探测约 30s + 浅克隆最长 180s 的网络等待）。期间 `lwa update` 会等待导入空闲（最多 180s）再决定重启或跳过--慢网络下表现为 update 等待，属预期；确需立即升级可等导入完成后重跑 `lwa update`。
 - Agent 协作见 Skill `lwa-import-git`。
 
+### rebuild 与源码陈旧检测（issue #8）
+
+`lwa rebuild <id>` 只重建镜像 / 产物，**不会**同步上游源码。若 folder / git 源
+在导入后又有变更，rebuild 出来的仍是 `current/` 里的旧产物。为此：
+
+- rebuild 前自动做**源码陈旧检测**：folder 源比对源目录内容指纹与上次同步
+  指纹（`sourceSyncHash`）；git 源做短超时 `ls-remote` 比对远端 OID。检出
+  陈旧时打印黄色警告 + 写 registry `source_stale` 事件，**不阻断重建**；
+  git 探测离线 / 失败时不警告、不阻断（网络问题不会变成 rebuild 障碍）。
+- 检出陈旧后的两种修法：
+
+  ```bash
+  lwa rebuild --sync <id>                          # 先走更新管线同步源码，再重建
+  lwa import --from-dir <目录> --update <id>        # 或显式更新（git 源用 --from-git）
+  ```
+
+  `--sync` 复用 `import --update` 的既有更新管线（folder→`update_from_dir`、
+  git→`update_from_git`），自带无变更短路；`--sync` 只支持 folder / git 源
+  实例，zip / 无源实例会被拒绝（Exit 2）。
+- `lwa doctor` 的 `source_freshness` 检查（WARN 级，纯离线）批量列出源码
+  漂移 / 源目录丢失的 folder 源实例；git 源不触网，仅 SKIP 提示。
+
 ---
 
 ## 三、容器实例路径别名（IMP-014）

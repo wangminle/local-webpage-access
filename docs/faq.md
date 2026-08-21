@@ -314,6 +314,7 @@ status: pending
 * **daemon 自动导入（IMP-011）**：slug 冲突时记 `import_conflict` 事件并提示 `--update`，**不再**自动追加 `-2/-3`；导入成功后 zip 会移入 `inbox/processed/`。
 * **连续失败死信（BUG-297）**：同一 zip 指纹连续失败默认 5 次后移入 `inbox/failed/`；修好后移回 `inbox/` 根目录即可再试。
 * **`--update` 后容器仍是旧版？**：容器实例必须 **rebuild 镜像** 才会跑新源码。V0.5.2 起，running 容器的 `--update` 默认走 `lwa rebuild`（不再轻量 `restart`）。若用了 `--no-restart`，请手动 `lwa rebuild <id>`。
+* **`rebuild` 后跑的还是旧版？**（issue #8）：`rebuild` 只重建镜像 / 产物，不同步上游源码——folder / git 源在导入后再有改动时，重建出来的还是 `current/` 里的旧内容。`rebuild` 前会自动做源码陈旧检测（folder 比对内容指纹，git 短超时 `ls-remote` 比对 OID；检出时打印黄色警告并写 `source_stale` 事件，不阻断；git 离线不警告）。修法：`lwa rebuild --sync <id>`（先同步源码再重建，仅 folder/git 源）或 `lwa import --from-dir/--from-git --update <id>`。`lwa doctor` 的 `source_freshness` 检查（WARN 级、纯离线）可批量列出漂移的 folder 源实例。
 * **更新后数据库指向空库？**：**V0.7.8** 起 `generate_env` 重新生成 `.env` 时会保留已有 `DATABASE_URL`，不再被源目录占位 SQLite 文件（如 `_empty_check.db`）覆盖。若需手动修改 `DATABASE_URL`，直接编辑 `docker/.env` 后 `lwa rebuild <id>`。
 * **Gate-C 报 database 能力未通过？**：**V0.7.8** 起 `_verify_sqlite_database` 在 manifest 声明的文件未命中时，回退扫描 `data/` 目录下所有 `.db`/`.sqlite`/`.sqlite3` 文件，只要存在一个有效 SQLite 数据库即视为能力满足。
 * **同包重复导入**：同一 zip 指纹（`sourceZipHash`）会产生冗余实例。清理：
@@ -387,6 +388,24 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 
 改完后 `lwa restart <id>` 生效。安全边界仍在：家目录整体（`/home`、`/Users`）、
 `/etc`、`docker.sock`、`.ssh`/`.aws` 等凭据目录挂载会被 compose 安全审计拒绝。
+
+### 应用需要构建钩子 / 启动前迁移怎么办？（buildHooks / preStart，issue#7）
+
+手工改 `entry.start` 塞初始化命令会在下次 `lwa rebuild` 重生成 Dockerfile 时被
+抹掉。持久化出口是 `apps/<id>/local-web.json` 的两个字段（home-bookshelf 风格示例）：
+
+```json
+"buildHooks": ["python scripts/build_skills_bundle.py"],
+"preStart": "alembic upgrade head"
+```
+
+* `buildHooks`：字符串数组，镜像构建期在依赖安装完成、源码拷入之后于 `/app`
+  （源码根）逐条执行 `RUN <hook>`，适合构建期的资源打包/代码生成脚本。
+* `preStart`：容器每次启动时先执行，成功后才 `exec` 启动命令（CMD 变为
+  `sh -c "<preStart> && exec <start>"`），适合数据库迁移等启动前步骤；
+  preStart 失败则容器直接退出，不会带病启动。
+* 两个字段都不允许换行符；含 `curl … | sh` 类管道安装脚本会被 Dockerfile
+  安全审计拒绝落盘。改完后 `lwa rebuild <id>` 生效。
 
 ### "实例 xx 正在被其他操作占用，等待超时"（issue#1）
 
@@ -541,6 +560,18 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
   * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
   * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
 * **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME）+ 绝对 API 路径对照（IMP-055），直接指出哪些实例需要 rebuild 或 API 改造；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。瞬时连接失败（TIMEOUT / REFUSED）**不**算 IMP-023，避免误触发 `--rebuild-if-needed`。
+
+### 应用开发约定：客户端 IP 与转发头（issue #9）
+
+应用经 lwa 暴露后，**能否看到真实客户端 IP 取决于访问路径**，写应用时请按以下约定处理：
+
+* **经 :8080 别名入口（Caddy 反代，`http://<LAN-IP>:8080/<alias>/`）**：Caddy `reverse_proxy` 默认注入 `X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host`；lwa 别名片段额外显式注入 `X-Real-IP`（issue #9）。应用应优先读 `X-Forwarded-For`（取第一个值）或 `X-Real-IP` 判断来源（本机 / 局域网），不要直接用 socket 对端地址——那永远是 Caddy 回环 `127.0.0.1`。
+* **直连 hostPort 端口（`http://<LAN-IP>:<hostPort>/`）**：该路径不经过任何 lwa 代理，流量经 Docker NAT 进容器，应用看到的对端 IP 是 **Docker 网桥地址**（默认 `172.17.0.0/16` 段内；compose 项目网络由 Docker 另行分配），且**没有任何代理头**。这是 Docker NAT 的固有限制，lwa 无法修改。应用不应假设直连路径能看到真实客户端 IP。
+* **builtin 网关**：是纯静态服务（`python -m http.server`），不做反代，不涉及转发头。
+
+自查示例：`curl -s -H 'X-Debug: 1' http://127.0.0.1:8080/<alias>/` 并在应用侧打印请求头，确认 `X-Real-IP` 为调用方真实地址。
+
+暂无 HMAC 共享密钥签名头（issue #9 的「更进一步」项）：这些转发头不防伪，可信边界仍以管理面的 loopback + token 为准，应用不要把 `X-Forwarded-For` / `X-Real-IP` 当作鉴权依据。
 
 ### 如何在 Caddy 与 builtin 之间切换网关后端
 

@@ -194,3 +194,44 @@ def test_source_subdir_rejects_escape(bad: str) -> None:
     data["sourceSubdir"] = bad
     with pytest.raises(SchemaError):
         InstanceManifest.from_dict(data)
+
+
+# ---- issue#7：buildHooks / preStart ------------------------------------------
+
+
+def test_build_hooks_and_pre_start_defaults() -> None:
+    """issue#7：旧 manifest 无 buildHooks/preStart 字段可加载，取默认值。"""
+    m = InstanceManifest.from_dict(_static_manifest_dict())
+    assert m.buildHooks == []
+    assert m.preStart is None
+
+
+def test_build_hooks_and_pre_start_roundtrip(tmp_path: Path) -> None:
+    """issue#7：buildHooks/preStart 可写入并读回。"""
+    data = _static_manifest_dict()
+    data["buildHooks"] = ["python scripts/build_skills_bundle.py"]
+    data["preStart"] = "alembic upgrade head"
+    m = InstanceManifest.from_dict(data)
+    path = tmp_path / "local-web.json"
+    m.save(path)
+    loaded = InstanceManifest.load(path)
+    assert loaded.buildHooks == ["python scripts/build_skills_bundle.py"]
+    assert loaded.preStart == "alembic upgrade head"
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"])
+def test_build_hooks_reject_newline(newline: str) -> None:
+    """issue#7：buildHooks 条目含换行符拒绝（防 Dockerfile 注入）。"""
+    data = _static_manifest_dict()
+    data["buildHooks"] = [f"echo ok{newline}RUN evil"]
+    with pytest.raises(SchemaError):
+        InstanceManifest.from_dict(data)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"])
+def test_pre_start_rejects_newline(newline: str) -> None:
+    """issue#7：preStart 含换行符拒绝（防 Dockerfile 注入）。"""
+    data = _static_manifest_dict()
+    data["preStart"] = f"alembic upgrade head{newline}rm -rf /"
+    with pytest.raises(SchemaError):
+        InstanceManifest.from_dict(data)

@@ -856,9 +856,35 @@ def test_generate_alias_config_writes_strip_prefix_route(
     # 去前缀反向代理到本机 hostPort
     assert "handle_path /voiceprint-app-demo/* {" in content
     assert "reverse_proxy 127.0.0.1:18001" in content
+    # issue #9：显式注入 X-Real-IP（Caddy {remote_host} 占位符）
+    assert "header_up X-Real-IP {remote_host}" in content
     # 无尾斜杠 → 301 到 /voiceprint-app-demo/
     assert "handle /voiceprint-app-demo {" in content
     assert "redir /voiceprint-app-demo/ permanent" in content
+
+
+def test_generate_alias_config_injects_x_real_ip_header(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """issue #9：别名片段 reverse_proxy 块显式 header_up X-Real-IP {remote_host}。
+
+    Caddy 默认已注入 X-Forwarded-For/Proto/Host；X-Real-IP 是显式补充，
+    让按 nginx 习惯读 X-Real-IP 的应用也能拿到真实客户端 IP。
+    """
+    path = gateway.generate_alias_config("demo", "ip-echo", 18001)
+    content = path.read_text(encoding="utf-8")
+    assert (
+        "\treverse_proxy 127.0.0.1:18001 {\n"
+        "\t\theader_up X-Real-IP {remote_host}\n"
+        "\t}\n"
+    ) in content
+
+    # spa_fallback 逃生舱的回退代理同样注入（同一 reverse_proxy 路径）
+    path = gateway.generate_alias_config(
+        "app", "spa-app", 18002, runtime="docker-compose", spa_fallback=True
+    )
+    content = path.read_text(encoding="utf-8")
+    assert content.count("header_up X-Real-IP {remote_host}") == 2
 
 
 def test_generate_alias_config_no_spa_fallback_by_default(
