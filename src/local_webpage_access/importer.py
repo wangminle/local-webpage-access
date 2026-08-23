@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import html as html_lib
 import os
 import re
@@ -588,6 +589,28 @@ class Importer:
                     "检测到 .env.example：部署后复制为 docker/.env.example，"
                     "业务密钥请填入 docker/.env.local（compose 自动注入）",
                 )
+            # issue #12：源目录存在 .env（构建上下文里被 .dockerignore 排除、
+            # 运行时也不会注入容器），明确登记事件--绝不静默吞掉，也绝不自动
+            # 复制进镜像（密钥可能入 layer）。指引迁移路径 docker/.env.local。
+            # BUG-591：.dockerignore 用 **/.env 排除所有层级，检测也要覆盖
+            # resolve_source_workdir 之后的实际项目根（sourceSubdir/monorepo
+            # 场景，如 current/backend/.env），消息展示相对 current/ 的路径。
+            env_candidates: list[tuple[Path, str]] = [(current_dir, ".env")]
+            source_subdir = getattr(manifest, "sourceSubdir", None)
+            if source_subdir:
+                from local_webpage_access.paths import resolve_source_workdir
+
+                workdir = resolve_source_workdir(current_dir, source_subdir)
+                if workdir != current_dir.resolve():
+                    env_candidates.append((workdir, f"{source_subdir}/.env"))
+            for env_dir, env_rel in env_candidates:
+                if (env_dir / ".env").is_file():
+                    self.registry.add_event(
+                        instance_id,
+                        "env_detected",
+                        f"检测到源目录 {env_rel}：被 .dockerignore 排除、不会进入镜像或容器；"
+                        "业务键请手动迁移到 docker/.env.local（compose 自动注入）",
+                    )
             # IMP-001：剥离摘要登记为可审计事件（仅当实际剥离了成员时）
             if sanitized is not None and sanitized.stripped_names:
                 parts = ", ".join(
@@ -2044,6 +2067,9 @@ def apply_detection_to_manifest(
     CHK-178/P2：亦保留路径别名（``routeMode=name`` + ``routeHost``）。别名是
     用户/CLI 选择，不从 zip 推导；``build_manifest_from_detection`` 默认
     ``path_alias=None``，不在此回填会把别名静默清空。
+    BUG-584：亦保留 ``verificationOverrides``（lwa probe / 管理页配置的
+    稳定探针覆盖层）：重建默认 None，不透传会在 ``lwa scan`` /
+    ``import --update`` 后把用户配置静默清空。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -2083,6 +2109,12 @@ def apply_detection_to_manifest(
     fresh.sourceGitRefKind = getattr(manifest, "sourceGitRefKind", None)
     fresh.sourceGitCommit = getattr(manifest, "sourceGitCommit", None)
     fresh.sourceGitSubdir = getattr(manifest, "sourceGitSubdir", None)
+    # BUG-584 / CHK-252：verificationOverrides 是用户显式配置（lwa probe /
+    # 管理页），不从 zip 推导，scan / update 重建不得清空。深拷贝避免与
+    # 旧 manifest 共享可变结构。
+    fresh.verificationOverrides = copy.deepcopy(
+        getattr(manifest, "verificationOverrides", None)
+    )
     # CHK-178/P2：路径别名是用户/CLI 选择，不从 zip 推导，重扫不得清空。
     # ``build_manifest_from_detection`` 默认 ``path_alias=None``，不透传会把
     # static/container 的 routeMode=name、routeHost 重置为 port/None，导致

@@ -345,6 +345,37 @@ class ProbeSpec(BaseModel):
     description: str = ""  # 人类可读说明
 
 
+class ProbeOverride(BaseModel):
+    """用户显式声明的就绪探针（第二批 CHK-252：``lwa probe set``）。
+
+    只有用户显式声明的探针才可作为 mandatory 门槛——契约探针
+    （declared/discovered/guessed）均为证据，静态扫描无法判断鉴权与
+    返回语义，不构成失败条件。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    path: str
+    method: str = "GET"
+    expectedStatus: int = 200  # 预期状态码（精确匹配；2xx/3xx 同样视为通过）
+    description: str = ""
+
+
+class VerificationOverrides(BaseModel):
+    """实例级验证覆盖层（第二批 CHK-252），持久化在 manifest 顶层。
+
+    重导入/rebuild 只重写 ``capabilityContract``，本字段独立存在、
+    更新和重扫不得覆盖（stable override layer）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # 用户显式声明的就绪探针（mandatory 门槛的唯一来源）。
+    probes: list[ProbeOverride] = Field(default_factory=list)
+    # 关闭自动探针（契约中的 guessed/discovered 全部不执行）。
+    disableAutoProbes: bool = False
+
+
 class CapabilityContract(BaseModel):
     """部署成功必须保留的业务能力契约（IMP-058 §6.5）。
 
@@ -631,8 +662,10 @@ class InstanceManifest(BaseModel):
     verificationSummary: dict | None = None
     # 能力契约快照（C.01/C.07）：该实例声明的能力集合，用于降级时等价性校验
     capabilityContract: dict | None = None
-    # C.R06：四类部署指纹（source/plan/generated-config/image）
-    # 任一变化时禁止轻量 start，强制重建；全未变时允许轻量 start 且仍执行存活探针
+    # 第二批 CHK-252：用户级验证覆盖层（显式就绪探针 + 关闭自动探针）。
+    # 顶层独立字段——rebuild/重扫重写 capabilityContract 时不受影响。
+    verificationOverrides: VerificationOverrides | dict | None = None
+    # build 变化 → 强制镜像重建；仅 runtime 变化 → compose recreate；全未变 → 轻量 start
     deploymentFingerprints: dict | None = None
     # ---- Gate-2 新字段（IMP-056）----
     compatibilityFindings: list[CompatibilityFinding] = Field(default_factory=list)

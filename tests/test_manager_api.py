@@ -1990,6 +1990,7 @@ def caddy_alias_gateway(monkeypatch):
                 p.unlink()
 
     monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(path_alias, "verify_alias_live", lambda *a, **k: None)
 
 
 def test_path_alias_set_and_clear(manager_env: EnvBundle, caddy_alias_gateway) -> None:
@@ -2137,6 +2138,10 @@ def test_path_alias_running_triggers_gateway_reload(
         "local_webpage_access.path_alias.StaticGateway.reload_all",
         lambda self: reloaded.append(True),
     )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.verify_alias_live",
+        lambda *a, **k: None,
+    )
 
     resp = manager_env.client.patch(
         f"/api/instances/{iid}/path-alias",
@@ -2209,6 +2214,107 @@ def test_path_alias_reload_failure_does_not_persist(
     site = manager_env.registry.get_static_site(iid)
     assert site is not None
     assert site["route_host"] == "keep-me"
+
+
+def test_verification_get_and_patch(manager_env: EnvBundle) -> None:
+    iid = manager_env.instance_id
+    resp = manager_env.client.get(
+        f"/api/instances/{iid}/verification",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["instanceId"] == iid
+    assert "effectiveProbes" in body
+
+    resp2 = manager_env.client.patch(
+        f"/api/instances/{iid}/verification",
+        headers=manager_env.auth_headers(),
+        json={
+            "disableAutoProbes": True,
+            "probes": [{"path": "/ready", "expectedStatus": 204}],
+        },
+    )
+    assert resp2.status_code == 200
+    assert resp2.json()["overrides"]["disableAutoProbes"] is True
+    assert resp2.json()["overrides"]["probes"][0]["path"] == "/ready"
+
+
+def test_verification_patch_valid_probes_persist(manager_env: EnvBundle) -> None:
+    """BUG-588：合法配置 200 正常保存，后续 GET 可见且进入 effectiveProbes。"""
+    iid = manager_env.instance_id
+    resp = manager_env.client.patch(
+        f"/api/instances/{iid}/verification",
+        headers=manager_env.auth_headers(),
+        json={"probes": [{"path": "/healthz", "method": "GET", "expectedStatus": 200}]},
+    )
+    assert resp.status_code == 200
+
+    resp_get = manager_env.client.get(
+        f"/api/instances/{iid}/verification",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp_get.status_code == 200
+    assert resp_get.json()["overrides"]["probes"][0]["path"] == "/healthz"
+    assert any(p["path"] == "/healthz" for p in resp_get.json()["effectiveProbes"])
+
+
+def test_verification_patch_rejects_invalid_probes(manager_env: EnvBundle) -> None:
+    """BUG-588：非法探针配置返回 400 且不写盘，后续 GET 不受影响。"""
+    from local_webpage_access.models import InstanceManifest
+
+    iid = manager_env.instance_id
+    for probe in (
+        {"path": "/ready", "expectedStatus": "not-a-number"},  # 非数字状态码
+        {"path": "ready"},  # path 不以 / 开头
+        {"path": "/ready", "method": "FETCH"},  # 非法 method
+        {"path": "/ready", "expectedStatus": 99},  # 超出 100..599
+    ):
+        resp = manager_env.client.patch(
+            f"/api/instances/{iid}/verification",
+            headers=manager_env.auth_headers(),
+            json={"probes": [probe]},
+        )
+        assert resp.status_code == 400, probe
+
+    # manifest 未被污染：GET 正常且无 overrides 落盘
+    resp_get = manager_env.client.get(
+        f"/api/instances/{iid}/verification",
+        headers=manager_env.auth_headers(),
+    )
+    assert resp_get.status_code == 200
+    assert resp_get.json()["overrides"] == {}
+    saved = InstanceManifest.load(manager_env.workspace.app_manifest_path(iid))
+    assert not getattr(saved, "verificationOverrides", None)
+
+
+def test_path_alias_skip_compat_check_flag(
+    manager_env: EnvBundle, caddy_alias_gateway, monkeypatch
+) -> None:
+    from local_webpage_access import path_alias
+    from local_webpage_access.errors import RecognitionError
+
+    calls = {"live": 0}
+
+    def fake_live(*args, **kwargs):
+        calls["live"] += 1
+        raise RecognitionError("live verify blocked")
+
+    monkeypatch.setattr(path_alias, "verify_alias_live", fake_live)
+    monkeypatch.setattr(
+        path_alias,
+        "_apply_gateway_alias",
+        lambda *a, **k: (True, True),
+    )
+    iid = manager_env.instance_id
+    resp = manager_env.client.patch(
+        f"/api/instances/{iid}/path-alias",
+        headers=manager_env.auth_headers(),
+        json={"alias": "skip-live", "skipCompatCheck": True},
+    )
+    assert resp.status_code == 200
+    assert calls["live"] == 0
+    assert resp.json().get("compatCheckSkipped") is True
 
 
 # ---- 浏览量统计 API（IMP-024 / DEV-061）--------------------------------------

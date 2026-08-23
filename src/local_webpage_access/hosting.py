@@ -48,6 +48,7 @@ from local_webpage_access.probe import mark_probe_url, urlopen_direct
 from local_webpage_access.ports import PortAllocator, build_network_entry, is_port_listening
 from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
+from local_webpage_access.verification_config import effective_capability_contract
 
 log = get_logger("hosting")
 
@@ -670,10 +671,17 @@ def host_container(
             **se_context,
         )
 
-    # 确定最终状态
+    # 第二批 CHK-252：验证结论（degraded）不再写入进程状态——Status 只表达
+    # 进程/部署态；验证警告经 verificationSummary 由 UI 叠加展示
+    # （「运行中 · 验证有警告」）。
     if verification["overall_status"] == "degraded":
-        final_status = Status.DEGRADED
-        status_detail = "DEGRADED（可选探针失败）"
+        final_status = Status.RUNNING
+        status_detail = "RUNNING（验证有警告）"
+        registry.add_event(
+            instance_id,
+            "lifecycle_stage",
+            "Gate-C 验证有警告（可选探针/能力证据），详见 verificationSummary",
+        )
     else:
         final_status = Status.RUNNING
         status_detail = "RUNNING"
@@ -685,6 +693,7 @@ def host_container(
         "livenessPassed": verification.get("liveness_passed", False),
         "mandatoryAllPassed": verification.get("mandatory_all_passed", False),
         "optionalWarnings": verification.get("optional_warnings", []),
+        "probeNotes": verification.get("probe_notes", []),
         "observedCapabilities": verification.get("observed_capabilities", []),
     }
 
@@ -874,12 +883,13 @@ def start_container(
         registry.record_health_check(instance_id)
         status_detail = "RUNNING"
     elif overall == "degraded":
-        manifest.status = Status.DEGRADED
-        status_detail = "DEGRADED（可选探针失败）"
+        # 第二批 CHK-252：验证警告不再降级进程状态，保持 RUNNING。
+        manifest.status = Status.RUNNING
+        status_detail = "RUNNING（验证有警告）"
         registry.add_event(
             instance_id,
             "lifecycle_stage",
-            f"Gate-C 轻量 start 可选探针失败（host_port={host_port}）",
+            f"Gate-C 轻量 start 验证有警告（host_port={host_port}），详见 verificationSummary",
         )
     else:
         manifest.status = Status.FAILED
@@ -897,6 +907,7 @@ def start_container(
         "livenessPassed": verification.get("liveness_passed", False),
         "mandatoryAllPassed": verification.get("mandatory_all_passed", False),
         "optionalWarnings": verification.get("optional_warnings", []),
+        "probeNotes": verification.get("probe_notes", []),
         "observedCapabilities": verification.get("observed_capabilities", []),
     }
 
@@ -917,6 +928,133 @@ def start_container(
     )
     log.info("容器实例 %s 已 %s（%s），端口 %d", instance_id, action, status_detail, host_port)
     return manifest
+
+
+def recreate_container_runtime(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> InstanceManifest:
+    """CHK-252：仅 compose/.env 变化时 force-recreate，不 rebuild 镜像。"""
+    manifest = _load_manifest(workspace, instance_id)
+    if manifest.runtime.value != "docker-compose" or manifest.container is None:
+        raise HostingError(
+            f"实例 {instance_id} 不是容器实例",
+            instance_id=instance_id,
+            runtime=manifest.runtime.value,
+        )
+    DockerRuntime.ensure_available()
+    runtime = DockerRuntime(workspace, registry)
+    if not _can_recreate_container_without_rebuild(workspace, runtime, instance_id):
+        log.info("实例 %s 无法 runtime recreate，回退完整重建", instance_id)
+        return host_container(workspace, config, registry, instance_id)
+
+    if runtime.is_running(instance_id):
+        runtime.stop(instance_id)
+    manifest.container.containerId = None
+    manifest.container.imageId = None
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+    try:
+        runtime.up(instance_id, force_recreate=True)
+    except Exception as exc:
+        # BUG-589：旧容器已 stop、身份已清空，不可恢复；收敛为 failed 而不是
+        # 留下 manifest/registry/容器三方分叉。
+        _recreate_failed_rollback(workspace, registry, instance_id, manifest, runtime, exc)
+        raise
+    action = "recreate"
+
+    host_port = manifest.container.hostPort
+    fresh_port = False
+    if not host_port:
+        host_port, fresh_port = _ensure_container_port(config, registry, instance_id)
+        manifest.container.hostPort = host_port
+
+    observed_cid = _safe(lambda: runtime.container_id(instance_id))
+    observed_iid = _safe(lambda: runtime.image_id(instance_id))
+    if observed_cid:
+        manifest.container.containerId = observed_cid
+    if observed_iid:
+        manifest.container.imageId = observed_iid
+
+    verification = _evaluate_container_verification(
+        host_port, manifest, workspace, registry, instance_id
+    )
+    overall = verification.get("overall_status", "failed")
+    if overall == "failed":
+        error = verification.get("error") or "runtime recreate 后验证失败"
+        # BUG-589：与 _liveness_failed_rollback 对称——清理新容器、释放本轮
+        # 新分配端口、写 FAILED 并记录诊断。
+        if fresh_port:
+            with contextlib.suppress(Exception):
+                PortAllocator(config, registry).release_instance(instance_id)
+        failure = HostingError(error, instance_id=instance_id)
+        _recreate_failed_rollback(
+            workspace, registry, instance_id, manifest, runtime, failure
+        )
+        raise failure
+
+    # 第二批 CHK-252：验证警告不再降级进程状态（failed 已在上面 raise）。
+    manifest.status = Status.RUNNING
+    manifest.desiredState = DesiredState.RUNNING
+    manifest.lastError = None
+    from local_webpage_access.lifecycle import _compute_deployment_fingerprints
+
+    manifest.deploymentFingerprints = _compute_deployment_fingerprints(workspace, manifest)
+    manifest.verificationSummary = {
+        "overallStatus": overall,
+        "livenessPassed": verification.get("liveness_passed", False),
+        "mandatoryAllPassed": verification.get("mandatory_all_passed", False),
+        "optionalWarnings": verification.get("optional_warnings", []),
+        "probeNotes": verification.get("probe_notes", []),
+        "observedCapabilities": verification.get("observed_capabilities", []),
+    }
+    manifest.touch()
+    manifest.save(workspace.app_manifest_path(instance_id))
+    registry.update_status(
+        instance_id,
+        manifest.status.value,
+        desired_state=DesiredState.RUNNING.value,
+        last_error=manifest.lastError,
+        clear_last_error=manifest.lastError is None,
+    )
+    registry.add_event(
+        instance_id,
+        "start",
+        f"容器实例 runtime recreate（{action}，host_port={host_port}）",
+    )
+    log.info("容器实例 %s runtime recreate 完成，端口 %d", instance_id, host_port)
+    return manifest
+
+
+def _recreate_failed_rollback(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    runtime: DockerRuntime,
+    exc: Exception,
+) -> None:
+    """BUG-589：runtime recreate 失败收敛——清理新容器、写 FAILED 并记录诊断。
+
+    旧容器在 recreate 前已 stop 且身份已清空，不可恢复；如实记录为
+    failed（清空容器身份，下次 start 走完整重建），而不是留下
+    manifest/registry/实际容器三方分叉。与 :func:`_liveness_failed_rollback`
+    对称。
+    """
+    with contextlib.suppress(Exception):
+        runtime.down(instance_id)
+    if manifest.container is not None:
+        manifest.container.containerId = None
+        manifest.container.imageId = None
+    _mark_failed(workspace, registry, instance_id, manifest, exc)
+    with contextlib.suppress(Exception):
+        registry.add_event(
+            instance_id,
+            "lifecycle_stage",
+            f"runtime recreate 失败已回滚（新容器已清理）：{str(exc)[:200]}",
+        )
 
 
 def _can_recreate_container_without_rebuild(
@@ -1264,15 +1402,19 @@ def _evaluate_container_verification(
 
     # CHK-192/P1：从 manifest 加载持久化的能力契约（含 requiredProbes），
     # 不再临时推断（原 _infer_capability_contract 丢失 requiredProbes 且无探针执行）。
-    contract = _load_capability_contract(manifest)
+    contract = effective_capability_contract(manifest)
     required = contract.required_capabilities
 
-    # 执行 mandatory 探针（如 /health），结果作成功门槛。
+    # 第二批 CHK-252：探针三层语义——可达性（_wait_for_http，任意 HTTP 响应即
+    # 存活）/ 就绪性（只有 isMandatory ∧ source="declared" 的用户显式探针按
+    # 期望状态通过才算就绪，失败 => failed）/ 能力证据（契约探针与能力覆盖只
+    # 产生告警或备注，不再构成失败条件）。
     # BUG-499：只有 source in ("declared", "discovered") 的探针通过才可作为
     # API 能力证据；guessed 探针（如通用 /health、api_probe）仅诊断，
     # 不得满足 servesApi（否则偶然 /health 200 假绿、无标准路径 API 假红）。
     mandatory_all_passed = True
     optional_warnings: list[str] = []
+    probe_notes: list[str] = []
     successful_business_probe = False
     for spec in contract.requiredProbes:
         passed, code = _probe_path(
@@ -1280,14 +1422,22 @@ def _evaluate_container_verification(
             spec.path,
             expected_status=spec.expectedStatus,
         )
-        if passed and spec.source in ("declared", "discovered"):
-            successful_business_probe = True
-        if spec.isMandatory:
-            if not passed:
-                mandatory_all_passed = False
-        else:
-            if not passed:
-                optional_warnings.append(f"可选探针 {spec.path} 未通过（code={code}）")
+        if passed:
+            if spec.source in ("declared", "discovered"):
+                successful_business_probe = True
+            continue
+        if spec.isMandatory and spec.source == "declared":
+            # 用户显式声明的就绪门槛：期望状态必须满足，失败 => failed。
+            mandatory_all_passed = False
+            continue
+        if code in (401, 403):
+            # 端点存在但受保护：服务在响应，鉴权是应用语义——不算成功、不降级。
+            probe_notes.append(f"端点 {spec.path} 存在但受保护（code={code}）")
+            continue
+        if code == 404 and spec.source == "guessed":
+            # 猜测探针落空：应用本就不保证提供该端点，中性丢弃。
+            continue
+        optional_warnings.append(f"可选探针 {spec.path} 未通过（code={code}）")
 
     # BUG-481：契约是要求，不是证据。首页存活不再自动补齐 API/DB/迁移。
     if successful_business_probe:
@@ -1315,12 +1465,16 @@ def _evaluate_container_verification(
     verifiable_required = {
         capability for capability in required if capability != "api" or has_api_evidence_source
     }
-    capabilities_covered = verifiable_required.issubset(observed)
+    missing_capabilities = sorted(verifiable_required - observed)
+    if missing_capabilities:
+        # 第二批 CHK-252：能力证据是证据不是门槛——未覆盖只告警，不判失败。
+        optional_warnings.append(
+            f"能力证据未覆盖：{', '.join(missing_capabilities)}"
+            "（能力证据仅作告警；可用 lwa probe 显式声明就绪探针）"
+        )
 
-    # 总体判定（CHK-192/P1：能力未覆盖 -> failed，不再假报 passed）
+    # 总体判定：只有不可达或用户声明的就绪探针失败才 failed。
     if not liveness_ok or not mandatory_all_passed:
-        overall = "failed"
-    elif not capabilities_covered:
         overall = "failed"
     elif optional_warnings:
         overall = "degraded"
@@ -1332,14 +1486,15 @@ def _evaluate_container_verification(
         "liveness_passed": liveness_ok,
         "mandatory_all_passed": mandatory_all_passed,
         "optional_warnings": optional_warnings,
+        "probe_notes": probe_notes,
         "observed_capabilities": sorted(observed),
         "error": (
             None
             if overall != "failed"
             else (
-                "必选探针未通过"
+                "必选探针未通过（用户声明的就绪门槛）"
                 if not mandatory_all_passed
-                else f"未观测到所需能力：{', '.join(sorted(verifiable_required - observed))}"
+                else f"基础存活探针失败（host_port={host_port}）"
             )
         ),
     }
@@ -1446,11 +1601,18 @@ def _liveness_failed_rollback(
 
 
 def _http_ok(host_port: int, *, timeout: float = 2.0) -> bool:
-    """单次 HTTP GET 健康探测（2xx/3xx 视为成功）。"""
+    """单次 HTTP GET 可达性探测（第二批 CHK-252：三层语义之「可达性」）。
+
+    收到任意 HTTP 状态码（含 401/404/5xx）即视为进程和端口活着——
+    就绪与否交由显式声明的探针判定；连接拒绝/超时才是不可达。
+    """
     url = mark_probe_url(f"http://127.0.0.1:{host_port}/")
     try:
         resp = urlopen_direct(url, timeout=timeout)
-        return 200 <= resp.status < 400
+        return 100 <= resp.status < 600
+    except urllib.error.HTTPError:
+        # 收到了 HTTP 响应（状态码任意）＝ 服务在监听。
+        return True
     except Exception:  # noqa: BLE001
         return False
 

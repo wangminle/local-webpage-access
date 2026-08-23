@@ -451,10 +451,12 @@ status: failed, lastError: 容器退出码 1
 **V0.7.7** 起 `lwa start` 对首次部署的容器实例执行实证校验状态机：
 
 * **VERIFYING**：容器已 `compose up` 但存活探针尚未通过（等待 HTTP 响应）。正常情况下几秒内自动转为 RUNNING。
-* **FAILED**：必选存活探针超时（容器进程已启动但端口不响应，或容器在超时窗口内退出）。不假报 running。查看 `lwa logs <id> --category run` 排查根因（常见：应用启动 crash、端口不对、启动脚本被 shell 操作符拆碎）。
-* **DEGRADED**：必选探针通过但可选探针未通过（如猜测的 `/health` 端点返回 404）。实例可用但管理页显示降级横幅。
+* **FAILED**：基础存活不可达（连接拒绝/超时），或**用户显式声明的就绪探针**（`lwa probe set`）未按期望状态通过。不假报 running。查看 `lwa logs <id> --category run` 排查根因（常见：应用启动 crash、端口不对、启动脚本被 shell 操作符拆碎）。
+* ~~**DEGRADED**~~（**V0.8.6 起（第二批 CHK-252）不再写入进程状态**）：验证结论与进程状态分离——可选探针/能力证据有告警时实例保持 RUNNING，管理页在状态徽标旁叠加「验证有警告」徽标，明细见实例 `verificationSummary`（含 `optionalWarnings` / `probeNotes`）。
 
-**关于猜测探针**：Flask/Django/Express 不保证提供 `/health` 端点。`source="guessed"` 的探针（如 `/health`、`/`）仅产生诊断，不通过不判失败。只有 `source="declared"` 或 `source="discovered"` 的探针可作成功门槛。**V0.7.9**：源码扫描只采纳可确认的 GET/HEAD 健康路径（`/health`、`/healthz`、`/ping`、`/ready` 等），忽略 POST 与注释文本；探针对 2xx/3xx（含 204）一律通过。无声明/发现探针时 `servesApi` 降为 DEGRADED（「API 无法实证」），不再因 guessed `/health` 假红或假绿。`frontend/` 子目录的 npm 构建在 `current/<subdir>` 执行；`sourceSubdir` 不得越出 `current/`。
+**三层探针语义（第二批 CHK-252）**：① 可达性——收到任意 HTTP 状态码（含 401/404/5xx）即算进程和端口活着；② 就绪性——只有用户显式声明的探针（`lwa probe set`，或项目 declared 门槛）按期望状态通过才算业务就绪，失败判 FAILED；③ 能力证据——契约探针与能力覆盖只产生告警/备注，不构成失败条件。
+
+**关于猜测探针**：Flask/Django/Express 不保证提供 `/health` 端点。`source="guessed"` 的探针 404 视为中性（猜测落空，不产生告警）；401/403 视为「端点存在但受保护」（记录备注，不算成功也不降级）；5xx 才告警。**第二批 CHK-252 起 `source="discovered"` 的探针同样降为可选证据**——静态路由扫描无法判断鉴权与返回语义（受保护的 `/health` 返回 401 不应回滚容器），mandatory 门槛只来自用户显式声明（`lwa probe set` / `lwa probe auto off` 关闭自动探针）。**V0.7.9**：源码扫描只采纳可确认的 GET/HEAD 健康路径（`/health`、`/healthz`、`/ping`、`/ready` 等），忽略 POST 与注释文本；探针对 2xx/3xx（含 204）一律通过。无声明/发现探针时 `servesApi` 产生「API 无法实证」告警（验证降级），不再因 guessed `/health` 假红或假绿。`frontend/` 子目录的 npm 构建在 `current/<subdir>` 执行；`sourceSubdir` 不得越出 `current/`。
 
 **关于降级**：top-1 候选 build/start 失败时，按 `fallback_policy` 策略处理（默认 `confirm` 需用户确认；`auto-equivalent` 在能力等价时可自动降级；`disabled` 不降级）。后端候选不会自动降级为静态/前端候选（能力守恒）。
 

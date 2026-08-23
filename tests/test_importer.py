@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import zipfile
 from pathlib import Path
 
@@ -1880,3 +1881,182 @@ def test_import_path_alias_allows_relative_spa_assets(
     assert result.manifest.static is not None
     assert result.manifest.static.routeMode == "name"
     assert result.manifest.static.routeHost == "ok-spa"
+
+
+# ---- issue #12：源 .env 检测登记事件 ----------------------------------------
+
+
+def test_import_source_env_records_event(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #12：zip 含 .env -> 导入后登记 env_detected 事件（不静默吞掉）。"""
+    zip_path = _make_zip(
+        tmp_path / "demo-env.zip",
+        {
+            "requirements.txt": "fastapi\n",
+            ".env": "SECRET_TOKEN=abc\n",
+        },
+    )
+    result = importer.import_zip(zip_path)
+    events = importer.registry.list_events(result.instance_id)
+    matched = [e for e in events if e.get("event_type") == "env_detected"]
+    assert len(matched) == 1
+    assert ".env.local" in matched[0].get("message", "")
+    # 事件里绝不携带值，只描述迁移路径。
+    assert "abc" not in matched[0].get("message", "")
+
+
+def test_import_no_source_env_no_event(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #12 反例：无源 .env 时不登记 env_detected。"""
+    zip_path = _make_zip(
+        tmp_path / "demo-noenv.zip",
+        {"requirements.txt": "fastapi\n"},
+    )
+    result = importer.import_zip(zip_path)
+    events = importer.registry.list_events(result.instance_id)
+    types = [e.get("event_type") for e in events]
+    assert "env_detected" not in types
+
+
+# ---- BUG-591：sourceSubdir 项目的 .env 检测 ---------------------------------
+
+
+def test_import_subdir_env_records_event(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """BUG-591：sourceSubdir 项目内（如 backend/）的 .env 不得静默失效。
+
+    复现：.dockerignore 用 ``**/.env`` 排除所有层级 .env，但导入检测只查
+    current/.env 根目录；backend/.env 被静默排除、无任何警告。修复后应登记
+    env_detected 事件且消息含相对路径 backend/.env。
+    """
+    zip_path = _make_zip(
+        tmp_path / "mono.zip",
+        {
+            # 根级文件避免 zip 单层根目录被拍平（backend/ 保持为子目录）
+            "README.md": "# mono\n",
+            "backend/requirements.txt": "flask\n",
+            "backend/app.py": "app = None\n",
+            "backend/.env": "SECRET_TOKEN=abc\n",
+        },
+    )
+    result = importer.import_zip(zip_path)
+    assert result.manifest.sourceSubdir == "backend"
+    events = importer.registry.list_events(result.instance_id)
+    matched = [e for e in events if e.get("event_type") == "env_detected"]
+    assert len(matched) == 1
+    message = matched[0].get("message", "")
+    assert "backend/.env" in message
+    assert ".env.local" in message
+    # 事件里绝不携带值，只描述迁移路径。
+    assert "abc" not in message
+
+
+def test_import_root_and_subdir_env_record_two_events(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """BUG-591：根目录与子目录同时有 .env 时两处都应登记（含各自相对路径）。"""
+    zip_path = _make_zip(
+        tmp_path / "mono2.zip",
+        {
+            # 根级文件避免 zip 单层根目录被拍平（backend/ 保持为子目录）
+            "README.md": "# mono\n",
+            "backend/requirements.txt": "flask\n",
+            "backend/app.py": "app = None\n",
+            ".env": "ROOT_TOKEN=root\n",
+            "backend/.env": "SUB_TOKEN=sub\n",
+        },
+    )
+    result = importer.import_zip(zip_path)
+    events = importer.registry.list_events(result.instance_id)
+    matched = [e for e in events if e.get("event_type") == "env_detected"]
+    assert len(matched) == 2
+    messages = [e.get("message", "") for e in matched]
+    assert any("backend/.env" in m for m in messages)
+    assert any("backend/.env" not in m for m in messages)
+
+
+# ---- BUG-584：重扫/更新不得清空 verificationOverrides -----------------------
+
+
+def _set_probe_overrides(manifest: InstanceManifest, manifest_path: Path) -> dict:
+    """模拟 lwa probe set：写入覆盖层并落盘，返回覆盖层原文。"""
+    from local_webpage_access.verification_config import set_verification_overrides
+
+    overrides = {
+        "probes": [{"path": "/ready", "expectedStatus": 200}],
+        "disableAutoProbes": True,
+    }
+    set_verification_overrides(manifest, copy.deepcopy(overrides))
+    manifest.save(manifest_path)
+    return overrides
+
+
+def _assert_probe_overrides(manifest: InstanceManifest) -> None:
+    from local_webpage_access.verification_config import get_verification_overrides
+
+    ov = get_verification_overrides(manifest)
+    assert ov.get("disableAutoProbes") is True
+    assert [p.get("path") for p in ov.get("probes") or []] == ["/ready"]
+
+
+def test_rescan_preserves_verification_overrides(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """BUG-584：``lwa scan`` 重扫不得清空用户配置的 verificationOverrides。
+
+    复现：apply_detection_to_manifest 重建 manifest 时未透传
+    verificationOverrides，fresh.verificationOverrides = None。
+    """
+    from local_webpage_access.importer import apply_detection_to_manifest
+    from local_webpage_access.scanner import Scanner
+
+    zip_path = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(zip_path)
+    iid = r1.instance_id
+    manifest_path = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(manifest_path)
+    _set_probe_overrides(manifest, manifest_path)
+
+    # 模拟 lwa scan：重新扫描并应用
+    scanner = Scanner()
+    detection = scanner.detect(workspace.app_current(iid))
+    fresh = apply_detection_to_manifest(manifest, detection, workspace)
+    assert fresh.verificationOverrides is not None
+    _assert_probe_overrides(fresh)
+    # 深拷贝隔离：改 fresh 不得影响旧 manifest 的覆盖层
+    fresh_ov = fresh.verificationOverrides
+    assert isinstance(fresh_ov, dict)
+    fresh_ov["disableAutoProbes"] = False
+    _assert_probe_overrides(manifest)
+
+
+def test_update_zip_preserves_verification_overrides(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """BUG-584：``import --update`` 重建 manifest 不得清空 verificationOverrides。"""
+    zip_path = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(zip_path)
+    iid = r1.instance_id
+    manifest_path = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(manifest_path)
+    _set_probe_overrides(manifest, manifest_path)
+
+    zip_v2 = _make_zip(
+        tmp_path / "api-v2.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=2\n"},
+    )
+    result = importer.update_zip(zip_v2, iid, restart=False)
+    assert result.manifest.verificationOverrides is not None
+    _assert_probe_overrides(result.manifest)
+    # 落盘 manifest 同样保留
+    saved = InstanceManifest.load(manifest_path)
+    _assert_probe_overrides(saved)

@@ -1746,12 +1746,15 @@ def _register_routes(app: FastAPI) -> None:
         if alias == "":
             alias = None
 
+        skip_compat = bool(payload.get("skipCompatCheck"))
+
         result = set_instance_path_alias(
             ctx.workspace,
             ctx.config,
             ctx.registry,
             instance_id,
             alias,
+            skip_compat_check=skip_compat,
         )
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
@@ -1760,6 +1763,90 @@ def _register_routes(app: FastAPI) -> None:
         body["action"] = "path-alias"
         body["instance"] = snap.to_dict()
         return body
+
+    @app.get(
+        "/api/instances/{instance_id}/verification",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def get_verification(instance_id: str) -> dict[str, Any]:
+        """CHK-252：读取实例验证探针覆盖层与有效探针列表。"""
+        from local_webpage_access.models import InstanceManifest
+        from local_webpage_access.verification_config import overrides_to_dict
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+        manifest = InstanceManifest.load(ctx.workspace.app_manifest_path(instance_id))
+        return {"instanceId": instance_id, **overrides_to_dict(manifest)}
+
+    @app.patch(
+        "/api/instances/{instance_id}/verification",
+        dependencies=[api],
+        tags=["instances"],
+    )
+    def patch_verification(
+        instance_id: str,
+        payload: dict[str, Any] = Body(default={}),
+    ) -> dict[str, Any]:
+        """CHK-252：更新 verificationOverrides（重扫/rebuild 不得覆盖）。"""
+        from local_webpage_access.lifecycle import instance_lock
+        from local_webpage_access.models import InstanceManifest
+        from local_webpage_access.verification_config import (
+            get_verification_overrides,
+            overrides_to_dict,
+            set_verification_overrides,
+        )
+
+        ctx = _Ctx(app)
+        _require_instance(ctx, instance_id)
+        mpath = ctx.workspace.app_manifest_path(instance_id)
+        # BUG-167 纪律：manifest 读-改-写持实例锁，防止与 CLI（import/
+        # probe）及状态同步并发时互相覆盖写入。
+        with instance_lock(ctx.workspace, instance_id):
+            manifest = InstanceManifest.load(mpath)
+
+            if payload.get("reset"):
+                set_verification_overrides(manifest, None)
+                ctx.registry.add_event(instance_id, "probe", "管理页清除 verificationOverrides")
+            else:
+                overrides = get_verification_overrides(manifest)
+                if "disableAutoProbes" in payload:
+                    overrides["disableAutoProbes"] = bool(payload.get("disableAutoProbes"))
+                if "probes" in payload:
+                    raw_probes = payload.get("probes")
+                    if raw_probes is not None and not isinstance(raw_probes, list):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "error": {
+                                    "code": "bad_request",
+                                    "message": "probes 必须为数组",
+                                }
+                            },
+                        )
+                    overrides["probes"] = raw_probes or []
+                # BUG-588：写入前做完整结构校验，失败返回 400 且不写盘
+                try:
+                    set_verification_overrides(manifest, overrides or None)
+                except LwaError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "error": {
+                                "code": "bad_request",
+                                "message": str(exc),
+                            }
+                        },
+                    ) from exc
+                ctx.registry.add_event(instance_id, "probe", "管理页更新 verificationOverrides")
+
+            manifest.save(mpath)
+        sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
+        return {
+            "instanceId": instance_id,
+            "action": "verification",
+            **overrides_to_dict(manifest),
+        }
 
     # ---- pending 列表（WBS-22.09）----
     @app.get("/api/pending", dependencies=[api], tags=["instances"])

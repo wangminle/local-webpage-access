@@ -582,9 +582,12 @@ class DockerRuntime:
         detached: bool = True,
         log_path: Path | None = None,
         timeout: int = _UP_TIMEOUT,
+        force_recreate: bool = False,
     ) -> ComposeResult:
         """``docker compose up``（WBS-14.03）。默认 ``-d`` 后台启动。"""
         args = self._compose_cmd(instance_id, "up")
+        if force_recreate:
+            args.append("--force-recreate")
         if detached:
             args.append("-d")
         result = _execute(

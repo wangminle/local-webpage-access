@@ -248,3 +248,39 @@ def test_cli_pageviews_summary_and_detail(monkeypatch, tmp_path: Path) -> None:
     missing = CliRunner().invoke(app, ["pageviews", "no-such"])
     assert missing.exit_code == 1
     assert "不存在" in missing.output
+
+
+def test_print_import_result_warns_subdir_env(tmp_path, capsys) -> None:
+    """BUG-591 收尾：CLI 导入摘要对 sourceSubdir 项目内 .env 同样警告（含相对路径）。"""
+    from types import SimpleNamespace
+
+    from local_webpage_access.cli.importing import _print_import_result
+
+    app_dir = tmp_path / "apps" / "demo"
+    backend = app_dir / "current" / "backend"
+    backend.mkdir(parents=True)
+    (backend / ".env").write_text("SECRET=x\n", encoding="utf-8")
+
+    manifest = SimpleNamespace(
+        name="demo",
+        kind="container",
+        runtime="python",
+        static=None,
+        container=None,
+        sourceSubdir="backend",
+        compatibilityFindings=None,
+        lastError=None,
+    )
+    result = SimpleNamespace(
+        instance_id="demo",
+        manifest=manifest,
+        detection=SimpleNamespace(form="zip", confidence=0.9, pending=False),
+        app_dir=app_dir,
+        zip_hash="abc",
+        sanitized=None,
+    )
+
+    _print_import_result(result, SimpleNamespace(staticGatewayPort=8080))
+    out = capsys.readouterr().out
+    assert "backend/.env" in out
+    assert ".dockerignore" in out

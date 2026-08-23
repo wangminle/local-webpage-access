@@ -1954,6 +1954,8 @@ def test_compute_deployment_fingerprints_structure():
     assert "sourceHash" in fps
     assert "planHash" in fps
     assert "configHash" in fps
+    assert "buildConfigHash" in fps
+    assert "runtimeConfigHash" in fps
     assert "imageId" in fps
     assert fps["sourceHash"] == ""  # appPath=None
     assert fps["imageId"] == "sha256:abc123"

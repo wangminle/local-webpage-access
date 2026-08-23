@@ -91,6 +91,9 @@
     stopped: "已停止",
     pending: "待识别",
     building: "构建中",
+    // issue #12（补充）：过渡状态缺失中文标签，statusLabel 会原样回退显示英文。
+    verifying: "验证中",
+    degraded: "降级运行",
     cancelling: "取消中",
     cancelled: "已取消",
     failed: "失败",
@@ -116,6 +119,18 @@
     var cls = "badge-" + String(status || "pending").replace(/_/g, "-");
     return (
       '<span class="badge ' + cls + '">' + LWA.esc(LWA.statusLabel(status)) + "</span>"
+    );
+  };
+
+  // 第二批 CHK-252：验证结论与进程状态分离——运行中但验证有警告时，
+  // 在状态徽标旁叠加提示徽标（“运行中 · 验证有警告”），不再降级进程状态。
+  LWA.verificationChipHtml = function (instance) {
+    if (!instance || instance.verificationOverall !== "degraded") {
+      return "";
+    }
+    return (
+      ' <span class="badge badge-verify-warn" title="可选探针或能力证据有告警，' +
+      '服务进程正常运行；详情见实例 verificationSummary">验证有警告</span>'
     );
   };
 
@@ -287,6 +302,13 @@
     html += LWA.opBtn(id, "logs", "日志", false);
     html += LWA.opBtn(
       id,
+      "verification",
+      "验证探针",
+      inProgress,
+      "配置就绪探针与自动探针开关"
+    );
+    html += LWA.opBtn(
+      id,
       "path-alias",
       "路径别名",
       !supportsAlias || inProgress,
@@ -390,7 +412,7 @@
     return (
       '<tr class="' + rowClass + '">' +
       nameCell +
-      "<td>" + LWA.badgeHtml(i.status) + "</td>" +
+      "<td>" + LWA.badgeHtml(i.status) + LWA.verificationChipHtml(i) + "</td>" +
       '<td class="cell-muted">' + LWA.esc(i.desiredState || "—") + "</td>" +
       '<td class="cell-muted">' + LWA.esc(i.servingMode || "—") + "</td>" +
       "<td>" + LWA.esc(i.kind || "—") + "</td>" +

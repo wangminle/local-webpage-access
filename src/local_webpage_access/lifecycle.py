@@ -322,11 +322,11 @@ def start_instance(
     with instance_lock(workspace, instance_id):
         manifest = _load(workspace, instance_id)
         if _is_deployed_container(manifest):
-            # C.R06：四类指纹检查--任一变化禁止轻量 start，强制重建
+            # C.R06 / CHK-252：指纹变化 → full rebuild / runtime recreate / 轻量 start
             current_fps = _compute_deployment_fingerprints(workspace, manifest)
             stored_fps = getattr(manifest, "deploymentFingerprints", None)
-            changed, changed_fields = _fingerprints_changed(stored_fps, current_fps)
-            if changed:
+            action, changed_fields = _fingerprint_change_action(stored_fps, current_fps)
+            if action == "full_rebuild":
                 log.info(
                     "实例 %s 指纹变化（%s），禁止轻量 start，强制重建",
                     instance_id,
@@ -346,6 +346,20 @@ def start_instance(
                     host_instance,
                     fallback_policy=fallback_policy,
                 )
+            elif action == "runtime_recreate":
+                log.info(
+                    "实例 %s 仅运行时配置变化（%s），compose recreate（不 rebuild）",
+                    instance_id,
+                    ", ".join(changed_fields),
+                )
+                registry.add_event(
+                    instance_id,
+                    "lifecycle_stage",
+                    f"运行时配置变化（{', '.join(changed_fields)}），compose recreate",
+                )
+                from local_webpage_access.hosting import recreate_container_runtime
+
+                manifest = recreate_container_runtime(workspace, config, registry, instance_id)
             else:
                 log.info("实例 %s 已部署且指纹未变，使用轻量 start", instance_id)
                 manifest = start_container(workspace, config, registry, instance_id)
@@ -364,6 +378,11 @@ def start_instance(
         # 同步生成别名片段（端口漂移时也会重写）；静态别名由 _enable_static 处理，
         # 此处对其为 no-op（conf 已是正确端口）。
         _sync_alias_port(workspace, config, instance_id, manifest)
+        from local_webpage_access.path_alias import maybe_verify_alias_after_start
+
+        maybe_verify_alias_after_start(
+            workspace, config, registry, instance_id, manifest
+        )
         return manifest
 
 
@@ -801,10 +820,9 @@ def _compute_config_fingerprint(
     dockerfile_path: Path | None,
     env_path: Path | None,
 ) -> str:
-    """C.R06：计算生成配置指纹（SHA256）。
+    """C.R06：计算生成配置指纹（SHA256，向后兼容合并值）。
 
     对 compose.yaml + Dockerfile + .env 的内容做有序拼接哈希。
-    任一文件缺失则跳过（空内容参与哈希以区分「文件不存在」和「文件为空」）。
     """
     h = hashlib.sha256()
     for label, path in [
@@ -818,6 +836,39 @@ def _compute_config_fingerprint(
             try:
                 content = path.read_bytes()
                 h.update(content)
+            except OSError:
+                h.update(b"<read-error>")
+        else:
+            h.update(b"<missing>")
+    return h.hexdigest()
+
+
+def _compute_build_config_fingerprint(dockerfile_path: Path | None) -> str:
+    """CHK-252：仅 Dockerfile 的构建指纹。"""
+    h = hashlib.sha256()
+    h.update(b"dockerfile\0")
+    if dockerfile_path and isinstance(dockerfile_path, Path) and dockerfile_path.is_file():
+        try:
+            h.update(dockerfile_path.read_bytes())
+        except OSError:
+            h.update(b"<read-error>")
+    else:
+        h.update(b"<missing>")
+    return h.hexdigest()
+
+
+def _compute_runtime_config_fingerprint(
+    compose_path: Path | None,
+    env_path: Path | None,
+) -> str:
+    """CHK-252：Compose + .env 的运行时指纹（变更时 compose recreate，不 rebuild）。"""
+    h = hashlib.sha256()
+    for label, path in [("compose", compose_path), ("env", env_path)]:
+        h.update(label.encode("utf-8"))
+        h.update(b"\0")
+        if path and isinstance(path, Path) and path.is_file():
+            try:
+                h.update(path.read_bytes())
             except OSError:
                 h.update(b"<read-error>")
         else:
@@ -858,6 +909,8 @@ def _compute_deployment_fingerprints(
             dockerfile_path = Path(manifest.container.dockerfilePath)
         env_path = workspace.app_env_path(manifest.id)
     config_hash = _compute_config_fingerprint(compose_path, dockerfile_path, env_path)
+    build_hash = _compute_build_config_fingerprint(dockerfile_path)
+    runtime_hash = _compute_runtime_config_fingerprint(compose_path, env_path)
 
     # image fingerprint
     image_id = ""
@@ -868,8 +921,59 @@ def _compute_deployment_fingerprints(
         "sourceHash": source_hash,
         "planHash": plan_hash,
         "configHash": config_hash,
+        "buildConfigHash": build_hash,
+        "runtimeConfigHash": runtime_hash,
         "imageId": image_id,
     }
+
+
+def _fingerprint_change_action(
+    stored: dict | None,
+    current: dict,
+) -> tuple[str, list[str]]:
+    """CHK-252：判定指纹变化应触发的启动路径。
+
+    Returns:
+        ``(action, changed_fields)`` — action 为 ``none`` / ``runtime_recreate`` / ``full_rebuild``
+    """
+    if not stored:
+        return "none", []
+    # BUG-583：新格式指纹（含 build/runtime 拆分）决策只用拆分后的 hash 字段。
+    # 真实 .env/Compose 变化会同时改写 runtimeConfigHash 与聚合 configHash，
+    # 若把 configHash 纳入新格式决策，changed_fields 不可能只含
+    # runtimeConfigHash，runtime_recreate 永远不可达。legacy configHash 仅用于
+    # 旧格式实例迁移兼容时的比对。
+    new_format = "buildConfigHash" in stored or "runtimeConfigHash" in stored
+    changed_fields: list[str] = []
+    for key in (
+        "sourceHash",
+        "planHash",
+        "buildConfigHash",
+        "runtimeConfigHash",
+        "configHash",
+        "imageId",
+    ):
+        if new_format and key == "configHash":
+            continue
+        if stored.get(key, "") != current.get(key, ""):
+            changed_fields.append(key)
+
+    if not changed_fields:
+        return "none", []
+
+    build_keys = {"sourceHash", "planHash", "buildConfigHash", "imageId", "configHash"}
+
+    # 旧实例仅有 configHash：任一 config 变化仍走 full rebuild（保守）
+    if not new_format:
+        if "configHash" in changed_fields:
+            return "full_rebuild", changed_fields
+        return "full_rebuild" if any(k in changed_fields for k in build_keys - {"configHash"}) else (
+            "runtime_recreate" if changed_fields else "none"
+        ), changed_fields
+
+    if any(k in changed_fields for k in build_keys - {"configHash"}):
+        return "full_rebuild", changed_fields
+    return "runtime_recreate", changed_fields
 
 
 def _fingerprints_changed(

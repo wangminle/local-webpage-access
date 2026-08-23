@@ -25,6 +25,7 @@ import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -639,6 +640,145 @@ def _extract_absolute_resources(html: str, *, limit: int = _MAX_SUBRESOURCES) ->
         if len(out) >= limit:
             break
     return out
+
+
+# ---- SPA 绝对路径资源结构化扫描（issue #10）--------------------------------
+#
+# 旧守卫复用上面的正则抽样（上限 6 条）做拦截判定，有三处缺陷：
+# 1. 不认识别名前缀：按 --base=/<alias>/ 正确构建的 /<alias>/assets/… 也被当成
+#    危险绝对路径，「推荐修复方案过不了守卫本身」；
+# 2. 抽样阶段就截断：前 6 条恰好都是别名前缀资源、第 7 条才是 /assets/… 时漏报；
+# 3. 不区分资源语义：canonical / favicon / 导航链接 404 不致命，却同样硬拦截。
+# 结构化扫描器先完整解析、分类、过滤（别名前缀豁免按路径段边界），
+# 展示样本的截断留给调用方，与探测预算（_MAX_SUBRESOURCES）解耦。
+
+# 加载型 link rel 值：加载失败直接白屏/样式丢失，别名守卫硬拦截。
+_LOAD_LINK_RELS = frozenset({"stylesheet", "modulepreload", "preload", "prefetch"})
+# 提示型 link rel 值：仅影响 SEO / 图标 / 备选入口，别名下 404 不致命，只警告。
+_WARN_LINK_RELS = frozenset(
+    {"canonical", "icon", "shortcut", "apple-touch-icon", "alternate", "manifest", "author"}
+)
+# src 属性视为加载型的标签（图片/媒体/子文档等渲染必需资源）。
+_LOAD_SRC_TAGS = frozenset({"img", "source", "video", "audio", "iframe", "embed", "track"})
+
+
+@dataclass(frozen=True)
+class SpaAbsoluteResourceScan:
+    """入口 HTML 绝对路径资源扫描结果（issue #10：结构化分类）。
+
+    * ``load_paths``：加载型资源（``script src``、stylesheet / modulepreload /
+      preload 等 ``link``、``img`` 等媒体标签），别名下会白屏 -> 硬拦截；
+    * ``warn_paths``：提示型引用（导航 ``a``、canonical、favicon 等），只警告。
+    两个列表均已去重、且不截断（截断由调用方按展示需要再做）。
+    """
+
+    load_paths: tuple[str, ...] = ()
+    warn_paths: tuple[str, ...] = ()
+
+
+class _AbsoluteResourceCollector(HTMLParser):
+    """结构化抽取 HTML 中 src=/href= 引用的绝对路径资源并按语义分类。
+
+    用 :class:`html.parser.HTMLParser` 逐标签解析（而非全文正则），保证
+    ``rel`` 与 ``href`` 无论先后顺序都能正确关联到同一个 ``<link>``。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._load: list[str] = []
+        self._warn: list[str] = []
+        self._seen_load: set[str] = set()
+        self._seen_warn: set[str] = set()
+
+    def _record(self, value: str | None, *, load: bool) -> None:
+        # 绝对路径判定：单个 ``/`` 开头，排除协议相对 ``//cdn…``。
+        if not value or not value.startswith("/") or value.startswith("//"):
+            return
+        bucket, seen = (
+            (self._load, self._seen_load) if load else (self._warn, self._seen_warn)
+        )
+        if value not in seen:
+            seen.add(value)
+            bucket.append(value)
+
+    def _record_srcset(self, value: str | None) -> None:
+        # srcset="a.png 1x, /img/b.png 2x"：逐候选取 URL 部分。
+        if not value:
+            return
+        for candidate in value.split(","):
+            url = candidate.strip().split(" ")[0] if candidate.strip() else ""
+            self._record(url, load=True)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "script":
+            self._record(attr.get("src"), load=True)
+            return
+        if tag == "link":
+            href = attr.get("href")
+            if not href:
+                return
+            rels = {r.lower() for r in attr.get("rel", "").split()}
+            if rels & _LOAD_LINK_RELS:
+                self._record(href, load=True)
+            elif rels & _WARN_LINK_RELS:
+                self._record(href, load=False)
+            return
+        if tag == "a" or tag == "area":
+            self._record(attr.get("href"), load=False)
+            return
+        if tag == "base":
+            # <base href> 改变相对路径解析基，语义偏导航，只警告不拦截。
+            self._record(attr.get("href"), load=False)
+            return
+        if tag in _LOAD_SRC_TAGS:
+            self._record(attr.get("src"), load=True)
+            self._record_srcset(attr.get("srcset"))
+
+    # <script src> 偶见自闭合写法，按开始标签同等处理即可。
+
+    def result(self) -> SpaAbsoluteResourceScan:
+        return SpaAbsoluteResourceScan(
+            load_paths=tuple(self._load), warn_paths=tuple(self._warn)
+        )
+
+
+def _alias_exempt(path: str, alias: str | None) -> bool:
+    """按**路径段边界**判断 ``path`` 是否带 ``/{alias}`` 前缀（issue #10）。
+
+    允许 ``/{alias}`` 与 ``/{alias}/...``（含查询串/锚点，比较前剥离）；
+    ``/{alias}-other/...`` 前缀相同但段不同，**不**豁免。
+    """
+    if not alias:
+        return False
+    bare = path.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    prefix = f"/{alias}"
+    return bare == prefix or bare.startswith(prefix + "/")
+
+
+def scan_absolute_spa_resources(
+    html: str, *, alias: str | None = None
+) -> SpaAbsoluteResourceScan:
+    """结构化扫描入口 HTML 的绝对路径资源并按语义分类（issue #10）。
+
+    先完整解析、分类（不截断），再按 ``alias`` 豁免 ``/{alias}`` /
+    ``/{alias}/...`` 前缀资源（正确按 base path 构建的产物不应被拦截）；
+    返回的两组路径由调用方自行决定展示样本数量，避免「先截断后过滤」漏报。
+    """
+    collector = _AbsoluteResourceCollector()
+    try:
+        collector.feed(html)
+        collector.close()
+    except Exception:  # noqa: BLE001 -- 病态 HTML 不应让守卫崩溃，退回空结果
+        log.warning("入口 HTML 解析失败，跳过结构化资源扫描（issue #10）")
+        return SpaAbsoluteResourceScan()
+    if alias is None:
+        return collector.result()
+    scan = collector.result()
+    return SpaAbsoluteResourceScan(
+        load_paths=tuple(p for p in scan.load_paths if not _alias_exempt(p, alias)),
+        warn_paths=tuple(p for p in scan.warn_paths if not _alias_exempt(p, alias)),
+    )
 
 
 # 匹配 HTML / JS 中出现的绝对 API 路径模式（/api/、/api/v1/、/api/v1/members 等）。

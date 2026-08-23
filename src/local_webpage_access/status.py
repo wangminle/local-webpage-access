@@ -104,6 +104,9 @@ class InstanceStatus:
     source_git_ref_kind: str | None = None
     source_git_commit: str | None = None
     source_git_subdir: str | None = None
+    # 第二批 CHK-252：验证结论（passed/degraded）与进程状态分离，
+    # 从 manifest.verificationSummary 透传给列表 API / UI 叠加展示。
+    verification_overall: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -176,6 +179,8 @@ class InstanceStatus:
             "sourceGitRefKind": self.source_git_ref_kind,
             "sourceGitCommit": self.source_git_commit,
             "sourceGitSubdir": self.source_git_subdir,
+            # 第二批 CHK-252：验证结论（passed/degraded/failed）独立于进程状态。
+            "verificationOverall": self.verification_overall,
             **self.extra,
         }
 
@@ -206,6 +211,8 @@ def instance_status(
     source_git_ref_kind: str | None = None
     source_git_commit: str | None = None
     source_git_subdir: str | None = None
+    # 第二批 CHK-252：从 manifest.verificationSummary 读取最近一次验证结论。
+    verification_overall: str | None = None
     manifest_path = workspace.app_manifest_path(instance_id)
     if manifest_path.is_file():
         try:
@@ -219,6 +226,9 @@ def instance_status(
             source_git_ref_kind = getattr(manifest, "sourceGitRefKind", None)
             source_git_commit = getattr(manifest, "sourceGitCommit", None)
             source_git_subdir = getattr(manifest, "sourceGitSubdir", None)
+            summary = getattr(manifest, "verificationSummary", None)
+            if isinstance(summary, dict):
+                verification_overall = summary.get("overallStatus")
         except Exception:  # noqa: BLE001 - manifest 读取失败不阻断状态
             pass
 
@@ -264,6 +274,7 @@ def instance_status(
         source_git_ref_kind=source_git_ref_kind,
         source_git_commit=source_git_commit,
         source_git_subdir=source_git_subdir,
+        verification_overall=verification_overall,
     )
 
 

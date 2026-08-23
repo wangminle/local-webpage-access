@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 
+from pathlib import Path
+
 import pytest
 
-from local_webpage_access.compose import generate_compose, generate_env, service_name
+from local_webpage_access.compose import (
+    ensure_env_local_secrets,
+    generate_compose,
+    generate_env,
+    service_name,
+)
+from local_webpage_access.errors import ConfigError
 from local_webpage_access.models import (
     ContainerConfig,
     DatabaseConfig,
@@ -525,3 +533,297 @@ def test_env_sqlite_no_subdir_uses_root_path(workspace: Workspace) -> None:
     generate_env(m, workspace, host_port=18000)
     target = workspace.app_data("api") / "bookshelf.db"
     assert target.is_file(), f"源 SQLite 未复制到 {target}"
+
+
+# ---- issue #11：业务键安全迁移 -------------------------------------------------
+
+
+def test_env_business_keys_migrate_to_env_local_on_regen(workspace: Workspace) -> None:
+    """issue #10/#11 主诉：重生成 .env 不再整文件覆盖，业务键迁入 .env.local。"""
+    m = _mk_manifest()
+    first = generate_env(m, workspace, host_port=18000)
+    # 模拟用户在 .env 手写业务键（此前重生成会被整体抹掉）。
+    first.write_text(
+        first.read_text(encoding="utf-8")
+        + "JWT_SECRET=my-secret\nOPENAI_API_KEY=sk-test\n",
+        encoding="utf-8",
+    )
+    second = generate_env(m, workspace, host_port=18001)
+    env_text = second.read_text(encoding="utf-8")
+    # 管理键按新值重写。
+    assert "HOST_PORT=18001" in env_text
+    # 业务键不再滞留在 .env，也不被静默丢弃。
+    assert "JWT_SECRET=" not in env_text
+    assert "OPENAI_API_KEY=" not in env_text
+    local = second.parent / ".env.local"
+    local_text = local.read_text(encoding="utf-8")
+    assert "JWT_SECRET=my-secret" in local_text
+    assert "OPENAI_API_KEY=sk-test" in local_text
+
+
+def test_env_local_existing_value_wins_on_conflict(workspace: Workspace) -> None:
+    """issue #11：.env.local 已有同名键时现有值优先，迁移只报告冲突。"""
+    m = _mk_manifest()
+    first = generate_env(m, workspace, host_port=18000)
+    docker_dir = first.parent
+    # 用户已把密钥填在 .env.local，同时旧 .env 里还留着一份旧值。
+    (docker_dir / ".env.local").write_text("JWT_SECRET=local-wins\n", encoding="utf-8")
+    first.write_text(
+        first.read_text(encoding="utf-8") + "JWT_SECRET=stale-value\n", encoding="utf-8"
+    )
+    generate_env(m, workspace, host_port=18001)
+    local_text = (docker_dir / ".env.local").read_text(encoding="utf-8")
+    assert "JWT_SECRET=local-wins" in local_text
+    assert "stale-value" not in local_text
+
+
+def test_env_unparseable_lines_backed_up_not_dropped(workspace: Workspace) -> None:
+    """issue #11：无法按 KEY=VALUE 解析的行整体备份并告警，绝不静默丢弃。"""
+    m = _mk_manifest()
+    first = generate_env(m, workspace, host_port=18000)
+    first.write_text(
+        "HOST_PORT=18000\n"
+        "THIS IS NOT AN ASSIGNMENT\n"
+        "API_KEY=keep\n",
+        encoding="utf-8",
+    )
+    generate_env(m, workspace, host_port=18001)
+    backups = sorted(p for p in first.parent.glob(".env.lwa-backup-*"))
+    assert len(backups) == 1
+    backup_text = backups[0].read_text(encoding="utf-8")
+    assert "THIS IS NOT AN ASSIGNMENT" in backup_text
+    # 可解析的业务键正常迁移，坏行只留在备份里。
+    local_text = (first.parent / ".env.local").read_text(encoding="utf-8")
+    assert "API_KEY=keep" in local_text
+    assert "THIS IS NOT AN ASSIGNMENT" not in local_text
+    assert "THIS IS NOT AN ASSIGNMENT" not in first.read_text(encoding="utf-8")
+
+
+def test_env_and_env_local_file_modes_are_0600(workspace: Workspace) -> None:
+    """issue #11：.env / .env.local 含密钥类值，原子写入统一 0600 权限。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / ".env.example").write_text(
+        "JWT_SECRET=\n", encoding="utf-8"
+    )
+    m = _mk_manifest()
+    first = generate_env(m, workspace, host_port=18000)
+    first.write_text(
+        first.read_text(encoding="utf-8") + "API_KEY=keep\n", encoding="utf-8"
+    )
+    second = generate_env(m, workspace, host_port=18001)
+    assert (second.stat().st_mode & 0o777) == 0o600
+    assert ((second.parent / ".env.local").stat().st_mode & 0o777) == 0o600
+
+
+def test_env_non_sqlite_database_url_migrates_as_business_key(workspace: Workspace) -> None:
+    """issue #11：非 SQLite 实例的 DATABASE_URL 是用户键（LWA 从不写它），迁移不丢弃。"""
+    m = _mk_manifest(has_database=True, database_type="postgres")
+    first = generate_env(m, workspace, host_port=18000)
+    first.write_text(
+        first.read_text(encoding="utf-8")
+        + "DATABASE_URL=postgres://user:pw@db:5432/app\n",
+        encoding="utf-8",
+    )
+    second = generate_env(m, workspace, host_port=18001)
+    assert "DATABASE_URL=" not in second.read_text(encoding="utf-8")
+    local_text = (second.parent / ".env.local").read_text(encoding="utf-8")
+    assert "DATABASE_URL=postgres://user:pw@db:5432/app" in local_text
+
+
+def test_env_local_migration_then_jwt_secret_append(workspace: Workspace) -> None:
+    """issue #11：业务键迁移先创建 .env.local（无 JWT_SECRET）时，自动密钥改为追加。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / ".env.example").write_text(
+        "JWT_SECRET=\n", encoding="utf-8"
+    )
+    m = _mk_manifest()
+    first = generate_env(m, workspace, host_port=18000)
+    # 旧 .env 里用户手写了业务密钥（迁移后 .env.local 无 JWT_SECRET）。
+    first.write_text(
+        first.read_text(encoding="utf-8") + "API_KEY=keep\n", encoding="utf-8"
+    )
+    second = generate_env(m, workspace, host_port=18001)
+    local = second.parent / ".env.local"
+    local_text = local.read_text(encoding="utf-8")
+    # 迁移的业务键保留，且自动追加了 JWT_SECRET（此前文件已存在就直接跳过）。
+    assert "API_KEY=keep" in local_text
+    assert "JWT_SECRET=" in local_text
+    # 追加位置在业务键之后，且只有一条 JWT_SECRET。
+    assert local_text.count("JWT_SECRET=") == 1
+
+
+def test_env_invalid_key_names_backed_up_not_migrated(workspace: Workspace) -> None:
+    """含空格等非法字符的键名不能迁入 .env.local（compose 解析 env_file 可能整体报错）。"""
+    m = _mk_manifest()
+    first = generate_env(m, workspace, host_port=18000)
+    first.write_text(
+        "HOST_PORT=18000\n"
+        "SECRET VALUE=1\n"
+        "API KEY=x\n"
+        "API_KEY=keep\n",
+        encoding="utf-8",
+    )
+    generate_env(m, workspace, host_port=18001)
+    local_text = (first.parent / ".env.local").read_text(encoding="utf-8")
+    assert "API_KEY=keep" in local_text
+    assert "SECRET VALUE=1" not in local_text
+    assert "API KEY=x" not in local_text
+    # 坏键行进备份，不静默丢弃。
+    backups = sorted(p for p in first.parent.glob(".env.lwa-backup-*"))
+    assert len(backups) == 1
+    backup_text = backups[0].read_text(encoding="utf-8")
+    assert "SECRET VALUE=1" in backup_text
+    assert "API KEY=x" in backup_text
+
+
+def test_env_local_export_prefixed_jwt_secret_not_duplicated(workspace: Workspace) -> None:
+    """export 前缀的 JWT_SECRET 须识别为已有密钥，不得追加第二条（后值会顶掉用户值）。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / ".env.example").write_text(
+        "JWT_SECRET=\nAPI_KEY=\n", encoding="utf-8"
+    )
+    m = _mk_manifest()
+    first = generate_env(m, workspace, host_port=18000)
+    # 用户在 .env.local 手写（或迁移带入）了 export 前缀形式的 JWT_SECRET。
+    local = first.parent / ".env.local"
+    local.write_text("export JWT_SECRET=my-secret\n", encoding="utf-8")
+    first.write_text(
+        first.read_text(encoding="utf-8") + "API_KEY=keep\n", encoding="utf-8"
+    )
+    generate_env(m, workspace, host_port=18001)
+    local_text = local.read_text(encoding="utf-8")
+    assert "export JWT_SECRET=my-secret" in local_text
+    assert "API_KEY=keep" in local_text
+    # 修复前：检测用 ^JWT_SECRET= 严格匹配识别不到 export 行，会追加自动
+    # 生成的第二条 JWT_SECRET，compose env_file 后值覆盖前值，用户值被顶掉。
+    assert local_text.count("JWT_SECRET=") == 1
+
+
+# ---- BUG-585：重生成 fail-closed -------------------------------------------------
+
+
+def test_env_regen_aborts_when_old_env_unreadable(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-585：旧 .env 存在但读取抛 OSError 时中止重生成，原 .env 内容不变。"""
+    m = _mk_manifest()
+    env_path = generate_env(m, workspace, host_port=18000)
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "JWT_SECRET=my-secret\n",
+        encoding="utf-8",
+    )
+    original = env_path.read_text(encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def boom(self: Path, *args: object, **kwargs: object) -> str:
+        if self == env_path:
+            raise OSError("模拟瞬时 I/O 错误")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(ConfigError):
+        generate_env(m, workspace, host_port=18001)
+    monkeypatch.undo()
+    assert env_path.read_text(encoding="utf-8") == original
+
+
+def test_env_regen_aborts_when_env_local_unreadable(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-585：.env.local 存在但读取失败时中止，.env 与 .env.local 内容均不变。"""
+    m = _mk_manifest()
+    env_path = generate_env(m, workspace, host_port=18000)
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "JWT_SECRET=my-secret\n",
+        encoding="utf-8",
+    )
+    local_path = env_path.parent / ".env.local"
+    local_path.write_text("JWT_SECRET=local-wins\n", encoding="utf-8")
+    original_env = env_path.read_text(encoding="utf-8")
+    original_local = local_path.read_text(encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def boom(self: Path, *args: object, **kwargs: object) -> str:
+        if self == local_path:
+            raise OSError("模拟权限错误")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(ConfigError):
+        generate_env(m, workspace, host_port=18001)
+    monkeypatch.undo()
+    assert env_path.read_text(encoding="utf-8") == original_env
+    assert local_path.read_text(encoding="utf-8") == original_local
+
+
+def test_env_regen_aborts_when_backup_fails(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-585：含无法解析行的旧 .env 备份失败时中止，原 .env 内容不变。"""
+    m = _mk_manifest()
+    env_path = generate_env(m, workspace, host_port=18000)
+    env_path.write_text(
+        "HOST_PORT=18000\nTHIS IS NOT AN ASSIGNMENT\nAPI_KEY=keep\n",
+        encoding="utf-8",
+    )
+    original = env_path.read_text(encoding="utf-8")
+
+    real_write_text = Path.write_text
+
+    def boom(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name.startswith(".env.lwa-backup-"):
+            raise OSError("模拟磁盘写失败")
+        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    with pytest.raises(ConfigError):
+        generate_env(m, workspace, host_port=18001)
+    assert env_path.read_text(encoding="utf-8") == original
+
+
+# ---- ensure_env_local_secrets fail-closed（BUG-585 收尾）------------------------
+
+
+def test_ensure_env_local_secrets_aborts_when_env_local_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_env_local_secrets：.env.local 存在但读取失败时抛 ConfigError，不静默跳过。"""
+    local_path = tmp_path / ".env.local"
+    local_path.write_text("API_KEY=x\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text("JWT_SECRET=\n", encoding="utf-8")
+    original = local_path.read_text(encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def boom(self: Path, *args: object, **kwargs: object) -> str:
+        if self == local_path:
+            raise OSError("模拟权限错误")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(ConfigError):
+        ensure_env_local_secrets(tmp_path)
+    monkeypatch.undo()
+    assert local_path.read_text(encoding="utf-8") == original
+
+
+def test_ensure_env_local_secrets_aborts_when_example_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_env_local_secrets：.env.example 读取失败时抛 ConfigError，且不创建 .env.local。"""
+    example_path = tmp_path / ".env.example"
+    example_path.write_text("JWT_SECRET=\n", encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def boom(self: Path, *args: object, **kwargs: object) -> str:
+        if self == example_path:
+            raise OSError("模拟瞬时 I/O 错误")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(ConfigError):
+        ensure_env_local_secrets(tmp_path)
+    assert not (tmp_path / ".env.local").exists()

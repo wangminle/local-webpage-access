@@ -1184,3 +1184,35 @@ def test_source_info_labels_tag_vs_branch() -> None:
     """CHK-239 low-3：详情抽屉按 sourceGitRefKind 区分 tag/分支展示。"""
     app_js = APP_JS.read_text(encoding="utf-8")
     assert 'inst.sourceGitRefKind === "tag" ? "tag "' in app_js
+
+
+def test_helpers_status_labels_verifying_degraded() -> None:
+    """issue #12（补充）：verifying/degraded 过渡状态有中文标签（否则原样回退英文）。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const h = context.window.__LWA_TEST_HOOKS__;
+
+assert.strictEqual(h.statusLabel("verifying"), "验证中");
+assert.strictEqual(h.statusLabel("degraded"), "降级运行");
+const v = h.badgeHtml("verifying");
+assert.ok(v.indexOf("badge-verifying") !== -1 && v.indexOf("验证中") !== -1, v);
+const d = h.badgeHtml("degraded");
+assert.ok(d.indexOf("badge-degraded") !== -1 && d.indexOf("降级运行") !== -1, d);
+"""
+    )
+
+
+def test_style_has_verifying_degraded_badge_css() -> None:
+    """issue #12（补充）：badge-verifying / badge-degraded 有对应样式类。"""
+    css = (
+        Path(__file__).parent.parent
+        / "src"
+        / "local_webpage_access"
+        / "manager_static"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    assert ".badge-verifying" in css
+    assert ".badge-degraded" in css

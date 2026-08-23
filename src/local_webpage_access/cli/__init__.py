@@ -8,6 +8,7 @@
 * :mod:`local_webpage_access.cli.status`      —— status / stats / list
 * :mod:`local_webpage_access.cli.system`      —— setup / doctor / update
 * :mod:`local_webpage_access.cli.alias`       —— ``lwa alias set/clear`` 子命令组
+* :mod:`local_webpage_access.cli.probe`       —— ``lwa probe show/set/reset`` 子命令组
 * :mod:`local_webpage_access.cli.daemon`      —— ``lwa daemon on/off/status`` 子命令组
 * :mod:`local_webpage_access.cli.manager`     —— ``lwa manager on/off/status/start/logs`` 子命令组
 * :mod:`local_webpage_access.cli.gateway`     —— ``lwa gateway on/off/status/switch`` 子命令组
@@ -234,11 +235,13 @@ def _register_all() -> None:
         daemon,
         gateway,
         manager,
+        probe,
         registry,
         workspace,
     )
 
     app.add_typer(alias.app, name="alias")
+    app.add_typer(probe.app, name="probe")
     app.add_typer(access.app, name="access")
     app.add_typer(autostart.app, name="autostart")
     app.add_typer(daemon.app, name="daemon")

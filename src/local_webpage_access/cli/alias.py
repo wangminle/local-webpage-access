@@ -18,6 +18,11 @@ app = typer.Typer(help="管理实例路径别名（IMP-006）")
 def alias_set(
     instance_id: str = typer.Argument(..., help="实例 ID"),
     slug: str = typer.Argument(..., help="路径别名 slug"),
+    skip_compat_check: bool = typer.Option(
+        False,
+        "--skip-compat-check",
+        help="跳过别名入口活验证（仍会记录审计事件）",
+    ),
 ) -> None:
     """为静态实例设置路径别名。"""
     from local_webpage_access.path_alias import set_instance_path_alias
@@ -25,7 +30,9 @@ def alias_set(
     try:
         ws, config, reg = open_workspace_registry()
         try:
-            result = set_instance_path_alias(ws, config, reg, instance_id, slug)
+            result = set_instance_path_alias(
+                ws, config, reg, instance_id, slug, skip_compat_check=skip_compat_check
+            )
         finally:
             reg.close()
         if result.unchanged:
@@ -34,6 +41,20 @@ def alias_set(
         typer.secho(f"已设置路径别名：/{slug}/", fg=typer.colors.GREEN)
         if result.route_url:
             typer.echo(f"  入口：{result.route_url}")
+        if result.compat_check_skipped:
+            typer.secho(
+                "  提示：已跳过别名活验证（--skip-compat-check）",
+                fg=typer.colors.YELLOW,
+            )
+        elif result.live_verified:
+            typer.echo("  别名活验证已通过")
+        # 降级为警告（别名下可能 404 但不白屏），随结果带回 CLI 展示。
+        for warn_path in result.html_warnings:
+            typer.secho(
+                f"  警告：提示型绝对路径引用 {warn_path} 在别名 /{slug}/ 下可能 404"
+                f"（导航/图标类，不影响页面渲染，已放行）",
+                fg=typer.colors.YELLOW,
+            )
         # IMP-023 / IMP-055：设别名时已对入口 HTML 绝对路径资源硬拦截。
         # html_verified=False 表示探不到入口（实例未监听 / HTML 拉不到），守卫跳过。
         if not result.html_verified:

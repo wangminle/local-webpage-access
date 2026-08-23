@@ -22,11 +22,14 @@ compose.yaml 用字符串模板而非 ``yaml.safe_dump`` 渲染，保证 ``${}``
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from local_webpage_access.errors import PathError
+from local_webpage_access.errors import ConfigError, PathError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest
 from local_webpage_access.paths import Workspace, resolve_source_workdir
@@ -42,6 +45,13 @@ _SQLITE_DEFAULT_DB_FILENAME = "app.sqlite"
 # IMP-015：业务密钥可选注入文件（用户按 docker/.env.example 填写后放入 docker/.env.local）。
 # 用 Compose env_file 的对象形式 required:false，缺失时不报错（WBS-20260708 阶段3.2 决策）。
 _ENV_LOCAL_BLOCK = "      - path: .env.local\n        required: false\n"
+
+# issue #11：LWA 管理键——每次重生成以新值覆盖（DATABASE_URL 走 BUG-491 特殊
+# 保留逻辑）。旧 .env 中的其余键视为**业务键**，迁移到 .env.local 而不是被
+# 整文件覆盖抹掉（.env 与 .env.local 同在 compose env_file 里，注入语义不变）。
+_ENV_MANAGED_KEYS = frozenset(
+    {"HOST_PORT", "INTERNAL_PORT", "MEMORY_LIMIT", "CPU_LIMIT", "DATABASE_URL"}
+)
 
 _COMPOSE_TEMPLATE = """\
 # 由 lwa 自动生成，请勿手动编辑。
@@ -211,6 +221,11 @@ def generate_env(
     ]
     # BUG-491：提前解析 out_path，SQLite 分支需要读取已有 .env 中的 DATABASE_URL。
     out_path = workspace.app_env_path(manifest.id)
+    # issue #11：先解析旧 .env（管理键重写、业务键迁移、无法解析的行备份），
+    # 再覆盖写入，杜绝整文件覆盖吞掉用户手写的业务键。DATABASE_URL 仅在
+    # SQLite 实例下算 LWA 管理键（BUG-491 保留逻辑）；非 SQLite 实例 LWA
+    # 从不写它，视为用户业务键迁移到 .env.local。
+    existing = _parse_existing_env(out_path, database_url_managed=_is_sqlite(manifest))
 
     if _is_sqlite(manifest):
         # A.R01：只有当证据表明应用消费 DATABASE_URL 时才自动注入。
@@ -224,12 +239,7 @@ def generate_env(
 
         # BUG-491：更新已有实例时，保留旧 .env 中的 DATABASE_URL，避免被源目录
         # 占位 SQLite 文件（如 _empty_check.db）覆盖指向空库导致数据丢失。
-        preserved_db_url: str | None = None
-        if out_path.is_file():
-            for line in out_path.read_text(encoding="utf-8").splitlines():
-                if line.startswith("DATABASE_URL=") and not line.startswith("#"):
-                    preserved_db_url = line[len("DATABASE_URL=") :]
-                    break
+        preserved_db_url = existing.database_url
 
         if consumes_db_url:
             if preserved_db_url:
@@ -294,7 +304,14 @@ def generate_env(
             lines.append("# 如需注入，请在应用 config 中使用 os.getenv('DATABASE_URL')。")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # issue #11：先迁业务键再覆盖 .env——迁移中断时旧 .env 原样保留；覆盖
+    # 中断时业务键已在 .env.local（两处冗余无害，下次迁移按同名冲突幂等收敛）。
+    if existing.unparseable_lines:
+        _backup_unparseable_env(out_path, existing.unparseable_lines)
+    if existing.business_lines:
+        _migrate_business_keys_to_env_local(out_path.parent, existing.business_lines)
+    # issue #11：临时文件 + os.replace 原子写入（崩溃不留半写文件），权限 0600。
+    _atomic_write_env(out_path, "\n".join(lines) + "\n")
     log.info("已生成 .env：%s", out_path)
 
     # IMP-015（WBS-20260708 阶段3.2）：业务 .env.example 复制为 docker/.env.example。
@@ -319,21 +336,173 @@ def generate_env(
     return out_path
 
 
-def ensure_env_local_secrets(docker_dir: Path, env_example: Path | None = None) -> Path | None:
-    """若 ``.env.local`` 不存在且 example 声明了空的 ``JWT_SECRET``，则生成并写入。
+@dataclass
+class _ExistingEnv:
+    """旧 ``.env`` 的解析结果（issue #11）。
 
-    不覆盖已有 ``.env.local``。返回写入路径或 None。
+    日志只报告**键名/行号**，绝不打印值。
+    """
+
+    database_url: str | None = None
+    # (键名, 原始行)：迁移到 .env.local 时保留原格式（引号、内嵌注释等）。
+    business_lines: list[tuple[str, str]] = field(default_factory=list)
+    # (行号, 原始行)：无法按 KEY=VALUE 解析的行，备份后告警，绝不静默丢弃。
+    unparseable_lines: list[tuple[int, str]] = field(default_factory=list)
+
+
+def _parse_existing_env(env_path: Path, *, database_url_managed: bool = True) -> _ExistingEnv:
+    """把已有 ``.env`` 拆成管理键 / 业务键 / 无法解析的行（issue #11）。
+
+    ``database_url_managed=False``（非 SQLite 实例）时 ``DATABASE_URL`` 按业务键处理。
+    BUG-585：文件不存在按空处理；存在但读取失败抛 :class:`ConfigError`（fail-closed）。
+    """
+    existing = _ExistingEnv()
+    if not env_path.is_file():
+        return existing
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # BUG-585：fail-closed——旧 .env 存在但读不出（权限/瞬时 I/O）时绝不能
+        # 按"无旧配置"继续，否则随后的覆盖写入会静默吞掉业务键。
+        raise ConfigError(f"读取旧 .env 失败，已中止重生成以保留原文件：{exc}") from exc
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, sep, value = line.partition("=")
+        if not sep or not key.strip():
+            existing.unparseable_lines.append((lineno, raw))
+            continue
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            # 键名含空格等非法字符：docker compose 解析 env_file 时可能整个
+            # 报错，绝不能原样迁入 .env.local--归入坏行，走备份+告警。
+            existing.unparseable_lines.append((lineno, raw))
+            continue
+        if key == "DATABASE_URL" and database_url_managed:
+            # BUG-491：SQLite 分支特殊保留逻辑的输入。
+            existing.database_url = value
+        elif key not in _ENV_MANAGED_KEYS or key == "DATABASE_URL":
+            existing.business_lines.append((key, raw))
+    return existing
+
+
+def _atomic_write_env(path: Path, content: str, *, mode: int = 0o600) -> None:
+    """issue #11：临时文件 + ``os.replace`` 原子写入；默认 0600（含端口/密钥类值）。"""
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.chmod(mode)
+    os.replace(tmp, path)
+
+
+def _backup_unparseable_env(env_path: Path, unparseable_lines: list[tuple[int, str]]) -> None:
+    """issue #11：覆盖前把含无法解析行的旧 ``.env`` 整体备份，告警只报行号。
+
+    BUG-585：备份失败抛 :class:`ConfigError`（fail-closed），绝不无备份覆盖。
+    """
+    if not env_path.is_file():
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = env_path.with_name(f".env.lwa-backup-{stamp}")
+    try:
+        backup.write_text(env_path.read_text(encoding="utf-8"), encoding="utf-8")
+        backup.chmod(0o600)
+        log.warning(
+            "旧 .env 第 %s 行无法按 KEY=VALUE 解析，不会进入新 .env/.env.local，"
+            "已整体备份到 %s，请人工检查（issue #11）",
+            "、".join(str(no) for no, _ in unparseable_lines),
+            backup,
+        )
+    except OSError as exc:
+        # BUG-585：fail-closed——备份失败就中止重生成，绝不在没有备份的
+        # 情况下覆盖含无法解析行的旧 .env。
+        raise ConfigError(f"备份旧 .env 失败，已中止重生成以保留原文件：{exc}") from exc
+
+
+def _migrate_business_keys_to_env_local(
+    docker_dir: Path, business_lines: list[tuple[str, str]]
+) -> None:
+    """把旧 ``.env`` 的业务键迁入 ``.env.local``（issue #11）。
+
+    ``.env`` 与 ``.env.local`` 同在 compose env_file 列表中，注入语义不变；
+    ``.env.local`` 已有同名键时**现有值优先**，仅报告冲突。日志只打印键名。
+    BUG-585：读/写 ``.env.local`` 失败抛 :class:`ConfigError`（fail-closed），
+    文件不存在按空处理。
     """
     local_path = docker_dir / ".env.local"
-    if local_path.exists():
-        return None
+    existing_text = ""
+    if local_path.is_file():
+        try:
+            existing_text = local_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            # BUG-585：fail-closed——读不出已有 .env.local 时中止整个重生成，
+            # 否则同名键去重依据丢失，覆盖 .env 后业务键可能两边都找不到。
+            raise ConfigError(f"读取 .env.local 失败，已中止重生成以保留原文件：{exc}") from exc
+    existing_keys = set(
+        re.findall(r"(?m)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", existing_text)
+    )
+    append_lines: list[str] = []
+    migrated: list[str] = []
+    conflicts: list[str] = []
+    for key, raw_line in business_lines:
+        if key in existing_keys:
+            conflicts.append(key)
+            continue
+        existing_keys.add(key)
+        append_lines.append(raw_line)
+        migrated.append(key)
+    if conflicts:
+        log.warning(
+            "业务键与 .env.local 已有键冲突，以 .env.local 现有值为准：%s",
+            "、".join(conflicts),
+        )
+    if not append_lines:
+        return
+    merged = existing_text
+    if merged and not merged.endswith("\n"):
+        merged += "\n"
+    merged += "# 以下键由 lwa 从 .env 迁移（issue #11）。\n" + "\n".join(append_lines) + "\n"
+    try:
+        _atomic_write_env(local_path, merged)
+    except OSError as exc:
+        # BUG-585：fail-closed——.env.local 写不进去时中止，.env 尚未覆盖。
+        raise ConfigError(f"写入 .env.local 失败，已中止重生成以保留原文件：{exc}") from exc
+    log.info("已迁移业务键至 .env.local（键名）：%s", "、".join(migrated))
+
+
+def ensure_env_local_secrets(docker_dir: Path, env_example: Path | None = None) -> Path | None:
+    """为空的 ``JWT_SECRET`` 生成持久值并写入 ``.env.local``（BUG-199）。
+
+    issue #11：``.env.local`` 已存在时不再直接跳过--若其中尚无
+    ``JWT_SECRET``（如刚被业务键迁移创建），改为**追加**而不是覆盖/跳过；
+    已有 ``JWT_SECRET``（迁移带入或此前生成）时仍不代填。
+
+    fail-closed（同 BUG-585）：``.env.local``/``.env.example`` 存在但读取
+    失败时抛 ``ConfigError`` 中止，而不是静默跳过让应用带空密钥运行。
+    """
+    local_path = docker_dir / ".env.local"
+    existing_text = ""
+    if local_path.is_file():
+        try:
+            existing_text = local_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            # fail-closed（同 BUG-585）：读不出就无法判断 JWT_SECRET 是否已存在，
+            # 静默跳过会让应用带空密钥运行；中止并保留文件，交由用户修复权限。
+            raise ConfigError(f"读取 .env.local 失败，已中止密钥补齐以保留原文件：{exc}") from exc
+        # 与迁移侧键识别同口径（容忍 export 前缀/缩进）：迁移保留原始行，
+        # ``export JWT_SECRET=…`` 必须视为已有 JWT_SECRET，否则会追加第二条
+        # 同名键（compose env_file 后值覆盖前值，用户迁移值被静顶掉）。
+        if re.search(r"(?m)^\s*(?:export\s+)?JWT_SECRET\s*=", existing_text):
+            return None
     example = env_example if env_example is not None else docker_dir / ".env.example"
     if not example.is_file():
         return None
     try:
         text = example.read_text(encoding="utf-8")
-    except OSError:
-        return None
+    except OSError as exc:
+        raise ConfigError(f"读取 .env.example 失败，已中止密钥补齐：{exc}") from exc
     if not re.search(r"(?m)^JWT_SECRET=", text):
         return None
     # 已在 example 里填了非空值则不代填
@@ -341,14 +510,15 @@ def ensure_env_local_secrets(docker_dir: Path, env_example: Path | None = None) 
     if m and m.group(1).strip():
         return None
     jwt = secrets.token_hex(32)
-    local_path.write_text(
-        f"# 由 lwa 自动生成（BUG-199）；可按 .env.example 补充其它密钥。\nJWT_SECRET={jwt}\n",
-        encoding="utf-8",
-    )
-    try:
-        local_path.chmod(0o600)
-    except OSError:
-        pass
+    if existing_text:
+        # issue #11：追加而非覆盖（保留迁移进来的业务键）。
+        content = existing_text.rstrip("\n") + f"\nJWT_SECRET={jwt}\n"
+    else:
+        content = (
+            "# 由 lwa 自动生成（BUG-199）；可按 .env.example 补充其它密钥。\n"
+            f"JWT_SECRET={jwt}\n"
+        )
+    _atomic_write_env(local_path, content)
     log.info("已生成业务密钥文件：%s（含 JWT_SECRET）", local_path)
     return local_path
 

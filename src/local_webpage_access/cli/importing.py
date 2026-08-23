@@ -258,6 +258,33 @@ def _print_import_result(result, config) -> None:
             "业务密钥请填入 docker/.env.local（compose 自动注入，缺失不报错）",
             fg=typer.colors.CYAN,
         )
+    # issue #12：.env.local 配置指引改为无条件输出（此前只在检测到 .env.example
+    # 时提示，源项目没有 example 就完全不知道往哪填密钥）。
+    typer.secho(
+        "  业务密钥/自定义环境变量：填入 docker/.env.local（compose 自动注入，缺失不报错）",
+        fg=typer.colors.CYAN,
+    )
+    # issue #12：源目录 .env 会被 .dockerignore 排除、运行时也不注入容器，
+    # 明确告警并指引迁移路径；绝不自动复制进镜像（密钥可能入 layer）。
+    # BUG-591 同步：.dockerignore 用 **/.env 排除所有层级，检测同样覆盖
+    # resolve_source_workdir 之后的实际项目根（sourceSubdir/monorepo，
+    # 如 current/backend/.env），消息展示相对 current/ 的路径。
+    current_dir = result.app_dir / "current"
+    env_candidates: list[tuple[Path, str]] = [(current_dir, ".env")]
+    source_subdir = getattr(result.manifest, "sourceSubdir", None)
+    if source_subdir:
+        from local_webpage_access.paths import resolve_source_workdir
+
+        workdir = resolve_source_workdir(current_dir, source_subdir)
+        if workdir != current_dir.resolve():
+            env_candidates.append((workdir, f"{source_subdir}/.env"))
+    for env_dir, env_rel in env_candidates:
+        if (env_dir / ".env").is_file():
+            typer.secho(
+                f"  警告：检测到源目录 {env_rel}：不会进入镜像或容器（.dockerignore 排除）；"
+                "业务键请手动迁移到 docker/.env.local",
+                fg=typer.colors.YELLOW,
+            )
     # IMP-001：剥离摘要（仅当实际剥离了冗余成员时显示）
     if result.sanitized and result.sanitized.stripped_names:
         san = result.sanitized

@@ -352,6 +352,11 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 .badge-pending  { background: var(--amber-bg); color: var(--amber); }
 .badge-failed   { background: var(--red-bg);   color: var(--red); }
 .badge-building { background: var(--blue-bg);  color: var(--primary); }
+/* 过渡状态：验证中（蓝，进行时）/ 降级运行（琥珀，部分可用需关注） */
+.badge-verifying { background: var(--blue-bg); color: var(--primary); }
+.badge-degraded  { background: var(--amber-bg); color: var(--amber); }
+/* 第二批 CHK-252：验证结论徽标（叠加在运行中状态旁，不降级进程状态） */
+.badge-verify-warn { background: var(--amber-bg); color: var(--amber); }
 .badge-cancelling { background: var(--amber-bg); color: var(--amber); }
 .badge-cancelled { background: var(--muted-bg, #eee); color: var(--muted, #666); }
 .badge-queued   { background: var(--amber-bg); color: var(--amber); }
@@ -609,6 +614,25 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   background: var(--bg);
   color: var(--text);
   font-family: var(--monospace); /* 评审-组9#2：原引用未定义的 --font-mono */
+}
+.path-alias-checkbox {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.path-alias-checkbox input {
+  width: auto;
+  margin-top: 0.2rem;
+}
+.verification-box ul {
+  margin: 0.25rem 0 0.75rem;
+  padding-left: 1.25rem;
+}
+.verification-box li {
+  margin: 0.25rem 0;
+}
+.verification-effective {
+  margin-top: 0.5rem;
 }
 /* 评审-组9#1（CHK-245）：C.R03 降级确认弹窗的类名此前无任何样式，
    内容直接压在遮罩上几乎不可读。与 .modal-inner 同规格补齐。 */

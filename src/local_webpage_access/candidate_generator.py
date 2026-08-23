@@ -562,13 +562,17 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
                 evidence_refs.append("frontend_candidate")
 
             # BUG-504：为后端生成可满足的 API 能力证据。
-            # 优先从源码发现业务端点（source="discovered"，可作门槛）；未发现时
-            # 保留 guessed /health 仅诊断（不得作 API 证据，由验证器降级处理）。
+            # 第二批 CHK-252：discovered 探针降为**可选证据**——静态路由扫描
+            # 无法判断鉴权（401）与返回语义，不能作为失败门槛；mandatory 门槛
+            # 只来自用户显式声明（manifest.verificationOverrides / lwa probe set）。
+            # 未发现健康端点时保留 guessed /health 仅诊断。
             discovered_probes = _discover_health_probes(evidence, backend)
             if discovered_probes:
                 for probe in discovered_probes:
                     contract.requiredProbes.append(probe)
-                reasoning.append(f"从源码发现 {len(discovered_probes)} 个健康端点探针")
+                reasoning.append(
+                    f"从源码发现 {len(discovered_probes)} 个健康端点探针（可选证据）"
+                )
             else:
                 # CHK-193/P1：source="guessed" 的探针保持可选（isMandatory=False）。
                 # Flask/Django/Express 等普通后端不保证提供 /health 端点，
@@ -766,7 +770,9 @@ def _discover_health_probes(
     扫描后端源码（根或 sourceSubdir 子目录，受限深度）中的路由声明：
     仅 Python ``@app.get`` / ``@app.head`` 与 Node ``app.get`` / ``app.head``。
     命中的健康类路径（/health、/healthz、/ping、/ready 等）生成
-    ``source="discovered"`` 的 mandatory 探针。
+    ``source="discovered"`` 的探针。第二批 CHK-252 起 discovered 探针
+    一律 ``isMandatory=False``（可选证据）：静态扫描无法判断端点鉴权
+    与返回语义（如受保护的 /health 返回 401），不得作为失败门槛。
 
     带路径参数的声明（含 ``{``/``<``）无法静态探测，跳过。
     """
@@ -805,9 +811,12 @@ def _discover_health_probes(
             path=route,
             method=method,
             expectedStatus=200,
-            isMandatory=True,
+            isMandatory=False,
             source="discovered",
-            description=f"源码声明的健康端点（HTTP {method} {route}，来自路由声明扫描）",
+            description=(
+                f"源码发现的健康端点（HTTP {method} {route}，可选证据；"
+                "静态扫描无法判断鉴权/返回语义，不作为门槛）"
+            ),
         )
         for method, route in sorted(found)
     ]

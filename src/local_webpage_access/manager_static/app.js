@@ -256,6 +256,12 @@
               ["image", "镜像"], ["hostPort", "宿主端口"], ["internalPort", "内部端口"],
             ])
           );
+          html += section(
+            "环境配置",
+            '<p class="detail-hint">LWA 生成的 <code>.env</code> 会在 start/rebuild 时重生成；业务密钥请写入实例目录下的 <code>.env.local</code>（权限 0600），不会被覆盖。</p>' +
+              '<p class="detail-hint">导入时源目录中的 <code>.env</code> <strong>不会</strong>进入镜像或工作区；若需保留其中的业务键，请手动迁移到 <code>.env.local</code> 后再启动。</p>' +
+              '<p class="detail-hint">CLI：<code>lwa probe show/set/reset &lt;id&gt;</code> 可管理就绪探针；列表操作区「验证探针」可在线编辑。</p>'
+          );
         }
         if (manifest.static) {
           html += section(
@@ -439,7 +445,21 @@
           drawer: { open: false, title: "", body: "" },
           currentDetailId: null,
           logs: { open: false, title: "", category: "run", content: "", instanceId: null },
-          pathAlias: { open: false, title: "", value: "", error: "", instanceId: null },
+          pathAlias: { open: false, title: "", value: "", skipCompatCheck: false, error: "", instanceId: null },
+          verification: {
+            open: false,
+            title: "",
+            instanceId: null,
+            loading: false,
+            saving: false,
+            error: "",
+            disableAutoProbes: false,
+            probes: [],
+            inheritedProbes: [],
+            effectiveProbes: [],
+            newPath: "",
+            newExpectedStatus: 200,
+          },
           // IMP-047：文件夹源导入弹窗
           // IMP-051：picking 防连点；canPickFolder 仅 loopback
           folderImport: { open: false, sourceDir: "", name: "", pathAlias: "", error: "", submitting: false, picking: false },
@@ -696,6 +716,7 @@
             var id = btn.getAttribute("data-id");
             if (op === "logs") { this.openLogs(id); return; }
             if (op === "path-alias") { this.openPathAlias(id); return; }
+            if (op === "verification") { this.openVerification(id); return; }
             if (op === "remove") { this.openRemoveDialog(id); return; }
             if (op === "pageview") { this.openPageview(id); return; }
               if (op === "update-from-dir") { this.doUpdateFromDir(id); return; }
@@ -1063,6 +1084,7 @@
           this.pathAlias.instanceId = id;
           var inst = this.instances.filter(function (x) { return x.id === id; })[0];
           this.pathAlias.value = (inst && inst.routeHost) || "";
+          this.pathAlias.skipCompatCheck = false;
           this.pathAlias.error = "";
           this.pathAlias.title = "路径别名 · " + id;
           this.pathAlias.open = true;
@@ -1076,7 +1098,7 @@
           apiFetch(this, "/api/instances/" + encodeURIComponent(savedId) + "/path-alias", {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ alias: alias }),
+            body: JSON.stringify({ alias: alias, skipCompatCheck: !!this.pathAlias.skipCompatCheck }),
           })
             .then(function (data) {
               self.pathAlias.open = false;
@@ -1094,6 +1116,94 @@
           this.submitPathAlias(this.pathAlias.value.trim() || null);
         },
         clearPathAlias: function () { this.submitPathAlias(null); },
+
+        // ---- 验证探针 ----
+        openVerification: function (id) {
+          var self = this;
+          this.verification.instanceId = id;
+          this.verification.title = "验证探针 · " + id;
+          this.verification.open = true;
+          this.verification.loading = true;
+          this.verification.error = "";
+          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/verification")
+            .then(function (data) {
+              self.verification.loading = false;
+              var ov = data.overrides || {};
+              self.verification.disableAutoProbes = !!ov.disableAutoProbes;
+              self.verification.probes = (ov.probes || []).slice();
+              self.verification.inheritedProbes = data.inheritedProbes || [];
+              self.verification.effectiveProbes = data.effectiveProbes || [];
+            })
+            .catch(function (e) {
+              self.verification.loading = false;
+              self.verification.error = e.message;
+            });
+        },
+        closeVerification: function () {
+          this.verification.open = false;
+          this.verification.error = "";
+        },
+        addVerificationProbe: function () {
+          var path = (this.verification.newPath || "").trim();
+          if (!path) return;
+          if (path.charAt(0) !== "/") path = "/" + path;
+          this.verification.probes.push({
+            path: path,
+            method: "GET",
+            expectedStatus: Number(this.verification.newExpectedStatus) || 200,
+            description: "用户显式配置探针",
+          });
+          this.verification.newPath = "";
+        },
+        removeVerificationProbe: function (idx) {
+          this.verification.probes.splice(idx, 1);
+        },
+        saveVerification: function () {
+          var self = this;
+          var id = this.verification.instanceId;
+          if (!id) return;
+          this.verification.saving = true;
+          this.verification.error = "";
+          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/verification", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              disableAutoProbes: !!this.verification.disableAutoProbes,
+              probes: this.verification.probes,
+            }),
+          })
+            .then(function () {
+              self.verification.saving = false;
+              self.verification.open = false;
+              self.toast("验证探针已保存", "success");
+              self.refresh();
+            })
+            .catch(function (e) {
+              self.verification.saving = false;
+              self.verification.error = e.message;
+            });
+        },
+        resetVerification: function () {
+          var self = this;
+          var id = this.verification.instanceId;
+          if (!id || !window.confirm("确认清除该实例的探针覆盖层？")) return;
+          this.verification.saving = true;
+          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/verification", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reset: true }),
+          })
+            .then(function () {
+              self.verification.saving = false;
+              self.verification.open = false;
+              self.toast("已恢复默认探针", "success");
+              self.refresh();
+            })
+            .catch(function (e) {
+              self.verification.saving = false;
+              self.verification.error = e.message;
+            });
+        },
 
         // ---- IMP-047：文件夹源导入 ----
         openFolderImport: function () {
@@ -1289,6 +1399,7 @@
           else if (this.gitImport.open) this.closeGitImport();
           else if (this.pageview.open) this.closePageview();
           else if (this.pathAlias.open) this.closePathAlias();
+          else if (this.verification.open) this.closeVerification();
           else if (this.logs.open) this.closeLogs();
           else if (this.drawer.open) this.closeDetail();
         },
@@ -1466,12 +1577,50 @@
     '    <p class="path-alias-hint">设置后可通过统一入口 <code>http://&lt;LAN-IP&gt;:&lt;staticGatewayPort&gt;/&lt;slug&gt;/</code> 访问（Caddy 模式）。</p>',
     '    <label class="path-alias-field"><span>别名 slug</span>',
     '      <input type="text" placeholder="my-app-demo" autocomplete="off" spellcheck="false" v-model="pathAlias.value" @keydown.enter="savePathAlias" /></label>',
+    '    <label class="path-alias-field path-alias-checkbox">',
+    '      <input type="checkbox" v-model="pathAlias.skipCompatCheck" />',
+    '      <span>跳过兼容检查（不跑别名入口活验证；仅在你确认构建已带 <code>--base=/{slug}/</code> 时使用）</span></label>',
     '    <p class="path-alias-error" :hidden="!pathAlias.error">{{ pathAlias.error }}</p>',
     '    <div class="path-alias-actions">',
     '      <button class="btn btn-ghost" type="button" @click="clearPathAlias">清除别名</button>',
     '      <div class="path-alias-actions-main">',
     '        <button class="btn btn-ghost" type="button" @click="closePathAlias">取消</button>',
     '        <button class="btn btn-primary" type="button" @click="savePathAlias">保存</button>',
+    "      </div></div></div></div>",
+    // CHK-252：验证探针编辑
+    '<div class="modal" :hidden="!verification.open">',
+    '  <div class="modal-inner path-alias-box verification-box"><div class="modal-head">',
+    '    <h2>{{ verification.title }}</h2>',
+    '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭验证探针" @click="closeVerification">✕</button></div>',
+    '    <p class="path-alias-hint" v-if="verification.loading">加载中…</p>',
+    '    <template v-else>',
+    '      <p class="path-alias-hint">用户显式探针才会作为就绪门槛；契约中 guessed/discovered 探针默认仅诊断。</p>',
+    '      <label class="path-alias-field path-alias-checkbox">',
+    '        <input type="checkbox" v-model="verification.disableAutoProbes" />',
+    '        <span>关闭自动探针（不执行 guessed/discovered）</span></label>',
+    '      <div class="verification-probe-list" v-if="verification.probes.length">',
+    '        <p class="detail-hint">用户探针</p>',
+    '        <ul><li v-for="(p, idx) in verification.probes" :key="idx">',
+    '          <code>{{ p.path }}</code> → {{ p.expectedStatus }}',
+    '          <button class="btn btn-ghost btn-sm" type="button" @click="removeVerificationProbe(idx)">删除</button>',
+    "        </li></ul></div>",
+    '      <label class="path-alias-field"><span>新增就绪探针路径</span>',
+    '        <input type="text" placeholder="/health" autocomplete="off" spellcheck="false" v-model="verification.newPath" @keydown.enter="addVerificationProbe" /></label>',
+    '      <label class="path-alias-field"><span>期望状态码</span>',
+    '        <input type="number" min="100" max="599" v-model.number="verification.newExpectedStatus" /></label>',
+    '      <div class="verification-effective" v-if="verification.effectiveProbes.length">',
+    '        <p class="detail-hint">有效探针（合并后）</p>',
+    '        <ul><li v-for="(p, idx) in verification.effectiveProbes" :key="\'eff-\'+idx">',
+    '          <code>{{ p.path }}</code> · mandatory={{ p.isMandatory }} · {{ p.source }}',
+    "        </li></ul></div>",
+    '    </template>',
+    '    <p class="path-alias-error" :hidden="!verification.error">{{ verification.error }}</p>',
+    '    <div class="path-alias-actions">',
+    '      <button class="btn btn-ghost" type="button" :disabled="verification.saving" @click="resetVerification">恢复默认</button>',
+    '      <div class="path-alias-actions-main">',
+    '        <button class="btn btn-ghost" type="button" @click="closeVerification">取消</button>',
+    '        <button class="btn btn-primary" type="button" :disabled="verification.saving || verification.loading" @click="addVerificationProbe">添加</button>',
+    '        <button class="btn btn-primary" type="button" :disabled="verification.saving || verification.loading" @click="saveVerification">{{ verification.saving ? "保存中…" : "保存" }}</button>',
     "      </div></div></div></div>",
     // IMP-047：文件夹源导入
     '<div class="modal" :hidden="!folderImport.open">',

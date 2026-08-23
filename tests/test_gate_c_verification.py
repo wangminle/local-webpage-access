@@ -798,7 +798,7 @@ class TestBackendCapabilityObservation:
         discovered = [p for p in probes if p.source == "discovered"]
         assert len(discovered) == 1
         assert discovered[0].path == "/health"
-        assert discovered[0].isMandatory is True
+        assert discovered[0].isMandatory is False
 
     def test_node_backend_plan_discovers_health_probe(self, tmp_path: Path) -> None:
         """BUG-504：Node 后端 app.get('/health') 同样生成 discovered 探针。"""
@@ -829,7 +829,7 @@ class TestBackendCapabilityObservation:
         discovered = [p for p in probes if p.source == "discovered"]
         assert len(discovered) == 1
         assert discovered[0].path == "/health"
-        assert discovered[0].isMandatory is True
+        assert discovered[0].isMandatory is False
 
     def test_post_health_route_is_not_discovered_as_get_probe(self, tmp_path: Path) -> None:
         """BUG-506：@app.post("/health") 不得生成 mandatory GET /health 探针。"""
@@ -1088,6 +1088,7 @@ class TestContainerRuntimeEvidence:
         assert any("无法实证" in w for w in result["optional_warnings"])
 
     def test_hosting_optional_probe_failure_is_degraded(self, workspace) -> None:
+        """CHK-252：guessed 探针 404 为中性；5xx 才产生告警并 degraded。"""
         from local_webpage_access.hosting import _evaluate_container_verification
 
         manifest = self._sqlite_manifest()
@@ -1108,8 +1109,22 @@ class TestContainerRuntimeEvidence:
                 MagicMock(),
                 "api",
             )
-        assert result["overall_status"] == "degraded"
-        assert result["optional_warnings"]
+        assert result["overall_status"] == "passed"
+        assert result["optional_warnings"] == []
+
+        with (
+            patch("local_webpage_access.hosting._wait_for_http", return_value=True),
+            patch("local_webpage_access.hosting._probe_path", return_value=(False, 503)),
+        ):
+            result5xx = _evaluate_container_verification(
+                18000,
+                manifest,
+                workspace,
+                MagicMock(),
+                "api",
+            )
+        assert result5xx["overall_status"] == "degraded"
+        assert result5xx["optional_warnings"]
 
 
 class TestNodeSubdirCandidate:

@@ -1331,6 +1331,7 @@ def test_container_path_alias(workspace, registry, config, monkeypatch) -> None:
                 p.unlink()
 
     monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(path_alias, "verify_alias_live", lambda *a, **k: None)
 
     result = set_instance_path_alias(workspace, config, registry, "api", "api-alias")
     assert result.alias == "api-alias"
@@ -1636,6 +1637,7 @@ def test_concurrent_path_alias_rejects_duplicate(workspace, registry, config, mo
                 p.unlink()
 
     monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(path_alias, "verify_alias_live", lambda *a, **k: None)
 
     # 拉长网关写入窗口，放大「先查后写」竞态（修复前双双成功）。
     real_apply = path_alias._apply_gateway_alias
