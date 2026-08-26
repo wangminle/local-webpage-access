@@ -28,6 +28,8 @@ from local_webpage_access.doctor import (
     check_port_pool,
     check_python_packages,
     check_python_version,
+    check_base_image_readiness,
+    _dockerfile_from_images,
     check_registry,
     check_static_gateway,
     format_report,
@@ -1620,3 +1622,180 @@ def test_workspace_consistency_skip_when_registry_read_fails(env, monkeypatch) -
     assert r.status == STATUS_SKIP
     assert "registry" in (r.detail or "")
     assert "database is locked" in (r.detail or "")
+
+
+# ---- issue #14：base_image_readiness（纯本地基础镜像就绪度）-------------------
+
+
+def _seed_container_dockerfile(ws: Workspace, iid: str = "api", image: str = "python:3.13-slim") -> None:
+    d = ws.apps / iid / "docker"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Dockerfile").write_text(
+        f"# demo\nFROM --platform=linux/arm64 {image} AS runtime\nCMD [\"python\"]\n",
+        encoding="utf-8",
+    )
+
+
+def _docker_ok_runner() -> dict:
+    return {("docker", "version"): _proc(0, stdout="29.6.1\n")}
+
+
+def test_base_image_readiness_skip_when_docker_unavailable(env) -> None:
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    r = check_base_image_readiness(ws, runner=_failing_runner)
+    assert r.status == STATUS_SKIP
+
+
+def test_base_image_readiness_skip_without_dockerfiles(env) -> None:
+    """纯静态站工作区（无容器 Dockerfile）→ SKIP，不假红不假绿。"""
+    ws, _config, _reg = env
+    r = check_base_image_readiness(ws, runner=_runner_from_map(_docker_ok_runner()))
+    assert r.status == STATUS_SKIP
+
+
+def test_base_image_readiness_ok_when_all_cached(env) -> None:
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(0, stdout="sha256:abc\n")
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_OK
+    assert "python:3.13-slim" in r.message
+
+
+def test_base_image_readiness_warn_when_uncached_and_no_acceleration(env) -> None:
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(1, stderr="No such image\n")
+    mapping[("docker", "info")] = _proc(0, stdout='[]|""|""\n')
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_WARN
+    assert "registry-mirrors" in (r.suggestion or "")
+    assert "python:3.13-slim" in (r.detail or "")
+    assert "api" in (r.detail or "")
+
+
+def test_base_image_readiness_ok_when_mirror_configured(env) -> None:
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(1, stderr="No such image\n")
+    mapping[("docker", "info")] = _proc(0, stdout='["https://docker.example.mirror"]|""|""\n')
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_OK
+    assert "docker.example.mirror" in r.message
+
+
+def test_base_image_readiness_ok_when_daemon_proxy_configured(env) -> None:
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(1, stderr="No such image\n")
+    mapping[("docker", "info")] = _proc(0, stdout='[]|"http://127.0.0.1:7890"|""\n')
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_OK
+
+
+def test_dockerfile_from_images_joins_continuations_and_skips_stages() -> None:
+    """CHK-261：续行 FROM、scratch、前序 stage 别名都不是需要拉取的外部镜像。"""
+    text = (
+        "FROM --platform=linux/arm64 \\\n"
+        "    python:3.13-slim AS base\n"
+        "RUN pip install uv\n"
+        "FROM scratch AS export\n"
+        "COPY --from=base /app /app\n"
+        "FROM base AS final\n"
+        "CMD [\"python\"]\n"
+    )
+    assert _dockerfile_from_images(text) == ["python:3.13-slim"]
+
+
+def test_base_image_readiness_ok_for_multistage_when_real_image_cached(env) -> None:
+    """合法多阶段 Dockerfile 不得因 scratch/stage 别名/续行反斜杠误报未缓存。"""
+    ws, _config, _reg = env
+    d = ws.apps / "api" / "docker"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Dockerfile").write_text(
+        "FROM --platform=linux/arm64 \\\n"
+        "    python:3.13-slim AS base\n"
+        "FROM scratch AS export\n"
+        "FROM base AS final\n",
+        encoding="utf-8",
+    )
+    inspect_calls: list[str] = []
+
+    def runner(cmd: Sequence[str], **_kwargs) -> subprocess.CompletedProcess:
+        if cmd[:2] == ["docker", "version"]:
+            return _proc(0, stdout="29.6.1\n")
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            inspect_calls.append(cmd[3])
+            if cmd[3] == "python:3.13-slim":
+                return _proc(0, stdout="sha256:abc\n")
+            return _proc(1, stderr="No such image\n")
+        return _proc(1, stderr="unexpected")
+
+    r = check_base_image_readiness(ws, runner=runner)
+    assert inspect_calls == ["python:3.13-slim"]
+    assert r.status == STATUS_OK
+
+
+def test_base_image_readiness_warn_when_docker_info_unreadable(env) -> None:
+    """docker info 读取失败不假绿：WARN 并说明未能读取加速配置。"""
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(1, stderr="No such image\n")
+    mapping[("docker", "info")] = _proc(1, stderr="boom")
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_WARN
+    assert "未能读取" in r.message
+
+
+def test_base_image_readiness_null_mirrors_does_not_crash(env) -> None:
+    """BUG-596：docker info 的 Mirrors 序列化为 null（Go 空切片）不中断 doctor。"""
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(1, stderr="No such image\n")
+    mapping[("docker", "info")] = _proc(0, stdout='null|""|""\n')
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_WARN
+    assert "未缓存" in r.message
+
+
+def test_base_image_readiness_null_mirrors_with_proxy_ok(env) -> None:
+    """BUG-596：Mirrors 为 null 但配了代理时仍判 OK，不因 null 崩。"""
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws)
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(1, stderr="No such image\n")
+    mapping[("docker", "info")] = _proc(0, stdout='null|"http://127.0.0.1:7890"|""\n')
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_OK
+
+
+def test_base_image_readiness_third_party_registry_hint(env) -> None:
+    """BUG-597：ghcr.io 未缓存且无代理时，不得建议配 Docker Hub registry-mirrors。"""
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws, iid="web", image="ghcr.io/org/app:latest")
+    mapping = _docker_ok_runner()
+    mapping[("docker", "image", "inspect")] = _proc(1, stderr="No such image\n")
+    mapping[("docker", "info")] = _proc(0, stdout='[]|""|""\n')
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_WARN
+    assert "registry-mirrors" not in (r.suggestion or "")
+    assert "ghcr.io" in (r.message or "")
+    assert "代理" in (r.suggestion or "")
+
+
+def test_base_image_readiness_scratch_only_skip_message(env) -> None:
+    """P3：仅 FROM scratch 时 SKIP，但文案不得称「纯静态站」。"""
+    ws, _config, _reg = env
+    _seed_container_dockerfile(ws, image="scratch")
+    mapping = _docker_ok_runner()
+    r = check_base_image_readiness(ws, runner=_runner_from_map(mapping))
+    assert r.status == STATUS_SKIP
+    assert "纯静态站" not in (r.message or "")
+    assert "scratch" in (r.message or "")

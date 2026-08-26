@@ -355,8 +355,16 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 /* 过渡状态：验证中（蓝，进行时）/ 降级运行（琥珀，部分可用需关注） */
 .badge-verifying { background: var(--blue-bg); color: var(--primary); }
 .badge-degraded  { background: var(--amber-bg); color: var(--amber); }
-/* 第二批 CHK-252：验证结论徽标（叠加在运行中状态旁，不降级进程状态） */
-.badge-verify-warn { background: var(--amber-bg); color: var(--amber); }
+/* 第二批 CHK-252：验证结论徽标（叠加在运行中状态旁，不降级进程状态）。
+   覆盖 .badge 的 inline-flex 为块级 flex + fit-content：整体换行到状态
+   徽标下方独占一行，避免与状态徽标并排把状态列撑宽。 */
+.badge-verify-warn {
+  background: var(--amber-bg);
+  color: var(--amber);
+  display: flex;
+  width: fit-content;
+  margin-top: 3px;
+}
 .badge-cancelling { background: var(--amber-bg); color: var(--amber); }
 .badge-cancelled { background: var(--muted-bg, #eee); color: var(--muted, #666); }
 .badge-queued   { background: var(--amber-bg); color: var(--amber); }

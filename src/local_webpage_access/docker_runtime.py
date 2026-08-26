@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import json
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -78,6 +79,98 @@ def is_docker_permission_error(text: str | None) -> bool:
         or "connect: permission denied" in blob
         or ("docker.sock" in blob and "permission" in blob)
     )
+
+
+# issue #14：Docker Hub 不可达错误的集中分类器。双信号保守匹配——
+# registry 特征与网络特征必须同时命中，避免把 pip/npm 超时或普通构建
+# 失败误判为 Hub 故障。CHK-261：registry 信号必须是 docker.io / registry-1.docker.io
+# 主机，不能用通用 "failed to resolve source metadata"（ghcr.io / quay.io
+# 超时也会出现该句，误报成 Hub 并建议配 Hub mirror）。
+_REGISTRY_SIGNALS = (
+    "registry-1.docker.io",
+    "index.docker.io",
+    "docker.io/",  # buildkit: load metadata for docker.io/library/python:3.13-slim
+)
+_NETWORK_SIGNALS = (
+    "i/o timeout",
+    "context deadline exceeded",
+    "deadlineexceeded",
+    "connection timed out",
+    "tls handshake timeout",
+    "no route to host",
+    "no such host",  # DNS 解析失败（阻断/污染），处置与超时相同
+)
+
+
+def is_registry_timeout_error(text: str | None) -> bool:
+    """识别 Docker Hub 不可达导致的拉取/构建超时（issue #14）。"""
+    blob = (text or "").lower()
+    if not blob:
+        return False
+    has_network = any(sig in blob for sig in _NETWORK_SIGNALS)
+    has_registry = any(sig in blob for sig in _REGISTRY_SIGNALS)
+    return has_network and has_registry
+
+
+def extract_failed_registry_image(text: str | None) -> str | None:
+    """尽力从 buildkit 输出提取失败的基础镜像名（如 ``python:3.13-slim``）。"""
+    blob = text or ""
+    m = re.search(
+        r"docker\.io/library/([a-z0-9._-]+):([^\s\"']+)", blob, re.IGNORECASE
+    )
+    if m:
+        return f"{m.group(1)}:{m.group(2)}"
+    m = re.search(
+        r"registry-1\.docker\.io/v2/library/([a-z0-9._-]+)/manifests/([^\s\"']+)",
+        blob,
+        re.IGNORECASE,
+    )
+    if m:
+        return f"{m.group(1)}:{m.group(2)}"
+    return None
+
+
+def registry_timeout_hint(text: str | None) -> str:
+    """命中 Hub 不可达特征时返回平台化处理指引，未命中返回空串（issue #14）。
+
+    所有失败出口（CLI 异常 / builds.error_summary / 总超时异常）统一经
+    此函数取指引，不在各分支拼字符串。不硬编码单一第三方 mirror，
+    daemon 代理与 Docker Desktop 代理是不同配置层，分开表述。
+    """
+    if not is_registry_timeout_error(text):
+        return ""
+    lines = ["基础镜像拉取超时：Docker Hub 在当前网络可能不可达。"]
+    image = extract_failed_registry_image(text)
+    if image:
+        lines.append(f"失败镜像：{image}。")
+    lines += [
+        "可按平台任选其一：",
+        "- Linux/WSL：在 /etc/docker/daemon.json 配置 registry-mirrors"
+        "（国内可选 DaoCloud、阿里云等公共加速器）后重启 Docker，"
+        "或为 dockerd 配置 HTTP 代理（systemd drop-in）；",
+        "- Docker Desktop（macOS/Windows）：Settings→Docker Engine 配置 "
+        "registry-mirrors，或 Settings→Resources→Proxies 配置代理"
+        "（daemon 代理与终端代理是两层配置）；",
+        "- 离线环境：在可联网机器 docker pull 后 docker save | docker load 预置镜像。",
+        "完整命令输出见该实例 logs/（build 为 build.log，up 为 run.log）。",
+    ]
+    return "\n".join(lines)
+
+
+def _error_summary_with_hint(text: str | None, limit: int = 500) -> str:
+    """失败摘要：原始尾部 + （命中时）Hub 指引，总量不超过 limit。
+
+    指引在尾部截断中优先保留——原始 buildkit 输出在 build.log 有完整
+    原文，摘要里让出空间给可操作信息。
+    """
+    blob = (text or "").strip()
+    hint = registry_timeout_hint(blob)
+    if not hint:
+        return blob[-limit:] if blob else ""
+    room = max(0, limit - len(hint) - 4)
+    head = blob[-room:] if room else ""
+    summary = f"{head}\n——\n{hint}" if head else hint
+    return summary[:limit]
 
 
 def probe_docker_permission() -> str | None:
@@ -368,8 +461,19 @@ def _execute_streaming(
                     instance_id=instance_id,
                 )
             if timed_out:
+                # issue #14：总超时此前只抛"命令超时"，已捕获的部分输出（可能
+                # 含 buildkit 的 registry 超时原文）被丢弃——带进消息尾部并
+                # 过集中分类器，Hub 不可达时给出平台化指引。
+                partial = "".join(chunks)
+                tail = partial.strip().splitlines()[-10:]
+                summary = f"命令超时（{timeout}s）：{' '.join(args)}"
+                if tail:
+                    summary += "\n" + "\n".join(tail)
+                hint = registry_timeout_hint(partial)
+                if hint:
+                    summary += "\n——\n" + hint
                 raise DockerError(
-                    f"命令超时（{timeout}s）：{' '.join(args)}",
+                    summary,
                     command=list(args),
                     timeout=timeout,
                 )
@@ -435,6 +539,10 @@ def _require_ok(result: ComposeResult, *, action: str, instance_id: str) -> Comp
         return result
     tail = (result.stderr or result.stdout).strip().splitlines()
     summary = "\n".join(tail[-10:]) if tail else f"exit {result.returncode}"
+    # issue #14：Docker Hub 不可达的超时原文可读性差，统一追加分类器指引。
+    hint = registry_timeout_hint(result.stderr or result.stdout)
+    if hint:
+        summary += "\n——\n" + hint
     raise DockerError(
         f"Docker {action} 失败（实例 {instance_id}，exit {result.returncode}）：{summary}",
         instance_id=instance_id,
@@ -554,10 +662,11 @@ class DockerRuntime:
             elif build_id is not None and self.registry is not None:
                 # 评审-组3：超时（DockerError）等异常此前不收尾 builds 行，
                 # 管理页该构建永久显示"进行中"；统一 finish failed。
+                # issue #14：摘要经集中分类器，Hub 不可达时带平台化指引。
                 self.registry.finish_build(
                     build_id,
                     status="failed",
-                    error_summary=str(exc)[:500],
+                    error_summary=_error_summary_with_hint(str(exc)),
                 )
             raise
         if build_id is not None and self.registry is not None:
@@ -567,7 +676,7 @@ class DockerRuntime:
                 self.registry.finish_build(
                     build_id,
                     status="failed",
-                    error_summary=_tail(result.stderr or result.stdout, 500),
+                    error_summary=_error_summary_with_hint(result.stderr or result.stdout),
                 )
         if not result.ok:
             self._event(instance_id, "error", f"镜像构建失败（exit {result.returncode}）")
@@ -1059,7 +1168,10 @@ __all__ = [
     "DOCKER_PERMISSION_HINT",
     "DockerRuntime",
     "ensure_available",
+    "extract_failed_registry_image",
     "is_available",
+    "is_registry_timeout_error",
+    "registry_timeout_hint",
     "is_docker_permission_error",
     "probe_docker_permission",
 ]

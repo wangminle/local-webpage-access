@@ -999,3 +999,116 @@ def test_bind_mounts_ignores_volume_mounts(workspace, monkeypatch) -> None:
     monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
 
     assert DockerRuntime(workspace).bind_mounts("api") == []
+
+
+# ---- issue #14：Docker Hub 不可达错误分类与指引 -------------------------------
+
+_HUB_TIMEOUT_STDERR = (
+    "#3 [internal] load metadata for docker.io/library/python:3.13-slim\n"
+    '#3 ERROR: failed to do request: Head '
+    '"https://registry-1.docker.io/v2/library/python/manifests/3.13-slim": '
+    'dial tcp 199.96.61.1:443: i/o timeout\n'
+    "failed to solve: DeadlineExceeded: python:3.13-slim: "
+    "failed to resolve source metadata for docker.io/library/python:3.13-slim\n"
+)
+
+
+def test_is_registry_timeout_error_positive_and_negative() -> None:
+    """双信号匹配：buildkit 真实超时文案命中；pip/npm 超时与普通失败不误判。"""
+    from local_webpage_access.docker_runtime import is_registry_timeout_error
+
+    assert is_registry_timeout_error(_HUB_TIMEOUT_STDERR)
+    # 普通构建失败：无网络特征
+    assert not is_registry_timeout_error("npm error: ENOTFOUND\nexit 1")
+    # PyPI 超时：有网络特征、无 registry 特征
+    assert not is_registry_timeout_error(
+        "WARNING: Retrying after error ReadTimeoutError on https://pypi.org/simple/"
+    )
+    # registry 特征但非网络故障（manifest 不存在）
+    assert not is_registry_timeout_error(
+        "docker.io/library/python:3.13-slim: manifest unknown"
+    )
+    # CHK-261：通用 "failed to resolve source metadata" 不能当 Docker Hub 信号，
+    # 否则 ghcr.io / quay.io 超时会被误报成 Hub 不可达并建议配 Hub mirror。
+    assert not is_registry_timeout_error(
+        "#3 [internal] load metadata for ghcr.io/astral-sh/uv:latest\n"
+        "#3 ERROR: failed to resolve source metadata for ghcr.io/astral-sh/uv:latest: "
+        "dial tcp: lookup ghcr.io: no such host\n"
+        "failed to solve: DeadlineExceeded: ghcr.io/astral-sh/uv:latest: "
+        "failed to resolve source metadata for ghcr.io/astral-sh/uv:latest\n"
+    )
+    assert not is_registry_timeout_error(
+        "failed to resolve source metadata for quay.io/prometheus/busybox:latest: "
+        "context deadline exceeded\n"
+    )
+
+
+def test_extract_failed_registry_image() -> None:
+    from local_webpage_access.docker_runtime import extract_failed_registry_image
+
+    assert extract_failed_registry_image(_HUB_TIMEOUT_STDERR) == "python:3.13-slim"
+    assert (
+        extract_failed_registry_image("#3 load metadata for docker.io/library/node:24-alpine")
+        == "node:24-alpine"
+    )
+    assert extract_failed_registry_image("no image reference here") is None
+
+
+def test_build_hub_timeout_error_carries_hint(workspace, registry, monkeypatch) -> None:
+    """issue #14 路径一（buildkit 非零退出）：CLI 异常与 error_summary 均含指引。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr=_HUB_TIMEOUT_STDERR
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    build_id = registry.add_build("api", status="running")
+    rt = DockerRuntime(workspace, registry)
+    with pytest.raises(DockerError, match="registry-mirrors"):
+        rt.build("api", build_id=build_id)
+
+    builds = registry.list_builds("api")
+    summary = builds[0]["error_summary"]
+    assert "registry-mirrors" in summary
+    assert "python:3.13-slim" in summary  # 分类器提取的失败镜像
+    assert "build.log" in summary
+    assert len(summary) <= 500
+
+
+def test_build_normal_failure_has_no_hub_hint(workspace, registry, monkeypatch) -> None:
+    """普通构建失败不带 Hub 指引，保持原始摘要。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(args=[], returncode=1, stderr="npm error: ENOTFOUND\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    build_id = registry.add_build("api", status="running")
+    rt = DockerRuntime(workspace, registry)
+    with pytest.raises(DockerError, match="build 失败"):
+        rt.build("api", build_id=build_id)
+
+    summary = registry.list_builds("api")[0]["error_summary"]
+    assert "registry-mirrors" not in summary
+    assert "npm error" in summary
+
+
+def test_execute_streaming_timeout_classifies_hub_unreachable(tmp_path: Path) -> None:
+    """issue #14 路径二（LWA 总超时）：已捕获的部分输出进分类器，异常带指引。"""
+    log = tmp_path / "build.log"
+    script = f"print({_HUB_TIMEOUT_STDERR!r}, flush=True); import time; time.sleep(30)"
+    with pytest.raises(DockerError, match="命令超时") as excinfo:
+        _execute(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+            log_path=log,
+            timeout=3,
+        )
+    message = str(excinfo.value)
+    assert "python:3.13-slim" in message
+    assert "registry-mirrors" in message
+    # build.log 保留 BuildKit 原文（不被摘要覆盖）
+    content = log.read_text(encoding="utf-8")
+    assert "registry-1.docker.io" in content

@@ -445,10 +445,70 @@ def test_stdlib_http_yields_to_static_index(tmp_path: Path) -> None:
 
 
 def test_detect_python_uv_lock_uses_uv_sync(tmp_path: Path) -> None:
+    """issue #13：仅含 [[package]] 记录的有效 lock 才走 uv sync。"""
     (tmp_path / "requirements.txt").write_text("fastapi\n")
-    (tmp_path / "uv.lock").write_text("")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "fastapi"\nversion = "0.115.0"\n'
+    )
     result = Scanner().detect(tmp_path)
     assert result.entry.install == "uv sync"
+
+
+def test_detect_python_empty_uv_lock_falls_back_to_requirements(tmp_path: Path) -> None:
+    """issue #13：空壳 uv.lock（无包记录）+ 有效 requirements.txt → 回退 pip 分支并留 note。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n")
+    (tmp_path / "pyproject.toml").write_text("version = 1\n")
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\nrevision = "abc"\nrequires-python = ">=3.13"\n'
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.entry.install == "pip install -r requirements.txt"
+    assert any("uv.lock" in n and "空壳" in n for n in result.notes)
+
+
+def test_detect_python_empty_uv_lock_no_deps_install_none(tmp_path: Path) -> None:
+    """issue #13：空壳 lock 不算依赖文件——stdlib 零依赖服务 install=None（CHK-225 路径）。"""
+    (tmp_path / "uv.lock").write_text('version = 1\nrequires-python = ">=3.13"\n')
+    (tmp_path / "server.py").write_text(
+        "from http.server import HTTPServer, BaseHTTPRequestHandler\n"
+        "HTTPServer(('0.0.0.0', 8000), BaseHTTPRequestHandler).serve_forever()\n"
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.entry.install is None
+    assert result.entry.start == "python server.py"
+
+
+def test_detect_python_broken_uv_lock_no_silent_downgrade(tmp_path: Path) -> None:
+    """issue #13：TOML 损坏的 lock 不静默降级——保持 uv sync 并在 notes 诊断。
+
+    即使文本里残留 [[package]] 标记也不做字符串计数兜底（会把"损坏"与
+    "空壳"两种故障混为一谈），损坏必须显式暴露给用户。
+    """
+    (tmp_path / "requirements.txt").write_text("fastapi\n")
+    (tmp_path / "uv.lock").write_text(
+        "this is [not valid toml\n[[package]]\nname = fastapi\n"
+    )
+    result = Scanner().detect(tmp_path)
+    assert result.entry.install == "uv sync"
+    assert any("损坏" in n for n in result.notes)
+
+
+def test_uv_lock_state_unreadable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """issue #13：读取失败 → UNREADABLE（不静默换源），而非按空壳回退。"""
+    from local_webpage_access.scanner import _uv_lock_state
+
+    lock = tmp_path / "uv.lock"
+    lock.write_text("version = 1\n")
+    original_read = Path.read_text
+
+    def _raise_for_lock(self: Path, *args: object, **kwargs: object) -> str:
+        if self == lock:
+            raise OSError("permission denied")
+        return original_read(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_lock)
+    assert _uv_lock_state(lock).name == "UNREADABLE"
 
 
 # ---- SQLite + fullstack ---------------------------------------------------

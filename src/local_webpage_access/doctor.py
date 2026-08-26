@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import platform
 import re
@@ -275,6 +276,230 @@ def check_docker_compose(runner: SubprocessRunner = _default_runner) -> CheckRes
         "docker_compose",
         STATUS_OK,
         f"Docker Compose 可用（{compose_version}，≥ {RECOMMENDED_COMPOSE_VERSION}）",
+    )
+
+
+def _join_dockerfile_continuations(text: str) -> str:
+    """合并以 ``\\`` 续行的 Dockerfile 逻辑行。"""
+    out: list[str] = []
+    acc = ""
+    for line in text.splitlines():
+        piece = line.rstrip()
+        if acc:
+            piece = acc + " " + piece.lstrip()
+            acc = ""
+        if piece.endswith("\\") and not piece.lstrip().startswith("#"):
+            acc = piece[:-1].rstrip()
+            continue
+        out.append(piece)
+    if acc:
+        out.append(acc)
+    return "\n".join(out)
+
+
+def _dockerfile_from_images(text: str) -> list[str]:
+    """提取 Dockerfile 外部基础镜像（跳过 ``--platform``、scratch、stage 别名）。
+
+    CHK-261：续行 ``FROM --platform=... \\`` 不得把 ``\\`` 当镜像名；
+    ``FROM scratch`` 与 ``FROM <前序 AS 别名>`` 不是需要拉取的外部镜像，
+    否则 ``docker image inspect`` 必然失败，对本可离线构建的合法文件误报 WARN。
+    """
+    images: list[str] = []
+    stages: set[str] = set()
+    for line in _join_dockerfile_continuations(text).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tokens = stripped.split()
+        if tokens[0].upper() != "FROM":
+            continue
+        rest = [tok for tok in tokens[1:] if not tok.startswith("--")]
+        if not rest:
+            continue
+        image = rest[0]
+        alias: str | None = None
+        for idx, tok in enumerate(rest):
+            if tok.upper() == "AS" and idx + 1 < len(rest):
+                alias = rest[idx + 1]
+                break
+        is_internal = image.lower() == "scratch" or image in stages
+        if alias:
+            stages.add(alias)
+        if is_internal:
+            continue
+        images.append(image)
+    return images
+
+
+def _image_registry(image: str) -> str:
+    """判定基础镜像所属 registry；Docker Hub 统一归一化为 ``docker.io``。
+
+    按 Docker 镜像名规则：第一个 ``/`` 前的分量若含 ``.``、``:`` 或为
+    ``localhost``，即为 registry 主机名（ghcr.io / quay.io / …）；否则是
+    Docker Hub 的 library 命名空间（``python:3.13-slim``、``docker.io/...``）。
+    """
+    name = image.split("@", 1)[0]
+    parts = name.split("/")
+    if len(parts) > 1 and (
+        "." in parts[0] or ":" in parts[0] or parts[0] == "localhost"
+    ):
+        return parts[0]
+    return "docker.io"
+
+
+def _safe_json_list(raw: str) -> list[str]:
+    """把 ``docker info`` 的 JSON 字段安全解析成字符串列表。
+
+    BUG-596：Go 空切片经 JSON 序列化可能是 ``null``（不是 ``[]``），
+    ``json.loads`` 返回 ``None``，直接迭代会 TypeError；此处把 null/空/
+    坏值统一回退为空列表，保证 ``lwa doctor`` 不中断。
+    """
+    try:
+        value = json.loads(raw or "[]")
+    except (ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [m for m in value if isinstance(m, str) and m]
+
+
+def check_base_image_readiness(
+    ws: Workspace, runner: SubprocessRunner = _default_runner
+) -> CheckResult:
+    """issue #14：基础镜像就绪度（纯本地，不做网络探测）。
+
+    依次判定：
+
+    1. Docker 不可用 → SKIP（check_docker 已 FAIL，不重复报）；
+    2. 无容器 Dockerfile（纯静态站工作区）→ SKIP；
+    3. 解析各实例 Dockerfile 的 FROM 并去重，逐个 ``docker image inspect``
+       查本地缓存；
+    4. 全部已缓存 → OK（构建可离线进行）；
+    5. 有未缓存镜像时读 daemon 配置（``docker info`` 的 registry mirrors 与
+       HTTP/HTTPS proxy）：已配 mirror/代理 → OK（拉取走加速通道，本地无法
+       证实可达性，不假红）；未配任何加速 → WARN，给出平台化指引。
+
+    刻意不做 pull / manifest inspect 在线探测——doctor 会因此变慢、受瞬时
+    网络与限流影响，还可能在加速器抖动时产出假红。
+    """
+    probe = runner(["docker", "version", "--format", "{{.Server.Version}}"])
+    if probe.returncode != 0:
+        return CheckResult(
+            "base_image_readiness",
+            STATUS_SKIP,
+            "Docker 不可用，跳过基础镜像就绪度检查（docker 检查项已报告原因）",
+        )
+
+    images: dict[str, list[str]] = {}  # image -> instance ids
+    found_dockerfile = False
+    for dockerfile in sorted(ws.apps.glob("*/docker/Dockerfile")):
+        found_dockerfile = True
+        try:
+            text = dockerfile.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        iid = dockerfile.relative_to(ws.apps).parts[0]
+        for image in _dockerfile_from_images(text):
+            images.setdefault(image, []).append(iid)
+
+    if not images:
+        message = (
+            "基础镜像均为 scratch / 内部阶段别名，无外部拉取风险"
+            if found_dockerfile
+            else "无容器实例 Dockerfile（纯静态站），无基础镜像拉取风险"
+        )
+        return CheckResult("base_image_readiness", STATUS_SKIP, message)
+
+    uncached: list[str] = []
+    for image in images:
+        res = runner(["docker", "image", "inspect", image, "--format", "{{.Id}}"])
+        if res.returncode != 0:
+            uncached.append(image)
+
+    cached = sorted(set(images) - set(uncached))
+    if not uncached:
+        return CheckResult(
+            "base_image_readiness",
+            STATUS_OK,
+            f"基础镜像全部已在本地缓存（{', '.join(sorted(images))}），构建可离线进行",
+        )
+
+    # 有未缓存镜像：读 daemon 的 mirrors / proxy 配置（一条命令合并取）。
+    info = runner(
+        [
+            "docker",
+            "info",
+            "--format",
+            "{{json .RegistryConfig.Mirrors}}|{{json .HTTPProxy}}|{{json .HTTPSProxy}}",
+        ]
+    )
+    if info.returncode != 0:
+        return CheckResult(
+            "base_image_readiness",
+            STATUS_WARN,
+            f"{len(uncached)} 个基础镜像未缓存，且未能读取 daemon 加速配置",
+            detail="未缓存：" + ", ".join(uncached),
+            suggestion=(
+                "确认 `docker info` 可用后重跑；并配置 registry-mirrors 或代理"
+                "（Linux/WSL：/etc/docker/daemon.json；Docker Desktop：Settings→Docker Engine）"
+            ),
+        )
+    try:
+        mirrors_raw, http_proxy_raw, https_proxy_raw = (
+            info.stdout or ""
+        ).strip().split("|", 2)
+        mirrors = _safe_json_list(mirrors_raw)
+        proxies = [
+            p for p in (json.loads(http_proxy_raw or '""'), json.loads(https_proxy_raw or '""')) if p
+        ]
+    except (ValueError, json.JSONDecodeError):
+        mirrors, proxies = [], []
+
+    uncached_detail = "未缓存：" + ", ".join(f"{img}（{'/'.join(iids)}）" for img, iids in
+                                             sorted(images.items()) if img in uncached)
+    if mirrors or proxies:
+        accel = mirrors + proxies
+        return CheckResult(
+            "base_image_readiness",
+            STATUS_OK,
+            f"基础镜像有未缓存项，但 daemon 已配置加速（{', '.join(accel)}）",
+            detail=uncached_detail + "；已缓存：" + (", ".join(cached) or "无"),
+        )
+
+    # BUG-597：未缓存镜像若来自 ghcr.io / quay.io 等第三方 registry，Docker Hub
+    # 的 registry-mirrors 帮不上忙——不能照搬 Hub 文案建议配 Hub mirror。
+    uncached_registries = sorted({_image_registry(img) for img in uncached})
+    hub_only = uncached_registries == ["docker.io"]
+    if hub_only:
+        message = (
+            f"{len(uncached)} 个基础镜像未缓存，且 daemon 未配置 registry-mirrors/代理"
+            "——Docker Hub 不可达网络下首次构建会超时"
+        )
+        suggestion = (
+            "任选其一：Linux/WSL 在 /etc/docker/daemon.json 配置 registry-mirrors"
+            "（国内可选 DaoCloud、阿里云等公共加速器）后重启 Docker；"
+            "Docker Desktop 在 Settings→Docker Engine 配置；"
+            "或为 dockerd 配置 HTTP 代理；"
+            "或在可联网机器 docker pull 后 docker save | docker load 预置上述镜像"
+        )
+    else:
+        message = (
+            f"{len(uncached)} 个基础镜像未缓存，且 daemon 未配置代理"
+            f"——含第三方 registry（{', '.join(uncached_registries)}），"
+            "Docker Hub 的 registry-mirrors 无法覆盖，网络受限时首次构建会超时"
+        )
+        suggestion = (
+            "Docker Hub 加速器帮不上 ghcr.io / quay.io 等第三方 registry，任选其一："
+            "为 dockerd 配置 HTTP/HTTPS 代理（Linux/WSL：systemd drop-in；"
+            "Docker Desktop：Settings→Resources→Proxies）；"
+            "或在可联网机器 docker pull 后 docker save | docker load 预置上述镜像"
+        )
+    return CheckResult(
+        "base_image_readiness",
+        STATUS_WARN,
+        message,
+        detail=uncached_detail + "；已缓存：" + (", ".join(cached) or "无"),
+        suggestion=suggestion,
     )
 
 
@@ -1965,6 +2190,8 @@ def run_doctor(
             check_python_packages(),
             check_docker(runner=runner),
             check_docker_compose(runner=runner),
+            # issue #14：基础镜像就绪度（纯本地，WARN 级）
+            check_base_image_readiness(ws, runner=runner),
             check_caddy(config, runner=runner),
             # IMP-065：git 可执行（缺失仅 WARN，不影响 zip/文件夹导入）
             check_git(runner=runner),
@@ -2102,6 +2329,7 @@ __all__ = [
     "check_lan_url_stale",
     "check_source_freshness",
     "check_backend_handoff",
+    "check_base_image_readiness",
     "check_port_contention",
     "check_disk_space",
     "check_memory",

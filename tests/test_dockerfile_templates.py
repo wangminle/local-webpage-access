@@ -170,6 +170,28 @@ def test_python_zero_dependency_skips_pip_layer(workspace: Workspace) -> None:
     assert 'CMD ["python", "server.py"]' in content
 
 
+def test_python_empty_uv_lock_fallback_renders_pip_path(workspace: Workspace) -> None:
+    """issue #13 端到端：空壳 uv.lock 回退后，Dockerfile 走 requirements 分支。
+
+    scanner 把 install 决策为 "pip install -r requirements.txt" 后，模板必须：
+    COPY requirements.txt（不 COPY uv.lock）、不出现 uv sync、启动命令不带
+    uv run 前缀——否则空壳 lock 的失败只是被推迟到构建期。
+    """
+    m = _mk_manifest(
+        kind=Kind.PYTHON,
+        stack=["fastapi"],
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app --host 0.0.0.0 --port 8000",
+        internal_port=8000,
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "COPY current/requirements.txt requirements.txt" in content
+    assert "uv.lock" not in content
+    assert "uv sync" not in content
+    assert "uv run" not in content
+    assert '["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]' in content
+
+
 def test_python_flask_dockerfile(workspace: Workspace) -> None:
     m = _mk_manifest(
         kind=Kind.PYTHON,

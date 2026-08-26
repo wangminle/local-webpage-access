@@ -13,6 +13,7 @@ import json
 import re
 import tomllib  # Python 3.11+ 标准库（项目要求 >=3.13）
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 from local_webpage_access.logging import get_logger
@@ -100,6 +101,24 @@ HEAVY_RUNTIMES = {
 }
 
 
+class UvLockState(Enum):
+    """uv.lock 内容状态（issue #13）。
+
+    - VALID_NONEMPTY：TOML 合法且含 ``[[package]]`` 记录 → 走 ``uv sync``。
+    - VALID_EMPTY：TOML 合法但无包记录（空壳）→ 回退其他依赖文件分支；
+      ``uv sync --frozen`` 对空壳会静默装 0 个包且 exit 0，失败被推迟到
+      运行期（uvicorn: not found），必须在导入期拦截。
+    - INVALID / UNREADABLE：TOML 损坏 / 读取失败 → **不静默换源**，保持
+      uv 路径并在 notes 里给出诊断，令错误在构建前可见、可归因。
+    """
+
+    MISSING = "missing"
+    VALID_NONEMPTY = "valid_nonempty"
+    VALID_EMPTY = "valid_empty"
+    INVALID = "invalid"
+    UNREADABLE = "unreadable"
+
+
 # ---- 文件摘要 ---------------------------------------------------------------
 
 
@@ -117,6 +136,8 @@ class FileSummary:
     has_pyproject_toml: bool = False
     has_pipfile: bool = False
     has_uv_lock: bool = False
+    # issue #13：uv.lock 内容状态（四态，见 UvLockState）。
+    uv_lock_state: "UvLockState" = UvLockState.MISSING
     has_manage_py: bool = False
     has_alembic_ini: bool = False  # IMP-052：顶层 alembic.ini
     has_runtime_paths: bool = False  # BUG-198：src/app/runtime_paths.py 等
@@ -157,6 +178,7 @@ def summarize(root: Path) -> FileSummary:
                 summary.has_pipfile = True
             elif name == "uv.lock":
                 summary.has_uv_lock = True
+                summary.uv_lock_state = _uv_lock_state(entry)
             elif name == "manage.py":
                 summary.has_manage_py = True
             elif name == "alembic.ini":
@@ -764,6 +786,22 @@ class Scanner:
 
     def _detect_python(self, summary: FileSummary, result: DetectionResult) -> None:
         result.kind = Kind.PYTHON
+        # issue #13：uv.lock 状态诊断进 notes，随导入摘要/manifest 透出，
+        # 避免"为何没走/为何走了 uv sync"的排障成本。
+        if summary.has_uv_lock:
+            if summary.uv_lock_state is UvLockState.VALID_EMPTY:
+                result.notes.append(
+                    "检测到空壳 uv.lock（无 [[package]] 记录），已回退 pip 安装分支（issue #13）"
+                )
+            elif summary.uv_lock_state is UvLockState.INVALID:
+                result.notes.append(
+                    "uv.lock 无法解析（TOML 损坏），仍按 uv sync 安装；"
+                    "若构建失败请优先核对 lock 文件（issue #13）"
+                )
+            elif summary.uv_lock_state is UvLockState.UNREADABLE:
+                result.notes.append(
+                    "uv.lock 读取失败，仍按 uv sync 安装；请确认文件权限（issue #13）"
+                )
         matched: list[str] = []
         for dep in summary.python_deps:
             base = dep.lower().split("[")[0]
@@ -818,8 +856,10 @@ class Scanner:
                 result.confidence = "medium"
                 # 零依赖：无 requirements/pyproject/pipfile 时 install 置 None，
                 # 避免容器构建执行 pip install -r requirements.txt 落空失败。
+                # issue #13：空壳 uv.lock 不算依赖文件，正确落 install=None
+                # （CHK-225 零依赖路径），而不是 COPY 一个装不出任何包的 lock。
                 has_dep_file = (
-                    summary.has_uv_lock
+                    (summary.has_uv_lock and _uv_lock_usable(summary))
                     or summary.has_requirements_prod
                     or summary.has_requirements_txt
                     or summary.has_pyproject_toml
@@ -968,8 +1008,38 @@ def _stdlib_http_entry(summary: FileSummary) -> str | None:
     return None
 
 
+def _uv_lock_state(path: Path) -> UvLockState:
+    """判定 uv.lock 内容状态（issue #13）。
+
+    只用 tomllib 结构化解析，不做字符串计数兜底——TOML 损坏时若靠
+    ``[[package]]`` 标记字符串命中继续走 uv，会把"损坏 lock"与"空壳 lock"
+    两种不同故障混为一谈；损坏必须显式暴露为 INVALID，由调用方保持 uv
+    路径并给出诊断，而不是静默降级或静默放行。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return UvLockState.UNREADABLE
+    try:
+        packages = tomllib.loads(text).get("package")
+    except tomllib.TOMLDecodeError:
+        return UvLockState.INVALID
+    if isinstance(packages, list) and packages:
+        return UvLockState.VALID_NONEMPTY
+    return UvLockState.VALID_EMPTY
+
+
+def _uv_lock_usable(summary: FileSummary) -> bool:
+    """uv.lock 是否作为安装源保留：仅空壳（VALID_EMPTY）回退其他依赖文件。
+
+    INVALID / UNREADABLE 不静默换源（保持 uv 路径 + notes 诊断），
+    避免"读不了就偷偷改用 pip"造成难以归因的版本漂移。
+    """
+    return summary.uv_lock_state is not UvLockState.VALID_EMPTY
+
+
 def _python_install_command(summary: FileSummary) -> str:
-    if summary.has_uv_lock:
+    if summary.has_uv_lock and _uv_lock_usable(summary):
         return "uv sync"
     # IMP-017：优先 requirements-prod.txt（已剔除测试包的生产依赖清单）。
     if summary.has_requirements_prod:
