@@ -122,6 +122,7 @@ swap=4GB
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
 * **数据持久化**：仅自动 bind mount `data/` 目录。其他路径（如日志、上传目录）需用户在项目内处理。
+* **容器运行身份（issue #20）**：V0.8.8 起新导入实例默认非 root（UID/GID 对齐宿主 `data/` 属主，Dockerfile `USER` 与 Compose `user` 双保险）；**存量旧实例不会在一次普通 rebuild 中被自动切换**——manifest 缺 `container.runAsNonRoot` 的按 legacy root 运行并告警，经 `lwa migrate-user <id>`（先过属主/写权限预检）显式迁移；确需 root 兼容可 `--root` 或在 `local-web.json` 设 `container.runAsNonRoot=false`。
 * **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。
 * **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。路径别名的前提是应用侧显式、可配置的 base path（方案 B）；LWA 做门禁与探测，不代改应用源码（IMP-055）。无源码时优先 hostPort 或未来主机名别名。
 * **别名下 SPA 绝对资源路径（IMP-023 / IMP-055）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 -> **空 200、404 或错误 MIME（如 JS 请求得到 text/html）**，页面白屏。

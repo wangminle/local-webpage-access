@@ -929,6 +929,102 @@ def test_update_replaces_content_and_hash(
     assert getattr(m, "sourceZipHash", None) == result.zip_hash
 
 
+def test_update_migrates_start_export_database_url_to_env(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #15：旧式 start 的 export DATABASE_URL 在 manifest 替换时刻迁入 .env。
+
+    旧管线把 DATABASE_URL 烤在 entry.start 里（.env 无该键）；更新重建
+    manifest 后新 start 不再 export，若不迁移，随后 generate_env 会注入
+    默认空库——升级后表现为数据全丢。
+    """
+    from local_webpage_access.models import InstanceManifest
+
+    v1 = _make_zip(
+        tmp_path / "demo.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    iid = importer.import_zip(v1).instance_id
+
+    # 模拟旧式部署：DATABASE_URL 烤在 entry.start 的 export 里
+    mpath = workspace.app_manifest_path(iid)
+    m = InstanceManifest.load(mpath)
+    m.entry.start = (
+        "sh -c 'export DATABASE_URL=sqlite:////app/data/bookshelf.db "
+        "&& exec uvicorn main:app --host 0.0.0.0 --port 8000'"
+    )
+    m.save(mpath)
+
+    v2 = _make_zip(
+        tmp_path / "demo-v2.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=2\n"},
+    )
+    importer.update_zip(v2, iid, restart=False)
+
+    env_text = workspace.app_env_path(iid).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/bookshelf.db" in env_text
+    assert "issue #15" in env_text  # 迁移来源可追溯
+    # 新 manifest 的 start 已由管线重建，不再 export；值改由 .env 承载
+    m2 = InstanceManifest.load(mpath)
+    assert "DATABASE_URL" not in (m2.entry.start or "")
+
+
+def test_update_start_db_url_migration_skips_existing_env_value(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #15：.env 已有 DATABASE_URL 时不被旧 start 的 export 覆盖（幂等）。"""
+    from local_webpage_access.models import InstanceManifest
+
+    v1 = _make_zip(
+        tmp_path / "demo.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    iid = importer.import_zip(v1).instance_id
+
+    env_path = workspace.app_env_path(iid)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(
+        "HOST_PORT=18000\nDATABASE_URL=sqlite:////app/data/app.sqlite\n",
+        encoding="utf-8",
+    )
+
+    mpath = workspace.app_manifest_path(iid)
+    m = InstanceManifest.load(mpath)
+    m.entry.start = (
+        "sh -c 'export DATABASE_URL=sqlite:////app/data/bookshelf.db && exec uvicorn main:app'"
+    )
+    m.save(mpath)
+
+    v2 = _make_zip(
+        tmp_path / "demo-v2.zip",
+        {"requirements.txt": "fastapi\n", "main.py": "x = 1\n"},
+    )
+    importer.update_zip(v2, iid, restart=False)
+
+    env_text = env_path.read_text(encoding="utf-8")
+    assert env_text.count("DATABASE_URL=") == 1
+    assert "sqlite:////app/data/app.sqlite" in env_text
+
+
+def test_update_start_without_db_url_export_leaves_env_absent(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #15：start 无 export DATABASE_URL 时不创建/改动 .env。"""
+    v1 = _make_zip(
+        tmp_path / "demo.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    iid = importer.import_zip(v1).instance_id
+
+    v2 = _make_zip(
+        tmp_path / "demo-v2.zip",
+        {"requirements.txt": "fastapi\n", "main.py": "app=2\n"},
+    )
+    importer.update_zip(v2, iid, restart=False)
+
+    assert not workspace.app_env_path(iid).exists()
+
+
 def test_update_same_hash_skips(importer: Importer, workspace: Workspace, tmp_path: Path) -> None:
     """相同 hash 再次更新 → skipped，不 rebuild。"""
     zip_path = _make_static_zip(tmp_path / "demo.zip", "v1")
@@ -2060,3 +2156,143 @@ def test_update_zip_preserves_verification_overrides(
     # 落盘 manifest 同样保留
     saved = InstanceManifest.load(manifest_path)
     _assert_probe_overrides(saved)
+
+
+# ---- issue #19：更新后 discovered 健康探针不得降级 ---------------------------
+
+
+def _make_fastapi_zip(zip_path: Path, route_path: str, body_marker: str) -> Path:
+    """构造带健康路由声明的 FastAPI 包（扫描层可识别 + 探针层可发现）。"""
+    return _make_zip(
+        zip_path,
+        {
+            "requirements.txt": "fastapi\nuvicorn\n",
+            "main.py": (
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n\n"
+                f'@app.get("{route_path}")\n'
+                "def health():\n"
+                f'    return {{"ok": "{body_marker}"}}\n'
+            ),
+        },
+    )
+
+
+def _contract_probes(manifest: InstanceManifest) -> list[dict]:
+    """取 manifest 选中计划的 requiredProbes（list[dict]）。"""
+    contract = manifest.capabilityContract or {}
+    return list(contract.get("requiredProbes") or [])
+
+
+def test_update_zip_keeps_discovered_health_probe(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #19：``import --update`` 后 /api/health 仍为 source=discovered。
+
+    复现根因：更新管线先把 staging 原子改名成 current、再调
+    apply_detection_to_manifest 生成部署计划；此时 detection.evidence.root
+    仍指向已不存在的 ``current.new``，_discover_health_probes 静默返回空，
+    契约降级为 guessed /health。对 current/ 重新扫描则立即得到 discovered。
+    """
+    v1 = _make_fastapi_zip(tmp_path / "api.zip", "/api/health", "v1")
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    # 基线：首导即 discovered /api/health（无 guessed 混入）
+    probes1 = _contract_probes(r1.manifest)
+    discovered1 = [p for p in probes1 if p["source"] == "discovered"]
+    assert [(p["path"], p["method"]) for p in discovered1] == [("/api/health", "GET")]
+
+    v2 = _make_fastapi_zip(tmp_path / "api-v2.zip", "/api/health", "v2")
+    result = importer.update_zip(v2, iid, restart=False)
+
+    probes2 = _contract_probes(result.manifest)
+    discovered2 = [p for p in probes2 if p["source"] == "discovered"]
+    assert [(p["path"], p["method"]) for p in discovered2] == [("/api/health", "GET")]
+    # 不再回退到 guessed /health（guessed 只在无发现时作为诊断保留）
+    guessed = [p for p in probes2 if p["source"] == "guessed"]
+    assert guessed == []
+    # 落盘 manifest 与内存一致
+    saved = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert _contract_probes(saved) == probes2
+
+
+def test_update_zip_refreshes_probe_on_endpoint_change(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #19：新版本把 /api/health 改成 /ready 时，契约只保留新端点。"""
+    v1 = _make_fastapi_zip(tmp_path / "api.zip", "/api/health", "v1")
+    iid = importer.import_zip(v1).instance_id
+
+    v2 = _make_fastapi_zip(tmp_path / "api-v2.zip", "/ready", "v2")
+    result = importer.update_zip(v2, iid, restart=False)
+
+    probes = _contract_probes(result.manifest)
+    discovered = [p for p in probes if p["source"] == "discovered"]
+    assert [p["path"] for p in discovered] == ["/ready"]
+    # 旧端点不得残留
+    assert all("/api/health" != p["path"] for p in probes)
+
+
+def test_update_zip_discovered_probe_with_overrides_preserved(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #19：discovered 探针与 verificationOverrides 在同一次更新中并存保留。"""
+    v1 = _make_fastapi_zip(tmp_path / "api.zip", "/api/health", "v1")
+    iid = importer.import_zip(v1).instance_id
+    manifest_path = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(manifest_path)
+    _set_probe_overrides(manifest, manifest_path)
+
+    v2 = _make_fastapi_zip(tmp_path / "api-v2.zip", "/api/health", "v2")
+    result = importer.update_zip(v2, iid, restart=False)
+
+    # 探针不降级
+    probes = _contract_probes(result.manifest)
+    assert [p["path"] for p in probes if p["source"] == "discovered"] == ["/api/health"]
+    # 覆盖层仍保留（BUG-584 与 issue #19 组合场景）
+    _assert_probe_overrides(result.manifest)
+
+
+def test_discover_health_probes_warns_on_missing_root(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """issue #19：扫描根不存在时必须留 WARNING（含路径），不得静默返回空。
+
+    不依赖全局 logging 配置：setup_logging 会把 ``local_webpage_access`` 父
+    logger 的 propagate 置 False 并跨测试残留，caplog 的 handler 挂在 root，
+    故必须把 handler 直接加到 candidate_generator 子 logger 上（项目惯例，
+    见 test_lifecycle.test_remove_writes_stage_orphan_events）。
+    """
+    import logging
+
+    from local_webpage_access.candidate_generator import (
+        DeploymentCandidate,
+        _discover_health_probes,
+        log as cg_log,
+    )
+    from local_webpage_access.models import ProjectEvidence
+
+    missing_root = tmp_path / "gone" / "current.new"
+    evidence = ProjectEvidence(root=str(missing_root))
+    backend = DeploymentCandidate(
+        kind="python",
+        runtime="docker_compose",
+        servingMode="container",
+        form="backend-container",
+    )
+
+    cg_log.addHandler(caplog.handler)
+    orig_level = cg_log.level
+    cg_log.setLevel(logging.WARNING)
+    try:
+        probes = _discover_health_probes(evidence, backend)
+    finally:
+        cg_log.removeHandler(caplog.handler)
+        cg_log.setLevel(orig_level)
+
+    assert probes == []
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any(str(missing_root) in r.getMessage() for r in warnings), (
+        "缺失扫描根应记录含路径的 WARNING"
+    )

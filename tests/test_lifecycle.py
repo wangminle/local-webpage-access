@@ -231,11 +231,12 @@ def test_instance_lock_timeout_raises(workspace) -> None:
     try_acquire_exclusive(fd)
     write_lock_payload(fd, f"{os.getpid()}\n{time_mod.time():.3f}\n".encode())
     try:
-        # issue#1 问题3：错误信息带持有者 PID 与重试指引
+        # issue#1 问题3 / BUG-604：错误信息带持有者 PID；持有者存活且心跳新鲜
+        # （本进程持有、刚写入时间戳）时提示耐心等待，不再输出"超时请重试"
         with pytest.raises(LifecycleError, match=f"PID {os.getpid()}"):
             with instance_lock(workspace, "api", timeout=0.3):
                 pass
-        with pytest.raises(LifecycleError, match="稍候重试"):
+        with pytest.raises(LifecycleError, match="请耐心等待"):
             with instance_lock(workspace, "api", timeout=0.3):
                 pass
     finally:
@@ -1120,6 +1121,76 @@ def test_instance_lock_heartbeat_refreshes_timestamp(workspace) -> None:
         lifecycle._LOCK_HEARTBEAT_INTERVAL = original
 
 
+def test_touch_lock_heartbeat_never_exposes_empty_payload(
+    workspace, monkeypatch
+) -> None:
+    """BUG-606：心跳刷新不得在写入新载荷前清空锁文件。"""
+    import os
+
+    from local_webpage_access import file_lock, lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-consistent.lock"
+    lock_path.write_text(f"{os.getpid()}\n1.000\n", encoding="utf-8")
+    original_ftruncate = file_lock.os.ftruncate
+    observed_during_truncate: list[str] = []
+
+    def _observing_ftruncate(fd: int, length: int) -> None:
+        # write_lock_payload 必须已先 os.write 完整载荷，才进入截断。
+        observed_during_truncate.append(lock_path.read_text(encoding="utf-8"))
+        original_ftruncate(fd, length)
+
+    monkeypatch.setattr(file_lock.os, "ftruncate", _observing_ftruncate)
+    lifecycle._touch_lock_heartbeat(lock_path)
+
+    assert observed_during_truncate, "心跳刷新必须经过写后截断观测点"
+    assert all(
+        len(content.strip().splitlines()) >= 2
+        for content in observed_during_truncate
+    )
+    content = lock_path.read_text(encoding="utf-8").strip().splitlines()
+    assert content[0] == str(os.getpid())
+    assert float(content[1]) > 1.0
+
+
+def test_read_lock_payload_retries_incomplete_read(workspace, monkeypatch) -> None:
+    """BUG-606：读取器遇到瞬时单行载荷时应重读完整载荷。"""
+    from local_webpage_access import lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-retry.lock"
+    reads = iter(["123\n", "123\n456.000\n"])
+
+    def _read_text(_self, *args, **kwargs):
+        return next(reads)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    assert lifecycle._read_lock_payload(lock_path) == (123, 456.0)
+
+
+def test_read_lock_payload_persistent_invalid_content_degrades_safely(
+    workspace, monkeypatch
+) -> None:
+    """BUG-606：持续无效的观测载荷不应向诊断路径抛异常。"""
+    from local_webpage_access import lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-invalid.lock"
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: "invalid\n")
+
+    assert lifecycle._read_lock_payload(lock_path) == (0, 0.0)
+
+
+def test_read_lock_payload_persistent_single_line_preserves_pid(
+    workspace, monkeypatch
+) -> None:
+    """BUG-606：持续单行时保留 PID，供调用方用 mtime 兜底。"""
+    from local_webpage_access import lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-single-line.lock"
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: "123\n")
+
+    assert lifecycle._read_lock_payload(lock_path) == (123, 0.0)
+
+
 def test_instance_lock_heartbeat_keeps_lock_fresh(workspace, monkeypatch) -> None:
     """持锁超过 stale 阈值后锁仍不应被判为陈旧（BUG-046 核心）。
 
@@ -1139,6 +1210,86 @@ def test_instance_lock_heartbeat_keeps_lock_fresh(workspace, monkeypatch) -> Non
         _t.sleep(1.0)
         # 锁不应被判为 stale（因为心跳在持续刷新）
         assert lifecycle._lock_is_stale(lock_path) is False
+
+
+# ---- 回归测试：BUG-604（issue #17）----------------------------------------
+#
+# BUG-604：持锁者心跳正常时错误消息仍统一拼"等待超时 + 请稍候重试"，
+#          正常进行中的长构建被误读为死锁（现场：daemon 构建 34 分钟，CLI
+#          报"占用超时请重试"却注明"心跳仍在刷新"）。修复后
+#          _lock_timeout_message 按 PID 存活 × 心跳新鲜度三分支。
+
+
+def _write_lock_file(lock_path, pid: int, ts: float) -> None:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(f"{pid}\n{ts:.3f}\n", encoding="utf-8")
+
+
+def test_lock_timeout_message_fresh_heartbeat_waits_not_retries(workspace) -> None:
+    """BUG-604：持有者存活且心跳新鲜 → 提示耐心等待，不得出现超时/请重试。"""
+    import os
+    import time as _t
+
+    from local_webpage_access.lifecycle import _lock_timeout_message
+
+    lock_path = workspace.run / "lifecycle-i17f.lock"
+    _write_lock_file(lock_path, os.getpid(), _t.time())
+    msg = _lock_timeout_message("i17f", lock_path, 30.0)
+
+    assert "仍在刷新" in msg
+    assert "请耐心等待" in msg
+    # issue #17 的矛盾措辞不得再出现在"正常进行中"分支
+    assert "等待超时" not in msg
+    assert "稍候重试" not in msg
+
+
+def test_lock_timeout_message_stale_heartbeat_suspects_holder(workspace) -> None:
+    """BUG-604/605：持有者存活但心跳停滞 → 提示排查并安全终止持有进程。
+
+    项目无 unlock 命令，且 BUG-213 要求锁文件不 unlink（同 inode 互斥）；
+    文案不得出现"强制解锁"这类引导手工删锁文件的建议。
+    """
+    import os
+    import time as _t
+
+    from local_webpage_access import lifecycle
+    from local_webpage_access.lifecycle import _lock_timeout_message
+
+    lock_path = workspace.run / "lifecycle-i17s.lock"
+    _write_lock_file(
+        lock_path, os.getpid(), _t.time() - lifecycle._STALE_LOCK_SECONDS * 2
+    )
+    msg = _lock_timeout_message("i17s", lock_path, 30.0)
+
+    assert "停滞" in msg
+    assert "疑似" in msg
+    assert "安全终止" in msg  # flock 随进程退出释放，锁文件不动
+    assert "强制解锁" not in msg  # BUG-605：不得建议不可执行的强制解锁
+
+
+def test_lock_timeout_message_dead_pid_reports_residual_lock(workspace) -> None:
+    """BUG-604/605：持有者已退出 → 仅提示重试（锁已随进程退出释放）。"""
+    import time as _t
+
+    from local_webpage_access.lifecycle import _lock_timeout_message, _pid_alive
+
+    dead_pid = 4194304
+    assert _pid_alive(dead_pid) is False
+    lock_path = workspace.run / "lifecycle-i17d.lock"
+    _write_lock_file(lock_path, dead_pid, _t.time())
+    msg = _lock_timeout_message("i17d", lock_path, 30.0)
+
+    assert "已退出" in msg
+    assert "可稍候重试" in msg
+    assert "强制解锁" not in msg  # BUG-605：不得建议不可执行的强制解锁
+
+
+def test_lock_timeout_message_missing_lock_generic(workspace) -> None:
+    """BUG-604：锁文件缺失/不可读 → 保持通用占位消息（不抛异常）。"""
+    from local_webpage_access.lifecycle import _lock_timeout_message
+
+    msg = _lock_timeout_message("i17x", workspace.run / "no-such.lock", 30.0)
+    assert "等待超时" in msg
 
 
 # ---- 回归测试：BUG-047 ----------------------------------------------------

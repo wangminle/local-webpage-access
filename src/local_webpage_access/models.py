@@ -162,6 +162,14 @@ class ContainerConfig(BaseModel):
     # issue#1：额外 bind mount（``宿主路径:容器路径[:ro]`` 列表），渲染 compose 时
     # 合并进 volumes--手工改 compose.yaml 会在重生成时被抹掉，业务定制走这里。
     extraVolumes: list[str] = Field(default_factory=list)
+    # issue #20：容器是否以非 root 身份运行（宿主 data/ 目录 UID/GID 对齐方案）。
+    # - ``True``：新导入实例的默认值；Dockerfile 末尾生成 ``USER <uid>:<gid>``、
+    #   Compose 增加 ``user:`` 防御层，UID/GID 统一取实例 ``data/`` 目录宿主属主。
+    # - ``None``：旧 manifest 缺失该字段，按 legacy root 运行并告警（不做一次性
+    #   强制切换，经 ``lwa migrate-user`` 显式迁移）。
+    # - ``False``：用户显式确认需要 root 兼容，尊重选择。
+    # scan / import --update 重建 manifest 时必须透传（apply_detection_to_manifest）。
+    runAsNonRoot: bool | None = None
 
 
 class NetworkConfig(BaseModel):

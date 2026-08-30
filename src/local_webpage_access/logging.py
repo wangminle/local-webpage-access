@@ -95,6 +95,34 @@ def secure_chmod(path: Path, mode: int = 0o600) -> None:
         pass
 
 
+def append_global_log(
+    log_dir: Path,
+    message: str,
+    *,
+    logger_name: str = "local_webpage_access.daemon",
+    level: str = "INFO",
+) -> None:
+    """跨进程向 ``logs/lwa.log`` 追加一条运维可见记录（issue #16 / BUG-603）。
+
+    ``lwa.log`` 的 RotatingFileHandler 属 CLI 进程，daemon 等长驻进程不得再挂
+    第二个 rotating handler（双进程滚动会互相截断）。本函数用 **每次打开、
+    O_APPEND 追加、随即关闭** 的裸写方式落一条与 ``_LOG_FORMAT`` 同格式的
+    行：小行追加在 POSIX 上原子，CLI 侧滚动最坏让一行落入 ``lwa.log.1``，
+    不损坏任何一侧。失败静默（面包屑丢失不影响主流程）。
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "lwa.log"
+        existed = log_path.exists()
+        ts = datetime.now().strftime(_DATE_FORMAT)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{ts} {level:<8} {logger_name} {message}\n")
+        if not existed:
+            secure_chmod(log_path)
+    except OSError:
+        return
+
+
 def get_logger(name: str) -> logging.Logger:
     """获取子模块 logger，自动归入 ``local_webpage_access`` 命名空间。"""
     if name.startswith("local_webpage_access"):
@@ -159,6 +187,7 @@ def utc_now() -> datetime:
 __all__ = [
     "setup_logging",
     "get_logger",
+    "append_global_log",
     "secure_chmod",
     "instance_log_dir",
     "write_instance_log",

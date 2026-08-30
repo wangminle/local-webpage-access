@@ -24,9 +24,9 @@ python3 -m pytest tests/test_doctor.py
 | 层 | 说明 | 是否需要 Docker | 典型文件 |
 | --- | --- | --- | --- |
 | 单元测试 | 纯逻辑，无 IO | 否 | `test_config.py`、`test_paths.py`、`test_models.py`、`test_registry.py`、`test_ports.py`、`test_scanner.py` |
-| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_folder_source.py`（IMP-047）、`test_compose.py`、`test_daemon.py`（含 daemon→manager API）、`test_manager_api.py`、`test_security.py`（含 generate_compose 审计）、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime）、`test_pageviews.py`、`test_build_queue.py`、`test_zip_processor.py`、`test_manager_static_app.py` |
+| 模块集成 | 模块间串联，mock 外部进程 | 否 | `test_importer.py`、`test_folder_source.py`（IMP-047）、`test_compose.py`、`test_daemon.py`（含 daemon→manager API）、`test_manager_api.py`、`test_security.py`（含 generate_compose 审计）、`test_doctor.py`、`test_lifecycle.py`（mock DockerRuntime）、`test_hosting.py`、`test_container_identity.py`（issue #20 非 root 身份：UID/GID 对齐、预检、migrate-user）、`test_pageviews.py`、`test_build_queue.py`、`test_zip_processor.py`、`test_manager_static_app.py` |
 | 样例夹具 | 验证 6 个样例识别正确 | 否 | `test_fixtures.py`、`tests/fixtures/` |
-| 真实 Docker | 端到端容器构建与运行 | **是** | `test_docker_integration.py` |
+| 真实 Docker | 端到端容器构建与运行（含 issue #20 非 root 验证：`id -u` 非 0、`/app/data` 与 RUNTIME_ROOT 布局非 root 写 SQLite） | **是** | `test_docker_integration.py` |
 
 ## Docker 测试跳过条件（WBS-28.15）
 

@@ -72,6 +72,29 @@ def _get_thread_lock(instance_id: str) -> threading.RLock:
 # ---- 并发锁（WBS-17.12）-----------------------------------------------------
 
 
+def _read_lock_payload(lock_path: Path, *, attempts: int = 3) -> tuple[int, float]:
+    """读取 PID/心跳载荷，容忍并发刷新期间的短暂不完整内容。
+
+    BUG-606：锁文件是运行中观测数据，读者不应因一次空读或
+    单行读取而误判。重试全部失败时保留可解析的 PID，让调用方
+    仍可用 mtime 兜底；完全无效则返回安全占位。
+    """
+    last_pid = 0
+    for _ in range(max(1, attempts)):
+        try:
+            content = lock_path.read_text(encoding="utf-8").strip().splitlines()
+            if not content:
+                continue
+            pid = int(content[0])
+            last_pid = pid
+            if len(content) < 2:
+                continue
+            return pid, float(content[1])
+        except (OSError, ValueError):
+            continue
+    return last_pid, 0.0
+
+
 def _touch_lock_heartbeat(
     lock_path: Path, stop: "threading.Event | None" = None
 ) -> None:
@@ -87,33 +110,57 @@ def _touch_lock_heartbeat(
             content = fh.read().strip().splitlines()
             pid_line = content[0] if content else str(os.getpid())
             # 评审-组2：join(5s) 超时后锁可能已释放；写前由调用方传入 stop 复查
-            fh.seek(0)
-            fh.truncate()
-            fh.write(f"{pid_line}\n{time.time():.3f}\n")
-            fh.flush()
+            payload = f"{pid_line}\n{time.time():.3f}\n".encode()
+            # BUG-606：先完整覆盖再截断，不暴露 truncate→write 空窗口。
+            write_lock_payload(fh.fileno(), payload)
     except OSError:
         return
 
 
 def _lock_timeout_message(instance_id: str, lock_path: Path, timeout: float) -> str:
-    """issue#1 问题3：锁超时错误附持有者信息，给出可操作的重试指引。
+    """issue#1 问题3 / BUG-604（issue #17）：锁等待失败的错误按持有者状态分流。
 
-    读锁文件首行 PID 与心跳时间戳（BUG-046 写入格式），持有者存活且心跳
-    新鲜说明上一次操作仍在收尾（失败回滚也会持锁一段时间），提示稍候重试
-    而非让用户误判为死锁。
+    读锁文件首行 PID 与心跳时间戳（BUG-046 写入格式），区分两种本质不同
+    的状态，不再统一输出"等待超时 + 请稍候重试"：
+
+    - 持有者存活且心跳新鲜（≤ :data:`_STALE_LOCK_SECONDS`）：正常进行中的
+      长耗时操作（如 Docker 构建可持续数十分钟），只提示等待完成，**不**
+      出现"超时/请重试"字样，避免被误读为死锁而 kill 持有者；
+    - 持有者存活但心跳停滞：疑似持有者异常退出或卡死，提示排查并**安全
+      终止持有进程**——flock 随进程退出自动释放，锁文件不动、同 inode
+      互斥（BUG-213）不受影响。项目无 unlock 命令，绝不建议"强制解锁"
+      或手工删锁文件（BUG-605：会破坏 inode 级互斥，可能并行持锁）；
+    - 持有者已退出：其文件锁已被系统释放，稍候重试即可接管。
     """
-    holder = ""
-    try:
-        content = lock_path.read_text(encoding="utf-8").strip().splitlines()
-        pid = int(content[0]) if content else 0
-        ts = float(content[1]) if len(content) > 1 else 0.0
-    except (OSError, ValueError):
-        return f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）"
-    age = time.time() - ts if ts > 0 else -1.0
-    if pid and _pid_alive(pid):
-        holder = f"（持有者 PID {pid}，心跳 {age:.0f} 秒前仍在刷新）"
-    hint = "上一次操作尚未收尾，请稍候重试"
-    return f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）{holder}：{hint}"
+    generic = f"实例 {instance_id} 正在被其他操作占用，等待超时（{timeout}s）"
+    pid, ts = _read_lock_payload(lock_path)
+    if ts <= 0.0:
+        # 无心跳行（异常现场）：以锁文件 mtime 兜底，与 _lock_is_stale 同口径
+        try:
+            ts = lock_path.stat().st_mtime
+        except OSError:
+            return generic
+    if not pid:
+        return generic
+    age = max(0.0, time.time() - ts)
+    if not _pid_alive(pid):
+        return (
+            f"{generic}（持有者 PID {pid} 已退出，其文件锁已随进程退出释放）："
+            f"可稍候重试"
+        )
+    if age <= _STALE_LOCK_SECONDS:
+        return (
+            f"实例 {instance_id} 正由 PID {pid} 执行另一操作"
+            f"（心跳 {age:.0f} 秒前仍在刷新，属正常进行中的长耗时操作，"
+            f"已等待 {timeout}s）：请耐心等待该操作完成，无需手动重试"
+        )
+    return (
+        f"实例 {instance_id} 的操作持有者 PID {pid} 心跳已停滞 {age:.0f} 秒"
+        f"（超过 {_STALE_LOCK_SECONDS:.0f} 秒观测阈值），疑似持有者异常退出"
+        f"或卡死：可排查该进程，确认无有效工作后安全终止它"
+        f"（其文件锁会随进程退出自动释放），再重试本操作；"
+        f"请勿手工删除锁文件（会破坏锁互斥）"
+    )
 
 
 @contextlib.contextmanager
@@ -214,12 +261,7 @@ def _lock_is_stale(lock_path: Path) -> bool:
 
     互斥已由 :mod:`file_lock` 保证；本函数保留供测试与诊断，不再用于抢锁。
     """
-    try:
-        content = lock_path.read_text(encoding="utf-8").strip().splitlines()
-        pid = int(content[0]) if content else 0
-        ts = float(content[1]) if len(content) > 1 else 0.0
-    except (OSError, ValueError):
-        return True
+    pid, ts = _read_lock_payload(lock_path)
     if pid and _pid_alive(pid):
         # 进程仍在：仅超时才视为陈旧
         if ts <= 0.0:

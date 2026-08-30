@@ -489,3 +489,140 @@ class TestGateCFailureScenePreservation:
             assert not runtime.is_running(instance_id)
         finally:
             reg.close()
+
+
+@_docker_guard
+@requires_docker
+class TestNonRootContainerIdentity:
+    """issue #20：生成器输出的非 root 容器真实验证。
+
+    覆盖：``docker exec id -u`` 不为 0；非 root 进程可在 bind mount 的
+    ``/app/data`` 写普通文件与 SQLite 库（含 -wal/-shm 创建）。
+    """
+
+    def test_generated_container_runs_non_root_and_writes_data(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from local_webpage_access.compose import generate_compose, generate_env
+        from local_webpage_access.docker_runtime import DockerRuntime
+        from local_webpage_access.dockerfile_templates import generate_dockerfile
+        from local_webpage_access.models import EntryConfig
+        from local_webpage_access.paths import Workspace
+        from local_webpage_access.registry import Registry
+        from tests._helpers import make_container_manifest
+
+        ws = Workspace(tmp_path / "ws")
+        ws.ensure_workspace_dirs()
+        reg = Registry(ws.db_path)
+        reg.open()
+        runtime = DockerRuntime(ws)
+        instance_id = "test-i20-nonroot"
+        host_port = _free_port()
+        try:
+            # 零依赖 stdlib 服务（python:3.13-slim 本地缓存，构建最快）
+            current = ws.app_current(instance_id)
+            current.mkdir(parents=True)
+            manifest = make_container_manifest(
+                instance_id,
+                entry=EntryConfig(install=None, start="python -m http.server 8000"),
+            )
+            manifest.container.runAsNonRoot = True
+            # 让 data/ 存在（属主 = 当前用户），身份解析与其对齐
+            ws.app_data(instance_id).mkdir(parents=True, exist_ok=True)
+
+            generate_dockerfile(manifest, ws)
+            generate_compose(manifest, ws, host_port=host_port)
+            generate_env(manifest, ws, host_port=host_port)
+
+            runtime.build(instance_id)
+            runtime.up(instance_id)
+            assert runtime.is_running(instance_id)
+
+            def _exec(*args: str) -> subprocess.CompletedProcess:
+                return _run(["docker", "exec", f"lwa-{instance_id}", *args], timeout=30)
+
+            # 1. 运行身份非 root
+            uid = _exec("id", "-u")
+            assert uid.returncode == 0, uid.stderr
+            assert uid.stdout.strip() != "0", "容器不得以 root 运行（issue #20）"
+
+            # 2. bind mount 的 /app/data 可写（普通文件）
+            probe = _exec("sh", "-c", "echo ok > /app/data/probe.txt && cat /app/data/probe.txt")
+            assert probe.returncode == 0, probe.stderr
+            assert "ok" in probe.stdout
+
+            # 3. SQLite 可建库建表（隐含 -wal/-shm 创建权限）
+            sqlite_check = _exec(
+                "python",
+                "-c",
+                "import sqlite3; con=sqlite3.connect('/app/data/t.db');"
+                " con.execute('create table t(x)'); con.commit(); con.close()",
+            )
+            assert sqlite_check.returncode == 0, sqlite_check.stderr
+            # 宿主侧可见落盘（bind mount 对齐验证）
+            assert (ws.app_data(instance_id) / "t.db").is_file()
+        finally:
+            with suppress(Exception):
+                runtime.down(instance_id)
+            reg.close()
+
+    def test_runtime_root_container_writes_sqlite_as_non_root(self, tmp_path: Path) -> None:
+        """issue #20：RUNTIME_ROOT 布局（/app/runtime/data）的非 root SQLite 写入。"""
+        from local_webpage_access.compose import generate_compose, generate_env
+        from local_webpage_access.docker_runtime import DockerRuntime
+        from local_webpage_access.dockerfile_templates import generate_dockerfile
+        from local_webpage_access.models import DatabaseConfig, EntryConfig
+        from local_webpage_access.paths import Workspace
+        from local_webpage_access.registry import Registry
+        from tests._helpers import make_container_manifest
+
+        ws = Workspace(tmp_path / "ws")
+        ws.ensure_workspace_dirs()
+        reg = Registry(ws.db_path)
+        reg.open()
+        runtime = DockerRuntime(ws)
+        instance_id = "test-i20-rtroot"
+        host_port = _free_port()
+        try:
+            ws.app_current(instance_id).mkdir(parents=True)
+            manifest = make_container_manifest(
+                instance_id,
+                entry=EntryConfig(install=None, start="python -m http.server 8000"),
+                hasDatabase=True,
+                database=DatabaseConfig(type="sqlite", dataDir="runtime/data"),
+            )
+            manifest.container.runAsNonRoot = True
+            ws.app_data(instance_id).mkdir(parents=True, exist_ok=True)
+
+            generate_dockerfile(manifest, ws)
+            compose_path = generate_compose(manifest, ws, host_port=host_port)
+            generate_env(manifest, ws, host_port=host_port)
+            # RUNTIME_ROOT 布局：data 挂载点为 /app/runtime/data
+            assert "../data:/app/runtime/data" in compose_path.read_text(encoding="utf-8")
+
+            runtime.build(instance_id)
+            runtime.up(instance_id)
+            assert runtime.is_running(instance_id)
+
+            uid = _run(["docker", "exec", f"lwa-{instance_id}", "id", "-u"], timeout=30)
+            assert uid.stdout.strip() != "0", "RUNTIME_ROOT 容器同样不得以 root 运行"
+
+            sqlite_check = _run(
+                [
+                    "docker",
+                    "exec",
+                    f"lwa-{instance_id}",
+                    "python",
+                    "-c",
+                    "import sqlite3; con=sqlite3.connect('/app/runtime/data/t.db');"
+                    " con.execute('create table t(x)'); con.commit(); con.close()",
+                ],
+                timeout=30,
+            )
+            assert sqlite_check.returncode == 0, sqlite_check.stderr
+            assert (ws.app_data(instance_id) / "t.db").is_file()
+        finally:
+            with suppress(Exception):
+                runtime.down(instance_id)
+            reg.close()

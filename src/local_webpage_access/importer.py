@@ -859,6 +859,15 @@ class Importer:
                         instance_id=instance_id,
                     )
 
+                # issue #19：manifest 重建必须在原子换入**前**、staging 仍在原位时
+                # 完成。build_manifest_from_detection → generate_plans 会沿
+                # detection.evidence.root 扫描后端源码发现健康探针（BUG-504），
+                # 换入后该路径已随 os.replace 消失，发现静默返回空、探针降级为
+                # guessed /health（实测 FastAPI 的 /api/health 更新后即丢失）。
+                # 提前还有 fail-fast 收益：计划生成的问题在旧 current/ 被替换
+                # 前暴露，current/ 原封未动、finally 只需清暂存区。
+                prepared_manifest = apply_detection_to_manifest(old_manifest, detection, self.ws)
+
                 # BUG-124：跨形态 upsert 会删除旧 static_sites/containers 子表，
                 # 必须在换表前按旧 manifest 停掉 runtime。即使 desired=stopped 也尝试，
                 # 以清理历史遗留的存活进程；业务停止失败只警告，不阻断从未托管实例更新。
@@ -894,7 +903,9 @@ class Importer:
                 # status/desiredState 由 apply_detection_to_manifest 决定
                 # （pending→识别成功 → stopped；已在跑/已停则保留），
                 # 勿再强制写回 old status（BUG-444）。
-                manifest = apply_detection_to_manifest(old_manifest, detection, self.ws)
+                # issue #19：重建已在换入前基于 staging 完成（见上方 prepared_manifest），
+                # 此处只接管结果；名称刷新等仍读换入后的 current/（新版本内容）。
+                manifest = prepared_manifest
                 # 若旧名仍是 slug 美化名，且新包主页有 <title>，顺带刷新显示名
                 if is_auto_titleized_name(
                     old_manifest.name,
@@ -953,6 +964,12 @@ class Importer:
                     manifest.container.imageId = None
                 manifest.touch()
                 manifest.save(manifest_path)
+
+                # issue #15：manifest 已替换，旧 entry.start 里烤死的
+                # ``export DATABASE_URL=…`` 随之消失；趁旧 manifest 还在内存，
+                # 把该值迁入旧 docker/.env，让 generate_env 的 BUG-491 保留
+                # 逻辑接管（不迁移则可能注入默认空库，升级后表现为数据全丢）。
+                _migrate_start_db_url_to_env(old_manifest, self.ws)
 
                 # 覆盖 original.zip（备份已在上面完成）
                 shutil.copy2(src, orig_zip)
@@ -1896,6 +1913,73 @@ class Importer:
 
 # ---- 辅助 -------------------------------------------------------------------
 
+# issue #15：旧式 start 命令里烤死的 DATABASE_URL（export 形式，值可带引号）。
+_START_EXPORT_DB_URL_RE = re.compile(
+    r"export\s+DATABASE_URL\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s&;\"']+))"
+)
+
+
+def _migrate_start_db_url_to_env(old_manifest: InstanceManifest, ws: Workspace) -> None:
+    """issue #15：把旧式 ``entry.start`` 的 ``export DATABASE_URL=…`` 迁入 docker/.env。
+
+    旧管线把环境变量烤在容器 CMD 的 export 里（早期文档推荐的"改 start 加
+    alembic"写法）。更新管线重建 manifest 后新 start 不再 export；若旧 ``.env``
+    也从未记录该键，随后 :func:`compose.generate_env` 会注入默认空库——升级后
+    表现为数据全丢。在 manifest 替换时刻把值落进旧 .env，BUG-491 的保留逻辑
+    即接管（与 issue #11 业务键迁移同思路）。
+
+    仅在 .env 缺少 DATABASE_URL 时写入（已有值以 .env 为准），幂等；失败仅
+    告警不阻断（generate_env 侧的 data/ 扫描仍兜底）。
+    """
+    if getattr(old_manifest, "runtime", None) is None:
+        return
+    if old_manifest.runtime.value != "docker-compose":
+        return  # docker/.env 只对容器实例存在
+    entry = getattr(old_manifest, "entry", None)
+    start = getattr(entry, "start", None) if entry is not None else None
+    if not start or "DATABASE_URL" not in start:
+        return
+    match = _START_EXPORT_DB_URL_RE.search(start)
+    if match is None:
+        return
+    value = next(g for g in match.groups() if g)
+    env_path = ws.app_env_path(old_manifest.id)
+    try:
+        existing_text = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+    except OSError as exc:
+        # 读不出时无从判断是否已有键，跳过迁移；generate_env 侧 BUG-585 会对
+        # 同一读取失败 fail-closed，data/ 扫描兜底也仍在。
+        log.warning(
+            "实例 %s：读取旧 docker/.env 失败，跳过 entry.start 的 DATABASE_URL 迁移：%s",
+            old_manifest.id,
+            exc,
+        )
+        return
+    if re.search(r"(?m)^\s*(?:export\s+)?DATABASE_URL\s*=", existing_text):
+        return  # .env 已有值（更近的事实来源），不覆盖
+    from local_webpage_access.compose import _atomic_write_env
+
+    sep = "" if not existing_text or existing_text.endswith("\n") else "\n"
+    new_text = (
+        f"{existing_text}{sep}"
+        "# issue #15：自旧 entry.start 的 export 迁移（可手改）\n"
+        f"DATABASE_URL={value}\n"
+    )
+    try:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_env(env_path, new_text)
+    except OSError as exc:
+        log.warning(
+            "实例 %s：迁入旧 start 的 DATABASE_URL 失败（忽略，data/ 扫描兜底）：%s",
+            old_manifest.id,
+            exc,
+        )
+        return
+    log.info(
+        "实例 %s：已把旧 entry.start 的 DATABASE_URL 迁入 docker/.env（issue #15）",
+        old_manifest.id,
+    )
+
 
 def _dir_size(path: Path) -> int:
     total = 0
@@ -2016,6 +2100,10 @@ def build_manifest_from_detection(
             "composePath": str(workspace.app_compose_path(instance_id)),
             "dockerfilePath": str(workspace.app_dockerfile_path(instance_id)),
             "resourceLimits": profile_to_limits(resource_profile),
+            # issue #20：新导入容器实例显式非 root（宿主 data/ UID/GID 对齐）。
+            # 旧实例 manifest 缺该字段为 None（legacy root + 告警），经
+            # lwa migrate-user 显式迁移，不在重建时静默切换运行身份。
+            "runAsNonRoot": True,
         }
         if path_alias is not None:
             # IMP-014：导入期预写容器别名；首次 start 时生成 Caddy 片段。
@@ -2070,6 +2158,9 @@ def apply_detection_to_manifest(
     BUG-584：亦保留 ``verificationOverrides``（lwa probe / 管理页配置的
     稳定探针覆盖层）：重建默认 None，不透传会在 ``lwa scan`` /
     ``import --update`` 后把用户配置静默清空。
+    issue #20：亦保留 ``container.runAsNonRoot``——重建默认 True，不透传
+    会把 legacy root 旧实例在普通 rebuild 中静默切换运行身份（未确认的
+    破坏性变更）；三态语义见 ContainerConfig。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -2136,6 +2227,12 @@ def apply_detection_to_manifest(
     ):
         fresh.container.routeMode = "name"
         fresh.container.routeHost = manifest.container.routeHost
+    # issue #20：运行身份三态（True/None/False）是导入时刻或用户显式选择，
+    # scan / update 重建不得静默切换（fresh 默认 True；None 旧实例保持
+    # legacy root，待 lwa migrate-user 显式迁移）。跨形态切换时旧 manifest
+    # 无 container 子表，fresh 维持新导入默认 True。
+    if manifest.container is not None and fresh.container is not None:
+        fresh.container.runAsNonRoot = manifest.container.runAsNonRoot
     return fresh
 
 

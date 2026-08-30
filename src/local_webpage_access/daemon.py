@@ -74,6 +74,10 @@ STATE_FILENAME = "daemon.json"
 LOCK_FILENAME = "daemon.lock"
 START_LOCK_FILENAME = "daemon-start.lock"
 LOG_FILENAME = "daemon.log"
+# issue #16 / BUG-603：daemon 进程标记（_main 启动时置 1）。hosting._stage
+# 检测到该标记时把 lifecycle_stage 镜像进 lwa.log，使 daemon 自动恢复路径
+# 的阶段对只看主日志的运维可见；CLI/manager 进程不受影响。
+_DAEMON_PROCESS_MARKER = "LWA_DAEMON_PROCESS"
 # BUG-298：须覆盖子进程抢锁后的 Docker capability 探测（可达 10s+），
 # 避免父进程把仍在探测的健康子进程误杀。
 DAEMON_START_TIMEOUT = 30.0
@@ -751,6 +755,21 @@ def process_zip(
 _RECONCILE_SKIP_STATUSES = {"pending", "queued"}
 
 
+def _mirror_recovery_to_lwa_log(
+    workspace: Workspace, message: str, *, level: str = "INFO"
+) -> None:
+    """issue #16 / BUG-603：把自愈起止镜像到 ``logs/lwa.log``（O_APPEND 裸写）。
+
+    daemon 自身日志按 IMP-034 落 ``daemon.log``；但 CLI 的构建失败留在
+    ``lwa.log``，运维继续盯 ``lwa.log`` 时看不到 daemon 的恢复进度（现场：
+    23:22 后零日志、实际 23:35 已恢复）。镜像只写起止两三条面包屑，完整
+    阶段仍在 ``daemon.log`` / registry events。失败静默，不影响自愈主流程。
+    """
+    from local_webpage_access.logging import append_global_log
+
+    append_global_log(workspace.logs, message, level=level)
+
+
 def reconcile(
     workspace: Workspace,
     config: Config,
@@ -927,10 +946,30 @@ def reconcile(
                 log.info("daemon reconcile: 实例 %s 期望态已变为 %s，跳过拉起",
                          iid, fresh.get("desired_state"))
                 continue
+            # issue #16 / BUG-603：CLI 触发的构建失败只留在 lwa.log，daemon 的
+            # 自动重试恢复又只写 daemon.log（IMP-034 按进程分文件），运维盯
+            # lwa.log 会误判"构建卡死"。恢复的起止在此镜像一条到 lwa.log，
+            # 完整 lifecycle_stage 由 hosting._stage 镜像（见 hosting.py）。
+            _mirror_recovery_to_lwa_log(
+                workspace,
+                f"daemon 自动恢复开始：实例 {iid} 状态偏离（{actual_status}，"
+                f"desired=running），将持有实例锁执行恢复（完整阶段日志见 logs/daemon.log）",
+            )
             do_restart(workspace, config, registry, iid)
             _reconcile_failures.pop(failure_key, None)
             restarted.append(iid)
             log.info("daemon reconcile: 恢复实例 %s（%s → running）", iid, actual_status or "?")
+            if actual_status == "failed":
+                _mirror_recovery_to_lwa_log(
+                    workspace,
+                    f"daemon 自愈成功：实例 {iid}（failed → running）："
+                    f"此前的失败操作（如构建失败）已由 daemon 自动重试并恢复",
+                )
+            else:
+                _mirror_recovery_to_lwa_log(
+                    workspace,
+                    f"daemon 自愈成功：实例 {iid}（{actual_status} → running）",
+                )
             with contextlib.suppress(Exception):
                 registry.add_event(
                     iid,
@@ -946,6 +985,12 @@ def reconcile(
             )
             _reconcile_failures[failure_key] = (failures, monotonic() + delay)
             log.warning("daemon reconcile: 恢复 %s 失败：%s", iid, exc)
+            _mirror_recovery_to_lwa_log(
+                workspace,
+                f"daemon 自愈失败：实例 {iid}：{exc}"
+                f"（daemon 将按退避周期自动重试，无需手动干预）",
+                level="WARNING",
+            )
     return restarted
 
 
@@ -1409,6 +1454,9 @@ def _main() -> int:
 
     workspace.ensure_workspace_dirs()
     attach_daemon_log_handler(workspace, level=args.log_level.upper())
+    # issue #16 / BUG-603：标记本进程为 daemon——hosting._stage 据此把
+    # lifecycle_stage 镜像到 lwa.log，运维盯主日志也能看到恢复路径的阶段。
+    os.environ.setdefault(_DAEMON_PROCESS_MARKER, "1")
     from local_webpage_access.config import load_config
 
     config = load_config(workspace)

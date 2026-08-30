@@ -26,6 +26,7 @@ import os
 import re
 import secrets
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,6 +43,11 @@ _DATA_VOLUME_RUNTIME = "../data:/app/runtime/data"
 # IMP-058 Gate-A CHK-V03：默认 SQLite 文件名（scanner 未扫描到源文件时的兜底）。
 # 若 DatabaseConfig.dbFilename 存在，则用原文件名，避免把应用指向全新空库（BUG-474）。
 _SQLITE_DEFAULT_DB_FILENAME = "app.sqlite"
+# issue #15：宿主 data/ 目录中视为 SQLite 库文件的扩展名。
+_SQLITE_DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+# issue #15 / BUG-599：LWA 生成的 DATABASE_URL 固定为该容器内目录的平铺形式
+# ``sqlite:////app/data/<文件名>``（BUG-474 绝对路径口径，RUNTIME_ROOT 布局同）。
+_SQLITE_URL_DIR = "/app/data"
 # IMP-015：业务密钥可选注入文件（用户按 docker/.env.example 填写后放入 docker/.env.local）。
 # 用 Compose env_file 的对象形式 required:false，缺失时不报错（WBS-20260708 阶段3.2 决策）。
 _ENV_LOCAL_BLOCK = "      - path: .env.local\n        required: false\n"
@@ -64,7 +70,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: lwa-{instance_id}
-    ports:
+{user_block}    ports:
       - "${{HOST_PORT}}:${{INTERNAL_PORT}}"
     env_file:
       - .env
@@ -165,6 +171,14 @@ def generate_compose(
         volumes.append(entry)
     volumes_block = "    volumes:\n" + "".join(f"      - {v}\n" for v in volumes)
 
+    # issue #20：runAsNonRoot=True 时加 user: 防御层。Compose 的 user 覆盖
+    # 镜像默认运行用户，即使后续 Dockerfile 模板变动意外丢 USER 也不会回到
+    # root。UID:GID 与 Dockerfile 同源（container_identity 统一解析），防漂移。
+    from local_webpage_access.container_identity import resolve_container_identity
+
+    identity = resolve_container_identity(manifest, workspace)
+    user_block = f'    user: "{identity.docker_user()}"\n' if identity is not None else ""
+
     content = _COMPOSE_TEMPLATE.format(
         project_name=project_name,
         instance_id=manifest.id,
@@ -176,6 +190,7 @@ def generate_compose(
         cpus=limits.cpus,
         env_local_block=_ENV_LOCAL_BLOCK,
         extra_environment=extra_environment,
+        user_block=user_block,
     )
     # WBS-25.03/04/05：自检生成的 compose 是否含 critical 安全问题
     # （模板本身安全；此检查防止模板被改动或 skill 覆盖后引入风险）。
@@ -186,13 +201,132 @@ def generate_compose(
         codes = ", ".join(f.code for f in findings if f.level == "critical")
         raise RuntimeError(f"生成的 compose.yaml 含 critical 安全问题（{codes}），已拒绝写出")
     for f in findings:
-        log.warning("compose 安全审计 [%s] %s", f.code, f.message)
+        # issue #20：按 finding 级别分流（与 generate_dockerfile 对称）。
+        emit = log.warning if f.level == "warn" else log.info
+        emit("compose 安全审计 [%s] %s", f.code, f.message)
 
     out_path = workspace.app_compose_path(manifest.id)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(content, encoding="utf-8")
     log.info("已生成 compose.yaml：%s", out_path)
     return out_path
+
+
+def _scan_existing_db_files(host_data_dir: Path) -> list[Path]:
+    """issue #15：列出 ``data/`` 下非空 SQLite 库文件。
+
+    排除 ``-wal`` / ``-shm`` 边车文件与空文件——空文件多为应用刚启动时创建的
+    占位库，不能作为"已有数据"的证据（#15 现场：崩掉的容器留下 0 字节
+    ``app.sqlite``，真实数据在旁边的 ``bookshelf.db``）。
+    """
+    if not host_data_dir.is_dir():
+        return []
+    candidates: list[Path] = []
+    for entry in sorted(host_data_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name.lower()
+        if name.endswith(("-wal", "-shm")):
+            continue
+        if not name.endswith(_SQLITE_DB_SUFFIXES):
+            continue
+        try:
+            if entry.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        candidates.append(entry)
+    return candidates
+
+
+def _resolve_db_filename_from_data_dir(
+    *,
+    host_data_dir: Path,
+    db_filename: str,
+    instance_id: str,
+) -> str:
+    """issue #15：注入默认 DATABASE_URL 前对账宿主 ``data/`` 目录。
+
+    旧式部署把 DATABASE_URL 烤在 ``entry.start`` 的 export 里、旧 ``.env`` 从未
+    记录（preserved 为空）时，直接注入默认 ``app.sqlite`` 会让已有数据的实例
+    静默连上空库——升级后表现为"数据全丢"。决策表：
+
+    - 目标文件已存在且非空 → 维持（数据在位，既有行为）；
+    - 目标缺失/为空且恰有一个非空候选 → 指向该候选并 WARNING（切换可见；
+      恰好自动救回已踩坑现场：空 ``app.sqlite`` + 有数据的旧库）；
+    - 多个非空候选 → fail-closed（ConfigError 列出文件，绝不替用户猜）；
+    - 零候选 → 维持默认并 WARNING（将创建全新数据库，切换永远可见）。
+    """
+    target = host_data_dir / db_filename
+    try:
+        if target.is_file() and target.stat().st_size > 0:
+            return db_filename
+    except OSError:
+        pass  # stat 失败按目标缺失处理，走下方候选盘点
+    candidates = [p for p in _scan_existing_db_files(host_data_dir) if p.name != db_filename]
+    if len(candidates) == 1:
+        found = candidates[0].name
+        log.warning(
+            "实例 %s：data/ 中目标库 %s 不存在或为空，检测到唯一非空库 %s，"
+            "DATABASE_URL 将指向它（issue #15：防静默切空库）",
+            instance_id,
+            db_filename,
+            found,
+        )
+        return found
+    if len(candidates) > 1:
+        names = "、".join(p.name for p in candidates)
+        raise ConfigError(
+            f"实例 {instance_id}：data/ 中存在多个非空 SQLite 文件（{names}），"
+            f"无法确定 DATABASE_URL 应指向哪个。请在 docker/.env 手动写入 "
+            f"DATABASE_URL=sqlite:////app/data/<文件名> 后重试（issue #15）",
+            instance_id=instance_id,
+        )
+    log.warning(
+        "实例 %s：data/ 中没有任何非空 SQLite 文件，DATABASE_URL 将指向全新空库 %s"
+        "（issue #15：新建数据库提示）",
+        instance_id,
+        db_filename,
+    )
+    return db_filename
+
+
+def _strip_env_quotes(value: str) -> str:
+    """剥离 dotenv 成对引号与前后空白（compose / python-dotenv 同口径）。"""
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1].strip()
+    return v
+
+
+def parse_sqlite_url(value: str) -> tuple[str, str, str] | None:
+    """按 URL 语义解析 DATABASE_URL 的 SQLite 文件部分（issue #15 / BUG-600）。
+
+    先按 dotenv 规则去引号，再以 :mod:`urllib.parse` 拆 scheme 与 query；
+    SQLAlchemy 斜杠语义：``sqlite:///rel.db`` 相对、``sqlite:////abs/x.db``
+    绝对。返回 ``(容器内目录, 文件名, query)``；相对路径目录为 ``""``。
+    返回 ``None`` 表示不参与文件对账，调用方应跳过不评判：
+
+    - 非 sqlite scheme（postgresql:// 等手工/异构配置）；
+    - 带 netloc（``sqlite://host/db`` 非 SQLite 文件语义）；
+    - ``:memory:`` 等非文件路径、空路径、无法解析的值。
+    """
+    try:
+        parsed = urllib.parse.urlparse(_strip_env_quotes(value))
+    except ValueError:
+        return None
+    if parsed.scheme != "sqlite" or parsed.netloc:
+        return None
+    rest = parsed.path  # 'sqlite://<path>'：'/rel.db'（相对）或 '//abs/x.db'（绝对）
+    if not rest.startswith("/"):
+        return None
+    fs_path = rest[1:]  # 去掉 sqlite:// 的分隔斜杠：'rel.db' 或 '/abs/x.db'
+    if not fs_path or fs_path.startswith(":"):
+        return None
+    dir_part, _, name = fs_path.rpartition("/")
+    if not name:
+        return None
+    return (dir_part, name, parsed.query)
 
 
 def generate_env(
@@ -242,14 +376,46 @@ def generate_env(
         preserved_db_url = existing.database_url
 
         if consumes_db_url:
+            host_data_dir = workspace.app_data(manifest.id)
+            host_data_dir.mkdir(parents=True, exist_ok=True)
             if preserved_db_url:
-                # 保留已有 DATABASE_URL（用户或上一次部署已确认可用）
-                log.info(
-                    "保留已有 DATABASE_URL（实例 %s）：%s",
-                    manifest.id,
-                    preserved_db_url,
-                )
-                lines.append(f"DATABASE_URL={preserved_db_url}")
+                # BUG-491：保留已有 DATABASE_URL（用户或上一次部署已确认可用）。
+                # BUG-599：仅"规范管理形式"（sqlite + 平铺 /app/data/<文件名>）保留
+                # 前仍要核验目标——目标缺失/为空时进入与首次注入相同的候选对账，
+                # 否则存量错误 .env 会绕过对账，与 issue #15"自动救回已踩坑现场"
+                # 的目标不符。非规范形式（其他目录 / 相对路径 / 其他 scheme /
+                # :memory:）视为用户手工配置，原样保留（log.info 留痕的强制保留）。
+                parsed = parse_sqlite_url(preserved_db_url)
+                if parsed is not None and parsed[0] == _SQLITE_URL_DIR:
+                    old_name = parsed[1]
+                    reconciled = _resolve_db_filename_from_data_dir(
+                        host_data_dir=host_data_dir,
+                        db_filename=old_name,
+                        instance_id=manifest.id,
+                    )
+                    if reconciled != old_name:
+                        query = parsed[2]
+                        suffix = f"?{query}" if query else ""
+                        lines.append(
+                            f"DATABASE_URL=sqlite:////app/data/{reconciled}{suffix}"
+                        )
+                        log.warning(
+                            "实例 %s：.env 原 DATABASE_URL 指向缺失/空库 %s，已切换到"
+                            "唯一非空候选 %s（BUG-599：存量错误 .env 不得绕过对账）",
+                            manifest.id,
+                            old_name,
+                            reconciled,
+                        )
+                    else:
+                        lines.append(f"DATABASE_URL={preserved_db_url}")
+                else:
+                    log.info(
+                        "保留已有 DATABASE_URL（实例 %s，非规范管理形式，按手工配置"
+                        "原样保留）：%s",
+                        manifest.id,
+                        preserved_db_url,
+                    )
+                    lines.append(f"DATABASE_URL={preserved_db_url}")
             else:
                 # BUG-474: 所有 SQLite 项目都注入绝对路径 DATABASE_URL，避免相对路径在不同 cwd 下解析到不同库文件。
                 # IMP-058 Gate-A CHK-V03：保留 scanner 扫描到的源 SQLite 文件名，避免把应用
@@ -263,13 +429,11 @@ def generate_env(
                 # 直接拼接到 /app/data/ 会导致路径重复（/app/data/data/app.sqlite）。
                 # 只取 basename 作为容器内文件名。
                 db_filename = Path(raw_db_filename).name
-                lines.append(f"DATABASE_URL=sqlite:////app/data/{db_filename}")
 
                 # CHK-192/P1：把源 SQLite 文件复制到宿主 data 目录（apps/<id>/data/），
                 # 该目录通过 compose 挂载为 /app/data。若不复制，容器启动时指向空库，
                 # 既有数据丢失。仅在源文件存在且目标不存在时复制（避免覆盖用户修改）。
-                host_data_dir = workspace.app_data(manifest.id)
-                host_data_dir.mkdir(parents=True, exist_ok=True)
+                # （host_data_dir 已在 consumes_db_url 分支顶部统一创建。）
                 # CHK-193/P1：构造源 SQLite 文件路径时需包含 sourceSubdir。
                 # 当 sourceSubdir="backend" 时，dbFilename 相对于 backend/，
                 # 源文件在 current/backend/<dbFilename>，而非 current/<dbFilename>。
@@ -294,6 +458,15 @@ def generate_env(
                         )
                     except OSError as exc:
                         log.warning("复制源 SQLite 文件失败（忽略）：%s", exc)
+
+                # issue #15：注入前对账宿主 data/ 已有库文件——绝不让已有数据的
+                # 实例静默切到新空库（可能改写 db_filename 或 fail-closed）。
+                db_filename = _resolve_db_filename_from_data_dir(
+                    host_data_dir=host_data_dir,
+                    db_filename=db_filename,
+                    instance_id=manifest.id,
+                )
+                lines.append(f"DATABASE_URL=sqlite:////app/data/{db_filename}")
         else:
             # A.R01：无消费证据，不自动注入 DATABASE_URL
             log.warning(
@@ -539,4 +712,5 @@ __all__ = [
     "container_data_paths",
     "service_name",
     "uses_runtime_root",
+    "parse_sqlite_url",
 ]

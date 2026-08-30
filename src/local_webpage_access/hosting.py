@@ -445,6 +445,30 @@ def _managed_sqlite_data_mount_drifted(
     return False
 
 
+def _mirror_stage_to_global_log(
+    workspace: Workspace, instance_id: str, stage: str
+) -> None:
+    """issue #16 / BUG-603：daemon 进程内把 lifecycle_stage 镜像到 ``lwa.log``。
+
+    CLI 触发的重建本就把阶段写进 lwa.log（进程日志落点）；daemon 触发
+    （reconcile 自动恢复 / inbox 处理）时同样会经历完整的 build/up 阶段，
+    但其进程日志只落 daemon.log（IMP-034），运维盯 lwa.log 会误判构建
+    卡死。检测到 daemon 进程标记（daemon._main 启动时设置）时用 O_APPEND
+    裸写镜像一行，格式与 CLI 侧完全一致；CLI/manager 进程零影响。
+    """
+    import os
+
+    if os.environ.get("LWA_DAEMON_PROCESS") != "1":
+        return
+    from local_webpage_access.logging import append_global_log
+
+    append_global_log(
+        workspace.logs,
+        f"lifecycle_stage instance={instance_id} stage={stage}",
+        logger_name="local_webpage_access.hosting",
+    )
+
+
 def host_container(
     workspace: Workspace,
     config: Config,
@@ -487,11 +511,19 @@ def host_container(
     def _stage(name: str) -> None:
         msg = f"stage={name}"
         log.info("lifecycle_stage instance=%s %s", instance_id, msg)
+        _mirror_stage_to_global_log(workspace, instance_id, name)
         with contextlib.suppress(Exception):
             registry.add_event(instance_id, "lifecycle_stage", msg)
 
     try:
         _stage("host_start")
+        # issue #20：非 root 身份预检必须先于任何状态改变（数据救出、down、
+        # 生成器覆写）——runAsNonRoot=True 而 data/ 属主为 root 时直接拒绝，
+        # 提示先修正属主；否则停机后才发现，留下无法恢复的已停现场。
+        from local_webpage_access.container_identity import ensure_non_root_identity_ready
+
+        ensure_non_root_identity_ready(manifest, workspace)
+
         # BUG-205：重建 down 前先把容器内数据救出到宿主 data/，避免旧库随容器删除丢失
         _rescue_container_data_before_rebuild(workspace, manifest, instance_id, runtime)
 

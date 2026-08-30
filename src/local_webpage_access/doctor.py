@@ -1448,6 +1448,108 @@ def check_source_freshness(ws: Workspace) -> CheckResult:
     )
 
 
+def check_database_url_alignment(ws: Workspace) -> CheckResult:
+    """issue #15：SQLite 实例 DATABASE_URL 指向错位检查（WARN 级，纯离线）。
+
+    读各容器实例 ``docker/.env`` 的 ``DATABASE_URL``，指向的库文件在宿主
+    ``data/`` 中缺失或为空、但同目录存在其他非空库文件时 WARN——典型的
+    "升级/重建后静默切到新空库"现场（数据文件还在，只是没被指向）。
+    兜住存量已踩坑实例；无 DATABASE_URL（A.R01 未注入）不参与。
+    """
+    from local_webpage_access.compose import _is_sqlite, parse_sqlite_url
+    from local_webpage_access.models import InstanceManifest
+
+    apps_root = ws.apps
+    if not apps_root.is_dir():
+        return CheckResult("database_url_alignment", STATUS_SKIP, "无实例目录")
+    misaligned: list[str] = []
+    for manifest_path in sorted(apps_root.glob("*/local-web.json")):
+        try:
+            manifest = InstanceManifest.load(manifest_path)
+        except Exception:  # noqa: BLE001 — 损坏 manifest 由其它检查报告
+            continue
+        if manifest.runtime.value != "docker-compose" or not _is_sqlite(manifest):
+            continue
+        env_path = ws.app_env_path(manifest.id)
+        db_url: str | None = None
+        try:
+            if env_path.is_file():
+                for raw in env_path.read_text(encoding="utf-8").splitlines():
+                    line = raw.strip()
+                    if line.startswith("export "):
+                        line = line[len("export ") :].strip()
+                    key, sep, value = line.partition("=")
+                    if sep and key.strip() == "DATABASE_URL":
+                        db_url = value.strip()
+                        break
+        except OSError:
+            continue  # 读不出 .env 的情况由 generate_env 侧 fail-closed 管
+        if not db_url:
+            continue  # A.R01：未注入 DATABASE_URL 的实例不参与
+        # BUG-600：改用与 compose 相同的统一解析——dotenv 去引号、urlparse 拆
+        # query、仅 sqlite scheme，杜绝把合法在位库（带引号/带查询参数的 URL）
+        # 误报为错位。仅对平铺 /app/data（LWA 管理挂载）与相对路径做 basename
+        # 映射；其他容器目录（用户手工配置）与其他 scheme 不评判。宿主侧同为
+        # apps/<id>/data/（RUNTIME_ROOT 布局的容器内路径不同，宿主目录一致）。
+        parsed = parse_sqlite_url(db_url)
+        if parsed is None or parsed[0] not in ("", "/app/data"):
+            continue
+        db_name = parsed[1]
+        if not db_name:
+            continue
+        data_dir = ws.app_data(manifest.id)
+        target = data_dir / db_name
+        try:
+            target_ok = target.is_file() and target.stat().st_size > 0
+        except OSError:
+            continue
+        if target_ok:
+            continue
+        others = [
+            p.name
+            for p in _nonempty_sqlite_files_in(data_dir)
+            if p.name != db_name
+        ]
+        if others:
+            misaligned.append(f"{manifest.id}（指向 {db_name}，另有 {', '.join(others[:4])}）")
+    if misaligned:
+        return CheckResult(
+            "database_url_alignment",
+            STATUS_WARN,
+            f"{len(misaligned)} 个 SQLite 实例的 DATABASE_URL 指向缺失/空库，但 data/ 存在其他非空库",
+            detail="疑似错位实例：" + ", ".join(misaligned[:8]),
+            suggestion="数据文件仍在 data/，只是未被指向；在 docker/.env 手动改写 "
+            "DATABASE_URL=sqlite:////app/data/<文件名> 后 `lwa rebuild <id>`（issue #15）",
+        )
+    return CheckResult(
+        "database_url_alignment",
+        STATUS_OK,
+        "SQLite 实例 DATABASE_URL 指向的库文件均在位（无注入实例不参与）",
+    )
+
+
+def _nonempty_sqlite_files_in(data_dir: Path) -> list[Path]:
+    """issue #15：列目录下非空 SQLite 文件（排除 -wal/-shm 边车），与 compose 同口径。"""
+    if not data_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for entry in sorted(data_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name.lower()
+        if name.endswith(("-wal", "-shm")):
+            continue
+        if not name.endswith((".db", ".sqlite", ".sqlite3")):
+            continue
+        try:
+            if entry.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        out.append(entry)
+    return out
+
+
 def check_backend_handoff(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
     """建议 F / G3：检测 builtin 与 caddy 在同一 hostPort 上双开（切换残留）。
 
@@ -2208,6 +2310,8 @@ def run_doctor(
             check_workspace_path_consistency(ws, config, registry=caddy_probe_registry),
             # issue #8：源码新鲜度（WARN 级，纯离线；git 源不触网）
             check_source_freshness(ws),
+            # issue #15：SQLite DATABASE_URL 指向错位（WARN 级，纯离线）
+            check_database_url_alignment(ws),
             check_backend_handoff(ws, config, caddy_probe_registry)
             if caddy_probe_registry is not None
             else CheckResult("backend_handoff", STATUS_SKIP, "registry 不可用，跳过后端交接检测"),
@@ -2328,6 +2432,7 @@ __all__ = [
     "check_workspace_path_consistency",
     "check_lan_url_stale",
     "check_source_freshness",
+    "check_database_url_alignment",
     "check_backend_handoff",
     "check_base_image_readiness",
     "check_port_contention",

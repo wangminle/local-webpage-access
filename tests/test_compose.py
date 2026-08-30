@@ -242,6 +242,67 @@ def test_env_sqlite_preserves_source_db_filename(workspace: Workspace) -> None:
     assert "app.sqlite" not in text
 
 
+def test_env_db_url_redirects_to_sole_nonempty_data_file(workspace: Workspace) -> None:
+    """issue #15：旧式部署升级现场——空 app.sqlite + 有数据 bookshelf.db。
+
+    旧 .env 从未记录 DATABASE_URL（旧式烤在 entry.start 里），重生成时不能
+    静默指向空 app.sqlite；唯一非空候选 bookshelf.db 应被采纳并告警。
+    """
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    data_dir = workspace.app_data("api")
+    (data_dir / "app.sqlite").write_bytes(b"")  # 崩掉容器留下的 0 字节空库
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 1024)  # 真实数据
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/bookshelf.db" in text
+    # 空库文件保留在原地（不删用户文件），只是不再指向它
+    assert (data_dir / "app.sqlite").exists()
+
+
+def test_env_db_url_fail_closed_on_multiple_candidates(workspace: Workspace) -> None:
+    """issue #15：data/ 有多个非空库文件时 fail-closed，绝不替用户猜。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    data_dir = workspace.app_data("api")
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 100)
+    (data_dir / "library.db").write_bytes(b"y" * 100)
+    with pytest.raises(ConfigError, match="多个非空 SQLite"):
+        generate_env(m, workspace, host_port=18000)
+
+
+def test_env_db_url_default_when_no_data_files(workspace: Workspace) -> None:
+    """issue #15：零候选时维持默认名（全新数据库，切换经 WARNING 可见）。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")  # data/ 存在但无任何库文件
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in text
+
+
+def test_env_db_url_keeps_nonempty_target(workspace: Workspace) -> None:
+    """issue #15：目标库已存在且非空 → 维持指向，不受其他候选干扰。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    m.database.dbFilename = "bookshelf.db"
+    workspace.ensure_app_dirs("api")
+    data_dir = workspace.app_data("api")
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 100)
+    (data_dir / "legacy.db").write_bytes(b"y" * 100)
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/bookshelf.db" in text
+
+
+def test_env_db_url_ignores_wal_shm_and_empty_files(workspace: Workspace) -> None:
+    """issue #15：-wal/-shm 边车与空文件不算"已有数据"候选。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    data_dir = workspace.app_data("api")
+    (data_dir / "bookshelf.db-wal").write_bytes(b"x" * 100)
+    (data_dir / "bookshelf.db-shm").write_bytes(b"y" * 100)
+    (data_dir / "empty.db").write_bytes(b"")
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    # 边车/空文件都不算数 → 零候选 → 维持默认
+    assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in text
+
+
 def test_env_sqlite_no_consumption_skips_injection(workspace: Workspace) -> None:
     """A.R01 反例：应用不消费 DATABASE_URL 时不注入，添加注释提示。"""
     m = _mk_manifest(has_database=True, database_type="sqlite", consumes_db_url=False)
@@ -285,6 +346,104 @@ def test_env_sqlite_preserves_existing_database_url_on_regen(workspace: Workspac
     second_text = second_path.read_text(encoding="utf-8")
     assert f"DATABASE_URL={corrected_url}" in second_text
     assert "_empty_check.db" not in second_text
+
+
+# ---- BUG-599：存量 .env 的规范 URL 不得绕过候选对账 --------------------------
+
+
+def _write_env_with_db_url(workspace: Workspace, url: str) -> None:
+    env_path = workspace.app_env_path("api")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(f"HOST_PORT=18000\nDATABASE_URL={url}\n", encoding="utf-8")
+
+
+def test_env_preserved_db_url_target_empty_switches_to_sole_candidate(
+    workspace: Workspace,
+) -> None:
+    """BUG-599 复现：.env 指向 0 字节 app.sqlite、data/ 另有非空 bookshelf.db。
+
+    旧实现无条件保留 preserved URL，重生成后仍指向空库、绕过对账；修复后进入
+    与首次注入相同的候选决策：唯一非空候选被采纳并 WARNING。
+    """
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    data_dir = workspace.app_data("api")
+    (data_dir / "app.sqlite").write_bytes(b"")
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 512)
+    _write_env_with_db_url(workspace, "sqlite:////app/data/app.sqlite")
+
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/bookshelf.db" in text
+    assert (data_dir / "app.sqlite").exists()  # 空库保留原地，仅不再指向
+
+
+def test_env_preserved_db_url_missing_target_zero_candidates_keeps_url(
+    workspace: Workspace,
+) -> None:
+    """BUG-599：目标缺失且无候选 → 维持原 URL（切换经 WARNING 可见，不静默改）。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")  # data/ 空
+    _write_env_with_db_url(workspace, "sqlite:////app/data/app.sqlite")
+
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/app.sqlite" in text
+
+
+def test_env_preserved_db_url_multiple_candidates_fail_closed(
+    workspace: Workspace,
+) -> None:
+    """BUG-599：存量 .env 目标为空 + 多个非空候选 → 与注入路径同样 fail-closed。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    data_dir = workspace.app_data("api")
+    (data_dir / "app.sqlite").write_bytes(b"")
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 100)
+    (data_dir / "library.db").write_bytes(b"y" * 100)
+    _write_env_with_db_url(workspace, "sqlite:////app/data/app.sqlite")
+
+    with pytest.raises(ConfigError, match="多个非空 SQLite"):
+        generate_env(m, workspace, host_port=18000)
+
+
+def test_env_preserved_db_url_nonempty_target_kept_verbatim(
+    workspace: Workspace,
+) -> None:
+    """BUG-599：目标在位非空 → 原样保留（含用户手写引号，零改写）。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    (workspace.app_data("api") / "app.sqlite").write_bytes(b"x" * 100)
+    quoted = '"sqlite:////app/data/app.sqlite"'
+    _write_env_with_db_url(workspace, quoted)
+
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert f"DATABASE_URL={quoted}" in text
+
+
+def test_env_preserved_db_url_manual_noncanonical_preserved(
+    workspace: Workspace,
+) -> None:
+    """BUG-599：非规范 URL（其他容器目录）视为手工配置，原样保留、不做对账。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    (workspace.app_data("api") / "bookshelf.db").write_bytes(b"x" * 100)
+    manual = "sqlite:////var/lib/myapp/custom.db"
+    _write_env_with_db_url(workspace, manual)
+
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert f"DATABASE_URL={manual}" in text
+
+
+def test_env_preserved_db_url_query_preserved_on_switch(workspace: Workspace) -> None:
+    """BUG-599：切换候选时保留原 URL 的 query 参数（连接选项不丢）。"""
+    m = _mk_manifest(has_database=True, database_type="sqlite")
+    workspace.ensure_app_dirs("api")
+    data_dir = workspace.app_data("api")
+    (data_dir / "app.sqlite").write_bytes(b"")
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 512)
+    _write_env_with_db_url(workspace, "sqlite:////app/data/app.sqlite?mode=ro")
+
+    text = generate_env(m, workspace, host_port=18000).read_text(encoding="utf-8")
+    assert "DATABASE_URL=sqlite:////app/data/bookshelf.db?mode=ro" in text
 
 
 def test_compose_runtime_root_volume_and_env(workspace: Workspace) -> None:

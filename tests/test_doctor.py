@@ -1799,3 +1799,124 @@ def test_base_image_readiness_scratch_only_skip_message(env) -> None:
     assert r.status == STATUS_SKIP
     assert "纯静态站" not in (r.message or "")
     assert "scratch" in (r.message or "")
+
+
+# ---- doctor：check_database_url_alignment（issue #15）-----------------------
+
+
+def test_db_url_alignment_warns_on_misaligned_target(env) -> None:
+    """issue #15：DATABASE_URL 指向空/缺失库而 data/ 另有非空库 → WARN。"""
+    from local_webpage_access.doctor import check_database_url_alignment
+
+    ws, _config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    data_dir = ws.app_data("api")
+    (data_dir / "app.sqlite").write_bytes(b"")  # 被指向的空库（升级踩坑现场）
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 512)  # 真实数据
+    env_path = ws.app_env_path("api")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("DATABASE_URL=sqlite:////app/data/app.sqlite\n", encoding="utf-8")
+
+    r = check_database_url_alignment(ws)
+    assert r.name == "database_url_alignment"
+    assert r.status == STATUS_WARN
+    assert "api" in (r.detail or "")
+    assert "bookshelf.db" in (r.detail or "")
+    assert "rebuild" in (r.suggestion or "")
+
+
+def test_db_url_alignment_ok_when_target_nonempty(env) -> None:
+    """issue #15：指向的库在位且非空 → OK（其他库文件不干扰）。"""
+    from local_webpage_access.doctor import check_database_url_alignment
+
+    ws, _config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    data_dir = ws.app_data("api")
+    (data_dir / "app.sqlite").write_bytes(b"x" * 100)
+    (data_dir / "legacy.db").write_bytes(b"y" * 100)
+    env_path = ws.app_env_path("api")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("DATABASE_URL=sqlite:////app/data/app.sqlite\n", encoding="utf-8")
+
+    r = check_database_url_alignment(ws)
+    assert r.status == STATUS_OK
+
+
+def test_db_url_alignment_ok_without_env_db_url(env) -> None:
+    """A.R01：.env 无 DATABASE_URL（未注入）的实例不参与检查。"""
+    from local_webpage_access.doctor import check_database_url_alignment
+
+    ws, _config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    (ws.app_data("api") / "bookshelf.db").write_bytes(b"x" * 100)
+    # docker/.env 不存在（从未 rebuild）→ 不判错位
+
+    r = check_database_url_alignment(ws)
+    assert r.status == STATUS_OK
+
+
+# ---- BUG-600：带引号/查询参数/非 sqlite 的 URL 解析 ---------------------------
+
+
+def _write_alignment_env(ws, url: str) -> None:
+    env_path = ws.app_env_path("api")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(f"DATABASE_URL={url}\n", encoding="utf-8")
+
+
+def test_db_url_alignment_quoted_url_ok(env) -> None:
+    """BUG-600 复现（反向）：引号包裹的 URL 指向在位非空库 → 不得误报 WARN。"""
+    from local_webpage_access.doctor import check_database_url_alignment
+
+    ws, _config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    (ws.app_data("api") / "app.sqlite").write_bytes(b"x" * 100)
+    _write_alignment_env(ws, '"sqlite:////app/data/app.sqlite"')
+
+    r = check_database_url_alignment(ws)
+    assert r.status == STATUS_OK
+
+
+def test_db_url_alignment_query_url_reports_correct_name(env) -> None:
+    """BUG-600：带 query 的 URL 指向空库 → WARN 中文件名不带 ? 参数、不串引号。"""
+    from local_webpage_access.doctor import check_database_url_alignment
+
+    ws, _config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    data_dir = ws.app_data("api")
+    (data_dir / "app.sqlite").write_bytes(b"")
+    (data_dir / "bookshelf.db").write_bytes(b"x" * 100)
+    _write_alignment_env(ws, 'sqlite:////app/data/app.sqlite?mode=ro&cache=shared')
+
+    r = check_database_url_alignment(ws)
+    assert r.status == STATUS_WARN
+    assert "app.sqlite" in (r.detail or "")
+    assert '"' not in (r.detail or "")
+    assert "mode=ro" not in (r.detail or "")  # 文件名不含 query 残留
+
+
+def test_db_url_alignment_skips_non_sqlite_scheme(env) -> None:
+    """BUG-600：非 sqlite scheme（如 postgresql://）不参与文件对账。"""
+    from local_webpage_access.doctor import check_database_url_alignment
+
+    ws, _config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    (ws.app_data("api") / "bookshelf.db").write_bytes(b"x" * 100)
+    _write_alignment_env(ws, "postgresql://user:pass@db:5432/app?sslmode=require")
+
+    r = check_database_url_alignment(ws)
+    assert r.status == STATUS_OK
+
+
+def test_db_url_alignment_skips_memory_and_foreign_dir(env) -> None:
+    """BUG-600：:memory: 与非 /app/data 目录（手工配置）不评判、不误报。"""
+    from local_webpage_access.doctor import check_database_url_alignment
+
+    ws, _config, reg = env
+    _seed_sqlite_container_with_canonical_paths(ws, reg, "api")
+    (ws.app_data("api") / "bookshelf.db").write_bytes(b"x" * 100)
+    _write_alignment_env(ws, "sqlite:///:memory:")
+
+    assert check_database_url_alignment(ws).status == STATUS_OK
+    _write_alignment_env(ws, "sqlite:////var/lib/myapp/custom.db")
+    assert check_database_url_alignment(ws).status == STATUS_OK

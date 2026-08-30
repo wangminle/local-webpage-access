@@ -1138,6 +1138,65 @@ def test_reconcile_non_str_updated_at_does_not_abort_round(
     assert "bad" in restarted
 
 
+def test_reconcile_mirrors_recovery_to_lwa_log(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """issue #16 / BUG-603：自愈起止镜像到 lwa.log，运维盯主日志不再有盲区。
+
+    现场：CLI 构建失败留在 lwa.log，daemon 恢复只写 daemon.log，主日志在
+    23:22→23:35 间零记录、被误判构建卡死。修复后 lwa.log 应有恢复开始 +
+    「失败已自动重试并恢复」两条面包屑。
+    """
+    from datetime import datetime, timedelta
+
+    _seed_instance(registry, workspace, "x", desired="running", status="failed")
+    # 陈旧 failed（宿主机重启前遗留），避开 issue#1 的刚失败首轮退避
+    stale = (
+        datetime.now() - timedelta(seconds=daemon_mod.RECONCILE_BACKOFF_BASE_SECONDS * 2)
+    ).isoformat()
+    registry._conn.execute("UPDATE instances SET updated_at = ? WHERE id = 'x'", (stale,))
+    registry._conn.commit()
+
+    daemon_mod.reconcile(
+        workspace, config, registry, restarter=lambda ws, cfg, reg, iid: None
+    )
+
+    text = (workspace.logs / "lwa.log").read_text(encoding="utf-8")
+    assert "daemon 自动恢复开始：实例 x" in text
+    assert "logs/daemon.log" in text  # 指向完整阶段日志的落点
+    assert "daemon 自愈成功：实例 x（failed → running）" in text
+    assert "已由 daemon 自动重试并恢复" in text
+
+
+def test_reconcile_mirrors_non_failed_recovery_without_retry_wording(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """BUG-603：非 failed 偏离（如 stopped）的恢复镜像不带"自动重试"措辞。"""
+    _seed_instance(registry, workspace, "y", desired="running", status="stopped")
+    daemon_mod.reconcile(
+        workspace, config, registry, restarter=lambda ws, cfg, reg, iid: None
+    )
+    text = (workspace.logs / "lwa.log").read_text(encoding="utf-8")
+    assert "daemon 自愈成功：实例 y（stopped → running）" in text
+
+
+def test_reconcile_mirrors_failure_to_lwa_log(
+    workspace: Workspace, config: Config, registry: Registry
+) -> None:
+    """BUG-603：恢复失败也要在 lwa.log 留痕（含退避重试提示）。"""
+
+    def _boom(ws, cfg, reg, iid):
+        raise RuntimeError("recover boom")
+
+    _seed_instance(registry, workspace, "z", desired="running", status="stopped")
+    daemon_mod.reconcile(workspace, config, registry, restarter=_boom)
+
+    text = (workspace.logs / "lwa.log").read_text(encoding="utf-8")
+    assert "daemon 自愈失败：实例 z" in text
+    assert "recover boom" in text
+    assert "自动重试" in text
+
+
 def test_reconcile_backs_off_just_failed(
     workspace: Workspace, config: Config, registry: Registry
 ) -> None:

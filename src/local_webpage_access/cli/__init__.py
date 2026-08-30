@@ -60,7 +60,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.8.5-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.8.8-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -218,12 +218,14 @@ def _register_all() -> None:
     from local_webpage_access.cli import (
         importing,
         lifecycle,
+        migrate_user,
         status as status_cmd,
         system,
     )
 
     importing.register(app)
     lifecycle.register(app)
+    migrate_user.register(app)
     status_cmd.register(app)
     system.register(app)
 

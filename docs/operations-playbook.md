@@ -317,7 +317,7 @@ lwa autostart status [--json]           # 单元 + 进程 + 运行模式（syste
 
 - **停服**：先 `lwa autostart disable`，再 `lwa daemon/manager/gateway off`（`off` 已内置 `coordinated_disable`）。
 - **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长（V0.8.2 起按 live 证据估算：存活 pidfile / systemd `InactiveEnterTimestamp`，陈旧 `run/*.json` 不采信、不确定不虚报）；enabled=false 跳过。均不与 KeepAlive 抢锁。重启后先**等待服务就绪**（`waitReady`，最多约 30s）再进入 access/doctor 收尾，超时降级 warning 并提示稍后 `lwa doctor` 复核（V0.8.2 / issue #5）。
-- **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。
+- **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。V0.8.8（issue #16）起自愈起止与 `lifecycle_stage` 阶段会镜像一份到 `logs/lwa.log`（完整日志仍在 `logs/daemon.log`）——构建失败后盯主日志即可看到"自动恢复开始 / 已自动重试并恢复"，不再表现为静默恢复。
 - **Linux**：systemd user + 建议 `enable-linger`；**WSL** 另需 Windows 登录任务唤醒发行版；**Windows 原生不支持**自启（见 [autostart.md](autostart.md)）。
 
 ---
@@ -418,6 +418,8 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 - `port_contention`——`:2019` / 别名入口上是否有非预期监听者（测试/外部孤儿，§2.7 现场即 pytest 泄漏的 Caddy 占 :2019）；仅 caddy 后端检查。
 - `port_pool`（建议 H）——排除 lwa 自用端口（managerPort、staticGatewayPort、registry 已分配 hostPort），不再把这些合法自用端口误报为冲突。
 - `workspace_path_consistency`（V0.6.12 / DEV-094；**V0.6.13** 加固）——活跃 manifest/registry 派生路径是否等于当前工作区规范值；Caddy 主配置/sites/aliases 引用是否落在当前工作区且存在；Docker 可用时 SQLite data bind mount Source 是否指向 `apps/<id>/data`。外部 `sourceZipPath`、历史 builds/events 不告警。Docker 不可用、挂载观测失败或 **registry 不可用/读取失败** 时对应子项 SKIP（整体不报假绿 OK）。容器查询失败会中止启动（禁止当作「无容器」绕过挂载 fail-safe）。提示优先 `lwa workspace relocate --verify`，已裸 mv 场景按 `rebuild` / `recover` / `gateway on` 修复。
+- `base_image_readiness`（V0.8.7 / issue #14）——未缓存基础镜像是否可拉取；镜像来自第三方 registry（ghcr/quay 等）或 Docker Hub 不可达时按 registry 归类提示（配代理 / 离线预置，而非一律建议 Hub mirror）。
+- `database_url_alignment`（V0.8.8 / issue #15，WARN 级纯离线）——SQLite 实例 `docker/.env` 的 `DATABASE_URL` 指向缺失/空库但同目录存在其他非空库时提示疑似错位（数据仍在 `data/`，只是未被指向）；带引号/query 的 URL 与非 sqlite scheme 不误报。
 
 ### 7.6 管理页兜底链接（建议 D）
 

@@ -780,6 +780,17 @@ def _discover_health_probes(
     if backend.sourceSubdir:
         scan_root = scan_root / backend.sourceSubdir
     if not scan_root.is_dir():
+        # issue #19：扫描根不存在时历史行为是静默返回空、探针降级为 guessed
+        # /health。这里必须留 WARNING（含 root 与候选上下文），否则再次出现
+        # 换入后才重建 manifest 一类的顺序缺陷时无法从日志定位。
+        log.warning(
+            "健康探针源码发现跳过：扫描根 %s 不存在（后端候选 kind=%s，"
+            "sourceSubdir=%s，evidence.root=%s）；契约将只有 guessed /health",
+            scan_root,
+            backend.kind,
+            backend.sourceSubdir or "root",
+            evidence.root,
+        )
         return []
 
     extensions = (".py",) if backend.kind == "python" else (".js", ".ts", ".mjs", ".cjs")

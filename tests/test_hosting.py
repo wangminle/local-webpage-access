@@ -854,6 +854,98 @@ def test_host_container_releases_port_on_build_failure(
     assert registry.allocated_ports() == []
 
 
+# ---- 回归测试：BUG-603（issue #16）----------------------------------------
+#
+# BUG-603：daemon 进程触发的重建（reconcile 自动恢复 / inbox 处理）阶段
+#          日志只落 daemon.log，lwa.log 看起来"构建卡死"。修复后 daemon
+#          进程标记（LWA_DAEMON_PROCESS=1）存在时，lifecycle_stage 镜像进
+#          lwa.log；CLI / manager 进程行为不变。
+
+
+class _OkRuntime:
+    """build/up 全成功 + 可观测身份的假 runtime。"""
+
+    ensure_available = staticmethod(lambda: None)
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def is_running(self, iid):
+        return False
+
+    def down(self, iid, **kw):
+        pass
+
+    def build(self, iid, **kw):
+        return None
+
+    def up(self, iid, **kw):
+        return None
+
+    def container_id(self, iid, **kw):
+        return "fake-cid"
+
+    def image_id(self, iid, **kw):
+        return "fake-iid"
+
+
+def _seed_ok_container(workspace: Workspace, registry: Registry) -> None:
+    from tests._helpers import make_container_manifest
+
+    workspace.ensure_app_dirs("api")
+    m = make_container_manifest("api")
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+
+
+def test_host_container_stages_mirrored_to_lwa_log_in_daemon_process(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-603：daemon 进程内 lifecycle_stage 全量镜像到 lwa.log。"""
+    from local_webpage_access.hosting import host_container
+
+    _seed_ok_container(workspace, registry)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _OkRuntime)
+    monkeypatch.setattr(
+        "local_webpage_access.hosting._evaluate_container_verification",
+        lambda *a, **k: {"overall_status": "passed"},
+    )
+    monkeypatch.setenv("LWA_DAEMON_PROCESS", "1")
+
+    host_container(workspace, config, registry, "api")
+
+    text = (workspace.logs / "lwa.log").read_text(encoding="utf-8")
+    for stage in (
+        "host_start",
+        "dockerfile_ready",
+        "compose_ready",
+        "compose_build_start",
+        "compose_build_done",
+        "compose_up_start",
+        "compose_up_done",
+    ):
+        assert f"lifecycle_stage instance=api stage={stage}" in text
+
+
+def test_host_container_stages_not_mirrored_outside_daemon_process(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-603：无 daemon 标记（CLI/manager 进程）时不镜像，行为不变。"""
+    from local_webpage_access.hosting import host_container
+
+    _seed_ok_container(workspace, registry)
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _OkRuntime)
+    monkeypatch.setattr(
+        "local_webpage_access.hosting._evaluate_container_verification",
+        lambda *a, **k: {"overall_status": "passed"},
+    )
+    monkeypatch.delenv("LWA_DAEMON_PROCESS", raising=False)
+
+    host_container(workspace, config, registry, "api")
+
+    assert not (workspace.logs / "lwa.log").exists()
+
+
 def test_host_container_keeps_reused_port_on_build_failure(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:

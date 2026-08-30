@@ -260,3 +260,33 @@ def test_read_log_tail_avoids_full_read_text(workspace, monkeypatch) -> None:
     monkeypatch.setattr(Path, "read_text", boom)
     text = read_log(workspace, "api", "build", tail=2)
     assert text == "TAIL-A\nTAIL-B"
+
+
+# ---- 回归测试：BUG-603（issue #16）----------------------------------------
+
+
+def test_append_global_log_writes_formatted_line(workspace) -> None:
+    """BUG-603：跨进程面包屑以 _LOG_FORMAT 同构格式追加到 lwa.log。"""
+    from local_webpage_access.logging import append_global_log
+
+    append_global_log(workspace.logs, "自愈成功：实例 x（failed → running）")
+    append_global_log(workspace.logs, "自愈失败：实例 y", level="WARNING")
+
+    lines = (workspace.logs / "lwa.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    # 格式：%(asctime)s %(levelname)-8s %(name)s %(message)s
+    assert " INFO     local_webpage_access.daemon 自愈成功：实例 x（failed → running）" in lines[0]
+    assert " WARNING  local_webpage_access.daemon 自愈失败：实例 y" in lines[1]
+    # 首次创建时收紧权限（BUG-118 同口径）
+    assert (workspace.logs / "lwa.log").stat().st_mode & 0o777 == 0o600
+
+
+def test_append_global_log_swallows_errors(tmp_path, monkeypatch) -> None:
+    """BUG-603：日志文件打不开时面包屑静默丢弃，不影响主流程。"""
+    from local_webpage_access.logging import append_global_log
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("local_webpage_access.logging.Path.open", boom)
+    append_global_log(tmp_path, "任何消息")  # 不抛异常即通过

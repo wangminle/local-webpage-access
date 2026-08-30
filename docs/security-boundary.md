@@ -111,12 +111,23 @@ defaultResourceLimits:
 * 每实例 `restart: unless-stopped`，崩溃自动重启。
 * 构建并发限流（`buildConcurrency: 1`），避免并发构建 OOM。
 
-## 非 root 容器
+## 非 root 容器（issue #20）
 
-所有生成的 Dockerfile 都切换到非 root 用户：
+生成的容器默认以非 root 身份运行，采用**宿主数据目录 UID/GID 对齐**方案
+（`/app/data` 是宿主 bind mount，运行时属主由宿主目录决定，镜像构建期的
+`chown` 会被覆盖，故不能靠镜像内建用户解决）：
 
-* Node 基线：`node:24-alpine`，内置 `node` 用户（UID 1000）。
-* Python 基线：`python:3.13-slim`，创建 `app` 用户并 `USER app`。
+* 目标身份统一取实例 `apps/<id>/data/` 目录的宿主属主（UID:GID），
+  Dockerfile 末尾生成 `USER <uid>:<gid>`（Docker 支持数字形式，不要求
+  镜像内存在同名用户）并以 `ENV HOME=/tmp` 提供可写 HOME；
+* Compose 服务再加一层 `user: "<uid>:<gid>"`，覆盖镜像默认用户，防止
+  模板漂移回 root；两侧使用同一解析结果（`container_identity` 模块）；
+* rebuild 前预检：`runAsNonRoot=true` 而 `data/` 属主为 root 时**在停止
+  旧容器之前**直接拒绝，提示先 `chown` 修正属主；
+* 旧实例（manifest 缺 `container.runAsNonRoot` 字段）按 legacy root 运行
+  并告警，不做一次性强制切换；通过写权限检查的实例经
+  `lwa migrate-user <id>` 显式迁移，确需 root 兼容可 `--root` 或在
+  `local-web.json` 设置 `container.runAsNonRoot=false`。
 
 容器内进程不具备 root 权限，即便应用有漏洞也降低了逃逸面。
 

@@ -124,6 +124,17 @@ def generate_dockerfile(
         # 容器实例只可能是 node/python；兜底用通用 shell 启动
         content = _render_generic(manifest, internal_port)
 
+    # issue #20：runAsNonRoot=True 时末尾生成 USER（紧邻 CMD 之前）。
+    # UID:GID 取宿主 data/ 属主（container_identity 统一解析，Compose 侧
+    # 同源），数字形式无需镜像内建用户；HOME 指向可写目录，避免应用在
+    # 只读 /root 下落缓存文件失败。bind mount 场景不能靠镜像内 chown——
+    # 运行时属主由宿主目录决定。
+    from local_webpage_access.container_identity import resolve_container_identity
+
+    identity = resolve_container_identity(manifest, workspace)
+    if identity is not None:
+        content = _insert_user_before_cmd(content, identity.docker_user())
+
     # 与 generate_compose 对称：写出前审计；pipe_to_shell / add_remote_url 为
     # critical，拒绝落盘（防止模板改动或 entry.install/build 注入供应链风险）。
     from local_webpage_access.security import audit_dockerfile, has_critical
@@ -133,7 +144,10 @@ def generate_dockerfile(
         codes = ", ".join(f.code for f in findings if f.level == "critical")
         raise RuntimeError(f"生成的 Dockerfile 含 critical 安全问题（{codes}），已拒绝写出")
     for f in findings:
-        log.warning("Dockerfile 安全审计 [%s] %s", f.code, f.message)
+        # issue #20：按 finding 级别分流——no_user 定义为 info，统一 warning
+        # 会把 legacy root 实例的每次 rebuild 都刷成告警噪音。
+        emit = log.warning if f.level == "warn" else log.info
+        emit("Dockerfile 安全审计 [%s] %s", f.code, f.message)
 
     out_path.write_text(content, encoding="utf-8")
     # BUG-117：构建上下文是 apps/<id>/，.dockerignore 与 Dockerfile 一并生成。
@@ -634,6 +648,22 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
 
 
 # ---- 辅助 --------------------------------------------------------------------
+
+
+def _insert_user_before_cmd(content: str, docker_user: str) -> str:
+    """issue #20：把 ``ENV HOME=/tmp`` + ``USER <uid>:<gid>`` 插在最后一条 CMD 之前。
+
+    USER 影响其后所有 RUN/CMD/ENTRYPOINT 的执行身份；紧邻 CMD 放置可保证
+    运行命令以非 root 执行，且不落在任何构建层（依赖安装需要 root）之后
+    引发混淆。无 CMD（异常现场）时追加到文件末尾。
+    """
+    lines = content.splitlines()
+    user_lines = ["ENV HOME=/tmp", f"USER {docker_user}"]
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("CMD "):
+            lines[i:i] = user_lines
+            return "\n".join(lines) + "\n"
+    return content.rstrip("\n") + "\n" + "\n".join(user_lines) + "\n"
 
 
 # BUG-471：CMD/启动命令含 shell 操作符（&&、||、;、$()、``、裸 ()）时，
