@@ -127,13 +127,17 @@ def generate_dockerfile(
     # issue #20：runAsNonRoot=True 时末尾生成 USER（紧邻 CMD 之前）。
     # UID:GID 取宿主 data/ 属主（container_identity 统一解析，Compose 侧
     # 同源），数字形式无需镜像内建用户；HOME 指向可写目录，避免应用在
-    # 只读 /root 下落缓存文件失败。bind mount 场景不能靠镜像内 chown——
-    # 运行时属主由宿主目录决定。
+    # 只读 /root 下落缓存文件失败。issue #22：bind mount 的 data/ 运行时
+    # 属主由宿主决定，但镜像内非挂载目录仍须在 USER 前 chown。
     from local_webpage_access.container_identity import resolve_container_identity
 
     identity = resolve_container_identity(manifest, workspace)
     if identity is not None:
-        content = _insert_user_before_cmd(content, identity.docker_user())
+        content = _insert_user_before_cmd(
+            content,
+            identity.docker_user(),
+            chown_tree=_non_root_chown_tree(manifest, source_dir),
+        )
 
     # 与 generate_compose 对称：写出前审计；pipe_to_shell / add_remote_url 为
     # critical，拒绝落盘（防止模板改动或 entry.install/build 注入供应链风险）。
@@ -254,6 +258,50 @@ def _render_node(
 # ---- Python -----------------------------------------------------------------
 
 
+# issue #18：pip 下载韧性——每源 retries/timeout；主源硬故障 || 切下一段。
+# 默认值与 BuildMirrors.pipRetries / pipTimeout 对齐（可配置覆盖）。
+_PIP_RETRIES = 3
+_PIP_TIMEOUT = 60
+# issue #18：依赖安装失败时的可行动提示（写入 build 日志，指向换源出口）。
+_PIP_FAIL_HINT = (
+    "lwa: 依赖安装失败。可能是镜像源不可达或过慢——可在 local-web.yml 的 "
+    "buildMirrors 中调整 pip / pipFallbacks / pipRetries / pipTimeout，"
+    "或 enabled: false 走官方 PyPI，然后重试构建"
+)
+
+
+def _pip_retry_flags(mirrors: BuildMirrors | None) -> str:
+    """issue #18：每段 pip 安装的 ``--retries`` / ``--timeout``。"""
+    retries = _PIP_RETRIES
+    timeout = _PIP_TIMEOUT
+    if mirrors is not None:
+        retries = mirrors.pipRetries
+        timeout = mirrors.pipTimeout
+    return f"--retries {retries} --timeout {timeout}"
+
+
+def _pip_index_sources(mirrors: BuildMirrors | None) -> list[str]:
+    """issue #18：有序列表——主源 + pipFallbacks（去重、去空）。"""
+    sources: list[str] = []
+    if mirrors is None:
+        return sources
+    primary = (mirrors.pip or "").rstrip("/")
+    if primary:
+        sources.append(primary)
+    for raw in getattr(mirrors, "pipFallbacks", None) or []:
+        url = (raw or "").rstrip("/")
+        if url and url not in sources:
+            sources.append(url)
+    return sources
+
+
+def _join_index_attempts(attempts: list[str]) -> str:
+    """多源用括号包每段，避免 ``&&`` / ``||`` 优先级把切源链拆乱。"""
+    if len(attempts) <= 1:
+        return attempts[0] if attempts else ""
+    return " || ".join(f"( {a} )" for a in attempts)
+
+
 def _pip_run(shell_cmd: str, *, mirrors: BuildMirrors | None = None) -> str:
     """把 pip/uv/pipenv 安装命令包成带 BuildKit cache mount 的 RUN（BUG-117）。
 
@@ -263,44 +311,71 @@ def _pip_run(shell_cmd: str, *, mirrors: BuildMirrors | None = None) -> str:
     依赖时 ``uv sync`` / ``pipenv install`` 仍访问官方 PyPI。故对 uv 段注入
     ``UV_DEFAULT_INDEX``、pipenv 段注入 ``PIPENV_PYPI_MIRROR``（uv / Pipenv 官方
     索引配置变量），使其依赖解析也走镜像。
+    issue #18：每段恒注入 ``--retries/--timeout``；主源硬故障时 ``||`` 切
+    ``pipFallbacks``（默认官方 → 腾讯）。不注入 ``--extra-index-url``——pip
+    对同版本包仍走 ``-i`` 源，慢而不失败时 extra-index 不会切走。括号包裹
+    不改变原命令的 ``&&`` 语义；失败时把换源出口打进 build 日志。
     """
     cmd = shell_cmd.replace("pip install --no-cache-dir", "pip install").strip()
-    if mirrors and mirrors.pip:
-        idx = mirrors.pip.rstrip("/")
+    retry_flags = _pip_retry_flags(mirrors)
+    sources = _pip_index_sources(mirrors)
+    timeout = _PIP_TIMEOUT
+    if mirrors is not None:
+        timeout = mirrors.pipTimeout
 
-        def _inject_segment(seg: str) -> str:
-            seg = seg.strip()
-            if not seg:
-                return seg
-            if seg.startswith("pip install") and "-i " not in seg:
-                return f"{seg} -i {idx}"
-            if (seg.startswith("uv ") or seg == "uv") and "UV_DEFAULT_INDEX=" not in seg:
-                return f"UV_DEFAULT_INDEX={idx} {seg}"
-            if seg.startswith("pipenv") and "PIPENV_PYPI_MIRROR=" not in seg:
-                return f"PIPENV_PYPI_MIRROR={idx} {seg}"
+    def _inject_segment(seg: str) -> str:
+        seg = seg.strip()
+        if not seg:
             return seg
+        if seg.startswith("pip install"):
+            flags = ""
+            if "--retries" not in seg and "--timeout" not in seg:
+                flags = f" {retry_flags}"
+            if "-i " in seg or not sources:
+                return f"{seg}{flags}"
+            attempts = [f"{seg} -i {src}{flags}" for src in sources]
+            return _join_index_attempts(attempts)
+        if (seg.startswith("uv ") or seg == "uv") and "UV_DEFAULT_INDEX=" not in seg:
+            if not sources:
+                return f"UV_HTTP_TIMEOUT={timeout} {seg}"
+            attempts = [
+                f"UV_HTTP_TIMEOUT={timeout} UV_DEFAULT_INDEX={src} {seg}" for src in sources
+            ]
+            return _join_index_attempts(attempts)
+        if seg.startswith("pipenv") and "PIPENV_PYPI_MIRROR=" not in seg:
+            if not sources:
+                return f"PIP_DEFAULT_TIMEOUT={timeout} {seg}"
+            attempts = [
+                f"PIP_DEFAULT_TIMEOUT={timeout} PIPENV_PYPI_MIRROR={src} {seg}"
+                for src in sources
+            ]
+            return _join_index_attempts(attempts)
+        return seg
 
-        # 同时处理 ``&&`` / ``||`` / ``;`` 连接的多段命令（与 _with_npm_registry 对齐）
-        def _split_inject(cmd_part: str, sep: str) -> str:
-            parts = [_inject_segment(s) for s in cmd_part.split(sep)]
-            return f" {sep} ".join(p for p in parts if p)
+    # 同时处理 ``&&`` / ``||`` / ``;`` 连接的多段命令（与 _with_npm_registry 对齐）
+    def _split_inject(cmd_part: str, sep: str) -> str:
+        parts = [_inject_segment(s) for s in cmd_part.split(sep)]
+        return f" {sep} ".join(p for p in parts if p)
 
-        and_parts: list[str] = []
-        for and_seg in cmd.split("&&"):
-            seg = and_seg
-            if "||" in seg:
-                seg = _split_inject(seg, "||")
-            elif ";" in seg:
-                seg = _split_inject(seg, ";")
-            else:
-                seg = _inject_segment(seg)
-            and_parts.append(seg)
-        cmd = " && ".join(p for p in and_parts if p)
+    and_parts: list[str] = []
+    for and_seg in cmd.split("&&"):
+        seg = and_seg
+        if "||" in seg:
+            seg = _split_inject(seg, "||")
+        elif ";" in seg:
+            seg = _split_inject(seg, ";")
+        else:
+            seg = _inject_segment(seg)
+        and_parts.append(seg)
+    cmd = " && ".join(p for p in and_parts if p)
     mounts = ["--mount=type=cache,target=/root/.cache/pip"]
     if "uv sync" in cmd or cmd.startswith("uv ") or "UV_DEFAULT_INDEX=" in cmd:
         mounts.append("--mount=type=cache,target=/root/.cache/uv")
     mount_prefix = " ".join(mounts)
-    return f"RUN {mount_prefix} \\\n  {cmd}"
+    return (
+        f"RUN {mount_prefix} \\\n"
+        f"  ( {cmd} ) || ( echo '{_PIP_FAIL_HINT}' && exit 1 )"
+    )
 
 
 def _with_npm_registry(cmd: str, mirrors: BuildMirrors | None) -> str:
@@ -650,20 +725,44 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
 # ---- 辅助 --------------------------------------------------------------------
 
 
-def _insert_user_before_cmd(content: str, docker_user: str) -> str:
-    """issue #20：把 ``ENV HOME=/tmp`` + ``USER <uid>:<gid>`` 插在最后一条 CMD 之前。
+def _insert_user_before_cmd(
+    content: str, docker_user: str, *, chown_tree: str | None = None
+) -> str:
+    """issue #20 / #22：把 chown（可选）+ ``ENV HOME=/tmp`` + ``USER`` 插在最后一条 CMD 之前。
 
     USER 影响其后所有 RUN/CMD/ENTRYPOINT 的执行身份；紧邻 CMD 放置可保证
     运行命令以非 root 执行，且不落在任何构建层（依赖安装需要 root）之后
     引发混淆。无 CMD（异常现场）时追加到文件末尾。
+
+    issue #22：bind mount 的 ``data/`` 运行时属主由宿主决定，但镜像内非挂载
+    目录（``/app/runtime`` 及兄弟子目录、WORKDIR ``/app``）构建期属主是
+    root。``chown_tree`` 与 ``sqlite_mkdir`` 同源；无 sqlite 时回退 ``/app``。
     """
     lines = content.splitlines()
     user_lines = ["ENV HOME=/tmp", f"USER {docker_user}"]
+    if chown_tree:
+        user_lines.insert(0, f"RUN chown -R {docker_user} {chown_tree}")
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].startswith("CMD "):
             lines[i:i] = user_lines
             return "\n".join(lines) + "\n"
     return content.rstrip("\n") + "\n" + "\n".join(user_lines) + "\n"
+
+
+def _non_root_chown_tree(
+    manifest: InstanceManifest, source_dir: Path | None
+) -> str:
+    """issue #22：非 root 镜像内需改属主的目录树，与 sqlite_mkdir 同源。
+
+    RUNTIME_ROOT → ``/app/runtime``（覆盖 logs/secrets 等兄弟目录）；
+    普通 sqlite → ``/app/data``；无 sqlite 时回退 ``/app``（三类模板都有 USER）。
+    bind mount 覆盖 data/ 时再 chown 一次幂等无害。
+    """
+    if _is_sqlite(manifest):
+        if _uses_runtime_root_layout(manifest, source_dir):
+            return "/app/runtime"
+        return "/app/data"
+    return "/app"
 
 
 # BUG-471：CMD/启动命令含 shell 操作符（&&、||、;、$()、``、裸 ()）时，

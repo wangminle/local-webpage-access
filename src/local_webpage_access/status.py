@@ -107,6 +107,10 @@ class InstanceStatus:
     # 第二批 CHK-252：验证结论（passed/degraded）与进程状态分离，
     # 从 manifest.verificationSummary 透传给列表 API / UI 叠加展示。
     verification_overall: str | None = None
+    # C.01（IMP-056 后置包）：兼容性预检摘要——manifest.compatibilityFindings
+    # 非空时的最高等级与条数；无 findings 时为 None/0（列表输出保持紧凑）。
+    compatibility_severity: str | None = None
+    compatibility_count: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -181,8 +185,28 @@ class InstanceStatus:
             "sourceGitSubdir": self.source_git_subdir,
             # 第二批 CHK-252：验证结论（passed/degraded/failed）独立于进程状态。
             "verificationOverall": self.verification_overall,
+            # C.01：JSON 稳定字段（非拼接文案）；无 findings 时为 null/0
+            "compatibilitySeverity": self.compatibility_severity,
+            "compatibilityCount": self.compatibility_count,
             **self.extra,
         }
+
+
+_COMPAT_SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
+
+
+def _highest_compatibility_severity(findings: list) -> str:
+    """C.01：取 findings 中的最高展示等级（critical > warning > info）。"""
+    highest = "info"
+    for f in findings:
+        sev: str | None = getattr(f, "severity", None)
+        if sev is None and isinstance(f, dict):
+            sev = f.get("severity")
+        if sev is None:
+            continue
+        if _COMPAT_SEVERITY_ORDER.get(str(sev), -1) > _COMPAT_SEVERITY_ORDER.get(highest, -1):
+            highest = str(sev)
+    return highest
 
 
 def instance_status(
@@ -213,6 +237,9 @@ def instance_status(
     source_git_subdir: str | None = None
     # 第二批 CHK-252：从 manifest.verificationSummary 读取最近一次验证结论。
     verification_overall: str | None = None
+    # C.01：兼容性预检摘要（最高等级 + 条数；不读 DB，直接读 manifest）
+    compatibility_severity: str | None = None
+    compatibility_count = 0
     manifest_path = workspace.app_manifest_path(instance_id)
     if manifest_path.is_file():
         try:
@@ -229,6 +256,10 @@ def instance_status(
             summary = getattr(manifest, "verificationSummary", None)
             if isinstance(summary, dict):
                 verification_overall = summary.get("overallStatus")
+            findings = getattr(manifest, "compatibilityFindings", None) or []
+            if findings:
+                compatibility_severity = _highest_compatibility_severity(findings)
+                compatibility_count = len(findings)
         except Exception:  # noqa: BLE001 - manifest 读取失败不阻断状态
             pass
 
@@ -275,6 +306,8 @@ def instance_status(
         source_git_commit=source_git_commit,
         source_git_subdir=source_git_subdir,
         verification_overall=verification_overall,
+        compatibility_severity=compatibility_severity,
+        compatibility_count=compatibility_count,
     )
 
 

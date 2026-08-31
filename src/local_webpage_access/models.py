@@ -677,8 +677,17 @@ class InstanceManifest(BaseModel):
     deploymentFingerprints: dict | None = None
     # ---- Gate-2 新字段（IMP-056）----
     compatibilityFindings: list[CompatibilityFinding] = Field(default_factory=list)
+    # C.02（IMP-056 后置包）：findings 的扫描元数据——证据根（current/ 或主包
+    # 子目录）、扫描时间、stale 标记（重扫失败时保留旧结果并置 true）。
+    compatibilityScanMeta: dict | None = None
     # A.R01：数据库配置消费信号（从 evidence 传递，compose 据此决定是否注入 DATABASE_URL）
     databaseConfig: dict | None = None
+    # issue #21：别名活验证通过记录。别名是用户资产，一次启动后活验证失败
+    # （应用慢启动 / 临时故障）不得清除已验证过的别名；仅「从未验证过的
+    # deferred 别名」（导入期设置、首次 start 前无片段）才走 BUG-586 清除回滚。
+    # aliasLiveVerifiedFor 记录验证通过时的别名 slug，换别名后标记失效。
+    aliasLiveVerifiedAt: str | None = None
+    aliasLiveVerifiedFor: str | None = None
 
     @field_validator("kind", "runtime", "servingMode", "resourceProfile", "desiredState", "status")
     @classmethod

@@ -469,7 +469,7 @@ def test_run_update_marks_restart_failed_when_import_still_busy(
     monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
     started = {"n": 0}
     monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager",
+        "local_webpage_access.manager_service.stop_manager_internal",
         lambda ws: started.__setitem__("n", started["n"] + 1) or True,
     )
 
@@ -486,12 +486,12 @@ def test_manager_restart_skipped_when_not_running(
     """manager 原本未运行 → 步骤 skipped，不调用 start_manager。"""
     started = {"count": 0}
 
-    def fake_start(ws, cfg):
+    def fake_start(ws, cfg, **kw):
         started["count"] += 1
         return 999
 
     monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: False)
-    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager_internal", lambda ws: True)
     monkeypatch.setattr("local_webpage_access.manager_service.start_manager", fake_start)
 
     opts = _opts(restart_manager=True)
@@ -525,12 +525,12 @@ def test_manager_restart_runs_for_legacy_health_without_workspace_root(
     )
     monkeypatch.setattr("local_webpage_access.manager_service.is_pid_alive", lambda pid: True)
     monkeypatch.setattr(
-        "local_webpage_access.manager_service.stop_manager",
+        "local_webpage_access.manager_service.stop_manager_internal",
         lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True,
     )
     monkeypatch.setattr(
         "local_webpage_access.manager_service.start_manager",
-        lambda ws, cfg: calls.__setitem__("start", calls["start"] + 1) or 888,
+        lambda ws, cfg, **kw: calls.__setitem__("start", calls["start"] + 1) or 888,
     )
     # BUG-451：无 version 字段的旧 health 视为通过
     monkeypatch.setattr(
@@ -556,10 +556,10 @@ def test_manager_restart_failure_captured(
         lambda ws, name: (None, True, False),
     )
     monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
-    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager_internal", lambda ws: True)
     monkeypatch.setattr(
         "local_webpage_access.manager_service.start_manager",
-        lambda ws, cfg: (_ for _ in ()).throw(RuntimeError("start boom")),
+        lambda ws, cfg, **kw: (_ for _ in ()).throw(RuntimeError("start boom")),
     )
     # doctor 也开，验证它仍然执行
     monkeypatch.setattr("local_webpage_access.updater.run_doctor_check", lambda ws, cfg: "ok")
@@ -625,9 +625,9 @@ def test_manager_restart_retries_then_fails_on_version_mismatch(
         lambda ws, name: (None, True, False),
     )
     monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
-    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager_internal", lambda ws: True)
 
-    def fake_start(ws, cfg):
+    def fake_start(ws, cfg, **kw):
         starts["n"] += 1
         return 1000 + starts["n"]
 
@@ -664,7 +664,7 @@ def test_daemon_not_started_when_stopped(
     import local_webpage_access.daemon as dmod
 
     monkeypatch.setattr(dmod, "is_running", lambda ws: False)
-    monkeypatch.setattr(dmod, "stop_daemon", lambda ws: True)
+    monkeypatch.setattr(dmod, "stop_daemon_internal", lambda ws: True)
     monkeypatch.setattr(dmod, "start_daemon", fake_start)
 
     opts = _opts(restart_daemon=True)
@@ -685,7 +685,7 @@ def test_daemon_restart_via_autostart_when_managed(
     calls = {"stop": 0, "start": 0}
     monkeypatch.setattr(dmod, "is_running", lambda ws: True)
     monkeypatch.setattr(
-        dmod, "stop_daemon", lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True
+        dmod, "stop_daemon_internal", lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True
     )
     monkeypatch.setattr(
         dmod,
@@ -714,7 +714,7 @@ def test_daemon_restart_stop_failure_marks_failed(
 
     started = {"n": 0}
     monkeypatch.setattr(dmod, "is_running", lambda ws: True)
-    monkeypatch.setattr(dmod, "stop_daemon", lambda ws: False)  # 终止失败
+    monkeypatch.setattr(dmod, "stop_daemon_internal", lambda ws: False)  # 终止失败
     monkeypatch.setattr(
         dmod,
         "start_daemon",
@@ -747,12 +747,12 @@ def test_gateway_restart_via_autostart_when_managed(
         lambda ws, name: (calls.append(name) or "gateway 已由自启动重启", True, True),
     )
     monkeypatch.setattr(
-        "local_webpage_access.gateway_service.stop_gateway",
+        "local_webpage_access.gateway_service.stop_gateway_internal",
         lambda ws, cfg: pytest.fail("自启动接管时不应手工 stop gateway"),
     )
     monkeypatch.setattr(
         "local_webpage_access.gateway_service.start_gateway",
-        lambda ws, cfg: pytest.fail("自启动接管时不应额外 start gateway"),
+        lambda ws, cfg, **kw: pytest.fail("自启动接管时不应额外 start gateway"),
     )
 
     report = run_update(
@@ -785,7 +785,7 @@ def test_gateway_not_started_when_stopped(
     )
     monkeypatch.setattr(
         "local_webpage_access.gateway_service.start_gateway",
-        lambda ws, cfg: pytest.fail("原本 stopped 的 gateway 不应启动"),
+        lambda ws, cfg, **kw: pytest.fail("原本 stopped 的 gateway 不应启动"),
     )
 
     report = run_update(
@@ -980,9 +980,9 @@ def test_access_refresh_runs_after_background_restarts(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
         lambda ws, name: (None, True, False),
     )
-    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager_internal", lambda ws: True)
 
-    def fake_start_mgr(ws, cfg):
+    def fake_start_mgr(ws, cfg, **kw):
         order.append("restartManager")
         return 4242
 
@@ -995,7 +995,7 @@ def test_access_refresh_runs_after_background_restarts(
     import local_webpage_access.daemon as dmod
 
     monkeypatch.setattr(dmod, "is_running", lambda ws: True)
-    monkeypatch.setattr(dmod, "stop_daemon", lambda ws: True)
+    monkeypatch.setattr(dmod, "stop_daemon_internal", lambda ws: True)
 
     def fake_start_daemon(ws, cfg, **kw):
         order.append("restartDaemon")
@@ -1276,7 +1276,7 @@ def test_update_access_review_debounce_absorbs_startup_window(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
         lambda ws, name: (None, True, False),
     )
-    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager_internal", lambda ws: True)
     monkeypatch.setattr(
         "local_webpage_access.manager_service.start_manager", lambda ws, cfg: 4242
     )
@@ -1349,7 +1349,7 @@ def test_update_access_review_debounce_reports_persistent_failure(
         "local_webpage_access.cli._common.coordinated_autostart_restart",
         lambda ws, name: (None, True, False),
     )
-    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager", lambda ws: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager_internal", lambda ws: True)
     monkeypatch.setattr(
         "local_webpage_access.manager_service.start_manager", lambda ws, cfg: 4242
     )

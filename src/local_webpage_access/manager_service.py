@@ -28,6 +28,14 @@ from local_webpage_access.errors import LifecycleError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
 from local_webpage_access.probe import urlopen_direct
+from local_webpage_access.service_failures import (
+    LastStartError,
+    clear_start_failures,
+    has_start_failures,
+    parse_consecutive_failures,
+    parse_last_start_error,
+    record_start_failure,
+)
 
 log = get_logger("manager")
 
@@ -41,13 +49,20 @@ MANAGER_START_LOCK_STALE_SECONDS = 60.0
 
 @dataclass
 class ManagerState:
-    """管理页后台运行态。"""
+    """管理页后台运行态。
+
+    IMP-064：``enabled`` 仅表用户意图；启动失败与进程退出只写
+    ``last_start_error`` / ``consecutive_start_failures`` 观测字段，
+    绝不把 ``enabled`` 改回 False（§16.2 写入契约）。
+    """
 
     enabled: bool = False
     pid: int | None = None
     started_at: str | None = None
     host: str = "0.0.0.0"
     port: int = 17800
+    last_start_error: LastStartError | None = None
+    consecutive_start_failures: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -95,6 +110,9 @@ def read_state(workspace: Workspace) -> ManagerState | None:
             started_at=data.get("started_at"),
             host=str(data.get("host", "0.0.0.0")),
             port=int(data.get("port", 17800)),
+            # IMP-064.01：旧文件缺字段读默认值（None/0），不做 schema 迁移
+            last_start_error=parse_last_start_error(data),
+            consecutive_start_failures=parse_consecutive_failures(data),
         )
     except (TypeError, ValueError):
         return None
@@ -389,8 +407,12 @@ def _wait_for_health(config: Config, *, timeout: float = MANAGER_START_TIMEOUT) 
     return False
 
 
-def start_manager(workspace: Workspace, config: Config) -> int:
-    """``lwa manager on`` / ``lwa init`` 自动启动：后台拉起管理页。"""
+def start_manager(workspace: Workspace, config: Config, *, source: str = "manual") -> int:
+    """``lwa manager on`` / ``lwa init`` 自动启动：后台拉起管理页。
+
+    ``source`` 标记启动来源（manual / update-restart / reconcile / autostart），
+    仅写入失败观测 ``last_start_error.source``，不影响行为（IMP-064.02）。
+    """
     if not config.managerEnabled:
         raise LifecycleError(
             "managerEnabled=false，管理页未启用；可在 local-web.yml 设为 true 后执行 lwa manager on",
@@ -406,6 +428,11 @@ def start_manager(workspace: Workspace, config: Config) -> int:
         if is_running(workspace, config):
             state = read_state(workspace)
             log.info("管理页已在运行（pid=%s），不重复启动", state.pid if state else "?")
+            if state is not None:
+                # IMP-064.06：已在运行早退也算启动成功，清零连续失败计数。
+                if has_start_failures(state):
+                    clear_start_failures(state)
+                    write_state(workspace, state)
             return int(state.pid) if state and state.pid else 0
 
         # 端口已被占用：仅当健康端点确认属于本工作区时才恢复状态
@@ -424,23 +451,53 @@ def start_manager(workspace: Workspace, config: Config) -> int:
             log.info("管理页端口 %s 已有本工作区健康响应，恢复状态记录", bind_port)
             return recovered_pid or 0
 
+        # IMP-064.02：on 入口先断言意图（enabled=True）再执行启动——后续任何
+        # 失败（端口冲突 / spawn / 健康超时）只写失败观测，意图保持开，
+        # doctor 报 FAIL 而非「已按意图停用」。
+        state = ManagerState(
+            enabled=True,
+            pid=state.pid if state else None,
+            started_at=state.started_at if state else None,
+            host=bind_host,
+            port=bind_port,
+            last_start_error=state.last_start_error if state else None,
+            consecutive_start_failures=(
+                state.consecutive_start_failures if state else 0
+            ),
+        )
+        write_state(workspace, state)
+
         if health_ok(bind_host, bind_port):
+            record_start_failure(
+                state,
+                f"管理页端口 {bind_port} 已被其他工作区占用，启动被拒绝",
+                source=source,
+            )
+            write_state(workspace, state)
             raise LifecycleError(
                 f"管理页端口 {bind_port} 已被其他工作区占用；"
                 "请修改 local-web.yml 的 managerPort，或停止占用该端口的管理页",
             )
 
-        pid = _spawn_manager(workspace)
-        state = ManagerState(
-            enabled=True,
-            pid=pid,
-            started_at=now_iso(),
-            host=bind_host,
-            port=bind_port,
-        )
+        try:
+            pid = _spawn_manager(workspace)
+        except Exception as exc:  # noqa: BLE001 — spawn 失败同样写失败观测
+            state.pid = None
+            record_start_failure(state, f"管理页子进程 spawn 失败：{exc}", source=source)
+            write_state(workspace, state)
+            raise
+        state.pid = pid
+        state.started_at = now_iso()
         write_state(workspace, state)
         if not _wait_for_health(config):
-            state.enabled = False
+            # IMP-064.02：健康检查失败只写失败观测（lastStartError + 计数），
+            # 杀残留进程、清 pid、抛原异常——绝不把 enabled 写回 False。
+            state.pid = None
+            record_start_failure(
+                state,
+                f"管理页子进程启动失败或健康检查超时（pid={pid}，port={bind_port}）",
+                source=source,
+            )
             write_state(workspace, state)
             if is_pid_alive(pid):
                 _terminate_pid(pid, timeout=1.0, workspace=workspace)
@@ -448,6 +505,9 @@ def start_manager(workspace: Workspace, config: Config) -> int:
                 f"管理页子进程启动失败或健康检查超时（pid={pid}，port={bind_port}）",
                 pid=pid,
             )
+        # IMP-064.02/064.06：启动成功清零失败计数。
+        clear_start_failures(state)
+        write_state(workspace, state)
         log.info("管理页已启动（pid=%s, port=%s）", pid, bind_port)
         # IMP-010 / DEV-041（WBS 0.8）：管理页成功启动后联动启动 Caddy 网关，
         # 使 :8080 别名入口随管理页一起就绪。maybe_start_gateway 已吞 LifecycleError
@@ -463,7 +523,7 @@ def start_manager(workspace: Workspace, config: Config) -> int:
 
 
 def stop_manager(workspace: Workspace) -> bool:
-    """``lwa manager off``：停止后台管理页。"""
+    """``lwa manager off``：停止后台管理页（用户级——写 ``enabled=False``）。"""
     state = read_state(workspace)
     if state is None:
         return True
@@ -490,13 +550,15 @@ def stop_manager(workspace: Workspace) -> bool:
         and state.enabled
         and health_matches_workspace(state.host, state.port, workspace.root, state=state)
     ):
-        # BUG-126：健康端点仍属于本工作区但找不到可确认身份的 PID，不能假报成功。
+        # BUG-126：健康端点仍属于本工作区但找不到可安全终止的 PID，不能假报成功。
         log.warning("管理页仍健康但未找到可安全终止的监听 PID（port=%s）", state.port)
         return False
     if stopped:
         state.enabled = False
         if discovered:
             state.pid = pid
+        # IMP-064.06：用户级 off 重置失败观测（用户已明确接管该服务）。
+        clear_start_failures(state)
         write_state(workspace, state)
         try:
             from local_webpage_access.capability import clear_capability_cache
@@ -507,6 +569,54 @@ def stop_manager(workspace: Workspace) -> bool:
         log.info("管理页已停止（pid=%s）", pid or state.pid)
     else:
         log.warning("管理页停止失败，进程可能仍在运行（pid=%s）", state.pid)
+    return stopped
+
+
+def stop_manager_internal(workspace: Workspace) -> bool:
+    """IMP-064.03：内部停止原语——终止进程但**不改用户意图**。
+
+    供 ``updater.restart_manager`` 主序列与版本不一致二次停止使用：写盘只清
+    ``pid``（保留 ``enabled`` 与失败观测），随后由 ``start_manager`` 的成败
+    决定意图与失败记录。与用户级 :func:`stop_manager`（写 ``enabled=False``
+    并重置失败记录）严格区分。
+    """
+    state = read_state(workspace)
+    if state is None:
+        return True
+    pid = state.pid
+    if pid is None and state.enabled:
+        pid = find_listening_pid(state.port)
+
+    stopped = True
+    if pid:
+        if is_pid_alive(pid) and not _manager_pid_matches(pid, workspace):
+            if state.pid is not None:
+                log.warning("管理页 PID %s 身份不匹配，按陈旧状态清理", pid)
+            else:
+                pid = None
+        else:
+            stopped = _terminate_pid(pid, workspace=workspace)
+
+    if (
+        pid is None
+        and state.enabled
+        and health_matches_workspace(state.host, state.port, workspace.root, state=state)
+    ):
+        log.warning("管理页仍健康但未找到可安全终止的监听 PID（port=%s）", state.port)
+        return False
+    if stopped:
+        # 只清运行观测：pid=None，enabled 保持原值（064.03 核心契约）
+        state.pid = None
+        write_state(workspace, state)
+        try:
+            from local_webpage_access.capability import clear_capability_cache
+
+            clear_capability_cache(workspace.root, "manager")
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("管理页已内部停止（意图保持 enabled=%s）", state.enabled)
+    else:
+        log.warning("管理页内部停止失败，进程可能仍在运行（pid=%s）", state.pid)
     return stopped
 
 
@@ -564,6 +674,8 @@ def existing_foreign_manager_hint(
 
 def manager_status(workspace: Workspace, config: Config) -> dict[str, Any]:
     """``lwa manager status``：返回状态摘要。"""
+    from local_webpage_access.service_failures import failure_note
+
     state = read_state(workspace)
     running = is_running(workspace, config)
     return {
@@ -574,6 +686,14 @@ def manager_status(workspace: Workspace, config: Config) -> dict[str, Any]:
         "startedAt": state.started_at if state else None,
         "host": (state.host if state else None) or config.managerHost,
         "port": (state.port if state else None) or config.managerPort,
+        # IMP-064.05：透出失败观测（无失败时为 None/0）
+        "lastStartError": (
+            state.last_start_error.to_dict() if state and state.last_start_error else None
+        ),
+        "consecutiveStartFailures": (
+            state.consecutive_start_failures if state else 0
+        ),
+        "lastStartErrorNote": failure_note(state) if state else None,
     }
 
 
@@ -655,19 +775,14 @@ def run_service_main() -> int:
                 log.exception("管理页子进程异常退出")
                 return 1
             finally:
-                # 进程退出（含 uvicorn 收到 SIGTERM 正常返回）后标记未运行，避免状态残留。
+                # IMP-064.03b：子进程退出（SIGTERM / uvicorn 正常返回）只清运行
+                # 观测（pid），**不得**写 enabled=False——监督器关机/重启后用户
+                # 意图仍是开，update reconcile 与 doctor 据此恢复/告警。
+                # pid 已被新进程覆盖时靠现有 pid 匹配跳过。
                 st = read_state(workspace)
                 if st is not None and st.pid == os.getpid():
-                    write_state(
-                        workspace,
-                        ManagerState(
-                            enabled=False,
-                            pid=st.pid,
-                            started_at=st.started_at,
-                            host=st.host,
-                            port=st.port,
-                        ),
-                    )
+                    st.pid = None
+                    write_state(workspace, st)
                     try:
                         from local_webpage_access.capability import clear_capability_cache
 
@@ -694,6 +809,7 @@ __all__ = [
     "find_listening_pid",
     "start_manager",
     "stop_manager",
+    "stop_manager_internal",
     "foreign_manager_hint",
     "existing_foreign_manager_hint",
     "manager_status",

@@ -247,6 +247,24 @@ warning 不阻断，提示稍后 `lwa doctor` 复核。若仍见瞬时 FAIL，�
    尝试 linger；`lwa init`/`setup` 收尾在 Linux systemd 环境 TTY 交互引导安装。一条命令修复：
    `lwa autostart install --with-caddy --linger`。
 
+### 服务启动失败后 update 还会自动拉起吗？（IMP-064 / V0.8.9）
+
+`run/{manager,daemon,gateway}.json` 的 `enabled` 只表用户意图，启动失败不再把它写回
+false——失败事实落在 `last_start_error`（原因/时间/来源）与 `consecutive_start_failures`
+观测字段。要点：
+
+* **失败自愈路径**：`lwa <svc> on` 失败 → 意图保持开、pid 清空、失败计数 +1；下一次
+  `lwa update` 的 reconcile（未熔断时）自动拉起并标注「意外未运行，已恢复」。
+* **熔断（防 boot loop）**：连续 ≥3 次失败且最近一次在 24h 内 → update 跳过自动拉起并
+  明示 `lwa <svc> on` 手动恢复；冷却过期（>24h）放行再试一次。**手动 on 不受熔断限制**，
+  手动 on 成功即清零计数；监督器（systemd/launchd）的 KeepAlive 重启语义不受影响。
+* **doctor/status**：`lwa doctor` 对 enabled 未运行报 FAIL 并附上次失败原因（熔断时明示）；
+  `lwa status` 自有服务段、`lwa manager/daemon/gateway status` 透出失败观测。
+* **联动不翻意图**：`gateway off` 后 `lwa manager on` / update 不再把 Caddy 拉起；
+  首次启用网关请显式 `lwa gateway on` 或 `lwa autostart install`（安装期置意图为开）。
+* **存量污染**：本版本前因失败路径写成 `enabled=false` 且无失败记录的旧文件，与真·用户
+  off 无法区分，不会自动翻回——请手动 `lwa <svc> on` 恢复。
+
 ## 导入类问题
 
 ### 零依赖 stdlib Python 服务如何导入（issue#1）
@@ -291,6 +309,28 @@ RuntimeError: 生成的 compose.yaml 含 critical 安全问题（privileged）�
 * Skill 或手工改写的模板引入了远程 `ADD` / 危险 Compose 字段。
 
 处理：去掉供应链风险指令，改用 `COPY` + 包管理器安装；详见 [安全边界](security-boundary.md)。
+
+### 容器构建 pip 下载很慢或失败？（V0.8.9 / issue #18）
+
+生成的 Dockerfile pip 层按**源链**执行：主源（china 默认阿里云）→ 官方 PyPI → 腾讯云，
+每段带 `--retries 3 --timeout 60`，主源**硬故障**（不可达/超时）时 `||` 切下一段，
+全链失败才让构建失败并把换源提示打进 build 日志。
+
+* 可在 `local-web.yml` 的 `buildMirrors` 调整：`pip`（主源）、`pipFallbacks`（备用链，
+  `[]` 表示只走主源）、`pipRetries` / `pipTimeout`；`enabled: false` 全部走官方源。
+* `||` 只管硬故障：主源**慢但能通**时 pip 会在主源上耗完，切源不会发生——此时请直接
+  换主源（改 `pip` 字段）或走代理。
+* 已知事实：requirements 变更后重构建会**全量重新下载**（实测镜像源响应头使 pip
+  HTTP 缓存未命中，BuildKit cache mount 在位也不救）——加一个小包也要等全部依赖
+  下载完成，这不是源切换能解决的问题。
+
+### 设置过的路径别名会因启动检查被清掉吗？（V0.8.9 / issue #21）
+
+不会。别名是用户资产：**已通过过活验证**的别名（或别名片段在本次启动前就存在的
+存量实例）在启动后活验证失败时只记 warning 与 `path-alias` 事件，别名元数据、
+片段、registry 登记全部保留。只有**从未验证过的 deferred 别名**（导入期设置、
+首次启动前无片段）在首次活验证失败时才按 BUG-586 收敛清除。另：统一入口对未
+命中任何别名路由的请求返回 **404**（此前是 200 空体，入口静默失效难定位）。
 
 ### 实例识别为 pending
 

@@ -946,6 +946,11 @@ class Importer:
                 ):
                     manifest.container.routeMode = "name"
                     manifest.container.routeHost = old_manifest.container.routeHost
+                # issue #23：钩子与别名同性质（用户显式配置）。apply_detection
+                # 已透传；此处幂等兜底覆盖 zip / folder / git（update_from_git
+                # 汇入本函数）三条更新路径。
+                manifest.buildHooks = list(getattr(old_manifest, "buildHooks", None) or [])
+                manifest.preStart = getattr(old_manifest, "preStart", None)
                 # 保留端口登记：从旧 registry 行读 hostPort 写回 manifest，
                 # 避免 upsert_from_manifest 用 manifest 的空 hostPort 清零登记
                 # （hosting 重启时靠 static_sites/containers 表复用端口）
@@ -2161,6 +2166,9 @@ def apply_detection_to_manifest(
     issue #20：亦保留 ``container.runAsNonRoot``——重建默认 True，不透传
     会把 legacy root 旧实例在普通 rebuild 中静默切换运行身份（未确认的
     破坏性变更）；三态语义见 ContainerConfig。
+    issue #23：亦保留 ``buildHooks`` / ``preStart``（用户显式钩子，不从 zip
+    推导）；重建默认 [] / None，不透传会在 scan / import --update /
+    rebuild --sync / git 更新后静默清空。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -2233,6 +2241,12 @@ def apply_detection_to_manifest(
     # 无 container 子表，fresh 维持新导入默认 True。
     if manifest.container is not None and fresh.container is not None:
         fresh.container.runAsNonRoot = manifest.container.runAsNonRoot
+    # issue #23：buildHooks / preStart 是用户在 manifest 的显式配置，不从
+    # zip 推导；build_manifest_from_detection 默认 [] / None，不透传会让
+    # scan / import --update / rebuild --sync / update_from_git（汇入
+    # _update_zip_locked）静默清空。list() 拷贝避免与旧 manifest 共享可变列表。
+    fresh.buildHooks = list(getattr(manifest, "buildHooks", None) or [])
+    fresh.preStart = getattr(manifest, "preStart", None)
     return fresh
 
 

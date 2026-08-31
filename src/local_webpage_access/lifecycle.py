@@ -419,11 +419,20 @@ def start_instance(
         # BUG-084 / IMP-021：首次启动前设置的容器别名此时才拿到 hostPort，
         # 同步生成别名片段（端口漂移时也会重写）；静态别名由 _enable_static 处理，
         # 此处对其为 no-op（conf 已是正确端口）。
+        # issue #21：片段在本轮同步前是否已在盘——存量实例的别名已跑过完整
+        # 部署周期的旁证；启动后活验证失败时据此保留别名而非清除。
+        alias_conf_path = workspace.app_alias_config(instance_id)
+        alias_fragment_preexisting = alias_conf_path.is_file()
         _sync_alias_port(workspace, config, instance_id, manifest)
         from local_webpage_access.path_alias import maybe_verify_alias_after_start
 
         maybe_verify_alias_after_start(
-            workspace, config, registry, instance_id, manifest
+            workspace,
+            config,
+            registry,
+            instance_id,
+            manifest,
+            alias_fragment_preexisting=alias_fragment_preexisting,
         )
         return manifest
 
@@ -1051,9 +1060,11 @@ def _snapshot_attempt(
 
     快照内容：
     - manifest 关键字段（selectedPlanId, kind, runtime, servingMode, entry,
-      sourceSubdir, container, capabilityContract）
-    - 生成文件内容（compose.yaml, Dockerfile, .env）--若文件存在
+      sourceSubdir, container, network, capabilityContract）
+    - 生成文件内容（compose.yaml, Dockerfile, .env, alias.conf）--若文件存在
     - 端口分配（hostPort from manifest.container）
+    issue #21 纵深防御：别名片段 + network.routeMode/routeHost 一并入快照，
+    避免将来新回滚路径漏掉已验证别名。
 
     返回 dict 可直接序列化。
     """
@@ -1066,6 +1077,7 @@ def _snapshot_attempt(
             "entry": manifest.entry.model_dump() if manifest.entry else None,
             "sourceSubdir": manifest.sourceSubdir,
             "container": manifest.container.model_dump() if manifest.container else None,
+            "network": manifest.network.model_dump() if manifest.network else None,
             "capabilityContract": getattr(manifest, "capabilityContract", None),
         },
         "files": {},
@@ -1078,6 +1090,7 @@ def _snapshot_attempt(
         ("compose.yaml", workspace.app_compose_path(instance_id)),
         ("Dockerfile", workspace.app_dockerfile_path(instance_id)),
         (".env", workspace.app_env_path(instance_id)),
+        ("alias.conf", workspace.app_alias_config(instance_id)),
     ]:
         # 防御 MagicMock 测试环境：只处理真实 Path
         if not isinstance(path, Path):
@@ -1130,6 +1143,7 @@ def _restore_from_snapshot(
         ContainerConfig,
         EntryConfig,
         Kind,
+        NetworkConfig,
         Runtime,
         ServingMode,
     )
@@ -1141,17 +1155,20 @@ def _restore_from_snapshot(
 
     # 1. 恢复生成文件（覆盖或删除本次 attempt 生成的文件）
     files = snapshot.get("files", {})
-    for name in ("Dockerfile", "compose.yaml", ".env"):
-        path = {
-            "Dockerfile": workspace.app_dockerfile_path(instance_id),
-            "compose.yaml": workspace.app_compose_path(instance_id),
-            ".env": workspace.app_env_path(instance_id),
-        }[name]
+    file_paths = {
+        "Dockerfile": workspace.app_dockerfile_path(instance_id),
+        "compose.yaml": workspace.app_compose_path(instance_id),
+        ".env": workspace.app_env_path(instance_id),
+        "alias.conf": workspace.app_alias_config(instance_id),
+    }
+    for name in ("Dockerfile", "compose.yaml", ".env", "alias.conf"):
+        path = file_paths[name]
         # 防御 MagicMock 测试环境：只处理真实 Path
         if not isinstance(path, Path):
             continue
         if name in files:
             try:
+                path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(files[name], encoding="utf-8")
                 restored.append(f"file:{name}")
             except Exception as exc:  # noqa: BLE001
@@ -1192,6 +1209,8 @@ def _restore_from_snapshot(
             manifest.sourceSubdir = mf["sourceSubdir"]
         if mf.get("container"):
             manifest.container = ContainerConfig(**mf["container"])
+        if mf.get("network"):
+            manifest.network = NetworkConfig(**mf["network"])
         if mf.get("capabilityContract"):
             manifest.capabilityContract = mf["capabilityContract"]
         manifest.touch()
@@ -1223,8 +1242,8 @@ def _rollback_attempt(
     回滚范围（§6.5 候选切换事务 Rollback 阶段）+ C.R04 扩展：
     - 容器（``docker compose down``）
     - 端口（释放本次 attempt 新分配的端口）
-    - 生成文件（compose.yaml / Dockerfile / .env -- 从快照恢复或删除）
-    - manifest 选中状态（selectedPlanId / kind / runtime / entry 等-- 从快照恢复）
+    - 生成文件（compose.yaml / Dockerfile / .env / alias.conf -- 从快照恢复或删除）
+    - manifest 选中状态（selectedPlanId / kind / runtime / entry / network 等-- 从快照恢复）
 
     逆序恢复：manifest -> 文件 -> 端口 -> 容器。
 

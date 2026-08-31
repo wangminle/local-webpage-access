@@ -729,6 +729,18 @@ def scan(
                         continue
                     manifest = InstanceManifest.load(manifest_path)
                     manifest = apply_detection_to_manifest(manifest, detection, ws)
+                    # C.02（IMP-056 后置包）：重扫后用同一 checker 原子刷新
+                    # findings——问题代码删除即清除旧 finding；失败保留旧结果
+                    # 并标 stale，不写半成品。
+                    from local_webpage_access.compatibility_checker import (
+                        refresh_compatibility_findings,
+                    )
+
+                    refreshed = refresh_compatibility_findings(
+                        current_dir,
+                        manifest,
+                        primary_subdir=detection.source_subdir,
+                    )
                     manifest.save(manifest_path)
                     reg.upsert_from_manifest(manifest)
                     reg.add_event(
@@ -736,6 +748,23 @@ def scan(
                         "scan",
                         f"重新扫描：{detection.form}（{detection.confidence}）",
                     )
+                    if refreshed:
+                        findings = manifest.compatibilityFindings
+                        if findings:
+                            order = {"info": 0, "warning": 1, "critical": 2}
+                            top = max(
+                                (f.severity for f in findings),
+                                key=lambda s: order.get(s, 0),
+                            )
+                            typer.secho(
+                                f"  {iid}：兼容性预检 {len(findings)} 条发现（最高 {top}）",
+                                fg=typer.colors.YELLOW,
+                            )
+                    else:
+                        typer.secho(
+                            f"  {iid}：兼容性预检重扫失败，旧结果已保留并标 stale",
+                            fg=typer.colors.YELLOW,
+                        )
                 status_label = detection.form if not detection.pending else "pending"
                 typer.echo(f"  {iid}：{status_label}（{detection.confidence}）")
         finally:

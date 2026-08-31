@@ -29,6 +29,13 @@ def test_default_config_values() -> None:
     resolved = cfg.buildMirrors.resolved()
     assert resolved.pip and "aliyun" in resolved.pip
     assert resolved.npm and "npmmirror" in resolved.npm
+    # issue #18：china 默认切源链官方 PyPI → 腾讯云，每源 retries 3
+    assert resolved.pipFallbacks == [
+        "https://pypi.org/simple",
+        "https://mirrors.cloud.tencent.com/pypi/simple",
+    ]
+    assert resolved.pipRetries == 3
+    assert resolved.pipTimeout == 60
 
 
 def test_build_mirrors_disabled_resolves_empty() -> None:

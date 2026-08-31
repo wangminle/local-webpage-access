@@ -1,8 +1,10 @@
 # GitHub Issue 代码质量共性分析报告
 
-> 盘点时间：2026-08-18  
+> 盘点时间：2026-08-18；2026-08-31 复评
 > 数据来源：[GitHub wangminle/local-webpage-access issues #1–#5](https://github.com/wangminle/local-webpage-access/issues)（2026-08-17 至 2026-08-18）  
 > 关联台账：[[CHK-233]] · 可视化原版见 `canvases/github-issues-quality-patterns.canvas.tsx`
+
+> **当前状态（2026-08-31）**：原分析样本 #1～#5 已全部关闭，BUG-549～552 已随 V0.8.2 收口。本文的质量规律继续有效，但原开放状态和修复顺序只保留为历史现场，不再作为当前待办。
 
 ## 摘要
 
@@ -11,8 +13,8 @@
 | 指标 | 数值 |
 | --- | --- |
 | 新增 Issue | 5 |
-| 仍开放 | 4（#2–#5） |
-| 已关闭 | 1（[#1](https://github.com/wangminle/local-webpage-access/issues/1)，V0.8.0 修复） |
+| 仍开放 | 0（原样本 #1～#5） |
+| 已关闭 | 5（#1～#5；#1 于 V0.8.0 修复，#2～#5 于 V0.8.2 收口） |
 | 落在自启/更新路径 | 4/5 |
 
 **一句话结论：** 大家真正有意见的，不是「测试不够」或「风格不统一」，而是：进程监管层上线后，多套真相源（json / pidfile / 监督器 / admin 探活）没有统一；运维命令对已达目标态仍会动进程；重启后的瞬态被当成真实失败。
@@ -26,20 +28,33 @@
 | # | 状态 | 标题 | 平台 | 质量焦点 |
 | --- | --- | --- | --- | --- |
 | [#1](https://github.com/wangminle/local-webpage-access/issues/1) | closed | stdlib 服务：识别无覆盖、挂载被抹、失败后撞锁 | Ubuntu | 封闭世界 + 生成物无出口 + 锁/自愈 |
-| [#2](https://github.com/wangminle/local-webpage-access/issues/2) | open | autostart enable：launchctl error 5，gateway 下线 | macOS | 竞态 + 失败不自愈 |
-| [#3](https://github.com/wangminle/local-webpage-access/issues/3) | open | autostart enable：已监管进程被非必要 stop | WSL2 systemd | 不幂等 + 能力未复用 |
-| [#4](https://github.com/wangminle/local-webpage-access/issues/4) | open | update 虚报 Gateway 中断 7.6 天；check 误杀自家 caddy | Ubuntu systemd | 陈旧 json 当观测 |
-| [#5](https://github.com/wangminle/local-webpage-access/issues/5) | open | update 内置 doctor/accessReview 落在重启窗口，瞬时 FAIL | Ubuntu systemd | 无就绪等待 + 误报 |
+| [#2](https://github.com/wangminle/local-webpage-access/issues/2) | closed | autostart enable：launchctl error 5，gateway 下线 | macOS | 竞态 + 失败不自愈 |
+| [#3](https://github.com/wangminle/local-webpage-access/issues/3) | closed | autostart enable：已监管进程被非必要 stop | WSL2 systemd | 不幂等 + 能力未复用 |
+| [#4](https://github.com/wangminle/local-webpage-access/issues/4) | closed | update 虚报 Gateway 中断 7.6 天；check 误杀自家 caddy | Ubuntu systemd | 陈旧 json 当观测 |
+| [#5](https://github.com/wangminle/local-webpage-access/issues/5) | closed | update 内置 doctor/accessReview 落在重启窗口，瞬时 FAIL | Ubuntu systemd | 无就绪等待 + 误报 |
+
+---
+
+## 2026-08-31 当前风险增量
+
+以下两项不是重新打开 #1～#5，而是说明本文质量规律仍会在新路径复现：
+
+| Issue | 当前状态与分级 | 对本文规律的增量 | 落地要求 |
+| --- | --- | --- | --- |
+| [#21](https://github.com/wangminle/local-webpage-access/issues/21) | **开放；直接修复** | liveness 失败回滚丢失 `routeMode=name`、路径别名及网关片段，继续命中 L3「失败 fail-safe」和 L5「意图/观测/持久化分离」 | 回滚快照必须覆盖 manifest 别名元数据和生成片段；恢复失败时停止自动 fallback 并报告残余项 |
+| [#18](https://github.com/wangminle/local-webpage-access/issues/18) | **开放；纳入可靠性改进** | 生成 Dockerfile 把单一镜像源硬编码为唯一通路，继续命中 L6「生成物要有用户出口」，并暴露外部依赖缺少超时、重试与 fallback | 下载源可配置；默认策略不得绑定单一第三方镜像；增加超时、有限重试、多源/官方源降级及失败诊断 |
+
+当前优先级：先处理可能造成入口静默失效的 #21，再处理 #18；IMP-064 继续作为 L5 的结构性修复，而不是用更多状态字段补丁替代意图/观测分离。
 
 ---
 
 ## 主题重叠：5 条 Issue 打中 4 条规律
 
-前四条规律各被 3/5 个 Issue 触及，说明不是孤立缺陷，而是同一设计习惯在不同命令上的重复。
+“陈旧状态当观测”被 2/5 个 Issue 直接触及，其余三条主要规律各被 3/5 个 Issue 触及，说明不是孤立缺陷，而是同一设计习惯在不同命令上的重复。
 
 | 规律 | 触及 Issue 数 | 计入 Issue |
 | --- | ---: | --- |
-| 陈旧状态当观测 | 3 | #3、#4 |
+| 陈旧状态当观测 | 2 | #3、#4 |
 | 命令不幂等 / 失败留残局 | 3 | #1（挂载抹除）、#2、#3 |
 | 重启竞态无就绪等待 | 3 | #2、#3、#5 |
 | 已有探活能力未接线 | 3 | #3、#4、#5 |
@@ -149,7 +164,7 @@ enable / start / update 被当成「再做一遍流程」，而不是「收敛�
 
 ---
 
-## 建议的修复顺序
+## 历史修复顺序（已完成）
 
 > 2026-08-18 补记：四项已全部修复并经红绿验证收口于 **V0.8.2**（BUG-549~552 / CHK-234/235），详见 2608 计划 changelog。
 
@@ -158,7 +173,7 @@ enable / start / update 被当成「再做一遍流程」，而不是「收敛�
 3. **#2** — 加 error 5 短重试 + 失败兜底拉起（台账 [[BUG-549]]）。
 4. **#5** — 在 restart 与 doctor 之间接入就绪等待。
 
-四条修完后，这批「监管层观测」裂缝会收口。
+四条已修完，这批原始「监管层观测」裂缝已收口；后续同类问题按“2026-08-31 当前风险增量”继续追踪。
 
 ---
 

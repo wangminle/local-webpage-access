@@ -95,6 +95,11 @@ _CHINA_PIP = "https://mirrors.aliyun.com/pypi/simple/"
 _CHINA_NPM = "https://registry.npmmirror.com"
 _CHINA_NODE_DIST = "https://mirrors.aliyun.com/nodejs-release"
 _CHINA_APT = "mirrors.aliyun.com"
+# issue #18：pip || 切源链——阿里（主源）→ 官方 PyPI → 腾讯云。
+# extra-index-url 不能在主源慢但包存在时切走；硬故障才走下一段。
+_OFFICIAL_PYPI = "https://pypi.org/simple"
+_TENCENT_PIP = "https://mirrors.cloud.tencent.com/pypi/simple/"
+_CHINA_PIP_FALLBACKS = (_OFFICIAL_PYPI, _TENCENT_PIP)
 
 
 class BuildMirrors(BaseModel):
@@ -102,11 +107,20 @@ class BuildMirrors(BaseModel):
 
     面向国内小主机：默认 ``enabled=true``，注入 pip/npm/Node 发行包与 apt 镜像。
     海外环境可设 ``enabled: false`` 走官方源。字段非空时覆盖 preset 默认值。
+
+    issue #18：``pipFallbacks`` 是主源失败后的 ``||`` 切源列表（china 默认
+    官方 PyPI → 腾讯云）；``pipRetries`` / ``pipTimeout`` 写入每段 pip 命令。
+    显式 ``pipFallbacks: []`` 关闭切源。``pipExtraIndex`` 保留解析兼容，
+    默认不再注入 ``--extra-index-url``（同版本包不会因主源慢而切走）。
     """
 
     enabled: bool = True
     preset: str = "china"  # china | none
     pip: str | None = None
+    pipExtraIndex: str | None = None
+    pipFallbacks: list[str] | None = None
+    pipRetries: int = Field(default=3, ge=0, le=20)
+    pipTimeout: int = Field(default=60, ge=1, le=600)
     npm: str | None = None
     nodeDistBase: str | None = None
     aptMirror: str | None = None
@@ -127,14 +141,27 @@ class BuildMirrors(BaseModel):
                 enabled=False,
                 preset="none",
                 pip=None,
+                pipExtraIndex=None,
+                pipFallbacks=[],
+                pipRetries=self.pipRetries,
+                pipTimeout=self.pipTimeout,
                 npm=None,
                 nodeDistBase=None,
                 aptMirror=None,
             )
+        fallbacks = (
+            [u.rstrip("/") for u in self.pipFallbacks]
+            if self.pipFallbacks is not None
+            else [u.rstrip("/") for u in _CHINA_PIP_FALLBACKS]
+        )
         return BuildMirrors(
             enabled=True,
             preset="china",
             pip=self.pip or _CHINA_PIP,
+            pipExtraIndex=self.pipExtraIndex,
+            pipFallbacks=fallbacks,
+            pipRetries=self.pipRetries,
+            pipTimeout=self.pipTimeout,
             npm=self.npm or _CHINA_NPM,
             nodeDistBase=(self.nodeDistBase or _CHINA_NODE_DIST).rstrip("/"),
             aptMirror=self.aptMirror or _CHINA_APT,
@@ -353,10 +380,16 @@ staticRateLimit:
   burst: 6      # 令牌桶容量（瞬时突发上限）
 
 # 容器构建镜像源（BUG-200）：默认启用国内源；海外可设 enabled: false
+# issue #18：pip 默认阿里 → 官方 → 腾讯，每源 retries 3；pipFallbacks: [] 关闭切源
 buildMirrors:
   enabled: true
   preset: china
   # pip: https://mirrors.aliyun.com/pypi/simple/
+  # pipFallbacks:
+  #   - https://pypi.org/simple
+  #   - https://mirrors.cloud.tencent.com/pypi/simple/
+  # pipRetries: 3
+  # pipTimeout: 60
   # npm: https://registry.npmmirror.com
   # nodeDistBase: https://mirrors.aliyun.com/nodejs-release
   # aptMirror: mirrors.aliyun.com

@@ -385,11 +385,18 @@ def test_start_gateway_rejects_foreign_admin_before_stopping_builtin(
 def test_start_gateway_raises_on_caddy_start_failure(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
+    """IMP-064.02：caddy_start 失败——意图保持 enabled=True，失败写观测字段。"""
     fake_gateway["admin_alive"] = False
     fake_gateway["start_ok"] = False
     with pytest.raises(LifecycleError):
         start_gateway(workspace, config)
-    assert read_state(workspace) is None  # 失败不写服务态
+    st = read_state(workspace)
+    assert st is not None
+    assert st.enabled is True  # on 的意图不因失败回退
+    assert st.pid is None
+    assert st.last_start_error is not None
+    assert "启动失败" in st.last_start_error.message
+    assert st.consecutive_start_failures == 1
 
 
 def test_start_gateway_restores_builtin_when_caddy_start_fails(
@@ -609,7 +616,9 @@ def test_gateway_status_exposes_orphan_master_when_builtin(
 def test_maybe_start_gateway_caddy_success(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
+    """IMP-064（规则 9）：联动仅在 gateway 意图为 enabled 时启动。"""
     fake_gateway["admin_alive"] = False
+    write_state(workspace, GatewayState(enabled=True))
     assert maybe_start_gateway(workspace, config) == 12345
     assert fake_gateway["start_calls"] == 1
 
@@ -628,6 +637,7 @@ def test_maybe_start_gateway_swallows_failure(
     """caddy 后端但启动失败时不抛，仅返回 None（降级 builtin 不阻断）。"""
     fake_gateway["admin_alive"] = False
     fake_gateway["start_ok"] = False
+    write_state(workspace, GatewayState(enabled=True))
     assert maybe_start_gateway(workspace, config) is None  # 不抛 LifecycleError
 
 
@@ -635,7 +645,24 @@ def test_maybe_start_gateway_noop_when_already_running(
     workspace: Workspace, config: Config, fake_gateway
 ) -> None:
     fake_gateway["admin_alive"] = True
+    write_state(workspace, GatewayState(enabled=True))
     assert maybe_start_gateway(workspace, config) == 0
+    assert fake_gateway["start_calls"] == 0
+
+
+def test_maybe_start_gateway_skips_disabled_intent(
+    workspace: Workspace, config: Config, fake_gateway
+) -> None:
+    """IMP-064（规则 9 / CHK-232 遗漏 2）：gateway off 后联动不把意图翻回开。"""
+    fake_gateway["admin_alive"] = False
+    write_state(workspace, GatewayState(enabled=False))
+    assert maybe_start_gateway(workspace, config) is None
+    assert fake_gateway["start_calls"] == 0
+    # 状态文件缺失（未表达意图）同样跳过——fresh init 不再联动拉起 Caddy
+    write_state(workspace, GatewayState(enabled=False))
+    state_path = workspace.run / "gateway.json"
+    state_path.unlink()
+    assert maybe_start_gateway(workspace, config) is None
     assert fake_gateway["start_calls"] == 0
 
 
@@ -746,7 +773,9 @@ def test_run_gateway_foreground_refreshes_capability_after_start(
     monkeypatch.setattr(
         "local_webpage_access.gateway_service.is_gateway_running", lambda *a, **k: True
     )
-    monkeypatch.setattr("local_webpage_access.gateway_service.stop_gateway", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.stop_gateway_internal", lambda *a, **k: None
+    )
     monkeypatch.setattr(cap_mod, "collect_capability_report", fake_collect)
     monkeypatch.setattr(cap_mod, "log_capability_probe", fake_log_probe)
     monkeypatch.setattr(cap_mod, "write_capability_cache", fake_write)

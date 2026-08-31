@@ -28,6 +28,7 @@ from local_webpage_access.dockerfile_templates import generate_dockerfile
 from local_webpage_access.errors import ConfigError
 from local_webpage_access.models import (
     ContainerConfig,
+    DatabaseConfig,
     EntryConfig,
     InstanceManifest,
     Kind,
@@ -135,6 +136,64 @@ def test_dockerfile_templates_emit_user_directive(
     codes = [f.code for f in audit_dockerfile(content)]
     assert "no_user" not in codes
     assert "root_user" not in codes
+
+
+@pytest.mark.parametrize(
+    ("kind", "install", "start"),
+    [
+        (Kind.PYTHON, "pip install -r requirements.txt", "uvicorn main:app"),
+        (Kind.NODE, "npm ci", "node server.js"),
+        (Kind.STATIC, None, "python -m http.server 8000"),
+    ],
+)
+def test_dockerfile_non_root_chown_before_user_all_templates(
+    workspace: Workspace, kind: Kind, install: str | None, start: str | None
+) -> None:
+    """issue #22：三类模板 runAsNonRoot=True 时 USER 前有 chown，且 uid:gid 同源。"""
+    _ensure_data_dir(workspace)
+    m = _mk_manifest(kind=kind, run_as_non_root=True, install=install, start=start)
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    lines = content.splitlines()
+    user_idx = next(i for i, ln in enumerate(lines) if ln.startswith("USER "))
+    user = lines[user_idx].split(" ", 1)[1]
+    chown_idx = next(
+        i for i, ln in enumerate(lines) if ln.startswith("RUN chown -R ")
+    )
+    assert chown_idx < user_idx, "chown 必须在 USER 之前"
+    assert f"RUN chown -R {user} " in lines[chown_idx]
+    assert " /app" in lines[chown_idx]
+
+
+def test_dockerfile_sqlite_chown_matches_mkdir_tree(workspace: Workspace) -> None:
+    """issue #22：sqlite 布局 chown 树与 sqlite_mkdir 同源。"""
+    _ensure_data_dir(workspace)
+    m = _mk_manifest(
+        run_as_non_root=True,
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+    )
+    m.hasDatabase = True
+    m.database = DatabaseConfig(type="sqlite")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "RUN mkdir -p /app/data" in content
+    assert "RUN chown -R " in content
+    chown = next(ln for ln in content.splitlines() if ln.startswith("RUN chown -R "))
+    assert chown.endswith(" /app/data")
+
+    m.database = DatabaseConfig(type="sqlite", dataDir="runtime/data")
+    content_rt = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "RUN mkdir -p /app/runtime/data" in content_rt
+    chown_rt = next(
+        ln for ln in content_rt.splitlines() if ln.startswith("RUN chown -R ")
+    )
+    assert chown_rt.endswith(" /app/runtime")
+
+
+def test_dockerfile_legacy_root_has_no_chown(workspace: Workspace) -> None:
+    """issue #22：legacy root 不插入 chown。"""
+    m = _mk_manifest(run_as_non_root=None, install="pip install -r requirements.txt")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "RUN chown -R " not in content
 
 
 def test_dockerfile_legacy_root_has_no_user(workspace: Workspace) -> None:

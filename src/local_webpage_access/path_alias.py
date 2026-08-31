@@ -21,7 +21,7 @@ from local_webpage_access.file_lock import (
     try_acquire_exclusive,
     write_lock_payload,
 )
-from local_webpage_access.logging import get_logger
+from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.models import (
     InstanceManifest,
     NetworkConfig,
@@ -310,6 +310,14 @@ def verify_alias_live(
             )
 
 
+def _alias_previously_verified(manifest: InstanceManifest, alias: str) -> bool:
+    """issue #21：别名是否通过过至少一次活验证（标记匹配当前别名）。"""
+    return bool(
+        manifest.aliasLiveVerifiedAt
+        and manifest.aliasLiveVerifiedFor == alias
+    )
+
+
 def maybe_verify_alias_after_start(
     workspace: Workspace,
     config: Config,
@@ -318,8 +326,19 @@ def maybe_verify_alias_after_start(
     manifest: InstanceManifest,
     *,
     skip_compat_check: bool = False,
+    alias_fragment_preexisting: bool | None = None,
 ) -> bool:
-    """实例首次 start 后对已配置别名补跑活验证（导入期未 running 时 deferred）。"""
+    """实例首次 start 后对已配置别名补跑活验证（导入期未 running 时 deferred）。
+
+    issue #21：活验证失败时的处置按「别名是否已被验证过」分流——
+
+    - **已验证别名**（``aliasLiveVerifiedFor`` 标记匹配，或本轮 start 前
+      别名片段已在盘——存量实例无标记但已跑过完整部署周期的旁证）：
+      保留别名元数据与片段，仅记 warning 与事件，不抛错、不清除。
+      应用慢启动 / 入口临时 5xx 不应静默摧毁用户配置的入口。
+    - **deferred 别名**（导入期设置、从未验证、片段系本轮生成）：维持
+      BUG-586 收敛行为——删除片段、清 manifest/registry 并抛错。
+    """
     alias = _current_alias(manifest)
     if not alias or skip_compat_check:
         return False
@@ -332,12 +351,40 @@ def maybe_verify_alias_after_start(
     )
     try:
         verify_alias_live(config, alias, entry_html=html, instance_id=instance_id)
-    except RecognitionError:
+    except RecognitionError as exc:
+        if _alias_previously_verified(manifest, alias) or alias_fragment_preexisting:
+            log.warning(
+                "实例 %s 别名 /%s/ 启动后活验证失败（%s）；"
+                "别名此前已验证/已在用，保留别名配置，请检查应用入口",
+                instance_id,
+                alias,
+                exc,
+            )
+            registry.add_event(
+                instance_id,
+                "path-alias",
+                f"别名 /{alias}/ 启动后活验证失败（已保留别名配置）：{str(exc)[:200]}",
+            )
+            return False
         _rollback_deferred_alias_after_failed_live_verify(
             workspace, config, registry, instance_id, manifest, host_port=host_port
         )
         raise
     except Exception as exc:  # noqa: BLE001
+        if _alias_previously_verified(manifest, alias) or alias_fragment_preexisting:
+            log.warning(
+                "实例 %s 别名 /%s/ 启动后活验证异常（%s）；"
+                "别名此前已验证/已在用，保留别名配置，请检查应用入口",
+                instance_id,
+                alias,
+                exc,
+            )
+            registry.add_event(
+                instance_id,
+                "path-alias",
+                f"别名 /{alias}/ 启动后活验证异常（已保留别名配置）：{str(exc)[:200]}",
+            )
+            return False
         _rollback_deferred_alias_after_failed_live_verify(
             workspace, config, registry, instance_id, manifest, host_port=host_port
         )
@@ -345,6 +392,11 @@ def maybe_verify_alias_after_start(
             f"别名 /{alias}/ 启动后活验证异常：{exc}",
             instance_id=instance_id,
         ) from exc
+    # issue #21：验证通过即落标记，后续启动的活验证失败走「保留」分支。
+    manifest.aliasLiveVerifiedAt = now_iso()
+    manifest.aliasLiveVerifiedFor = alias
+    with contextlib.suppress(OSError):
+        manifest.save(workspace.app_manifest_path(instance_id))
     registry.add_event(instance_id, "path-alias", f"别名 /{alias}/ 启动后活验证通过")
     return True
 
@@ -372,6 +424,10 @@ def _apply_manifest_alias(
     """写入 manifest.static（静态站点）或 manifest.container（容器，IMP-014）
     与 manifest.network（不持久化）。"""
     new_mode = RouteMode.NAME.value if alias else RouteMode.PORT.value
+    # issue #21：换别名 / 清除别名时，旧别名的活验证标记随之失效。
+    if manifest.aliasLiveVerifiedFor != alias:
+        manifest.aliasLiveVerifiedAt = None
+        manifest.aliasLiveVerifiedFor = None
     if manifest.runtime == Runtime.DOCKER_COMPOSE:
         # IMP-014：容器别名写入 container.routeMode/routeHost，registry 容器表据此联动。
         if manifest.container is not None:
@@ -581,6 +637,38 @@ def set_instance_path_alias(
             )
 
 
+def _enrich_alias_rejection_with_findings(
+    exc: RecognitionError,
+    manifest: InstanceManifest,
+) -> RecognitionError:
+    """C.03（IMP-056 后置包）：IMP-055 拒绝原因后附加关联的预检 finding。
+
+    只取 CHK-P03（绝对 API 路径 / 空 base 常量——与别名入口失效同族）且
+    file 非空的 finding，按「预检线索」标注，最多 3 条。无关联 finding 时
+    原样返回原异常（错误文案零变化）。**禁止**据此单独拒绝 alias——主错误
+    仍来自 IMP-055 硬守卫。
+    """
+    findings = getattr(manifest, "compatibilityFindings", None) or []
+    related = [
+        f
+        for f in findings
+        if getattr(f, "checkId", "") == "CHK-P03" and getattr(f, "file", None)
+    ]
+    if not related:
+        return exc
+    # LwaError.__str__ 自带 [CODE] 前缀；拼接须用原始 message，避免双重前缀。
+    lines = [exc.message or str(exc), "", "—— 预检线索（advisory，导入期静态扫描，不改变上述拒绝原因）——"]
+    for f in related[:3]:
+        loc = f"{f.file}:{f.line}" if f.line else str(f.file)
+        lines.append(f"  · {f.title}（{loc}）")
+        lines.append(f"    修复建议：{f.fix}")
+    if len(related) > 3:
+        lines.append(f"  …另有 {len(related) - 3} 条，见 lwa doctor / 管理页")
+    enriched = RecognitionError("\n".join(lines))
+    enriched.context = dict(getattr(exc, "context", {}) or {})
+    return enriched
+
+
 def _set_instance_path_alias_locked(
     workspace: Workspace,
     config: Config,
@@ -646,9 +734,15 @@ def _set_instance_path_alias_locked(
         )
         if html is not None:
             html_verified = True
-            html_warnings = reject_alias_if_absolute_spa_assets(
-                html=html, alias=alias, instance_id=instance_id
-            )
+            try:
+                html_warnings = reject_alias_if_absolute_spa_assets(
+                    html=html, alias=alias, instance_id=instance_id
+                )
+            except RecognitionError as exc:
+                # C.03（IMP-056 后置包）：拒绝原因保持 IMP-055 原文，其后附加
+                # 导入期预检的关联 finding 线索（file/line/fix）。无 finding
+                # 时错误完全原样；findings 只提供线索，不参与拒绝判定。
+                raise _enrich_alias_rejection_with_findings(exc, manifest) from exc
 
     # BUG-586：活验证失败回滚需恢复「变更前」片段，快照必须在新片段写入
     # 之前捕获；回滚时再读文件拿到的已是刚写入的新片段，恢复等于没恢复。
@@ -700,6 +794,11 @@ def _set_instance_path_alias_locked(
                 raise
 
     _apply_manifest_alias(manifest, config, alias)
+    # issue #21：运行中设置且活验证通过 → 落验证标记（须在 _apply_manifest_alias
+    # 之后，否则新别名会被判为「标记不匹配」而清空）。
+    if alias is not None and live_verified:
+        manifest.aliasLiveVerifiedAt = now_iso()
+        manifest.aliasLiveVerifiedFor = alias
     manifest.save(mpath)
 
     # 持久化别名到对应子表：静态站点 / 容器实例（IMP-014 容器别名落 containers 表）

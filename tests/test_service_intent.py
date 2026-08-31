@@ -185,7 +185,7 @@ def test_restart_manager_reconciles_enabled_but_down(
     monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: False)
     monkeypatch.setattr(
         "local_webpage_access.manager_service.start_manager",
-        lambda ws, cfg: 4321,
+        lambda ws, cfg, **kw: 4321,
     )
     monkeypatch.setattr(upd, "verify_manager_version", lambda cfg, **kw: (True, "V0.7.11-test"))
     # 无 autostart 单元在管 → managed=False → detached start
@@ -258,7 +258,7 @@ def test_restart_daemon_reconciles_enabled_but_down(workspace, config, monkeypat
     from local_webpage_access import daemon as daemon_mod
 
     monkeypatch.setattr(daemon_mod, "is_running", lambda ws: False)
-    monkeypatch.setattr(daemon_mod, "start_daemon", lambda ws, cfg: 777)
+    monkeypatch.setattr(daemon_mod, "start_daemon", lambda ws, cfg, **kw: 777)
     from local_webpage_access import autostart as asm
 
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: _NoUnitBackend())
@@ -292,7 +292,7 @@ def test_restart_gateway_reconciles_enabled_but_down(workspace, config, monkeypa
     )
     monkeypatch.setattr(
         "local_webpage_access.gateway_service.start_gateway",
-        lambda ws, cfg: 555,
+        lambda ws, cfg, **kw: 555,
     )
     from local_webpage_access import autostart as asm
 

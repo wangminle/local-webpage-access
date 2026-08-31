@@ -31,12 +31,12 @@ CLI, web manager, inbox auto-import, import-time security checks, and `lwa docto
 
 - **Import a zip, a local folder, or drop files into `inbox/`** — zip-slip protection, content fingerprints, read-only copy into the workspace (never run from your source tree).
 - **Detects how to run it** — `static` / Node / Python, with or without SQLite; unknown projects stay `pending` until you rescan.
-- **Port pool + optional path aliases** — stable `lanUrl`; `/{slug}/` via Caddy, refused if the SPA’s absolute paths would break. Alias entries inject `X-Real-IP` for the backend.
-- **Static and container hosting** — Caddy or builtin for static; generated non-root Dockerfile/Compose with SQLite `data/` mounts for apps (UID/GID aligned with the host `data/` owner; legacy instances migrate explicitly via `lwa migrate-user`, issue #20). Optional manifest `buildHooks` / `preStart` hooks (issue #7).
+- **Port pool + optional path aliases** — stable `lanUrl`; `/{slug}/` via Caddy, refused if the SPA’s absolute paths would break. Alias entries inject `X-Real-IP` for the backend. Verified aliases survive a failed post-start live check (V0.8.9, issue #21), and unmatched alias routes return 404 instead of an empty 200.
+- **Static and container hosting** — Caddy or builtin for static; generated non-root Dockerfile/Compose with SQLite `data/` mounts for apps (UID/GID aligned with the host `data/` owner; legacy instances migrate explicitly via `lwa migrate-user`, issue #20; image-layer dirs get `chown` before `USER`, issue #22). Optional manifest `buildHooks` / `preStart` hooks (issue #7) that survive `scan` / `import --update` / `rebuild --sync` (issue #23). pip layers chain mirrors with per-source retries/timeouts and `||` fallback (aliyun → PyPI → Tencent by default; `pipFallbacks` / `pipRetries` / `pipTimeout` configurable, issue #18).
 - **Lifecycle on a small host** — start / stop / recover / rebuild / cancel-build; default build concurrency 1; instance ports stay put. `rebuild` warns when the linked folder/git source has drifted (`--sync` refreshes it first; doctor `source_freshness` audits all instances).
 - **Web manager + inbox daemon** — Vue UI on `:17800` (loopback reads are token-free; LAN needs a rotating token). The daemon imports zips and heals dropped lightweight instances.
 - **Won’t silently write dangerous images** — generated Compose/Dockerfile audited before write; zip traversal / symlinks / bombs rejected.
-- **`lwa doctor` does not fake green** — Python / Docker / Compose / ports / disk, plus service runtime and autostart resilience. `--json` works even before `init`.
+- **`lwa doctor` does not fake green** — Python / Docker / Compose / ports / disk, plus service runtime and autostart resilience; failed service starts report `lastStartError` with a 3-in-24h auto-restart circuit breaker (V0.8.9, IMP-064), and `version_freshness` reuses `lwa update --check` with a 24h cache to flag outdated installs (IMP-062). `lwa list` / `status` surface compatibility-preflight findings (IMP-056 C.01–C.03). `--json` works even before `init`.
 - **Host setup and autostart** — Docker/Caddy install scripts (China mirrors by default); launchd / systemd units; Ubuntu LTS, Debian Stable, WSL2, macOS only.
 - **Move the workspace, update LWA, talk to an agent** — `lwa workspace relocate`, `lwa update` (fast-forward only), 20 SKILL.md files for AI assistants.
 
@@ -160,7 +160,13 @@ profile: default            # default | full
 serviceUser: null           # identity pinned by Full setup
 buildConcurrency: 1
 defaultResourceLimits: { memory: 512m, cpus: "0.75" }
-buildMirrors: { enabled: true, preset: china }
+buildMirrors:
+  enabled: true             # false → official sources everywhere
+  preset: china             # china | none
+  # pip source chain (V0.8.9, issue #18): primary + || fallbacks, per-source retries/timeout.
+  # pipFallbacks: []        # empty list → primary only
+  # pipRetries: 3
+  # pipTimeout: 60
 lanIpStrategy: auto         # auto | manual
 manualLanIp: null
 logLevel: INFO
@@ -247,12 +253,12 @@ CLI、管理页、inbox 自动导入、导入期安全检查、`lwa doctor` 均�
 
 - **zip、本机文件夹、或丢进 `inbox/`** — zip-slip 防护、内容指纹；只读复制进工作区，禁止在你的源码树里就地运行。
 - **自动识别运行形态** — `static` / Node / Python，是否带 SQLite；认不出的标 `pending`，可再 `scan`。
-- **端口池 + 可选路径别名** — `lanUrl` 稳定；Caddy 下 `/{slug}/`，SPA 绝对路径会打坏时直接拒绝。 别名入口为后端注入 `X-Real-IP`。
-- **静态与容器托管** — 静态走 Caddy 或内置服务；应用生成非 root Dockerfile/Compose（UID/GID 对齐宿主 `data/` 属主；旧实例经 `lwa migrate-user` 显式迁移，issue #20），SQLite 挂 `data/`。 支持 manifest 声明式 `buildHooks` / `preStart` 构建钩子（issue #7）。
+- **端口池 + 可选路径别名** — `lanUrl` 稳定；Caddy 下 `/{slug}/`，SPA 绝对路径会打坏时直接拒绝。 别名入口为后端注入 `X-Real-IP`。已验证别名在启动后活验证失败时保留、不再被静默清除，未命中的别名路由返回 404 而非空 200（V0.8.9，issue #21）。
+- **静态与容器托管** — 静态走 Caddy 或内置服务；应用生成非 root Dockerfile/Compose（UID/GID 对齐宿主 `data/` 属主；旧实例经 `lwa migrate-user` 显式迁移，issue #20；镜像内非挂载目录在 `USER` 前 `chown`，issue #22），SQLite 挂 `data/`。 支持 manifest 声明式 `buildHooks` / `preStart` 构建钩子（issue #7），且 `scan` / `import --update` / `rebuild --sync` 重建后不再被清空（issue #23）。 pip 层按源链重试/超时并 `||` 切源（默认阿里 → 官方 PyPI → 腾讯；`pipFallbacks` / `pipRetries` / `pipTimeout` 可配，issue #18）。
 - **小主机上的生命周期** — start / stop / recover / rebuild / cancel-build；默认构建并发 1；端口不漂移。 `rebuild` 检出关联 folder/git 源码漂移时警告（`--sync` 先同步再重建；doctor `source_freshness` 批量审计）。
 - **管理页 + inbox 守护进程** — `:17800` 的 Vue 界面（本机读免 token，局域网用自动轮换的 token）。daemon 导入 zip 并拉起掉线的轻量实例。
 - **危险镜像不会默写出** — 生成的 Compose/Dockerfile 写出前审计；zip 穿越 / 符号链接 / 炸弹拒绝导入。
-- **`lwa doctor` 不假绿** — Python / Docker / Compose / 端口 / 磁盘，以及服务是否在跑、自启是否装好。未 `init` 也可用 `--json`。
+- **`lwa doctor` 不假绿** — Python / Docker / Compose / 端口 / 磁盘，以及服务是否在跑、自启是否装好；服务启动失败附 `lastStartError` 原因与「连续 3 次/24h 熔断自动拉起」（V0.8.9，IMP-064），`version_freshness` 复用 `lwa update --check` 加 24h 缓存提示版本滞后（IMP-062）。 `lwa list` / `status` 直接展示兼容性预检发现（IMP-056 C.01–C.03）。未 `init` 也可用 `--json`。
 - **宿主机装配与自启** — Docker/Caddy 安装脚本（默认国内源）；launchd / systemd；仅 Ubuntu LTS、Debian Stable、WSL2、macOS。
 - **搬工作区、升级 LWA、交给 Agent** — `lwa workspace relocate`、`lwa update`（只允许快进）、20 份 SKILL.md。
 
@@ -376,7 +382,13 @@ profile: default            # default | full
 serviceUser: null           # Full 固化的运行身份
 buildConcurrency: 1
 defaultResourceLimits: { memory: 512m, cpus: "0.75" }
-buildMirrors: { enabled: true, preset: china }
+buildMirrors:
+  enabled: true             # false → official sources everywhere
+  preset: china             # china | none
+  # pip source chain (V0.8.9, issue #18): primary + || fallbacks, per-source retries/timeout.
+  # pipFallbacks: []        # empty list → primary only
+  # pipRetries: 3
+  # pipTimeout: 60
 lanIpStrategy: auto         # auto | manual
 manualLanIp: null
 logLevel: INFO

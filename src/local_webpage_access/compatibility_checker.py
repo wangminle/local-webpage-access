@@ -14,6 +14,7 @@ MVP 规则：
 from __future__ import annotations
 
 import re
+from typing import Any
 from pathlib import Path
 
 from local_webpage_access.logging import get_logger
@@ -197,3 +198,39 @@ def _get_line(content: str, line_num: int) -> str | None:
     if 1 <= line_num <= len(lines):
         return lines[line_num - 1]
     return None
+
+
+def refresh_compatibility_findings(
+    source_dir: Path,
+    manifest: Any,
+    *,
+    primary_subdir: str | None = None,
+) -> bool:
+    """C.02（IMP-056 后置包）：重扫后原子刷新 manifest 的 findings。
+
+    与 import 使用同一 :func:`check_compatibility` 入口；成功时**无条件覆盖**
+    ``compatibilityFindings``（问题代码删除后旧 finding 一并清除），并记录
+    证据根与扫描时间（``compatibilityScanMeta``）。checker 异常时保留旧
+    findings、仅在 meta 标 ``stale``，不写半成品。返回是否刷新成功。
+
+    调用方负责随后一次性 ``manifest.save()``（原子落盘）。
+    """
+    from local_webpage_access.logging import now_iso
+
+    scan_root = source_dir / primary_subdir if primary_subdir else source_dir
+    try:
+        findings = check_compatibility(source_dir, primary_subdir=primary_subdir)
+    except Exception as exc:  # noqa: BLE001 — 扫描失败保留旧结果并标 stale
+        log.warning("兼容性预检重扫失败（保留旧结果并标 stale）：%s", exc)
+        meta = dict(getattr(manifest, "compatibilityScanMeta", None) or {})
+        meta.update({"stale": True, "lastError": str(exc)[:200]})
+        manifest.compatibilityScanMeta = meta
+        return False
+    manifest.compatibilityFindings = findings
+    manifest.compatibilityScanMeta = {
+        "evidenceRoot": str(scan_root),
+        "scannedAt": now_iso(),
+        "stale": False,
+        "count": len(findings),
+    }
+    return True

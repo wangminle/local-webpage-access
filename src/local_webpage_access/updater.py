@@ -566,6 +566,32 @@ def _wait_services_ready(
     return (not pending), waited, pending
 
 
+def _reconcile_circuit_blocked(service: str, ws: Workspace, read_state_fn: Any) -> str | None:
+    """IMP-064.04：reconcile 自动拉起前的熔断判定。
+
+    连续失败 ≥3 次且最近一次在 24h 内 → 跳过自动拉起并明示手动恢复命令；
+    冷却过期（>24h）放行再试一次（计数保留）。只拦 update 的 reconcile 拉起，
+    不挡手动 ``lwa <svc> on``、不约束监督器 KeepAlive / JobRestart。
+    返回跳过文案；未熔断返回 ``None``。
+    """
+    from local_webpage_access.service_failures import (
+        failure_note,
+        start_failure_circuit_open,
+    )
+
+    try:
+        state = read_state_fn(ws)
+    except Exception:  # noqa: BLE001 — 状态读取失败按未熔断处理，交由后续 start 报错
+        return None
+    if state is None or not start_failure_circuit_open(state):
+        return None
+    note = failure_note(state) or "连续启动失败"
+    return (
+        f"{service} {note}，已暂停 update 自动拉起（熔断）；"
+        f"请 `lwa {service} on` 手动恢复（手动启动不受熔断限制）"
+    )
+
+
 def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) -> dict[str, Any]:
     """幂等重启管理页：仅当原本 running 时 stop→start（IMP-059 升级为三态）。
 
@@ -573,9 +599,12 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
 
     * running → 重启（BUG-191 协调 + BUG-451 版本校验，行为不变）；
     * enabled=true 且未运行 → **拉起**，报告标注「意外未运行（中断约 X），已恢复」；
+      IMP-064.04：拉起前做熔断判定，连续失败 ≥3 次/24h 内跳过并明示；
     * enabled=false → 跳过，文案不变（"原本未运行，跳过重启"）。
 
     ``reconcile=False``（``--no-reconcile``）时回到纯观察态：未运行一律跳过。
+    IMP-064.03：stop 全部走内部原语 ``stop_manager_internal``（不写
+    ``enabled=False``）；用户级 ``off`` 仍走 ``stop_manager``。
     """
     from local_webpage_access.cli._common import (
         coordinated_autostart_restart,
@@ -583,8 +612,9 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
     )
     from local_webpage_access.manager_service import (
         is_running,
+        read_state as read_manager_state,
         start_manager,
-        stop_manager,
+        stop_manager_internal,
     )
     from local_webpage_access.service_intent import (
         INTENT_ENABLED,
@@ -596,6 +626,11 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
     if not was_running:
         if not reconcile or service_intent(ws, config).manager != INTENT_ENABLED:
             return {"wasRunning": False, "pid": None, "message": "管理页原本未运行，跳过重启"}
+        # IMP-064.04：熔断判定——连续失败 ≥3 次且 24h 内则跳过自动拉起
+        circuit = _reconcile_circuit_blocked("manager", ws, read_manager_state)
+        if circuit is not None:
+            return {"wasRunning": False, "reconciled": False, "circuitBlocked": True,
+                    "pid": None, "message": circuit}
         # IMP-059：enabled 但意外未运行 → 拉起并标注（不掩盖事实）
         down_since, down_note = _down_since_fields("manager", ws)
         note, _ok, managed = coordinated_autostart_start(ws, "manager")
@@ -621,15 +656,16 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
                 "version": actual,
                 "message": msg,
             }
-        pid = start_manager(ws, config)
+        pid = start_manager(ws, config, source="reconcile")
         ok, actual = verify_manager_version(config)
         if not ok:
-            if not stop_manager(ws):
+            # IMP-064.03：版本不一致二次停止走内部原语，不写 enabled=False
+            if not stop_manager_internal(ws):
                 raise RuntimeError(
                     f"管理页版本不一致（实际 {actual or '未知'}）且二次停止失败；"
                     f"期望 {display_version()}"
                 )
-            pid = start_manager(ws, config)
+            pid = start_manager(ws, config, source="reconcile")
             ok, actual = verify_manager_version(config)
         if not ok:
             raise RuntimeError(
@@ -669,20 +705,22 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
             "message": msg,
         }
     # BUG-192：stop 失败不得报成重启成功（旧进程仍在跑）；抛错由 run_update 标 failed。
-    if not stop_manager(ws):
+    # IMP-064.03：内部停止原语——不写 enabled=False，意图由 start 成败决定。
+    if not stop_manager_internal(ws):
         raise RuntimeError(
             "管理页停止失败（旧进程可能仍在运行），已跳过重启；"
             "可 `lwa manager off` 后重试 `lwa manager on`"
         )
-    pid = start_manager(ws, config)
+    pid = start_manager(ws, config, source="update-restart")
     ok, actual = verify_manager_version(config)
     if not ok:
-        if not stop_manager(ws):
+        # IMP-064.03：版本不一致二次停止走内部原语，不写 enabled=False
+        if not stop_manager_internal(ws):
             raise RuntimeError(
                 f"管理页版本不一致（实际 {actual or '未知'}）且二次停止失败；"
                 f"期望 {display_version()}"
             )
-        pid = start_manager(ws, config)
+        pid = start_manager(ws, config, source="update-restart")
         ok, actual = verify_manager_version(config)
     if not ok:
         raise RuntimeError(
@@ -701,8 +739,11 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
 def restart_daemon(ws: Workspace, config: Config, *, reconcile: bool = True) -> dict[str, Any]:
     """幂等重启 daemon：running 才 stop→start；IMP-059 三态 reconcile。
 
-    enabled=true 且未运行 → 拉起并标注「意外未运行（中断约 X），已恢复」；
+    enabled=true 且未运行 → 拉起并标注「意外未运行（中断约 X），已恢复」
+    （IMP-064.04：拉起前熔断判定，连续失败 ≥3 次/24h 内跳过并明示）；
     enabled=false / ``--no-reconcile`` → 跳过（文案不变）。
+    IMP-064.03：stop 走内部原语 ``stop_daemon_internal``（SIGTERM，不写
+    ``enabled=False``）。
     """
     from local_webpage_access import daemon as daemon_mod
     from local_webpage_access.cli._common import (
@@ -715,6 +756,11 @@ def restart_daemon(ws: Workspace, config: Config, *, reconcile: bool = True) -> 
     if not was_running:
         if not reconcile or service_intent(ws, config).daemon != INTENT_ENABLED:
             return {"wasRunning": False, "pid": None, "message": "daemon 原本未运行，跳过重启"}
+        # IMP-064.04：熔断判定
+        circuit = _reconcile_circuit_blocked("daemon", ws, daemon_mod.read_state)
+        if circuit is not None:
+            return {"wasRunning": False, "reconciled": False, "circuitBlocked": True,
+                    "pid": None, "message": circuit}
         down_since, down_note = _down_since_fields("daemon", ws)
         note, _ok, managed = coordinated_autostart_start(ws, "daemon")
         if managed:
@@ -726,7 +772,7 @@ def restart_daemon(ws: Workspace, config: Config, *, reconcile: bool = True) -> 
                 "pid": None,
                 "message": f"daemon 意外未运行{down_note}，已恢复（{note or '通过自启动单元拉起'}）",
             }
-        pid = daemon_mod.start_daemon(ws, config)
+        pid = daemon_mod.start_daemon(ws, config, source="reconcile")
         return {
             "wasRunning": False,
             "reconciled": True,
@@ -745,11 +791,12 @@ def restart_daemon(ws: Workspace, config: Config, *, reconcile: bool = True) -> 
             "message": note or "daemon 已通过自启动重启",
         }
     # BUG-192：stop 失败不得报成重启成功（旧进程/锁仍在，重复 watcher 风险）。
-    if not daemon_mod.stop_daemon(ws):
+    # IMP-064.03：内部停止原语——SIGTERM 终止，不写 enabled=False。
+    if not daemon_mod.stop_daemon_internal(ws):
         raise RuntimeError(
             "daemon 停止失败（pid 仍存活），已跳过重启；可 `lwa daemon off` 后重试 `lwa daemon on`"
         )
-    pid = daemon_mod.start_daemon(ws, config)
+    pid = daemon_mod.start_daemon(ws, config, source="update-restart")
     return {"wasRunning": True, "pid": pid, "message": f"daemon 已重启（pid={pid}）"}
 
 
@@ -766,8 +813,9 @@ def restart_gateway(ws: Workspace, config: Config, *, reconcile: bool = True) ->
     )
     from local_webpage_access.gateway_service import (
         is_gateway_running,
+        read_state as read_gateway_state,
         start_gateway,
-        stop_gateway,
+        stop_gateway_internal,
     )
     from local_webpage_access.service_intent import INTENT_ENABLED, service_intent
 
@@ -784,6 +832,11 @@ def restart_gateway(ws: Workspace, config: Config, *, reconcile: bool = True) ->
                 "pid": None,
                 "message": "Gateway 原本未运行，跳过重启",
             }
+        # IMP-064.04：熔断判定
+        circuit = _reconcile_circuit_blocked("gateway", ws, read_gateway_state)
+        if circuit is not None:
+            return {"wasRunning": False, "reconciled": False, "circuitBlocked": True,
+                    "pid": None, "message": circuit}
         down_since, down_note = _down_since_fields("gateway", ws)
         note, ok, managed = coordinated_autostart_start(ws, "gateway")
         if managed:
@@ -797,7 +850,7 @@ def restart_gateway(ws: Workspace, config: Config, *, reconcile: bool = True) ->
                 "pid": None,
                 "message": f"Gateway 意外未运行{down_note}，已恢复（{note or '通过自启动单元拉起'}）",
             }
-        pid = start_gateway(ws, config)
+        pid = start_gateway(ws, config, source="reconcile")
         return {
             "wasRunning": False,
             "reconciled": True,
@@ -816,12 +869,13 @@ def restart_gateway(ws: Workspace, config: Config, *, reconcile: bool = True) ->
             "pid": None,
             "message": note or "Gateway 已通过自启动重启",
         }
-    if not stop_gateway(ws, config):
+    # IMP-064.03：内部停止原语——不写 enabled=False，意图由 start 成败决定。
+    if not stop_gateway_internal(ws, config):
         raise RuntimeError(
             "Gateway 停止失败（Caddy master 可能仍在运行），已跳过重启；"
             "可 `lwa gateway off` 后重试 `lwa gateway on`"
         )
-    pid = start_gateway(ws, config)
+    pid = start_gateway(ws, config, source="update-restart")
     return {"wasRunning": True, "pid": pid, "message": f"Gateway 已重启（pid={pid}）"}
 
 

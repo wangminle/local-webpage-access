@@ -1,7 +1,25 @@
 # 新增功能点计划（202608）— 编号续接 IMP-043
 
-> **状态（2026-08-11）**：本文件承接 [`../achievement/local-webpage-access-新增功能点2607.md`](../achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。**IMP-055**：路径别名兼容性门禁与文档口径见 §12；2026-08-11 评审后明确为「入口 HTML 根绝对资源负向守卫」，不构成整体兼容证明。**IMP-056 / IMP-057 的 MVP、IMP-058 Gate-A 原战术范围与 Gate-B 已落地；Gate-A 修订后 SQLite 安全加固见 IMP-058.A.R01。Gate-C 已具备核心模型、成功谓词、状态机和模拟故障注入，但完整计划执行、事务回滚、副作用采集及真实 Docker 门控仍按 Scanner 文档续接 WBS 收口。** **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050（优先级：中，不与 046/047 抢档）。****新立项待实施：IMP-064 服务意图字段去污染（§16，P1；CHK-230 / CHK-232 已修订契约）；IMP-065 GitHub 源一键导入运行（§17，P0；**已落地 DEV-120**，公共仓实机 E2E 待代理环境）。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
-> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 后续 048**；**§8 合集移植 049/050（优先级中 / 不着急）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**；**§12 路径别名 × 方案 B（IMP-055，含详细 WBS与评审边界）**；**§13 Scanner 多候选与实证校验（IMP-056～058 摘要）**；§14～§16（update 事故复盘 IMP-059～062、IMP-063 自更新通道、IMP-064 待实施）；**§17 GitHub 源一键导入运行（IMP-065，P0 · 待实施）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
+> **当前状态（2026-08-31 复评）**：本月主账已有 16 个 IMP 落地。剩余内容不再视为同优先级待办：IMP-064、IMP-063.13 与 IMP-065 公网 GitHub E2E 可直接实施；IMP-062 应复用现有 `lwa update --check`，只补 doctor 消费与缓存；IMP-029/048/049/050 须先补真实场景、兼容和迁移回滚方案后再决定是否实施。IMP-058 Gate-A/B/C、A.R01 与 C.R01～C.R07 已完成，真实 Docker 门控已于 2026-08-21 跑通 10 项。
+>
+> **历史状态（2026-08-11 起，保留追溯）**：本文件承接 [`../2-achievement/local-webpage-access-新增功能点2607.md`](../2-achievement/local-webpage-access-新增功能点2607.md)。**2607 范围内 IMP-025～028 / IMP-030～043 主路径均已落地**（见下「§0 上月收口」）。**8 月初已落地补记：IMP-044 / IMP-045**。**IMP-046 Token 7×24h 自动轮换已落地**（DEV-095）；**IMP-047 本机文件夹源导入与一键更新已落地**（DEV-096）。**IMP-051 管理页「选择文件夹」已落地**（DEV-097；仅 loopback）。**V0.7.1**：导入 UX 护栏（选根/dist、pending 勿冒充成功、错误码前缀剥离、`lwa update` 等导入空闲）与中文名 ID 回退等已收口。**IMP-052 / BUG-455 / BUG-456**：家庭图书 Agent 部署复盘后的 Python 启动推断与 manager off 跨工作区提示（见 §11）。**IMP-053**：已有 Runtime 复用提示（§11.5，DEV-099）。**IMP-055**：路径别名兼容性门禁与文档口径见 §12；2026-08-11 评审后明确为「入口 HTML 根绝对资源负向守卫」，不构成整体兼容证明。**IMP-056 / IMP-057 的 MVP、IMP-058 Gate-A 原战术范围与 Gate-B 已落地；后续状态以当前复评和 Scanner 文档为准。** **后续 / 不着急：IMP-048 zip↔文件夹转换；IMP-049 / IMP-050。** **当时新立项：IMP-064 待实施；IMP-065 后续已落地 DEV-120，公共仓实机 E2E 待完成。** **IMP-042.b 跨盘/跨机不纳入本文件、暂不开发**。候选仍含 IMP-029。
+> **范围**：§0 为 2607 与实施计划合集核对；§1～§2 已落地补记（044/045）；**§4～§5 本月优先 046/047（含可执行 WBS）**；**§6 IMP-051 文件夹选择器（已落地）+ V0.7.1 导入护栏收口**；**§7 IMP-048（重新论证）**；**§8 合集移植 049/050（重新论证后再排期）**；§9 其它候选；**§11 Agent 部署复盘与即时修复（含 IMP-053）**；**§12 路径别名 × 方案 B（IMP-055，含详细 WBS与评审边界）**；**§13 Scanner 多候选与实证校验（IMP-056～058 摘要）**；§14～§16（update 事故复盘 IMP-059～062、IMP-063 自更新通道、IMP-064 待实施）；**§17 GitHub 源一键导入运行（IMP-065 已落地，公网 E2E 待验收）**。无 §3（原 042.b 已删除）。日常跟踪以 `task-list.md` 为准。
+
+## 2026-08-31 剩余项实施分级
+
+| 分级 | 条目 | 当前决策与验收边界 |
+| --- | --- | --- |
+| **直接落地** | IMP-064 | 保持 §16 已评审契约；优先解决服务意图被失败路径污染，不再用观察态替代用户意图 |
+| **直接验收** | IMP-063.13、IMP-065 公网 GitHub E2E | 在真实代理/公网环境完成，不以本地 bare remote 或 `--no-pull` 结果替代 |
+| **调整后落地** | IMP-062 | 复用 IMP-063 的 `lwa update --check`；doctor 只负责 24h 缓存、SKIP/提示语义和展示，不重复实现远端探测 |
+| **重新论证** | IMP-029、IMP-048～050 | 实施前必须给出真实使用场景、数据兼容、迁移与回滚方案；没有持续痛点时保留候选，不为清空规划而开发 |
+
+## 2026-08-31 当前风险
+
+| Issue | 影响 | 对本计划的约束 |
+| --- | --- | --- |
+| [#21](https://github.com/wangminle/local-webpage-access/issues/21) | liveness 失败回滚丢失路径别名，网关入口可静默失效 | 直接修复；补 `routeMode`、别名元数据与网关片段的失败回滚回归，并回链 IMP-058 Gate-C |
+| [#18](https://github.com/wangminle/local-webpage-access/issues/18) | pip 层绑定单一镜像源且无重试/超时/fallback，构建耗时和成功率不可控 | 纳入生成 Dockerfile 可靠性改进；下载源可配置，默认策略不绑定单一第三方，失败诊断可行动 |
 
 ---
 
@@ -48,7 +66,7 @@
 
 ### 0.4 实施计划合集（20260804）核对
 
-来源：[`../achievement/local-webpage-access-实施计划合集-20260804.md`](../achievement/local-webpage-access-实施计划合集-20260804.md)。
+来源：[`../2-achievement/local-webpage-access-实施计划合集-20260804.md`](../2-achievement/local-webpage-access-实施计划合集-20260804.md)。
 
 | 计划块 | 结论 |
 | --- | --- |
@@ -334,7 +352,7 @@ P0 网关启动前写主配置（BUG-420）；P1 doctor 路径一致性（DEV-09
 
 IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡同」：识别成功却写 `pending`、API 不自动 start、UI 禁用启动；纯 HTML 因非 `index.html` 文件名被判 unknown。
 
-**修订方案（已实现）**：B 状态语义（成功→`stopped`）→ C `import-from-dir` 对齐 daemon 自动 start → A 任意 `.html` 识别与 `public/index.html` 兜底。详细流程图与验收记录见合集 [`../achievement/local-webpage-access-实施计划合集-20260804.md`](../achievement/local-webpage-access-实施计划合集-20260804.md)「2026-08-06 · 文件夹导入识别/部署死胡同收口」。
+**修订方案（已实现）**：B 状态语义（成功→`stopped`）→ C `import-from-dir` 对齐 daemon 自动 start → A 任意 `.html` 识别与 `public/index.html` 兜底。详细流程图与验收记录见合集 [`../2-achievement/local-webpage-access-实施计划合集-20260804.md`](../2-achievement/local-webpage-access-实施计划合集-20260804.md)「2026-08-06 · 文件夹导入识别/部署死胡同收口」。
 
 **runtime 验收源**：
 
@@ -471,9 +489,9 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 ---
 
-## 7. IMP-048 — ZIP 包模式 ↔ 文件夹源模式自由转换（后续待办）
+## 7. IMP-048 — ZIP 包模式 ↔ 文件夹源模式自由转换（重新论证后再决定）
 
-> **状态**：**后续待办 / 明确不在 IMP-046、IMP-047 同期实现**（2026-08-06 记入）。找到合适时间点再规划与开发。
+> **状态（2026-08-31 复评）**：不再作为默认后续待办。只有出现明确的双向来源转换场景，并补齐数据兼容、迁移和失败回滚方案后，才决定是否立项；`sourceKind` 预留本身不构成实施承诺。
 
 ### 7.1 需求（占位）
 
@@ -497,16 +515,15 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 | ID | 关系 |
 | --- | --- |
-| `IMP-048` | 本功能点（后续） |
-| `PLN-031` | 后续待办入账（见 task-list） |
+| `IMP-048` | 设计候选；复评通过后才立项 |
+| `PLN-031` | 历史规划记录，不代表当前已排期待办 |
 
 ---
 
-## 8. 合集 Task 11 移植 — IMP-049 / IMP-050（优先级：中 · 不着急）
+## 8. 合集 Task 11 移植 — IMP-049 / IMP-050（重新论证后再决定）
 
-> **来源**：[`实施计划合集` · 工作区迁移 Task 11](../achievement/local-webpage-access-实施计划合集-20260804.md#2026-07-29-工作区迁移workspace-relocate实施计划)（原标 P2）。**主路径 Task 1～10 已落地**；本节约两项为合集迁入本文件的残留。**跨盘 IMP-042.b 不纳入本文件、暂不开发。**
-> **状态**：**后续待办**。
-> **优先级：中（不着急）** — 属减债/生产加固，边际收益低于本月主线；**先做 IMP-046 / IMP-047 / IMP-051**，本两项不排期抢档、不阻塞发布。真痛（频繁绝对路径残留 / 多工作区正式部署）再开干。
+> **来源**：[`实施计划合集` · 工作区迁移 Task 11](../2-achievement/local-webpage-access-实施计划合集-20260804.md#2026-07-29-工作区迁移workspace-relocate实施计划)（原标 P2）。**主路径 Task 1～10 已落地**；本节约两项为合集迁入本文件的残留。**跨盘 IMP-042.b 不纳入本文件、暂不开发。**
+> **状态（2026-08-31 复评）**：保留设计候选，不直接排期。出现频繁绝对路径残留、多工作区正式部署等真实痛点后，先补存量兼容、迁移、回滚和多工作区边界，再决定是否实施。
 
 ### 8.1 IMP-049 — 工作区派生路径相对化写入
 
@@ -556,7 +573,7 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 | 候选 | 来源 | 优先级 | 备注 |
 | --- | --- | --- | --- |
-| **IMP-029** 资源采集接入周期任务 | [`待改进功能点记录-20260706.md`](../achievement/待改进功能点记录-20260706.md) | P2 | 不与 046/047/051 抢档；另排期时展开 |
+| **IMP-029** 资源采集接入周期任务 | [`待改进功能点记录-20260706.md`](../2-achievement/待改进功能点记录-20260706.md) | P2 | 保留候选；出现持续痛点并完成价值、边界和回滚复评后再决定是否排期 |
 
 ### 9.2 运维验收（非新功能）
 
@@ -585,11 +602,11 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 | 约定 | 说明 |
 | --- | --- |
-| 月度文件 | `design/plans/local-webpage-access-新增功能点YYMM.md`（本文件；进行中权威位置） |
-| IMP 号 | 全局递增不复用；046/047/**051 已落地**（含 §6.8 V0.7.1 收口）；048=后续；049/050=**优先级中 / 不着急**；042.b 不在本文件；**059/060/063 已落地（§14/§15，2026-08-17 事故复盘 + 当日实现）**；061 已落地（P1）；062=P2 占位（doctor 消费方，探测能力复用 063 `--check`）；**065 已落地（§17，2026-08-18，DEV-120）** |
+| 月度文件 | `design/3-plans/local-webpage-access-新增功能点YYMM.md`（本文件；进行中权威位置） |
+| IMP 号 | 全局递增不复用；046/047/**051 已落地**（含 §6.8 V0.7.1 收口）；029/048/049/050=重新论证后再决定；042.b 不在本文件；**059/060/061/063 已落地**；062=调整后落地（doctor 消费 063 `--check`）；064=直接落地；**065 已落地，公网 E2E 待验收** |
 | 与 task-list | 规划 `PLN-`；开发 `DEV-`；文档 `DOC-` |
-| 与 2607 | 7 月账本在 `design/achievement/`；本月只改本文件 |
-| achievement | **暂不入账**：本月进行中的 2608 只放 `design/plans/`；收口归档后再迁入 `achievement/`（若需要） |
+| 与 2607 | 7 月账本在 `design/2-achievement/`；本月只改本文件 |
+| achievement | **暂不入账**：本月进行中的 2608 只放 `design/3-plans/`；收口归档后再迁入 `design/2-achievement/`（若需要） |
 | 实施计划合集 | 历史已落地计划归档；未做项以本文件为准 |
 
 ---
@@ -805,7 +822,7 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 
 ## 13. IMP-058 — Scanner 多候选与实证校验架构摘要
 
-> **状态（2026-08-11）**：Gate-A 原战术范围、IMP-057 Monorepo 分类、Gate-B 多候选识别和 IMP-056 兼容性预检的 MVP 已实现；Gate-A 修订后 SQLite 安全加固见 Scanner 文档 A.R01。修订版 Gate-C 已进入实施后收口：部署计划/能力契约模型、成功谓词、状态机、证据分级探针和模拟故障注入已有实现；生命周期改用完整计划、能力契约精确等价、用户确认闭环、完整事务回滚、实际副作用采集和真实 Docker 门控仍未满足最终退出标准。
+> **状态（2026-08-31）**：Gate-A、Gate-B、修订版 Gate-C、A.R01 与 C.R01～C.R07 已完成；2026-08-21 真实 Docker 门控 10 项通过。当前仅由 #21 重新打开路径别名回滚完整性缺口，并将 #18 作为构建下载策略风险纳入后续改进；不重复实施已经完成的 Scanner WBS。
 >
 > **完整设计**：[`Scanner架构设计分析-多候选与实证校验-20260811.md`](./Scanner架构设计分析-多候选与实证校验-20260811.md)；前置规则设计见 [`导入预检与Monorepo识别增强-20260810.md`](./导入预检与Monorepo识别增强-20260810.md)。
 
@@ -843,7 +860,7 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 | DEV-108 / Gate-B | 证据收集、子目录探测、扁平候选已实现 | `deploymentCandidates` 仅是过渡期识别证据，不是可直接自动 fallback 的列表 |
 | DEV-109 / IMP-056 | 兼容性预检已实现 | 与 IMP-055 硬门禁分层，不把 advisory 结果冒充运行成功 |
 | DEV-110 / 初版 Gate-C | 候选降级、诊断和 API 探测已有实现记录 | 仅作历史实现基础，不代表修订架构最终验收 |
-| 修订版 Gate-C | 计划/组件/契约模型、VERIFYING/DEGRADED/FAILED、证据探针、attempt 诊断与模拟故障注入已有实现 | **仍为进行中**：运行时必须从扁平候选迁移到完整计划；等价性必须比较完整契约；回滚和副作用必须产生真实证据；真实 Docker 门控不得跳过 |
+| 修订版 Gate-C | 计划/组件/契约模型、VERIFYING/DEGRADED/FAILED、证据探针、attempt 诊断、等价 fallback、事务回滚和四类指纹已实现 | **历史 WBS 已完成**；真实 Docker 门控 10 项通过。#21 作为 C.R04/C.R05 的新增回归缺口单独修复 |
 
 ### 13.4 修订版 Gate-C 完成门槛
 
@@ -853,9 +870,9 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 - 非等价计划、回滚失败或 migration/外部写入无法验证恢复时，不触发自动 fallback。
 - 故障注入至少覆盖 build、up、required/optional probe、rollback 和不可逆 migration；真实 Docker 门控验证指纹与容器状态。
 
-### 13.5 后续 Agent 的 WBS 入口
+### 13.5 当前续作入口
 
-本月文档只承担范围导航，不复制详细开发台账。后续实现统一从完整 Scanner 文档的 **C.R01～C.R07** 开始：
+本月文档只承担范围导航，不复制详细开发台账。以下 C.R01～C.R07 已全部完成，保留为历史实施顺序，不再作为待办：
 
 1. C.R01：生命周期改为以 `DeploymentPlan[]` 为唯一执行真源。
 2. C.R02：以完整 `CapabilityContract` 比较替代计划等价性。
@@ -864,7 +881,9 @@ IMP-047 主路径落地后，管理页文件夹导入仍出现「待识别死胡
 5. C.R06：补 source/plan/generated-config/image 四类指纹。
 6. C.R07：完成真实 Docker 故障注入门控。
 
-Gate-A 的修订后 SQLite 安全加固从 **IMP-058.A.R01** 续接，可与 C.R01/C.R02 并行，但未验收前不得把「对所有 SQLite 统一注入」宣称为通用安全策略。
+Gate-A 的修订后 SQLite 安全加固 **IMP-058.A.R01** 已完成；无消费证据时不得注入 `DATABASE_URL` 的安全边界继续有效。
+
+当前 Scanner 续作仅处理 [#21](https://github.com/wangminle/local-webpage-access/issues/21)：补齐 `routeMode`、路径别名元数据和网关片段的快照/回滚，并在恢复不完整时停止自动 fallback。[#18](https://github.com/wangminle/local-webpage-access/issues/18) 进入构建下载策略改进，不重新打开候选模型、能力契约或指纹 WBS。
 
 IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与 Monorepo 识别增强》§9 可选包 C 继续，不扩张已完成 MVP 的定义。
 
@@ -1031,11 +1050,11 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 | `IMP-061` / `PLN-040` | 本功能点 / 规划入账 |
 | `DEV-*` | 实施时按 061.01-04 开发项 |
 
-### 14.6 IMP-062 — 版本滞后可发现性（P2 · 不着急，占位）
+### 14.6 IMP-062 — 版本滞后可发现性（调整后落地）
 
-> **状态**：占位（2026-08-17）。事故机落后两个版本（V0.7.9 → V0.7.11）无人知晓，直到用户主动 update 才发现。
+> **状态（2026-08-31 复评）**：价值仍在，但不再另造远端探测。复用 IMP-063 已实现的 `lwa update --check`，本项只实现 doctor 侧 24h 缓存、离线 SKIP、落后版本提示与展示语义。
 
-**需求（占位）**：`lwa update` 结束时或 `doctor --profile full` 中做**可选**远端版本检查（`git ls-remote` / GitHub API），落后即提示「有新版本可 update」；离线/失败静默 SKIP 不告警。
+**当前需求**：`doctor --profile full` 复用 `lwa update --check` 的结构化结果和远端探测语义，增加 24h 缓存；落后时提示「有新版本可 update」，离线或检查失败时显示 SKIP，不直接调用 `git ls-remote` / GitHub API，也不把网络问题升级为 doctor FAIL。
 
 **规划时必须回答**
 
@@ -1047,7 +1066,7 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 ### 14.7 明确不做（本轮）
 
 - **不给 lwa 自带进程监管守护**（supervisor 化）：监管交给 systemd / LaunchAgent，lwa 保持「被监管者 + 协调者」定位（BUG-191 已确立此边界，不推翻）。
-- **不做 update 自动 git pull**：IMP-040 `--pull` 已于 2026-07-20 从计划删除（DEV-085 关闭）；人工 pull 是预期流程。**【2026-08-17 更新：本条当日晚间被用户决策反转，重开为 IMP-063（§15）；「不做」范围收缩为 15.8 所列（不 clone、不自动回滚、不代操作非 ff merge/stash 等）。】**
+- ~~**不做 update 自动 git pull**~~：这是 2026-08-17 早期历史决策，已在当日晚间由 IMP-063 推翻，不再生效；当前“不做”范围仅以 §15.8 为准（不 clone、不自动回滚、不代操作非 ff merge/stash 等）。
 - **不做通知推送**（webhook/邮件/IM）：先靠 IMP-059/060 把可见性补齐；通知渠道待有真实需求再议（家庭单人场景，doctor/CLI 输出足够）。
 - **不强制消除裸进程模式**：保留开发/临时用途，靠 IMP-060 WARN + IMP-061 引导收敛。
 - **不合并三个 systemd 单元为单一 supervisor 单元**：分单元与现有 `coordinated_autostart_restart` 协调机制匹配，收益不明确，不动。
@@ -1240,9 +1259,9 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 
 ---
 
-## 16. IMP-064 - 服务意图字段去污染：`enabled` 只表用户意图，启动失败进独立字段（P1 · 待实施）
+## 16. IMP-064 - 服务意图字段去污染：`enabled` 只表用户意图，启动失败进独立字段（P1 · 已落地）
 
-> **状态**：**待实施**（2026-08-18 立项；CHK-230 / CHK-232 修订契约）。承接 CHK-225 设计裁决项「update 重启失败把 enabled=False 留盘、之后不再自愈」。
+> **状态**：**已落地**（2026-08-31，064.01–08 + 064.03b 全包实施；2026-08-18 立项、CHK-230 / CHK-232 修订契约）。承接 CHK-225 设计裁决项「update 重启失败把 enabled=False 留盘、之后不再自愈」。实现：`service_failures.py`（观测字段 + 熔断纯函数）、三服务 state/`start_*`/`stop_*_internal`/监督入口、`updater.restart_*` 换内部停止原语 + reconcile 熔断、doctor/status 消费；回归 `tests/test_imp064_intent_decontamination.py`。
 > **一句话**：`run/*.json` 的 `enabled` 回归纯用户意图；失败与进程退出只更新运行观测与 `lastStartError`；熔断只挡 IMP-059 的自动拉起，不挡手动 `on`、不改监督器。
 
 ### 16.1 背景与问题
@@ -1639,7 +1658,7 @@ H  065.27 → 065.28
 | 2026-08-18 | **§17.3/17.5 IMP-065 拍板对表 + WBS 细拆（065.01–28）**：17.3 增「WBS」列并补 065.o（`import_activity` 闸门 + 独立 tempfile）、065.p（errorKind 闭集）。17.5 按 047 体例拆为阶段 A–H 共 28 包（URL 拒绝矩阵 / clone 命令与 staging / 身份透传 / ls-remote 与 mismatch / CLI 分流 / API 与人话表 / doctor+文档 / 回归），每包对应拍板字母。旧 065.01–09 粗包废弃，实施按新编号开 DEV。 |
 | 2026-08-18 | **§17 IMP-065 契约补强（CHK-236 + 在线调研）**：对标 Coolify 公开仓 HTTPS URL（非 GitHub App）与 Dokku `git:sync --build-if-changes`；明确不跟 `git push` / `git:from-archive` / App webhook。补 git 源身份（`sourceKind=git`、禁止 `sourceDirPath`、scan 透传）、`urlsplit` 精确 hostname、query/fragment/userinfo 拒绝、staging 用工作区外 tempfile + `pack_source_dir`、clone 空 template/`hooksPath`/`GIT_LFS_SKIP_SMUDGE=1`、更新用已存储 ref、`--update` URL 一致性。拍板扩为 065.a–n；WBS 完成标准收紧。 |
 | 2026-08-18 | **GitHub issues #2–#5 修复收口 + V0.8.2**：对照 quality-patterns 文档（L1–L8）修复四条实机 issue--#2（BUG-549）macOS bootstrap error 5 自动短重试（共 3 次）+ enable/install 失败且 gateway 意图 enabled 时 fail-safe 直接拉起；#3（BUG-550）`_migrate_detached_for_supervision` 前置 `service_supervision_mode` 判定，监督器在管服务不再误停重迁（enable 幂等）；#4（BUG-551）`estimate_down_since` 改 live 证据链（pidfile 存活/pid 不一致弃陈旧 json/systemd InactiveEnterTimestamp/不确定不虚报），`_port_2019_foreign` 按 live pidfile+owner 识别自家 caddy，`start_gateway` 已在线路径刷新陈旧服务态；#5（BUG-552）update 重启与自检之间插入 `waitReady`（最多 30s 轮询 daemon/gateway，超时降级 warning 提示 doctor 复核）。新增回归 13 例（红绿验证 12 失败->全绿），145 passed / ruff / mypy clean。版本提升 **V0.8.2**（10 处）；README/FAQ/autostart.md/operations-playbook/testing.md 同步。台账 [[CHK-234]]、[[CHK-235]]。 |
-| 2026-08-18 | **§17 立项 IMP-065 GitHub 源一键导入运行（P0，PLN-043）**：依据 2026-08-13 竞品调研（对比分析 §三 P0-1 四维评分 P0、§二矩阵「Git 部署」LWA 空白）。方案：管理页/CLI 输入 `https://github.com/<owner>/<repo>` → `--depth 1` 浅克隆到暂存 → 复用 IMP-047 管线识别部署；git 源实例更新经 `git ls-remote` 无变更探测 → 重克隆走 IMP-009 原地升级。拍板：host allowlist=github.com（仅 https+443）、URL userinfo 拒绝、凭据/代理零托管（对齐 IMP-063）、前端入口不限 loopback、一次性浅克隆不做缓存、webhook/定时拉取/PR preview/GitHub API 通道不做。WBS 065.01–09，待实施。 |
+| 2026-08-18 | **§17 立项 IMP-065 GitHub 源一键导入运行（P0，PLN-043；历史立项状态，后续已落地）**：依据 2026-08-13 竞品调研（对比分析 §三 P0-1 四维评分 P0、§二矩阵「Git 部署」LWA 空白）。方案：管理页/CLI 输入 `https://github.com/<owner>/<repo>` → `--depth 1` 浅克隆到暂存 → 复用 IMP-047 管线识别部署；git 源实例更新经 `git ls-remote` 无变更探测 → 重克隆走 IMP-009 原地升级。拍板：host allowlist=github.com（仅 https+443）、URL userinfo 拒绝、凭据/代理零托管（对齐 IMP-063）、前端入口不限 loopback、一次性浅克隆不做缓存、webhook/定时拉取/PR preview/GitHub API 通道不做。WBS 065.01–09，当时待实施；最终状态见同日后续变更记录。 |
 | 2026-08-18 | **§16 IMP-064 再修订（CHK-232）**：①064.03b 覆盖 `run_gateway_foreground` 退出（不得调用户级 `stop_gateway`）；②`maybe_start_gateway` / `start_manager` 联动前查 `service_intent`，BUG-073 仅 `state is None` 可补写 True；③三服务 `on` 入口统一先断言 `enabled=True`（gateway 失败不再落成「已按意图停用」）。次要：已在运行早退清零计数；手动 on 失败计入熔断但不挡本次 on。规则扩为 10 条；064.02/03b/04/06/08 与验收同步。 |
 | 2026-08-18 | **§16 IMP-064 契约修订（CHK-230）**：补 064.03b（`run_service_main` `finally` 不得写 `enabled=False`，且须先于 064.03 完成）；`enabled` 写入契约改为 False 仅用户级 off、True 允许 on/start 成功断言/监督器入口/autostart 安装期；内部停止改为「写盘只清 pid」而非「完全不写状态」；触点更正 `daemon.py`（删除不存在的 `daemon_service.py`）、标明 gateway `start_*` 失败与 manager `finally` 不同构；熔断仅挡 reconcile、不进 `start_*`、不约束 KeepAlive；明示存量 `enabled=false` 不自动翻回。WBS 现为 064.01–08 + 064.03b。 |
 | 2026-08-18 | **§16 立项 IMP-064 服务意图字段去污染（P1，PLN-042）**：承接 CHK-225 设计裁决项（update 重启失败把 enabled=False 留盘、IMP-059/060 失明）。方案：`enabled` 回归纯用户意图，`lastStartError`/`consecutiveStartFailures` 观测字段承载失败事实；重启路径改内部停止原语不动意图；3 次/24h 熔断防 boot loop；doctor FAIL 文案带失败原因。WBS 064.01-08，待实施。 |
@@ -1657,7 +1676,7 @@ H  065.27 → 065.28
 | 2026-08-06 | 建档。核对 2607；补记 IMP-044 / IMP-045；承接 IMP-042.b 与 IMP-029 候选。 |
 | 2026-08-06 | **入账本月待办 IMP-046（Token 7×24h 自动轮换）、IMP-047（本机文件夹源导入+更新）；后续待办 IMP-048（zip↔文件夹转换）。** |
 | 2026-08-06 | **IMP-047 补强**：关联目录仅作只读复制源；运行必须在 LWA `apps/<id>/` 内，与 zip 同管线；禁止就地运行关联文件夹；更新无变更（内容指纹 / 可选 git diff）提示「无需更新」。 |
-| 2026-08-06 | **权威位置改为 `design/plans/`**（用户挪移）；同步修正 task-list / 2607 链接。 |
+| 2026-08-06 | **权威位置改为 `design/3-plans/`**（用户挪移）；同步修正 task-list / 2607 链接。 |
 | 2026-08-06 | 明确 **暂不进入 `achievement/`**：删除 achievement 下 2608 短链；进行中文档仅保留在 plans。 |
 | 2026-08-06 | **核对实施计划合集**：主路径均已落地；移植 Task 11 中路径相对化/CLI 解耦 → §8 IMP-049·050；合集文首同步。 |
 | 2026-08-06 | **删除 §3 IMP-042.b**：跨盘/跨机暂不开发、不纳入 2608 待办；仅在 §0.2 边界说明。 |

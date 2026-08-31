@@ -1260,6 +1260,116 @@ def test_restore_from_snapshot_restores_manifest_fields(tmp_path: Path) -> None:
     assert manifest.capabilityContract == {"servesApi": True}
 
 
+def test_snapshot_attempt_captures_alias_fragment_and_route(tmp_path: Path) -> None:
+    """issue #21 纵深防御：快照须包含 aliases/<id>.conf 与 network.routeMode/routeHost。
+
+    根因已由 aliasLiveVerifiedAt 处理；本项防止将来新回滚路径漏掉别名片段。
+    """
+    from local_webpage_access.lifecycle import _snapshot_attempt
+    from local_webpage_access.models import ContainerConfig
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path)
+    ws.ensure_app_dirs("prd-review")
+    alias_path = ws.app_alias_config("prd-review")
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    alias_body = "handle_path /prd-review/* {\n\treverse_proxy 127.0.0.1:18001\n}\n"
+    alias_path.write_text(alias_body, encoding="utf-8")
+
+    manifest = _mk_container_manifest(instance_id="prd-review")
+    manifest.container = ContainerConfig(
+        projectName="lwa-prd-review",
+        internalPort=8000,
+        composePath=str(ws.app_compose_path("prd-review")),
+        dockerfilePath=str(ws.app_dockerfile_path("prd-review")),
+        routeMode="name",
+        routeHost="prd-review",
+    )
+    manifest.network.routeMode = "name"
+    manifest.network.routeHost = "prd-review"
+
+    snapshot = _snapshot_attempt(ws, MagicMock(), "prd-review", manifest)
+    assert snapshot["files"]["alias.conf"] == alias_body
+    net = snapshot["manifestFields"]["network"]
+    assert net["routeMode"] == "name"
+    assert net["routeHost"] == "prd-review"
+    assert snapshot["manifestFields"]["container"]["routeMode"] == "name"
+    assert snapshot["manifestFields"]["container"]["routeHost"] == "prd-review"
+
+
+def test_restore_from_snapshot_restores_alias_fragment_and_route(tmp_path: Path) -> None:
+    """issue #21：回滚须写回别名片段，并把 network/container 路由字段复原。"""
+    from local_webpage_access.lifecycle import _restore_from_snapshot
+    from local_webpage_access.models import ContainerConfig
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path)
+    ws.ensure_app_dirs("prd-review")
+    alias_path = ws.app_alias_config("prd-review")
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    original = "handle_path /prd-review/* {\n\treverse_proxy 127.0.0.1:18001\n}\n"
+    alias_path.write_text("corrupted alias", encoding="utf-8")
+
+    manifest = _mk_container_manifest(instance_id="prd-review")
+    manifest.container = ContainerConfig(
+        projectName="lwa-prd-review",
+        internalPort=8000,
+        composePath=str(ws.app_compose_path("prd-review")),
+        dockerfilePath=str(ws.app_dockerfile_path("prd-review")),
+        routeMode="port",
+        routeHost=None,
+    )
+    manifest.network.routeMode = "port"
+    manifest.network.routeHost = None
+
+    snapshot = {
+        "manifestFields": {
+            "container": {
+                "projectName": "lwa-prd-review",
+                "internalPort": 8000,
+                "composePath": str(ws.app_compose_path("prd-review")),
+                "dockerfilePath": str(ws.app_dockerfile_path("prd-review")),
+                "routeMode": "name",
+                "routeHost": "prd-review",
+            },
+            "network": {"routeMode": "name", "routeHost": "prd-review"},
+        },
+        "files": {"alias.conf": original},
+    }
+    restored, residuals = _restore_from_snapshot(
+        ws, MagicMock(), "prd-review", manifest, snapshot
+    )
+    assert residuals == []
+    assert "file:alias.conf" in restored
+    assert alias_path.read_text(encoding="utf-8") == original
+    assert manifest.network.routeMode == "name"
+    assert manifest.network.routeHost == "prd-review"
+    assert manifest.container is not None
+    assert manifest.container.routeMode == "name"
+    assert manifest.container.routeHost == "prd-review"
+
+
+def test_restore_from_snapshot_removes_new_alias_fragment(tmp_path: Path) -> None:
+    """issue #21：快照无别名片段时，attempt 新建的 aliases/<id>.conf 应删除。"""
+    from local_webpage_access.lifecycle import _restore_from_snapshot
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path)
+    ws.ensure_app_dirs("fresh")
+    alias_path = ws.app_alias_config("fresh")
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    alias_path.write_text("new deferred alias", encoding="utf-8")
+
+    manifest = _mk_container_manifest(instance_id="fresh")
+    snapshot = {"manifestFields": {}, "files": {}}
+    restored, residuals = _restore_from_snapshot(
+        ws, MagicMock(), "fresh", manifest, snapshot
+    )
+    assert residuals == []
+    assert "file:alias.conf:removed" in restored
+    assert not alias_path.exists()
+
+
 def test_rollback_with_snapshot_restores_files(tmp_path: Path) -> None:
     """C.R04：_rollback_attempt 带 snapshot 时恢复生成文件。"""
     from local_webpage_access.lifecycle import _rollback_attempt

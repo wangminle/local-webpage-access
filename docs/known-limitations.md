@@ -221,3 +221,25 @@ swap=4GB
 * **并发互斥**：可变更的 update 全程持 repo（git common-dir）+ workspace 双锁（固定顺序）；两个 update 并发时后者 fail-fast 报「更新锁被占用」。会 fetch 的 `--check` 也取 repo 锁；`--dry-run` 严格零写入（不联网、不 fetch、不取锁，数据标 `fresh=false`）。
 * **不自动回滚**：快进后 pip/接力失败只在报告中给人工恢复链（`git status` 复查 → 干净时 `git reset --keep <oldHead>` → 重跑 `lwa update`）。
 * **服务拉起边界（IMP-059）**：仅当 `run/*.json` 持久化 `enabled=true`（含 config 交叉校验）的自有服务会被 update 拉起；`--no-reconcile` 回到纯观察态。裸进程模式（无自启单元）重启后仍不会自动恢复——靠 `lwa doctor` 的 `restart_resilience` WARN（IMP-060）与 IMP-061 引导收敛。
+
+## 服务意图与启动失败观测（IMP-064 / V0.8.9）
+
+* **存量污染不自动翻回**：IMP-064 之前失败路径写下的 `run/*.json enabled=false`（无
+  `last_start_error`）与真·用户 off 无法区分，读侧按 disabled 处理，不自动改回 true；
+  恢复靠用户 `lwa <svc> on`。禁止用「有 pid 残留就当失败」的启发式翻意图。
+* **熔断只拦 update 自动拉起**：连续 ≥3 次失败/24h 内跳过 reconcile 拉起；手动
+  `lwa <svc> on` 不受限（失败照常计数）；不约束监督器 KeepAlive / JobRestart。
+* **联动启动需显式意图**：`lwa init` / `lwa manager on` 不再联动拉起从未表达过意图的
+  Caddy 网关（`run/gateway.json` 缺失或 enabled=false 均跳过）；首次启用需
+  `lwa gateway on` 或安装自启单元。
+* **schema 兼容**：`last_start_error` / `consecutive_start_failures` 为增量字段，旧状态
+  文件读默认值（None/0），无迁移步骤。
+
+## pip 构建源链（V0.8.9 / issue #18）
+
+* **`||` 切源只覆盖硬故障**：主源慢但能通时（如镜像对大包限速）pip 会在主源上
+  耗完重试与下载，不会切走——需换主源（`buildMirrors.pip`）或走代理；
+  `pipRetries` / `pipTimeout` 只封死连接假死窗口，不限制单包总耗时。
+* **镜像源缓存未命中**：实测国内镜像的响应头使 pip HTTP 缓存不落盘，requirements
+  任何变更都会全量重新下载（BuildKit `/root/.cache/pip` 挂载在位也不改变该行为）。
+* uv / pipenv 项目同样走源链（`UV_DEFAULT_INDEX` / `PIPENV_PYPI_MIRROR` 逐源 `||`）。

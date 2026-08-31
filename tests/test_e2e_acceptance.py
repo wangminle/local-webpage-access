@@ -42,12 +42,19 @@ def ws_env(tmp_path: Path):
     from local_webpage_access.registry import Registry
 
     root = tmp_path / "e2e-ws"
-    init_workspace(root)
-    ws = Workspace(root)
-    ws.config_path.write_text(
-        example_config_text().replace("staticGateway: caddy", "staticGateway: builtin"),
+    # IMP-064：预写隔离配置（managerEnabled=false）——init_workspace 的
+    # maybe_start_manager 不再尝试拉起真实 manager，避免宿主机 17800 上
+    # 的其它工作区管理页污染测试工作区的服务状态（旧代码失败会静默写
+    # enabled=false 假绿；新语义如实记录失败并让 doctor FAIL）。
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "local-web.yml").write_text(
+        example_config_text()
+        .replace("staticGateway: caddy", "staticGateway: builtin")
+        .replace("managerEnabled: true", "managerEnabled: false"),
         encoding="utf-8",
     )
+    init_workspace(root)
+    ws = Workspace(root)
     config = load_config(ws)
     # BUG-121：双保险，避免示例配置回退
     config.staticGateway = "builtin"

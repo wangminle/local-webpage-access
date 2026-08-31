@@ -913,3 +913,150 @@ def test_build_hooks_pipe_to_shell_rejected_by_audit(workspace: Workspace) -> No
     )
     with pytest.raises(RuntimeError, match="critical"):
         generate_dockerfile(m, workspace)
+
+
+# ---- issue #18：pip 下载可靠性（备用源 / 超时重试 / 失败提示）----------------
+
+
+def test_pip_run_china_default_tries_aliyun_then_pypi_then_tencent() -> None:
+    """issue #18：china 默认顺序阿里源 → 官方源 → 腾讯源，每源 --retries 3，|| 切源。
+
+    extra-index-url 不能在主源慢但包存在时切走；|| 覆盖主源硬故障。
+    """
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(enabled=True, preset="china").resolved()
+    out = _pip_run("pip install -r requirements.txt", mirrors=mirrors)
+    aliyun = "https://mirrors.aliyun.com/pypi/simple"
+    official = "https://pypi.org/simple"
+    tencent = "https://mirrors.cloud.tencent.com/pypi/simple"
+    assert out.index(aliyun) < out.index(official) < out.index(tencent)
+    assert out.count(f"-i {aliyun}") >= 1
+    assert out.count(f"-i {official}") >= 1
+    assert out.count(f"-i {tencent}") >= 1
+    assert out.count("||") >= 2
+    assert out.count("--retries 3") >= 3
+    assert "--timeout 60" in out
+    assert "--extra-index-url" not in out
+    # 每源独立括号，避免与外层失败提示 ``||`` 抢优先级
+    assert "( pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple" in out
+    assert "( pip install -r requirements.txt -i https://pypi.org/simple" in out
+    assert "( pip install -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple" in out
+
+
+def test_pip_run_official_path_still_gets_retries_timeout() -> None:
+    """issue #18：关闭镜像（官方源）也注入超时/重试，无 -i / 切源链。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(enabled=False).resolved()
+    assert mirrors.pip is None
+    assert mirrors.pipFallbacks == []
+
+    out = _pip_run("pip install -r requirements.txt", mirrors=mirrors)
+    assert "-i " not in out
+    assert "--extra-index-url" not in out
+    assert "--retries 3" in out
+    assert "--timeout 60" in out
+
+
+def test_pip_run_empty_fallbacks_disables_chain() -> None:
+    """issue #18：pipFallbacks 显式空列表只走主源。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(enabled=True, preset="china", pipFallbacks=[]).resolved()
+    out = _pip_run("pip install -r requirements.txt", mirrors=mirrors)
+    assert "-i https://mirrors.aliyun.com/pypi/simple" in out
+    assert "-i https://pypi.org/simple" not in out
+    assert "mirrors.cloud.tencent.com" not in out
+    assert "--retries 3" in out
+
+
+def test_pip_run_custom_primary_and_fallbacks_respected() -> None:
+    """issue #18：主源与切源列表均可配置覆盖。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(
+        enabled=True,
+        preset="china",
+        pip="https://pypi.tuna.tsinghua.edu.cn/simple",
+        pipFallbacks=["https://mirrors.cloud.tencent.com/pypi/simple"],
+        pipRetries=3,
+    ).resolved()
+    out = _pip_run("pip install -r requirements.txt", mirrors=mirrors)
+    assert "-i https://pypi.tuna.tsinghua.edu.cn/simple" in out
+    assert "-i https://mirrors.cloud.tencent.com/pypi/simple" in out
+    assert "mirrors.aliyun.com" not in out
+
+
+def test_pip_run_user_provided_flags_not_duplicated() -> None:
+    """issue #18：用户自带 --retries/--timeout 时不重复注入，切源链仍展开。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(enabled=True, preset="china").resolved()
+    out = _pip_run(
+        "pip install -r requirements.txt --retries 3 --timeout 30",
+        mirrors=mirrors,
+    )
+    assert "--retries 3" in out
+    assert "--retries 5" not in out
+    assert "--timeout 30" in out
+    assert "-i https://pypi.org/simple" in out
+
+
+def test_pip_run_wraps_failure_hint(workspace: Workspace) -> None:
+    """issue #18：安装失败时输出可行动换源提示（build 日志可见），且括号包裹
+    不改变原命令语义。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(enabled=True, preset="china").resolved()
+    out = _pip_run(
+        "pip install pipenv && pipenv install --system --skip-lock",
+        mirrors=mirrors,
+    )
+    assert ") || ( echo '" in out
+    assert "buildMirrors" in out
+    assert "exit 1" in out
+    assert "( pip install pipenv" in out
+
+
+def test_pip_run_uv_segment_chains_index_and_timeout() -> None:
+    """issue #18：uv 段按同一源列表 || 切换 UV_DEFAULT_INDEX。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(enabled=True, preset="china").resolved()
+    out = _pip_run("uv sync", mirrors=mirrors)
+    assert "UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync" in out
+    assert "UV_DEFAULT_INDEX=https://pypi.org/simple uv sync" in out
+    assert "UV_HTTP_TIMEOUT=60" in out
+    assert "UV_EXTRA_INDEX_URL" not in out
+
+
+def test_pip_run_pipenv_segment_gets_timeout() -> None:
+    """issue #18：pipenv 段注入 PIP_DEFAULT_TIMEOUT 并按源列表切换镜像。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _pip_run
+
+    mirrors = BuildMirrors(enabled=True, preset="china").resolved()
+    out = _pip_run("pipenv install --system --skip-lock", mirrors=mirrors)
+    assert "PIPENV_PYPI_MIRROR=https://mirrors.aliyun.com/pypi/simple pipenv install" in out
+    assert "PIP_DEFAULT_TIMEOUT=60" in out
+
+
+def test_generated_dockerfile_carries_pip_resilience(workspace: Workspace) -> None:
+    """issue #18：端到端——生成 Dockerfile 的 pip 层带三源 || 链与 retries 3。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "-i https://mirrors.aliyun.com/pypi/simple" in content
+    assert "-i https://pypi.org/simple" in content
+    assert "-i https://mirrors.cloud.tencent.com/pypi/simple" in content
+    assert "--retries 3" in content
+    assert "--timeout 60" in content
+    assert "--extra-index-url" not in content

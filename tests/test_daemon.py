@@ -720,7 +720,11 @@ def test_start_daemon_serializes_concurrent_start(
 def test_start_daemon_rolls_back_state_when_child_exits(
     workspace: Workspace, config: Config, monkeypatch
 ) -> None:
-    """BUG-036：watcher 子进程立即退出后 state 不应保持 enabled=True。"""
+    """BUG-036 + IMP-064.02：watcher 子进程立即退出后——
+
+    意图保持 enabled=True（用户执行了 on），失败事实写入 lastStartError /
+    consecutiveStartFailures 观测字段，pid 已清。
+    """
     pid = 54321
     real_is_pid_alive = daemon_mod.is_pid_alive
 
@@ -738,8 +742,12 @@ def test_start_daemon_rolls_back_state_when_child_exits(
         daemon_mod.start_daemon(workspace, config, poll_interval=0.01)
     state = daemon_mod.read_state(workspace)
     assert state is not None
-    assert state.enabled is False
-    assert state.pid == pid
+    # IMP-064.02：失败不把意图改回关（去污染核心契约）
+    assert state.enabled is True
+    assert state.pid is None
+    assert state.last_start_error is not None
+    assert "启动失败" in state.last_start_error.message
+    assert state.consecutive_start_failures == 1
 
 
 # ---- stop_daemon clears enabled -------------------------------------------

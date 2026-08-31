@@ -51,6 +51,14 @@ from local_webpage_access.file_lock import (
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
+from local_webpage_access.service_failures import (
+    LastStartError,
+    clear_start_failures,
+    has_start_failures,
+    parse_consecutive_failures,
+    parse_last_start_error,
+    record_start_failure,
+)
 
 log = get_logger("daemon")
 
@@ -156,12 +164,18 @@ def try_auto_start_after_import(
 
 @dataclass
 class DaemonState:
-    """daemon 开关与运行态。"""
+    """daemon 开关与运行态。
+
+    IMP-064：``enabled`` 仅表用户意图；启动失败写 ``last_start_error`` /
+    ``consecutive_start_failures`` 观测字段，不改 ``enabled``。
+    """
 
     enabled: bool = False
     pid: int | None = None
     started_at: str | None = None
     poll_interval: float = DEFAULT_POLL_INTERVAL
+    last_start_error: LastStartError | None = None
+    consecutive_start_failures: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -218,6 +232,9 @@ def read_state(workspace: Workspace) -> DaemonState | None:
             pid=int(data["pid"]) if data.get("pid") is not None else None,
             started_at=data.get("started_at"),
             poll_interval=float(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
+            # IMP-064.01：旧文件缺字段读默认值，不做 schema 迁移
+            last_start_error=parse_last_start_error(data),
+            consecutive_start_failures=parse_consecutive_failures(data),
         )
     except (TypeError, ValueError):
         return None
@@ -1265,8 +1282,11 @@ def start_daemon(
     config: Config,
     *,
     poll_interval: float | None = None,
+    source: str = "manual",
 ) -> int:
     """``lwa daemon on``：持久化 enabled 并以子进程启动 watcher（WBS-21.01）。
+
+    ``source`` 标记启动来源，仅写入失败观测（IMP-064.02）。
 
     若已有 watcher 在跑，直接返回其 PID。返回当前 watcher PID。
     """
@@ -1276,6 +1296,10 @@ def start_daemon(
         state = read_state(workspace)
         if state and state.enabled and state.pid and is_running(workspace):
             log.info("daemon 已在运行（pid=%s），不重复启动", state.pid)
+            # IMP-064.06：已在运行早退清零连续失败计数。
+            if has_start_failures(state):
+                clear_start_failures(state)
+                write_state(workspace, state)
             return int(state.pid)
 
         existing_pid = _live_watcher_lock_pid(workspace)
@@ -1294,16 +1318,37 @@ def start_daemon(
             return existing_pid
 
         poll = poll_interval if poll_interval is not None else DEFAULT_POLL_INTERVAL
-        pid = _spawn_watcher(workspace, poll)
+        # IMP-064.02：on 入口先断言意图（enabled=True）再 spawn——失败只写
+        # 失败观测，意图保持开。
         state = DaemonState(
             enabled=True,
-            pid=pid,
-            started_at=now_iso(),
+            pid=state.pid if state else None,
+            started_at=state.started_at if state else None,
             poll_interval=poll,
+            last_start_error=state.last_start_error if state else None,
+            consecutive_start_failures=(
+                state.consecutive_start_failures if state else 0
+            ),
         )
         write_state(workspace, state)
+        try:
+            pid = _spawn_watcher(workspace, poll)
+        except Exception as exc:  # noqa: BLE001 — spawn 失败同样写失败观测
+            state.pid = None
+            record_start_failure(state, f"daemon 子进程 spawn 失败：{exc}", source=source)
+            write_state(workspace, state)
+            raise
+        state.pid = pid
+        state.started_at = now_iso()
+        write_state(workspace, state)
         if not _wait_for_watcher_start(workspace, pid):
-            state.enabled = False
+            # IMP-064.02：握手失败只写失败观测 + 清 pid，绝不写 enabled=False。
+            state.pid = None
+            record_start_failure(
+                state,
+                f"daemon 子进程启动失败或已退出（pid={pid}）",
+                source=source,
+            )
             write_state(workspace, state)
             if is_pid_alive(pid):
                 _terminate_pid(pid, timeout=1.0)
@@ -1311,6 +1356,9 @@ def start_daemon(
                 f"daemon 子进程启动失败或已退出（pid={pid}）",
                 pid=pid,
             )
+        # IMP-064.02/064.06：启动成功清零失败计数。
+        clear_start_failures(state)
+        write_state(workspace, state)
         log.info("daemon 已启动（pid=%s, poll=%.1fs）", pid, poll)
         return pid
 
@@ -1352,14 +1400,59 @@ def stop_daemon(workspace: Workspace) -> bool:
             clear_capability_cache(workspace.root, "daemon")
         except Exception:  # noqa: BLE001
             pass
-        log.info("daemon 已停止（pid=%s）", state.pid)
+        # IMP-064.06：用户级 off 重置失败观测。
+        clear_start_failures(state)
+        state.pid = None
+        write_state(workspace, state)
+        log.info("daemon 已停止")
     else:
         log.warning("daemon 终止失败（pid=%s 仍存活），保留锁文件供重试", state.pid)
     return stopped
 
 
+def stop_daemon_internal(workspace: Workspace) -> bool:
+    """IMP-064.03：内部停止原语——SIGTERM 终止 watcher 但**不改用户意图**。
+
+    供 ``updater.restart_daemon`` 主序列使用。不得走「先写 enabled=False 赶
+    watcher 自退」的用户级路径（那会污染意图）；写盘只清 ``pid``。watcher 的
+    优雅信号处理会等当前轮收尾后退出。
+    """
+    state = read_state(workspace)
+    if state is None:
+        return True
+    stopped = True
+    if state.pid:
+        if is_pid_alive(state.pid) and not pid_cmdline_contains(
+            state.pid,
+            "local_webpage_access.daemon",
+            str(workspace.root),
+        ):
+            log.warning("daemon PID %s 身份不匹配，按陈旧状态清理", state.pid)
+            stopped = True
+        else:
+            stopped = _terminate_pid(state.pid)
+    if stopped:
+        with contextlib.suppress(FileNotFoundError, PermissionError):
+            lock_path(workspace).unlink()
+        try:
+            from local_webpage_access.capability import clear_capability_cache
+
+            clear_capability_cache(workspace.root, "daemon")
+        except Exception:  # noqa: BLE001
+            pass
+        # 只清运行观测：pid=None，enabled 保持原值（064.03 核心契约）
+        state.pid = None
+        write_state(workspace, state)
+        log.info("daemon 已内部停止（意图保持 enabled=%s）", state.enabled)
+    else:
+        log.warning("daemon 内部停止失败（pid=%s 仍存活）", state.pid)
+    return stopped
+
+
 def daemon_status(workspace: Workspace) -> dict[str, Any]:
     """``lwa daemon status``：返回状态摘要（WBS-21.03）。"""
+    from local_webpage_access.service_failures import failure_note
+
     state = read_state(workspace)
     running = is_running(workspace)
     return {
@@ -1368,6 +1461,14 @@ def daemon_status(workspace: Workspace) -> dict[str, Any]:
         "pid": state.pid if state else None,
         "startedAt": state.started_at if state else None,
         "pollInterval": state.poll_interval if state else DEFAULT_POLL_INTERVAL,
+        # IMP-064.05：透出失败观测
+        "lastStartError": (
+            state.last_start_error.to_dict() if state and state.last_start_error else None
+        ),
+        "consecutiveStartFailures": (
+            state.consecutive_start_failures if state else 0
+        ),
+        "lastStartErrorNote": failure_note(state) if state else None,
     }
 
 
@@ -1550,5 +1651,6 @@ __all__ = [
     "run_watcher",
     "start_daemon",
     "stop_daemon",
+    "stop_daemon_internal",
     "daemon_status",
 ]

@@ -442,7 +442,7 @@ class StaticGateway:
                **相对路径资源**（``./assets/app.js``、``assets/logo.png``）能正确
                解析为 ``/<alias>/assets/...``。但**绝对路径资源**
                （``/assets/app.js``、以 ``/`` 开头的 ``src``/``href``）会绕过别名，
-               直接打到统一入口根 ``/assets/...`` -> 空 200 / 404。
+               直接打到统一入口根 ``/assets/...`` → 404（issue #21 前为空 200）。
 
                受影响的项目应在构建时设显式 base path（Vite ``--base=/<alias>/``）
                并让 Router/API 跟 ``BASE_URL``，或继续使用 hostPort 端口直达。
@@ -915,6 +915,15 @@ class StaticGateway:
             lines.append("\t}")
             for alias_conf in aliases:
                 lines.append(f"\timport {_caddy_quote(alias_conf.as_posix())}")
+            # issue #21：统一入口对未命中任何别名 handle 的请求显式 404。
+            # 此前站点块内无兜底路由，Caddy 对未命中请求返回 200 空体——
+            # 别名片段被误删后入口「静默失效」，只能靠人工比对直连与网关
+            # 响应才可定位。handle 块按出现顺序互斥执行，别名 handle 在前，
+            # 兜底 handle 只承接其余请求。
+            lines.append("\t# issue #21：未命中别名路由的请求显式 404（防静默空 200）")
+            lines.append("\thandle {")
+            lines.append("\t\trespond 404")
+            lines.append("\t}")
             lines.append("}")
         elif aliases and port is None:
             log.warning(

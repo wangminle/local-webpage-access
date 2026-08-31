@@ -256,6 +256,23 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 - `lwa doctor` 的 `source_freshness` 检查（WARN 级，纯离线）批量列出源码
   漂移 / 源目录丢失的 folder 源实例；git 源不触网，仅 SKIP 提示。
 
+### 构建慢 / pip 下载失败（issue #18，V0.8.9）
+
+生成的 Dockerfile pip 层按源链执行：**主源 → `pipFallbacks` 逐段 `||`**（china
+默认阿里云 → 官方 PyPI → 腾讯云），每段 `--retries 3 --timeout 60`。排障口径：
+
+- **构建报「依赖安装失败」并带换源提示** → 三段源全部硬故障：查 LWA 机器的
+  出网/代理（`https_proxy` 对 git 生效，对 Docker 构建内的 pip 不生效——构建
+  网络由 Docker 管理），或临时 `buildMirrors.enabled: false` 走官方源重试。
+- **构建极慢但最终成功** → 主源限速（`||` 不切走慢而能通的源）：换主源
+  （`buildMirrors.pip`，如清华 `https://pypi.tuna.tsinghua.edu.cn/simple`），
+  或给 Docker 配 registry 代理之外再配 build 网络代理。
+- **requirements 变更后全量重下** → 已知镜像缓存未命中行为（见
+  [known-limitations](known-limitations.md)），不是故障；减少无谓的
+  requirements 变更或接受该成本。
+- 调整参数：`buildMirrors.pipFallbacks`（`[]` 只走主源）/ `pipRetries` /
+  `pipTimeout`；改完 `lwa rebuild <id>` 生效。
+
 ---
 
 ## 三、容器实例路径别名（IMP-014）

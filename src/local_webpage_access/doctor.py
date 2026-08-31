@@ -2018,13 +2018,39 @@ def _service_observed_running(name: str, ws: Workspace, config: Config) -> bool 
         return None
 
 
+def _read_service_state_for_intent(name: str, ws: Workspace) -> Any:
+    """读取指定服务的状态文件对象（IMP-064.05：doctor 消费失败观测）。"""
+    try:
+        if name == "daemon":
+            from local_webpage_access import daemon as daemon_mod
+
+            return daemon_mod.read_state(ws)
+        if name == "manager":
+            from local_webpage_access import manager_service
+
+            return manager_service.read_state(ws)
+        if name == "gateway":
+            from local_webpage_access import gateway_service
+
+            return gateway_service.read_state(ws)
+    except Exception:  # noqa: BLE001 — 状态读取失败按无观测处理
+        return None
+    return None
+
+
 def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
     """IMP-060.01：比对自有服务意图（enabled）与观测（is_running）。
 
     enabled=true 且未运行 → **FAIL**（当前就是故障），建议文含恢复命令；
+    IMP-064.05：FAIL 文案与 detail 追加 ``lastStartError`` 失败原因与熔断状态
+    （去污染后 enabled=true 才语义真实；存量污染仍可能假绿，见 §16.2）。
     enabled=false → PASS（detail 注明「已按意图停用」）；gateway 在
     ``staticGateway != caddy`` 时不参与判定。
     """
+    from local_webpage_access.service_failures import (
+        failure_note,
+        start_failure_circuit_open,
+    )
     from local_webpage_access.service_intent import (
         INTENT_ENABLED,
         INTENT_NOT_APPLICABLE,
@@ -2037,6 +2063,7 @@ def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
     unknown: list[str] = []
     residual: list[str] = []
     lines: list[str] = []
+    circuit_notes: list[str] = []
     for name in SERVICE_NAMES:
         it = intent.get(name)
         if it == INTENT_NOT_APPLICABLE:
@@ -2044,6 +2071,8 @@ def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
             lines.append(f"{name}: 不适用（staticGateway={config.staticGateway}）")
             continue
         running = _service_observed_running(name, ws, config)
+        state = _read_service_state_for_intent(name, ws)
+        failure = failure_note(state) if state is not None else None
         if it != INTENT_ENABLED:
             # CHK-224#3：反向不一致——已停用但进程仍在（残留/stale 状态文件）
             # 至少 WARN，否则 doctor 会把残留服务报成健康。
@@ -2058,18 +2087,48 @@ def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
         if running is None:
             unknown.append(name)
             lines.append(f"{name}: enabled，运行态探测失败（未知）")
+            if failure:
+                lines.append(f"{name}: {failure}")
         elif running:
-            lines.append(f"{name}: enabled 且运行中")
+            line = f"{name}: enabled 且运行中"
+            if failure:
+                line += f"；{failure}"
+            lines.append(line)
         else:
             not_running.append(name)
-            lines.append(f"{name}: enabled 但未运行")
+            line = f"{name}: enabled 但未运行"
+            if failure:
+                # IMP-064.05：FAIL 文案追加 lastStartError.message（若有）
+                line += f"；{failure}"
+                if state is not None and start_failure_circuit_open(state):
+                    line += "（熔断中：update 自动拉起已暂停，需手动 lwa {} on）".format(name)
+                    circuit_notes.append(name)
+            lines.append(line)
 
     if not_running:
         fixes = "；".join(f"{_SERVICE_START_CMD[n]}（恢复 {n}）" for n in not_running)
+        message = f"自有服务运行态与期望不一致：{', '.join(not_running)} enabled 但未运行"
+        # IMP-064.05（规则 6）：FAIL 文案追加 lastStartError.message（若有）
+        first_failure = next(
+            (
+                line
+                for line in lines
+                for n in not_running
+                if line.startswith(f"{n}:") and "上次启动失败" in line
+            ),
+            None,
+        )
+        if first_failure:
+            message += f"；{first_failure}"
+        if circuit_notes:
+            message += (
+                f"；{', '.join(circuit_notes)} 连续启动失败熔断中"
+                "（update 自动拉起已暂停，手动 on 不受限制）"
+            )
         return CheckResult(
             "service_runtime_state",
             STATUS_FAIL,
-            f"自有服务运行态与期望不一致：{', '.join(not_running)} enabled 但未运行",
+            message,
             detail="\n".join(lines),
             suggestion=fixes + "；服务若常随重启/崩溃丢失，请 `lwa autostart check` 检查监管",
         )
@@ -2318,6 +2377,8 @@ def run_doctor(
             check_port_contention(ws, config, registry=caddy_probe_registry),
             check_disk_space(ws),
             check_memory(),
+            # IMP-062：版本滞后提示（复用 update --check + 24h 缓存；网络失败 SKIP）
+            check_version_freshness(ws),
         ]
         if access_review and caddy_probe_registry is not None:
             from local_webpage_access.access_workflow import review_access
@@ -2365,6 +2426,152 @@ def run_doctor(
                 )
             ]
     return report
+
+
+# ---- IMP-062：版本滞后可发现性 ------------------------------------------------
+
+# 24h 缓存：命中则不 fetch；所有状态（含 unavailable）都缓存，避免离线家庭
+# 服务器每次 doctor 都等待 fetch 超时。
+_VERSION_CHECK_CACHE_TTL = 24 * 3600
+_VERSION_CHECK_CACHE = "version-check.json"
+
+
+def _version_check_cache_path(ws: Workspace) -> Path:
+    return ws.run / _VERSION_CHECK_CACHE
+
+
+def _parse_iso_to_ts(value: str | None) -> float | None:
+    if not value:
+        return None
+    from datetime import datetime
+
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        from datetime import timezone
+
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def check_version_freshness(ws: Workspace) -> CheckResult:
+    """IMP-062：版本滞后提示——复用 ``lwa update --check`` 的探测与报告契约。
+
+    * 复用 :func:`update_source.run_source_check`（同 repo 锁、同 fetch 语义），
+      **不**重复实现 git ls-remote / GitHub API 探测；
+    * 24h 缓存（``run/version-check.json``）：命中即用缓存结论，不触网；
+    * 状态映射：``updateAvailable`` → WARN（提示 ``lwa update``）；``upToDate``
+      → OK；``unavailable``（网络/代理失败）→ **SKIP**（家庭服务器可能长期
+      内网，网络问题不升为 doctor FAIL）；``blocked``（detached/dirty/ahead
+      等本地仓库问题）→ SKIP 并附原因；
+    * 非 git 克隆安装（locate_repo 无果）→ SKIP。
+    """
+    import os as os_mod
+    import time as time_mod
+
+    from local_webpage_access.updater import locate_repo
+
+    def _skip(reason: str, *, suggestion: str | None = None) -> CheckResult:
+        return CheckResult("version_freshness", STATUS_SKIP, reason, suggestion=suggestion)
+
+    # BUG-121 同款门禁：pytest 下 locate_repo 会命中真实 editable 仓库，
+    # run_source_check 的 fetch 会触网并写生产 .git——测试一律 SKIP
+    # （专项测试自行 monkeypatch 注入替身，或设 LWA_ALLOW_VERSION_CHECK=1 放行）。
+    if os_mod.environ.get("PYTEST_CURRENT_TEST") and os_mod.environ.get(
+        "LWA_ALLOW_VERSION_CHECK"
+    ) != "1":
+        return _skip("测试环境跳过远端版本检查")
+
+    cache_path = _version_check_cache_path(ws)
+    cached: dict | None = None
+    try:
+        if cache_path.is_file():
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                cached = raw
+    except (OSError, json.JSONDecodeError):
+        cached = None
+
+    ts = _parse_iso_to_ts(cached.get("checkedAt")) if cached else None
+    if cached is not None and ts is not None and (time_mod.time() - ts) < _VERSION_CHECK_CACHE_TTL:
+        status = str(cached.get("status") or "")
+        detail = f"（24h 缓存，checkedAt={cached.get('checkedAt')}）"
+        if status == "updateAvailable":
+            behind = int(cached.get("behindBy") or 0)
+            target_ver = (cached.get("target") or {}).get("version")
+            msg = f"有新版本可更新：落后 {behind} 个提交"
+            if target_ver:
+                msg += f"（远端 {target_ver}）"
+            return CheckResult(
+                "version_freshness",
+                STATUS_WARN,
+                msg + detail,
+                suggestion="执行 `lwa update` 一键升级（fetch → 快进 → Runtime 刷新）",
+            )
+        if status == "upToDate":
+            return CheckResult("version_freshness", STATUS_OK, f"已是最新版本{detail}")
+        if status == "unavailable":
+            return _skip(f"远端版本探测不可达{detail}（网络/代理问题不构成 doctor FAIL）")
+        if status == "blocked":
+            reason = ((cached.get("error") or {}).get("message")) or "本地仓库状态不允许判定"
+            return _skip(f"版本判定被阻断：{reason}{detail}")
+
+    repo = locate_repo()
+    if repo is None:
+        return _skip("未识别到 lwa 源码根（非 git 克隆安装），跳过版本检查")
+
+    import local_webpage_access.update_source as us
+
+    try:
+        repo_fd = us.acquire_repo_lock(repo)
+    except us.UpdateLockBusy:
+        return _skip("更新锁被占用（已有 update/check 在执行），跳过本次版本检查")
+    try:
+        report = us.run_source_check(repo)
+    except us.SourceUpdateError as exc:
+        return _skip(f"版本探测失败：{exc.message}")
+    finally:
+        import os as os_mod
+
+        with contextlib.suppress(OSError):
+            os_mod.close(repo_fd)
+
+    data = report.to_dict()
+    # 写缓存（含 unavailable——避免离线环境每次 doctor 等 fetch 超时）
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        slim = {
+            "status": data["status"],
+            "checkedAt": data["checkedAt"],
+            "behindBy": data.get("behindBy") or 0,
+            "target": data.get("target"),
+            "error": data.get("error"),
+        }
+        cache_path.write_text(
+            json.dumps(slim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass  # 缓存写失败不影响本次结论
+
+    if report.status == "updateAvailable":
+        target_ver = (data.get("target") or {}).get("version")
+        msg = f"有新版本可更新：落后 {report.behind_by} 个提交"
+        if target_ver:
+            msg += f"（远端 {target_ver}）"
+        return CheckResult(
+            "version_freshness",
+            STATUS_WARN,
+            msg,
+            suggestion="执行 `lwa update` 一键升级（fetch → 快进 → Runtime 刷新）",
+        )
+    if report.status == "upToDate":
+        return CheckResult("version_freshness", STATUS_OK, "已是最新版本")
+    if report.status == "unavailable":
+        return _skip("远端版本探测不可达（网络/代理问题不构成 doctor FAIL）")
+    reason = ((data.get("error") or {}).get("message")) or "本地仓库状态不允许判定"
+    return _skip(f"版本判定被阻断：{reason}")
 
 
 def _allocated_ports_for_workspace(ws: Workspace) -> set[int]:

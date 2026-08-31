@@ -39,6 +39,22 @@ def _echo_source_lines(status: object) -> None:
         typer.echo(f"  ↳ 来源：{git_source_label(status)}")
 
 
+def _echo_compatibility_line(status: object) -> None:
+    """C.01（IMP-056 后置包）：实例已有兼容性预检 findings 时显示 ⚠ 与最高等级。
+
+    无 findings 不输出任何行（默认列表保持紧凑）；文案自带「⚠」与等级文字，
+    终端不支持颜色时仍可读。advisory 提示，诊断详情见 ``lwa doctor``。
+    """
+    severity = getattr(status, "compatibility_severity", None)
+    count = int(getattr(status, "compatibility_count", 0) or 0)
+    if not severity or count <= 0:
+        return
+    typer.secho(
+        f"  ↳ ⚠ 兼容性预检：{count} 条发现（最高 {severity}），详情 lwa doctor / 管理页",
+        fg=typer.colors.YELLOW,
+    )
+
+
 def status(
     instance_id: str = typer.Argument(None, help="实例 ID（省略则显示全部）"),
 ) -> None:
@@ -70,6 +86,8 @@ def status(
                 f"{s.status:10} {s.desired_state:10} {port:6} {s.name}"
             )
             _echo_source_lines(s)
+            # C.01：兼容性预检提示（无 findings 不输出）
+            _echo_compatibility_line(s)
             # IMP-006：路径别名入口 URL
             if s.route_url:
                 typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
@@ -83,7 +101,11 @@ def status(
 
 
 def _echo_service_modes(instance_id: str | None) -> None:
-    """IMP-061.03：全量视图追加自有服务运行模式（裸进程=重启后不自动恢复）。"""
+    """IMP-061.03：全量视图追加自有服务运行模式（裸进程=重启后不自动恢复）。
+
+    IMP-064.05：服务带未清零的启动失败观测（lastStartError）时以黄色提示，
+    连续失败计数一并展示。
+    """
     if instance_id:
         return
     from local_webpage_access import autostart as asm
@@ -92,6 +114,32 @@ def _echo_service_modes(instance_id: str | None) -> None:
     typer.echo("── 自有服务运行模式 ──")
     for name in asm.ALL_SERVICES:
         typer.echo(f"  {name:<10} {asm.service_supervision_mode(name)}")
+        note = _service_failure_note(name)
+        if note:
+            typer.secho(f"  {'':<10} ⚠ {note}", fg=typer.colors.YELLOW)
+
+
+def _service_failure_note(name: str) -> str | None:
+    """读取指定服务的启动失败观测摘要（IMP-064.05）；无失败返回 None。"""
+    try:
+        from local_webpage_access.paths import Workspace, find_workspace_root
+
+        root = find_workspace_root()
+        if root is None:
+            return None
+        ws = Workspace(root)
+        from local_webpage_access.doctor import _read_service_state_for_intent
+
+        state = _read_service_state_for_intent(name, ws)
+        if state is None:
+            return None
+        from local_webpage_access.service_failures import failure_note
+
+        if not state.enabled:
+            return None
+        return failure_note(state)
+    except Exception:  # noqa: BLE001 — 状态展示失败不影响主列表
+        return None
 
 
 def stats(
@@ -169,6 +217,8 @@ def list_cmd() -> None:
             port = str(s.host_port) if s.host_port else "-"
             typer.echo(f"{s.id[:20]:20} {s.kind:8} {s.runtime:16} {s.status:10} {port:6} {s.name}")
             _echo_source_lines(s)
+            # C.01：兼容性预检提示（无 findings 不输出）
+            _echo_compatibility_line(s)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

@@ -40,6 +40,14 @@ from local_webpage_access.file_lock import (
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
+from local_webpage_access.service_failures import (
+    LastStartError,
+    clear_start_failures,
+    has_start_failures,
+    parse_consecutive_failures,
+    parse_last_start_error,
+    record_start_failure,
+)
 from local_webpage_access.static_gateway import StaticGateway
 from local_webpage_access.version_requirements import MIN_CADDY_VERSION
 
@@ -59,7 +67,11 @@ ENTRY_PORT_DEFAULT = 8080
 
 @dataclass
 class GatewayState:
-    """Caddy 网关后台服务态。"""
+    """Caddy 网关后台服务态。
+
+    IMP-064：``enabled`` 仅表用户意图；启动失败写 ``last_start_error`` /
+    ``consecutive_start_failures`` 观测字段，不改 ``enabled``。
+    """
 
     enabled: bool = False
     pid: int | None = None
@@ -67,6 +79,8 @@ class GatewayState:
     # staticGatewayPort：别名统一入口端口；无别名时该端口不被占用，故可为 None。
     port: int | None = ENTRY_PORT_DEFAULT
     admin_port: int = ADMIN_PORT
+    last_start_error: LastStartError | None = None
+    consecutive_start_failures: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -98,6 +112,9 @@ def read_state(workspace: Workspace) -> GatewayState | None:
             started_at=data.get("started_at"),
             port=int(port) if port is not None else None,
             admin_port=int(data.get("admin_port", ADMIN_PORT)),
+            # IMP-064.01：旧文件缺字段读默认值，不做 schema 迁移
+            last_start_error=parse_last_start_error(data),
+            consecutive_start_failures=parse_consecutive_failures(data),
         )
     except (TypeError, ValueError):
         return None
@@ -231,6 +248,7 @@ def start_gateway(
     config: Config,
     *,
     registry: Registry | None = None,
+    source: str = "manual",
 ) -> int:
     """``lwa gateway on`` / ``lwa init`` 联动：启动 Caddy master 并写服务态。
 
@@ -252,6 +270,20 @@ def start_gateway(
     with gateway_start_lock(workspace):
         if gateway._admin_alive() and not is_gateway_running(workspace, config):
             owner = gateway.inspect_caddy_owner()
+            # IMP-064.02：拒绝启动同样写失败观测（意图保持开），doctor 据此报
+            # FAIL 并附原因，而不是「已按意图停用」。
+            fail_state = read_state(workspace) or GatewayState(
+                enabled=True,
+                port=config.staticGatewayPort,
+                admin_port=ADMIN_PORT,
+            )
+            fail_state.enabled = True
+            record_start_failure(
+                fail_state,
+                f"Caddy admin :{ADMIN_PORT} 被非本工作区进程占用，启动被拒绝",
+                source=source,
+            )
+            write_state(workspace, fail_state)
             raise LifecycleError(
                 "Caddy admin :2019 已被非本工作区进程占用，拒绝停止 builtin "
                 f"或认领外部网关（owner={owner.get('owner')}, pid={owner.get('pid')}）",
@@ -260,10 +292,10 @@ def start_gateway(
             state = read_state(workspace)
             # pid 优先取 live master 的 caddy.pid，缺失时回退服务态记录的最后 pid
             pid = _read_caddy_pid(gateway) or (state.pid if state else None)
-            # BUG-073：网关在线但服务态缺失/未启用（如 gateway.json 被删或来自旧版）
-            # → 补写恢复态，避免 gateway status 出现 running=true ∧ enabled=false
-            # 的不一致。不重复 caddy start。
-            if state is None or not state.enabled:
+            # BUG-073 / IMP-064.02（规则 9）：仅「状态文件缺失」可补写恢复态
+            # enabled=True；enabled=False 且 Caddy 在线视为残留进程（IMP-060
+            # residual WARN 同向），不把用户意图翻回开。
+            if state is None:
                 write_state(
                     workspace,
                     GatewayState(
@@ -274,21 +306,20 @@ def start_gateway(
                         admin_port=ADMIN_PORT,
                     ),
                 )
-                log.info("网关已在线，补写服务态（pid=%s）", pid if pid else "?")
+                log.info("网关在线但服务态缺失，补写恢复态（pid=%s）", pid if pid else "?")
+            elif not state.enabled:
+                log.warning(
+                    "网关 master 在线但 enabled=false（残留进程，不翻意图）；"
+                    "如需启用请 lwa gateway on",
+                )
             elif pid is not None and pid != state.pid:
                 # issue #4：监督器接管后 gateway.json 可能仍停在旧裸进程记录
                 # （旧 pid），不刷新会让中断时长估算/2019 冲突检查按陈旧记录虚报。
                 # 检测到 live pid 与记录不一致 -> 刷新为当前 master 的事实。
-                write_state(
-                    workspace,
-                    GatewayState(
-                        enabled=True,
-                        pid=pid,
-                        started_at=now_iso(),
-                        port=config.staticGatewayPort,
-                        admin_port=ADMIN_PORT,
-                    ),
-                )
+                state.pid = pid
+                state.started_at = now_iso()
+                state.port = config.staticGatewayPort
+                write_state(workspace, state)
                 log.info(
                     "网关服务态陈旧（json pid=%s，live pid=%s），已刷新",
                     state.pid,
@@ -296,6 +327,10 @@ def start_gateway(
                 )
             else:
                 log.info("网关已在运行（pid=%s），不重复启动", pid if pid else "?")
+                # IMP-064.06：已在运行早退清零连续失败计数。
+                if state is not None and has_start_failures(state):
+                    clear_start_failures(state)
+                    write_state(workspace, state)
             # 即使网关已在线，也清理可能残留的 builtin 孤儿（含 pid-less 孤儿，
             # §2.7）+ 刷新地址（建议 A/B）。不重复 caddy start，但交接收尾必须执行。
             # BUG-420：已在线也不重启，但先落盘当前主配置再 reload，修复 mv 后陈旧路径。
@@ -334,10 +369,35 @@ def start_gateway(
         # 无主配置 bootstrap：启动时直接加载真实主配置，无需启动后再 sync）。
         gateway.write_main_config()
 
+        # IMP-064.02：on 入口先断言意图（enabled=True）再 caddy_start——与
+        # manager/daemon 对齐；此前首次 write_state 发生在启动成功之后，
+        # `lwa gateway on` 失败会留下 enabled=false，doctor 误报「已按意图停用」。
+        state = read_state(workspace)
+        intent_state = GatewayState(
+            enabled=True,
+            pid=state.pid if state else None,
+            started_at=state.started_at if state else None,
+            port=config.staticGatewayPort,
+            admin_port=ADMIN_PORT,
+            last_start_error=state.last_start_error if state else None,
+            consecutive_start_failures=(
+                state.consecutive_start_failures if state else 0
+            ),
+        )
+        write_state(workspace, intent_state)
+
         if not gateway.caddy_start():
             # BUG-517：Caddy 启动失败时把 start 前停掉的 builtin 拉回来，否则站点
             # 会持续下线且难自愈。best-effort，失败不掩盖原始 caddy 启动异常。
             _restore_stopped_builtin(workspace, registry, gateway, stopped_builtin)
+            # IMP-064.02：失败只写失败观测 + 清 pid，绝不写 enabled=False。
+            intent_state.pid = None
+            record_start_failure(
+                intent_state,
+                "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）",
+                source=source,
+            )
+            write_state(workspace, intent_state)
             raise LifecycleError(
                 "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）；"
                 "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019",
@@ -356,6 +416,7 @@ def start_gateway(
             port=config.staticGatewayPort,
             admin_port=ADMIN_PORT,
         )
+        # IMP-064.02/064.06：启动成功清零失败计数。
         write_state(workspace, state)
         log.info(
             "网关已启动（pid=%s，admin=127.0.0.1:%d，entry=%s）",
@@ -431,6 +492,8 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
         if state is not None:
             state.enabled = False
             state.pid = None
+            # IMP-064.06：用户级 off 重置失败观测。
+            clear_start_failures(state)
             write_state(workspace, state)
         # BUG-077：backend 非 caddy 但 admin 仍在线 → 仍有残留 master，需关停
         if not gateway._admin_alive():
@@ -464,6 +527,8 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
         if state is not None:
             state.enabled = False
             state.pid = None
+            # IMP-064.06：用户级 off 重置失败观测。
+            clear_start_failures(state)
             write_state(workspace, state)
         try:
             from local_webpage_access.capability import clear_capability_cache
@@ -474,6 +539,33 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
         log.info("网关已停止")
     else:
         log.warning("网关停止失败，Caddy master 可能仍在运行（admin :2019）")
+    return stopped
+
+
+def stop_gateway_internal(workspace: Workspace, config: Config) -> bool:
+    """IMP-064.03：内部停止原语——停 Caddy master 但**不改用户意图**。
+
+    供 ``updater.restart_gateway`` 主序列与 ``run_gateway_foreground`` 退出
+    使用（后者此前调用户级 :func:`stop_gateway`，监督器 SIGTERM / 关机后会把
+    用户意图翻成关，属 CHK-232 遗漏 1）。写盘只清 ``pid``。
+    """
+    gateway = StaticGateway(workspace, config)
+    stopped = gateway.caddy_stop()
+    state = read_state(workspace)
+    if stopped:
+        if state is not None:
+            # 只清运行观测：pid=None，enabled 保持原值（064.03 核心契约）
+            state.pid = None
+            write_state(workspace, state)
+        try:
+            from local_webpage_access.capability import clear_capability_cache
+
+            clear_capability_cache(workspace.root, "gateway")
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("网关已内部停止（意图保持 enabled=%s）", state.enabled if state else "?")
+    else:
+        log.warning("网关内部停止失败，Caddy master 可能仍在运行（admin :2019）")
     return stopped
 
 
@@ -503,6 +595,8 @@ def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
         # 服务态缺失但 master 在线：补读 caddy.pid 便于展示。
         pid = _read_caddy_pid(gateway)
     configured_port = config.staticGatewayPort
+    from local_webpage_access.service_failures import failure_note
+
     return {
         "running": running,
         "enabled": bool(state and state.enabled),
@@ -514,18 +608,40 @@ def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
         "adminPort": ADMIN_PORT,
         "orphanMaster": orphan_master,
         "foreignMaster": foreign_master,
+        # IMP-064.05：透出失败观测
+        "lastStartError": (
+            state.last_start_error.to_dict() if state and state.last_start_error else None
+        ),
+        "consecutiveStartFailures": (
+            state.consecutive_start_failures if state else 0
+        ),
+        "lastStartErrorNote": failure_note(state) if state else None,
     }
 
 
 def maybe_start_gateway(workspace: Workspace, config: Config) -> int | None:
-    """``lwa init`` / ``lwa manager on`` 联动：caddy 后端时启动网关，失败只记日志。
+    """``lwa manager on`` / reconcile 联动：caddy 后端且 gateway 意图为开时启动。
 
-    非 caddy 后端跳过；启动失败不抛（业务可降级 builtin 静态服务继续工作），
-    仅记 warning 供排障。返回 pid（0 也算成功），跳过/失败返回 None。
+    IMP-064（规则 9 / CHK-232 遗漏 2）：联动前查 ``service_intent``——gateway
+    为 disabled / n.a.（含状态文件缺失=未表达意图）则**跳过**，不调
+    ``start_gateway``。否则 ``lwa manager on`` 会把用户主动 ``gateway off``
+    的意图翻回开。首次启用请显式 ``lwa gateway on``（或安装 autostart，安装
+    期会置意图为开）。
+
+    启动失败不抛（业务可降级 builtin 静态服务继续工作），仅记 warning 供排障。
+    返回 pid（0 也算成功），跳过/失败返回 ``None``。
     """
     gateway = StaticGateway(workspace, config)
     if gateway.detect_backend() != "caddy":
         log.info("staticGateway=%s，跳过网关自动启动", config.staticGateway)
+        return None
+    state = read_state(workspace)
+    if state is None or not state.enabled:
+        log.info(
+            "gateway 意图为 disabled（run/gateway.json enabled=%s），联动启动跳过；"
+            "如需启用请 lwa gateway on",
+            bool(state and state.enabled),
+        )
         return None
     try:
         return start_gateway(workspace, config)
@@ -604,8 +720,11 @@ def run_gateway_foreground(
             polls_since_capability_refresh = 0
 
     log.info("gateway 前台进程退出，停止 master")
+    # IMP-064.03b：前台监管退出（监督器 SIGTERM / 关机）改走内部停止——
+    # 停 master、清 pid，但保留 enabled=True。此前调用户级 stop_gateway 会把
+    # 用户意图翻成关，监督器拉回后意图/观测矛盾（CHK-232 遗漏 1）。
     with contextlib.suppress(Exception):  # noqa: BLE001
-        stop_gateway(workspace, config)
+        stop_gateway_internal(workspace, config)
     return 0
 
 
@@ -679,6 +798,7 @@ __all__ = [
     "is_gateway_running",
     "start_gateway",
     "stop_gateway",
+    "stop_gateway_internal",
     "gateway_status",
     "maybe_start_gateway",
     "gateway_start_lock",

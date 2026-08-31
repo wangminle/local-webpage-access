@@ -2296,3 +2296,67 @@ def test_discover_health_probes_warns_on_missing_root(
     assert any(str(missing_root) in r.getMessage() for r in warnings), (
         "缺失扫描根应记录含路径的 WARNING"
     )
+
+
+# ---- issue #23：scan / import --update 重建不得清空 buildHooks / preStart ----
+
+
+def test_rescan_preserves_build_hooks_and_prestart(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """issue #23：lwa scan 经 apply_detection_to_manifest 不得清空钩子。
+
+    git 源更新同样经 apply_detection（再汇入 _update_zip_locked），本断言覆盖
+    共用入口；zip --update 另见 test_update_preserves_build_hooks_and_prestart。
+    """
+    from local_webpage_access.importer import apply_detection_to_manifest
+    from local_webpage_access.scanner import Scanner
+
+    zip_path = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(zip_path)
+    iid = r1.instance_id
+    mpath = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(mpath)
+    manifest.buildHooks = ["chown -R 1000:1000 /app/runtime"]
+    manifest.preStart = "echo hi"
+    manifest.save(mpath)
+
+    scanner = Scanner()
+    detection = scanner.detect(workspace.app_current(iid))
+    fresh = apply_detection_to_manifest(
+        InstanceManifest.load(mpath), detection, workspace
+    )
+    assert fresh.buildHooks == ["chown -R 1000:1000 /app/runtime"]
+    assert fresh.preStart == "echo hi"
+
+
+def test_update_preserves_build_hooks_and_prestart(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
+) -> None:
+    """issue #23：import --update（及 git/folder 汇入的 _update_zip_locked）保留钩子。"""
+    v1 = _make_zip(
+        tmp_path / "api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=1\n"},
+    )
+    r1 = importer.import_zip(v1)
+    iid = r1.instance_id
+    mpath = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(mpath)
+    manifest.buildHooks = ["chown -R 1000:1000 /app/runtime"]
+    manifest.preStart = "echo hi"
+    manifest.save(mpath)
+    registry.upsert_from_manifest(manifest)
+
+    v2 = _make_zip(
+        tmp_path / "api-v2.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=2\n"},
+    )
+    result = importer.update_zip(v2, iid, restart=False)
+    assert result.manifest.buildHooks == ["chown -R 1000:1000 /app/runtime"]
+    assert result.manifest.preStart == "echo hi"
+    reloaded = InstanceManifest.load(mpath)
+    assert reloaded.buildHooks == ["chown -R 1000:1000 /app/runtime"]
+    assert reloaded.preStart == "echo hi"
