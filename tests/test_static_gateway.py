@@ -1390,7 +1390,11 @@ class _FakeCaddyPopen:
 
 
 def test_caddy_start_uses_devnull_not_pipes(gateway: StaticGateway, monkeypatch) -> None:
-    """BUG-412：Popen 必须 DEVNULL，避免 daemon 继承 PIPE 写端死锁。"""
+    """BUG-412：Popen 禁 PIPE，避免 daemon 继承 PIPE 写端死锁。
+
+    CHK-280 起 stderr 落盘 ``logs/caddy-runtime.log``（追加文件句柄——非
+    PIPE，无 communicate 死锁面）；stdout 保持 DEVNULL。
+    """
     captured: dict = {}
 
     def fake_popen(cmd, **kw):
@@ -1402,7 +1406,10 @@ def test_caddy_start_uses_devnull_not_pipes(gateway: StaticGateway, monkeypatch)
     monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
     assert gateway.caddy_start() is True
     assert captured["kwargs"].get("stdout") is subprocess.DEVNULL
-    assert captured["kwargs"].get("stderr") is subprocess.DEVNULL
+    stderr = captured["kwargs"].get("stderr")
+    assert stderr is not subprocess.PIPE
+    assert not isinstance(stderr, int), "stderr 应为日志文件句柄而非 fd 常量"
+    assert str(getattr(stderr, "name", "")).endswith("caddy-runtime.log")
 
 
 def test_caddy_start_does_not_call_bare_communicate_after_exit(

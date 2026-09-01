@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -164,33 +165,73 @@ def is_gateway_running(workspace: Workspace, config: Config) -> bool:
     return bool(owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"))
 
 
+# CHK-280 / BUG-615：启动锁可重入状态。RLock 必须跨整个
+# yield 临界区持有：不同线程先在进程内排队，当前持有者才能进入
+# finally 释放 flock；同线程重入（如 start_gateway 持锁时 reload 自愈链
+# 内再调 ensure_caddy_running）由 RLock + 线程本地 depth 跳过二次 flock。
+_gateway_start_thread_lock = threading.RLock()
+_gateway_start_state = threading.local()
+
+
 @contextlib.contextmanager
 def gateway_start_lock(
-    workspace: Workspace, *, timeout: float = GATEWAY_START_LOCK_TIMEOUT
+    workspace: Workspace, *, timeout: float | None = None
 ) -> Iterator[None]:
-    """串行化 ``lwa gateway on``，避免并发 ``caddy start``；回收陈旧启动锁（BUG-175）。"""
+    """串行化 ``lwa gateway on`` 与所有 ``caddy start`` 路径，避免并发双 master。
+
+    CHK-280 根因修复：daemon 自愈的 :meth:`StaticGateway.ensure_caddy_running`
+    此前不持本锁，update 重启窗口内与网关监督器的 ``caddy start`` 并发双跑，
+    Caddy SO_REUSEPORT 双 master 共享 pidfile。现在 ensure / stop_internal /
+    start_gateway 全部经本锁串行化。
+
+    同线程可重入（flock 由最外层持有者统一获取/释放）；跨线程/跨进程靠 flock
+    互斥，等待 ``timeout``（默认 :data:`GATEWAY_START_LOCK_TIMEOUT`，调用时
+    读取以便测试注入）后抛 :class:`LifecycleError`。回收陈旧启动锁（BUG-175）。
+    """
+    if timeout is None:
+        timeout = GATEWAY_START_LOCK_TIMEOUT
     path = start_lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
     deadline = time.monotonic() + timeout
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
-    ensure_lockable(fd)
-    while True:
-        try:
-            try_acquire_exclusive(fd)
-            write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
-            break
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise LifecycleError("网关启动锁被占用，稍后重试")
-            time.sleep(0.05)
+    remaining = max(0.0, deadline - time.monotonic())
+    if not _gateway_start_thread_lock.acquire(timeout=remaining):
+        raise LifecycleError("网关启动锁被占用，稍后重试")
     try:
-        yield
-    finally:
-        if fd is not None:
-            release_exclusive(fd)
-            with contextlib.suppress(OSError):
+        depth = int(getattr(_gateway_start_state, "depth", 0))
+        if depth:
+            _gateway_start_state.depth = depth + 1
+        else:
+            fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                ensure_lockable(fd)
+                while True:
+                    try:
+                        try_acquire_exclusive(fd)
+                        write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise LifecycleError("网关启动锁被占用，稍后重试") from None
+                        time.sleep(0.05)
+            except BaseException:
                 os.close(fd)
+                fd = None
+                raise
+            _gateway_start_state.depth = 1
+        try:
+            yield
+        finally:
+            if depth:
+                _gateway_start_state.depth = depth
+            else:
+                _gateway_start_state.depth = 0
+                if fd is not None:
+                    release_exclusive(fd)
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+    finally:
+        _gateway_start_thread_lock.release()
 
 
 def _restore_stopped_builtin(
@@ -286,7 +327,10 @@ def start_gateway(
             write_state(workspace, fail_state)
             raise LifecycleError(
                 "Caddy admin :2019 已被非本工作区进程占用，拒绝停止 builtin "
-                f"或认领外部网关（owner={owner.get('owner')}, pid={owner.get('pid')}）",
+                f"或认领外部网关（owner={owner.get('owner')}, pid={owner.get('pid')}）；"
+                "注意 run/caddy.pid 缺失也会触发本判定（CHK-280：重复 master 退出时 "
+                "Caddy 会删除共享 pidfile）——若 master 实为本工作区所有，"
+                "重建 pidfile 后重试",
             )
         if is_gateway_running(workspace, config):
             state = read_state(workspace)
@@ -400,7 +444,8 @@ def start_gateway(
             write_state(workspace, intent_state)
             raise LifecycleError(
                 "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）；"
-                "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019",
+                "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019；"
+                "Caddy 自身输出见 logs/caddy-runtime.log（CHK-280）",
             )
         if stopped_builtin:
             # 启动前清过占用 hostPort 的 builtin：再 reload 一次确保站点绑定生效。
@@ -548,9 +593,15 @@ def stop_gateway_internal(workspace: Workspace, config: Config) -> bool:
     供 ``updater.restart_gateway`` 主序列与 ``run_gateway_foreground`` 退出
     使用（后者此前调用户级 :func:`stop_gateway`，监督器 SIGTERM / 关机后会把
     用户意图翻成关，属 CHK-232 遗漏 1）。写盘只清 ``pid``。
+
+    CHK-280：停止全程持有 ``gateway_start_lock``，与 ``ensure_caddy_running`` /
+    ``start_gateway`` 串行化——否则 update 的 stop→start 间隙内 daemon 自愈可
+    在停止中途并发 ``caddy start``，新 master 让 ``caddy_stop`` 的退出等待误判
+    「未在预期时间内退出」并留下双 master。
     """
     gateway = StaticGateway(workspace, config)
-    stopped = gateway.caddy_stop()
+    with gateway_start_lock(workspace):
+        stopped = gateway.caddy_stop()
     state = read_state(workspace)
     if stopped:
         if state is not None:

@@ -50,6 +50,10 @@ _KILL_TIMEOUT = 10
 _GATEWAY_MUTATION_TIMEOUT = 30.0
 _gateway_mutation_thread_lock = threading.RLock()
 _gateway_mutation_state = threading.local()
+# CHK-280：已持配置锁（_gateway_mutation_lock）时 ensure_caddy_running 取启动锁
+# 的等待上限——压到 1s 让「配置锁 ↔ 启动锁」的跨进程 ABBA 竞争退化为有界等待，
+# 而非 5s 互卡（fail-safe 返回后由上层 reconcile/reload 自愈重试）。
+_ENSURE_START_LOCK_MUTATION_TIMEOUT = 1.0
 _T = TypeVar("_T")
 
 # 从站点片段解析 :port / root（BUG-216 失败恢复用）
@@ -966,6 +970,12 @@ class StaticGateway:
 
         BUG-412 / ADJ-036：并行探活用 ``Popen``，但 stdout/stderr 必须 ``DEVNULL``，
         且不得对可能被 daemon 继承的 PIPE 做无超时 ``communicate()``。
+
+        CHK-280 可观测性：stderr 落盘 ``logs/caddy-runtime.log``（追加，非
+        PIPE——普通文件 fd 可被 daemonize 的 master 安全继承，无 BUG-412 的
+        communicate 死锁面）。此前 stderr 进 DEVNULL，双 master 竞态中先退出的
+        master（现场 pid 70556）死因永久不可考。stdout 保持 DEVNULL（caddy
+        start 的 pingback 噪音无诊断价值）。
         """
         _refuse_caddy_admin_in_pytest("start")
         main = self.main_config_path()
@@ -988,6 +998,14 @@ class StaticGateway:
         ]
         pingback_failed = False
         result: subprocess.CompletedProcess[bytes] | None = None
+        # CHK-280：stderr 走日志文件；打开失败（权限/磁盘）回退 DEVNULL 不阻断启动。
+        err_fh = None
+        try:
+            self.ws.logs.mkdir(parents=True, exist_ok=True)
+            err_fh = (self.ws.logs / "caddy-runtime.log").open("ab")
+        except OSError as exc:
+            log.warning("caddy stderr 日志文件不可写，回退 DEVNULL：%s", exc)
+            err_fh = None
         # ADJ-036：Popen 后并行探 admin/pidfile，就绪即成功。
         # BUG-412：切勿 stdout/stderr=PIPE + 裸 communicate()——caddy start 会
         # daemonize，master 继承 pipe 写端不关闭 → communicate 永久阻塞，
@@ -998,7 +1016,7 @@ class StaticGateway:
             proc = subprocess.Popen(  # noqa: S603
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=err_fh if err_fh is not None else subprocess.DEVNULL,
             )
         except FileNotFoundError:
             log.warning("caddy start 失败：未找到 caddy 可执行文件")
@@ -1006,6 +1024,11 @@ class StaticGateway:
         except OSError as exc:
             log.warning("caddy start 执行异常：%s", exc)
             return False
+        finally:
+            # Popen 已 dup 文件描述符给子进程，父进程侧关闭自身句柄（幂等）；
+            # 失败路径同样需要关闭，避免 fd 泄漏（CHK-280）。
+            if err_fh is not None:
+                err_fh.close()
 
         deadline = time.monotonic() + float(_CADDY_START_TIMEOUT)
         early_ready = False
@@ -1151,26 +1174,68 @@ class StaticGateway:
             log.warning("Caddy master 未在预期时间内退出")
         return stopped
 
+    def _caddy_owner_ok(self) -> bool:
+        """admin 在线前提下的归属校验：本工作区 master 返回 True（否则 WARN + False）。"""
+        owner = self.inspect_caddy_owner()
+        if owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"):
+            return True
+        log.warning(
+            "Caddy admin :2019 在线但所有权不匹配：owner=%s euid=%s pid=%s",
+            owner.get("owner"),
+            owner.get("process_user"),
+            owner.get("pid"),
+        )
+        return False
+
     def ensure_caddy_running(self) -> bool:
         """确保 Caddy admin 在线且归属本工作区（IMP-010/0.3；IMP-033 owner 校验）。
 
         reload 前调用：master 缺失时 reload 必失败，故先拉起。
         admin 在线但 owner 不是本工作区 LWA Caddy 时返回 False（fail-closed）。
+
+        CHK-280 根因修复：admin 不在线时，「复查 + ``caddy start``」全程持有
+        ``gateway_start_lock``，与 ``start_gateway`` / ``stop_gateway_internal``
+        跨进程串行化——此前本方法不持锁，daemon 自愈在 update 重启窗口内与
+        网关监督器并发各跑一次 ``caddy start``，SO_REUSEPORT 双 master 共享
+        pidfile。设计要点：
+
+        * **无锁快路径**：master 健康时直接返回，不碰启动锁——稳态下与配置锁
+          （``_gateway_mutation_lock``）持有者零竞争；
+        * **锁序防死锁**：``start_gateway`` 持启动锁期间会调 ``write_main_config``
+          （取配置锁），而 ``reload_all`` 持配置锁时经本方法取启动锁，跨进程
+          存在 ABBA 环。本方法检测到当前线程已持配置锁时把启动锁等待上限压到
+          ``_ENSURE_START_LOCK_MUTATION_TIMEOUT``，让冲突退化为有界等待 +
+          fail-safe 返回，而非 5s 互卡；
+        * **fail-safe**：锁等待超时不启动 master——复查 admin（另一持有者可能
+          已拉起），健康则 True，否则 False 交由上层重试；
+        * 同线程重入安全（``start_gateway`` 持锁时 reload 自愈链再入本方法）：
+          ``gateway_start_lock`` 有线程本地可重入语义。
         """
+        # 延迟导入：gateway_service 模块级 import 本模块，反向 import 会成环。
+        from local_webpage_access.errors import LifecycleError
+        from local_webpage_access.gateway_service import gateway_start_lock
+
         if self._admin_alive():
-            owner = self.inspect_caddy_owner()
-            if owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"):
+            return self._caddy_owner_ok()
+
+        under_mutation = int(getattr(_gateway_mutation_state, "depth", 0)) > 0
+        lock_timeout = _ENSURE_START_LOCK_MUTATION_TIMEOUT if under_mutation else None
+        try:
+            with gateway_start_lock(self.ws, timeout=lock_timeout):
+                # 拿到锁后复查：等待期间另一持有者（update 重启/监督器）可能已拉起。
+                if self._admin_alive():
+                    return self._caddy_owner_ok()
+                self._clear_stale_caddy_pid()
+                log.warning("Caddy admin 不在线，尝试拉起 master")
+                return self.caddy_start()
+        except LifecycleError:
+            if self._admin_alive() and self._caddy_owner_ok():
                 return True
             log.warning(
-                "Caddy admin :2019 在线但所有权不匹配：owner=%s euid=%s pid=%s",
-                owner.get("owner"),
-                owner.get("process_user"),
-                owner.get("pid"),
+                "gateway_start_lock 被占用且 Caddy 未就绪，跳过本次拉起"
+                "（另一持有者正在启停网关；稍后 reconcile/探活会重试）"
             )
             return False
-        self._clear_stale_caddy_pid()
-        log.warning("Caddy admin 不在线，尝试拉起 master")
-        return self.caddy_start()
 
     def inspect_caddy_owner(self) -> dict:
         """检查 :2019 上 Caddy master 的所有权（IMP-033 / BUG-231）。

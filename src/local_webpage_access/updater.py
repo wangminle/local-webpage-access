@@ -94,6 +94,65 @@ class StepResult:
         return {"name": self.name, "status": self.status, "message": self.message, **self.extra}
 
 
+def _admin_master_pids(admin_port: int = 2019) -> list[str]:
+    """CHK-280：列出 admin 端口上的**去重**监听 PID（best-effort lsof）。
+
+    Caddy 的 SO_REUSEPORT 允许多个 master 同时绑 :2019——这正是双 master
+    竞态能静默存活的土壤。lsof 不可用/无监听时返回空列表（调用方 SKIP）。
+    """
+    if shutil.which("lsof") is None:
+        return []
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{admin_port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    pids: set[str] = set()
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2:
+            pids.add(parts[1])
+    return sorted(pids)
+
+
+def _check_single_caddy_master(config: Config) -> StepResult:
+    """CHK-280 纵深：update 重启后断言 admin 端口上只有一个 Caddy master。
+
+    现场复盘：双 master 存活期间监督器探活 / waitReady / doctor 全部通过
+    （两个 master 都健康分摊流量），故障延迟 11.5 分钟才显形——update 自检
+    对重复 master 存在结构性盲区，本步骤补上。
+    """
+    if config.staticGateway != "caddy":
+        return StepResult(
+            "caddyMasterCheck", "skipped", f"staticGateway={config.staticGateway}，跳过"
+        )
+    from local_webpage_access.gateway_service import ADMIN_PORT
+
+    pids = _admin_master_pids(ADMIN_PORT)
+    if not pids:
+        return StepResult(
+            "caddyMasterCheck", "skipped", f":{ADMIN_PORT} 无监听者或 lsof 不可用，无法判定"
+        )
+    if len(pids) == 1:
+        return StepResult(
+            "caddyMasterCheck", "ok", f":{ADMIN_PORT} 单 master（pid={pids[0]}）"
+        )
+    return StepResult(
+        "caddyMasterCheck",
+        "failed",
+        f":{ADMIN_PORT} 存在 {len(pids)} 个 Caddy master（pid={', '.join(pids)}）——"
+        "双 master 竞态残留（SO_REUSEPORT 双绑、共享 pidfile，CHK-280）；"
+        "保留 run/caddy.pid 所指 master，kill 其余后重跑 lwa doctor",
+        extra={"masterPids": pids},
+    )
+
+
 @dataclass
 class UpdateReport:
     """``lwa update`` 整体报告。"""
@@ -1211,6 +1270,12 @@ def _run_runtime_phase(
                     "后续 access/doctor 可能报瞬时失败，稍后请 lwa doctor 复核（issue #5）",
                 )
             )
+
+    # ---- 9.25 CHK-280 纵深：网关重启后断言 :2019 单 master ----
+    # 双 master 存活期间探活/waitReady/doctor 都通过（两 master 都健康），故障
+    # 延迟 11.5 分钟才显形——update 自检必须显式数一遍监听 PID 才能当场发现。
+    if options.restart_gateway:
+        report.steps.append(_check_single_caddy_master(config))
 
     # ---- 9.5 IMP-038：后台重启后再 refresh；review 单独走防抖（DEV-114）----
     from local_webpage_access.access_workflow import review_access_with_debounce, run_access_pass

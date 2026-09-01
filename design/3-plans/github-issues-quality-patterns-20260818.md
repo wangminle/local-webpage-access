@@ -1,6 +1,6 @@
 # GitHub Issue 代码质量共性分析报告
 
-> 盘点时间：2026-08-18；2026-08-31 复评
+> 盘点时间：2026-08-18；2026-09-01 复评
 > 数据来源：[GitHub wangminle/local-webpage-access issues #1–#5](https://github.com/wangminle/local-webpage-access/issues)（2026-08-17 至 2026-08-18）  
 > 关联台账：[[CHK-233]] · 可视化原版见 `canvases/github-issues-quality-patterns.canvas.tsx`
 
@@ -35,16 +35,17 @@
 
 ---
 
-## 2026-08-31 当前风险增量
+## 2026-09-01 风险增量与当前状态
 
-以下两项不是重新打开 #1～#5，而是说明本文质量规律仍会在新路径复现：
+以下三项不是重新打开 #1～#5，而是说明本文质量规律仍会在新路径复现；#18/#21/#26 均已完成并保留为回归约束：
 
 | Issue | 当前状态与分级 | 对本文规律的增量 | 落地要求 |
 | --- | --- | --- | --- |
-| [#21](https://github.com/wangminle/local-webpage-access/issues/21) | **开放；直接修复** | liveness 失败回滚丢失 `routeMode=name`、路径别名及网关片段，继续命中 L3「失败 fail-safe」和 L5「意图/观测/持久化分离」 | 回滚快照必须覆盖 manifest 别名元数据和生成片段；恢复失败时停止自动 fallback 并报告残余项 |
-| [#18](https://github.com/wangminle/local-webpage-access/issues/18) | **开放；纳入可靠性改进** | 生成 Dockerfile 把单一镜像源硬编码为唯一通路，继续命中 L6「生成物要有用户出口」，并暴露外部依赖缺少超时、重试与 fallback | 下载源可配置；默认策略不得绑定单一第三方镜像；增加超时、有限重试、多源/官方源降级及失败诊断 |
+| [#21](https://github.com/wangminle/local-webpage-access/issues/21) | **已完成（V0.8.9）** | liveness 失败回滚曾丢失 `routeMode=name`、路径别名及网关片段，命中 L3「失败 fail-safe」和 L5「意图/观测/持久化分离」 | 已补 manifest 别名元数据、网关片段快照与回滚回归；继续作为回归约束 |
+| [#18](https://github.com/wangminle/local-webpage-access/issues/18) | **已完成（V0.8.9）** | 生成 Dockerfile 曾把单一镜像源硬编码为唯一通路，命中 L6「生成物要有用户出口」 | 已补来源链、超时、有限重试、降级与诊断；继续作为生成物可靠性回归约束 |
+| [#26](https://github.com/wangminle/local-webpage-access/issues/26) | **已完成（V0.8.10）** | 同进程多线程启动竞争时，进程互斥锁与 `flock` 生命周期错位导致持有线程无法释放，继续命中锁与自愈边界 | 进程内可重入锁覆盖完整临界区，嵌套同线程只由最外层持有 `flock`，不同线程共享同一超时预算排队；update 收尾额外检查单 master |
 
-当前优先级：先处理可能造成入口静默失效的 #21，再处理 #18；IMP-064 继续作为 L5 的结构性修复，而不是用更多状态字段补丁替代意图/观测分离。
+当前优先级：保持 #18/#21/#26 的回归门禁；IMP-064 已作为 L5 的结构性修复落地，不再用更多状态字段补丁替代意图/观测分离。
 
 ---
 

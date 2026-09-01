@@ -37,6 +37,7 @@ CLI, web manager, inbox auto-import, import-time security checks, and `lwa docto
 - **Web manager + inbox daemon** — Vue UI on `:17800` (loopback reads are token-free; LAN needs a rotating token). The daemon imports zips and heals dropped lightweight instances.
 - **Won’t silently write dangerous images** — generated Compose/Dockerfile audited before write; zip traversal / symlinks / bombs rejected.
 - **`lwa doctor` does not fake green** — Python / Docker / Compose / ports / disk, plus service runtime and autostart resilience; failed service starts report `lastStartError` with a 3-in-24h auto-restart circuit breaker (V0.8.9, IMP-064), and `version_freshness` reuses `lwa update --check` with a 24h cache to flag outdated installs (IMP-062). `lwa list` / `status` surface compatibility-preflight findings (IMP-056 C.01–C.03). `--json` works even before `init`.
+- **Gateway starts stay single-master (V0.8.10, issue #26)** — all Caddy start/stop recovery paths share one reentrant process/thread lock; update additionally counts admin listeners and reports duplicate masters instead of passing a false-green health check.
 - **Host setup and autostart** — Docker/Caddy install scripts (China mirrors by default); launchd / systemd units; Ubuntu LTS, Debian Stable, WSL2, macOS only.
 - **Move the workspace, update LWA, talk to an agent** — `lwa workspace relocate`, `lwa update` (fast-forward only), 20 SKILL.md files for AI assistants.
 
@@ -259,6 +260,7 @@ CLI、管理页、inbox 自动导入、导入期安全检查、`lwa doctor` 均�
 - **管理页 + inbox 守护进程** — `:17800` 的 Vue 界面（本机读免 token，局域网用自动轮换的 token）。daemon 导入 zip 并拉起掉线的轻量实例。
 - **危险镜像不会默写出** — 生成的 Compose/Dockerfile 写出前审计；zip 穿越 / 符号链接 / 炸弹拒绝导入。
 - **`lwa doctor` 不假绿** — Python / Docker / Compose / 端口 / 磁盘，以及服务是否在跑、自启是否装好；服务启动失败附 `lastStartError` 原因与「连续 3 次/24h 熔断自动拉起」（V0.8.9，IMP-064），`version_freshness` 复用 `lwa update --check` 加 24h 缓存提示版本滞后（IMP-062）。 `lwa list` / `status` 直接展示兼容性预检发现（IMP-056 C.01–C.03）。未 `init` 也可用 `--json`。
+- **Gateway 启动保持单 master（V0.8.10，issue #26）** — Caddy 启动、停止与自愈路径共用可重入的进程/线程锁；update 额外统计 admin 监听者，发现重复 master 时明确失败，不再健康假绿。
 - **宿主机装配与自启** — Docker/Caddy 安装脚本（默认国内源）；launchd / systemd；仅 Ubuntu LTS、Debian Stable、WSL2、macOS。
 - **搬工作区、升级 LWA、交给 Agent** — `lwa workspace relocate`、`lwa update`（只允许快进）、20 份 SKILL.md。
 
