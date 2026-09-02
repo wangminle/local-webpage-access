@@ -1,7 +1,7 @@
 """正式支持平台矩阵与运行时门禁（IMP-036）。
 
-产品口径：仅正式支持 Linux 裸机（Ubuntu 22.04+ / Debian 12+）、WSL2 Linux、
-macOS；Windows 原生 hard fail；架构仅 x86_64/amd64 与 arm64/aarch64。
+产品口径：仅正式支持 Linux 裸机（Ubuntu 22.04+ / Debian 12+ / Fedora 43+）、
+WSL2 Linux、macOS；Windows 原生 hard fail；架构仅 x86_64/amd64 与 arm64/aarch64。
 
 **import 本模块不得 sys.exit**；门禁仅由 CLI / 服务入口显式调用
 :func:`require_supported_platform`。
@@ -37,6 +37,7 @@ MIN_KERNEL_VERSION = "5.15"
 MIN_GLIBC_VERSION = "2.35"
 MIN_UBUNTU_VERSION = "22.04"
 MIN_DEBIAN_VERSION = "12"
+MIN_FEDORA_VERSION = "43"
 # 正式发布矩阵：版本 ↔ 代号一一对应（报告层与 install-*-linux.sh 共用）
 SUPPORTED_UBUNTU_LTS: dict[str, str] = {
     "22.04": "jammy",
@@ -49,12 +50,18 @@ SUPPORTED_DEBIAN_STABLE: dict[str, str] = {
 }
 SUPPORTED_DEBIAN_MAJORS = frozenset(int(m) for m in SUPPORTED_DEBIAN_STABLE)
 DEBIAN_UNSTABLE_CODENAMES = frozenset({"sid", "unstable", "testing", "rc-buggy"})
+# Fedora 无代号配对，按大版本滚动窗口：当前 + 前一稳定版（截至 2026-09 为
+# 44 现行 / 43 前一）；新版本发布后随本矩阵滚动更新，未纳入前明确拒绝。
+SUPPORTED_FEDORA_RELEASES = frozenset({43, 44})
+FEDORA_RAWHIDE_CODENAMES = frozenset({"rawhide"})
 MIN_WSL_PACKAGE_VERSION = "2.1.5"
 # 截至 2026-07：Docker Desktop「当前及前两版」→ macOS 14 Sonoma+
 MACOS_MIN_MAJOR = 14
 SUPPORTED_ARCHES = frozenset({"x86_64", "amd64", "aarch64", "arm64"})
 
-_WINDOWS_ACTION = "Windows 原生不受支持；请在 WSL2 的 Ubuntu 22.04+/Debian 12+ 中安装并运行 lwa"
+_WINDOWS_ACTION = (
+    "Windows 原生不受支持；请在 WSL2 的 Ubuntu 22.04+/Debian 12+/Fedora 43+ 中安装并运行 lwa"
+)
 
 
 def _normalize_ubuntu_series(version: str) -> str | None:
@@ -99,6 +106,26 @@ def is_debian_stable(version: str, codename: str | None = None) -> bool:
     if code and code != expected:
         return False
     return True
+
+
+def is_fedora_release(version: str, codename: str | None = None) -> bool:
+    """仅允许 :data:`SUPPORTED_FEDORA_RELEASES` 内的大版本；拒绝 Rawhide。
+
+    Fedora 的 ``VERSION_CODENAME`` 在正式发布上通常为空，Rawhide 则为
+    ``Rawhide``——代号非空且命中 :data:`FEDORA_RAWHIDE_CODENAMES` 直接拒绝，
+    其余按 ``VERSION_ID`` 大版本对照滚动窗口判定。
+    """
+    code = (codename or "").strip().lower()
+    if code in FEDORA_RAWHIDE_CODENAMES:
+        return False
+    text = (version or "").strip()
+    if not text:
+        return False
+    try:
+        major = int(text.split(".")[0])
+    except ValueError:
+        return False
+    return major in SUPPORTED_FEDORA_RELEASES
 
 
 @dataclass
@@ -592,7 +619,7 @@ def collect_platform_support_report(
     if plat == PLATFORM_UNKNOWN:
         reasons.append("无法识别操作系统，无法证明满足正式支持矩阵")
         report.reasons = reasons
-        report.action = "请在 Ubuntu 22.04+/Debian 12+/WSL2 或 macOS 14+ 上运行"
+        report.action = "请在 Ubuntu 22.04+/Debian 12+/Fedora 43+/WSL2 或 macOS 14+ 上运行"
         return report
 
     if arch not in {"x86_64", "arm64"}:
@@ -622,7 +649,7 @@ def collect_platform_support_report(
     if plat not in (PLATFORM_LINUX, PLATFORM_WSL):
         reasons.append(f"平台 {plat} 不在正式支持矩阵")
         report.reasons = reasons
-        report.action = "请使用 Ubuntu/Debian 裸机、WSL2 或 macOS"
+        report.action = "请使用 Ubuntu/Debian/Fedora 裸机、WSL2 或 macOS"
         return report
 
     did = (distro_id or "").lower()
@@ -657,9 +684,21 @@ def collect_platform_support_report(
                     )
                     + "）"
                 )
+    elif did == "fedora":
+        if not is_fedora_release(dver, dcode):
+            if dcode and dcode in FEDORA_RAWHIDE_CODENAMES:
+                reasons.append("Fedora Rawhide 不是正式发布，不在支持矩阵")
+            else:
+                reasons.append(
+                    f"Fedora {dver or 'unknown'}"
+                    + (f"（{dcode}）" if dcode else "")
+                    + " 不在正式支持矩阵（当前 "
+                    + "/".join(str(m) for m in sorted(SUPPORTED_FEDORA_RELEASES))
+                    + "；新版本发布后随矩阵滚动更新）"
+                )
     else:
         reasons.append(
-            f"发行版 {did or 'unknown'} 不在正式支持矩阵（仅 Ubuntu LTS / Debian Stable）"
+            f"发行版 {did or 'unknown'} 不在正式支持矩阵（仅 Ubuntu LTS / Debian Stable / Fedora）"
         )
 
     if not kernel_version or not version_ge(kernel_version, MIN_KERNEL_VERSION):
@@ -717,15 +756,17 @@ def collect_platform_support_report(
         else:
             report.action = (
                 "请使用 WSL2（包 ≥ "
-                f"{MIN_WSL_PACKAGE_VERSION}）+ Ubuntu 22.04 LTS+/Debian 12+ Stable，"
+                f"{MIN_WSL_PACKAGE_VERSION}）+ Ubuntu 22.04 LTS+/Debian 12+ Stable/Fedora 43+，"
                 "启用 systemd；Full/autostart 工作区请放在 Linux 文件系统"
             )
     else:
         report.action = (
             "请使用 Ubuntu LTS（"
             + "/".join(sorted(SUPPORTED_UBUNTU_LTS))
-            + "）或 Debian Stable（"
+            + "）、Debian Stable（"
             + "/".join(sorted(SUPPORTED_DEBIAN_STABLE))
+            + "）或 Fedora（"
+            + "/".join(str(m) for m in sorted(SUPPORTED_FEDORA_RELEASES))
             + f"），内核 ≥ {MIN_KERNEL_VERSION}，glibc ≥ {MIN_GLIBC_VERSION}，并确保 systemd 可用"
         )
     return report
@@ -778,8 +819,10 @@ def assert_writable_workspace_allowed(
 
 __all__ = [
     "DEBIAN_UNSTABLE_CODENAMES",
+    "FEDORA_RAWHIDE_CODENAMES",
     "MACOS_MIN_MAJOR",
     "MIN_DEBIAN_VERSION",
+    "MIN_FEDORA_VERSION",
     "MIN_GLIBC_VERSION",
     "MIN_KERNEL_VERSION",
     "MIN_UBUNTU_VERSION",
@@ -787,6 +830,7 @@ __all__ = [
     "SUPPORTED_ARCHES",
     "SUPPORTED_DEBIAN_MAJORS",
     "SUPPORTED_DEBIAN_STABLE",
+    "SUPPORTED_FEDORA_RELEASES",
     "SUPPORTED_UBUNTU_LTS",
     "PlatformSupportReport",
     "assert_writable_workspace_allowed",
@@ -795,6 +839,7 @@ __all__ = [
     "detect_wsl_kernel_kind",
     "detect_wsl_package_version",
     "is_debian_stable",
+    "is_fedora_release",
     "is_ubuntu_lts",
     "is_wsl_drvfs_path",
     "require_supported_platform",

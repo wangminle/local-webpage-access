@@ -264,11 +264,78 @@ def locate_repo(explicit: str | None = None) -> Path | None:
 # ---- 单步动作 --------------------------------------------------------------
 
 
+class PipMissingError(RuntimeError):
+    """当前解释器缺少 pip 模块本身（``No module named pip``，issue #27）。
+
+    与「pip 命令执行失败」区分：此根因下「重跑 lwa update / pip install -e .」
+    都会再次失败（恢复动作依赖被缺失的东西本身），必须先 ``ensurepip``。
+    继承 ``RuntimeError`` 以兼容既有 ``except Exception``/``RuntimeError`` 捕获点。
+    """
+
+
+#: ``python -m pip`` 在 pip 模块缺失时的固定报错签名
+_PIP_MISSING_SIGNATURE = "No module named pip"
+
+#: pip 可用性探测超时（秒）
+_PIP_PROBE_TIMEOUT = 30
+
+
+def _pip_probe(executable: str) -> tuple[bool, str]:
+    """探测 ``<executable> -m pip --version``，返回 (是否成功, 合并输出)。
+
+    探测自身无法执行（超时 / OSError）按「无法判定」放行（ok=True），
+    交由真正的 pip install 输出分类，避免把环境异常误判成 pip 缺失。
+    """
+    try:
+        result = subprocess.run(
+            [executable, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_PIP_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True, ""
+    blob = f"{result.stdout or ''}\n{result.stderr or ''}"
+    return result.returncode == 0, blob
+
+
+def pip_module_missing(blob: str) -> bool:
+    """输出是否带 ``No module named pip`` 签名（pip 模块本身缺失）。"""
+    return _PIP_MISSING_SIGNATURE in (blob or "")
+
+
+def _pip_missing_guidance(executable: str) -> str:
+    return (
+        "当前解释器缺少 pip 模块（No module named pip），pip install 无法执行。"
+        f"先恢复 pip：`{executable} -m ensurepip --upgrade`，"
+        "再重跑 `lwa update` 完成环境刷新。"
+    )
+
+
+def pip_missing_preflight(executable: str | None = None) -> str | None:
+    """预检当前解释器是否缺 pip 模块；缺失返回恢复指引文案，否则 ``None``。
+
+    供 ``lwa update`` 在**快进源码之前**调用（issue #27）：venv 缺 pip 时先阻断
+    并给出 ensurepip 指引，避免「代码已快进、运行环境没跟上」的中间态。
+    """
+    exe = executable or sys_executable()
+    ok, blob = _pip_probe(exe)
+    if ok or not pip_module_missing(blob):
+        return None
+    return _pip_missing_guidance(exe)
+
+
 def run_pip_install(repo: Path) -> str:
     """在源码根执行 ``pip install -e .``，返回 stdout 摘要。
 
     抛 ``RuntimeError`` 让上层捕获为 step failed；不吞掉 pip 的原始错误。
+    pip 模块本身缺失时抛 :class:`PipMissingError`（先探测；安装输出带同样
+    签名时也归类，兜住探测与安装之间的窗口）。
     """
+    ok, blob = _pip_probe(sys_executable())
+    if not ok and pip_module_missing(blob):
+        raise PipMissingError(_pip_missing_guidance(sys_executable()))
     log.info("pip install -e . （cwd=%s）", repo)
     result = subprocess.run(
         [sys_executable(), "-m", "pip", "install", "-e", "."],
@@ -279,6 +346,9 @@ def run_pip_install(repo: Path) -> str:
         check=False,
     )
     if result.returncode != 0:
+        out_blob = f"{result.stdout or ''}\n{result.stderr or ''}"
+        if pip_module_missing(out_blob):
+            raise PipMissingError(_pip_missing_guidance(sys_executable()))
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-5:]
         raise RuntimeError(
             f"pip install -e . 失败（exit {result.returncode}）：\n" + "\n".join(tail)
@@ -1053,6 +1123,14 @@ def run_update(
             if s.status == "pending":
                 s.status = "skipped"
                 s.message = f"[dry-run] 将执行：{s.message}"
+        # issue #27：计划里预检 pip 缺失风险（只读探测，不违反零写入），
+        # 让用户在真正升级前先 ensurepip，避免「快进了代码、环境没跟上」
+        dry_pip = report.step("pip")
+        if dry_pip is not None and "[dry-run] 将执行" in dry_pip.message:
+            pip_issue = pip_missing_preflight()
+            if pip_issue is not None:
+                dry_pip.status = "warning"
+                dry_pip.message = f"[dry-run] {pip_issue}"
         report.steps.append(StepResult("syncSkills", "skipped", "[dry-run] 计划同步 skills/"))
         if options.sync_templates:
             report.steps.append(
@@ -1396,8 +1474,11 @@ __all__ = [
     "UpdateOptions",
     "StepResult",
     "UpdateReport",
+    "PipMissingError",
     "locate_repo",
     "run_pip_install",
+    "pip_module_missing",
+    "pip_missing_preflight",
     "sync_skills",
     "sync_templates",
     "migrate_config_defaults",

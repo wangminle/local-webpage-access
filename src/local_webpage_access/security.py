@@ -3,10 +3,11 @@
 本模块是 V1 安全边界的**集中校验层**，固化设计 §17 的默认保护：
 
 * :func:`audit_compose` —— 审计 Compose 文本：禁止 ``privileged``、禁止挂载
-  Docker socket、只允许实例自己的 ``data/``（WBS-25.03/04/05）。
-* :func:`audit_dockerfile` —— 审计 Dockerfile：``ADD <url>`` / ``curl|sh`` 为
-  critical（``generate_dockerfile`` 写出前拒绝）；``USER root`` 为 warn；
-  未声明 ``USER`` 为 info。
+  Docker socket 与宿主敏感目录，对非默认 ``data/`` 挂载告警
+  （WBS-25.03/04/05）。
+* :func:`audit_dockerfile` —— 审计 Dockerfile：``ADD <url>`` 与下载后直接
+  交给解释器执行的高危链为 critical（``generate_dockerfile`` 写出前拒绝）；
+  ``USER root`` 为 warn；未声明 ``USER`` 为 info。
 * :func:`audit_zip_members` —— zip slip / 路径穿越 / 符号链接防御纵深
   （WBS-25.10，BUG-049 增强符号链接检测）。importer 解压前做 critical 级拦截，
   此处亦可用于 skill 或外部产出的成员名二次校验。
@@ -138,7 +139,16 @@ _DANGEROUS_CAPS = frozenset(
         "SYS_MODULE",
         "DAC_READ_SEARCH",
         "DAC_OVERRIDE",
+        "ALL",
     }
+)
+
+_DOWNLOADER_INTERPRETER_CHAIN_RE = re.compile(
+    r"\b(?:curl|wget)\b[^|;&\r\n]*(?:\|\|?|&&|;)\s*(?:exec\s+)?"
+    r"(?:(?:/usr/bin/|/bin/)?(?:ba)?sh|"
+    r"(?:/usr/bin/|/bin/)?python(?:[0-9]+(?:\.[0-9]+)*)?|"
+    r"(?:/usr/bin/|/bin/)?(?:node|perl|ruby))\b",
+    re.IGNORECASE,
 )
 
 
@@ -465,7 +475,8 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
     * ``USER root`` → warn
     * 无 ``USER`` 指令 → info（默认 root 运行）
     * ``ADD <url>`` → **critical**（远程下载，不可复现且有供应链风险；生成路径拒绝写出）
-    * ``RUN ... | sh`` / ``| bash`` 管道执行 → **critical**（供应链风险；生成路径拒绝写出）
+    * ``RUN`` 中 downloader 经管道或命令分隔符直接交给常见解释器
+      执行 → **critical**（供应链风险；生成路径拒绝写出）
     """
     findings: list[SecurityFinding] = []
     # BUG-330：先合并 Dockerfile 反斜杠续行，避免把 curl 与 |sh 拆到物理行绕过。
@@ -499,14 +510,12 @@ def audit_dockerfile(text: str) -> list[SecurityFinding]:
                 )
             )
         elif upper.startswith("RUN "):
-            lowered = line.lower()
-            pipe_shell = re.search(r"\|\s*(?:/usr/bin/|/bin/)?(?:ba)?sh\b", lowered)
-            if pipe_shell and ("curl" in lowered or "wget" in lowered):
+            if _DOWNLOADER_INTERPRETER_CHAIN_RE.search(line):
                 findings.append(
                     SecurityFinding(
                         LEVEL_CRITICAL,
                         "pipe_to_shell",
-                        "Dockerfile 存在 curl|sh 类管道执行，存在供应链风险",
+                        "Dockerfile 存在下载后直接交给解释器执行的高危链",
                         detail=line,
                     )
                 )

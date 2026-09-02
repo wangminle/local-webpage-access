@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -1134,6 +1135,30 @@ def test_monorepo_frontend_build_only(tmp_path: Path) -> None:
     assert result.entry.build is not None
     assert "-w @app/web" in result.entry.build
     assert result.entry.buildOutputDir == "packages/web/dist"
+
+
+def test_monorepo_workspace_name_is_one_shell_argument(tmp_path: Path) -> None:
+    """package.json name 不能逃逸 npm ``-w`` 参数并注入 shell 命令。"""
+    malicious_name = "web; id > /tmp/lwa-workspace-injection"
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "mono", "workspaces": ["packages/*"]})
+    )
+    web = tmp_path / "packages" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text(
+        json.dumps(
+            {
+                "name": malicious_name,
+                "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"},
+                "scripts": {"build": "vite build"},
+            }
+        )
+    )
+
+    result = Scanner().detect(tmp_path)
+
+    assert result.entry.build is not None
+    assert shlex.split(result.entry.build) == ["npm", "run", "build", "-w", malicious_name]
 
 
 def test_monorepo_vite_not_web_server(tmp_path: Path) -> None:

@@ -38,7 +38,10 @@ CLI, web manager, inbox auto-import, import-time security checks, and `lwa docto
 - **Won’t silently write dangerous images** — generated Compose/Dockerfile audited before write; zip traversal / symlinks / bombs rejected.
 - **`lwa doctor` does not fake green** — Python / Docker / Compose / ports / disk, plus service runtime and autostart resilience; failed service starts report `lastStartError` with a 3-in-24h auto-restart circuit breaker (V0.8.9, IMP-064), and `version_freshness` reuses `lwa update --check` with a 24h cache to flag outdated installs (IMP-062). `lwa list` / `status` surface compatibility-preflight findings (IMP-056 C.01–C.03). `--json` works even before `init`.
 - **Gateway starts stay single-master (V0.8.10, issue #26)** — all Caddy start/stop recovery paths share one reentrant process/thread lock; update additionally counts admin listeners and reports duplicate masters instead of passing a false-green health check.
-- **Host setup and autostart** — Docker/Caddy install scripts (China mirrors by default); launchd / systemd units; Ubuntu LTS, Debian Stable, WSL2, macOS only.
+- **Fedora joins the supported matrix (V0.8.11)** — platform gate, Docker install script (dnf repo written directly, no config-manager plugin dependency), and Caddy install script (dnf package with GitHub-binary fallback) cover Fedora 43/44, a rolling window of current + previous stable; Rawhide and out-of-window versions are rejected.
+- **`lwa update` recovers from a missing pip instead of dead-looping (V0.8.11, issue #27)** — pip availability is probed **before** fast-forwarding, so a venv that lost pip fails fast with zero mutations; when pip fails after the fast-forward, the recovery chain leads with `ensurepip --upgrade` instead of "rerun lwa update / pip install", both of which depend on the missing pip itself.
+- **Security hardening batch (V0.8.11)** — npm monorepo workspace names are shell-quoted before reaching the build command; new port allocations bind-probe (bind-only occupants are no longer misallocated); `extraVolumes` are structurally validated and rendered as quoted YAML scalars; `cap_add: ALL` and downloader→interpreter chains (`curl && sh`, `wget | python`, …) are audited, with docs stating plainly the audit is a pattern gate, not a sandbox.
+- **Host setup and autostart** — Docker/Caddy install scripts (China mirrors by default); launchd / systemd units; Ubuntu LTS, Debian Stable, Fedora, WSL2, macOS only.
 - **Move the workspace, update LWA, talk to an agent** — `lwa workspace relocate`, `lwa update` (fast-forward only), 20 SKILL.md files for AI assistants.
 
 ## Installation
@@ -56,10 +59,10 @@ If joining the `docker` group still reports `sessionRefreshRequired`, re-login a
 
 ## Supported Platforms
 
-- **Linux**: Ubuntu LTS (22.04 / 24.04 / 26.04) and Debian Stable (12 / 13); x86_64 / arm64; kernel ≥ 5.15, glibc ≥ 2.35, systemd
+- **Linux**: Ubuntu LTS (22.04 / 24.04 / 26.04), Debian Stable (12 / 13), and Fedora (43 / 44, rolling window of current + previous); x86_64 / arm64; kernel ≥ 5.15, glibc ≥ 2.35, systemd
 - **WSL2**: same distros; WSL ≥ 2.1.5 with systemd as PID 1; keep the workspace on the Linux filesystem (autostart fail-closes on `/mnt/<drive>`). See [WSL2 host prep](docs/known-limitations.md)
 - **macOS**: 14 Sonoma+
-- **Not supported**: native Windows (use WSL2), WSL1, non-LTS Ubuntu, Debian sid/testing
+- **Not supported**: native Windows (use WSL2), WSL1, non-LTS Ubuntu, Debian sid/testing, Fedora Rawhide
 
 `lwa doctor` always prints a platform-support section; `lwa doctor --json` works before `init`.
 
@@ -261,7 +264,10 @@ CLI、管理页、inbox 自动导入、导入期安全检查、`lwa doctor` 均�
 - **危险镜像不会默写出** — 生成的 Compose/Dockerfile 写出前审计；zip 穿越 / 符号链接 / 炸弹拒绝导入。
 - **`lwa doctor` 不假绿** — Python / Docker / Compose / 端口 / 磁盘，以及服务是否在跑、自启是否装好；服务启动失败附 `lastStartError` 原因与「连续 3 次/24h 熔断自动拉起」（V0.8.9，IMP-064），`version_freshness` 复用 `lwa update --check` 加 24h 缓存提示版本滞后（IMP-062）。 `lwa list` / `status` 直接展示兼容性预检发现（IMP-056 C.01–C.03）。未 `init` 也可用 `--json`。
 - **Gateway 启动保持单 master（V0.8.10，issue #26）** — Caddy 启动、停止与自愈路径共用可重入的进程/线程锁；update 额外统计 admin 监听者，发现重复 master 时明确失败，不再健康假绿。
-- **宿主机装配与自启** — Docker/Caddy 安装脚本（默认国内源）；launchd / systemd；仅 Ubuntu LTS、Debian Stable、WSL2、macOS。
+- **Fedora 纳入正式支持矩阵（V0.8.11）** — 平台门禁、Docker 安装脚本（直写 dnf 仓库，不依赖 config-manager 插件）与 Caddy 安装脚本（dnf 包 + GitHub 二进制兜底）覆盖 Fedora 43/44（「当前 + 前一稳定版」滚动窗口）；Rawhide 与窗口外版本拒绝。
+- **`lwa update` 对 venv 缺失 pip 自愈，不再死循环（V0.8.11，issue #27）** — 快进**之前**预检 pip 可用性，缺失时零变更快速失败；快进后 pip 失败时恢复链第一步改为 `ensurepip --upgrade`，不再指引「重跑 lwa update / pip install」——两者都依赖被缺失的 pip 本身。
+- **安全加固批次（V0.8.11）** — npm monorepo 包名经 shell 转义后再进入构建命令；新端口分配改 bind 探测（bind-only 占用不再被误分配）；`extraVolumes` 结构化校验并以带引号 YAML 标量渲染；审计补 `cap_add: ALL` 与下载-解释执行链（`curl && sh`、`wget | python` 等），文档明示审计是高危模式门禁而非沙箱。
+- **宿主机装配与自启** — Docker/Caddy 安装脚本（默认国内源）；launchd / systemd；仅 Ubuntu LTS、Debian Stable、Fedora、WSL2、macOS。
 - **搬工作区、升级 LWA、交给 Agent** — `lwa workspace relocate`、`lwa update`（只允许快进）、20 份 SKILL.md。
 
 ## 安装
@@ -279,10 +285,10 @@ lwa init                      # Full 能力闭环：lwa init --full --yes
 
 ## 支持的平台
 
-- **Linux**：Ubuntu LTS（22.04 / 24.04 / 26.04）与 Debian Stable（12 / 13）；x86_64 / arm64；kernel ≥ 5.15、glibc ≥ 2.35、systemd
+- **Linux**：Ubuntu LTS（22.04 / 24.04 / 26.04）、Debian Stable（12 / 13）与 Fedora（43 / 44，按「当前 + 前一版」滚动窗口）；x86_64 / arm64；kernel ≥ 5.15、glibc ≥ 2.35、systemd
 - **WSL2**：同上发行版；WSL ≥ 2.1.5 且 systemd 为 PID 1；工作区放 Linux 文件系统（autostart 对 `/mnt/<drive>` 直接失败）。见 [WSL2 宿主准备](docs/known-limitations.md)
 - **macOS**：14 Sonoma+
-- **不支持**：Windows 原生（请用 WSL2）、WSL1、Ubuntu 非 LTS、Debian sid/testing
+- **不支持**：Windows 原生（请用 WSL2）、WSL1、Ubuntu 非 LTS、Debian sid/testing、Fedora Rawhide
 
 `lwa doctor` 末尾有「平台支持」段；未初始化时用 `lwa doctor --json`。
 

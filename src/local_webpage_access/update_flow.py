@@ -27,11 +27,13 @@ from local_webpage_access import update_source as us
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.updater import (
+    PipMissingError,
     StepResult,
     UpdateOptions,
     UpdateReport,
     _run_runtime_phase,
     locate_repo,
+    pip_missing_preflight,
     run_pip_install,
 )
 from local_webpage_access.version_info import resolve_version
@@ -269,6 +271,25 @@ def run_update_flow(
             )
             return _inline_tail(workspace_root, options, report.steps, report)
 
+        # ---- issue #27：pip 预检（快进前）----
+        # venv 缺 pip 模块时「快进 → pip 失败」会留下「代码新、环境旧」的
+        # 中间态，且恢复链依赖被缺失的 pip 本身（死循环）。先探测并阻断，
+        # 让用户先 ensurepip 再重跑；此处零变更（未 fetch、未快进、未重启）。
+        if not options.skip_pip:
+            pip_issue = pip_missing_preflight()
+            if pip_issue is not None:
+                report.steps.append(
+                    StepResult(
+                        "sourceUpdate",
+                        "skipped",
+                        "pip 预检未通过（当前解释器缺少 pip 模块），未执行源码更新——"
+                        "避免「代码已快进、运行环境没跟上」的中间态",
+                    )
+                )
+                report.steps.append(StepResult("pip", "failed", pip_issue))
+                report.version_after = resolve_version()
+                return report
+
         # ---- git 安装：目标解析 → fetch → 门禁 → 快进（锁已持有）----
         target: us.SourceTarget | None = None
         status: us.RepoStatus | None = None
@@ -354,13 +375,21 @@ def run_update_flow(
             except Exception as exc:  # noqa: BLE001
                 report.steps.append(StepResult("pip", "failed", str(exc)))
                 if head_changed:
-                    # 快进后 pip 失败：阻断 continuation，给恢复链（§15.1.8）
+                    # 快进后 pip 失败：阻断 continuation，给恢复链（§15.1.8）。
+                    # issue #27 / BUG-624：pip 模块缺失时须 ensurepip → 同一解释器
+                    # pip install -e <仓库> → 再跑 lwa update，避免新源码启动期
+                    # 缺依赖导致 CLI 无法进入 update 命令。
                     report.steps.append(
                         StepResult(
                             "continuation",
                             "failed",
                             "快进后 pip 安装失败，已停止 Runtime 后半段。"
-                            + us.recovery_hint(old_head),
+                            + us.recovery_hint(
+                                old_head,
+                                pip_missing=isinstance(exc, PipMissingError),
+                                python_executable=sys.executable,
+                                repo_path=repo,
+                            ),
                         )
                     )
                     report.version_after = resolve_version()

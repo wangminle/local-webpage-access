@@ -1,4 +1,4 @@
-"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.8.10-Build...`` 前缀。"""
+"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.8.11-Build...`` 前缀。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 _VERSION_PREFIX = re.compile(r"^V(\d+\.\d+\.\d+)", re.IGNORECASE)
 _PACKAGE_NAME = "local-webpage-access"
-_FALLBACK_VERSION = "0.8.10"
+_FALLBACK_VERSION = "0.8.11"
 
 
 def _is_lwa_repo(path: Path) -> bool:
@@ -78,7 +78,7 @@ def _version_from_metadata() -> str | None:
 
 @lru_cache(maxsize=1)
 def resolve_version() -> str:
-    """返回 semver 字符串（如 ``0.8.10``），不含 ``V`` 前缀。"""
+    """返回 semver 字符串（如 ``0.8.11``），不含 ``V`` 前缀。"""
     git_ver = _version_from_git(_repo_root())
     if git_ver:
         return git_ver
@@ -89,7 +89,7 @@ def resolve_version() -> str:
 
 
 def version_from_subject(subject: str | None) -> str | None:
-    """从 commit 主题解析 ``V0.8.10-Build...`` 前缀（IMP-063）。
+    """从 commit 主题解析 ``V0.8.11-Build...`` 前缀（IMP-063）。
 
     主题不含 ``Vx.y.z`` 时返回 ``None``——不伪造版本号，报告降级为短 SHA。
     """
@@ -100,7 +100,7 @@ def version_from_subject(subject: str | None) -> str | None:
 
 
 def display_version() -> str:
-    """UI/CLI 展示用（如 ``V0.8.10``）。"""
+    """UI/CLI 展示用（如 ``V0.8.11``）。"""
     return f"V{resolve_version()}"
 
 

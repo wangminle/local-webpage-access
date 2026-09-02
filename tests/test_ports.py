@@ -213,20 +213,48 @@ def test_allocate_skips_host_listening_port(registry: Registry) -> None:
         s.close()
 
 
-def test_allocate_ignores_bind_only_not_listening(registry: Registry, monkeypatch) -> None:
-    """BUG-364：仅 bind 占用（如 TIME_WAIT）且无监听者时仍应可分配。"""
+def test_allocate_skips_bind_only_port(registry: Registry, monkeypatch) -> None:
+    """新端口分配必须跳过已 bind 但未 listen 的端口。"""
     from local_webpage_access.config import PortPool
 
     cfg = Config(portPool=PortPool(start=20000, end=20010))
     registry.upsert_from_manifest(make_static_manifest("a"))
     alloc = PortAllocator(cfg, registry)
 
-    def fake_listening(port: int) -> bool:
-        return port == 20001  # 仅 20001 视为真占用
+    probed: list[int] = []
 
-    monkeypatch.setattr("local_webpage_access.ports.is_port_listening", fake_listening)
+    def fake_in_use(port: int) -> bool:
+        probed.append(port)
+        return port == 20000
+
+    monkeypatch.setattr("local_webpage_access.ports.is_port_in_use", fake_in_use)
     port = alloc.allocate("a", probe_host=True)
-    assert port == 20000
+    assert port == 20001
+    assert probed == [20000, 20001]
+
+
+def test_allocate_skips_real_bind_only_socket(registry: Registry) -> None:
+    """真实 socket 仅 bind 不 listen 时，新分配也不得选中该端口。"""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("0.0.0.0", 0))
+    busy_port = sock.getsockname()[1]
+    if busy_port > 65525:
+        sock.close()
+        pytest.skip("系统分配的临时端口无法构造长度为 11 的 PortPool")
+
+    try:
+        cfg = Config(portPool=PortPool(start=busy_port, end=busy_port + 10))
+        registry.upsert_from_manifest(make_static_manifest("bind-only"))
+        alloc = PortAllocator(cfg, registry)
+
+        port = alloc.allocate("bind-only", probe_host=True)
+
+        assert port != busy_port
+        assert busy_port < port <= busy_port + 10
+    finally:
+        sock.close()
 
 
 # ---- 回归测试：BUG-017 ----------------------------------------------------

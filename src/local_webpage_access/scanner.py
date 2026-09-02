@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import tomllib  # Python 3.11+ 标准库（项目要求 >=3.13）
 from dataclasses import dataclass, field
 from enum import Enum
@@ -607,11 +608,12 @@ class Scanner:
         若主包无 ``name`` 字段，使用路径作为 ``-w`` 参数。
         """
         pkg_name = primary.name
+        workspace_arg = shlex.quote(str(pkg_name))
         scripts = summary.node_scripts
 
         # build：若主包有 build 脚本 -> npm run build -w <name>
         if "build" in scripts:
-            result.entry.build = f"npm run build -w {pkg_name}"
+            result.entry.build = f"npm run build -w {workspace_arg}"
         else:
             result.entry.build = None
 
@@ -620,9 +622,9 @@ class Scanner:
             # 前端构建型：start 为 None（静态托管）
             result.entry.start = None
         elif "start" in scripts:
-            result.entry.start = f"npm run start -w {pkg_name}"
+            result.entry.start = f"npm run start -w {workspace_arg}"
         elif "server" in scripts:
-            result.entry.start = f"npm run server -w {pkg_name}"
+            result.entry.start = f"npm run server -w {workspace_arg}"
         # 否则保持 _detect_node 已设置的 start
 
         # install 保持根目录（_node_install_command 已正确）

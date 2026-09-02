@@ -12,8 +12,8 @@
 4. 生成的 Dockerfile 带注释头，记录模板来源和关键参数，方便 skill 二次修复。
 5. SQLite 项目通过 Compose 的 ``env_file`` 注入 ``DATABASE_URL=sqlite:////app/data/app.sqlite``，
    Dockerfile 只负责约定 ``/app/data`` 目录存在（WBS-12.09）。
-6. 写出前调用 ``audit_dockerfile``：``ADD <url>`` / ``curl|sh`` 为 critical，拒绝落盘
-   （与 ``generate_compose`` 对称）。
+6. 写出前调用 ``audit_dockerfile``：``ADD <url>`` / 下载后直接解释执行链
+   为 critical，拒绝落盘（与 ``generate_compose`` 对称）。
 """
 
 from __future__ import annotations
@@ -783,7 +783,8 @@ def _build_hooks_block(manifest: InstanceManifest) -> str:
 
     钩子声明在 ``apps/<id>/local-web.json``，rebuild 重生成 Dockerfile 时保留
     （手工改 Dockerfile 会被抹掉）。换行符在 manifest 校验阶段已拒绝；含
-    ``curl|sh`` 等供应链风险指令会被 ``audit_dockerfile`` 拒绝落盘。
+    下载后直接解释执行的供应链风险指令会被
+    ``audit_dockerfile`` 拒绝落盘。
     """
     return "".join(f"RUN {hook.strip()}\n" for hook in manifest.buildHooks if hook.strip())
 

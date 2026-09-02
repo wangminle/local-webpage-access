@@ -27,7 +27,7 @@ description: >-
 
 - **macOS**：用户**登录触发**型自启（LaunchAgent），**不是**无人值守系统级服务。
 - **Linux**：systemd **user** 服务，登出后需 `enable-linger` 才保活。
-- **WSL**：Linux 侧同 Ubuntu；但发行版**不随 Windows 开机自启**，需 Windows 登录任务唤醒。
+- **WSL**：Linux 侧同支持矩阵发行版（Ubuntu LTS / Debian Stable / Fedora）；但发行版**不随 Windows 开机自启**，需 Windows 登录任务唤醒。
 
 ## 输出
 

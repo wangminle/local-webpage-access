@@ -159,7 +159,7 @@ class ContainerConfig(BaseModel):
     # 让 registry containers 表与别名统一入口（reverse_proxy hostPort）联动。
     routeMode: str = RouteMode.PORT.value
     routeHost: str | None = None
-    # issue#1：额外 bind mount（``宿主路径:容器路径[:ro]`` 列表），渲染 compose 时
+    # issue#1：额外 bind mount（``宿主路径:绝对容器路径[:ro|rw]`` 列表），渲染 compose 时
     # 合并进 volumes--手工改 compose.yaml 会在重生成时被抹掉，业务定制走这里。
     extraVolumes: list[str] = Field(default_factory=list)
     # issue #20：容器是否以非 root 身份运行（宿主 data/ 目录 UID/GID 对齐方案）。

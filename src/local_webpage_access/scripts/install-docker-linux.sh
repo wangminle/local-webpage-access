@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# LWA：在 Ubuntu 22.04+ / Debian 12+（含 WSL）上安装 Docker Engine + Compose 插件。
+# LWA：在 Ubuntu 22.04+ / Debian 12+ / Fedora 43+（含 WSL）上安装 Docker Engine + Compose 插件。
 #
-# 流程对齐官方文档（apt 仓库方式）：
+# 流程对齐官方文档（Debian 系走 apt 仓库、Fedora 走 dnf 仓库）：
 #   https://docs.docker.com/engine/install/ubuntu/
+#   https://docs.docker.com/engine/install/fedora/
 # 默认将 download.docker.com 替换为阿里云 Docker CE 镜像：
 #   https://mirrors.aliyun.com/docker-ce/
 #   https://developer.aliyun.com/mirror/docker-ce
@@ -13,7 +14,7 @@
 #   LWA_DOCKER_REGISTRY_MIRRORS='https://xxxx.mirror.aliyuncs.com' bash install-docker-linux.sh
 #
 # 环境变量：
-#   LWA_DOCKER_APT_MIRROR        apt 仓库根 URL（默认阿里云；--official 时忽略）
+#   LWA_DOCKER_APT_MIRROR        apt/dnf 仓库根 URL（默认阿里云；--official 时忽略）
 #   LWA_DOCKER_REGISTRY_MIRRORS  逗号分隔的 registry-mirrors（默认 https://docker.m.daocloud.io；
 #                                可换阿里云个人加速器；设 none 跳过写入）
 #   LWA_MIN_DOCKER_VERSION       最低 Engine 版本（默认 29.0.0）
@@ -50,6 +51,7 @@ Usage: install-docker-linux.sh [--official] [--help]
 
 参考：https://docs.docker.com/engine/install/ubuntu/
       https://docs.docker.com/engine/install/debian/
+      https://docs.docker.com/engine/install/fedora/
 EOF
 }
 
@@ -122,10 +124,10 @@ run_sudo() {
   fi
 }
 
-# 输出两行：distro_family（ubuntu|debian）与 apt suite/codename。
+# 输出两行：distro_family（ubuntu|debian|fedora）与发行版代号/版本。
 # 严禁把 Debian 伪装成 Ubuntu 代号去拉 /linux/ubuntu 源。
-detect_debian_family() {
-  [[ -f /etc/os-release ]] || die "未找到 /etc/os-release，本脚本仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable（含 WSL）"
+detect_distro_family() {
+  [[ -f /etc/os-release ]] || die "未找到 /etc/os-release，本脚本仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable / Fedora 43+（含 WSL）"
   # shellcheck disable=SC1091
   . /etc/os-release
   local id="${ID:-}"
@@ -199,8 +201,29 @@ detect_debian_family() {
       fi
       printf 'debian\n%s\n' "$codename"
       ;;
+    fedora)
+      local major="${ver%%.*}"
+      local code_lower
+      code_lower="$(printf '%s' "$codename" | tr '[:upper:]' '[:lower:]')"
+      case "$code_lower" in
+        rawhide)
+          die "Fedora Rawhide 不是正式发布；仅支持 43/44（见 SUPPORTED_FEDORA_RELEASES）"
+          ;;
+      esac
+      if [[ -z "$ver" ]] || [[ "$major" -lt 43 ]]; then
+        die "Fedora ${ver:-unknown} 低于最低要求 43"
+      fi
+      # 须与 platform_support.SUPPORTED_FEDORA_RELEASES 保持同步
+      case "$major" in
+        43|44) ;;
+        *)
+          die "Fedora $ver 尚未纳入正式支持矩阵（当前 43/44；新版本发布后随矩阵滚动更新）"
+          ;;
+      esac
+      printf 'fedora\n%s\n' "${ver}"
+      ;;
     *)
-      die "当前发行版 ID=${id:-unknown}。仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable；见 https://docs.docker.com/engine/install/"
+      die "当前发行版 ID=${id:-unknown}。仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable / Fedora 43+；见 https://docs.docker.com/engine/install/"
       ;;
   esac
 }
@@ -230,7 +253,7 @@ already_good() {
   return 0
 }
 
-uninstall_conflicts() {
+uninstall_conflicts_apt() {
   # https://docs.docker.com/engine/install/ubuntu/#uninstall-old-versions
   log "卸载可能冲突的旧包（docker.io / podman-docker 等）…"
   local pkgs
@@ -238,6 +261,49 @@ uninstall_conflicts() {
   if [[ -n "${pkgs}" ]]; then
     # shellcheck disable=SC2086
     apt_get remove -y $pkgs || true
+  else
+    log "未发现冲突包，跳过"
+  fi
+}
+
+uninstall_conflicts_fedora() {
+  # https://docs.docker.com/engine/install/fedora/#uninstall-old-versions
+  # 官方冲突包清单；不得默认加入 containerd / runc——dnf remove 可能连带拆掉
+  # 其他依赖它们的软件。额外兼容包须逐个证明必要性。
+  log "卸载可能冲突的旧包（docker / docker-engine / moby-engine 等）…"
+  local pkg
+  local -a official extra installed=()
+  official=(
+    docker
+    docker-client
+    docker-client-latest
+    docker-common
+    docker-latest
+    docker-latest-logrotate
+    docker-logrotate
+    docker-selinux
+    docker-engine-selinux
+    docker-engine
+  )
+  # docker-cli：Fedora 43/44 将 CLI 拆为可独立安装的子包并持有
+  # /usr/bin/docker；显式安装时不会随 moby-engine 的依赖清理自动移除。
+  # moby-engine：Fedora 仓库将发行版 Docker 打包为此名，与 docker-ce 文件冲突
+  # （官方清单仍写 docker / docker-engine 旧名）。
+  # podman-docker：提供 docker CLI 包装，会遮蔽 docker-ce-cli（Ubuntu 官方
+  # 清单亦含此项；Fedora 默认常用 podman）。
+  extra=(
+    docker-cli
+    moby-engine
+    podman-docker
+  )
+  for pkg in "${official[@]}" "${extra[@]}"; do
+    if rpm -q "$pkg" >/dev/null 2>&1; then
+      installed+=("$pkg")
+    fi
+  done
+  if ((${#installed[@]})); then
+    log "将卸载：${installed[*]}"
+    run_sudo dnf remove -y "${installed[@]}"
   else
     log "未发现冲突包，跳过"
   fi
@@ -295,6 +361,54 @@ EOF
 install_packages() {
   log "安装 docker-ce / cli / containerd / buildx / compose 插件…"
   apt_get install -y \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-buildx-plugin \
+    docker-compose-plugin
+}
+
+setup_dnf_repo() {
+  # https://docs.docker.com/engine/install/fedora/
+  # 直接写 repo 文件而非 dnf config-manager --add-repo：不依赖 dnf-plugins-core，
+  # dnf4 / dnf5 通用；$releasever / $basearch 由 dnf 自行展开（写入时转义）。
+  local base gpg_url key_tmp
+  if [[ "$USE_OFFICIAL" -eq 1 ]]; then
+    base="${OFFICIAL_APT_ROOT}/linux/fedora"
+    log "配置官方 dnf 仓库：$base"
+  else
+    base="${LWA_DOCKER_APT_MIRROR:-$DEFAULT_APT_MIRROR}/linux/fedora"
+    log "配置阿里云 Docker CE dnf 仓库：$base"
+  fi
+  gpg_url="${base}/gpg"
+
+  log "导入 Docker CE GPG key…"
+  key_tmp="$(mktemp)"
+  if ! curl -fsSL "$gpg_url" -o "$key_tmp"; then
+    rm -f "$key_tmp"
+    die "无法获取 Docker CE GPG key：$gpg_url（可试 --official 或检查网络）"
+  fi
+  run_sudo rpm --import "$key_tmp"
+  rm -f "$key_tmp"
+
+  # 清理 add-repo 时代可能残留的官方源文件，避免与新 repo 双源
+  if ls /etc/yum.repos.d/download.docker.com*.repo >/dev/null 2>&1; then
+    run_sudo rm -f /etc/yum.repos.d/download.docker.com*.repo
+  fi
+
+  run_sudo tee /etc/yum.repos.d/docker-ce.repo >/dev/null <<EOF
+[docker-ce-stable]
+name=Docker CE Stable - \$basearch
+baseurl=${base}/\$releasever/\$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=${gpg_url}
+EOF
+}
+
+install_packages_fedora() {
+  log "安装 docker-ce / cli / containerd / buildx / compose 插件…"
+  run_sudo dnf install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
@@ -405,16 +519,22 @@ verify_install() {
 
 main() {
   need_cmd curl
-  need_cmd apt-get
-  need_cmd dpkg
-  check_apt_pkg
 
   local family codename
   {
     read -r family
     read -r codename
-  } < <(detect_debian_family)
-  log "检测到 ${family}（代号 $codename）"
+  } < <(detect_distro_family)
+  log "检测到 ${family}（$codename）"
+
+  if [[ "$family" == "fedora" ]]; then
+    need_cmd dnf
+    need_cmd rpm
+  else
+    need_cmd apt-get
+    need_cmd dpkg
+    check_apt_pkg
+  fi
 
   if already_good; then
     write_daemon_mirrors "$DEFAULT_REGISTRY_MIRRORS"
@@ -426,9 +546,15 @@ main() {
     exit 0
   fi
 
-  uninstall_conflicts
-  setup_apt_repo "$family" "$codename"
-  install_packages
+  if [[ "$family" == "fedora" ]]; then
+    uninstall_conflicts_fedora
+    setup_dnf_repo
+    install_packages_fedora
+  else
+    uninstall_conflicts_apt
+    setup_apt_repo "$family" "$codename"
+    install_packages
+  fi
   write_daemon_mirrors "$DEFAULT_REGISTRY_MIRRORS"
   start_docker
   if [[ -n "$DEFAULT_REGISTRY_MIRRORS" ]]; then

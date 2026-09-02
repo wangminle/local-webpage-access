@@ -25,6 +25,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -893,15 +894,39 @@ def apply_fast_forward(
 # ---- 恢复指引（§15.1.8）-------------------------------------------------------
 
 
-def recovery_hint(old_head: str | None) -> str:
+def recovery_hint(
+    old_head: str | None,
+    *,
+    pip_missing: bool = False,
+    python_executable: str | None = None,
+    repo_path: str | Path | None = None,
+) -> str:
     """升级关键步骤失败时的**人工**恢复链（不自动执行）。
 
     先要求复查 ``git status``；工作树仍干净时才给经 shell 安全转义的
     ``git reset --keep`` 建议，并明示重跑 pip/update 的完整链。
+
+    ``pip_missing=True``（issue #27：venv 缺 pip 模块）时给针对性链——通用链
+    的「重跑 lwa update（或 pip install -e .）」依赖被缺失的 pip 本身，会把
+    用户引入死循环。快进后竞态还可能让新源码在 CLI 启动期就缺依赖：须先
+    ``ensurepip``，再用同一解释器对明确仓库路径 ``pip install -e``，最后才
+    重跑 ``lwa update``。代码回退降级为「通常无需」。
     """
     if not old_head:
         return ""
     quoted = shlex.quote(old_head)
+    if pip_missing:
+        quoted_python = shlex.quote(python_executable or sys.executable)
+        quoted_repo = shlex.quote(str(repo_path) if repo_path else ".")
+        return (
+            "升级关键步骤失败（当前解释器缺少 pip 模块）。恢复链（人工执行）："
+            f"① 恢复 pip：`{quoted_python} -m ensurepip --upgrade`；"
+            f"② 用同一解释器安装已快进源码：`{quoted_python} -m pip install -e {quoted_repo}`"
+            "（避免新源码启动期依赖缺失导致 `lwa` 无法启动）；"
+            "③ 再跑 `lwa update` 完成收尾（代码已快进，重跑会按「已是最新」"
+            "直接进入环境刷新，无需回退）；"
+            f"④ 如确需回退代码：`git reset --keep {quoted}`（恢复 pip 后通常无需）。"
+        )
     return (
         "升级关键步骤失败。恢复链（人工执行）：① 复查 `git status` 确认工作树干净；"
         f"② 如需回退代码：`git reset --keep {quoted}`；"

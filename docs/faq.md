@@ -19,7 +19,7 @@ lwa setup --full --resume          # 重登后继续验收（exit 2 时）
 | default（缺省） | `lwa setup` / `lwa init` | 检测+指引；缺 Docker 时 TTY 可询问是否跑内置脚本；`setup` 无需工作区 |
 | full | `lwa setup --full` / `lwa init --full` | 安装 Caddy/Docker/Compose，并验收 Full 能力闭环（见下）；**需已初始化工作区**；非 TTY 必须 `--yes` |
 
-`--default` 与 `--full` 互斥。内置脚本覆盖 macOS / Ubuntu LTS（22.04/24.04/26.04）/ Debian Stable（12/13）（含 WSL2）。**Windows 原生不受支持**——请在 WSL2 内安装运行。详见 [运维手册 · 宿主机装配](operations-playbook.md#零宿主机装配imp-031032033) 与 [已知限制](known-limitations.md)。
+`--default` 与 `--full` 互斥。内置脚本覆盖 macOS / Ubuntu LTS（22.04/24.04/26.04）/ Debian Stable（12/13）/ Fedora（43/44）（含 WSL2）。**Windows 原生不受支持**——请在 WSL2 内安装运行。详见 [运维手册 · 宿主机装配](operations-playbook.md#零宿主机装配imp-031032033) 与 [已知限制](known-limitations.md)。
 
 遇到问题时，第一步永远是：
 
@@ -222,6 +222,28 @@ V1 要求 Docker Compose 插件（`docker compose` 子命令）。安装 `docker
 * 非 git 克隆安装：`sourceUpdate skipped` 并提示迁移到 clone + `pip install -e .`。
 * 快进后 pip/接力失败：报告附人工恢复链（`git status` 复查 → 干净时
   `git reset --keep <oldHead>` → 重跑 `lwa update`）；不自动回滚。
+  若失败原因是当前解释器缺少 pip 模块（issue #27），恢复链会**针对性**改为
+  「ensurepip 恢复 pip → 对源码根 `pip install -e` → 重跑 `lwa update`」，
+  不再指引依赖被缺失 pip 本身的动作；详见下方专节。
+
+### 升级时报 `No module named pip`（venv 缺 pip）怎么办？（V0.8.11 / issue #27）
+
+V0.8.11 起 `lwa update` 在**快进源码之前**预检当前解释器的 pip 模块：
+
+* **预检发现缺失**：直接失败并给出指引，**不 fetch、不快进、零变更**——
+  不会进入「代码已快进、运行环境没跟上」的中间态。按报告里的命令执行
+  `<venv>/bin/python3 -m ensurepip --upgrade` 恢复 pip 后重跑 `lwa update` 即可
+  （源码未动，重跑走完整流程）。
+* **快进后 pip 步骤才失败**（预检与安装之间 pip 被删的竞态）：恢复链为
+  ① `<venv>/bin/python3 -m ensurepip --upgrade`；② 同一解释器
+  `-m pip install -e <源码根>`（避免新源码新增 CLI 启动期依赖导致 `lwa`
+  无法启动）；③ 再跑 `lwa update` 完成收尾（代码已快进，重跑会按「已是最新」
+  直接进入环境刷新）；④ 如确需回退代码 `git reset --keep <oldHead>`
+  （恢复 pip 后通常无需）。
+* `lwa update --dry-run` 也会标注该风险（pip 步骤 warning），便于升级前先修。
+
+历史背景：V0.8.10 及之前，此故障的恢复链指引「重跑 `lwa update`（或
+`pip install -e .`）」，两者都依赖被缺失的 pip 本身，形成死循环（issue #27）。
 
 ### `lwa update` 收尾 access/doctor 偶报瞬时失败？（V0.8.2 / issue #5）
 
@@ -302,10 +324,12 @@ RuntimeError: 生成的 compose.yaml 含 critical 安全问题（privileged）�
 ```
 
 `generate_dockerfile` / `generate_compose` 在落盘前跑审计：Dockerfile 的 `ADD <url>`、
-`curl|sh` / `wget|sh`，以及 Compose 的 privileged / Docker socket 等为 **critical**，
+下载后经管道或命令分隔符直接交给常见解释器执行的高危链，以及 Compose 的
+privileged / Docker socket 等为 **critical**，
 直接拒绝写出。常见原因：
 
-* `local-web.json` 的 `entry.install` / `entry.build` 含管道装脚本（如 `curl … | sh`）。
+* `local-web.json` 的 `entry.install` / `entry.build` 含下载执行链（如
+  `curl … | sh`、`curl -o /tmp/x && sh /tmp/x`、`wget … | python`）。
 * Skill 或手工改写的模板引入了远程 `ADD` / 危险 Compose 字段。
 
 处理：去掉供应链风险指令，改用 `COPY` + 包管理器安装；详见 [安全边界](security-boundary.md)。
@@ -444,8 +468,9 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 * `preStart`：容器每次启动时先执行，成功后才 `exec` 启动命令（CMD 变为
   `sh -c "<preStart> && exec <start>"`），适合数据库迁移等启动前步骤；
   preStart 失败则容器直接退出，不会带病启动。
-* 两个字段都不允许换行符；含 `curl … | sh` 类管道安装脚本会被 Dockerfile
-  安全审计拒绝落盘。改完后 `lwa rebuild <id>` 生效。
+* 两个字段都不允许换行符；下载后直接交给 shell / Python / Node
+  等解释器的高危执行链会被 Dockerfile 安全审计拒绝落盘。该审计是
+  高危模式门禁，不等同于构建沙箱。改完后 `lwa rebuild <id>` 生效。
 
 ### "实例 xx 正在被其他操作占用"（issue#1 / issue #17）
 

@@ -8,6 +8,7 @@ git 测试统一用**临时 bare remote + clone 夹具**，禁止依赖外网与
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -685,6 +686,186 @@ def test_flow_non_git_install_skips_source(git_env: GitEnv, tmp_path, monkeypatc
     assert src.status == "skipped"
     assert "clone" in src.message
     assert report.step("pip").status == "ok"
+
+
+# ---- issue #27：venv 缺 pip 的恢复链死循环修复 ------------------------------------
+
+
+def test_run_pip_install_raises_pip_missing_before_install(monkeypatch, tmp_path) -> None:
+    """预探测发现 No module named pip：直接抛 PipMissingError，不执行 pip install。"""
+    from local_webpage_access import updater as upd
+
+    monkeypatch.setattr(
+        upd, "_pip_probe", lambda exe: (False, "/x/.venv/bin/python3: No module named pip")
+    )
+    monkeypatch.setattr(
+        upd.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("pip 缺失时应直接抛错，不得执行 pip install"),
+    )
+    with pytest.raises(upd.PipMissingError, match="ensurepip"):
+        upd.run_pip_install(tmp_path)
+
+
+def test_run_pip_install_classifies_missing_pip_from_install_output(
+    monkeypatch, tmp_path
+) -> None:
+    """探测通过但安装输出带 No module named pip（探测与安装之间被删）：同样归类。"""
+
+    class FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = "/x/.venv/bin/python3: No module named pip"
+
+    from local_webpage_access import updater as upd
+
+    monkeypatch.setattr(upd, "_pip_probe", lambda exe: (True, "pip 25.0 from ..."))
+    monkeypatch.setattr(upd.subprocess, "run", lambda *a, **k: FakeCompleted())
+    with pytest.raises(upd.PipMissingError, match="ensurepip"):
+        upd.run_pip_install(tmp_path)
+
+
+def test_run_pip_install_generic_failure_stays_runtime_error(monkeypatch, tmp_path) -> None:
+    """普通 pip 失败（网络等）：维持 RuntimeError，不误判为 pip 缺失。"""
+
+    class FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = "ERROR: Could not find a version..."
+
+    from local_webpage_access import updater as upd
+
+    monkeypatch.setattr(upd, "_pip_probe", lambda exe: (True, "pip 25.0 from ..."))
+    monkeypatch.setattr(upd.subprocess, "run", lambda *a, **k: FakeCompleted())
+    with pytest.raises(RuntimeError) as ei:
+        upd.run_pip_install(tmp_path)
+    assert not isinstance(ei.value, upd.PipMissingError)
+
+
+def test_recovery_hint_pip_missing_targets_ensurepip() -> None:
+    """issue #27：pip 缺失的恢复链以 ensurepip 打头，移除依赖 pip 的死循环指引。"""
+    hint = us.recovery_hint(
+        "abc123def456", pip_missing=True, python_executable="/opt/ws/.venv/bin/python3"
+    )
+    assert "ensurepip --upgrade" in hint
+    assert "/opt/ws/.venv/bin/python3" in hint
+    assert "git reset --keep" in hint  # 回退代码仍可用，仅降级
+    assert "（或 pip install -e .）" not in hint  # 死循环指引必须移除
+
+
+def test_recovery_hint_pip_missing_installs_editable_before_lwa_cli(
+    tmp_path: Path,
+) -> None:
+    """BUG-624：快进后新源码可能新增 CLI 启动期依赖，恢复不得先跑 lwa。
+
+    场景：预检成功、源码已快进、随后 pip 模块消失。ensurepip 之后若立刻
+    ``lwa update``，新代码可能在进入 update 命令前因缺依赖崩溃。恢复链必须
+    先用同一解释器对明确仓库路径做 ``pip install -e``，再跑 ``lwa update``。
+    """
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    py = "/opt/ws/.venv/bin/python3"
+    hint = us.recovery_hint(
+        "abc123def456",
+        pip_missing=True,
+        python_executable=py,
+        repo_path=repo,
+    )
+    quoted_py = shlex.quote(py)
+    quoted_repo = shlex.quote(str(repo))
+    assert f"{quoted_py} -m ensurepip --upgrade" in hint
+    assert f"{quoted_py} -m pip install -e {quoted_repo}" in hint
+    assert hint.index("ensurepip") < hint.index("pip install -e") < hint.index("lwa update")
+    assert "② 重跑 `lwa update`" not in hint
+
+
+def test_recovery_hint_generic_chain_unchanged() -> None:
+    hint = us.recovery_hint("abc123def456")
+    assert "重跑 `lwa update`（或 pip install -e .）" in hint
+    assert "ensurepip" not in hint
+
+
+def test_flow_pip_preflight_blocks_before_ff(git_env: GitEnv, tmp_path, monkeypatch) -> None:
+    """issue #27：venv 缺 pip 时预检阻断——不 fetch、不快进、工作树零变更。"""
+    from local_webpage_access import update_flow
+
+    ws_root = _make_workspace(tmp_path)
+    git_env.push_commit("a.txt", "1", "V0.7.12-Build3000")
+    _git(git_env.repo, "reset", "-q", "--hard", "origin/main~1")
+    head_before = _git(git_env.repo, "rev-parse", "HEAD").strip()
+
+    fetches = []
+    monkeypatch.setattr(update_flow.us, "fetch_candidate", lambda *a, **k: fetches.append(1))
+    monkeypatch.setattr(
+        update_flow,
+        "pip_missing_preflight",
+        lambda: "当前解释器缺少 pip 模块（No module named pip）。"
+        "先恢复 pip：/x/.venv/bin/python3 -m ensurepip --upgrade，再重跑 lwa update。",
+    )
+    monkeypatch.setattr(
+        update_flow, "run_pip_install", lambda repo: pytest.fail("预检未过不得执行 pip")
+    )
+    report = run_update_flow(ws_root, _flow_options(git_env.repo))
+    src = report.step("sourceUpdate")
+    assert src is not None and src.status == "skipped"
+    assert "预检" in src.message
+    pip_step = report.step("pip")
+    assert pip_step is not None and pip_step.status == "failed"
+    assert "ensurepip" in pip_step.message
+    assert fetches == []  # 预检先于 fetch
+    assert _git(git_env.repo, "rev-parse", "HEAD").strip() == head_before  # 未快进
+    assert report.step("continuation") is None
+    assert report.has_failures
+
+
+def test_flow_pip_missing_after_ff_targets_ensurepip_chain(
+    git_env: GitEnv, tmp_path, monkeypatch
+) -> None:
+    """快进后 pip 因模块缺失失败（预检后的竞态窗口）：恢复链走 ensurepip 版。"""
+    from local_webpage_access import update_flow
+    from local_webpage_access.updater import PipMissingError
+
+    ws_root = _make_workspace(tmp_path)
+    git_env.push_commit("a.txt", "1", "V0.7.12-Build3000")
+    _git(git_env.repo, "reset", "-q", "--hard", "origin/main~1")
+
+    def raise_missing(repo):
+        raise PipMissingError("当前解释器缺少 pip 模块（No module named pip）。")
+
+    monkeypatch.setattr(update_flow, "run_pip_install", raise_missing)
+    launched = []
+    monkeypatch.setattr(
+        update_flow,
+        "_launch_continuation",
+        lambda *a, **k: launched.append(1) or (None, "不应接力"),
+    )
+    report = run_update_flow(ws_root, _flow_options(git_env.repo))
+    cont = report.step("continuation")
+    assert cont is not None and cont.status == "failed"
+    assert "ensurepip --upgrade" in cont.message
+    assert f"-m pip install -e {shlex.quote(str(git_env.repo))}" in cont.message
+    assert cont.message.index("ensurepip") < cont.message.index("pip install -e")
+    assert cont.message.index("pip install -e") < cont.message.index("lwa update")
+    assert "（或 pip install -e .）" not in cont.message
+    assert launched == []
+
+
+def test_flow_dry_run_flags_pip_missing_risk(git_env: GitEnv, tmp_path, monkeypatch) -> None:
+    """issue #27（可选增强）：dry-run 计划标注 pip 缺失风险（warning）。"""
+    from local_webpage_access import updater as updater_mod
+
+    ws_root = _make_workspace(tmp_path)
+    monkeypatch.setattr(
+        updater_mod,
+        "pip_missing_preflight",
+        lambda: "当前解释器缺少 pip 模块（No module named pip）。"
+        "先恢复 pip：ensurepip --upgrade，再重跑 lwa update。",
+    )
+    report = run_update_flow(ws_root, _flow_options(git_env.repo, dry_run=True))
+    pip_step = report.step("pip")
+    assert pip_step is not None and pip_step.status == "warning"
+    assert "ensurepip" in pip_step.message
+    assert not report.has_failures  # warning 不改 dry-run 退出码语义
 
 
 # ---- 063.08 continuation 拒绝路径（真实子进程） ------------------------------------

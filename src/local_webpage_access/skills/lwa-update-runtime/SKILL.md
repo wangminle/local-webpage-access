@@ -22,7 +22,7 @@ description: >-
 | `lwa init` | **首次**创建工作区（目录、registry、配置） |
 | **`lwa update`（V0.4.0 起）** | 已有工作区 + **lwa 包升级** + skills/config 同步 + 重启 manager/daemon |
 
-当前已实现 `lwa update` CLI（**V0.8.10** 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
+当前已实现 `lwa update` CLI（**V0.8.11** 为当前版本）；本 skill 应优先调用它。只有在 `lwa update`
 执行失败、需要定位具体步骤，或用户明确要求手动处理时，才使用下方手动兜底步骤。
 
 ## 输入
@@ -85,7 +85,12 @@ lwa update --no-restart-gateway
   拒绝（`skip_pip_conflict`），避免新旧代码混跑；`--no-pull --skip-pip` 组合仍可用；
 - 快进后 pip / 接力失败：停止 Runtime 后半段并给出人工恢复链
   （`git status` 复查 → 干净时 `git reset --keep <oldHead>` → 重跑 `lwa update`），
-  **不自动回滚**；
+  **不自动回滚**。V0.8.11（issue #27）：pip 步骤前会**预检**当前解释器的 pip
+  模块，venv 缺 pip（`No module named pip`）时在快进前**零变更阻断**，不会进入
+  「代码已快进、环境没跟上」的中间态；若快进后才因缺 pip 失败（竞态），恢复链
+  针对性改为：① 同一 Python `-m ensurepip --upgrade` → ② `-m pip install -e
+  <明确仓库路径>`（避免新源码启动期依赖缺失导致 CLI 无法进入 update 命令）→
+  ③ 重跑 `lwa update` 收尾；
 - 两个 `lwa update` 并发：repo/workspace 双锁 fail-fast，后者直接报「更新锁被占用」。
 
 预期结果：
@@ -152,6 +157,7 @@ curl -s http://127.0.0.1:17800/api/health   # version 字段应已更新
 | --- | --- |
 | 管理页仍显示旧版本 | 先运行 `lwa update`（自启在管时由其协调重启）；勿直接 `manager off/on` 除非已 `autostart disable`；再查 17800 端口 PID |
 | `lwa version` 已新但页面旧 | 浏览器强刷；确认访问的是本机 127.0.0.1 而非旧 tab 缓存 |
+| pip 步骤报 `No module named pip` | venv 缺 pip 模块（issue #27）：按报告恢复链执行——同一 Python `ensurepip --upgrade` → `pip install -e <仓库路径>` → 重跑 `lwa update`；勿反复重试或只回退代码（对缺 pip 无效） |
 | 代码变更后实例行为异常 | `lwa restart <id>` 或 `lwa update --restart-instances` |
 | update 后出现双 daemon/manager | 多为自启未协调的旧路径残留；改用 `lwa update`，或 `autostart disable` 后清理进程再 enable |
 

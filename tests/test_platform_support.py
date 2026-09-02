@@ -518,6 +518,87 @@ def test_debian_future_major_rejected() -> None:
     assert report.supported is False
 
 
+# ---- Fedora（滚动窗口：当前 + 前一稳定版）----------------------------------------
+
+
+def _supported_fedora(**overrides):
+    base = dict(
+        platform_name="linux",
+        distro_id="fedora",
+        distro_version="44",
+        kernel_version="6.15.0",
+        libc_version="2.41",
+        architecture="x86_64",
+        systemd_available=True,
+        systemd_pid1=True,
+    )
+    base.update(overrides)
+    return collect_platform_support_report(**base)
+
+
+def test_fedora_matrix_releases_supported() -> None:
+    from local_webpage_access.platform_support import SUPPORTED_FEDORA_RELEASES
+
+    assert SUPPORTED_FEDORA_RELEASES, "Fedora 滚动窗口不得为空"
+    for ver in sorted(SUPPORTED_FEDORA_RELEASES):
+        report = _supported_fedora(distro_version=str(ver))
+        assert report.supported is True, report.reasons
+
+
+def test_fedora_previous_window_release_supported() -> None:
+    """前一稳定版（43）在窗口内；VERSION_CODENAME 为空不影响判定。"""
+    report = _supported_fedora(distro_version="43", distro_codename="")
+    assert report.supported is True
+
+
+def test_fedora_rawhide_rejected() -> None:
+    report = _supported_fedora(distro_version="44", distro_codename="Rawhide")
+    assert report.supported is False
+    assert any("Rawhide" in r for r in report.reasons)
+
+
+def test_fedora_future_release_rejected() -> None:
+    """未纳入矩阵的未来 Fedora（如 45）不得假绿，须提示随矩阵滚动更新。"""
+    report = _supported_fedora(distro_version="45")
+    assert report.supported is False
+    assert any("45" in r and "支持矩阵" in r for r in report.reasons)
+
+
+def test_fedora_old_release_rejected() -> None:
+    report = _supported_fedora(distro_version="42")
+    assert report.supported is False
+
+
+def test_fedora_version_with_patch_suffix_parsed() -> None:
+    """VERSION_ID 理论上可带后缀（如 44.1）；按大版本对照窗口。"""
+    report = _supported_fedora(distro_version="44.1")
+    assert report.supported is True
+
+
+def test_user_facing_docs_include_fedora_in_supported_matrix() -> None:
+    """BUG-623：对外口径不得把 Fedora 列为不支持，也不得从安装矩阵遗漏。"""
+    root = Path(__file__).resolve().parents[1]
+    known = (root / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    assert "Fedora/RHEL/Arch 等未纳入矩阵" not in known
+    assert "Fedora" in known
+    assert "43" in known and "44" in known
+    faq = (root / "docs" / "faq.md").read_text(encoding="utf-8")
+    assert "Fedora" in faq
+    assert "43" in faq and "44" in faq
+    skill = (
+        root
+        / "src"
+        / "local_webpage_access"
+        / "skills"
+        / "lwa-setup-host-environment"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "Fedora" in skill
+    assert "43" in skill and "44" in skill
+    checklist = (root / "docs" / "release-checklist.md").read_text(encoding="utf-8")
+    assert "Fedora" in checklist
+
+
 def test_cli_gate_blocks_init_on_windows(monkeypatch, tmp_path: Path) -> None:
     from typer.testing import CliRunner
 

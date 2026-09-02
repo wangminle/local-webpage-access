@@ -26,12 +26,14 @@
 | bind mount 宿主敏感目录（`/`、`/etc`、`/var`、`/root`、`/proc`、`/var/lib/docker` 等） | critical | `host_sensitive_mount` |
 | 非 `data/` 的 host bind mount | warn | `unexpected_host_mount` |
 | `network_mode: host` | warn | `host_network` |
-| 危险 `cap_add`（`SYS_ADMIN` / `NET_ADMIN` / `SYS_PTRACE` 等） | warn | `dangerous_capability` |
+| 危险 `cap_add`（`ALL` / `SYS_ADMIN` / `NET_ADMIN` / `SYS_PTRACE` 等） | warn | `dangerous_capability` |
 | 以 root 用户运行（`user: root` 或 `user: 0`） | warn | `root_user` |
 | Compose YAML 非法 / 结构错误 | critical | `invalid_yaml` |
 
-**允许的 host bind mount**：仅 `./data`、`../data`（实例自己的持久化目录）。
-这是 V1 唯一允许的 bind mount 源，保证容器只能写自己的 `data/`。
+**默认 host bind mount** 是 `./data`、`../data`（实例自己的持久化目录）。
+`container.extraVolumes` 是显式业务扩展口，只接受
+`source:/absolute/container/path[:ro|rw]` 短格式，并始终作为带引号的 YAML
+字符串写出；非 `data/` 路径会按上表规则告警或拒绝。
 
 ## Dockerfile 审计（`audit_dockerfile`）
 
@@ -45,7 +47,11 @@
 | 显式 `USER root` 或 `USER 0` | warn | `root_user` |
 | 未声明 `USER`（默认 root） | info | `no_user` |
 | `ADD <url>`（远程下载，不可复现且有供应链风险） | **critical** | `add_remote_url` |
-| `RUN` 中含 `curl ... \| sh` / `wget ... \| sh` 模式 | **critical** | `pipe_to_shell` |
+| `RUN` 中 downloader 经 `\|`、`&&`、`;` 等直接交给 `sh` / `bash` / `python` / `node` / `perl` / `ruby` | **critical** | `pipe_to_shell` |
+
+> Dockerfile 审计是高危模式门禁，**不是 shell 语义分析器或构建沙箱**。
+> 它不承诺识别所有变形；自定义 `entry.install`、`entry.build` 和
+> `buildHooks` 仍应视为会在容器构建期执行的代码，只导入信任的项目。
 
 > V1 生成的 Dockerfile 默认非 root（`node:24-alpine` 用 `node` 用户，
 > `python:3.13-slim` 创建 `app` 用户并切换）。warn/info 仍记录日志但不阻断写出。

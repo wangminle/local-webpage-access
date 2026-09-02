@@ -42,10 +42,10 @@ Linux 上 `usermod -aG docker` 后若当前进程仍无 docker 组：按提示�
 
 内置脚本（包内 `scripts/`，默认国内源）：
 
-- **Docker**：`install-docker-linux.sh`（官方 apt 流程 + 默认阿里云 docker-ce；`--official` 切官方源；默认写入 `registry-mirrors`）、`install-docker-macos.sh`（brew cask Docker Desktop）。
-- **Caddy**：`install-caddy-linux.sh` / `install-caddy-macos.sh`（Linux 脚本会停用冲突的系统 caddy.service）。
+- **Docker**：`install-docker-linux.sh`（Debian 系走官方 apt 流程、Fedora 走 dnf 仓库 + 默认阿里云 docker-ce；`--official` 切官方源；默认写入 `registry-mirrors`）、`install-docker-macos.sh`（brew cask Docker Desktop）。
+- **Caddy**：`install-caddy-linux.sh` / `install-caddy-macos.sh`（Linux 脚本会停用冲突的系统 caddy.service；Debian 系用 Cloudsmith apt 源，Fedora 用官方仓库 dnf 包，均回退 GitHub Release 二进制）。
 
-Windows **原生进程不受支持**，无内置安装脚本。请在 **WSL2**（Ubuntu LTS 22.04/24.04/26.04 或 Debian Stable 12/13）内执行 `lwa setup` / `lwa init`。装完后建议 `lwa setup` 复核，再 `lwa doctor`（需已 `init`；未初始化时 `lwa doctor --json` 仍可输出平台诊断）；Full 环境用 `lwa doctor --profile full`。WSL 下请勿把工作区放在 `/mnt/<drive>` 再跑 `--full` / `autostart`（写入前 fail-closed）。
+Windows **原生进程不受支持**，无内置安装脚本。请在 **WSL2**（Ubuntu LTS 22.04/24.04/26.04、Debian Stable 12/13 或 Fedora 43/44）内执行 `lwa setup` / `lwa init`。装完后建议 `lwa setup` 复核，再 `lwa doctor`（需已 `init`；未初始化时 `lwa doctor --json` 仍可输出平台诊断）；Full 环境用 `lwa doctor --profile full`。WSL 下请勿把工作区放在 `/mnt/<drive>` 再跑 `--full` / `autostart`（写入前 fail-closed）。
 
 **运行前（尤其 WSL）**：先核对宿主内存配额、工作区是否在 Linux 盘、防火墙是否放行业务口——见 [已知限制 · WSL2 宿主准备](known-limitations.md#wsl2-宿主准备运行前)；自启与可选 mirrored 网络见 [开机自启](autostart.md#wsl-的-windows-侧)。
 

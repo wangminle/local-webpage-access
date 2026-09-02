@@ -219,7 +219,7 @@ def _python_install_hint(plat: str) -> str:
     if plat == "macos":
         return "推荐：`brew install python@3.13` 或从 https://www.python.org/downloads/ 安装"
     if plat == "linux":
-        return "推荐：发行版包管理器安装 python3.13，或用 pyenv / uv 管理版本"
+        return "推荐：发行版包管理器（apt / dnf）安装 python3.13，或用 pyenv / uv 管理版本"
     if plat == "windows":
         return "推荐：从 https://www.python.org/downloads/ 安装 3.13+，并勾选 Add to PATH"
     return "安装 Python 3.13+ 并确保 `python3` / `pip` 在 PATH 中"
@@ -242,7 +242,8 @@ def _docker_install_hint(plat: str) -> str:
         return (
             f"{builtin}；或官方文档："
             "https://docs.docker.com/engine/install/ubuntu/ "
-            "https://docs.docker.com/engine/install/debian/"
+            "https://docs.docker.com/engine/install/debian/ "
+            "https://docs.docker.com/engine/install/fedora/"
         )
     if plat == "windows":
         return (
@@ -272,8 +273,9 @@ def _caddy_install_hint(plat: str) -> str:
         return f"{builtin}；或 `brew install caddy`（需 ≥ {MIN_CADDY_VERSION}）"
     if plat == "linux":
         return (
-            f"{builtin}；或官方 apt："
+            f"{builtin}；或官方包管理器源："
             "https://caddyserver.com/docs/install#debian-ubuntu-raspbian "
+            "（Debian/Ubuntu 用 apt；Fedora 用 dnf）"
             f"（需 ≥ {MIN_CADDY_VERSION}）"
         )
     if plat == "windows":
@@ -378,11 +380,12 @@ lwa setup
 
 _SCRIPT_LINUX = """\
 #!/usr/bin/env bash
-# lwa 宿主机环境参考安装脚本（Ubuntu 22.04+ / Debian 12+）—— 请审阅后逐段执行；需 root/sudo 权限。
+# lwa 宿主机环境参考安装脚本（Ubuntu 22.04+ / Debian 12+ / Fedora 43+）—— 请审阅后逐段执行；需 root/sudo 权限。
 set -euo pipefail
 
 echo "==> Python 3.13+"
 # 示例（Debian/Ubuntu）：sudo apt install python3.13 python3.13-venv python3-pip
+# 示例（Fedora）：sudo dnf install python3.13 python3-pip
 # 或使用 pyenv / uv
 
 echo "==> 安装 lwa（在项目根目录执行）"
@@ -391,10 +394,12 @@ echo "==> 安装 lwa（在项目根目录执行）"
 echo "==> Docker Engine + Compose 插件"
 # 官方文档：https://docs.docker.com/engine/install/
 # 示例：sudo apt install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+# 示例（Fedora）：sudo dnf install docker-ce docker-ce-cli containerd.io docker-compose-plugin
 # sudo usermod -aG docker "$USER" && newgrp docker
 
 echo "==> Caddy（推荐；缺失时 staticGateway=caddy 会降级 builtin，Caddy 模式需 ≥ 2.10.0）"
 # 官方文档：https://caddyserver.com/docs/install#debian-ubuntu-raspbian
+# Fedora：sudo dnf install caddy
 
 echo "==> Node.js（前端 SPA 构建需要，推荐 ≥ 24）"
 # 示例：fnm / nvm / NodeSource

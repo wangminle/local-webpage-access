@@ -236,7 +236,8 @@ def build_route_url(
 class PortAllocator:
     """端口池分配器。
 
-    分配顺序：端口池范围内 → 跳过 registry 已登记 → 跳过宿主机已监听 → 跳过显式排除。
+    分配顺序：端口池范围内 → 跳过 registry 已登记 → 跳过宿主机无法 bind 的端口
+    → 跳过显式排除。
     """
 
     def __init__(self, config: Config, registry: Registry) -> None:
@@ -262,7 +263,7 @@ class PortAllocator:
         Args:
             instance_id: 实例 ID，用于登记。
             exclude: 额外排除的端口集合。
-            probe_host: 是否探测宿主机监听状态（测试时可关闭）。
+            probe_host: 是否探测宿主机 bind 可用性（测试时可关闭）。
 
         Returns:
             分配到的端口号。
@@ -277,10 +278,10 @@ class PortAllocator:
             if port in allocated or port in exclude:
                 continue
             if probe_host:
-                # BUG-364：独占 bind（is_port_in_use）会把 TIME_WAIT 误判为占用；
-                # 分配决策以「是否有活跃监听者」为准（与 BUG-045 静态复用语义对齐）。
-                if is_port_listening(port):
-                    log.debug("端口 %d 有活跃监听，跳过", port)
+                # 新分配必须以「此刻能否真正 bind」为准；connect 只能
+                # 证明有无监听者，会漏掉 bind-only 占用并导致后续启动失败。
+                if is_port_in_use(port):
+                    log.debug("端口 %d 无法 bind，跳过", port)
                     continue
             # 并发安全登记：若端口在登记前被其他实例抢走（BUG-017），
             # allocate_port 返回 False，跳到下一个候选端口重试。

@@ -6,17 +6,17 @@
 ## 平台与运行环境
 
 * **正式支持操作系统（IMP-036）**：
-  * Linux 裸机：Ubuntu **LTS**（当前：22.04 jammy / 24.04 noble / 26.04 resolute）、Debian **Stable**（12 bookworm / 13 trixie）；kernel ≥5.15、glibc ≥2.35、systemd。版本与代号须配对；非 LTS、sid/testing、未纳入矩阵的未来版本一律拒绝。
+  * Linux 裸机：Ubuntu **LTS**（当前：22.04 jammy / 24.04 noble / 26.04 resolute）、Debian **Stable**（12 bookworm / 13 trixie）、Fedora（43 / 44，按「当前 + 前一稳定版」滚动窗口）；kernel ≥5.15、glibc ≥2.35、systemd。Ubuntu/Debian 版本与代号须配对；非 LTS、sid/testing、Fedora Rawhide、未纳入矩阵的未来版本一律拒绝。
   * WSL2 Linux（同上发行版；WSL 包 ≥2.1.5 且 systemd 为 PID 1）；Windows **仅作 WSL2 宿主**。WSL 下 Full Profile / `lwa autostart` 写路径禁止工作区位于 `/mnt/<drive>`（写入前 fail-closed）；只读诊断与普通 CLI 不因路径形似 `/mnt` 而全局阻断。运行前宿主准备见下文「WSL2 宿主准备」。
   * macOS：**14 Sonoma+**（滚动下限，对齐 Docker Desktop「当前及前两版」；截至 2026-07）
   * 架构仅 **x86_64/amd64**、**arm64/aarch64**
-* **明确不支持**：**Windows 原生**进程（CLI/服务入口 hard fail，请改用 WSL2）；WSL1；Ubuntu 非 LTS；Debian sid/testing；Alpine/musl、Fedora/RHEL/Arch 等未纳入矩阵的发行版；32 位 / ARMv7 等。
+* **明确不支持**：**Windows 原生**进程（CLI/服务入口 hard fail，请改用 WSL2）；WSL1；Ubuntu 非 LTS；Debian sid/testing；Fedora Rawhide 与未纳入滚动窗口的 Fedora 版本；Alpine/musl、RHEL/CentOS/Arch 等未纳入矩阵的发行版；32 位 / ARMv7 等。
 * **平台诊断**：`lwa doctor --json` 在**未初始化工作区**时仍输出 `platformSupport`（reasons / action / supported），便于排障；已初始化时人类可读模式也会在末尾打印「平台支持」段（`doctor` 是唯一豁免平台门禁的命令）。
 * **WSL 包版本探测**：优先 PATH 中的 `wsl.exe`，并回退 `/mnt/<drive>/Windows/System32/wsl.exe`（覆盖 `appendWindowsPath=false`）；已处理 UTF-16LE 输出与中文本地化。若 `[interop] enabled=false` 导致 Windows 二进制完全不可执行，则仍会 `wslVersion=unknown` 并 fail-closed——此时应在 Windows 侧确认版本。
 * **Python**：要求 3.13+，不支持更早版本。
 * **Docker**：要求 Docker + Docker Compose 插件（`docker compose` 子命令）。
   Compose v1 独立二进制不支持；低于推荐版本时仅告警，不阻断已满足最低线的环境。
-  `lwa setup --full` / 内置安装脚本覆盖 **macOS / Ubuntu / Debian（含 WSL2）**。`--full` **需要已初始化工作区**（`lwa init --full` 或先 `init` 再 `setup --full`）；default 的 `lwa setup` 可无工作区。
+  `lwa setup --full` / 内置安装脚本覆盖 **macOS / Ubuntu / Debian / Fedora（含 WSL2）**。`--full` **需要已初始化工作区**（`lwa init --full` 或先 `init` 再 `setup --full`）；default 的 `lwa setup` 可无工作区。
   Full Profile（`profile: full`）还会验收 manager/daemon/gateway 真实 Docker 权限与 Caddy owner；未闭环不假绿（见 FAQ「Full Profile」）。
   Linux 上 LWA 以 `serviceUser` 访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，或对 system unit 使用 `SupplementaryGroups=docker`（`lwa autostart` 默认 user unit 仍依赖会话组）。
   观测失败写 `unknown` / `runtimeAccess`，不把运行中容器误标 stopped；管理页与 API 在能力降级时阻断容器操作。
@@ -219,7 +219,7 @@ swap=4GB
 * **fetch 失败是降级不是故障**：断网/代理/凭据问题 → `sourceUpdate warning`，以本地代码完成 Runtime 刷新（离线可用）；代理与凭据沿用 git 自身机制（`https_proxy` / credential helper / SSH remote），lwa 不内置代理配置、不存 token。
 * **非 git 克隆安装**（如 release zip 解包）：`sourceUpdate skipped` 并提示迁移到 clone + `pip install -e .`，不会自动 clone。
 * **并发互斥**：可变更的 update 全程持 repo（git common-dir）+ workspace 双锁（固定顺序）；两个 update 并发时后者 fail-fast 报「更新锁被占用」。会 fetch 的 `--check` 也取 repo 锁；`--dry-run` 严格零写入（不联网、不 fetch、不取锁，数据标 `fresh=false`）。
-* **不自动回滚**：快进后 pip/接力失败只在报告中给人工恢复链（`git status` 复查 → 干净时 `git reset --keep <oldHead>` → 重跑 `lwa update`）。
+* **不自动回滚**：快进后 pip/接力失败只在报告中给人工恢复链（`git status` 复查 → 干净时 `git reset --keep <oldHead>` → 重跑 `lwa update`）。缺 pip 模块时须先用同一解释器 `-m ensurepip --upgrade`，再 `-m pip install -e <仓库路径>`，最后才重跑 `lwa update`（避免新源码启动期依赖缺失导致 CLI 无法启动）。
 * **服务拉起边界（IMP-059）**：仅当 `run/*.json` 持久化 `enabled=true`（含 config 交叉校验）的自有服务会被 update 拉起；`--no-reconcile` 回到纯观察态。裸进程模式（无自启单元）重启后仍不会自动恢复——靠 `lwa doctor` 的 `restart_resilience` WARN（IMP-060）与 IMP-061 引导收敛。
 
 ## 服务意图与启动失败观测（IMP-064 / V0.8.9）

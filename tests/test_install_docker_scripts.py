@@ -119,7 +119,7 @@ def test_caddy_linux_guards_against_ubuntu_old_package() -> None:
 def test_linux_script_supports_debian_family_without_ubuntu_spoof() -> None:
     """IMP-036：Debian 走 /linux/debian，不得伪装成 Ubuntu 代号。"""
     text = _LINUX.read_text(encoding="utf-8")
-    assert "detect_debian_family" in text
+    assert "detect_distro_family" in text
     assert "/linux/debian" in text or "linux/${family}" in text or "linux/${family}" in text
     assert "bookworm" in text
     # 不得在 Debian 分支写死 ubuntu apt 路径伪装
@@ -142,8 +142,97 @@ def test_linux_script_rejects_debian_sid_and_ubuntu_non_lts() -> None:
 def test_caddy_linux_script_accepts_debian() -> None:
     caddy = _SCRIPTS / "install-caddy-linux.sh"
     text = caddy.read_text(encoding="utf-8")
-    assert "detect_debian_family" in text
+    assert "detect_distro_family" in text
     assert "Debian" in text or "debian" in text
+
+
+def _bash_function(text: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = text.index(marker)
+    collected: list[str] = []
+    for line in text[start:].splitlines():
+        collected.append(line)
+        if line == "}":
+            break
+    return "\n".join(collected)
+
+
+# Docker Fedora 官方冲突包清单：
+# https://docs.docker.com/engine/install/fedora/#uninstall-old-versions
+_FEDORA_OFFICIAL_CONFLICTS = (
+    "docker",
+    "docker-client",
+    "docker-client-latest",
+    "docker-common",
+    "docker-latest",
+    "docker-latest-logrotate",
+    "docker-logrotate",
+    "docker-selinux",
+    "docker-engine-selinux",
+    "docker-engine",
+)
+
+
+def test_linux_script_supports_fedora_dnf_flow() -> None:
+    """Fedora：dnf 仓库直写（不依赖 config-manager 插件）+ rpm 导入 GPG key。"""
+    text = _LINUX.read_text(encoding="utf-8")
+    assert "https://docs.docker.com/engine/install/fedora/" in text
+    assert "fedora)" in text
+    assert "need_cmd dnf" in text
+    assert "/etc/yum.repos.d/docker-ce.repo" in text
+    assert "rpm --import" in text
+    assert "dnf install -y" in text
+    assert "moby-engine" in text  # Fedora 冲突包卸载（docker.io 是 Debian 系的）
+    assert "dnf remove -y" in text
+    # 阿里云镜像对 fedora 同样生效（$releasever/$basearch 由 dnf 展开）
+    assert '\\$releasever' in text
+    assert '\\$basearch' in text
+
+
+def test_fedora_uninstall_follows_official_conflict_list() -> None:
+    """BUG-622：Fedora 冲突包须严格采用官方清单；不得默认卸 containerd/runc。"""
+    import re
+
+    text = _LINUX.read_text(encoding="utf-8")
+    fn = _bash_function(text, "uninstall_conflicts_fedora")
+    for pkg in _FEDORA_OFFICIAL_CONFLICTS:
+        assert pkg in fn, f"漏掉官方冲突包 {pkg}"
+    # 已证明必要的发行版兼容包（注释须说明理由）
+    assert "moby-engine" in fn
+    assert "podman-docker" in fn
+    code_lines = [
+        ln for ln in fn.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    # Fedora 43/44 将 CLI 拆成可独立显式安装的 docker-cli 子包；它直接拥有
+    # /usr/bin/docker，不能依赖删除 moby-engine 时的依赖清理来顺带移除。
+    assert re.search(r"(?<![\w-])docker-cli(?![\w-])", code) is not None
+    assert "containerd" not in code
+    assert re.search(r"(?<![\w-])runc(?![\w-])", code) is None
+    # 已安装冲突包的卸载失败不得被 || true 吞掉
+    assert re.search(r"dnf remove[^\n]*\|\|\s*true", fn) is None
+
+
+def test_linux_script_fedora_window_synced_with_platform_support() -> None:
+    """Fedora 允许窗口须与 platform_support.SUPPORTED_FEDORA_RELEASES 一致。"""
+    from local_webpage_access.platform_support import SUPPORTED_FEDORA_RELEASES
+
+    releases = sorted(SUPPORTED_FEDORA_RELEASES)
+    docker = _LINUX.read_text(encoding="utf-8")
+    caddy = (_SCRIPTS / "install-caddy-linux.sh").read_text(encoding="utf-8")
+    for script, name in ((docker, "docker"), (caddy, "caddy")):
+        assert "|".join(str(r) for r in releases) in script, f"{name} 脚本 Fedora 窗口不同步"
+        for ver in releases:
+            assert f"低于最低要求 {releases[0]}" in script or str(ver) in script
+
+
+def test_caddy_linux_script_supports_fedora() -> None:
+    """Fedora：dnf 官方仓库优先，GitHub Release 二进制兜底；拒绝 Rawhide。"""
+    text = (_SCRIPTS / "install-caddy-linux.sh").read_text(encoding="utf-8")
+    assert "install_via_dnf" in text
+    assert "dnf install -y caddy" in text
+    assert "rawhide" in text
+    assert "install_via_github_release" in text  # 兜底路径发行版无关
 
 
 def test_linux_daemon_json_invalid_aborts_instead_of_empty_rebuild(

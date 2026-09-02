@@ -518,6 +518,7 @@ def check_git(runner: SubprocessRunner = _default_runner) -> CheckResult:
             detail="GitHub 源导入（IMP-065）不可用；zip / 本机文件夹导入不受影响",
             suggestion=(
                 "安装 git（Ubuntu：sudo apt install git；"
+                "Fedora：sudo dnf install git；"
                 "macOS：xcode-select --install）后即可使用 GitHub 源导入"
             ),
         )

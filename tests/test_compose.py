@@ -202,6 +202,68 @@ def test_compose_merges_extra_volumes(workspace: Workspace) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "volume",
+    [
+        r"D:\\Projects\\demo:/workspace:rw",
+        "${HOME}/project:/workspace:ro",
+    ],
+)
+def test_compose_accepts_supported_extra_volume_sources(
+    workspace: Workspace,
+    volume: str,
+) -> None:
+    """Windows 路径和 Compose 变量源应作为一个 YAML 字符串保留。"""
+    import yaml
+
+    m = _mk_manifest(internal_port=8000)
+    assert m.container is not None
+    m.container.extraVolumes = [volume]
+
+    path = generate_compose(m, workspace, host_port=18000)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert data["services"]["app"]["volumes"][1] == volume
+
+
+@pytest.mark.parametrize(
+    "volume",
+    [
+        "{type: bind, source: /mnt/project, target: /app}",
+        "/mnt/project:relative/path:ro",
+        "/mnt/project:/app:z",
+    ],
+)
+def test_compose_rejects_non_short_format_extra_volumes(
+    workspace: Workspace,
+    volume: str,
+) -> None:
+    """extraVolumes 仅接受 bind 短格式与 ro/rw mode。"""
+    m = _mk_manifest(internal_port=8000)
+    assert m.container is not None
+    m.container.extraVolumes = [volume]
+
+    with pytest.raises(ValueError, match="extraVolumes"):
+        generate_compose(m, workspace, host_port=18000)
+
+
+def test_compose_quotes_extra_volume_as_yaml_scalar(workspace: Workspace) -> None:
+    """YAML 注释等指示符必须留在 volume 字符串内。"""
+    import yaml
+
+    volume = "/home/fenix/project#snapshot:/workspace:ro"
+    m = _mk_manifest(internal_port=8000)
+    assert m.container is not None
+    m.container.extraVolumes = [volume]
+
+    path = generate_compose(m, workspace, host_port=18000)
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+
+    assert '"/home/fenix/project#snapshot:/workspace:ro"' in text
+    assert data["services"]["app"]["volumes"][1] == volume
+
+
 def test_compose_rejects_malformed_extra_volume(workspace: Workspace) -> None:
     """extraVolumes 含换行（YAML 注入向量）时拒绝写出。"""
     m = _mk_manifest(internal_port=8000)

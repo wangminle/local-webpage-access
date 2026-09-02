@@ -22,6 +22,7 @@ compose.yaml 用字符串模板而非 ``yaml.safe_dump`` 渲染，保证 ``${}``
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -52,6 +53,10 @@ _SQLITE_URL_DIR = "/app/data"
 # 用 Compose env_file 的对象形式 required:false，缺失时不报错（WBS-20260708 阶段3.2 决策）。
 _ENV_LOCAL_BLOCK = "      - path: .env.local\n        required: false\n"
 
+_EXTRA_VOLUME_RE = re.compile(
+    r"^(?P<source>.+):(?P<target>/[^:\r\n]*)(?::(?P<mode>ro|rw))?$"
+)
+
 # issue #11：LWA 管理键——每次重生成以新值覆盖（DATABASE_URL 走 BUG-491 特殊
 # 保留逻辑）。旧 .env 中的其余键视为**业务键**，迁移到 .env.local 而不是被
 # 整文件覆盖抹掉（.env 与 .env.local 同在 compose env_file 里，注入语义不变）。
@@ -78,6 +83,39 @@ services:
     cpus: "${{CPU_LIMIT:-{cpus}}}"
     restart: unless-stopped
 """
+
+
+def _validate_extra_volume(entry: str, *, instance_id: str) -> str:
+    """校验 ``source:/absolute/container/path[:ro|rw]`` bind 短格式。
+
+    这里只负责结构边界；源路径是否敏感仍交给 ``audit_compose``
+    判定。返回值随后必须作为带引号的 YAML 字符串标量渲染。
+    """
+    value = entry.strip()
+    if not value or any(ord(char) < 32 for char in value):
+        raise ValueError(
+            f"实例 {instance_id} container.extraVolumes 含非法条目（空或控制字符）：{entry!r}"
+        )
+
+    match = _EXTRA_VOLUME_RE.fullmatch(value)
+    if match is None:
+        raise ValueError(
+            f"实例 {instance_id} container.extraVolumes 必须为 "
+            f"source:/absolute/container/path[:ro|rw]：{entry!r}"
+        )
+
+    source = match.group("source")
+    source_normalized = source.replace("\\", "/")
+    is_windows_abs = bool(re.fullmatch(r"[A-Za-z]:/.*", source_normalized))
+    if not (
+        source.startswith(("/", ".", "~", "$"))
+        or is_windows_abs
+    ):
+        raise ValueError(
+            f"实例 {instance_id} container.extraVolumes 只允许 bind 源路径：{entry!r}"
+        )
+
+    return value
 
 
 def uses_runtime_root(source_dir: Path | None, manifest: InstanceManifest) -> bool:
@@ -160,16 +198,15 @@ def generate_compose(
 
     # issue#1 问题2：volumes 合并 manifest.container.extraVolumes（业务定制挂载）。
     # 手工编辑 compose.yaml 会在重生成时被抹掉；持久化出口是 local-web.json 的
-    # container.extraVolumes，每次渲染原样合并。安全审计在写出前统一把关。
-    volumes: list[str] = [data_volume]
+    # container.extraVolumes，每次渲染先校验 bind 短格式，再作为带引号的
+    # YAML 字符串标量合并。安全审计继续负责宿主敏感路径判定。
+    rendered_volumes: list[str] = [data_volume]
     for extra in container.extraVolumes:
-        entry = extra.strip()
-        if not entry or "\n" in entry or "\r" in entry:
-            raise ValueError(
-                f"实例 {manifest.id} container.extraVolumes 含非法条目（空或换行）：{extra!r}"
-            )
-        volumes.append(entry)
-    volumes_block = "    volumes:\n" + "".join(f"      - {v}\n" for v in volumes)
+        entry = _validate_extra_volume(extra, instance_id=manifest.id)
+        rendered_volumes.append(json.dumps(entry, ensure_ascii=False))
+    volumes_block = "    volumes:\n" + "".join(
+        f"      - {volume}\n" for volume in rendered_volumes
+    )
 
     # issue #20：runAsNonRoot=True 时加 user: 防御层。Compose 的 user 覆盖
     # 镜像默认运行用户，即使后续 Dockerfile 模板变动意外丢 USER 也不会回到

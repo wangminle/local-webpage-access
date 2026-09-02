@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# LWA：在 Ubuntu 22.04+ / Debian 12+（含 WSL）上安装 Caddy（≥ MIN_CADDY_VERSION，默认 2.10.0）。
+# LWA：在 Ubuntu 22.04+ / Debian 12+ / Fedora 43+（含 WSL）上安装 Caddy（≥ MIN_CADDY_VERSION，默认 2.10.0）。
 #
-# 优先：官方 Cloudsmith apt 仓库
+# Debian 系：优先官方 Cloudsmith apt 仓库
 #   https://caddyserver.com/docs/install#debian-ubuntu-raspbian
-# 备选：官方 GitHub Release 二进制（Cloudsmith 不可达、或 apt 仍落到 Ubuntu 旧包时）
+# Fedora：优先官方仓库 dnf 包
+#   https://caddyserver.com/docs/install#fedora-centos-rhel
+# 备选（通用）：官方 GitHub Release 二进制（仓库不可达、或仍落到旧包时）
 #   https://github.com/caddyserver/caddy/releases
 #
 # 用法：bash install-caddy-linux.sh
@@ -74,14 +76,18 @@ already_good() {
   return 0
 }
 
-detect_debian_family() {
-  [[ -f /etc/os-release ]] || die "仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable（含 WSL）"
+# detect 后置的发行版家族（ubuntu|debian|fedora），供 main 分支选择安装路径
+DISTRO_FAMILY="unknown"
+
+detect_distro_family() {
+  [[ -f /etc/os-release ]] || die "仅支持 Ubuntu 22.04 LTS+ / Debian 12+ Stable / Fedora 43+（含 WSL）"
   # shellcheck disable=SC1091
   . /etc/os-release
   case "${ID:-}" in
-    ubuntu|debian) ;;
-    *) die "当前 ID=${ID:-?}，仅支持 Ubuntu LTS / Debian Stable" ;;
+    ubuntu|debian|fedora) ;;
+    *) die "当前 ID=${ID:-?}，仅支持 Ubuntu LTS / Debian Stable / Fedora" ;;
   esac
+  DISTRO_FAMILY="${ID}"
   local ver="${VERSION_ID:-}"
   local major="${ver%%.*}"
   local codename="${VERSION_CODENAME:-}"
@@ -137,6 +143,21 @@ detect_debian_family() {
     if [[ "$major" -eq 13 && "$codename" != "trixie" ]]; then
       die "Debian 版本/代号不匹配：VERSION_ID=$ver 应对 trixie，实际为 ${codename}"
     fi
+  fi
+  if [[ "${ID}" == "fedora" ]]; then
+    local code_lower
+    code_lower="$(printf '%s' "${codename}" | tr '[:upper:]' '[:lower:]')"
+    case "$code_lower" in
+      rawhide) die "Fedora Rawhide 不是正式发布；仅支持 43/44（见 SUPPORTED_FEDORA_RELEASES）" ;;
+    esac
+    if [[ -z "$ver" ]] || [[ "$major" -lt 43 ]]; then
+      die "Fedora ${ver:-unknown} 低于最低要求 43"
+    fi
+    # 须与 platform_support.SUPPORTED_FEDORA_RELEASES 保持同步
+    case "$major" in
+      43|44) ;;
+      *) die "Fedora $ver 尚未纳入正式支持矩阵（当前 43/44；新版本发布后随矩阵滚动更新）" ;;
+    esac
   fi
   log "检测到 ${ID} ${ver:-?}（${codename:-?}）"
 }
@@ -282,6 +303,25 @@ install_via_cloudsmith() {
   return 0
 }
 
+install_via_dnf() {
+  # Fedora 官方仓库自带 caddy 包；安装失败或版本 < MIN 时返回 1，
+  # 由调用方回退 GitHub Release 二进制（发行版无关）。
+  # https://caddyserver.com/docs/install#fedora-centos-rhel
+  log "通过 dnf 安装 Fedora 官方仓库的 caddy…"
+  if ! run_sudo dnf install -y caddy; then
+    warn "dnf install caddy 失败"
+    return 1
+  fi
+  local ver
+  ver="$(caddy_installed_version)"
+  if [[ -z "$ver" ]] || ! version_ge "$ver" "$MIN_CADDY_VERSION"; then
+    warn "dnf 安装的 caddy 版本为 ${ver:-unknown}，不满足 ≥ $MIN_CADDY_VERSION"
+    return 1
+  fi
+  disable_system_caddy_service
+  return 0
+}
+
 install_via_github_release() {
   local arch ver url tmpdir tarball
   arch="$(detect_arch)"
@@ -326,6 +366,9 @@ verify() {
   ver="$(extract_semver "$raw")"
   [[ -n "$ver" ]] || die "无法读取 caddy version"
   if ! version_ge "$ver" "$MIN_CADDY_VERSION"; then
+    if [[ "$DISTRO_FAMILY" == "fedora" ]]; then
+      die "Caddy $ver < $MIN_CADDY_VERSION。请确认 Fedora 官方仓库版本后执行：sudo dnf install -y caddy；或重跑本脚本走 GitHub 回退。"
+    fi
     warn "当前 apt-cache policy caddy："
     apt_policy_hint >&2
     die "Caddy $ver < $MIN_CADDY_VERSION。请勿使用 Ubuntu universe 旧包；确认 Cloudsmith 源可用后执行：sudo apt update && sudo apt install -y caddy；或重跑本脚本走 GitHub 回退。"
@@ -336,9 +379,13 @@ verify() {
 
 main() {
   need_cmd curl
-  need_cmd apt-get
   need_cmd tar
-  detect_debian_family
+  detect_distro_family
+  if [[ "$DISTRO_FAMILY" == "fedora" ]]; then
+    need_cmd dnf
+  else
+    need_cmd apt-get
+  fi
   # IMP-033 / BUG-231：版本已达标也必须处理系统 caddy.service，不得跳过 disable
   if already_good; then
     log "Caddy 版本已达标，仍检查并停用系统 caddy.service…"
@@ -346,13 +393,20 @@ main() {
     exit 0
   fi
 
-  if install_via_cloudsmith; then
+  if [[ "$DISTRO_FAMILY" == "fedora" ]]; then
+    if install_via_dnf; then
+      verify
+      exit 0
+    fi
+    warn "dnf 路径未装到达标版本，回退 GitHub Release…"
+  elif install_via_cloudsmith; then
     verify
     exit 0
+  else
+    warn "Cloudsmith apt 路径未装到达标版本，回退 GitHub Release…"
   fi
 
-  warn "Cloudsmith apt 路径未装到达标版本，回退 GitHub Release…"
-  install_via_github_release || die "Cloudsmith 与 GitHub 安装均失败。可手动：https://caddyserver.com/docs/install"
+  install_via_github_release || die "仓库安装与 GitHub 安装均失败。可手动：https://caddyserver.com/docs/install"
   verify
 }
 
