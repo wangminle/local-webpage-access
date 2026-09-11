@@ -939,6 +939,163 @@ def test_capability_refresh_interval_defaults_to_300() -> None:
     assert api_mod._CAPABILITY_INITIAL_DELAY == 15.0
 
 
+def test_capability_retry_backoff_defaults() -> None:
+    """issue #29：短退避快探缺省 10s 起、封顶 60s。"""
+    import local_webpage_access.manager_api as api_mod
+
+    assert api_mod._CAPABILITY_RETRY_BASE == 10.0
+    assert api_mod._CAPABILITY_RETRY_MAX == 60.0
+
+
+def test_capability_fragment_docker_pending() -> None:
+    """issue #29：片段判据覆盖 manager 自身与合并的 daemon 缓存字段。"""
+    from local_webpage_access.manager_api import _capability_fragment_docker_pending
+
+    assert _capability_fragment_docker_pending(None) is False
+    assert _capability_fragment_docker_pending({}) is False
+    assert _capability_fragment_docker_pending({"capabilities": {}}) is False
+    ready = {"capabilities": {"dockerAccess": "ready", "daemonDockerAccess": "ready"}}
+    assert _capability_fragment_docker_pending(ready) is False
+    # unknown 不算 pending（服务未起/缓存缺失维持长周期，不空转快探）
+    unknown = {"capabilities": {"daemonDockerAccess": "unknown"}}
+    assert _capability_fragment_docker_pending(unknown) is False
+    for key in ("dockerAccess", "managerDockerAccess", "daemonDockerAccess"):
+        frag = {"capabilities": {key: "daemon_unavailable"}}
+        assert _capability_fragment_docker_pending(frag) is True
+        frag = {"capabilities": {key: "unavailable"}}
+        assert _capability_fragment_docker_pending(frag) is True
+
+
+def test_manager_capability_fast_retry_when_docker_pending(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """issue #29：Docker 未就绪时短退避快探，恢复 ready 后回到长周期。"""
+    import threading
+    import time
+
+    import local_webpage_access.manager_api as api_mod
+    from local_webpage_access.capability import CapabilityReport
+
+    calls = {"n": 0}
+    became_ready = threading.Event()
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        calls["n"] += 1
+        pending = calls["n"] < 5
+        if not pending:
+            became_ready.set()
+        state = "daemon_unavailable" if pending else "ready"
+        return CapabilityReport(
+            profile="full",
+            overall="unready" if pending else "ready",
+            docker_access=state,
+            manager_docker_access=state,
+            daemon_docker_access=state,
+            caddy_binary="ready",
+            caddy_runtime="ready",
+            caddy_owner="lwa_service_user",
+            caddy_workspace_access="ready",
+            gateway_access="ready",
+            details={"role": "manager"},
+        )
+
+    monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 0.05)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 60.0)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_RETRY_BASE", 0.05)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_RETRY_MAX", 0.1)
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", fake_collect)
+    monkeypatch.setattr(
+        "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.log_capability_probe", lambda *a, **k: None
+    )
+
+    # 重新创建 app，使 lifespan 使用缩短后的退避参数
+    app = create_app(
+        manager_env.workspace,
+        manager_env.config,
+        manager_env.registry,
+        token=manager_env.token,
+    )
+    with TestClient(app):
+        # 未就绪期间走短退避：若仍是 60s 长周期，3s 内绝无可能探满 5 次
+        assert became_ready.wait(timeout=3.0), f"快探未生效，实际 {calls['n']} 次"
+        assert calls["n"] >= 5
+        # ready 后回到 60s 长周期：至多再补一次按旧退避排好的探测
+        time.sleep(0.5)
+        assert calls["n"] <= 6
+
+
+def test_manager_capability_backoff_takes_effect_immediately_after_transition(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-627：ready→unavailable 的那一轮探测后，下一次等待立即走短退避。
+
+    旧实现先 wait(旧 delay) 再按本轮结果更新 delay——转换被发现后仍先
+    空等一个长周期（生产 300s），短退避滞后一轮才生效。本测试把长周期缩到
+    2s：第 3 轮发现 unavailable 后，第 4 轮必须在 1s 内到达。
+    """
+    import threading
+    import time
+
+    import local_webpage_access.manager_api as api_mod
+    from local_webpage_access.capability import CapabilityReport
+
+    calls = {"n": 0}
+    third_seen = threading.Event()
+    fourth_seen = threading.Event()
+    t_third = {"v": None}
+
+    def fake_collect(**kwargs):  # noqa: ANN003
+        calls["n"] += 1
+        if calls["n"] == 3:
+            t_third["v"] = time.monotonic()
+            third_seen.set()
+        if calls["n"] >= 4:
+            fourth_seen.set()
+        state = "ready" if calls["n"] < 3 else "daemon_unavailable"
+        return CapabilityReport(
+            profile="full",
+            overall="ready" if state == "ready" else "unready",
+            docker_access=state,
+            manager_docker_access=state,
+            daemon_docker_access=state,
+            caddy_binary="ready",
+            caddy_runtime="ready",
+            caddy_owner="lwa_service_user",
+            caddy_workspace_access="ready",
+            gateway_access="ready",
+            details={"role": "manager"},
+        )
+
+    monkeypatch.setattr(api_mod, "_CAPABILITY_INITIAL_DELAY", 0.02)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 2.0)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_RETRY_BASE", 0.02)
+    monkeypatch.setattr(api_mod, "_CAPABILITY_RETRY_MAX", 0.05)
+    monkeypatch.setattr("local_webpage_access.capability.collect_capability_report", fake_collect)
+    monkeypatch.setattr(
+        "local_webpage_access.capability.write_capability_cache", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.log_capability_probe", lambda *a, **k: None
+    )
+
+    app = create_app(
+        manager_env.workspace,
+        manager_env.config,
+        manager_env.registry,
+        token=manager_env.token,
+    )
+    with TestClient(app):
+        # probe1 --0.02--> probe2(ready) --2.0--> probe3：前两次 ready，第三次 unavailable
+        assert third_seen.wait(timeout=3.0), f"前序探测未按期发生（{calls['n']} 次）"
+        assert fourth_seen.wait(timeout=1.0), (
+            f"转换后短退避未立即生效（{calls['n']} 次）"
+        )
+        assert time.monotonic() - (t_third["v"] or 0.0) < 1.0
+
+
 def test_manager_capability_tracks_caddy_ready_then_unready(
     manager_env: EnvBundle, monkeypatch
 ) -> None:

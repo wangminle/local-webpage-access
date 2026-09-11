@@ -75,6 +75,14 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fenix.lwa.daemon.pli
 launchctl bootout      gui/$(id -u)/com.fenix.lwa.daemon
 ```
 
+**Docker Desktop 也要登录自启（issue #29）**：launchd `RunAtLoad` 在登录后立即拉起
+daemon/manager/gateway，而 Docker Desktop 是用户态 GUI 进程、就绪更慢
+（`/var/run/docker.sock` 尚未存在）。建议开启 Docker Desktop「Start Docker Desktop
+when you sign in」（或 系统设置 → 通用 → 登录项），缩小 Docker 未就绪窗口。即便
+开启自启，Docker 就绪仍需 1–2 分钟；此期间 daemon/manager 的能力探针会自动改走
+10s→20s→40s 短退避快探（封顶 60s），Full Profile 假红窗口通常 1 分钟内收敛，
+无需手动执行 `lwa setup --full --resume`。
+
 ## Linux / WSL（systemd user）
 
 ```bash

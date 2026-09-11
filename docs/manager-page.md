@@ -236,12 +236,14 @@ Content-Type: application/json
 ```
 
 * 仅适用于 `sourceKind=git` 的实例；无 `url` 时用 manifest 存储的仓库地址与
-  ref/tag 类型做 `git ls-remote` 探测。
+  ref/tag 类型做 `git ls-remote` 探测。zip/folder 源实例显式传 `url` 时
+  原地切换为 git 源（issue #28，换源不换实例）。
 * 远端 OID 未变 → `skipped=true`（「无需更新」，零克隆零重建）；有新提交 →
   重新浅克隆 → 既有原地升级（保留 id / 端口 / data / 别名）。
-* 传入 `url` 与实例 `sourceGitUrl` 不一致 → 400（`source_mismatch`）；换源请先
-  删除实例再导入。
-* git 源实例不能用 zip `update` / `update-from-dir` 更新（会被拒绝）。
+* git 实例传入 `url` 与实例 `sourceGitUrl` 不一致 → 400（`source_mismatch`）；
+  更换仓库请先删除实例再导入。
+* git 源实例不能用 zip `update` 更新（会被拒绝）；可用 CLI
+  `--from-dir <目录> --update` 原地切换为文件夹源。
 
 ### 路径别名（IMP-006 / IMP-014 / IMP-022）
 

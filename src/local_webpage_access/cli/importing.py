@@ -34,14 +34,16 @@ def import_cmd(
         None,
         "--from-dir",
         help="IMP-047：从本机文件夹源导入（复制进工作区，非就地运行）。"
-        "与 zip_path 互斥；加 --update <id> 时从关联源目录更新。",
+        "与 zip_path 互斥；加 --update <id> 时从关联源目录更新，"
+        "zip/git 源实例则原地切换为文件夹源（issue #28，换源不换实例）。",
     ),
     from_git: str = typer.Option(
         None,
         "--from-git",
         help="IMP-065：从 GitHub 仓库导入（https://github.com/<owner>/<repo>，"
         "浅克隆后复制进工作区）。与 zip_path / --from-dir 互斥；"
-        "加 --update <id> 时对该实例做远端探测更新。",
+        "加 --update <id> 时对该实例做远端探测更新，"
+        "zip/folder 源实例则原地切换为 git 源（issue #28，换源不换实例）。",
     ),
     ref: str = typer.Option(
         None,
@@ -387,8 +389,10 @@ def _do_update_from_git(
 ) -> None:
     """IMP-065：``lwa import --from-git <url> --update <id>`` 的编排。
 
-    传入 URL 经规范化后须与 manifest 的 ``sourceGitUrl`` 一致，否则
-    ``source_mismatch``（在 ``update_from_git`` 内判定，禁止用另一仓库覆盖）。
+    git 源实例：传入 URL 经规范化后须与 manifest 的 ``sourceGitUrl`` 一致，
+    否则 ``source_mismatch``（在 ``update_from_git`` 内判定，禁止用另一仓库覆盖）。
+    zip/folder 源实例（issue #28）：无既有 git 身份，传入 URL 原地切换为
+    git 源（换源不换实例），下方一致性预检因 ``stored_url`` 为空自动跳过。
     """
     # BUG-553：旧侧 OID 从更新前的 manifest 读取——UpdateResult.prev_hash 在
     # 真正升级后是打包 zip 的 sha256，与 commit 不是同一单位，不能混排展示。
@@ -507,9 +511,10 @@ def _do_update_from_dir(
 ) -> None:
     """IMP-047：``lwa import --from-dir --update <id>`` 的编排。
 
-    ``from_dir`` 是用户在命令行传入的目录；若提供则须与 manifest 中记录的
-    ``sourceDirPath`` 一致，否则拒绝（防止更新时误传另一个目录）。
-    不传时使用 manifest 中的关联目录（向后兼容）。
+    ``from_dir`` 是用户在命令行传入的目录；folder 源实例若提供则须与
+    manifest 中记录的 ``sourceDirPath`` 一致，否则拒绝（防止更新时误传
+    另一个目录）。zip/git 源实例无关联目录（issue #28）：传入的目录
+    交给 ``update_from_dir`` 原地切换为文件夹源（换源不换实例）。
     """
     if from_dir is not None:
         from local_webpage_access.models import InstanceManifest
@@ -529,6 +534,7 @@ def _do_update_from_dir(
 
     result = importer.update_from_dir(
         instance_id,
+        source_dir=from_dir,
         restart=restart,
         keep_data=keep_data,
         yes=yes,

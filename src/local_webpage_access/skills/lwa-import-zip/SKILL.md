@@ -110,6 +110,11 @@ lwa import inbox/foo-v2.zip --update foo --force-kind-change
 
 **update 保留什么**：`instance_id`、`hostPort`（端口登记不动，重启时复用，LAN URL 不变）、
 `data/`（SQLite / 上传文件等持久数据）、`desiredState`、IMP-006 路径别名。
+
+**要改为 folder / git 源持续更新？**（V0.8.12 / issue #28）zip 实例可原地切换，无需
+remove+reimport：`lwa import --from-dir <目录> --update <id>` 切 folder 源，
+`lwa import --from-git <url> --update <id>` 切 git 源；同样保留 id / 端口 / 别名 / data/。
+详见 [lwa-import-folder](../lwa-import-folder/SKILL.md) 与 [lwa-import-git](../lwa-import-git/SKILL.md)。
 **update 替换什么**：`apps/<id>/current/` 全量业务源码、`sourceZipHash`、扫描结果。
 
 **容器实例（DEV-067 / BUG-112）**：源码换入后会清空 `containerId`/`imageId`（作废旧部署）。

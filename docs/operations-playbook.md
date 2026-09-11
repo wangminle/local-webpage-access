@@ -208,7 +208,7 @@ lwa import --from-dir /home/user/my-site --update my-app --dry-run
 - 源目录必须为绝对路径；`node_modules/`、`.git/`、`__pycache__/` 等会被自动剥离。
 - `--update` 时传入的 `--from-dir` 路径须与实例关联目录一致，否则 Exit 2（不会静默用错目录）；更换关联目录请删实例后重新导入。
 - 源目录被删除 / 移动后 update 会**报错**（不会回退到 mount 模式）；需确认路径或改用 zip 更新。
-- `sourceKind=zip` 的实例不能用 `--from-dir --update`（会报错）。
+- `sourceKind=zip`/`git` 的实例可用 `--from-dir <目录> --update <id>` 原地切换为文件夹源（issue #28，换源不换实例：保留 id / 端口 / 别名 / data/）；不带目录的 `--from-dir --update` 仍仅对 folder 源有效。
 - 导入进行中勿立刻 `lwa update`（会等待或跳过重启，避免打断导入）。
 - Agent 协作见 Skill `lwa-import-folder`。
 
@@ -230,7 +230,7 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 
 注意事项：
 - 一次性浅克隆进临时 staging（克隆超 180s 或源码 >2 GiB 拒绝导入），实例内不保留 `.git`。
-- `--update` 传入的仓库须与实例记录一致（Exit 2，换源请删实例重导）；git 源实例不能用 zip `--update` / `--from-dir --update` 更新。
+- `--update` 传入的仓库须与实例记录一致（Exit 2，git 实例换仓库请删实例重导）；git 源实例不能用 zip `--update` 更新；zip/folder 源实例传 `--from-git <url> --update` 可原地切换为 git 源（issue #28，换源不换实例：保留 id / 端口 / 别名 / data/）。
 - **导入/更新全程持有全局导入锁**（含 `ls-remote` 探测约 30s + 浅克隆最长 180s 的网络等待）。期间 `lwa update` 会等待导入空闲（最多 180s）再决定重启或跳过--慢网络下表现为 update 等待，属预期；确需立即升级可等导入完成后重跑 `lwa update`。
 - Agent 协作见 Skill `lwa-import-git`。
 

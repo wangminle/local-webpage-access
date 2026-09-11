@@ -445,7 +445,8 @@ class MacLaunchdBackend(AutostartBackend):
 
     def start(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
         target = self._target(name)
-        # kickstart 不带 -k：仅启动未在跑的单元（已在跑则等价 restart），由 launchd
+        # kickstart 不带 -k：仅启动未在跑的单元；对**已在跑**的单元是 no-op（进程不
+        # 换新），调用方如需换新须用 restart（kickstart -k）（BUG-614），由 launchd
         # 保证单一进程（IMP-059.03：enabled 未运行时经监督器拉起，不 detached 出第二个）。
         res = runner(["launchctl", "kickstart", target], capture_output=True)
         outcomes = [
@@ -1278,9 +1279,11 @@ def coordinated_start(
 ) -> CoordinatedResult:
     """IMP-059.03：拉起"enabled 但意外未运行"的服务时与自启动协调。
 
-    单元已加载/启用 → 交监督器 ``start``（systemctl --user start / launchctl
-    kickstart），由监督器保证单一进程；``managed=True`` 时调用方**不应**再
-    detached spawn（否则监督器与 detached 进程抢锁/端口产生双进程）。
+    单元已加载/启用 → 交监督器：进程未在跑时 ``start``（systemctl --user start /
+    launchctl kickstart），**已在跑**时 ``restart``（BUG-614：kickstart 无 -k /
+    systemctl start 对在跑单元是 no-op，不得假报"已拉起"），由监督器保证单一进程；
+    ``managed=True`` 时调用方**不应**再 detached spawn（否则监督器与 detached 进程
+    抢锁/端口产生双进程）。
 
     单元不存在或未加载未启用 → ``managed=False``，调用方按 detached
     start_manager/start_daemon/start_gateway 处理。
@@ -1301,22 +1304,38 @@ def coordinated_start(
         enabled = False
     if not (loaded or enabled):
         return CoordinatedResult()
+    # BUG-614：单元**已在跑**时 ``launchctl kickstart``（无 -k）/ ``systemctl start``
+    # 均为 no-op——进程不换新旧代码，此前却返回 ok=True/managed=True 假报"已拉起"。
+    # 已在跑 → 改走 restart（kickstart -k / systemctl restart）真正换新，与
+    # coordinated_restart 语义对齐；未在跑 → start（kickstart / systemctl start）。
     try:
-        _outcomes, ok = backend.start(service_name, runner)
+        running_pid = backend.main_pid(service_name, runner)
+    except Exception:  # noqa: BLE001 — 探测失败按"未知"处理
+        running_pid = None
+    # systemd 的 is_loaded 即 is-active（active 即视为在跑）；launchd 的 loaded 只表示
+    # 单元已加载，需以 MainPID 是否在为准。PID 解析失败而 systemd active 时按在跑计，
+    # 宁可 restart 也不假报 start 成功。getattr 兼容无 platform 属性的测试替身后端。
+    already_running = running_pid is not None or (
+        loaded and getattr(backend, "platform", "") in (PLATFORM_LINUX, PLATFORM_WSL)
+    )
+    action = backend.restart if already_running else backend.start
+    verb = "重启" if already_running else "拉起"
+    try:
+        _outcomes, ok = action(service_name, runner)
     except Exception as exc:  # noqa: BLE001 — 启动异常则回退 detached start
         return CoordinatedResult(
-            note=f"⚠️ {service_name} 自启动单元启动异常（{exc}），回退 detached 启动",
+            note=f"⚠️ {service_name} 自启动单元{verb}异常（{exc}），回退 detached 启动",
             ok=False,
             managed=False,
         )
     if ok:
         return CoordinatedResult(
-            note=f"已通过自启动单元拉起 {service_name}（监督器保证单一进程）",
+            note=f"已通过自启动单元{verb} {service_name}（监督器保证单一进程）",
             ok=True,
             managed=True,
         )
     return CoordinatedResult(
-        note=f"⚠️ {service_name} 自启动单元启动失败，回退 detached 启动",
+        note=f"⚠️ {service_name} 自启动单元{verb}失败，回退 detached 启动",
         ok=False,
         managed=False,
     )

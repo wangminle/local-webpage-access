@@ -17,6 +17,8 @@ description: >-
 - 用户给 GitHub 仓库地址，说「部署 / 导入这个仓库」。
 - 已有 `sourceKind=git` 实例，需要「从源更新」。
 - 不想手工 `git clone` 再走文件夹导入。
+- zip/folder 源实例想改为从 GitHub 仓库持续更新——**原地切换源类型**
+  （V0.8.12 / issue #28，`--from-git <url> --update`）。
 
 ## 红线（必须遵守）
 
@@ -60,9 +62,14 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <instance-id>
 
 - 远端 OID 未变 → 「无需更新」跳过，不 clone、不 rebuild、不重启。
 - 有新提交 → 重新浅克隆 → 原地升级（保留 id / 端口 / data / 别名）。
-- 传入 URL 规范化后必须与实例记录一致（换仓库会被拒，`source_mismatch`）；
-  换源请先 `lwa remove` 再重新导入。
-- git 源实例不能用 zip `--update` / `--from-dir --update` 更新（会被拒绝）。
+- git 实例传入 URL 规范化后必须与实例记录一致（换**另一个仓库**会被拒，
+  `source_mismatch`；须先 `lwa remove` 再重新导入）。
+- **源类型切换**（V0.8.12 / issue #28）：zip/folder 源实例显式传
+  `--from-git <url> --update` 即原地切换为 git 源（「换源不换实例」：保留
+  id / hostPort / 路径别名 / data/，登记新 git 身份并清 folder 指纹残留）。
+- git 源实例不能用 zip `--update` 更新（会切断内容与远端身份的关联）；
+  改走本地目录可用 `--from-dir <目录> --update` 切换（见
+  [lwa-import-folder](../lwa-import-folder/SKILL.md)）。
 
 ## 失败排查（结构化 errorKind）
 

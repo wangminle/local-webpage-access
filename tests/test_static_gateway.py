@@ -1412,6 +1412,31 @@ def test_caddy_start_uses_devnull_not_pipes(gateway: StaticGateway, monkeypatch)
     assert str(getattr(stderr, "name", "")).endswith("caddy-runtime.log")
 
 
+def test_caddy_start_isolates_process_group(gateway: StaticGateway, monkeypatch) -> None:
+    """BUG-613：caddy start 的 Popen 须进程组隔离——``caddy start`` daemonize 后
+    master 不 setsid，仍继承调用方（daemon/gateway_service）进程组；launchd
+    ``kickstart -k`` 重启 daemon 单元时组内 SIGTERM 会连带杀掉 master。
+    POSIX 用 start_new_session，Windows 用 CREATE_NEW_PROCESS_GROUP。
+    """
+    captured: dict = {}
+
+    def fake_popen(cmd, **kw):
+        captured["kwargs"] = kw
+        return _FakeCaddyPopen(cmd, returncode=0)
+
+    monkeypatch.setattr("local_webpage_access.static_gateway.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(gateway, "_admin_alive", lambda **kw: True)
+    monkeypatch.setattr(gateway, "_workspace_caddy_pid_alive", lambda: True)
+    assert gateway.caddy_start() is True
+    if os.name == "nt":
+        assert (
+            captured["kwargs"].get("creationflags")
+            == subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        )
+    else:
+        assert captured["kwargs"].get("start_new_session") is True
+
+
 def test_caddy_start_does_not_call_bare_communicate_after_exit(
     gateway: StaticGateway, monkeypatch
 ) -> None:

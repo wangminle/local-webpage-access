@@ -444,6 +444,98 @@ def test_systemd_restart_uses_systemctl_restart(monkeypatch) -> None:
     assert len(restarts) == 1
 
 
+# ---- coordinated_start（BUG-614）--------------------------------------------
+
+
+def test_coordinated_start_running_unit_restarts_instead_of_noop(
+    tmp_path, monkeypatch
+) -> None:
+    """BUG-614：launchd 单元已在跑（有 MainPID）时，kickstart（无 -k）是 no-op，
+    进程不换新旧代码——必须改走 kickstart -k，不得假报"已拉起"。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    backend.write_unit(
+        "gateway", backend.render("gateway", python_exe="/py", workspace_root=root)
+    )
+    record: list[list[str]] = []
+    # _fake_runner 的 `launchctl print` 输出含 "pid = 1" → 单元已在跑
+    res = asm.coordinated_start(ws, "gateway", runner=_fake_runner(record))
+    assert res.managed is True and res.ok is True
+    assert res.note is not None and "重启" in res.note
+    kicks = [c for c in record if c[:2] == ["launchctl", "kickstart"]]
+    assert kicks and all("-k" in c for c in kicks), f"在跑单元应走 kickstart -k：{kicks}"
+
+
+def test_coordinated_start_not_running_unit_starts(tmp_path, monkeypatch) -> None:
+    """单元已加载/启用但进程未在跑（print 无 pid）→ kickstart 无 -k 拉起，文案为"拉起"。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    backend.write_unit(
+        "gateway", backend.render("gateway", python_exe="/py", workspace_root=root)
+    )
+    record: list[list[str]] = []
+
+    def runner(cmd, **kwargs):
+        record.append(list(cmd))
+        joined = " ".join(cmd)
+        if "print-disabled" in joined:
+            return CompletedProcess(
+                args=cmd, returncode=0, stdout="disabled services = {\n}\n", stderr=""
+            )
+        if "print" in joined:
+            # 已加载但无 pid 行 → 未在跑
+            return CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="state = not running\ndisabled = false\n",
+                stderr="",
+            )
+        return CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    res = asm.coordinated_start(ws, "gateway", runner=runner)
+    assert res.managed is True and res.ok is True
+    assert res.note is not None and "拉起" in res.note
+    kicks = [c for c in record if c[:2] == ["launchctl", "kickstart"]]
+    assert kicks and all("-k" not in c for c in kicks), f"未在跑单元应走 kickstart：{kicks}"
+
+
+def test_coordinated_start_systemd_active_unit_restarts(tmp_path, monkeypatch) -> None:
+    """BUG-614：systemctl start 对已 active 单元同样是 no-op——须走 systemctl restart。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "linux")
+    monkeypatch.setattr(asm, "systemd_available", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.SystemdUserBackend()
+    backend.write_unit(
+        "gateway", backend.render("gateway", python_exe="/py", workspace_root=root)
+    )
+    record: list[list[str]] = []
+    # _fake_runner：is-active=active 且 MainPID=1 → 已在跑
+    res = asm.coordinated_start(ws, "gateway", runner=_fake_runner(record))
+    assert res.managed is True and res.ok is True
+    assert res.note is not None and "重启" in res.note
+    restarts = [
+        c for c in record if c[:2] == ["systemctl", "--user"] and "restart" in c
+    ]
+    assert restarts and any("lwa-gateway.service" in c for c in restarts)
+    starts = [c for c in record if c[:2] == ["systemctl", "--user"] and "start" in c]
+    assert not starts, f"active 单元不得再走 systemctl start：{starts}"
+
+
+def test_coordinated_start_no_unit(tmp_path, monkeypatch) -> None:
+    """无单元文件时 managed=False（调用方按 detached start 处理），语义不变。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    res = asm.coordinated_start(ws, "gateway")
+    assert res.managed is False
+    assert res.note is None
+
+
 # ---- 完备性检查 ------------------------------------------------------------
 
 

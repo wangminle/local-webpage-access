@@ -1002,6 +1002,145 @@ class TestUpdateFromGit:
         assert manifest.sourceGitSubdir == "site"  # 打包范围不漂移
 
 
+# ---- issue #28：zip/folder 实例 --from-git <url> --update 原地切换为 git 源 ------
+
+
+class TestSourceSwitchToGit:
+    """issue #28：非 git 源实例带 url 的 update_from_git → 换源不换实例。"""
+
+    def _import_zip(self, importer: Importer, tmp_path: Path) -> str:
+        zip_path = tmp_path / "plain.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("index.html", "<html><body>zip v1</body></html>")
+        return importer.import_zip(zip_path, name="switch-zip").instance_id
+
+    def test_zip_instance_switches_to_git(
+        self, git_env: GitEnv, importer: Importer, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        iid = self._import_zip(importer, tmp_path)
+
+        # 业务数据与别名（切源不得触碰）
+        data_dir = workspace.app_data(iid)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "app.db").write_text("business-data", encoding="utf-8")
+        manifest_path = workspace.app_manifest_path(iid)
+        m = InstanceManifest.load(manifest_path)
+        assert m.static is not None
+        m.static.routeMode = "name"
+        m.static.routeHost = "my-alias"
+        m.save(manifest_path)
+        row_before = importer.registry.get_instance(iid) or {}
+
+        result = importer.update_from_git(
+            iid,
+            url="https://github.com/acme/mysite",
+            clone_url=str(git_env.remote),
+        )
+        assert result.skipped is False
+
+        # git 身份登记（默认分支 trunk / 远端 HEAD OID）
+        manifest = InstanceManifest.load(manifest_path)
+        assert manifest.sourceKind == "git"
+        assert manifest.sourceGitUrl == "https://github.com/acme/mysite"
+        assert manifest.sourceGitRef == "trunk"
+        assert manifest.sourceGitRefKind == "branch"
+        assert manifest.sourceGitCommit == git_env.head_oid()
+        assert manifest.sourceDirPath is None
+        # 内存结果与磁盘一致
+        assert result.manifest.sourceGitCommit == git_env.head_oid()
+        assert result.manifest.sourceKind == "git"
+        # 别名 / data/ 保留，实例 id / created_at 不变
+        assert manifest.static is not None
+        assert manifest.static.routeHost == "my-alias"
+        assert (data_dir / "app.db").read_text(encoding="utf-8") == "business-data"
+        row_after = importer.registry.get_instance(iid) or {}
+        assert row_after["id"] == iid
+        assert row_after.get("created_at") == row_before.get("created_at")
+        # current/ 已覆盖为仓库内容
+        current = workspace.app_current(iid)
+        assert "Git Site" in (current / "index.html").read_text(encoding="utf-8")
+
+        # 切源后按 git 语义工作：OID 未变 → 短路跳过
+        again = importer.update_from_git(iid, clone_url=str(git_env.remote))
+        assert again.skipped is True
+
+    def test_folder_instance_switches_to_git(
+        self, git_env: GitEnv, importer: Importer, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        d = tmp_path / "local-src"
+        d.mkdir()
+        d.joinpath("index.html").write_text("<html>local v1</html>", encoding="utf-8")
+        iid = importer.import_from_dir(d).instance_id
+
+        result = importer.update_from_git(
+            iid,
+            url="https://github.com/acme/mysite",
+            clone_url=str(git_env.remote),
+        )
+        assert result.skipped is False
+        manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+        assert manifest.sourceKind == "git"
+        assert manifest.sourceGitUrl == "https://github.com/acme/mysite"
+        assert manifest.sourceGitCommit == git_env.head_oid()
+        # folder 身份字段清除
+        assert manifest.sourceDirPath is None
+        assert manifest.sourceSyncHash is None
+        current = workspace.app_current(iid)
+        assert "Git Site" in (current / "index.html").read_text(encoding="utf-8")
+
+    def test_zip_instance_switch_dry_run_writes_nothing(
+        self, git_env: GitEnv, importer: Importer, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        iid = self._import_zip(importer, tmp_path)
+        result = importer.update_from_git(
+            iid,
+            url="https://github.com/acme/mysite",
+            clone_url=str(git_env.remote),
+            dry_run=True,
+        )
+        assert result.dry_run is True
+        manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+        assert manifest.sourceKind == "zip"
+        assert manifest.sourceGitUrl is None
+
+    def test_zip_instance_without_url_still_raises(
+        self, git_env: GitEnv, importer: Importer, tmp_path: Path
+    ) -> None:
+        """不传 url 时维持原报错（zip 实例无 git 身份可探测）。"""
+        iid = self._import_zip(importer, tmp_path)
+        with pytest.raises(ZipImportError, match="不是 git 源实例"):
+            importer.update_from_git(iid, clone_url=str(git_env.remote))
+
+    def test_git_instance_switches_to_folder(
+        self, git_env: GitEnv, importer: Importer, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        """git→folder 反向切换：git 身份字段清除，folder 身份登记。"""
+        iid = importer.import_from_git(
+            "https://github.com/acme/mysite", clone_url=str(git_env.remote)
+        ).instance_id
+
+        d = tmp_path / "local-src"
+        d.mkdir()
+        d.joinpath("index.html").write_text("<html>local v1</html>", encoding="utf-8")
+        result = importer.update_from_dir(iid, source_dir=str(d))
+        assert result.skipped is False
+
+        manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+        assert manifest.sourceKind == "folder"
+        assert manifest.sourceDirPath == str(d.resolve())
+        assert manifest.sourceSyncHash is not None
+        assert manifest.sourceGitUrl is None
+        assert manifest.sourceGitRef is None
+        assert manifest.sourceGitRefKind is None
+        assert manifest.sourceGitCommit is None
+        assert manifest.sourceGitSubdir is None
+        current = workspace.app_current(iid)
+        assert "local v1" in (current / "index.html").read_text(encoding="utf-8")
+
+        # 切源后按 folder 语义工作：无变更 → 短路跳过
+        assert importer.update_from_dir(iid).skipped is True
+
+
 # ---- 阶段 E（065.19–20）：CLI -------------------------------------------------
 
 

@@ -436,6 +436,172 @@ class TestUpdateFromDir:
         assert manifest.lastError is None
 
 
+# ---- issue #28：zip/git 实例 --from-dir <目录> --update 原地切换为 folder 源 -----
+
+
+class TestSourceSwitchToFolder:
+    """issue #28：非 folder 源实例带目录 update_from_dir → 换源不换实例。"""
+
+    def _import_zip(self, importer: Importer, tmp_path: Path) -> str:
+        zip_path = tmp_path / "switch-app.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("index.html", "<html><body>zip v1</body></html>")
+        return importer.import_zip(zip_path, name="switch-app").instance_id
+
+    def test_zip_instance_switches_to_folder(
+        self, importer: Importer, source_dir: Path, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        iid = self._import_zip(importer, tmp_path)
+
+        # 制造业务数据、路径别名与端口登记（切源不得触碰）
+        data_dir = workspace.app_data(iid)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "app.db").write_text("business-data", encoding="utf-8")
+        manifest_path = workspace.app_manifest_path(iid)
+        m = InstanceManifest.load(manifest_path)
+        assert m.static is not None
+        m.static.routeMode = "name"
+        m.static.routeHost = "my-alias"
+        m.static.hostPort = 48091
+        m.save(manifest_path)
+        # 同步 registry（模拟已启动实例的端口登记，hostPort 走 registry 保留链）
+        importer.registry.upsert_from_manifest(
+            m,
+            app_path=str(workspace.app_current(iid)),
+            source_zip_path=str(workspace.app_original_zip(iid)),
+        )
+        row_before = importer.registry.get_instance(iid) or {}
+
+        result = importer.update_from_dir(iid, source_dir=str(source_dir))
+        assert result.skipped is False
+
+        manifest = InstanceManifest.load(manifest_path)
+        # 新源身份写回
+        assert manifest.sourceKind == "folder"
+        assert manifest.sourceDirPath == str(source_dir.resolve())
+        assert manifest.sourceSyncHash is not None
+        # 别名 / 端口不动
+        assert manifest.static is not None
+        assert manifest.static.routeMode == "name"
+        assert manifest.static.routeHost == "my-alias"
+        assert manifest.static.hostPort == 48091
+        site_row = importer.registry.get_static_site(iid) or {}
+        assert site_row.get("host_port") == 48091
+        # data/ 保留
+        assert (data_dir / "app.db").read_text(encoding="utf-8") == "business-data"
+        # current/ 已覆盖为新源内容
+        current = workspace.app_current(iid)
+        assert "Hello" in (current / "index.html").read_text(encoding="utf-8")
+        # 实例 id / 创建时间不变
+        row_after = importer.registry.get_instance(iid) or {}
+        assert row_after["id"] == iid
+        assert row_after.get("created_at") == row_before.get("created_at")
+
+        # 切源后按 folder 语义继续增量更新（无需再传目录）
+        source_dir.joinpath("index.html").write_text("<html>v2</html>", encoding="utf-8")
+        again = importer.update_from_dir(iid)
+        assert again.skipped is False
+        assert importer.update_from_dir(iid).skipped is True
+
+    def test_switch_with_identical_content_still_switches_identity(
+        self, importer: Importer, source_dir: Path, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        """切源目录内容与当前 zip 版本完全一致时，身份仍须完成切换。
+
+        issue #28 典型场景：把原 zip 解压成目录后 --from-dir --update。
+        _update_zip_locked 按打包 zip 指纹判 skipped——若随 skipped 跳过身份
+        写回，「换源不换实例」会静默失败（本用例即修复前行为）。
+        """
+        from local_webpage_access.zip_processor import compute_zip_hash
+
+        iid = self._import_zip(importer, tmp_path)
+        # 预置 sourceZipHash = 该目录打包后的 zip 哈希，确保内层命中 skipped
+        packed = tmp_path / "packed.zip"
+        pack_source_dir(source_dir, dest_zip=packed)
+        manifest_path = workspace.app_manifest_path(iid)
+        m = InstanceManifest.load(manifest_path)
+        m.sourceZipHash = compute_zip_hash(packed)
+        m.save(manifest_path)
+
+        result = importer.update_from_dir(iid, source_dir=str(source_dir))
+        assert result.skipped is True  # 内容一致：内层按 zip 指纹跳过更新
+
+        manifest = InstanceManifest.load(manifest_path)
+        assert manifest.sourceKind == "folder"  # 身份必须已切换
+        assert manifest.sourceDirPath == str(source_dir.resolve())
+        assert manifest.sourceSyncHash == compute_source_hash(source_dir)
+        assert result.manifest.sourceKind == "folder"  # 返回值与磁盘身份一致
+
+        # 切换后再从目录更新（不传目录）走 folder 常规指纹短路
+        again = importer.update_from_dir(iid)
+        assert again.skipped is True
+
+    def test_zip_instance_switch_dry_run_writes_nothing(
+        self, importer: Importer, source_dir: Path, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        iid = self._import_zip(importer, tmp_path)
+        result = importer.update_from_dir(iid, source_dir=str(source_dir), dry_run=True)
+        assert result.dry_run is True
+        # dry-run 不切源：磁盘身份仍是 zip
+        manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+        assert manifest.sourceKind == "zip"
+        assert manifest.sourceDirPath is None
+
+    def test_zip_instance_without_dir_still_raises(
+        self, importer: Importer, tmp_path: Path
+    ) -> None:
+        """不传目录时维持原报错（报错文案给出原地切换提示）。"""
+        iid = self._import_zip(importer, tmp_path)
+        with pytest.raises(ZipImportError, match="不是文件夹源"):
+            importer.update_from_dir(iid)
+
+    def test_folder_instance_zip_update_behavior_unchanged(
+        self, importer: Importer, source_dir: Path, workspace: Workspace, tmp_path: Path
+    ) -> None:
+        """反向回归：folder 实例用普通 --update zip 更新仍允许，folder 身份不变。"""
+        result = importer.import_from_dir(source_dir)
+        iid = result.instance_id
+        new_zip = tmp_path / "new.zip"
+        with zipfile.ZipFile(new_zip, "w") as zf:
+            zf.writestr("index.html", "<html><body>from zip</body></html>")
+        updated = importer.update_zip(new_zip, iid)
+        assert updated.skipped is False
+        manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+        assert manifest.sourceKind == "folder"
+        assert manifest.sourceDirPath == str(source_dir.resolve())
+        current = workspace.app_current(iid)
+        assert "from zip" in (current / "index.html").read_text(encoding="utf-8")
+
+    def test_cli_from_dir_update_switches_zip_instance(
+        self,
+        importer: Importer,
+        source_dir: Path,
+        workspace: Workspace,
+        registry: Registry,
+        tmp_path: Path,
+    ) -> None:
+        """端到端编排：``--from-dir <目录> --update <id>`` 对 zip 实例原地切源。"""
+        from local_webpage_access.cli.importing import _do_update_from_dir
+
+        iid = self._import_zip(importer, tmp_path)
+        _do_update_from_dir(
+            importer,
+            workspace,
+            Config(),
+            registry,
+            instance_id=iid,
+            from_dir=str(source_dir),
+            restart=False,
+            keep_data=True,
+            yes=True,
+            dry_run=False,
+            force_kind_change=False,
+        )
+        manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+        assert manifest.sourceKind == "folder"
+        assert manifest.sourceDirPath == str(source_dir.resolve())
+
+
 # ---- P2：CLI --from-dir --update 路径须与关联目录一致 ------------------------
 
 

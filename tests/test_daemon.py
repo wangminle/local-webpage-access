@@ -1800,6 +1800,101 @@ def test_run_watcher_periodically_refreshes_capability(
     assert len(probes) >= 2
 
 
+def test_run_watcher_fast_retry_when_docker_pending(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """issue #29：Docker 未就绪时 10s→20s→40s→60s 短退避快探，恢复 ready 回长周期。"""
+    now = [0.0]
+    probes: list[float] = []
+    stop = threading.Event()
+
+    class _AdvancingStop:
+        """stop_event.wait(timeout) 顺带推进假时钟，模拟真实等待流逝。"""
+
+        def is_set(self) -> bool:
+            return stop.is_set()
+
+        def set(self) -> None:
+            stop.set()
+
+        def wait(self, timeout: float | None = None) -> bool:
+            if timeout:
+                now[0] += timeout
+            return stop.is_set()
+
+    def fake_probe(ws, cfg):  # noqa: ANN001, ANN202
+        probes.append(now[0])
+        if len(probes) >= 6:
+            stop.set()
+        # 前 4 次 Docker 未就绪，第 5 次起恢复 ready
+        return "daemon_unavailable" if len(probes) <= 4 else "ready"
+
+    monkeypatch.setattr(daemon_mod, "_probe_daemon_capability", fake_probe)
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=_AdvancingStop(),  # type: ignore[arg-type]
+        poll_interval=1.0,
+        stable_seconds=0.0,
+        process_fn=lambda *a: {"action": "skipped"},
+        clock=lambda: now[0],
+        sleep=lambda *_a: None,
+        capability_refresh_interval=100.0,
+        capability_initial_delay=5.0,
+    )
+    # 首探 5s（initial_delay）；未就绪退避 10/20/40/60（封顶）；ready 后回 100s 长周期
+    assert probes == [5.0, 15.0, 35.0, 75.0, 135.0, 235.0]
+
+
+def test_run_watcher_pending_retry_survives_long_streak(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-626：Docker 长期 unavailable 时 watcher 不得因指数溢出退出。"""
+    now = [0.0]
+    probes: list[float] = []
+    stop = threading.Event()
+    # BUG-626 真回归：跨过未截断指数的溢出边界（2**1024 参与 float 乘法在
+    # 约第 1025 次探测 OverflowError 并杀死 watcher）；虚拟时钟驱动、瞬完成。
+    target = 1100
+
+    class _AdvancingStop:
+        def is_set(self) -> bool:
+            return stop.is_set()
+
+        def set(self) -> None:
+            stop.set()
+
+        def wait(self, timeout: float | None = None) -> bool:
+            if timeout:
+                now[0] += timeout
+            return stop.is_set()
+
+    def fake_probe(ws, cfg):  # noqa: ANN001, ANN202
+        probes.append(now[0])
+        if len(probes) >= target:
+            stop.set()
+        return "unavailable"
+
+    monkeypatch.setattr(daemon_mod, "_probe_daemon_capability", fake_probe)
+
+    daemon_mod.run_watcher(
+        workspace,
+        config,
+        registry,
+        stop_event=_AdvancingStop(),  # type: ignore[arg-type]
+        poll_interval=60.0,
+        stable_seconds=0.0,
+        process_fn=lambda *a: {"action": "skipped"},
+        clock=lambda: now[0],
+        sleep=lambda *_a: None,
+        capability_refresh_interval=300.0,
+        capability_initial_delay=0.0,
+    )
+    assert len(probes) >= target
+
+
 # ---- 跨模块：daemon → manager API（原 phase57 独有场景）---------------------
 
 

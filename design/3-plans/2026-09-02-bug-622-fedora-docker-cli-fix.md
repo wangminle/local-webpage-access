@@ -1,5 +1,7 @@
 # BUG-622 Fedora docker-cli 遗漏修复实施计划
 
+> **执行状态（2026-09-11 补记）**：三项任务已完成——Fedora 兼容包数组加入 docker-cli（含官方包元数据依据注释），回归测试与脚本校验通过；台账见 task-list BUG-622（已修复）。本文转为完成记录留存。
+
 > **执行要求：** 按 TDD 顺序逐项实施并在完成前运行完整验证。
 
 **目标：** Fedora 43/44 上即使 `docker-cli` 是用户显式安装的，Docker CE 安装脚本也会先移除该冲突包，避免 `/usr/bin/docker` 与 `docker-ce-cli` 冲突。

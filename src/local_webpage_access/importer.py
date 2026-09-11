@@ -1153,6 +1153,7 @@ class Importer:
         self,
         instance_id: str,
         *,
+        source_dir: str | Path | None = None,
         restart: bool = True,
         keep_data: bool = True,
         yes: bool = False,  # noqa: ARG002 - 交互确认由 CLI 层处理
@@ -1163,6 +1164,9 @@ class Importer:
 
         流程：
         1. 读 manifest 的 ``sourceDirPath``；缺失或非 folder 源 -> 报错。
+           例外（issue #28）：非 folder 源（zip/git）实例显式传 ``source_dir``
+           时，原地切换为文件夹源——「换源不换实例」，保留 id/hostPort/
+           路径别名/data/，仅覆盖 current/ 并登记新源身份。
         2. 校验源目录仍存在/可读；缺失 -> 明确错误（禁止挂载回退）。
         3. 计算当前源目录指纹，与 ``sourceSyncHash`` 比较：
            - 相同 -> ``skipped=True``（无需更新），不 rebuild / 不重启。
@@ -1170,11 +1174,13 @@ class Importer:
         4. 更新成功后写回新的 ``sourceSyncHash``。
 
         Raises:
-            ZipImportError: 实例不存在、非 folder 源、源目录缺失、更新失败。
+            ZipImportError: 实例不存在、非 folder 源且未传 ``source_dir``、
+                源目录缺失、更新失败。
         """
         with import_activity_lock(self.ws):
             return self._update_from_dir_locked(
                 instance_id,
+                source_dir=source_dir,
                 restart=restart,
                 keep_data=keep_data,
                 yes=yes,
@@ -1186,6 +1192,7 @@ class Importer:
         self,
         instance_id: str,
         *,
+        source_dir: str | Path | None = None,
         restart: bool = True,
         keep_data: bool = True,
         yes: bool = False,
@@ -1214,15 +1221,34 @@ class Importer:
 
         source_kind = getattr(old_manifest, "sourceKind", "zip")
         source_dir_str = getattr(old_manifest, "sourceDirPath", None)
+        switching_to_folder = False
         if source_kind != "folder" or not source_dir_str:
-            if source_kind == "git":
-                hint = "请用 lwa import --from-git <url> --update 从远端更新"
-            else:
-                hint = "请用 lwa import --update 加 zip"
-            raise ZipImportError(
-                f"实例 {instance_id} 不是文件夹源实例（sourceKind={source_kind!r}），"
-                f"无法用 update-from-dir 更新；{hint}。",
-                instance_id=instance_id,
+            if source_dir is None:
+                if source_kind == "git":
+                    hint = (
+                        "请用 lwa import --from-git <url> --update 从远端更新；"
+                        "如需改为文件夹源，用 lwa import --from-dir <目录> --update 原地切换"
+                    )
+                else:
+                    hint = (
+                        "可用 lwa import --from-dir <目录> --update 原地切换为文件夹源，"
+                        "或用 lwa import --update 加 zip"
+                    )
+                raise ZipImportError(
+                    f"实例 {instance_id} 不是文件夹源实例（sourceKind={source_kind!r}），"
+                    f"无法用 update-from-dir 更新；{hint}。",
+                    instance_id=instance_id,
+                )
+            # issue #28：zip/git 实例带新目录原地切换为 folder 源（换源不换实例：
+            # 保留 id/hostPort/路径别名/data/，仅覆盖 current/ 并登记新源身份）。
+            resolved_dir = validate_source_dir(source_dir, workspace_root=self.ws.root)
+            source_dir_str = str(resolved_dir)
+            switching_to_folder = True
+            log.info(
+                "实例 %s 源类型切换：%s -> folder（源目录 %s）",
+                instance_id,
+                source_kind,
+                source_dir_str,
             )
 
         source_dir = Path(source_dir_str)
@@ -1238,8 +1264,8 @@ class Importer:
         new_sync_hash = compute_source_hash(source_dir)
         old_sync_hash = getattr(old_manifest, "sourceSyncHash", None)
 
-        # 无变更短路
-        if new_sync_hash == old_sync_hash:
+        # 无变更短路（切源场景恒走全量更新：旧指纹属于另一源类型，不可比）
+        if new_sync_hash == old_sync_hash and not switching_to_folder:
             log.info(
                 "实例 %s 的文件夹源内容未变化（指纹 %s），跳过更新",
                 instance_id,
@@ -1292,13 +1318,33 @@ class Importer:
         # update_zip 重建 manifest 后 sourceKind 会回到默认 "zip"，
         # 必须同时恢复 sourceKind/sourceDirPath/sourceSyncHash，否则下一次
         # update_from_dir 会被判为非 folder 源而拒绝（P0 回归）。
-        if not result.dry_run and not result.skipped:
+        # 例外：切源场景 skipped 时也必须写回——目录内容与原 zip 完全一致时
+        # _update_zip_locked 按 zip 指纹判 skipped，若随之跳过身份写回，
+        # 「换源不换实例」会静默失败（issue #28 典型场景：原 zip 解压成目录
+        # 再切换）。与 git 切换路径「skipped 仍刷新身份」的约定对齐。
+        if not result.dry_run and (not result.skipped or switching_to_folder):
             updated_manifest = InstanceManifest.load(manifest_path)
             updated_manifest.sourceKind = "folder"
             updated_manifest.sourceDirPath = str(source_dir)
             updated_manifest.sourceSyncHash = new_sync_hash
+            if switching_to_folder:
+                # issue #28 切源：清除旧 git 身份残留，避免误导后续
+                # update-from-git 的身份校验
+                updated_manifest.sourceGitUrl = None
+                updated_manifest.sourceGitRef = None
+                updated_manifest.sourceGitRefKind = None
+                updated_manifest.sourceGitCommit = None
+                updated_manifest.sourceGitSubdir = None
+                switch_note = f"源类型切换：{source_kind} → folder（源目录 {source_dir}）"
+                if result.skipped:
+                    switch_note += "；内容与当前版本一致，仅切换源身份"
+                self.registry.add_event(instance_id, "update", switch_note)
             updated_manifest.touch()
             updated_manifest.save(manifest_path)
+            if switching_to_folder:
+                # 返回值与磁盘身份保持一致（skipped 分支的 result.manifest
+                # 仍是旧 zip 身份，调用方按其展示会误导）
+                result.manifest = updated_manifest
 
         return result
 
@@ -1459,6 +1505,9 @@ class Importer:
         流程：
         1. 实例存在且 ``sourceKind=="git"``；传入 ``url`` 时规范化后必须与
            ``sourceGitUrl`` 一致，否则 ``source_mismatch``（065.l）。
+           例外（issue #28）：非 git 源（zip/folder）实例显式传 ``url`` 时，
+           原地切换为 git 源——「换源不换实例」，无既有 git 身份可校验，
+           直接按传入 url 克隆并登记新身份（保留 id/hostPort/别名/data/）。
         2. ``git ls-remote`` 对**已存储** ref+kind 探测远端 OID（不落盘，
            缺省分支不得每次再猜 HEAD）。
         3. OID 未变 → ``skipped=True``「无需更新」，零 clone / 零 rebuild。
@@ -1518,67 +1567,86 @@ class Importer:
         stored_kind = getattr(old_manifest, "sourceGitRefKind", None)
         stored_commit = getattr(old_manifest, "sourceGitCommit", None)
         stored_subdir = getattr(old_manifest, "sourceGitSubdir", None)
+        switching_to_git = False
         if source_kind != "git" or not (stored_url and stored_ref and stored_kind and stored_commit):
-            raise ZipImportError(
-                f"实例 {instance_id} 不是 git 源实例（sourceKind={source_kind!r}）"
-                f"或 git 身份字段缺失，无法用 update-from-git 更新；"
-                f"zip 源请用 lwa import --update，文件夹源请用 --from-dir --update。",
-                instance_id=instance_id,
+            if url is None:
+                raise ZipImportError(
+                    f"实例 {instance_id} 不是 git 源实例（sourceKind={source_kind!r}）"
+                    f"或 git 身份字段缺失，无法用 update-from-git 更新；"
+                    f"zip 源请用 lwa import --update，文件夹源请用 --from-dir --update；"
+                    f"如需改为 git 源，用 lwa import --from-git <url> --update 原地切换。",
+                    instance_id=instance_id,
+                )
+            # issue #28：zip/folder 实例带新仓库原地切换为 git 源（换源不换实例）。
+            # 无既有 git 身份：source_mismatch 校验与 OID 探测短路均不适用，
+            # 直接按传入 url 克隆并登记新身份（ref 缺省 = 远端默认分支）。
+            switching_to_git = True
+            stored_url = stored_ref = stored_kind = stored_commit = stored_subdir = None
+            log.info(
+                "实例 %s 源类型切换：%s -> git（仓库 %s）",
+                instance_id,
+                source_kind,
+                url,
             )
 
         target = git_source.parse_github_url(url) if url is not None else None
-        if target is not None and target.url != stored_url:
-            raise GitSourceError(
-                f"传入的仓库 {target.url} 与实例 {instance_id} 关联的 {stored_url} 不一致；"
-                f"如需更换来源，请先删除实例再重新导入",
-                kind="source_mismatch",
-                instance_id=instance_id,
+        if switching_to_git:
+            assert target is not None  # 切源路径 url 必传（上方已校验）
+        else:
+            # 非切源路径：上方校验已保证 git 身份字段齐全（否则已 raise 或转入切源）
+            assert stored_url and stored_ref and stored_kind and stored_commit
+            if target is not None and target.url != stored_url:
+                raise GitSourceError(
+                    f"传入的仓库 {target.url} 与实例 {instance_id} 关联的 {stored_url} 不一致；"
+                    f"如需更换来源，请先删除实例再重新导入",
+                    kind="source_mismatch",
+                    instance_id=instance_id,
+                )
+            if target is None:
+                target = git_source.parse_github_url(stored_url)
+
+            remote_oid = git_source.probe_remote_commit(
+                clone_url or stored_url,
+                ref=stored_ref,
+                ref_kind=stored_kind,
             )
-        if target is None:
-            target = git_source.parse_github_url(stored_url)
 
-        remote_oid = git_source.probe_remote_commit(
-            clone_url or stored_url,
-            ref=stored_ref,
-            ref_kind=stored_kind,
-        )
+            # 无变更短路（065.b / 065.16）：OID 相同 → 无需更新，不 clone 不 rebuild
+            if remote_oid == stored_commit:
+                log.info(
+                    "实例 %s 的 git 源无变更（%s %s @ %s），跳过更新",
+                    instance_id,
+                    stored_kind,
+                    stored_ref,
+                    stored_commit[:12],
+                )
+                if not dry_run:
+                    self.registry.add_event(
+                        instance_id,
+                        "update",
+                        f"git 源无变更（{stored_kind} {stored_ref} @ {stored_commit[:12]}），跳过更新",
+                    )
+                return UpdateResult(
+                    instance_id=instance_id,
+                    manifest=old_manifest,
+                    detection=None,
+                    app_dir=self.ws.app_dir(instance_id),
+                    zip_hash=stored_commit,
+                    prev_hash=stored_commit,
+                    skipped=True,
+                    dry_run=dry_run,
+                    was_running=old_manifest.desiredState == DesiredState.RUNNING,
+                    needs_restart=False,
+                )
 
-        # 无变更短路（065.b / 065.16）：OID 相同 → 无需更新，不 clone 不 rebuild
-        if remote_oid == stored_commit:
             log.info(
-                "实例 %s 的 git 源无变更（%s %s @ %s），跳过更新",
+                "实例 %s 的 git 源有新提交（%s %s：%s -> %s）",
                 instance_id,
                 stored_kind,
                 stored_ref,
                 stored_commit[:12],
+                remote_oid[:12],
             )
-            if not dry_run:
-                self.registry.add_event(
-                    instance_id,
-                    "update",
-                    f"git 源无变更（{stored_kind} {stored_ref} @ {stored_commit[:12]}），跳过更新",
-                )
-            return UpdateResult(
-                instance_id=instance_id,
-                manifest=old_manifest,
-                detection=None,
-                app_dir=self.ws.app_dir(instance_id),
-                zip_hash=stored_commit,
-                prev_hash=stored_commit,
-                skipped=True,
-                dry_run=dry_run,
-                was_running=old_manifest.desiredState == DesiredState.RUNNING,
-                needs_restart=False,
-            )
-
-        log.info(
-            "实例 %s 的 git 源有新提交（%s %s：%s -> %s）",
-            instance_id,
-            stored_kind,
-            stored_ref,
-            stored_commit[:12],
-            remote_oid[:12],
-        )
 
         fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-git-update-")
         os.close(fd)
@@ -1622,11 +1690,14 @@ class Importer:
             updated = InstanceManifest.load(manifest_path)
             updated.sourceKind = "git"
             updated.sourceDirPath = None
-            updated.sourceGitUrl = stored_url
+            updated.sourceGitUrl = target.url
             updated.sourceGitRef = new_ref
             updated.sourceGitRefKind = new_kind
             updated.sourceGitCommit = new_commit
             updated.sourceGitSubdir = stored_subdir
+            if switching_to_git:
+                # issue #28 切源：清除 folder 源残留指纹（folder→git）
+                updated.sourceSyncHash = None
             updated.touch()
             updated.save(manifest_path)
             # 内存结果与磁盘身份保持一致（与 import_from_git 同约定：git 路径
@@ -1635,7 +1706,14 @@ class Importer:
             result.manifest = updated
             # dry-run 不落盘，不得记「已更新」事件；zip 内容未变的 skipped 已由
             # _update_zip_locked 记「zip 未变化…跳过更新」，不再叠加双事件。
-            if not result.skipped:
+            if switching_to_git:
+                self.registry.add_event(
+                    instance_id,
+                    "update",
+                    f"源类型切换：{source_kind} → git（{target.url}，"
+                    f"{new_kind} {new_ref} @ {new_commit[:12]}）",
+                )
+            elif not result.skipped:
                 self.registry.add_event(
                     instance_id,
                     "update",

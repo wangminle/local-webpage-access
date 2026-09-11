@@ -39,6 +39,64 @@ ComponentState = Literal[
 ]
 CaddyOwner = Literal["lwa_service_user", "system_caddy", "foreign_process", "unknown"]
 
+# issue #29：Docker 未就绪但可自愈的能力状态（如 macOS 重启后 Docker Desktop
+# 晚于 LWA 服务就绪）。命中这些状态时 daemon/manager 的能力探针改走短退避快探。
+_DOCKER_PENDING_STATES = frozenset({"unavailable", "daemon_unavailable"})
+CAPABILITY_RETRY_BACKOFF_BASE = 10.0
+CAPABILITY_RETRY_BACKOFF_MAX = 60.0
+# 10 * 2^6 = 640，再与 max 取 min 即为封顶。必须先截断指数再求值：
+# streak 无界时 `base * 2**(streak-1)` 约第 1025 次 OverflowError（BUG-626）。
+_CAPABILITY_RETRY_EXPONENT_CAP = 6
+
+
+def docker_state_pending(state: Any) -> bool:
+    """Docker 能力状态是否为「未就绪、可自愈」（issue #29 短退避快探判据）。"""
+    return state in _DOCKER_PENDING_STATES
+
+
+def capability_retry_delay(
+    streak: int,
+    *,
+    base: float = CAPABILITY_RETRY_BACKOFF_BASE,
+    max_delay: float = CAPABILITY_RETRY_BACKOFF_MAX,
+) -> float:
+    """issue #29 / BUG-626：连续 pending 的短退避（10s→20s→40s，封顶 ``max_delay``）。
+
+    ``streak`` 从 1 起算。指数先封顶再参与浮点乘法，长期 unavailable
+    （含 Default Profile 未装 Docker）不得溢出杀死后台线程。
+    """
+    exponent = min(max(int(streak) - 1, 0), _CAPABILITY_RETRY_EXPONENT_CAP)
+    return min(float(max_delay), float(base) * (2**exponent))
+
+
+def next_capability_probe_delay(
+    *,
+    pending: bool,
+    streak: int,
+    first_wait: bool,
+    initial_delay: float,
+    refresh_interval: float,
+    retry_base: float = CAPABILITY_RETRY_BACKOFF_BASE,
+    retry_max: float = CAPABILITY_RETRY_BACKOFF_MAX,
+) -> tuple[float, int, bool]:
+    """计算下一轮能力探针等待（issue #29 / BUG-627）。
+
+    必须在本轮探测结果出来之后、等待之前调用：否则 ready→unavailable
+    会先睡掉上一轮排定的 300s。首次等待固定为 ``initial_delay``（BUG-277）。
+    返回 ``(delay, new_streak, new_first_wait)``。
+    """
+    if first_wait:
+        return float(initial_delay), 0, False
+    if pending:
+        new_streak = int(streak) + 1
+        return (
+            capability_retry_delay(new_streak, base=retry_base, max_delay=retry_max),
+            new_streak,
+            False,
+        )
+    return float(refresh_interval), 0, False
+
+
 # 观测失败分类（与实例 runtimeAccess / observationError 对齐）
 ObservationError = Literal[
     "permission_denied",
@@ -434,7 +492,10 @@ def collect_capability_report(
         _merge_cached_backend_probes(report, root, current_role=role)
 
     report.overall = _compute_overall(report)
-    if report.overall != "ready" and not report.action:
+    # issue #29：ready 后不得残留此前持久化的建议文案（API/CLI 脏数据）。
+    if report.overall == "ready":
+        report.action = None
+    elif not report.action:
         report.action = _default_action(report)
     return report
 
@@ -640,12 +701,17 @@ def read_capability_health_fragment(workspace_root: Path) -> dict[str, Any] | No
         return None
     if not _cache_is_fresh(data):
         return None
+    overall = data.get("overall", "unknown")
+    action = data.get("action")
+    if overall == "ready":
+        # issue #29：ready 片段不得残留旧建议文案（陈旧磁盘缓存兜底）。
+        action = None
     return {
         "profile": data.get("profile"),
-        "overall": data.get("overall", "unknown"),
+        "overall": overall,
         "serviceUser": data.get("serviceUser"),
         "capabilities": data.get("capabilities") or {},
-        "action": data.get("action"),
+        "action": action,
     }
 
 
@@ -872,8 +938,13 @@ __all__ = [
     "classify_docker_observation_error",
     "clear_capability_cache",
     "collect_capability_report",
+    "CAPABILITY_RETRY_BACKOFF_BASE",
+    "CAPABILITY_RETRY_BACKOFF_MAX",
+    "capability_retry_delay",
     "current_service_user",
+    "docker_state_pending",
     "load_profile_state",
+    "next_capability_probe_delay",
     "log_capability_probe",
     "overlay_gateway_access_from_cache",
     "probe_caddy_binary_state",

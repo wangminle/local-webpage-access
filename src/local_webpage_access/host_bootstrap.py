@@ -15,7 +15,10 @@ import sys
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Callable, Literal, Sequence
+
+if TYPE_CHECKING:
+    from local_webpage_access.capability import CapabilityReport
 
 from local_webpage_access.doctor import SubprocessRunner, _default_runner
 from local_webpage_access.platform_detect import detect_platform
@@ -553,6 +556,12 @@ def run_full_bootstrap(
             include_backend_cached=True,
         )
         if report.overall != "ready":
+            # issue #29：CLI 视角 Docker 已 ready 而 manager/daemon 缓存仍
+            # unavailable（macOS 重启后 Docker Desktop 晚于 LWA 就绪）时，主动触发
+            # manager 即时重探并等 daemon 短退避探针收敛后复验一轮，避免复读
+            # 「doctor + resume」建议造成永不收敛的死循环。
+            report = _refresh_backend_capability_once(workspace_root, report, messages)
+        if report.overall != "ready":
             messages.append(
                 "能力验收未通过（Full 强制闭环）："
                 f"overall={report.overall} "
@@ -663,6 +672,138 @@ def _try_start_backends_for_capability(workspace_root: Path, messages: list[str]
 
     # 给子进程写入 capability-*.json 的短窗口
     time.sleep(1.5)
+
+
+# issue #29：等待 daemon 短退避探针把能力缓存刷出 Docker 未就绪的上限/轮询间隔。
+_CAPABILITY_CONVERGE_WAIT_TIMEOUT = 90.0
+_CAPABILITY_CONVERGE_WAIT_INTERVAL = 5.0
+
+
+def _request_manager_capability_refresh(workspace_root: Path, messages: list[str]) -> bool:
+    """请求本机 manager 立即重探能力（``GET /api/capability?refresh=true``）。
+
+    issue #29：macOS 重启后 Docker Desktop 晚于 LWA 就绪时，manager/daemon 缓存
+    仍是 unavailable；resume 验收应主动触发即时重探而非干等 300s 周期。本机
+    loopback 的 GET 免 token（IMP-003）；带上 run/manager-token.json 仅为兼容
+    非典型绑定。触发失败不致命——按现有缓存继续验收。
+    """
+    import json
+    import urllib.request
+
+    from local_webpage_access.config import load_config
+    from local_webpage_access.manager_service import _health_check_host
+    from local_webpage_access.paths import Workspace
+    from local_webpage_access.ports import format_http_host
+    from local_webpage_access.probe import urlopen_direct
+
+    ws = Workspace(Path(workspace_root))
+    if not ws.config_path.is_file():
+        return False
+    try:
+        config = load_config(ws)
+    except Exception:  # noqa: BLE001
+        return False
+    host = _health_check_host(str(getattr(config, "managerHost", "") or "0.0.0.0"))
+    port = int(getattr(config, "managerPort", 0) or 17800)
+    # BUG-628：IPv6 字面量须加方括号（managerHost=:: 时 _health_check_host 得
+    # ::1，裸拼 host:port 因冒号歧义产生非法 URL，重探静默失败提前返回旧报告）。
+    url = f"http://{format_http_host(host)}:{port}/api/capability?refresh=true"
+    req = urllib.request.Request(url)
+    try:
+        token_data = json.loads((ws.run / "manager-token.json").read_text(encoding="utf-8"))
+        token = str(token_data.get("token") or "").strip()
+    except (OSError, ValueError):
+        token = ""
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        # refresh=true 为同步探测，Docker 超时场景可达 10s+，给足上限。
+        with urlopen_direct(req, timeout=30.0) as resp:  # noqa: S310
+            if resp.status != 200:
+                messages.append(f"触发 manager 能力重探失败（HTTP {resp.status}），按缓存验收。")
+                return False
+        messages.append("已触发本机 manager 即时能力重探（/api/capability?refresh=true）。")
+        return True
+    except Exception as exc:  # noqa: BLE001 — 触发失败不致命，按现有缓存验收
+        messages.append(f"触发 manager 能力重探未成功（继续按缓存验收）：{exc}")
+        return False
+
+
+def _await_daemon_capability_ready(
+    workspace_root: Path,
+    *,
+    timeout: float = _CAPABILITY_CONVERGE_WAIT_TIMEOUT,
+    interval: float = _CAPABILITY_CONVERGE_WAIT_INTERVAL,
+    sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
+) -> bool:
+    """等 daemon 短退避探针把 ``capability-daemon.json`` 刷出 Docker 未就绪。
+
+    issue #29：配合 daemon/manager 的短退避快探（10s→20s→40s，封顶 60s），
+    resume 验收给出一个有上界的收敛窗口，而不是立刻复述旧建议。
+    """
+    import json
+    import time
+
+    from local_webpage_access.capability import _cache_is_fresh, docker_state_pending
+
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    path = Path(workspace_root) / "run" / "capability-daemon.json"
+    deadline = clock() + max(0.0, timeout)
+    while True:
+        state: object = None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict) and _cache_is_fresh(data):
+            caps = data.get("capabilities")
+            if isinstance(caps, dict):
+                state = caps.get("daemonDockerAccess")
+        if state is not None and not docker_state_pending(state):
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(interval)
+
+
+def _refresh_backend_capability_once(
+    workspace_root: Path,
+    report: CapabilityReport,
+    messages: list[str],
+) -> CapabilityReport:
+    """issue #29：后台 Docker 能力缓存陈旧时触发即时重探并复验一轮。
+
+    仅在「CLI 视角 cliDockerAccess=ready 且 manager/daemon 缓存为
+    unavailable/daemon_unavailable」时介入；其余失败原因（权限、owner、
+    caddy 等）原样返回，由既有失败路径给出真实剩余阻塞原因。
+    """
+    from local_webpage_access.capability import (
+        collect_capability_report,
+        docker_state_pending,
+    )
+
+    if report.cli_docker_access != "ready":
+        return report
+    if not (
+        docker_state_pending(report.manager_docker_access)
+        or docker_state_pending(report.daemon_docker_access)
+    ):
+        return report
+    if not _request_manager_capability_refresh(workspace_root, messages):
+        return report
+    if docker_state_pending(report.daemon_docker_access):
+        if _await_daemon_capability_ready(workspace_root):
+            messages.append("daemon 能力缓存已随短退避探针收敛。")
+        else:
+            messages.append("等待 daemon 能力缓存收敛超时，按最新状态复验。")
+    return collect_capability_report(
+        workspace_root=workspace_root,
+        profile="full",
+        role="cli",
+        include_backend_cached=True,
+    )
 
 
 def _persist_full_config(workspace_root: Path, service_user: str, *, ready: bool) -> None:

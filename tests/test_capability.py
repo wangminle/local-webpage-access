@@ -759,3 +759,202 @@ def test_three_role_caches_converge_manager_and_cli_overall_ready(
         include_backend_cached=True,
     )
     assert gateway.overall == "ready"
+
+
+def test_docker_state_pending_states() -> None:
+    """issue #29：仅 unavailable/daemon_unavailable 视为「未就绪、可自愈」。"""
+    from local_webpage_access.capability import docker_state_pending
+
+    assert docker_state_pending("unavailable") is True
+    assert docker_state_pending("daemon_unavailable") is True
+    assert docker_state_pending("ready") is False
+    assert docker_state_pending("permission_denied") is False
+    assert docker_state_pending("unknown") is False
+    assert docker_state_pending("timeout") is False
+    assert docker_state_pending(None) is False
+
+
+def test_collect_capability_report_clears_action_when_ready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """issue #29：overall=ready 后不得残留持久化状态里的旧建议文案。"""
+    save_profile_state(
+        tmp_path,
+        {
+            "profile": "full",
+            "serviceUser": "fenix",
+            "overall": "unready",
+            "sessionRefreshRequired": False,
+            "action": "执行：lwa doctor --profile full 与 lwa setup --full --resume",
+        },
+    )
+    write_capability_cache(
+        tmp_path,
+        "manager",
+        CapabilityReport(profile="full", manager_docker_access="ready"),
+    )
+    write_capability_cache(
+        tmp_path,
+        "daemon",
+        CapabilityReport(
+            profile="full", daemon_docker_access="ready", details={"role": "daemon"}
+        ),
+    )
+    write_capability_cache(
+        tmp_path,
+        "gateway",
+        CapabilityReport(profile="full", gateway_access="ready", details={"role": "gateway"}),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability._backend_role_alive",
+        lambda _root, role: role in ("manager", "daemon", "gateway"),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_docker_access_state", lambda: "ready"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_runtime_fields",
+        lambda _root: ("ready", "lwa_service_user", "fenix", "ready"),
+    )
+
+    report = collect_capability_report(
+        workspace_root=tmp_path,
+        profile="full",
+        role="cli",
+        include_backend_cached=True,
+    )
+    assert report.overall == "ready"
+    assert report.action is None
+    assert report.to_health_fragment()["action"] is None
+
+
+def test_collect_capability_report_keeps_action_when_unready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """issue #29 对照：overall 非 ready 时仍保留/补全建议文案。"""
+    save_profile_state(
+        tmp_path,
+        {
+            "profile": "full",
+            "serviceUser": "fenix",
+            "overall": "unready",
+            "sessionRefreshRequired": False,
+            "action": "执行：lwa doctor --profile full 与 lwa setup --full --resume",
+        },
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_docker_access_state",
+        lambda: "daemon_unavailable",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_binary_state", lambda: "ready"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.capability.probe_caddy_runtime_fields",
+        lambda _root: ("ready", "lwa_service_user", "fenix", "ready"),
+    )
+
+    report = collect_capability_report(
+        workspace_root=tmp_path,
+        profile="full",
+        role="cli",
+        include_backend_cached=True,
+    )
+    assert report.overall != "ready"
+    assert report.action
+
+
+def test_read_capability_health_fragment_clears_action_when_ready(tmp_path: Path) -> None:
+    """issue #29：陈旧磁盘缓存 overall=ready 但带 action 时，片段须清空 action。"""
+    from local_webpage_access.capability import read_capability_health_fragment
+    from local_webpage_access.logging import now_iso
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "capability-manager.json").write_text(
+        json.dumps(
+            {
+                "profile": "full",
+                "overall": "ready",
+                "checkedAt": now_iso(),
+                "serviceUser": "fenix",
+                "capabilities": {"dockerAccess": "ready"},
+                "action": "执行：lwa doctor --profile full 与 lwa setup --full --resume",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    frag = read_capability_health_fragment(tmp_path)
+    assert frag is not None
+    assert frag["overall"] == "ready"
+    assert frag["action"] is None
+
+
+def test_capability_retry_delay_sequence_and_long_streak_no_overflow() -> None:
+    """BUG-626：短退避 10→20→40 封顶 60；streak≈1025 不得 OverflowError。"""
+    from local_webpage_access.capability import capability_retry_delay
+
+    assert capability_retry_delay(1) == 10.0
+    assert capability_retry_delay(2) == 20.0
+    assert capability_retry_delay(3) == 40.0
+    assert capability_retry_delay(4) == 60.0
+    assert capability_retry_delay(5) == 60.0
+    # 审查实证：未封顶指数时第 1025 次 `10 * 2**1024` 溢出并杀死后台线程。
+    assert capability_retry_delay(1025) == 60.0
+    assert capability_retry_delay(10**6) == 60.0
+
+
+def test_next_capability_probe_delay_ready_then_unavailable_skips_stale_refresh() -> None:
+    """BUG-627：ready→unavailable 后下一轮须立刻进入 10s 快探，不得先睡 300s。
+
+    首次等待仍是 initial_delay（BUG-277 等 gateway）。调度必须在本轮探测结果
+    出来之后、等待之前计算。
+    """
+    from local_webpage_access.capability import next_capability_probe_delay
+
+    kwargs = {"initial_delay": 15.0, "refresh_interval": 300.0}
+    delay, streak, first = next_capability_probe_delay(
+        pending=False, streak=0, first_wait=True, **kwargs
+    )
+    assert (delay, streak, first) == (15.0, 0, False)
+
+    delay, streak, first = next_capability_probe_delay(
+        pending=True, streak=streak, first_wait=first, **kwargs
+    )
+    assert delay == 10.0
+    assert streak == 1
+    assert first is False
+
+    delay, streak, first = next_capability_probe_delay(
+        pending=True, streak=streak, first_wait=first, **kwargs
+    )
+    assert delay == 20.0
+    assert streak == 2
+
+    delay, streak, first = next_capability_probe_delay(
+        pending=False, streak=streak, first_wait=first, **kwargs
+    )
+    assert delay == 300.0
+    assert streak == 0
+
+
+def test_next_capability_probe_delay_first_wait_is_always_initial() -> None:
+    """首次等待固定 15s，即使第一探已是 pending 也不跳过 BUG-277 启动语义。"""
+    from local_webpage_access.capability import next_capability_probe_delay
+
+    kwargs = {"initial_delay": 15.0, "refresh_interval": 300.0}
+    delay, streak, first = next_capability_probe_delay(
+        pending=True, streak=0, first_wait=True, **kwargs
+    )
+    assert delay == 15.0
+    assert streak == 0
+    assert first is False
+    delay, streak, _ = next_capability_probe_delay(
+        pending=True, streak=streak, first_wait=first, **kwargs
+    )
+    assert delay == 10.0
+    assert streak == 1

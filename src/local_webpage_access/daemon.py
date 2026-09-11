@@ -40,6 +40,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from local_webpage_access.capability import (
+    CAPABILITY_RETRY_BACKOFF_BASE,
+    CAPABILITY_RETRY_BACKOFF_MAX,
+    capability_retry_delay,
+    docker_state_pending,
+)
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LifecycleError, ZipImportError
 from local_webpage_access.file_lock import (
@@ -76,6 +82,7 @@ DEFAULT_SUPERVISE_INTERVAL = 60.0
 # capability_initial_delay 一次，吸收三 unit 同启竞态。
 DEFAULT_CAPABILITY_REFRESH_INTERVAL = 300.0
 DEFAULT_CAPABILITY_INITIAL_DELAY = 15.0
+# issue #29 短退避常量从 capability 再导出，供测试与 __all__ 兼容。
 RECONCILE_BACKOFF_BASE_SECONDS = 60.0
 RECONCILE_BACKOFF_MAX_SECONDS = 1800.0
 STATE_FILENAME = "daemon.json"
@@ -1052,6 +1059,9 @@ def run_watcher(
     BUG-407：按 ``capability_initial_delay``（默认 15s）再探一次能力，之后按
     ``capability_refresh_interval``（默认 300s）周期刷新 ``capability-daemon.json``，
     与 manager/gateway 对齐，吸收 systemd 三 unit 同启竞态。
+
+    issue #29：探测结果显示 Docker 未就绪（unavailable/daemon_unavailable）时
+    改走短退避快探（10s→20s→40s，封顶 60s），恢复 ready 后回到长周期。
     """
     stop_event = stop_event or threading.Event()
     poll_interval = poll_interval if poll_interval is not None else DEFAULT_POLL_INTERVAL
@@ -1068,6 +1078,8 @@ def run_watcher(
     # _main 启动时已探过一次；此处先等 initial_delay 再探，之后走 refresh 周期。
     next_capability_at = clock() + max(0.0, float(capability_initial_delay))
     capability_period = max(1.0, float(capability_refresh_interval))
+    # issue #29：Docker 未就绪的连续探测次数，驱动短退避快探。
+    capability_retry_streak = 0
     hb_stop = threading.Event()
     if heartbeat is not None and heartbeat_interval > 0:
 
@@ -1104,9 +1116,22 @@ def run_watcher(
             if now_ts >= next_capability_at:
                 next_capability_at = now_ts + capability_period
                 try:
-                    _probe_daemon_capability(workspace, config)
+                    docker_state = _probe_daemon_capability(workspace, config)
                 except Exception:  # noqa: BLE001 — 能力探测失败不中断 watcher
                     log.exception("daemon 周期能力自检失败")
+                    docker_state = None
+                # issue #29：Docker 未就绪（如 macOS 重启后 Docker Desktop 晚起）
+                # 改走 10s→20s→40s 短退避快探（封顶 60s），恢复 ready 回到长周期。
+                if docker_state_pending(docker_state):
+                    capability_retry_streak += 1
+                    retry_delay = capability_retry_delay(
+                        capability_retry_streak,
+                        base=CAPABILITY_RETRY_BACKOFF_BASE,
+                        max_delay=CAPABILITY_RETRY_BACKOFF_MAX,
+                    )
+                    next_capability_at = now_ts + min(retry_delay, capability_period)
+                else:
+                    capability_retry_streak = 0
 
             processed = load_processed_set(workspace)
             for zip_path in scan_inbox(workspace):
@@ -1475,8 +1500,12 @@ def daemon_status(workspace: Workspace) -> dict[str, Any]:
 # ---- CLI 入口（``python -m local_webpage_access.daemon --workspace ...``）-------
 
 
-def _probe_daemon_capability(workspace: Workspace, config: Config) -> None:
-    """以 watcher 真实身份探测并写入 daemon capability 缓存。"""
+def _probe_daemon_capability(workspace: Workspace, config: Config) -> str | None:
+    """以 watcher 真实身份探测并写入 daemon capability 缓存。
+
+    返回本次探测的 ``dockerAccess``（供 issue #29 短退避快探调度判定）；
+    探测失败返回 ``None``（保持原长周期）。
+    """
     try:
         from local_webpage_access.capability import (
             collect_capability_report,
@@ -1495,8 +1524,10 @@ def _probe_daemon_capability(workspace: Workspace, config: Config) -> None:
         level = "WARNING" if report.docker_access == "permission_denied" else "INFO"
         log_capability_probe("daemon", report, level=level)
         write_capability_cache(workspace.root, "daemon", report)
+        return report.docker_access
     except Exception:  # noqa: BLE001
         log.exception("daemon 能力自检失败")
+        return None
 
 
 @contextlib.contextmanager
@@ -1626,6 +1657,8 @@ __all__ = [
     "DEFAULT_SUPERVISE_INTERVAL",
     "DEFAULT_CAPABILITY_REFRESH_INTERVAL",
     "DEFAULT_CAPABILITY_INITIAL_DELAY",
+    "CAPABILITY_RETRY_BACKOFF_BASE",
+    "CAPABILITY_RETRY_BACKOFF_MAX",
     "read_state",
     "write_state",
     "clear_state",

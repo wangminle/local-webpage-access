@@ -360,6 +360,57 @@ class _ManagedBackend(_NoUnitBackend):
         return [CmdOutcome(["fake", "start"], 0, "", "")], True
 
 
+class _RunningManagedBackend(_ManagedBackend):
+    """单元已加载/启用且**进程仍在跑**（main_pid 有值）的后端（BUG-614）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.restarted: list[str] = []
+
+    def main_pid(self, name, runner) -> int:  # noqa: ARG002
+        return 4242
+
+    def start(self, name, runner):  # noqa: ARG002
+        raise AssertionError("BUG-614：在跑单元不得走 start（kickstart 无 -k 是 no-op）")
+
+    def restart(self, name, runner):  # noqa: ARG002
+        from local_webpage_access.autostart import CmdOutcome
+
+        self.restarted.append(name)
+        return [CmdOutcome(["fake", "restart"], 0, "", "")], True
+
+
+def test_restart_gateway_managed_running_unit_reports_restart(
+    workspace, config, monkeypatch
+) -> None:
+    """BUG-614：监督器单元仍在跑（仅 caddy master 被杀）时，restart_gateway 须交
+    监督器 restart 换新，且恢复文案与事实一致——不再假报"已通过自启动单元拉起"。"""
+    _write_state(
+        workspace,
+        "gateway.json",
+        {"enabled": True, "started_at": "2026-08-17T03:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.is_gateway_running",
+        lambda ws, cfg: False,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.start_gateway",
+        lambda ws, cfg, **kw: pytest.fail("managed 路径不得 detached start_gateway"),
+    )
+    from local_webpage_access import autostart as asm
+
+    backend = _RunningManagedBackend()
+    monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
+
+    info = upd.restart_gateway(workspace, config)
+    assert info["reconciled"] is True
+    assert info["unexpectedDown"] is True
+    assert backend.restarted == ["gateway"]  # 在跑单元被真正换新（kickstart -k 语义）
+    assert "已恢复" in info["message"] and "重启" in info["message"]
+    assert "拉起" not in info["message"]
+
+
 # ---- issue #4：gateway 陈旧 gateway.json 不得虚报中断时长 ---------------------
 
 

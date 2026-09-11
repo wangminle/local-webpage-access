@@ -1012,12 +1012,22 @@ class StaticGateway:
         # gateway_service 卡死在启动、不写 gateway.json / capability 缓存。
         # 0.6.9 的 subprocess.run(..., timeout=) 无此问题；此处用 DEVNULL +
         # poll/wait(timeout=) 保留并行探活且不死锁。
+        # BUG-613：进程组隔离。``caddy start`` 虽 fork 守护化 master，但**不
+        # setsid**——master 仍继承调用方（daemon/gateway_service 前台入口）的进程组，
+        # launchd ``kickstart -k`` 重启 daemon 单元时组内 SIGTERM 会连带杀掉 master
+        # （无 POST /stop 优雅退出）。POSIX 下以 start_new_session 让包装进程自建
+        # 会话/进程组，master 继承新组即与 daemon 解耦；Windows 用
+        # CREATE_NEW_PROCESS_GROUP（与 _start_builtin 同款取舍）。
+        popen_kwargs: dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": err_fh if err_fh is not None else subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        else:
+            popen_kwargs["start_new_session"] = True
         try:
-            proc = subprocess.Popen(  # noqa: S603
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=err_fh if err_fh is not None else subprocess.DEVNULL,
-            )
+            proc = subprocess.Popen(cmd, **popen_kwargs)  # noqa: S603
         except FileNotFoundError:
             log.warning("caddy start 失败：未找到 caddy 可执行文件")
             return False

@@ -17,6 +17,7 @@ description: >-
 - 用户说「从文件夹导入 / 关联本机目录 / `--from-dir`」。
 - 源码在磁盘目录里，尚未打 zip。
 - 已有 `sourceKind=folder` 实例，需要「从源更新」。
+- zip/git 源实例想改为从本机目录持续更新——**原地切换源类型**（V0.8.12 / issue #28）。
 
 ## 红线（必须遵守）
 
@@ -26,7 +27,8 @@ description: >-
 1. **关联 ≠ 运行根**：Caddy root、compose bind、builtin 静态根、构建 cwd **不得**指向用户目录。
 2. 只读复制源；LWA **不**往关联目录写运行产物。
 3. 路径必须是**绝对路径**（拒绝 `./x`、`.` 等相对路径）。
-4. 不要用本 skill 做 zip↔文件夹模式转换（归 IMP-048，未实现）。
+4. **反向转换（folder/git → zip）未实现**（归 IMP-048）；正向（zip/git → folder）自
+   V0.8.12 起支持原地切换（issue #28），见下「更新」节。
 
 ## 导入（新建）
 
@@ -40,14 +42,21 @@ lwa import --from-dir /abs/path/to/my-site --name "My App" --path-alias myapp
 ## 更新
 
 ```bash
-# 路径须与实例关联目录一致（不一致会 Exit 2，不会静默改用别的目录）
+# folder 实例常规更新：路径须与实例关联目录一致（不一致会 Exit 2，不会静默改用别的目录）
+lwa import --from-dir /abs/path/to/my-site --update <instance-id>
+
+# zip/git 实例原地切换为 folder 源（V0.8.12 / issue #28，「换源不换实例」：
+# 保留实例 id / hostPort / 路径别名 / data/，仅覆盖 current/ 并登记新源身份）
 lwa import --from-dir /abs/path/to/my-site --update <instance-id>
 ```
 
 - 内容指纹未变 → 跳过（「无需更新」/已跳过），不 rebuild、不重启。
 - 有变更 → 再复制并走既有 update（data 策略对齐 zip / `--keep-data`）。
 - 关联目录缺失/不可读 → 报错，**禁止**回退为挂载运行。
-- 更换关联目录：先 `lwa remove`（按需）再对新路径重新 `--from-dir` 导入；不要指望 `--update` 换源。
+- **切换语义**（zip/git → folder）：即使目录内容与当前版本完全一致，也会完成
+  源身份切换（事件注明「仅切换源身份」）；切换会清掉旧 git 身份字段。
+  不带目录的 `--from-dir --update` 仍仅对 folder 源实例有效。
+- 更换关联目录（folder 实例换另一个目录）：先 `lwa remove`（按需）再对新路径重新 `--from-dir` 导入；`--update` 传不同目录会被一致性预检拒绝。
 
 ## 与 zip skill 分工
 
@@ -56,7 +65,7 @@ lwa import --from-dir /abs/path/to/my-site --update <instance-id>
 | 手里是 zip | [`lwa-import-zip`](../lwa-import-zip/SKILL.md) |
 | 手里是本机目录 | **本 skill** |
 
-zip 实例不能用 `--from-dir --update`；folder 实例日常更新用本路径，不要误走 zip `--update` 除非用户明确改用 zip（IMP-048 前无正式转换）。
+zip/git 实例要改走目录持续更新，用上节的原地切换（V0.8.12）；folder 实例日常更新用本路径，不要误走 zip `--update` 除非用户明确改用 zip（folder → zip 反向转换归 IMP-048，未实现）。
 
 ## 管理页
 

@@ -44,6 +44,11 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, statu
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from local_webpage_access.capability import (
+    CAPABILITY_RETRY_BACKOFF_BASE,
+    CAPABILITY_RETRY_BACKOFF_MAX,
+    next_capability_probe_delay,
+)
 from local_webpage_access.config import Config
 from local_webpage_access.errors import (
     BuildError,
@@ -80,6 +85,29 @@ _CAPABILITY_INITIAL_DELAY = 15.0
 _CAPABILITY_REFRESH_INTERVAL = 300.0
 _CAPABILITY_STOP_JOIN_TIMEOUT = 2.0
 _CAPABILITY_ERROR_LOG_INTERVAL = 300.0
+# issue #29：短退避缺省与 capability.CAPABILITY_RETRY_BACKOFF_* 对齐。
+_CAPABILITY_RETRY_BASE = CAPABILITY_RETRY_BACKOFF_BASE
+_CAPABILITY_RETRY_MAX = CAPABILITY_RETRY_BACKOFF_MAX
+
+
+def _capability_fragment_docker_pending(frag: Any) -> bool:
+    """能力片段中 Docker 相关字段是否仍未就绪（issue #29 短退避快探判据）。
+
+    同时看 manager 自身探测（dockerAccess/managerDockerAccess）与合并进来的
+    daemon 磁盘缓存（daemonDockerAccess）：后者仍 unavailable 时 manager 需
+    短间隔重读，等 daemon 快探收敛。
+    """
+    from local_webpage_access.capability import docker_state_pending
+
+    if not isinstance(frag, dict):
+        return False
+    caps = frag.get("capabilities")
+    if not isinstance(caps, dict):
+        return False
+    return any(
+        docker_state_pending(caps.get(key))
+        for key in ("dockerAccess", "managerDockerAccess", "daemonDockerAccess")
+    )
 
 
 # ---- token 机制（WBS-22.12）-------------------------------------------------
@@ -610,17 +638,29 @@ def create_app(
                 log.exception("manager 能力自检失败")
 
         def _bg_probe() -> None:
-            delay = _CAPABILITY_INITIAL_DELAY
+            # BUG-627：首轮用固定初始延迟（BUG-277：吸收 gateway 就绪窗口），
+            # 之后**先按本轮探测结果计算下一周期、再等待**——原实现先等旧
+            # delay 再更新，ready→unavailable 转换后仍先空等一个 300s 周期。
+            first_wait = True
+            retry_streak = 0
             while True:
+                frag: dict[str, Any] | None = None
                 try:
                     frag = _refresh_capability_cache()
                     app.state.capability_fragment = frag
                 except Exception as exc:  # noqa: BLE001 — 探测失败不阻断管理页
                     _mark_probe_failed(exc)
-                # BUG-277：首次延后等待 gateway 就绪；之后按间隔周期刷新。
+                delay, retry_streak, first_wait = next_capability_probe_delay(
+                    pending=_capability_fragment_docker_pending(frag),
+                    streak=retry_streak,
+                    first_wait=first_wait,
+                    initial_delay=_CAPABILITY_INITIAL_DELAY,
+                    refresh_interval=_CAPABILITY_REFRESH_INTERVAL,
+                    retry_base=_CAPABILITY_RETRY_BASE,
+                    retry_max=_CAPABILITY_RETRY_MAX,
+                )
                 if stop_event.wait(timeout=delay):
                     break
-                delay = _CAPABILITY_REFRESH_INTERVAL
 
         probe_thread = _threading.Thread(target=_bg_probe, name="lwa-capability-probe", daemon=True)
         probe_thread.start()

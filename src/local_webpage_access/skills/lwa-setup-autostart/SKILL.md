@@ -26,6 +26,9 @@ description: >-
 ## 产品口径（每次输出必含一句）
 
 - **macOS**：用户**登录触发**型自启（LaunchAgent），**不是**无人值守系统级服务。
+  Docker Desktop 是用户态 GUI 进程、就绪更慢——建议开启其「Start Docker Desktop
+  when you sign in」（issue #29）；即便未开启，V0.8.12 起 Docker 能力探针会以
+  10s→20s→40s 短退避（封顶 60s）快探收敛，Full Profile 假红通常 1 分钟内自愈。
 - **Linux**：systemd **user** 服务，登出后需 `enable-linger` 才保活。
 - **WSL**：Linux 侧同支持矩阵发行版（Ubuntu LTS / Debian Stable / Fedora）；但发行版**不随 Windows 开机自启**，需 Windows 登录任务唤醒。
 
