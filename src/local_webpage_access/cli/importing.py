@@ -57,7 +57,7 @@ def import_cmd(
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="非交互确认（CI / daemon 调用）"),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="仅预演：展示 hash 差异与形态变化，不写盘"
+        False, "--dry-run", help="仅与 --update 使用：预演更新的 hash 差异与形态变化，不写盘；全新导入不支持"
     ),
     no_restart: bool = typer.Option(
         False,
@@ -128,6 +128,10 @@ def import_cmd(
                 fg=typer.colors.RED,
                 err=True,
             )
+            raise typer.Exit(code=2)
+        if dry_run and update is None:
+            typer.secho("全新导入不支持 --dry-run；仅可与 --update <id> 一起预演更新。",
+                        fg=typer.colors.RED, err=True)
             raise typer.Exit(code=2)
         ws, config, reg = open_workspace_registry()
         try:

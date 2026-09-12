@@ -669,6 +669,63 @@ def _enrich_alias_rejection_with_findings(
     return enriched
 
 
+def _append_lwa_build_hint(
+    exc: RecognitionError,
+    manifest: InstanceManifest,
+    alias: str,
+) -> RecognitionError:
+    """DEV-132：Vite 前端实例的别名拒绝附加 LWA 侧最短解法。
+
+    守卫方案 B 指向应用侧改造（改源码 / 本地重建）；对 shared-static 且
+    stack 检出 Vite 的实例，LWA 自身即可完成「构建期注入 base」——
+    manifest ``buildEnv`` 或 ``entry.build`` 注入 + rebuild；
+    环境变量方式要求项目读取 VITE_BASE。仅提示，不改变拒绝判定；非 Vite 原样返回
+    （错误文案零变化）。
+
+    BUG-640：``buildBaseFromAlias`` 已开启时，构建期 ``effective_build_env()``
+    会用当前已保存别名推导 ``VITE_BASE`` 并覆盖手动值——直接
+    ``configure --build-env`` + rebuild 无法迁移到新 base，修复指引须先
+    ``--no-follow-alias-base`` 关闭跟随，完成目标 base 构建与别名变更后再
+    重新开启，否则指引本身会陷入重复失败。
+    """
+    if manifest.runtime != Runtime.SHARED_STATIC:
+        return exc
+    stack_lower = {s.lower() for s in manifest.stack}
+    if "vite" not in stack_lower:
+        return exc
+    # LwaError.__str__ 自带 [CODE] 前缀；拼接须用原始 message（同 _enrich_alias_rejection_with_findings）。
+    if manifest.buildBaseFromAlias:
+        lines = [
+            exc.message or str(exc),
+            "",
+            "—— Vite 构建配置（当前已开启别名跟随，手动 VITE_BASE 会被当前别名覆盖）——",
+            f"  按顺序迁移到 /{alias}/：",
+            f"  1. lwa configure {manifest.id} --no-follow-alias-base"
+            f" --build-env VITE_BASE=/{alias}/"
+            "（先关跟随再设目标 base；buildEnv 整组替换，其他变量需一并传入；"
+            "要求 vite.config 读 process.env.VITE_BASE）",
+            f"  2. lwa rebuild {manifest.id}（产物资源将带 /{alias}/ 前缀）",
+            f"  3. 重新设置别名 /{alias}/ 即可通过本守卫",
+            f"  4. lwa configure {manifest.id} --follow-alias-base"
+            "（迁移完成后重新开启跟随，后续构建按新别名推导 base）",
+        ]
+    else:
+        lines = [
+            exc.message or str(exc),
+            "",
+            "—— Vite 构建配置（环境变量方式需要项目配置配合）——",
+            f"  选择下列方式后执行 lwa rebuild {manifest.id}：",
+            f"  · lwa configure {manifest.id} --build-env VITE_BASE=/{alias}/"
+            "（buildEnv 整组替换，其他变量需一并传入；要求 vite.config 读 process.env.VITE_BASE）",
+            f'  · 或改 "entry": {{"build": "npm run build -- --base=/{alias}/"}}'
+            "（仅适用于 build 脚本直接调用 Vite；entry.build 重扫时不保留）",
+            f"  rebuild 后产物资源将带 /{alias}/ 前缀，重新设置别名即可通过本守卫。",
+        ]
+    enriched = RecognitionError("\n".join(lines))
+    enriched.context = dict(getattr(exc, "context", {}) or {})
+    return enriched
+
+
 def _set_instance_path_alias_locked(
     workspace: Workspace,
     config: Config,
@@ -742,7 +799,9 @@ def _set_instance_path_alias_locked(
                 # C.03（IMP-056 后置包）：拒绝原因保持 IMP-055 原文，其后附加
                 # 导入期预检的关联 finding 线索（file/line/fix）。无 finding
                 # 时错误完全原样；findings 只提供线索，不参与拒绝判定。
-                raise _enrich_alias_rejection_with_findings(exc, manifest) from exc
+                # DEV-132：Vite 实例再附加 LWA 侧解法（buildEnv / --base + rebuild）。
+                enriched = _enrich_alias_rejection_with_findings(exc, manifest)
+                raise _append_lwa_build_hint(enriched, manifest, alias) from exc
 
     # BUG-586：活验证失败回滚需恢复「变更前」片段，快照必须在新片段写入
     # 之前捕获；回滚时再读文件拿到的已是刚写入的新片段，恢复等于没恢复。

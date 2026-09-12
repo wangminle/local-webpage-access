@@ -2657,6 +2657,7 @@ def test_instances_redundant_flag_false_when_unique(manager_env: EnvBundle) -> N
     items = resp.json()["instances"]
     assert len(items) == 1
     assert items[0]["redundant"] is False
+    assert items[0]["configLossReasons"] == []  # issue #31
 
 
 def test_api_redundant_empty_when_unique(manager_env: EnvBundle) -> None:
@@ -2681,12 +2682,19 @@ def test_api_redundant_lists_duplicate(manager_env: EnvBundle) -> None:
 
 
 def test_api_redundant_item_has_camel_case_keys(manager_env: EnvBundle) -> None:
-    """IMP-019：冗余项字段为 camelCase（sourceZipHash / createdAt）。"""
+    """IMP-019：冗余项字段为 camelCase（sourceZipHash / createdAt / configLossReasons）。
+
+    BUG-639：新增 keeperId（同指纹组保留者），供批量清理锁内仅复核目标
+    与保留者，避免逐目标全库重算指纹。
+    """
     _seed_redundant_duplicate(manager_env)
     resp = manager_env.client.get("/api/redundant", headers=manager_env.auth_headers())
     item = resp.json()["instances"][0]
-    assert set(item.keys()) == {"id", "name", "sourceZipHash", "createdAt"}
+    assert set(item.keys()) == {"id", "name", "sourceZipHash", "createdAt",
+                                "configLossReasons", "skipReasons", "updatedAt", "pathAlias",
+                                "keeperId"}
     assert item["sourceZipHash"]  # 带指纹
+    assert item["configLossReasons"] == []  # 纯静态导入无独立配置
 
 
 def test_instances_redundant_flag_true_for_duplicate(manager_env: EnvBundle) -> None:
@@ -2697,6 +2705,25 @@ def test_instances_redundant_flag_true_for_duplicate(manager_env: EnvBundle) -> 
     by_id = {i["id"]: i for i in resp.json()["instances"]}
     assert by_id[manager_env.instance_id]["redundant"] is False
     assert by_id[dup_id]["redundant"] is True
+
+
+def test_instances_config_loss_reasons_exposed(manager_env: EnvBundle) -> None:
+    """issue #31：/api/instances 对配置了别名的冗余实例附 configLossReasons。"""
+    dup_id = _seed_redundant_duplicate(manager_env)
+    from local_webpage_access.models import InstanceManifest, RouteMode
+
+    ws = manager_env.workspace
+    manifest_path = ws.app_manifest_path(dup_id)
+    manifest = InstanceManifest.load(manifest_path)
+    manifest.static.routeMode = RouteMode.NAME.value
+    manifest.static.routeHost = "dup-alias"
+    manifest.save(manifest_path)
+
+    resp = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
+    by_id = {i["id"]: i for i in resp.json()["instances"]}
+    assert by_id[manager_env.instance_id]["configLossReasons"] == []
+    reasons = by_id[dup_id]["configLossReasons"]
+    assert any("dup-alias" in r for r in reasons)
 
 
 def test_api_remove_single_instance(manager_env: EnvBundle) -> None:
@@ -2908,10 +2935,43 @@ def test_api_redundant_remove_batch(manager_env: EnvBundle) -> None:
     assert body["action"] == "remove-redundant"
     assert body["removed"] == [dup_id]
     assert body["count"] == 1
+    assert body["skipped"] == []
     resp2 = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
     ids = [i["id"] for i in resp2.json()["instances"]]
     assert dup_id not in ids
     assert manager_env.instance_id in ids  # 最早者保留
+
+
+def test_api_redundant_remove_skips_alias_guarded(manager_env: EnvBundle) -> None:
+    """issue #31：配置了别名的冗余实例默认跳过，allowConfigLoss=1 才删除。"""
+    dup_id = _seed_redundant_duplicate(manager_env)
+    from local_webpage_access.models import InstanceManifest, RouteMode
+
+    ws = manager_env.workspace
+    manifest_path = ws.app_manifest_path(dup_id)
+    manifest = InstanceManifest.load(manifest_path)
+    manifest.static.routeMode = RouteMode.NAME.value
+    manifest.static.routeHost = "dup-alias"
+    manifest.save(manifest_path)
+
+    # 默认：跳过，不删除
+    resp = manager_env.client.post("/api/redundant/remove", headers=manager_env.auth_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["removed"] == []
+    assert body["count"] == 0
+    assert body["skipped"] == [{"id": dup_id, "reasons": ["配置了路径别名 /dup-alias/"]}]
+    assert manager_env.registry.get_instance(dup_id) is not None
+
+    # allowConfigLoss=1：允许删除
+    resp2 = manager_env.client.post(
+        "/api/redundant/remove?allowConfigLoss=1", headers=manager_env.auth_headers()
+    )
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+    assert body2["removed"] == [dup_id]
+    assert body2["skipped"] == []
+    assert manager_env.registry.get_instance(dup_id) is None
 
 
 # ---- IMP-040：LAN 地址新鲜度 / access refresh API ---------------------------
@@ -3324,3 +3384,23 @@ def test_pick_directory_lan_without_token_401(manager_env: EnvBundle) -> None:
         resp = lan.post("/api/pick-directory")
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "unauthorized"
+
+
+def test_instance_settings_api_validates_and_acknowledges(manager_env: EnvBundle) -> None:
+    from local_webpage_access.models import InstanceManifest
+    env = manager_env
+    url = f'/api/instances/{env.instance_id}/settings'
+    assert env.client.patch(url, json={'redundancyAcknowledged': True}).status_code == 401
+    path = env.workspace.app_manifest_path(env.instance_id)
+    before = path.read_bytes()
+    bad = env.client.patch(url, headers=env.auth_headers(), json={'buildEnv': {'BAD':'x\ny'}})
+    assert bad.status_code == 400
+    assert path.read_bytes() == before
+    response = env.client.patch(url, headers=env.auth_headers(), json={
+        'buildEnv': {'VITE_BASE':'/demo/'}, 'buildBaseFromAlias': True,
+        'redundancyAcknowledged': True,
+    })
+    assert response.status_code == 200
+    saved = InstanceManifest.load(path)
+    assert saved.buildEnv == {'VITE_BASE':'/demo/'}
+    assert saved.buildBaseFromAlias and saved.redundancyAcknowledged

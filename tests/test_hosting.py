@@ -457,6 +457,44 @@ def test_build_and_host_frontend_success(
     stop_instance(workspace, config, registry, "spa")
 
 
+def test_build_and_host_frontend_injects_build_env(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """DEV-132：manifest.buildEnv 注入安装/构建命令环境（os.environ 为底合并）。"""
+    from local_webpage_access.models import InstanceManifest
+
+    _seed_frontend_instance(workspace, registry, "spa")
+    mpath = workspace.app_manifest_path("spa")
+    manifest = InstanceManifest.load(mpath)
+    manifest.buildEnv = {"VITE_BASE": "/alias-demo/"}
+    manifest.save(mpath)
+
+    seen: dict[str, dict | None] = {}
+
+    def fake_run(cmd, *, cwd, log_path, env=None, **kw):
+        seen[cmd] = env
+        if "build" in cmd:
+            dist = Path(cwd) / "dist"
+            dist.mkdir(exist_ok=True)
+            (dist / "index.html").write_text("<html>built</html>")
+        return _subprocess_completed(0)
+
+    monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
+
+    build_and_host_frontend(workspace, config, registry, "spa")
+
+    import os
+
+    assert len(seen) == 2  # install + build 均注入
+    for cmd, env in seen.items():
+        assert env is not None, f"{cmd} 未收到 env"
+        assert env.get("VITE_BASE") == "/alias-demo/"
+        # subprocess env 整体替换语义：须以 os.environ 为底，PATH 不得丢失
+        assert env.get("PATH") == os.environ.get("PATH")
+
+    stop_instance(workspace, config, registry, "spa")
+
+
 def test_build_and_host_frontend_build_failure(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:

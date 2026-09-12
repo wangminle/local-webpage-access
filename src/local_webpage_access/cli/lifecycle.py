@@ -339,13 +339,19 @@ def remove(
         "--redundant",
         help="IMP-012：批量移除冗余实例（按原始 zip 指纹去重，保留每组最早者）",
     ),
+    allow_config_loss: bool = typer.Option(
+        False,
+        "--allow-config-loss",
+        help="issue #31：允许删除携带独立配置（路径别名 / buildEnv）的冗余实例",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="非交互确认（CI / 脚本调用）"),
 ) -> None:
     """移除实例（默认保留磁盘文件与 data/，仅删 registry 索引）。
 
     ``--redundant``（IMP-012）：批量清理冗余实例——由同一原始 zip 重复导入产生，
     按其 sha256 指纹分组，保留每组 createdAt 最早者，其余移除。执行前打印待删
-    列表与指纹供确认。
+    列表与指纹供确认。issue #31 护栏：携带独立配置（路径别名 / buildEnv）的
+    目标默认跳过，仅 ``--allow-config-loss`` 时删除。
     """
     from local_webpage_access.lifecycle import (
         list_redundant_instances,
@@ -364,24 +370,59 @@ def remove(
                         fg=typer.colors.GREEN,
                     )
                     return
+                guarded = [d for d in targets if d.get("configLossReasons")]
+                if allow_config_loss:
+                    guarded_note = f"其中 {len(guarded)} 个携带独立配置，允许删除配置；运行态保护仍优先"
+                else:
+                    guarded_note = f"其中 {len(guarded)} 个携带独立配置，默认跳过"
                 typer.secho(
-                    f"发现 {len(targets)} 个冗余实例（将保留每组最早者）：",
+                    f"发现 {len(targets)} 个冗余实例（将保留每组最早者；{guarded_note}）：",
                     fg=typer.colors.YELLOW,
                 )
                 for desc in targets:
+                    marker = ""
+                    reasons = desc.get("configLossReasons") or []
+                    if desc.get("skipReasons"):
+                        marker = "  [将跳过：" + "；".join(desc["skipReasons"]) + "]"
+                    elif reasons:
+                        # 预览标注须与实际处置一致：--allow-config-loss 时这些
+                        # 实例会被删除，不能再标「将跳过」。
+                        verb = "将跳过" if not allow_config_loss else "将删除（含配置）"
+                        marker = f"  [{verb}：{'；'.join(reasons)}]"
                     typer.echo(
                         f"  {desc['id']:<24} {desc['name']:<16} "
-                        f"sha256:{desc['sourceZipHash'][:12]} ({desc['createdAt']})"
+                        f"sha256:{desc['sourceZipHash'][:12]} ({desc['createdAt']}){marker}"
                     )
                 if not yes:
                     if not typer.confirm("确认移除以上冗余实例？", default=False):
                         typer.echo("已取消")
                         return
-                removed = remove_redundant(ws, config, reg, purge=purge, force=force)
-                typer.secho(
-                    f"已移除 {len(removed)} 个冗余实例",
-                    fg=typer.colors.GREEN,
+                outcome = remove_redundant(
+                    ws,
+                    config,
+                    reg,
+                    purge=purge,
+                    force=force,
+                    allow_config_loss=allow_config_loss,
                 )
+                removed = outcome["removed"]
+                skipped = outcome["skipped"]
+                if removed:
+                    typer.secho(
+                        f"已移除 {len(removed)} 个冗余实例",
+                        fg=typer.colors.GREEN,
+                    )
+                else:
+                    typer.secho(
+                        "没有实例被移除",
+                        fg=typer.colors.YELLOW,
+                    )
+                for item in skipped:
+                    typer.secho(
+                        f"已跳过 {item['id']}：{'；'.join(item['reasons'])}"
+                        "（如确认要删，加 --allow-config-loss）",
+                        fg=typer.colors.YELLOW,
+                    )
                 return
 
             if not instance_id:

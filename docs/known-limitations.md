@@ -191,7 +191,7 @@ swap=4GB
 
 ## CLI 与自动化
 
-* **批量操作**：无通用批量 start/stop；需借助 shell 循环或管理页 API。**例外**：`lwa remove --redundant` 与管理页「批量删除冗余」可按 zip 指纹批量清理冗余实例（IMP-012 / IMP-019）。
+* **批量操作**：无通用批量 start/stop；需借助 shell 循环或管理页 API。**例外**：`lwa remove --redundant` 与管理页「批量删除冗余」可按 zip 指纹批量清理冗余实例（IMP-012 / IMP-019）。携带独立配置（路径别名 / buildEnv）的冗余实例默认跳过，需 `--allow-config-loss` 才会删除（issue #31）。
 * **滚动更新**：不支持蓝绿/滚动发布，`rebuild` 是停机重建。
 * **CI/CD 集成**：无原生 webhook 触发器；可通过 inbox/ + daemon 或 API 自行实现。
 
@@ -243,3 +243,7 @@ swap=4GB
 * **镜像源缓存未命中**：实测国内镜像的响应头使 pip HTTP 缓存不落盘，requirements
   任何变更都会全量重新下载（BuildKit `/root/.cache/pip` 挂载在位也不改变该行为）。
 * uv / pipenv 项目同样走源链（`UV_DEFAULT_INDEX` / `PIPENV_PYPI_MIRROR` 逐源 `||`）。
+
+* **导入预览（#30）**：`lwa import --dry-run` 仅支持带 `--update <id>` 的原地更新。全新 zip、folder、git 导入传该选项会在打开工作区/下载前以退出码 2 拒绝，不会静默执行真实导入。
+* **构建环境**：`buildEnv` / `buildBaseFromAlias` 仅供宿主前端安装和构建使用，不支持 Docker 镜像构建或容器运行环境。Vite 项目须主动读取 `VITE_BASE`；别名跟随仅在下次构建生效，不会自动重构建或改写源码。手改 `entry.build --base` 不属于重扫保留清单，请优先使用 `lwa configure` 的持久配置。
+* **冗余清理**：运行中、期望运行、构建/排队/验证/取消中等过渡态以及配置不可读的实例始终跳过，`allowConfigLoss` 和 `force` 不绕过这条保护。请先停止，或明确选择单实例删除；`redundancyAcknowledged` 实例不会进入冗余候选。

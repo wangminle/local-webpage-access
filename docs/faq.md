@@ -388,7 +388,7 @@ status: pending
   lwa remove --redundant --purge  # 连磁盘一起清
   ```
 
-  或在管理页勾选「仅冗余」后「批量删除冗余」。任意项目的行内「删除」走 IMP-035 双阶段确认（可仅移除或彻底删除）。详见 [管理页](manager-page.md) 与 [运维手册](operations-playbook.md)。
+  携带独立配置（路径别名 / buildEnv）的冗余实例默认**跳过**（预览列表会标注「将跳过」），确要删除需追加 `--allow-config-loss`（issue #31）。或在管理页勾选「仅冗余」后「批量删除冗余」（弹窗列明每个实例的处置）。任意项目的行内「删除」走 IMP-035 双阶段确认（可仅移除或彻底删除）。详见 [管理页](manager-page.md) 与 [运维手册](operations-playbook.md)。
 
 ### 文件夹源导入（IMP-047 / V0.7.0+；管理页选目录 IMP-051 / V0.7.1）
 
@@ -471,6 +471,30 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 * 两个字段都不允许换行符；下载后直接交给 shell / Python / Node
   等解释器的高危执行链会被 Dockerfile 安全审计拒绝落盘。该审计是
   高危模式门禁，不等同于构建沙箱。改完后 `lwa rebuild <id>` 生效。
+
+### 前端构建需要注入环境变量怎么办？（buildEnv，DEV-132）
+
+推荐使用 `lwa configure <id> --build-env KEY=VALUE`（整组替换，可重复），详细选项见本页末尾。仅宿主前端构建生效，不用于容器构建。
+
+前端项目的构建产物常依赖部署期参数（最典型：路径别名下的 Vite `base`）。
+此前只能在 `entry.build` 里烤命令前缀（如 `VITE_BASE=/<alias>/ npm run build`），
+但 `entry` 不在重扫保留清单——`lwa scan` / `import --update` 重建 manifest 时会被
+重置，别名实例 rebuild 后即白屏。持久化出口是 `apps/<id>/local-web.json` 顶层字段：
+
+```json
+"buildEnv": {"VITE_BASE": "/my-alias/"}
+```
+
+* `lwa rebuild` / 启动构建时以 `{**os.environ, **buildEnv}` 注入安装与构建命令
+  （subprocess env 是整体替换语义，故以 `os.environ` 为底，PATH 不丢）。
+* `buildEnv` 与 `buildHooks` / `preStart` 同属重扫保留清单，`lwa scan` /
+  `import --update` / git 更新不会清空。
+* 项目侧需自行读取：如 Vite 在 `vite.config.js` 用
+  `base: process.env.VITE_BASE ?? '/'`。若不想改项目配置，Vite 还有通用写法：
+  把 `entry.build` 改成 `npm run build -- --base=/<alias>/`（CLI `--base` 覆盖），
+  但该值烤在 `entry` 里，**不在保留清单**，重扫后需检查是否被重置。
+* 应用源码若把默认 base 烤死为别名（编译期默认值），裸构建产物将只能服务别名
+  入口，端口直达白屏——base 应是部署期参数，默认值保持 `'/'` 通用。
 
 ### "实例 xx 正在被其他操作占用"（issue#1 / issue #17）
 
@@ -628,6 +652,11 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
   * 自查：`curl -i http://127.0.0.1:8080/<alias>/`，看 HTML 里 `src=` 是 `/assets/...`（绝对＝有问题）还是 `./assets/...`（相对＝正常）；再分别 `curl -i` 无前缀与带 `/<alias>` 前缀的资源 URL，对照状态码 / Content-Length / Content-Type。
   * **修复（方案 B - 显式、可配置的 base path）**：
     - Vite 构建：`vite build --base=/<alias>/`，同步重建静态产物后重新设置别名
+    - **LWA 侧免回源码（DEV-132）**：Vite 实例在 `apps/<id>/local-web.json`
+      顶层加 `"buildEnv": {"VITE_BASE": "/<alias>/"}`（重扫不清空）后
+      `lwa rebuild <id>`；或临时改 `entry.build` 为
+      `npm run build -- --base=/<alias>/`（不在保留清单，重扫会重置）。
+      设别名被守卫拦下时，Vite 实例的错误提示会附带该路径
     - Vue Router：`createWebHistory(import.meta.env.BASE_URL)`
     - 前端 API 客户端：从 `import.meta.env.BASE_URL` 派生请求路径（如 `/<alias>/api/v1`）
     - `base: './'` 可消除绝对资源路径但**不推荐作为最终方案**（Router/API 仍需跟 `BASE_URL`）
@@ -706,3 +735,26 @@ lwa gateway switch builtin --dry-run     # 只看将影响的实例
 - **能力范围**：`lwa workspace relocate`（IMP-042）支持 **macOS / Linux / WSL 同卷**原子改名；跨盘/跨机不自动，请按 [工作区迁移手册](workspace-rename.md) 人工处理。
 - 若迁前已 `docker compose down`：含 BUG-382 的版本用 `lwa start` 即可 `up -d`；旧版本可能需临时 `lwa rebuild`。
 - **V0.6.12 起裸 mv 防复发**：`lwa doctor` 的 `workspace_path_consistency` 会报告陈旧派生路径、落在旧工作区的 Caddy 引用、SQLite data mount 漂移；`gateway on` 启动前按当前工作区落盘主配置；容器 start 遇挂载漂移会 fail-safe 救援，`down` 失败或两侧数据冲突时中止并要求人工确认。**V0.6.13** 起：容器状态查询失败禁止当作「无容器」继续 start；registry 不可读时一致性检查 SKIP。修复入口：`relocate --verify` / `rebuild` / `recover` / `gateway on`。
+
+### 如何配置构建环境并让 base 跟随别名？
+
+使用 `lwa configure <id>` 查看配置；例如：
+
+```bash
+lwa configure demo --build-env VITE_BASE=/demo/ --build-env APP_MODE=preview
+lwa configure demo --follow-alias-base
+lwa rebuild demo
+```
+
+`--build-env` 可重复，整组替换原构建环境映射；`--clear-build-env` 清空映射。
+`--follow-alias-base` 开启后，每次宿主前端构建会从当前已保存别名计算 `VITE_BASE`：
+有别名为 `/别名/`，清除别名后为 `/`，且优先于手动 `buildEnv.VITE_BASE`；
+`--no-follow-alias-base` 关闭跟随并恢复手动值。修改别名不会自动执行构建，需执行 `lwa rebuild`。
+项目的 `vite.config` **必须读取 `process.env.VITE_BASE`**，注入环境变量本身不会改变 Vite 的 base。
+首次别名因旧产物绝对路径被拒绝时，可先手动设置目标 `VITE_BASE` 并 rebuild，再设置别名、开启跟随；
+若跟随**已经开启**，须先 `lwa configure <id> --no-follow-alias-base` 关闭跟随（此时手动 `VITE_BASE` 才不会被
+当前别名覆盖），完成目标 base 构建与别名变更后再重新开启跟随——拒绝提示中的四步指引即按此顺序给出。
+
+这些参数仅用于 **宿主前端构建的安装/构建命令**，不注入 Docker 镜像构建或容器运行环境；
+容器请使用项目 Dockerfile/Compose 提供的构建参数。`buildEnv` 值禁止 CR、LF、NUL，变量名须合法。
+`buildEnv`、别名跟随开关和重复实例保留标记均会在 scan、更新、rebuild 的配置重建时保留。

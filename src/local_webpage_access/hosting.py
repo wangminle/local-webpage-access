@@ -240,17 +240,29 @@ def build_and_host_frontend(
     )
 
     try:
+        # DEV-132：实例级构建环境变量（manifest.buildEnv，如 VITE_BASE）注入
+        # 安装/构建命令。subprocess env 是整体替换语义——须以 os.environ 为底
+        # 合并，否则 npm/node 失去 PATH 而找不到可执行文件。
+        import os
+
+        from local_webpage_access.instance_settings import effective_build_env
+
+        build_env = {**os.environ, **effective_build_env(manifest)}
         # 1-5. 安装 + 构建（WBS-11.01~06）
         if manifest.entry.install:
             write_instance_log(
                 workspace.apps, instance_id, "build", f"安装：{manifest.entry.install}"
             )
-            run_command(manifest.entry.install, cwd=work_dir, log_path=build_log)
+            run_command(
+                manifest.entry.install, cwd=work_dir, log_path=build_log, env=build_env
+            )
         if manifest.entry.build:
             write_instance_log(
                 workspace.apps, instance_id, "build", f"构建：{manifest.entry.build}"
             )
-            run_command(manifest.entry.build, cwd=work_dir, log_path=build_log)
+            run_command(
+                manifest.entry.build, cwd=work_dir, log_path=build_log, env=build_env
+            )
         else:
             raise BuildError(
                 "缺少 build 脚本，无法构建前端项目",

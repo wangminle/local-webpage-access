@@ -116,6 +116,168 @@ def test_set_alias_rejects_when_entrypoint_has_absolute_assets(
     assert reloaded.static.routeHost is None
 
 
+def test_set_alias_vite_rejection_includes_lwa_build_hint(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """DEV-132：Vite 前端实例的别名拒绝须附加 LWA 侧最短解法。
+
+    stack 检出 vite 的 shared-static 实例，错误文案在 IMP-055 原文之后补充
+    buildEnv 字段 / entry.build --base 注入 + lwa rebuild 的修复路径；
+    非 Vite 实例错误文案保持不变（上方用例已覆盖——无 buildEnv 字样）。
+    """
+    from local_webpage_access import path_alias
+    from local_webpage_access.models import (
+        ResourceProfile,
+        ServingMode,
+        StaticConfig,
+    )
+
+    workspace.ensure_app_dirs("spa-vite")
+    (workspace.app_current("spa-vite") / "index.html").write_text(
+        '<script src="/assets/app.js"></script>'
+    )
+    manifest = InstanceManifest(
+        id="spa-vite",
+        name="spa-vite",
+        version="1",
+        kind=Kind.NODE,
+        stack=["vite"],
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.SMALL,
+        status=Status.RUNNING,
+        desiredState=DesiredState.RUNNING,
+        static=StaticConfig(
+            hostPort=21097,
+            enabled=True,
+        ),
+    )
+    manifest.save(workspace.app_manifest_path("spa-vite"))
+    registry.upsert_from_manifest(manifest)
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def is_enabled(self, iid):
+            return True
+
+        def generate_alias_config(self, iid, alias, hp, **kwargs):
+            pass
+
+        def reload_all(self):
+            pass
+
+        def remove_alias_config(self, iid):
+            pass
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(
+        path_alias,
+        "_fetch_entrypoint_html_for_alias_guard",
+        lambda **kwargs: '<script src="/assets/app.js"></script>',
+    )
+
+    with pytest.raises(RecognitionError) as ei:
+        set_instance_path_alias(
+            workspace, config, registry, "spa-vite", "home-bookshelf"
+        )
+    msg = str(ei.value)
+    # IMP-055 原文保留
+    assert "绝对路径资源" in msg
+    # LWA 侧解法：buildEnv 字段 + --base 注入 + rebuild
+    assert "buildEnv" in msg
+    assert "lwa configure spa-vite --build-env VITE_BASE=/home-bookshelf/" in msg
+    assert "--base=/home-bookshelf/" in msg
+    assert "lwa rebuild spa-vite" in msg
+
+
+def test_set_alias_vite_rejection_hint_requires_disabling_follow_first(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-640：buildBaseFromAlias 已开启时，提示须先 --no-follow-alias-base。
+
+    跟随开启时 effective_build_env() 以当前别名推导 VITE_BASE 并覆盖手动
+    值，直接 `configure --build-env` + rebuild 无法迁移到新 base、再次设
+    别名仍被拒——指引会陷入重复失败。须先关跟随，完成目标 base 构建与
+    别名变更后再重新开启。
+    """
+    from local_webpage_access import path_alias
+    from local_webpage_access.models import (
+        ResourceProfile,
+        ServingMode,
+        StaticConfig,
+    )
+
+    workspace.ensure_app_dirs("spa-follow")
+    (workspace.app_current("spa-follow") / "index.html").write_text(
+        '<script src="/assets/app.js"></script>'
+    )
+    manifest = InstanceManifest(
+        id="spa-follow",
+        name="spa-follow",
+        version="1",
+        kind=Kind.NODE,
+        stack=["vite"],
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.SMALL,
+        status=Status.RUNNING,
+        desiredState=DesiredState.RUNNING,
+        buildBaseFromAlias=True,
+        static=StaticConfig(
+            hostPort=21098,
+            enabled=True,
+        ),
+    )
+    manifest.save(workspace.app_manifest_path("spa-follow"))
+    registry.upsert_from_manifest(manifest)
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def is_enabled(self, iid):
+            return True
+
+        def generate_alias_config(self, iid, alias, hp, **kwargs):
+            pass
+
+        def reload_all(self):
+            pass
+
+        def remove_alias_config(self, iid):
+            pass
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(
+        path_alias,
+        "_fetch_entrypoint_html_for_alias_guard",
+        lambda **kwargs: '<script src="/assets/app.js"></script>',
+    )
+
+    with pytest.raises(RecognitionError) as ei:
+        set_instance_path_alias(workspace, config, registry, "spa-follow", "home-bookshelf")
+    msg = str(ei.value)
+    # IMP-055 原文保留
+    assert "绝对路径资源" in msg
+    # 修复指引：先关跟随再设目标 base，迁移完成后重新开启
+    assert (
+        "lwa configure spa-follow --no-follow-alias-base"
+        " --build-env VITE_BASE=/home-bookshelf/" in msg
+    )
+    assert "lwa rebuild spa-follow" in msg
+    assert "lwa configure spa-follow --follow-alias-base" in msg
+    # 不可再单独推荐会被当前别名覆盖的 --build-env 直设路径
+    assert "lwa configure spa-follow --build-env" not in msg
+
+
 def test_set_alias_blocks_absolute_assets_for_docker_compose(
     workspace, registry, config, monkeypatch
 ) -> None:

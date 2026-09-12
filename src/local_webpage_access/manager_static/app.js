@@ -481,6 +481,13 @@
             submitting: false,
             error: "",
           },
+          // issue #31：批量删除冗余确认弹窗（列明细 + 护栏提示，替代原生 confirm）
+          redundantDialog: {
+            allowConfigLoss: false,
+            open: false,
+            submitting: false,
+            error: "",
+          },
           toastState: { show: false, msg: "", kind: "" },
           // C.R03：降级确认弹窗
           fallbackDialog: {
@@ -592,8 +599,24 @@
           }
           return rows.map(function (i) { return LWA.rowHtml(i, self.pageviewMap); }).join("");
         },
+        // issue #31：冗余实例明细（含 configLossReasons，来自 /api/instances），
+        // 供批量删除弹窗列出 id / 名称 / 状态 / 跳过原因。
+        redundantInstances: function () {
+          return this.instances.filter(function (i) { return i.redundant; });
+        },
         redundantCount: function () {
-          return this.instances.filter(function (i) { return i.redundant; }).length;
+          return this.redundantInstances.length;
+        },
+        redundantDeletableCount: function () {
+          var allow = this.redundantDialog.allowConfigLoss;
+          return this.redundantInstances.filter(function (i) {
+            return !LWA.redundantRemovalReasons(i, allow).length;
+          }).length;
+        },
+        redundantGuardedCount: function () {
+          return this.redundantInstances.filter(function (i) {
+            return i.configLossReasons && i.configLossReasons.length;
+          }).length;
         },
       },
       methods: {
@@ -1017,15 +1040,61 @@
             });
         },
 
-        removeRedundant: function () {
-          var n = this.redundantCount;
-          if (!n) { this.toast("当前没有冗余实例", "error"); return; }
-          if (!confirm("确认批量删除 " + n + " 个冗余实例？\n（同源 zip 仅保留最早导入者；唯一实例不受影响。）")) return;
+        // ---- issue #31：批量删除冗余弹窗 ----
+        openRedundantDialog: function () {
+          if (!this.redundantInstances.length) {
+            this.toast("当前没有冗余实例", "error");
+            return;
+          }
+          this.redundantDialog.error = "";
+          this.redundantDialog.allowConfigLoss = false;
+          this.redundantDialog.open = true;
+        },
+        closeRedundantDialog: function () {
+          if (this.redundantDialog.submitting) return;
+          this.redundantDialog.open = false;
+        },
+        redundantRemovalReasons: function (i) {
+          return LWA.redundantRemovalReasons(i, this.redundantDialog.allowConfigLoss);
+        },
+        acknowledgeRedundant: function (id) {
+          if (this.redundantDialog.submitting) return;
           var self = this;
+          this.redundantDialog.submitting = true;
+          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/settings", {
+            method: "PATCH", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({redundancyAcknowledged: true})
+          }).then(function () {
+            self.instances = self.instances.map(function (i) {
+              return i.id === id ? Object.assign({}, i, {redundant: false}) : i;
+            });
+            self.toast("已标记为有意保留；可用 lwa configure 撤销", "success");
+            self.refresh();
+          }).catch(function (e) {
+            self.redundantDialog.error = e.message;
+          }).finally(function () { self.redundantDialog.submitting = false; });
+        },
+        submitRedundantDialog: function () {
+          if (this.redundantDialog.submitting || !this.redundantDeletableCount) return;
+          var self = this;
+          this.redundantDialog.submitting = true;
+          this.redundantDialog.error = "";
           this.toast("正在批量清理冗余…");
-          apiFetch(this, "/api/redundant/remove", { method: "POST" })
-            .then(function (data) { self.toast("已清理 " + (data.count || 0) + " 个冗余实例", "success"); self.refresh(); })
-            .catch(function (e) { self.toast("批量清理失败：" + e.message, "error"); });
+          apiFetch(this, "/api/redundant/remove?allowConfigLoss=" + this.redundantDialog.allowConfigLoss, { method: "POST" })
+            .then(function (data) {
+              self.redundantDialog.open = false;
+              self.redundantDialog.submitting = false;
+              var skipped = (data.skipped || []).length;
+              var msg = "已清理 " + (data.count || 0) + " 个冗余实例";
+              if (skipped) msg += "，跳过 " + skipped + " 个（受保护或清理失败）";
+              self.toast(msg, "success");
+              self.refresh();
+            })
+            .catch(function (e) {
+              self.redundantDialog.submitting = false;
+              self.redundantDialog.error = e.message || "批量清理失败";
+              self.toast("批量清理失败：" + e.message, "error");
+            });
         },
 
         // ---- 详情抽屉 ----
@@ -1394,6 +1463,7 @@
           }
           if (e.key !== "Escape") return;
           if (this.removeDialog.open) this.closeRemoveDialog();
+          else if (this.redundantDialog.open) this.closeRedundantDialog();
           else if (this.folderImport.open) this.closeFolderImport();
           else if (this.fallbackDialog.open) this.cancelFallback();
           else if (this.gitImport.open) this.closeGitImport();
@@ -1513,8 +1583,9 @@
     '        <option value="shared-static">静态站点</option><option value="container">容器</option>',
     "      </select>",
     '      <label><input type="checkbox" v-model="filters.pending" /> 仅待处理/失败</label>',
-    '      <label><input type="checkbox" v-model="filters.redundant" /> 仅冗余</label>',
-    '      <button class="btn btn-sm btn-warn" title="移除同包重复导入的冗余实例（保留每组最早者），不删最早者与唯一实例" @click="removeRedundant">批量删除冗余</button>',
+    '      <label title="琥珀色竖条 = 同一原始 zip 重复导入产生的冗余实例（保留每组最早导入者）"><input type="checkbox" v-model="filters.redundant" /> 仅冗余</label>',
+    '      <button class="btn btn-sm btn-warn" title="移除同包重复导入的冗余实例（保留每组最早者）；携带独立配置（路径别名 / buildEnv）的实例默认跳过" @click="openRedundantDialog">批量删除冗余</button>',
+    '      <span v-if="redundantCount" class="redundant-hint">琥珀竖条 = 同源 zip 重复导入，保留最早者；携带独立配置（别名 / buildEnv）的实例清理时自动跳过</span>',
     '      <button class="btn btn-sm" title="从本机文件夹导入（复制进工作区，非就地运行）" @click="openFolderImport">导入文件夹</button>',
     '      <button class="btn btn-sm" title="从 GitHub 仓库导入（浅克隆后复制进工作区；本机与局域网均可）" @click="openGitImport">从 GitHub 导入</button>',
     "    </div>",
@@ -1717,6 +1788,39 @@
     "        </button>",
     "      </div></div>",
     "  </div></div>",
+    // issue #31：批量删除冗余确认（列明细 + 护栏提示，替代原生 confirm）
+    '<div class="modal" :hidden="!redundantDialog.open" role="dialog" aria-modal="true" aria-labelledby="redundant-dialog-title">',
+    '  <div class="modal-card redundant-modal-card">',
+    '    <div class="modal-header"><h2 id="redundant-dialog-title">批量删除冗余实例</h2>',
+    '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭批量删除冗余" @click="closeRedundantDialog" :disabled="redundantDialog.submitting">✕</button></div>',
+    '    <div class="modal-body">',
+    '      <p class="remove-dialog-hint">以下 {{ redundantInstances.length }} 个实例与同源 zip 的更早实例重复（行首琥珀竖条）。清理<b>保留每组最早导入者</b>，最早者与唯一实例不受影响。</p>',
+    '      <div class="redundant-table-scroll"><table class="redundant-dialog-table">',
+    '        <thead><tr><th>实例</th><th>状态</th><th>别名</th><th>更新时间</th><th>处置</th><th>保留</th></tr></thead>',
+    '        <tbody>',
+    '          <tr v-for="i in redundantInstances" :key="i.id">',
+    '            <td><code>{{ i.id }}</code><span class="cell-muted">{{ i.name ? " · " + i.name : "" }}</span></td>',
+    '            <td>{{ statusLabel(i.status) }}</td>',
+    '            <td>{{ i.pathAlias ? "/" + i.pathAlias + "/" : "—" }}</td>',
+    '            <td>{{ i.updatedAt || "—" }}</td>',
+    '            <td v-if="redundantRemovalReasons(i).length" class="remove-dialog-warn">将跳过：{{ redundantRemovalReasons(i).join("；") }}</td>',
+    '            <td v-else class="cell-muted">{{ i.configLossReasons && i.configLossReasons.length ? "将移除（含独立配置）" : "将移除" }}</td>',
+    '            <td><button class="btn btn-sm" @click="acknowledgeRedundant(i.id)" :disabled="redundantDialog.submitting">有意保留</button></td>',
+    "          </tr>",
+    "        </tbody>",
+    "      </table></div>",
+    '      <label v-if="redundantGuardedCount"><input type="checkbox" v-model="redundantDialog.allowConfigLoss" :disabled="redundantDialog.submitting">我确认允许丢失这些实例的独立配置（别名、构建环境）</label>',
+    '      <p class="remove-dialog-warn">运行中或过渡态实例始终跳过，请先停止。可清理 {{ redundantDeletableCount }} 个；0 个时不能确认。</p>',
+    '      <p class="remove-dialog-error" :hidden="!redundantDialog.error">{{ redundantDialog.error }}</p>',
+    '    </div>',
+    '    <div class="modal-footer" style="display:flex; justify-content:flex-end; gap:0.5rem;">',
+    '      <button class="btn btn-ghost" type="button" @click="closeRedundantDialog" :disabled="redundantDialog.submitting">取消</button>',
+    '      <button class="btn btn-danger" type="button" @click="submitRedundantDialog" :disabled="redundantDialog.submitting || !redundantDeletableCount">',
+    '        {{ redundantDialog.submitting ? "清理中…" : "确认清理" }}',
+    "      </button>",
+    '    </div>',
+    "  </div>",
+    "</div>",
     // C.R03：降级确认弹窗
     '<div class="modal" :hidden="!fallbackDialog.open" role="dialog" aria-modal="true" aria-labelledby="fallback-dialog-title">',
     '  <div class="modal-card">',

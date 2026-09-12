@@ -398,9 +398,34 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   cursor: help;
 }
 
+/* issue #31：工具栏可见释义（存在冗余实例时显示，替代纯悬停 title） */
+.redundant-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* issue #31：批量删除冗余弹窗内的明细表 */
+.redundant-dialog-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 13px;
+}
+.redundant-dialog-table th,
+.redundant-dialog-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.redundant-dialog-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
 .cell-name {
   font-weight: 500;
-  max-width: 220px;
+  max-width: 440px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -433,6 +458,11 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 }
 .cell-url a { color: var(--primary); text-decoration: none; }
 .cell-url a:hover { text-decoration: underline; }
+/* 访问地址两行排版（与 .stack-tags 同思路）：每行块级堆叠，单元格内蕴宽度
+   取两行中较宽者——第一行「端口 · 本机」为宽度下限，最长路径别名为上限。 */
+.url-lines { display: block; }
+.url-line { display: block; }
+.url-line + .url-line { margin-top: 2px; }
 .cell-muted { color: var(--text-muted); }
 
 /* IMP-007：端口列主显示 hostPort，副信息为端口映射标签 */
@@ -463,6 +493,15 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   background: var(--blue-bg);
   color: var(--primary);
 }
+/* 技术栈列（DEV-133）：3 列网格——第一行最多 3 个标签，第 4 个起换行；
+   各行共用同一组列轨道（每列取最宽标签），第二行及以后与第一行等宽对齐。 */
+.stack-tags {
+  display: inline-grid;
+  grid-template-columns: repeat(3, max-content);
+  gap: 2px 3px;
+  vertical-align: middle;
+}
+.stack-tags .stack-tag { margin-right: 0; }
 
 /* ---- 抽屉 ---- */
 .drawer {
@@ -977,3 +1016,8 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
     width: 100%;
   }
 }
+
+/* 冗余预览六列；窄屏横向滚动，避免覆盖对话框操作按钮。 */
+.redundant-modal-card { width: min(1050px, calc(100vw - 32px)); max-width: 1050px; }
+.redundant-table-scroll { overflow-x: auto; }
+.redundant-dialog-table { min-width: 650px; }

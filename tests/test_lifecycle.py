@@ -1412,6 +1412,7 @@ def test_list_redundant_keeps_oldest(workspace, registry, config) -> None:
     ids = [r["id"] for r in redundant]
     assert ids == ["newer"]  # oldest 保留；unique 唯一不参与
     assert redundant[0]["sourceZipHash"]  # 带指纹
+    assert redundant[0]["configLossReasons"] == []  # 无独立配置（issue #31）
 
 
 def test_redundant_ignores_empty_hash(workspace, registry, config) -> None:
@@ -1431,8 +1432,9 @@ def test_remove_redundant_keeps_oldest_and_purges(workspace, registry, config) -
     _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
     _seed_redundant(workspace, registry, "drop", _SAME_ZIP, "2026-07-02T10:00:00")
 
-    removed = remove_redundant(workspace, config, registry, purge=True, force=True)
-    assert removed == ["drop"]
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == ["drop"]
+    assert outcome["skipped"] == []
     assert registry.get_instance("drop") is None
     assert registry.get_instance("keep") is not None  # 最早者保留
     assert not workspace.app_dir("drop").exists()  # purge 删了磁盘
@@ -1443,7 +1445,199 @@ def test_remove_redundant_none_when_all_unique(workspace, registry, config) -> N
     _seed_redundant(workspace, registry, "a", b"aaa", "2026-07-01T10:00:00")
     _seed_redundant(workspace, registry, "b", b"bbb", "2026-07-02T10:00:00")
     assert list_redundant_instances(workspace, registry) == []
-    assert remove_redundant(workspace, config, registry) == []
+    outcome = remove_redundant(workspace, config, registry)
+    assert outcome["removed"] == []
+    assert outcome["skipped"] == []
+
+
+# ---- issue #31：携带独立配置的冗余目标默认跳过 -----------------------------
+
+
+def _guard_manifest_for(workspace, iid: str) -> None:
+    """给实例的 manifest 写入路径别名 + buildEnv，模拟「删除即丢配置」场景。"""
+    from local_webpage_access.models import InstanceManifest, RouteMode
+
+    path = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(path)
+    manifest.container.routeMode = RouteMode.NAME.value
+    manifest.container.routeHost = "my-alias"
+    manifest.buildEnv = {"VITE_BASE": "/my-alias/"}
+    manifest.save(path)
+
+
+def test_redundant_list_reports_config_loss_reasons(workspace, registry, config) -> None:
+    """issue #31：list_redundant_instances 对带别名/buildEnv 的目标给出理由。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "plain", _SAME_ZIP, "2026-07-02T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-03T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    redundant = {r["id"]: r for r in list_redundant_instances(workspace, registry)}
+    assert set(redundant) == {"plain", "curated"}  # keep 为最早者保留
+    assert redundant["plain"]["configLossReasons"] == []
+    reasons = redundant["curated"]["configLossReasons"]
+    assert any("my-alias" in r for r in reasons)
+    assert any("buildEnv" in r for r in reasons)
+
+
+def test_remove_redundant_skips_config_loss_targets(workspace, registry, config) -> None:
+    """issue #31：携带独立配置的冗余目标默认跳过，不删除。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-02T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    outcome = remove_redundant(workspace, config, registry)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["curated"]
+    assert any("my-alias" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("curated") is not None  # 未被删除
+
+
+def test_remove_redundant_allow_config_loss_overrides(workspace, registry, config) -> None:
+    """issue #31：allow_config_loss=True 时携带独立配置的目标也可删除。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-02T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    outcome = remove_redundant(
+        workspace, config, registry, purge=True, force=True, allow_config_loss=True
+    )
+    assert outcome["removed"] == ["curated"]
+    assert outcome["skipped"] == []
+    assert registry.get_instance("curated") is None
+    assert registry.get_instance("keep") is not None
+
+
+# ---- BUG-639：锁内候选复核不得退化为逐目标全库指纹重算 ---------------------
+
+
+def test_remove_redundant_fingerprint_reads_are_linear(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-639：批量清理的 ZIP 指纹读取次数必须保持线性。
+
+    8 个同源实例全部因非空 data 目录跳过删除时，旧实现在每个目标的删除
+    锁内重新执行一次 list_redundant_instances（全库 ZIP 读取），本场景共
+    64 次全量读取（8 预览 + 7 目标 × 8 全库）；修复后预览全库扫描一次，
+    锁内每个目标仅复核自身与保留者两个 ZIP。断言上限 3N（N 次预览 +
+    2N 次锁内复核）。
+    """
+    from local_webpage_access import lifecycle as lc
+
+    for i in range(8):
+        iid = f"dup{i}"
+        _seed_redundant(workspace, registry, iid, _SAME_ZIP, f"2026-07-0{i + 1}T10:00:00")
+        data_dir = workspace.app_data(iid)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "keep.bin").write_bytes(b"x")
+
+    real_fp = lc._instance_zip_fingerprint
+    reads = {"n": 0}
+
+    def _counting_fp(ws, iid):
+        reads["n"] += 1
+        return real_fp(ws, iid)
+
+    monkeypatch.setattr(lc, "_instance_zip_fingerprint", _counting_fp)
+
+    outcome = remove_redundant(workspace, config, registry, purge=True)  # 无 force → data 保护全跳过
+
+    assert outcome["removed"] == []
+    assert len(outcome["skipped"]) == 7  # dup0 为保留者，不参与删除
+    assert reads["n"] <= 3 * 8  # 旧实现为 64
+
+
+def test_remove_redundant_recheck_rejects_replaced_target_zip(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-639：目标 ZIP 在预览后被替换时，锁内复核须拒绝删除。
+
+    复核仅重算目标与保留者指纹：目标指纹漂移即不再是冗余候选。
+    """
+    from local_webpage_access import lifecycle as lc
+
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "drop", _SAME_ZIP, "2026-07-02T10:00:00")
+
+    real_remove = lc.remove_instance
+
+    def _swap_target_zip_then_remove(*args, **kwargs):
+        workspace.app_original_zip("drop").write_bytes(b"replaced-after-preview")
+        return real_remove(*args, **kwargs)
+
+    monkeypatch.setattr(lc, "remove_instance", _swap_target_zip_then_remove)
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["drop"]
+    assert any("不再是冗余候选" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("drop") is not None
+
+
+def test_remove_redundant_recheck_falls_back_when_keeper_lost(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-639：保留者消失时退回全库复查，语义与旧实现一致。
+
+    保留者 original.zip 在预览后被移除：目标 drop 按全库复查成为新的
+    最早者（不再冗余，跳过），drop2 仍在其后（正常删除）。
+    """
+    from local_webpage_access import lifecycle as lc
+
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "drop", _SAME_ZIP, "2026-07-02T10:00:00")
+    _seed_redundant(workspace, registry, "drop2", _SAME_ZIP, "2026-07-03T10:00:00")
+
+    real_remove = lc.remove_instance
+
+    def _strip_keeper_zip_then_remove(*args, **kwargs):
+        keeper_zip = workspace.app_original_zip("keep")
+        if keeper_zip.exists():
+            keeper_zip.unlink()
+        return real_remove(*args, **kwargs)
+
+    monkeypatch.setattr(lc, "remove_instance", _strip_keeper_zip_then_remove)
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == ["drop2"]  # drop 成为新的最早者，保留
+    assert [s["id"] for s in outcome["skipped"]] == ["drop"]
+    assert any("不再是冗余候选" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("drop") is not None
+
+
+def test_cli_remove_redundant_preview_marks_deletion_when_allow_config_loss(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-634：--allow-config-loss 时预览不得再标「将跳过」（与实际处置一致）。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+    from local_webpage_access.registry import Registry
+
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-02T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    def _fake_open():  # CLI 收尾会 close，故每次返回新打开的 Registry
+        reg = Registry(workspace.root / "registry" / "local-web.db")
+        reg.open()
+        return workspace, config, reg
+
+    monkeypatch.setattr(
+        "local_webpage_access.cli.lifecycle.open_workspace_registry",
+        _fake_open,
+    )
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["remove", "--redundant", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "将跳过" in res.output  # 默认护栏跳过
+
+    res2 = runner.invoke(app, ["remove", "--redundant", "--allow-config-loss", "--yes"])
+    assert res2.exit_code == 0, res2.output
+    assert "将跳过" not in res2.output  # 实删场景不得再标跳过
+    assert "将删除（含配置）" in res2.output
+    assert registry.get_instance("curated") is None
 
 
 # ---- IMP-014：容器实例路径别名 --------------------------------------------

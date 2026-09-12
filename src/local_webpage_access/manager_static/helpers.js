@@ -8,6 +8,12 @@
 
   var LWA = {};
 
+  LWA.redundantRemovalReasons = function (instance, allowConfigLoss) {
+    var reasons = (instance.skipReasons || []).slice();
+    if (!allowConfigLoss) reasons = reasons.concat(instance.configLossReasons || []);
+    return reasons;
+  };
+
   // ---- 转义与格式化 ----
 
   LWA.esc = function (s) {
@@ -136,26 +142,33 @@
 
   // ---- 表格单元格 ----
 
+  // 标签统一包进 .stack-tags 容器（DEV-133）：配合 style.css 的 3 列网格实现
+  // 「第一行最多 3 个标签，第 4 个起换行」的窄列排版。仅表格技术栈列使用。
   LWA.stackHtml = function (stack, database) {
-    var html = "";
+    var tags = [];
     if (database) {
-      html += '<span class="stack-tag db" title="数据库">' + LWA.esc(database) + "</span>";
+      tags.push('<span class="stack-tag db" title="数据库">' + LWA.esc(database) + "</span>");
     }
     if (stack && stack.length) {
-      html += stack
-        .slice(0, 4)
-        .map(function (s) {
-          return '<span class="stack-tag">' + LWA.esc(s) + "</span>";
-        })
-        .join("");
+      tags = tags.concat(
+        stack
+          .slice(0, 4)
+          .map(function (s) {
+            return '<span class="stack-tag">' + LWA.esc(s) + "</span>";
+          })
+      );
     }
-    return html || '<span class="cell-muted">—</span>';
+    if (!tags.length) return '<span class="cell-muted">—</span>';
+    return '<span class="stack-tags">' + tags.join("") + "</span>";
   };
 
+  // 访问地址两行排版：第一行「端口 · 本机」，第二行路径别名。配合 style.css
+  // 的 .url-line 块级布局，列宽取两行中较宽者（端口/本机行为下限，最长别名
+  // 为上限），省下的宽度让给名称列。
   LWA.urlHtml = function (i) {
-    var parts = [];
+    var primary = [];
     if (i.lanUrl) {
-      parts.push(
+      primary.push(
         '<a href="' +
           LWA.esc(i.lanUrl) +
           '" target="_blank" rel="noopener" title="宿主端口访问（LAN IP）">端口</a>'
@@ -164,23 +177,33 @@
     // 建议项 D：始终提供 127.0.0.1 本机链接作兜底——DHCP/换网后 LAN IP 漂移，
     // 旧 lanUrl 打不开时，本机回环链接仍可用。
     if (i.localhostUrl) {
-      parts.push(
+      primary.push(
         '<a href="' +
           LWA.esc(i.localhostUrl) +
           '" target="_blank" rel="noopener" title="本机回环访问（127.0.0.1，LAN IP 漂移时兜底）">本机</a>'
       );
     }
+    var aliasHtml = "";
     if (i.routeUrl) {
-      parts.push(
+      aliasHtml =
         '<a href="' +
-          LWA.esc(i.routeUrl) +
-          '" target="_blank" rel="noopener" title="路径别名入口">/' +
-          LWA.esc(i.routeHost || "") +
-          "/</a>"
-      );
+        LWA.esc(i.routeUrl) +
+        '" target="_blank" rel="noopener" title="路径别名入口">/' +
+        LWA.esc(i.routeHost || "") +
+        "/</a>";
     }
-    if (!parts.length) return '<span class="cell-muted">—</span>';
-    return parts.join('<span class="cell-muted"> · </span>');
+    if (!primary.length && !aliasHtml) return '<span class="cell-muted">—</span>';
+    var html = "";
+    if (primary.length) {
+      html +=
+        '<span class="url-line">' +
+        primary.join('<span class="cell-muted"> · </span>') +
+        "</span>";
+    }
+    if (aliasHtml) {
+      html += '<span class="url-line url-alias">' + aliasHtml + "</span>";
+    }
+    return '<span class="url-lines">' + html + "</span>";
   };
 
   LWA.portHtml = function (i) {
@@ -406,7 +429,7 @@
       ' 详情">' +
       displayName +
       (i.redundant
-        ? ' <span class="redundant-badge" title="与同源 zip 的更早实例重复">冗余</span>'
+        ? ' <span class="redundant-badge" title="冗余：与同源 zip 的更早实例重复（每组保留最早导入者）。如两份是有意部署（不同别名各服务一份），忽略即可；否则可用「批量删除冗余」清理，携带独立配置（别名 / buildEnv）的实例会自动跳过">冗余</span>'
         : "") +
       "</button></td>";
     return (
@@ -579,6 +602,7 @@
       window.__LWA_TEST_HOOKS__.isActionableStatus = LWA.isActionableStatus;
       window.__LWA_TEST_HOOKS__.applyFilters = LWA.applyFilters;
       window.__LWA_TEST_HOOKS__.opsHtml = LWA.opsHtml;
+      window.__LWA_TEST_HOOKS__.urlHtml = LWA.urlHtml;
       window.__LWA_TEST_HOOKS__.rowHtml = LWA.rowHtml;
       window.__LWA_TEST_HOOKS__.pageviewHtml = LWA.pageviewHtml;
       window.__LWA_TEST_HOOKS__.sourceLabel = LWA.sourceLabel;

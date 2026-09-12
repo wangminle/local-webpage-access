@@ -2247,6 +2247,9 @@ def apply_detection_to_manifest(
     issue #23：亦保留 ``buildHooks`` / ``preStart``（用户显式钩子，不从 zip
     推导）；重建默认 [] / None，不透传会在 scan / import --update /
     rebuild --sync / git 更新后静默清空。
+    DEV-132：亦保留 ``buildEnv``（实例级构建环境变量，如
+    ``{"VITE_BASE": "/<alias>/"}``）；重建默认 None，不透传会与 entry.build
+    烤入值同途被静默清空（别名实例 --update 后白屏的根因之一）。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -2325,6 +2328,13 @@ def apply_detection_to_manifest(
     # _update_zip_locked）静默清空。list() 拷贝避免与旧 manifest 共享可变列表。
     fresh.buildHooks = list(getattr(manifest, "buildHooks", None) or [])
     fresh.preStart = getattr(manifest, "preStart", None)
+    # DEV-132：buildEnv（实例级构建环境变量，如 {"VITE_BASE": "/<alias>/"}）是
+    # 用户显式配置，不从源码推导；重建默认 None，不透传会让 scan / import
+    # --update / update_from_git（汇入 _update_zip_locked）静默清空——与 entry.build
+    # 烤入值被抹是同族缺口。深拷贝避免与旧 manifest 共享可变结构。
+    fresh.buildEnv = copy.deepcopy(getattr(manifest, "buildEnv", None))
+    fresh.buildBaseFromAlias = manifest.buildBaseFromAlias
+    fresh.redundancyAcknowledged = manifest.redundancyAcknowledged
     return fresh
 
 

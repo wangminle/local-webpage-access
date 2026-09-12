@@ -180,7 +180,9 @@ lwa remove --redundant          # 预览同指纹冗余（保留每组最早者�
 lwa remove --redundant --purge  # 确认后连磁盘一起清
 ```
 
-管理页也可：实例列表「仅冗余」勾选 → 行内删除单条，或顶部「批量删除冗余」。
+**护栏（issue #31）**：携带独立配置的冗余实例——配置了**路径别名**或 **buildEnv**——默认**跳过**不删（预览列表会标注「将跳过」及原因）。如确要删除，追加 `--allow-config-loss`。
+
+管理页也可：实例列表「仅冗余」勾选 → 行内删除单条，或顶部「批量删除冗余」（确认弹窗会列出每个实例的处置；携带独立配置者同样自动跳过）。
 
 ### 文件夹源导入与更新（IMP-047；选目录 IMP-051）
 
@@ -477,3 +479,10 @@ cd /abs/NEW && lwa workspace relocate --verify
 - [开机自启](autostart.md) — launchd / systemd；WSL 唤醒与可选 mirrored
 - [已知限制](known-limitations.md) — 含 WSL2 宿主准备（内存 / 防火墙 / 文件系统）
 - [排障 FAQ](faq.md) — 含 Full Profile / `setup --full --resume` / 症状→日志 / 内置安装脚本
+
+### 导入预览和清理前确认
+
+- 全新导入不要传 `--dry-run`（退出码 2）；只对 `--update <id>` 使用更新预演。
+- 用 `lwa configure <id>` 查看 buildEnv/别名跟随/重复保留配置；构建参数修改后手动 rebuild。
+- 有意部署的重复实例可执行 `lwa configure <id> --acknowledge-redundancy` 保留；反向选项可撤销。
+- 批量清理前先停止待删实例。`--allow-config-loss` 仅允许损失独立配置，不会突破运行态保护；管理页同样适用。

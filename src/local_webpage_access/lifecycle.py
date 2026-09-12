@@ -2060,6 +2060,9 @@ def remove_instance(
     *,
     purge: bool = False,
     force: bool = False,
+    redundant_only: bool = False,
+    allow_config_loss: bool = False,
+    redundant_witness: str | None = None,
 ) -> None:
     """移除实例（WBS-17.05 / WBS-17.10）。
 
@@ -2072,6 +2075,11 @@ def remove_instance(
     ``purge=True``：额外删除 ``apps/<id>/`` 整个目录。当 ``data/`` 非空时必须
     同时传 ``force=True``，避免误删数据库与上传文件（WBS-17.10）。
 
+    ``redundant_only=True`` 时须仍为冗余候选才允许删除。``redundant_witness``
+    为批量清理预览时同指纹组的保留者（BUG-639）：提供时锁内仅复核目标与
+    保留者两个 ZIP 指纹，避免逐目标全库重算导致二次复杂度；预览后组结构
+    变化（保留者被删 / 指纹漂移）时退回全库复查，守卫语义不变。
+
     IMP-041：各清理阶段写 INFO/WARNING 与 orphan ``remove_stage`` 事件，便于
     删除后对账；总览 orphan ``remove`` 事件（BUG-047）仍保留。
     """
@@ -2081,6 +2089,20 @@ def remove_instance(
     with instance_lock(workspace, instance_id):
         manifest = _load_optional(workspace, instance_id)
         registry_row = registry.get_instance(instance_id) or {}
+
+        if redundant_only:
+            reasons = _redundant_state_reasons(workspace, registry, instance_id)
+            if not allow_config_loss:
+                reasons += _redundant_config_loss_reasons(workspace, instance_id)
+            # 在删除锁内再次确认候选与保护条件，避免预览后的配置/状态变化。
+            # BUG-639：不再逐目标全库重算指纹，仅复核目标与保留者；预览后
+            # 组结构变化时由 _still_redundant_under_lock 退回全库复查。
+            if not _still_redundant_under_lock(
+                workspace, registry, instance_id, redundant_witness
+            ):
+                reasons.append("实例已不再是冗余候选")
+            if reasons:
+                raise LifecycleError("；".join(reasons), instance_id=instance_id)
 
         # data/ 保护：purge 时若数据目录非空，必须显式 force
         data_dir = workspace.app_data(instance_id)
@@ -2442,12 +2464,83 @@ def _instance_zip_fingerprint(workspace: Workspace, instance_id: str) -> str | N
     return digest.hexdigest()
 
 
+def _redundant_state_reasons(workspace: Workspace, registry: Registry, instance_id: str) -> list[str]:
+    """只自动移除明确静止的实例；期望运行、过渡态及未知态均保护。"""
+    manifest = _load_optional(workspace, instance_id)
+    row = registry.get_instance(instance_id) or {}
+    safe = {"stopped", "pending", "failed", "cancelled"}
+    states = {str(row.get("status") or "unknown")}
+    if manifest is None:
+        return ["实例配置缺失或不可读，请单独核实后删除"]
+    from local_webpage_access.models import DesiredState
+
+    states.add(manifest.status.value)
+    if manifest.desiredState == DesiredState.RUNNING or not states <= safe:
+        return ["实例正在运行、等待恢复或处于过渡状态；请先停止再清理"]
+    if manifest.redundancyAcknowledged:
+        return ["已标记为有意保留的重复实例"]
+    return []
+
+
+def _redundant_config_loss_reasons(workspace: Workspace, instance_id: str) -> list[str]:
+    """issue #31：检查冗余目标是否携带「删除即丢失」的独立 curated 配置。
+
+    返回人可读的跳过理由列表（空列表 = 可安全删除）。命中任一条即视为携带
+    独立配置：路径别名（routeMode=NAME 且 routeHost 非空）、buildEnv 非空。
+    manifest 缺失/损坏时不阻拦（返回空理由，按无配置处理，由 registry 降级清理）。
+    """
+    from local_webpage_access.path_alias import _current_alias
+
+    manifest = _load_optional(workspace, instance_id)
+    if manifest is None:
+        return []
+    reasons: list[str] = []
+    alias = _current_alias(manifest)
+    if alias:
+        reasons.append(f"配置了路径别名 /{alias}/")
+    if getattr(manifest, "buildEnv", None) or manifest.buildBaseFromAlias:
+        reasons.append("配置了构建环境变量 buildEnv")
+    return reasons
+
+
+def _still_redundant_under_lock(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    witness_id: str | None,
+) -> bool:
+    """BUG-639：删除锁内复核实例是否仍为冗余候选，且不退化为全库重算。
+
+    ``witness_id`` 为批量清理预览时同指纹组的保留者（createdAt 最早者）。
+    正常路径仅重算目标与保留者两个 ZIP 指纹（替代逐目标全库扫描的二次
+    复杂度）；仅当预览后组结构变化（保留者被删、任一指纹漂移）才退回
+    :func:`list_redundant_instances` 全库复查，保证守卫语义不变。
+    无见证者信息（直接调用 ``remove_instance``）时维持全库复查。
+    """
+    if witness_id is None:
+        return instance_id in {d["id"] for d in list_redundant_instances(workspace, registry)}
+    if witness_id == instance_id:
+        return False
+    fp = _instance_zip_fingerprint(workspace, instance_id)
+    if not fp:
+        return False
+    witness_fp = _instance_zip_fingerprint(workspace, witness_id)
+    if witness_fp == fp and registry.get_instance(witness_id):
+        return True
+    # 保留者已消失或指纹漂移：退回全库复查（罕见路径）。
+    return instance_id in {d["id"] for d in list_redundant_instances(workspace, registry)}
+
+
 def list_redundant_instances(workspace: Workspace, registry: Registry) -> list[dict[str, Any]]:
     """IMP-012：列出冗余实例（按原始 zip 指纹分组，保留 createdAt 最早者）。
 
     返回每个冗余实例的描述字典（``id`` / ``name`` / ``sourceZipHash`` /
-    ``createdAt``），按 createdAt 升序。空指纹（无原始 zip 或读取失败）的实例
-    不参与分组，避免误删无法证明同源的实例。每组保留最早者，其余视为冗余。
+    ``createdAt`` / ``configLossReasons``），按 createdAt 升序。空指纹（无原始
+    zip 或读取失败）的实例不参与分组，避免误删无法证明同源的实例。每组保留
+    最早者，其余视为冗余。``configLossReasons`` 来自
+    :func:`_redundant_config_loss_reasons`，非空表示删除该实例会丢失独立配置。
+    ``keeperId`` 为同组保留者 id，供批量清理在锁内仅复核目标与保留者
+    （BUG-639）。
     """
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in registry.list_instances():  # 已按 created_at ASC
@@ -2461,12 +2554,21 @@ def list_redundant_instances(workspace: Workspace, registry: Registry) -> list[d
             continue
         # members 已按 created_at ASC：首个为最早者保留，其余冗余
         for row in members[1:]:
+            manifest = _load_optional(workspace, row["id"])
+            if manifest is not None and manifest.redundancyAcknowledged:
+                continue
+            from local_webpage_access.path_alias import _current_alias
             redundant.append(
                 {
                     "id": row["id"],
                     "name": row["name"],
                     "sourceZipHash": fp,
+                    "keeperId": members[0]["id"],
                     "createdAt": row["created_at"],
+                    "updatedAt": manifest.updatedAt if manifest else row.get("updated_at"),
+                    "pathAlias": _current_alias(manifest) if manifest else None,
+                    "skipReasons": _redundant_state_reasons(workspace, registry, row["id"]),
+                    "configLossReasons": _redundant_config_loss_reasons(workspace, row["id"]),
                 }
             )
     redundant.sort(key=lambda r: r["createdAt"] or "")
@@ -2480,24 +2582,48 @@ def remove_redundant(
     *,
     purge: bool = False,
     force: bool = False,
-) -> list[str]:
-    """IMP-012：批量移除冗余实例，返回被移除的 instance_id 列表。
+    allow_config_loss: bool = False,
+) -> dict[str, Any]:
+    """IMP-012：批量移除冗余实例，返回 ``{"removed": [...], "skipped": [...]}``。
 
     先 :func:`list_redundant_instances` 取目标，逐个调 :func:`remove_instance`
     （共享 stop + registry 清理 + 可选 purge 流程）。单实例移除失败不中断整体，
-    仅记 warning；返回实际成功移除的 id。
+    仅记 warning。
+
+    issue #31 护栏：目标实例携带独立配置（路径别名 / buildEnv）时默认跳过，
+    防止「保留最早」启发式静默删掉携带最新配置的实例；仅当 ``allow_config_loss``
+    为真（CLI ``--allow-config-loss`` / API ``allowConfigLoss=1``）才允许删除。
+    ``skipped`` 元素为 ``{"id", "reasons"}``，``removed`` 为实际成功移除的 id。
+
+    BUG-639：锁内候选复核复用本次预览的分组信息（``keeperId`` 保留者），
+    每个目标仅重读目标与保留者两个 ZIP，不再逐目标全库重算指纹。
     """
     targets = list_redundant_instances(workspace, registry)
     removed: list[str] = []
+    skipped: list[dict[str, Any]] = []
     for desc in targets:
         iid = desc["id"]
+        reasons = desc.get("skipReasons") or []
+        if not allow_config_loss:
+            reasons = reasons + (desc.get("configLossReasons") or [])
+        if reasons:
+            log.warning(
+                "跳过冗余实例 %s（运行态保护不可覆盖；仅独立配置可用 --allow-config-loss）：%s",
+                iid,
+                "；".join(reasons),
+            )
+            skipped.append({"id": iid, "reasons": reasons})
+            continue
         try:
-            remove_instance(workspace, config, registry, iid, purge=purge, force=force)
+            remove_instance(workspace, config, registry, iid, purge=purge, force=force,
+                            redundant_only=True, allow_config_loss=allow_config_loss,
+                            redundant_witness=desc.get("keeperId"))
             removed.append(iid)
         except LwaError as exc:
+            skipped.append({"id": iid, "reasons": [str(exc)]})
             log.warning("移除冗余实例 %s 失败（跳过）：%s", iid, exc)
-    log.info("冗余清理完成：移除 %d / 目标 %d", len(removed), len(targets))
-    return removed
+    log.info("冗余清理完成：移除 %d / 跳过 %d / 目标 %d", len(removed), len(skipped), len(targets))
+    return {"removed": removed, "skipped": skipped}
 
 
 # ---- IMP-021：端口漂移时同步别名片段 ----------------------------------------

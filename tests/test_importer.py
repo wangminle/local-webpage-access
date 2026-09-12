@@ -1923,6 +1923,41 @@ def test_rescan_preserves_container_path_alias(
     assert fresh.container.routeHost == "prd-review"
 
 
+def test_rescan_preserves_build_env(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """DEV-132：``lwa scan`` / import --update 重建 manifest 不得清空 buildEnv。
+
+    复现口径：entry.build 烤入 VITE_BASE 的老方案在 --update 后被重置（entry
+    不透传），别名实例 rebuild 白屏；buildEnv 作为保留清单成员须存活。
+    """
+    from local_webpage_access.importer import apply_detection_to_manifest
+    from local_webpage_access.scanner import Scanner
+
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    r1 = importer.import_zip(zip_path)
+    iid = r1.instance_id
+    assert r1.manifest.buildEnv is None  # 新导入默认不设（不误导用户改字段）
+
+    # 用户显式配置构建环境变量后重扫
+    mpath = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(mpath)
+    manifest.buildEnv = {"VITE_BASE": "/voiceprint/"}
+    manifest.buildBaseFromAlias = True
+    manifest.redundancyAcknowledged = True
+    manifest.save(mpath)
+
+    scanner = Scanner()
+    detection = scanner.detect(workspace.app_current(iid))
+    fresh = apply_detection_to_manifest(manifest, detection, workspace)
+    assert fresh.buildEnv == {"VITE_BASE": "/voiceprint/"}
+    assert fresh.buildBaseFromAlias is True
+    assert fresh.redundancyAcknowledged is True
+    # 深拷贝：与旧 manifest 不共享可变结构
+    fresh.buildEnv["VITE_BASE"] = "/mutated/"
+    assert manifest.buildEnv == {"VITE_BASE": "/voiceprint/"}
+
+
 # ---- BUG-469：import --path-alias 不得绕过绝对 SPA 资源硬守卫 --------------
 
 

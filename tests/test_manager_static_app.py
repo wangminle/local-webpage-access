@@ -50,7 +50,11 @@ def _css_rule(css: str, selector: str) -> str:
 
 
 def test_instance_table_matches_v069_layout_except_two_line_name_clamp() -> None:
-    """BUG-414：完整恢复 V0.6.9 列宽规则，仅保留名称两行省略。"""
+    """BUG-414：完整恢复 V0.6.9 列宽规则，仅保留名称两行省略。
+
+    ADJ-048：名称列 max-width 220→440（访问地址改两行排版后宽度让渡），
+    其余「自动布局 + 无显式 width」约束不变。
+    """
     css = STYLE_CSS.read_text(encoding="utf-8")
     app_js = APP_JS.read_text(encoding="utf-8")
     table_rule = _css_rule(css, "table.instances")
@@ -63,7 +67,7 @@ def test_instance_table_matches_v069_layout_except_two_line_name_clamp() -> None
     assert "table-layout: fixed" not in table_rule
     assert ".col-name" not in css
     assert "col-name" not in app_js
-    assert "max-width: 220px" in name_cell_rule
+    assert "max-width: 440px" in name_cell_rule
     assert not any(line.startswith("width:") for line in name_cell_declarations)
     assert not any(line.startswith("min-width:") for line in name_cell_declarations)
     assert "min-width: 200px" in ops_column_rule
@@ -248,6 +252,51 @@ assert.ok(html2.indexOf("cell-muted") !== -1, html2);
     )
 
 
+def test_helpers_urlhtml_two_line_layout() -> None:
+    """访问地址两行排版：端口/本机在第一行，路径别名独立第二行（块级堆叠）。"""
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console: console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+const urlHtml = context.window.__LWA_TEST_HOOKS__.urlHtml;
+
+// 三者齐全：端口/本机在第一个 .url-line，别名独占 .url-line.url-alias
+var html = urlHtml({{
+  lanUrl: "http://192.168.1.10:8080/", localhostUrl: "http://127.0.0.1:8080/",
+  routeUrl: "http://127.0.0.1/apps/demo/", routeHost: "demo"
+}});
+assert.ok(html.indexOf("url-lines") !== -1, html);
+var firstLine = html.slice(html.indexOf('class="url-line"'), html.indexOf('class="url-line url-alias"'));
+assert.ok(firstLine.indexOf(">端口</a>") !== -1, firstLine);
+assert.ok(firstLine.indexOf(">本机</a>") !== -1, firstLine);
+assert.ok(firstLine.indexOf("路径别名") === -1, "别名链接不得出现在第一行: " + firstLine);
+var aliasLine = html.slice(html.indexOf('class="url-line url-alias"'));
+assert.ok(aliasLine.indexOf("路径别名入口") !== -1, aliasLine);
+assert.ok(aliasLine.indexOf(">/demo/</a>") !== -1, aliasLine);
+
+// 无别名：仅一行端口/本机，且无 .url-alias
+var htmlNoAlias = urlHtml({{
+  lanUrl: "http://192.168.1.10:8080/", localhostUrl: "http://127.0.0.1:8080/"
+}});
+assert.ok(htmlNoAlias.indexOf("url-alias") === -1, htmlNoAlias);
+assert.ok(htmlNoAlias.indexOf(">端口</a>") !== -1, htmlNoAlias);
+
+// 仅别名：第一行不存在，别名仍在第二行容器
+var htmlAliasOnly = urlHtml({{
+  routeUrl: "http://127.0.0.1/apps/demo/", routeHost: "demo"
+}});
+assert.ok(htmlAliasOnly.indexOf(">端口</a>") === -1, htmlAliasOnly);
+assert.ok(htmlAliasOnly.indexOf('class="url-line url-alias"') !== -1, htmlAliasOnly);
+
+// 全空：占位横线
+var htmlEmpty = urlHtml({{}});
+assert.ok(htmlEmpty.indexOf("cell-muted") !== -1, htmlEmpty);
+assert.ok(htmlEmpty.indexOf("url-line") === -1, htmlEmpty);
+"""
+    )
+
+
 def test_helpers_rowhtml_detail_entry_is_keyboard_accessible() -> None:
     """BUG-170：详情入口须为可聚焦按钮（非仅 click 的 td）。"""
     _run(
@@ -366,8 +415,8 @@ assert.strictEqual(typeof capturedRoot.template, "string");
 assert.ok(capturedRoot.template.indexOf("v-html=\\"tbodyHtml\\"") !== -1, "模板应含表格 v-html");
 assert.ok(capturedRoot.template.indexOf("importmap") === -1);
 
-// 方法挂接
-["refresh", "onTableClick", "openDetail", "openLogs", "openPathAlias", "openPageview", "removeRedundant", "submitToken", "openFolderImport", "pickFolder", "canPickFolder"].forEach(function (m) {{
+// 方法挂接（issue #31：removeRedundant 已拆为 openRedundantDialog / submitRedundantDialog）
+["refresh", "onTableClick", "openDetail", "openLogs", "openPathAlias", "openPageview", "openRedundantDialog", "closeRedundantDialog", "submitRedundantDialog", "submitToken", "openFolderImport", "pickFolder", "canPickFolder"].forEach(function (m) {{
   assert.strictEqual(typeof capturedRoot.methods[m], "function", "缺方法 " + m);
 }});
 
@@ -627,7 +676,7 @@ def test_app_remove_dialog_methods_and_no_native_confirm() -> None:
         or "_restoreRemoveFocus" in src
         or "focusRemoveDialog" in src
     ), "删除模态须管理键盘焦点"
-    # 源码中单实例删除路径不应调用 confirm（允许 removeRedundant 仍用 confirm）
+    # 源码中删除路径均不应调用原生 confirm（issue #31：批量删除冗余已改弹窗）
     # 简单启发式：openRemoveDialog 定义存在，且不存在 `if (!confirm("确认删除实例`
     assert 'confirm("确认删除实例' not in src
 
@@ -1216,3 +1265,41 @@ def test_style_has_verifying_degraded_badge_css() -> None:
     ).read_text(encoding="utf-8")
     assert ".badge-verifying" in css
     assert ".badge-degraded" in css
+
+
+def test_redundant_dialog_zero_targets_and_explicit_override() -> None:
+    _run(f"""
+const assert = require('assert');
+let calls = [];
+const fetchMock = function(url, opts) {{
+  calls.push([url, opts]);
+  return Promise.resolve({{ok:true, json:function(){{return Promise.resolve({{count:1,skipped:[]}});}}}});
+}};
+const context = {{ window: {{__LWA_TEST_HOOKS__:{{}}}}, console, setTimeout, clearTimeout,
+  URLSearchParams, location:{{hostname:'127.0.0.1',search:''}},
+  sessionStorage:{{getItem:()=>null,setItem:()=>{{}},removeItem:()=>{{}}}},
+  history:{{replaceState:()=>{{}}}}, document:null, fetch:fetchMock }};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let root;
+context.window.LWA.createManagerApp({{createApp:function(r){{root=r;return {{mount:()=>{{}}}};}}}},
+  {{document:null,fetch:fetchMock,location:context.location,sessionStorage:context.sessionStorage,
+    history:context.history,setInterval:()=>0,setTimeout,clearTimeout,URLSearchParams}});
+const ctx=Object.assign(root.data(), {{toast:()=>{{}},refresh:()=>{{}},requireToken:()=>{{}}}});
+ctx.redundantInstances=[{{id:'a',configLossReasons:['别名'],skipReasons:[]}}];
+ctx.redundantDeletableCount=root.computed.redundantDeletableCount.call(ctx);
+assert.strictEqual(ctx.redundantDeletableCount,0);
+root.methods.submitRedundantDialog.call(ctx);
+assert.strictEqual(calls.length,0);
+ctx.redundantDialog.allowConfigLoss=true;
+ctx.redundantDeletableCount=root.computed.redundantDeletableCount.call(ctx);
+assert.strictEqual(ctx.redundantDeletableCount,1);
+root.methods.submitRedundantDialog.call(ctx);
+assert.strictEqual(calls.length,1);
+assert.ok(calls[0][0].includes('allowConfigLoss=true'));
+ctx.redundantInstances[0].skipReasons=['运行中'];
+assert.strictEqual(root.computed.redundantDeletableCount.call(ctx),0);
+assert.ok(root.template.includes('更新时间'));
+assert.ok(root.template.includes('acknowledgeRedundant(i.id)'));
+assert.ok(root.template.includes('!redundantDeletableCount'));
+""")

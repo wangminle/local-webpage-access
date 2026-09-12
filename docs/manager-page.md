@@ -93,8 +93,8 @@ lwa manager off         # 停止
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
 | GET | `/api/instances/{id}/pageviews?limit=` | 单实例浏览量详情：按天分布 + 最近命中 + `uniqueIpList`（IMP-024/026；page 级过滤见 IMP-025）；CLI：`lwa pageviews <id>` |
 | GET | `/api/pageviews` | 全部实例浏览量汇总（惰性摄入日志后返回，IMP-024；Caddy 无别名直连端口见 IMP-028）；CLI：`lwa pageviews` |
-| GET | `/api/redundant` | 冗余实例列表（同 `sourceZipHash` 分组中非最早者，IMP-019） |
-| POST | `/api/redundant/remove?purge=&force=` | 批量移除冗余实例，保留每组最早者（IMP-019） |
+| GET | `/api/redundant` | 冗余实例列表（同 `sourceZipHash` 分组中非最早者，IMP-019；每项附 `configLossReasons`，issue #31） |
+| POST | `/api/redundant/remove?purge=&force=&allowConfigLoss=` | 批量移除冗余实例，保留每组最早者（IMP-019；携带独立配置者默认跳过并记入响应 `skipped`，issue #31） |
 | GET | `/api/pending` | pending 与 failed 实例队列 |
 | GET | `/api/port-pool` | 端口池占用摘要 |
 
@@ -288,6 +288,7 @@ Content-Type: application/json
 | `lanAddressStale` | 落盘 host 与当前 LAN IP 是否不一致 |
 | `lanUrlSource` | `live` / `manual` / `manifest` |
 | `redundant` | 是否为同 zip 指纹分组中的冗余实例（非最早者，IMP-019） |
+| `configLossReasons` | 冗余实例携带的「删除即丢失」独立配置清单（路径别名 / buildEnv，issue #31；非冗余实例为空数组） |
 
 详情中的 `manifest.nameSource` 为 `user` / `html_title` / `slug`（或旧数据 `null`），用于判断是否允许 title 回填。
 
@@ -370,22 +371,34 @@ GET /api/redundant
 Authorization: Bearer <token>
 ```
 
-返回 `{"instances": [...], "count": N}`，每项含 `id` / `name` / `sourceZipHash` / `createdAt`。
+返回 `{"instances": [...], "count": N}`，每项含 `id` / `name` / `sourceZipHash` / `createdAt` / `updatedAt` / `pathAlias` / `skipReasons` / `configLossReasons`。`configLossReasons` 非空表示删除该实例会丢失独立配置（路径别名 / buildEnv）。
 
 ```http
-POST /api/redundant/remove?purge=false&force=false
+POST /api/redundant/remove?purge=false&force=false&allowConfigLoss=false
 Authorization: Bearer <token>
 ```
 
 批量移除冗余（保留每组最早导入者），与 CLI `lwa remove --redundant` 同路径。`purge` / `force` 语义同单个 `remove`。
+
+**护栏（issue #31）**：携带独立配置的冗余实例（`configLossReasons` 非空）默认**跳过**；仅传 `allowConfigLoss=true` 才会删除。响应形如：
+
+```json
+{
+  "action": "remove-redundant",
+  "removed": ["plain-dup"],
+  "count": 1,
+  "skipped": [{"id": "alias-dup", "reasons": ["配置了路径别名 /my-alias/"]}]
+}
+```
 
 ## 前端功能
 
 单页前端（`/`，Vue 3）提供：
 
 * **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）；任一实例 `lanAddressStale` 时另有 **LAN 地址漂移**横幅，并可一键「刷新访问地址」（`POST /api/access/refresh`，IMP-040）。
-* **实例列表**：每行显示名称（**IMP-043**：导入优先显式 `--name`，其次主页 HTML `<title>`——含 `dist/`/`build/` 等托管产物入口，实体按浏览器语义解码——否则 slug 美化；`nameSource` 区分 `user` / `html_title` / `slug`；旧自动名回填持实例锁；名称最多两行省略，列宽随内容自然分配）、冗余实例带「冗余」徽章与行高亮、状态、期望态、形态、运行层、技术栈、访问地址、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **取消构建** / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing/cancelling` 时相应禁用）；状态为 `queued` / `building` / `cancelling` 时显示「取消构建」（IMP-039）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043；CLI：`lwa recover <id>`）。
-* **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，规则不变）。
+* **实例列表**：每行显示名称（**IMP-043**：导入优先显式 `--name`，其次主页 HTML `<title>`——含 `dist/`/`build/` 等托管产物入口，实体按浏览器语义解码——否则 slug 美化；`nameSource` 区分 `user` / `html_title` / `slug`；旧自动名回填持实例锁；名称最多两行省略，列宽随内容自然分配；**ADJ-048**：名称列上限 220→440px，宽度来自访问地址改两行排版后的让渡）、冗余实例带「冗余」徽章与行高亮、状态、期望态、形态、运行层、技术栈、访问地址（**ADJ-048**：两行排版——第一行「端口 · 本机」，第二行路径别名；列宽取两行中较宽者，即端口/本机为下限、最长别名为上限）、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **取消构建** / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing/cancelling` 时相应禁用）；状态为 `queued` / `building` / `cancelling` 时显示「取消构建」（IMP-039）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043；CLI：`lwa recover <id>`）。
+* **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，每组保留最早者；工具栏同时显示琥珀竖条释义）。
+* **批量删除冗余确认（issue #31）**：点「批量删除冗余」不再弹原生 confirm，改为模态逐项列出处置——表格含实例 / 状态 / 别名 / 更新时间 / 处置 / 保留六列；运行或过渡态始终跳过，独立配置默认跳过。底部可显式勾选允许损失配置，可删数为0时确认禁用；「有意保留」使实例退出候选。提交后 toast 汇总「已清理 N 个，跳过 M 个」。
 * **删除确认（IMP-035）**：受控双阶段模态——① 选择「仅移除」（默认，`purge=false`）或「彻底删除」（`purge=true`）；② 输入完整项目 ID；彻底删除须勾选「理解数据不可恢复」。非空 `data/` 首次 purge 得 409 `data_nonempty` 后，再勾选强制确认才发 `force=true`（不自动重试）。打开时焦点进入对话框，Tab 限制在模态内，Esc/关闭后恢复触发按钮焦点。
 * **路径别名对话框**：`shared-static` 与 `docker-compose` 实例操作区「路径别名」按钮可用（pending/building/queued 态禁用）；输入 slug 保存或清除；校验错误在对话框内展示。builtin 后端下设置会失败并展示后端错误信息（IMP-022）。
 * **从文件夹导入（IMP-047 / IMP-051）**：顶栏「导入文件夹」打开对话框；请选**项目根或 dist/**（含 `index.html` / `package.json`），不要只选 `src/`。源路径右侧「选择文件夹」仅在 **loopback** 可用（宿主机原生选目录）；局域网访问时按钮禁用，请粘贴 LWA 机器绝对路径。导入仍复制进工作区，非就地运行。API 错误文案不含 `[ZIP_IMPORT_ERROR]` 等前缀。
@@ -413,3 +426,24 @@ Authorization: Bearer <token>
 
 - [运维手册](operations-playbook.md) — 网关选型、冗余清理、容器别名、浏览量与 Caddy 排障
 - [Runtime 工作区说明](runtime-workspace.md)
+
+### 冗余清理补充保护与实例配置
+
+清理弹窗列出实例、状态、别名、更新时间和处置。默认跳过独立配置；勾选“允许丢失独立配置”才向
+`POST /api/redundant/remove?allowConfigLoss=true` 传递显式授权。运行/过渡态保护始终有效，
+可清理数量为 0 时确认按钮禁用。预览后的状态或配置变化会在后端删除锁内重新检查。
+返回的 `skipped` 也包含运行态保护和单实例删除失败，不只表示独立配置。
+
+点击“有意保留”将 `redundancyAcknowledged` 设为 true，实例退出冗余候选与徽标；
+可用 `lwa configure <id> --no-acknowledge-redundancy` 撤销。
+`GET /api/redundant` 及列表中的冗余实例新增 `skipReasons`（不可覆盖的保护原因）、
+`pathAlias`、`updatedAt`；原 `configLossReasons` 保留。
+
+经现有 API 鉴权的 `PATCH /api/instances/<id>/settings` 接受以下字段的部分更新，拒绝未知字段：
+
+```json
+{"buildEnv":{"VITE_BASE":"/demo/"},"buildBaseFromAlias":false,"redundancyAcknowledged":true}
+```
+
+`buildEnv` 为整组替换，null 清空；布尔字段必须是真正布尔值。构建配置仅支持宿主前端，
+不适用于容器；接口不会自动 rebuild。也可通过 `lwa configure` 操作，无需手改 JSON。

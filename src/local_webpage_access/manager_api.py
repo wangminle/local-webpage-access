@@ -887,13 +887,34 @@ def _register_routes(app: FastAPI) -> None:
         statuses = all_statuses(ctx.workspace, ctx.config, ctx.registry)
         # IMP-019（WBS-22.13）：标注冗余实例（同 zip 指纹分组中非最早者），
         # 前端据此显示冗余徽章 / 黄色边框 / 行内删除。
-        redundant_ids = {r["id"] for r in list_redundant_instances(ctx.workspace, ctx.registry)}
+        # issue #31：同时附带 configLossReasons，供「批量删除冗余」弹窗展示
+        # 哪些目标携带独立配置（路径别名 / buildEnv）将被跳过。
+        redundant_descs = list_redundant_instances(ctx.workspace, ctx.registry)
+        reasons_map = {r["id"]: r.get("configLossReasons") or [] for r in redundant_descs}
+        desc_map = {r["id"]: r for r in redundant_descs}
         items: list[dict[str, Any]] = []
         for snap in statuses:
             data = snap.to_dict()
-            data["redundant"] = snap.id in redundant_ids
+            data["redundant"] = snap.id in reasons_map
+            data["configLossReasons"] = reasons_map.get(snap.id) or []
+            desc = desc_map.get(snap.id, {})
+            data["skipReasons"] = desc.get("skipReasons") or []
+            if desc:
+                data["pathAlias"] = desc.get("pathAlias")
+                data["updatedAt"] = desc.get("updatedAt")
             items.append(data)
         return {"instances": items}
+
+    @app.patch("/api/instances/{instance_id}/settings", dependencies=[api], tags=["instances"])
+    def configure_instance(instance_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        from local_webpage_access.instance_settings import update_instance_settings
+        ctx = _Ctx(app)
+        try:
+            manifest = update_instance_settings(ctx.workspace, ctx.registry, instance_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "id": manifest.id,
+                "redundancyAcknowledged": manifest.redundancyAcknowledged}
 
     # ---- IMP-040：显式刷新访问地址（薄封装 refresh_network_entries）----
     @app.post("/api/access/refresh", dependencies=[api], tags=["access"])
@@ -1944,7 +1965,9 @@ def _register_routes(app: FastAPI) -> None:
         """IMP-019：列出冗余实例（同 zip 指纹分组中非最早者）。
 
         返回 ``{"instances": [...], "count": N}``，每项含
-        ``id`` / ``name`` / ``sourceZipHash`` / ``createdAt``，按 createdAt 升序。
+        ``id`` / ``name`` / ``sourceZipHash`` / ``createdAt`` / ``configLossReasons``，
+        按 createdAt 升序。``configLossReasons`` 非空表示删除该实例会丢失独立
+        配置（路径别名 / buildEnv，issue #31），默认批量删除会跳过它。
         """
         from local_webpage_access.lifecycle import list_redundant_instances
 
@@ -1959,6 +1982,11 @@ def _register_routes(app: FastAPI) -> None:
     def remove_redundant_op(
         purge: bool = Query(False, description="同时删除实例磁盘数据"),
         force: bool = Query(False, description="强制移除（跳过 data/ 非空检查）"),
+        allow_config_loss: bool = Query(
+            False,
+            alias="allowConfigLoss",
+            description="允许删除携带独立配置（路径别名 / buildEnv）的冗余实例（issue #31）",
+        ),
         confirm: bool = Query(
             False, description="purge/force 时必须显式传 true（对齐单实例 confirmId 门禁）"
         ),
@@ -1967,6 +1995,8 @@ def _register_routes(app: FastAPI) -> None:
 
         评审-组4：``purge``/``force`` 涉及删盘，与单实例 remove 的 confirmId
         契约对齐——必须显式 ``confirm=true``，否则 409。
+        issue #31 护栏：携带独立配置的冗余实例默认跳过，仅在显式
+        ``allowConfigLoss=true`` 时删除；响应附 ``skipped`` 明细。
         """
         from local_webpage_access.lifecycle import remove_redundant
 
@@ -1982,12 +2012,13 @@ def _register_routes(app: FastAPI) -> None:
                 },
             )
         try:
-            removed = remove_redundant(
+            outcome = remove_redundant(
                 ctx.workspace,
                 ctx.config,
                 ctx.registry,
                 purge=purge,
                 force=force,
+                allow_config_loss=allow_config_loss,
             )
         except LwaError as exc:
             code = _lwa_error_code(exc)
@@ -2000,16 +2031,22 @@ def _register_routes(app: FastAPI) -> None:
                 code,
             )
             raise
+        removed = outcome["removed"]
+        skipped = outcome["skipped"]
         log.info(
-            "audit remove-redundant purge=%s force=%s status=200 code=ok count=%s",
+            "audit remove-redundant purge=%s force=%s allowConfigLoss=%s status=200 code=ok"
+            " removed=%s skipped=%s",
             str(purge).lower(),
             str(force).lower(),
+            str(allow_config_loss).lower(),
             len(removed),
+            len(skipped),
         )
         return {
             "action": "remove-redundant",
             "removed": removed,
             "count": len(removed),
+            "skipped": skipped,
         }
 
 

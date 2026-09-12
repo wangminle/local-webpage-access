@@ -631,6 +631,13 @@ class InstanceManifest(BaseModel):
     # 使 CMD 变为 ``sh -c "<preStart> && exec <start>"``。均拒绝换行符（防注入）。
     buildHooks: list[str] = Field(default_factory=list)
     preStart: str | None = None
+    # DEV-132：实例级构建环境变量（如 {"VITE_BASE": "/<alias>/"}）。用户显式
+    # 配置，不从源码推导；前端构建/安装命令执行时注入（{**os.environ,
+    # **buildEnv}——subprocess env 是整体替换语义，须以 os.environ 为底）。
+    # 与 buildHooks/preStart 同属重扫保留清单，scan / import --update 不得清空。
+    buildEnv: dict[str, str] | None = None
+    buildBaseFromAlias: bool = False
+    redundancyAcknowledged: bool = False
     # IMP-047：来源类型与关联路径。旧实例默认 "zip"（迁移时由 from_dict extra 兜底）。
     sourceKind: str = "zip"
     sourceDirPath: str | None = None
@@ -693,6 +700,17 @@ class InstanceManifest(BaseModel):
     @classmethod
     def _coerce_enum(cls, v: Any) -> Any:
         return v
+
+    @field_validator("buildEnv")
+    @classmethod
+    def _validate_build_env(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        import re
+        for key, item in (value or {}).items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ValueError("buildEnv 变量名必须是合法环境变量名")
+            if any(char in item for char in ("\n", "\r", "\x00")):
+                raise ValueError("buildEnv 值不允许换行符或 NUL")
+        return value
 
     @field_validator("buildHooks", "preStart")
     @classmethod
