@@ -21,10 +21,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from local_webpage_access import file_lock
 from local_webpage_access.config import Config
 from local_webpage_access.daemon import is_pid_alive, pid_cmdline_contains
 from local_webpage_access.gateway_service import maybe_start_gateway
-from local_webpage_access.errors import LifecycleError
+from local_webpage_access.errors import (
+    LifecycleError,
+    ManagerLockFailureError,
+    ManagerLockHeldError,
+)
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
 from local_webpage_access.probe import urlopen_direct
@@ -44,7 +49,21 @@ START_LOCK_FILENAME = "manager-start.lock"
 INSTANCE_LOCK_FILENAME = "manager.instance.lock"
 LOG_FILENAME = "manager.log"
 MANAGER_START_TIMEOUT = 15.0
-MANAGER_START_LOCK_STALE_SECONDS = 60.0
+# BUG-641：单实例锁被占用且确认不是健康重复实例时的退出码（监督器可见失败）。
+MANAGER_LOCK_FAILURE_EXIT_CODE = 3
+# BUG-645/646：锁交接的重试上限——旧版进程退出时会 unlink 锁文件，可能需要
+# 丢弃当前（已无路径的）inode 重新竞争；正常 1～2 次内收敛。
+_LOCK_TAKEOVER_ATTEMPTS = 5
+# BUG-646：新协议锁记录第二行的标记。旧版（≤V0.8.13）只写单行 PID；新版
+# 持内核锁并写 ``flock`` 标记，据此识别「疑似仍在临界区的旧版持有者」。
+_LOCK_PROTOCOL_MARKER = "flock"
+# BUG-651：遗留空锁记录的认领年龄阈值——与旧版自身的陈旧窗口（V0.8.13
+# ``MANAGER_START_LOCK_STALE_SECONDS = 60``）同口径：从未写过内容的文件
+# mtime 即创建时间，达到阈值仍为空视为创建者崩溃残留，可就地认领；未达
+# 阈值拒入并保留空记录，后续调用随文件年龄增长自愈。
+_EMPTY_LOCK_CLAIM_SECONDS = 60.0
+# BUG-651：单实例锁遇遗留空记录时的观察预算（启动锁复用调用方 timeout）。
+_EMPTY_LOCK_WATCH_SECONDS = 5.0
 
 
 @dataclass
@@ -305,97 +324,399 @@ def _terminate_pid(
     return not is_pid_alive(pid)
 
 
+def _read_lock_payload(fd: int) -> tuple[int | None, bool]:
+    """从 fd 读取锁记录（BUG-645）：返回 (持有者 PID, 是否新协议记录)。
+
+    必须读 fd 而不是路径——旧版退出会 unlink 路径，他人重建后路径中的 PID
+    与本 fd 无关；「flock 成功」不能证明路径里的 PID 属于旧版。新协议第二行
+    为 :data:`_LOCK_PROTOCOL_MARKER`；旧版（≤V0.8.13）只写单行 PID，首行
+    仍兼容旧版解析。
+    """
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        data = os.read(fd, 128)
+        os.lseek(fd, 0, os.SEEK_SET)
+        lines = data.decode("utf-8", "replace").strip().splitlines()
+        pid = int(lines[0]) if lines else None
+        marked = len(lines) > 1 and lines[1].strip() == _LOCK_PROTOCOL_MARKER
+        return pid, marked
+    except (OSError, ValueError):
+        return None, False
+
+
+def _write_lock_payload(fd: int) -> None:
+    """以新协议写入自身 PID（PID 行 + ``flock`` 标记行，首行兼容旧版解析）。"""
+    file_lock.write_lock_payload(
+        fd, f"{os.getpid()}\n{_LOCK_PROTOCOL_MARKER}\n".encode()
+    )
+
+
+def _open_lock_file(path: Path) -> tuple[int, bool]:
+    """打开（必要时新建）锁文件，返回 (fd, 是否由本次调用新建)。
+
+    BUG-651：先按既有文件打开，不存在才 O_EXCL 新建——调用方据此区分
+    「自己新建的文件（可立即写入身份）」与「他人遗留的空记录（可能是旧版
+    「已建文件、未写 PID」的创建窗口，提前写入会让旧版随后覆写记录并在
+    退出时 unlink 新版持锁路径）」。权限/I/O 故障转为锁失败异常。
+    """
+    failure = "管理页锁文件无法打开（{path}）：{exc}"
+    for _ in range(3):
+        try:
+            return os.open(str(path), os.O_RDWR), False
+        except FileNotFoundError:
+            try:
+                return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR), True
+            except FileExistsError:
+                # 与旧版 O_EXCL 创建竞争失败：按既有文件重开
+                continue
+            except OSError as exc:
+                raise ManagerLockFailureError(
+                    failure.format(path=path, exc=exc),
+                    lock_path=str(path),
+                ) from exc
+        except OSError as exc:
+            raise ManagerLockFailureError(
+                failure.format(path=path, exc=exc),
+                lock_path=str(path),
+            ) from exc
+    raise ManagerLockFailureError(
+        f"管理页锁文件打开竞争失败（{path}），请重试",
+        lock_path=str(path),
+    )
+
+
+def _lock_path_matches_fd(path: Path, fd: int) -> bool:
+    """锁文件路径当前是否仍指向我们持有内核锁的 inode。
+
+    旧版（≤V0.8.13）进程退出时会 unlink 锁文件；若路径已被删除或指向新
+    inode，当前 fd 上的锁无法拦住后来者，必须换新 inode 重新竞争。
+    """
+    try:
+        return path.stat().st_ino == os.fstat(fd).st_ino
+    except OSError:
+        return False
+
+
+def _await_empty_lock_record(path: Path, fd: int, *, deadline: float) -> str:
+    """BUG-651：限时观察遗留空锁记录的归宿。
+
+    返回四种结局：``record``（出现 PID——旧版创建者恢复，交由旧协议判定）、
+    ``replaced``（路径被回收或重建——旧版临界区已结束 / 他人重建，换文件
+    重试）、``claim``（超时仍空且 inode 年龄达认领阈值——创建者崩溃残留，
+    就地认领，死亡进程不会再 unlink）、``refuse``（超时仍空且未达阈值——
+    拒入并保留空记录，后续调用随文件年龄增长自愈）。
+
+    空记录只可能来自旧版「O_EXCL 建文件后、写 PID 前」的窗口（新版新建
+    文件会立即写入身份）。旧版不持内核锁，flock 拦不住它：观察期内**绝不
+    写入**——提前写入会让旧版随后覆写记录、退出时再 unlink 新版持锁路径，
+    造成两版并存与互斥失效。因此本函数返回前不产生任何写动作，inode 的
+    mtime（未写过内容时即创建时间）保持可信。
+    """
+    while time.monotonic() < deadline:
+        if not _lock_path_matches_fd(path, fd):
+            return "replaced"
+        holder, _marked = _read_lock_payload(fd)
+        if holder is not None:
+            return "record"
+        time.sleep(0.05)
+    age = time.time() - os.fstat(fd).st_mtime
+    return "claim" if age >= _EMPTY_LOCK_CLAIM_SECONDS else "refuse"
+
+
 @contextlib.contextmanager
 def manager_start_lock(workspace: Workspace, *, timeout: float = 5.0) -> Iterator[None]:
-    """串行化 ``manager on``，并回收陈旧启动锁（BUG-130）。"""
+    """串行化 ``manager on``（BUG-130 / BUG-642 / BUG-646）。
+
+    BUG-642：改用 :mod:`file_lock` 内核排他锁——不再依赖 O_EXCL 创建 + PID/
+    文件年龄判定，消除「A 创建空文件未写 PID、B 判陈旧删除重建」的空窗竞争，
+    也取消「持有者仍存活但文件超过 60 秒即被抢占」的按年龄强删。锁文件创建后
+    长期保留（永不 unlink）；记录采用新协议（PID + ``flock`` 标记）。
+
+    BUG-646 / BUG-648（旧版交接协议）：旧版启动流程不持内核锁，只写单行 PID。
+    新版取到内核锁后若发现**旧协议记录且持有者仍存活**，判定旧版启动临界区
+    可能未结束：在剩余 ``timeout`` 内等待其退出后重新竞争；超时则**保留原旧
+    协议记录**并报告等待失败——绝不在旧临界区仍活跃时写入 flock 标记（否则
+    下次调用跳过旧版检查并与旧版并存；旧版随后 unlink 还会破坏新版互斥）。
+    绝不终止任意旧 CLI PID。
+
+    BUG-650：旧版临界区的结束以**锁路径被旧版 finally unlink** 为准，不是其
+    进程退出——旧 CLI 释放锁后仍会存活（等待健康检查、打印输出等），只盯
+    PID 存活会把已释放的锁误报为占用直到超时。等待期间同时监测 PID 存活与
+    路径 inode 指向，任一表明临界区结束即换文件重试。
+
+    BUG-651：遗留**空记录**可能是旧版「已建文件、未写 PID」的创建窗口——
+    旧版不持内核锁，flock 拦不住它，此时绝不提前写入新协议记录（旧版恢复
+    后会覆写记录、退出时还会 unlink 新版持锁路径，两版并存且互斥失效）。
+    新版新建文件**立即写入身份**（旧版 EEXIST 读到存活 PID 自行让路）；遇
+    遗留空记录先经 :func:`_await_empty_lock_record` 限时观察其归宿，超时
+    仍空则按 inode 年龄（≥60s，与旧版陈旧阈值同口径）判定崩溃残留后就地
+    认领，未达阈值拒入并保留原记录。
+
+    BUG-649：另一新版已持内核锁时，在 ``deadline`` 前重试获取，仅超时后报告
+    占用——恢复并发 ``lwa manager on`` 的限时串行等待与幂等成功路径。
+    """
     path = start_lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
     deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            os.write(fd, f"{os.getpid()}\n".encode())
-            break
-        except FileExistsError:
-            stale = False
-            try:
-                content = path.read_text(encoding="utf-8").strip().splitlines()
-                holder_pid = int(content[0]) if content else 0
-                stale = not is_pid_alive(holder_pid)
-                if not stale:
-                    stale = time.time() - path.stat().st_mtime > MANAGER_START_LOCK_STALE_SECONDS
-            except (OSError, ValueError):
-                stale = True
-            if stale:
-                with contextlib.suppress(FileNotFoundError, PermissionError):
-                    path.unlink()
-                continue
-            if time.monotonic() >= deadline:
-                raise LifecycleError("管理页启动锁被占用，稍后重试")
-            time.sleep(0.05)
+    attempts = _LOCK_TAKEOVER_ATTEMPTS
+    replaced_msg = (
+        f"管理页启动锁 {path} 在交接期间被反复重建，无法稳定持有；"
+        "请检查是否仍有旧版本进程在运行"
+    )
+
+    def recycle(current_fd: int) -> None:
+        """丢弃已被替换的 inode（关 fd、扣减重试配额），耗尽则报错。"""
+        nonlocal attempts
+        with contextlib.suppress(OSError):
+            os.close(current_fd)
+        attempts -= 1
+        if attempts <= 0:
+            raise ManagerLockFailureError(replaced_msg, lock_path=str(path))
+
     try:
+        while True:
+            fd, created = _open_lock_file(path)
+            if created:
+                # BUG-651：新建即写身份——旧版 EEXIST 读到存活 PID 按占用让路；
+                # 本进程崩溃也不会留下永空记录。文件仅本进程经 O_EXCL 取得，
+                # 写入先于内核锁是安全的（他人只读不写，见 _await_empty_lock_record）。
+                _write_lock_payload(fd)
+            else:
+                holder, marked = _read_lock_payload(fd)
+                if holder is None:
+                    # BUG-651：遗留空记录 → 限时观察，绝不提前写入
+                    outcome = _await_empty_lock_record(path, fd, deadline=deadline)
+                    if outcome == "replaced":
+                        recycle(fd)
+                        fd = None
+                        continue
+                    if outcome == "refuse":
+                        with contextlib.suppress(OSError):
+                            os.close(fd)
+                        fd = None
+                        raise ManagerLockHeldError(
+                            "管理页启动锁记录为空，疑似旧版本启动流程正在创建"
+                            "（尚未写入 PID）；已等待超时，稍后重试即可",
+                            lock_path=str(path),
+                            legacy=True,
+                        )
+                    if outcome == "record":
+                        holder, marked = _read_lock_payload(fd)
+                if holder is not None and holder > 0 and is_pid_alive(holder) and not marked:
+                    # BUG-646/648/650：旧协议 + 存活持有者 → 等待旧临界区结束：
+                    # 持有者进程退出，或锁路径被其 finally unlink。
+                    while time.monotonic() < deadline:
+                        if not _lock_path_matches_fd(path, fd):
+                            break  # BUG-650：路径已回收/重建 → 旧临界区已结束
+                        if not is_pid_alive(holder):
+                            break
+                        time.sleep(0.05)
+                    if is_pid_alive(holder) and _lock_path_matches_fd(path, fd):
+                        with contextlib.suppress(OSError):
+                            os.close(fd)
+                        fd = None
+                        raise ManagerLockHeldError(
+                            f"管理页启动锁疑似被旧版本启动流程持有（pid={holder}），"
+                            "已等待超时；旧版流程退出后重试即可",
+                            lock_path=str(path),
+                            holder_pid=holder,
+                            legacy=True,
+                        )
+                    recycle(fd)
+                    fd = None
+                    continue
+
+            # 认领点：内核锁在记录判定后获取
+            try:
+                file_lock.ensure_lockable(fd)
+                file_lock.try_acquire_exclusive(fd)
+            except BlockingIOError as exc:
+                # BUG-649：内核锁被占时限时重试，勿首次冲突即失败
+                if time.monotonic() >= deadline:
+                    holder, _marked = _read_lock_payload(fd)
+                    raise ManagerLockHeldError(
+                        "管理页启动锁被占用，稍后重试",
+                        lock_path=str(path),
+                        holder_pid=holder,
+                    ) from exc
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
+                time.sleep(0.05)
+                continue
+            except OSError as exc:
+                raise ManagerLockFailureError(
+                    f"管理页启动锁加锁失败（{path}）：{exc}",
+                    lock_path=str(path),
+                ) from exc
+
+            # BUG-645 同源：认领后核验路径仍指向本 fd，再发布记录——路径可能
+            # 已被旧版 unlink 或指向他人新持有的新 inode。
+            if not _lock_path_matches_fd(path, fd):
+                file_lock.release_exclusive(fd)
+                recycle(fd)
+                fd = None
+                continue
+            _write_lock_payload(fd)
+            if not _lock_path_matches_fd(path, fd):
+                # 写入后路径被旧版退出 unlink：换新 inode 重试。
+                file_lock.release_exclusive(fd)
+                recycle(fd)
+                fd = None
+                continue
+            break
         yield
     finally:
         if fd is not None:
+            file_lock.release_exclusive(fd)
             with contextlib.suppress(OSError):
                 os.close(fd)
-        with contextlib.suppress(FileNotFoundError, PermissionError):
-            path.unlink()
 
 
 @contextlib.contextmanager
 def manager_instance_lock(workspace: Workspace) -> Iterator[None]:
-    """管理页单实例锁（BUG-193）：run_service_main 在其整个生命周期持有。
+    """管理页单实例锁（BUG-193/641/642/645）：run_service_main 整个生命周期持有。
 
     与 :func:`manager_start_lock`（仅串行化 ``lwa manager on``、start 后即释放）
     不同，本锁由管理页子进程入口持有到退出，保证同一工作区只有一个 manager
     uvicorn 进程——避免两个 manager 并发启动互踩 manager.json（后写者覆盖先写者
     pid），导致 ``off`` 假报已停止而另一实例仍在端口上运行。
 
-    持有进程已死（崩溃残留）→ 回收；持有进程存活 → 抛 :class:`LifecycleError`
-    （入口据此退出，不再起第二个实例）。持有标识为本进程 PID，避免误删他人锁。
+    互斥由 :mod:`file_lock` 内核排他锁保证，整个持有期间保持 fd 打开，退出只
+    解锁并关闭，**永不 unlink**。内核锁在持有进程死亡时自动释放，因此死 PID、
+    被无关进程复用的 PID 都不会再长期拒启；空记录限时观察后按 inode 年龄自愈
+    认领（BUG-651，不再无条件直接接管）。记录从**本 fd** 读取且读前先核验路径
+    仍指向本 fd（BUG-645：路径可能被旧版 unlink 或指向他人新持有的新 inode，
+    绝不基于路径内容做终止决策）。
+
+    旧版交接（BUG-645）：锁层**不终止任何进程**。若记录为旧协议（无标记）且
+    PID 存活、身份核验为本工作区 manager——必为不持内核锁的旧版进程——抛
+    :class:`ManagerLockHeldError`（``legacy=True``）拒绝进入：旧版停止交由
+    升级/监督器协调层（``lwa update`` 协调重启 / ``lwa manager off``）执行，
+    入口再按健康分类退出码（健康重复实例 exit 0，否则 exit 3 并给出指引）。
+    PID 指向无关进程时仅覆盖记录，绝不发送信号。
+
+    BUG-651：遗留空记录可能是旧版 manager「已建文件、未写 PID」的启动窗口
+    （旧版单实例锁同样是 O_EXCL 创建后写单行 PID）。与 :func:`manager_start_lock`
+    同口径：新建即写身份；遇遗留空记录经 :func:`_await_empty_lock_record`
+    限时观察，超时仍空按 inode 年龄认领或拒入，绝不提前写入。
     """
     path = instance_lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    acquired = False
+    fd: int | None = None
+    attempts = _LOCK_TAKEOVER_ATTEMPTS
+    replaced_msg = (
+        f"管理页单实例锁 {path} 在交接期间被反复重建，无法稳定持有；"
+        "请检查是否仍有旧版本进程在运行"
+    )
+
+    def recycle(current_fd: int) -> None:
+        """丢弃已被替换的 inode（关 fd、扣减重试配额），耗尽则报错。"""
+        nonlocal attempts
+        with contextlib.suppress(OSError):
+            os.close(current_fd)
+        attempts -= 1
+        if attempts <= 0:
+            raise ManagerLockFailureError(replaced_msg, lock_path=str(path))
+
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-        acquired = True
-        os.write(fd, f"{os.getpid()}\n".encode())
-    except FileExistsError:
-        stale = False
-        try:
-            content = path.read_text(encoding="utf-8").strip().splitlines()
-            holder_pid = int(content[0]) if content else 0
-            stale = holder_pid <= 0 or not is_pid_alive(holder_pid)
-        except (OSError, ValueError):
-            stale = True
-        if stale:
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                path.unlink()
-            # 评审-组4：两进程同时回收陈旧锁时，另一方可能已抢先重建——二次
-            # O_EXCL open 的 FileExistsError 转干净的"已有实例"退出，不带
-            # traceback 冒泡到子进程入口。
+        while True:
+            fd, created = _open_lock_file(path)
+            if created:
+                # BUG-651：新建即写身份（同 manager_start_lock）。
+                _write_lock_payload(fd)
+            else:
+                holder, marked = _read_lock_payload(fd)
+                if holder is None:
+                    # BUG-651：遗留空记录 → 限时观察，绝不提前写入
+                    outcome = _await_empty_lock_record(
+                        path, fd, deadline=time.monotonic() + _EMPTY_LOCK_WATCH_SECONDS
+                    )
+                    if outcome == "replaced":
+                        recycle(fd)
+                        fd = None
+                        continue
+                    if outcome == "refuse":
+                        with contextlib.suppress(OSError):
+                            os.close(fd)
+                        fd = None
+                        raise ManagerLockHeldError(
+                            "管理页单实例锁记录为空，疑似旧版本管理页正在启动"
+                            "（尚未写入 PID）；请重试 `lwa update` 由监督器协调"
+                            "重启，或 `lwa manager off` 停止后再启动",
+                            lock_path=str(path),
+                            legacy=True,
+                        )
+                    if outcome == "record":
+                        holder, marked = _read_lock_payload(fd)
+                if (
+                    holder is not None
+                    and holder > 0
+                    and holder != os.getpid()
+                    and is_pid_alive(holder)
+                    and not marked
+                ):
+                    if _manager_pid_matches(holder, workspace):
+                        # 旧协议 + 存活 + 身份匹配 → 旧版 manager 持旧式锁。
+                        # 锁层拒绝进入（不终止，BUG-645），交由入口健康分类
+                        # 与协调层停止。
+                        with contextlib.suppress(OSError):
+                            os.close(fd)
+                        fd = None
+                        raise ManagerLockHeldError(
+                            f"疑似旧版本管理页进程（pid={holder}）仍持有旧式单实例锁；"
+                            "请重试 `lwa update` 由监督器协调重启，"
+                            "或 `lwa manager off` 停止后再启动",
+                            lock_path=str(path),
+                            holder_pid=holder,
+                            legacy=True,
+                        )
+                    log.info(
+                        "锁文件记录的 pid=%s 不是本工作区管理页（PID 可能被复用），仅覆盖记录",
+                        holder,
+                    )
+
+            # 认领点：内核锁在记录判定后获取（被占即拒——实例锁不重试等待）
             try:
-                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                acquired = True
-                os.write(fd, f"{os.getpid()}\n".encode())
-            except FileExistsError:
-                raise LifecycleError("管理页已有实例在运行") from None
-        else:
-            raise LifecycleError("管理页已有实例在运行")
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-    try:
+                file_lock.ensure_lockable(fd)
+                file_lock.try_acquire_exclusive(fd)
+            except BlockingIOError as exc:
+                holder, _marked = _read_lock_payload(fd)
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
+                raise ManagerLockHeldError(
+                    "管理页已有实例在运行",
+                    lock_path=str(path),
+                    holder_pid=holder,
+                ) from exc
+            except OSError as exc:
+                raise ManagerLockFailureError(
+                    f"管理页单实例锁加锁失败（{path}）：{exc}",
+                    lock_path=str(path),
+                ) from exc
+
+            # BUG-645：认领后核验路径仍指向本 fd，再发布记录
+            if not _lock_path_matches_fd(path, fd):
+                file_lock.release_exclusive(fd)
+                recycle(fd)
+                fd = None
+                continue
+            _write_lock_payload(fd)
+            if not _lock_path_matches_fd(path, fd):
+                # 写入后路径被旧版退出 unlink：换新 inode 重试。
+                file_lock.release_exclusive(fd)
+                recycle(fd)
+                fd = None
+                continue
+            break
         yield
     finally:
-        # BUG-173 同款：仅删除自己获取的锁，避免误删他人（含后到的）实例锁
-        if acquired:
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                path.unlink()
+        if fd is not None:
+            file_lock.release_exclusive(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def _wait_for_health(config: Config, *, timeout: float = MANAGER_START_TIMEOUT) -> bool:
@@ -709,6 +1030,22 @@ def maybe_start_manager(workspace: Workspace, config: Config) -> int | None:
         return None
 
 
+def _lock_held_exit_code(workspace: Workspace, config: Config) -> int:
+    """BUG-641：单实例锁被占用时的退出码分类。
+
+    只有健康端点确认**本工作区**已有健康 manager（真实重复实例）才返回 0——
+    退出 0 是为了不让监督器 KeepAlive 反复拉起第二个实例。否则返回
+    :data:`MANAGER_LOCK_FAILURE_EXIT_CODE`，把「不健康持锁」暴露为启动失败
+    而非静默离线；重试退避交由监督器既有策略，避免快速重试风暴。
+    """
+    state = read_state(workspace)
+    if health_matches_workspace(
+        config.managerHost, config.managerPort, workspace.root, state=state
+    ):
+        return 0
+    return MANAGER_LOCK_FAILURE_EXIT_CODE
+
+
 def run_service_main() -> int:
     """管理页子进程入口。"""
     import argparse
@@ -753,8 +1090,9 @@ def run_service_main() -> int:
 
     # BUG-193：单实例锁——保证同一工作区只有一个 manager 进程。否则两个 manager
     # 并发启动会互踩 manager.json（后写者覆盖先写者 pid），导致 `off` 假报已停止
-    # 而另一实例仍在端口上运行。已有实例存活时本入口直接退出（return 0，避免
-    # 监督器 KeepAlive 反复拉起第二个实例）。
+    # 而另一实例仍在端口上运行。BUG-641：锁被占用时只有确认已有本工作区健康
+    # 实例才 exit 0（重复实例，避免监督器反复拉起第二实例）；不健康持锁、
+    # 权限或 I/O 故障必须非零退出并给出排查信息，不得静默离线。
     try:
         with manager_instance_lock(workspace):
             # IMP-030/BUG-147：前台入口回写自身 pid 到 manager.json，使 manager_status /
@@ -789,9 +1127,28 @@ def run_service_main() -> int:
                         clear_capability_cache(workspace.root, "manager")
                     except Exception:  # noqa: BLE001
                         pass
-    except LifecycleError:
-        log.warning("已有管理页实例在运行，退出")
-        return 0
+    except ManagerLockHeldError as exc:
+        holder = exc.context.get("holder_pid")
+        lock_path = exc.context.get("lock_path") or instance_lock_path(workspace)
+        if _lock_held_exit_code(workspace, config) == 0:
+            log.warning("已有本工作区健康管理页实例在运行（holder_pid=%s），退出", holder)
+            return 0
+        log.error(
+            "管理页单实例锁被占用且未探得本工作区健康实例：%s（holder_pid=%s，"
+            "锁文件=%s，运行日志=%s）",
+            exc.message,
+            holder,
+            lock_path,
+            log_file_path(workspace),
+        )
+        return MANAGER_LOCK_FAILURE_EXIT_CODE
+    except ManagerLockFailureError as exc:
+        log.error(
+            "管理页单实例锁获取失败：%s；运行日志=%s",
+            exc,
+            log_file_path(workspace),
+        )
+        return MANAGER_LOCK_FAILURE_EXIT_CODE
     return 0
 
 

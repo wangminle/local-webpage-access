@@ -2483,11 +2483,15 @@ def _redundant_state_reasons(workspace: Workspace, registry: Registry, instance_
 
 
 def _redundant_config_loss_reasons(workspace: Workspace, instance_id: str) -> list[str]:
-    """issue #31：检查冗余目标是否携带「删除即丢失」的独立 curated 配置。
+    """issue #31 / BUG-644：检查冗余目标是否携带「删除即丢失」的独立 curated 配置。
 
     返回人可读的跳过理由列表（空列表 = 可安全删除）。命中任一条即视为携带
-    独立配置：路径别名（routeMode=NAME 且 routeHost 非空）、buildEnv 非空。
+    独立配置：路径别名（routeMode=NAME 且 routeHost 非空）、buildEnv 非空、
+    buildHooks 非空、preStart 非空（BUG-644：独立构建/启动钩子与 buildEnv 同属
+    重扫保留清单，删除即永久丢失，purge 也不例外）。
     manifest 缺失/损坏时不阻拦（返回空理由，按无配置处理，由 registry 降级清理）。
+    预览（``list_redundant_instances``）与删除锁内复核共用本函数，保证两处
+    判定一致。
     """
     from local_webpage_access.path_alias import _current_alias
 
@@ -2500,6 +2504,10 @@ def _redundant_config_loss_reasons(workspace: Workspace, instance_id: str) -> li
         reasons.append(f"配置了路径别名 /{alias}/")
     if getattr(manifest, "buildEnv", None) or manifest.buildBaseFromAlias:
         reasons.append("配置了构建环境变量 buildEnv")
+    if getattr(manifest, "buildHooks", None):
+        reasons.append("配置了构建钩子 buildHooks")
+    if manifest.preStart:
+        reasons.append("配置了启动前命令 preStart")
     return reasons
 
 

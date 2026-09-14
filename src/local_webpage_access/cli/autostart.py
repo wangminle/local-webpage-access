@@ -89,39 +89,58 @@ def autostart_install(
 
 
 @app.command("enable")
-def autostart_enable() -> None:
+def autostart_enable(
+    service: str = typer.Option(
+        None,
+        "--service",
+        help="只启用指定服务（manager/daemon/gateway）；缺省启用全部已安装单元（BUG-647）",
+    ),
+) -> None:
     """启用已安装的自启动单元。"""
     from local_webpage_access import autostart as asm
 
     try:
         ws, config, _reg = open_workspace_registry()
         _reg.close()
-        op = asm.enable(ws, config)
+        op = asm.enable(ws, config, services=[service] if service else None)
     except AutostartError as exc:
         _unsupported_exit(exc)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    _print_op(op, ok_msg="已启用自启动单元")
+    _print_op(op, ok_msg=f"已启用自启动单元（{service}）" if service else "已启用自启动单元")
 
 
 @app.command("disable")
-def autostart_disable() -> None:
+def autostart_disable(
+    service: str = typer.Option(
+        None,
+        "--service",
+        help="只停用指定服务（manager/daemon/gateway）；缺省停用全部已安装单元（BUG-647）",
+    ),
+) -> None:
     """停用自启动单元（持久 disable；不删除单元文件）。"""
     from local_webpage_access import autostart as asm
 
     try:
         ws, config, _reg = open_workspace_registry()
         _reg.close()
-        op = asm.disable(ws, config)
+        op = asm.disable(ws, config, services=[service] if service else None)
     except AutostartError as exc:
         _unsupported_exit(exc)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    _print_op(op, ok_msg="已停用自启动单元（launchctl disable 持久化；单元文件保留）")
+    _print_op(
+        op,
+        ok_msg=(
+            f"已停用自启动单元 {service}（launchctl disable 持久化；单元文件保留）"
+            if service
+            else "已停用自启动单元（launchctl disable 持久化；单元文件保留）"
+        ),
+    )
 
 
 @app.command("uninstall")

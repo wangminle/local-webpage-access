@@ -1079,17 +1079,67 @@ def install(
 # ---- enable / disable / uninstall / status --------------------------------
 
 
+def _resolve_scope(
+    installed: list[str], services: list[str] | None, *, action: str
+) -> tuple[list[str] | None, OpResult | None]:
+    """BUG-647：解析按服务限定的操作范围；非法/未安装时返回失败的 OpResult。"""
+    if services is None:
+        return None, None
+    valid = ("manager", "daemon", "gateway")
+    unknown = [s for s in services if s not in valid]
+    if unknown:
+        return None, OpResult(
+            [
+                CmdOutcome(
+                    ["(scope)", *services],
+                    1,
+                    "",
+                    f"未知服务 {','.join(unknown)}（可选：manager/daemon/gateway）",
+                )
+            ],
+            False,
+        )
+    missing = [s for s in services if s not in installed]
+    if missing:
+        return None, OpResult(
+            [
+                CmdOutcome(
+                    ["(scope)", *services],
+                    1,
+                    "",
+                    f"未安装自启动单元：{','.join(missing)}；请先 lwa autostart install",
+                )
+            ],
+            False,
+        )
+    selected = list(dict.fromkeys(services))
+    return selected, None
+
+
 def enable(
-    ws: Workspace, config: Config, *, runner: SubprocessRunner = _default_runner
+    ws: Workspace,
+    config: Config,
+    *,
+    services: list[str] | None = None,
+    runner: SubprocessRunner = _default_runner,
 ) -> OpResult:
-    """启用**实际已安装**的单元，并做受控迁移；返回含真实成败的 :class:`OpResult`。"""
+    """启用**实际已安装**的单元，并做受控迁移；返回含真实成败的 :class:`OpResult`。
+
+    BUG-647：``services`` 提供时只操作指定服务（须已安装），保留其他服务的
+    原启用状态——用于单服务恢复（如 ``manager off/on`` 之后只恢复 manager），
+    避免全局 enable 顺带启用原本停用的其他单元。
+    """
     backend = select_backend()
-    services = installed_services(ws, backend)
+    installed = installed_services(ws, backend)
+    selected, scope_error = _resolve_scope(installed, services, action="enable")
+    if scope_error is not None:
+        return scope_error
+    names = installed if selected is None else selected
     outcomes: list[CmdOutcome] = []
     all_ok = True
-    if "daemon" in services:
+    if "daemon" in names:
         _prepare_daemon_for_supervision(ws)
-    for name in services:
+    for name in names:
         if not _migrate_detached_for_supervision(ws, config, name, runner=runner):
             all_ok = False
             outcomes.append(
@@ -1109,18 +1159,29 @@ def enable(
             # BUG-549 / issue #2：bootout 已停 master，enable 又失败时兜底拉回。
             note = _gateway_enable_fail_safe(ws, config)
             outcomes.append(CmdOutcome(["(fail-safe)", "gateway"], 1, note, ""))
-    return OpResult(outcomes, all_ok and bool(services))
+    return OpResult(outcomes, all_ok and bool(names))
 
 
 def disable(
-    ws: Workspace, config: Config, *, runner: SubprocessRunner = _default_runner
+    ws: Workspace,
+    config: Config,
+    *,
+    services: list[str] | None = None,
+    runner: SubprocessRunner = _default_runner,
 ) -> OpResult:
-    """停用**实际已安装**的单元（持久 disable）。"""
+    """停用**实际已安装**的单元（持久 disable）。
+
+    BUG-647：``services`` 提供时只停用指定服务，保留其他服务的原启用状态。
+    """
     backend = select_backend()
-    services = installed_services(ws, backend)
+    installed = installed_services(ws, backend)
+    selected, scope_error = _resolve_scope(installed, services, action="disable")
+    if scope_error is not None:
+        return scope_error
+    names = installed if selected is None else selected
     outcomes: list[CmdOutcome] = []
     all_ok = True
-    for name in services:
+    for name in names:
         outs, ok = backend.disable(name, runner)
         outcomes.extend(outs)
         all_ok = all_ok and ok

@@ -170,6 +170,26 @@ class DataNonemptyError(LifecycleError):
     code = "data_nonempty"
 
 
+# ---- 管理页锁（BUG-641/642）-----------------------------------------------
+
+
+class ManagerLockHeldError(LifecycleError):
+    """manager 内核文件锁被其他进程持有。
+
+    ``context["lock_path"]`` / ``context["holder_pid"]`` 携带诊断信息。持有者
+    是否为「同工作区健康重复实例」须由入口按健康端点分类后再决定退出码，
+    不得一概静默成功（BUG-641）。
+    """
+
+    code = "MANAGER_LOCK_HELD"
+
+
+class ManagerLockFailureError(LifecycleError):
+    """manager 锁文件打开/加锁失败（权限、I/O），或旧版持有者协调停止失败。"""
+
+    code = "MANAGER_LOCK_FAILURE"
+
+
 class HostingError(LwaError):
     """静态托管流程中的错误（缺少 index.html、形态不支持等）。"""
 
@@ -200,6 +220,8 @@ __all__ = [
     "DockerError",
     "LifecycleError",
     "DataNonemptyError",
+    "ManagerLockHeldError",
+    "ManagerLockFailureError",
     "HostingError",
     "MigrateError",
 ]

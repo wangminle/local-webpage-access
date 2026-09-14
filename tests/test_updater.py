@@ -651,6 +651,47 @@ def test_manager_restart_retries_then_fails_on_version_mismatch(
     assert report.step("doctor").status == "ok"
 
 
+def test_off_on_recovery_hint_preserves_autostart() -> None:
+    """BUG-643/647：恢复指引优先协调重启（保留自启），且只恢复目标服务的自启单元。"""
+    from local_webpage_access.updater import _off_on_recovery_hint
+
+    for service in ("manager", "daemon", "gateway"):
+        hint = _off_on_recovery_hint(service)
+        # 优先推荐保留自启状态的监督器协调重启
+        assert "`lwa update`" in hint
+        # off/on 仍可用，但必须说明它会停用自启动
+        assert f"`lwa {service} off`" in hint and f"`lwa {service} on`" in hint
+        assert "off 会停用自启动" in hint
+        # BUG-647：只恢复目标服务——全局 enable 会顺带启用其他服务的单元
+        assert f"`lwa autostart enable --service {service}`" in hint
+        assert "不带 --service 会启用全部已安装服务" in hint
+        assert "`lwa autostart status`" in hint
+
+
+def test_manager_restart_failure_hint_keeps_autostart(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """BUG-643：restartManager 失败文案不再裸推荐 off/on——须含自启恢复指引与排查入口。"""
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: (None, True, False),
+    )
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
+    monkeypatch.setattr("local_webpage_access.manager_service.stop_manager_internal", lambda ws: False)
+
+    report = run_update(
+        workspace,
+        config,
+        registry,
+        options=_opts(restart_manager=True),
+    )
+    step = report.step("restartManager")
+    assert step is not None and step.status == "failed"
+    assert "lwa autostart enable" in step.message
+    assert "logs/manager.log" in step.message
+    assert "lwa update" in step.message
+
+
 def test_daemon_not_started_when_stopped(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:

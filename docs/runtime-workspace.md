@@ -85,7 +85,8 @@ runtime/                      ← 工作区根（Runtime 根目录）
 - **用途**：运行态元数据，例如：
   - `manager-token.json` — 管理页 API token
   - `manager.json` — 管理页后台进程状态；`manager-start.lock` 串行化 `manager on`，
-    `manager.instance.lock` 为管理页运行态单实例锁（BUG-193，避免并发实例互踩状态）
+    `manager.instance.lock` 为管理页运行态单实例锁（内核文件锁；两把锁的文件创建后
+    长期保留、不会删除，崩溃残留无需人工清理，BUG-193/641/642）
   - `daemon.json` / `daemon.lock` — daemon 开关与 watcher 锁
   - `gateway.json` — Caddy 网关后台服务态（IMP-010）
   - `caddy.pid` — Caddy master pid（`caddy start --pidfile` 写入）
@@ -210,11 +211,14 @@ pip install -e .
 
 # 工作区：重启 lwa 自有服务
 cd runtime
-# 自启在管时：先停用再手搓 off/on，否则 KeepAlive/Restart 会立刻拉回旧进程
-lwa autostart disable
+# 自启在管时：按服务停用自启再手搓 off/on，否则 KeepAlive/Restart 会立刻拉回旧进程；
+# 恢复时同样按服务启用，避免顺带开启原本停用的其他服务（BUG-647）
+lwa autostart disable --service manager
 lwa manager off && lwa manager on
+lwa autostart enable --service manager
+lwa autostart disable --service daemon
 lwa daemon off && lwa daemon on    # 若启用了 daemon
-# 需要继续自启时再：lwa autostart enable
+lwa autostart enable --service daemon
 
 # 可选：托管/import 逻辑变更时重启业务实例
 lwa restart <instance-id>

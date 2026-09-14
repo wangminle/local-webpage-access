@@ -1711,3 +1711,93 @@ def test_port_2019_uses_live_pidfile_when_json_stale(tmp_path, monkeypatch) -> N
     assert asm._port_2019_foreign(ws, config) is False
     item = asm._check_caddy(ws, config)
     assert item.status == "ok"
+
+
+# ---- BUG-647：enable/disable 按服务限定（保留其他服务原状态）------------------
+
+
+def _install_all_services(tmp_path, monkeypatch):
+    root, ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "linux")
+    monkeypatch.setattr(asm, "systemd_available", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    asm.install(ws, config, with_caddy=True, enable=False)
+    assert asm.installed_services(ws) == ["daemon", "manager", "gateway"]
+    return root, ws, config
+
+
+def test_enable_scoped_service_only_touches_target(tmp_path, monkeypatch) -> None:
+    """BUG-647：services=["manager"] 只启用 manager，不动已安装的 daemon/gateway。"""
+    _root, ws, config = _install_all_services(tmp_path, monkeypatch)
+
+    record: list[list[str]] = []
+    op = asm.enable(ws, config, services=["manager"], runner=_fake_runner(record))
+    assert op.success is True
+    joined = [" ".join(c) for c in record]
+    assert any("lwa-manager" in c for c in joined)
+    assert not any("lwa-daemon" in c for c in joined)
+    assert not any("lwa-gateway" in c for c in joined)
+
+
+def test_disable_scoped_service_only_touches_target(tmp_path, monkeypatch) -> None:
+    """BUG-647：services=["gateway"] 只停用 gateway，保留 manager/daemon 原状态。"""
+    _root, ws, config = _install_all_services(tmp_path, monkeypatch)
+
+    record: list[list[str]] = []
+    op = asm.disable(ws, config, services=["gateway"], runner=_fake_runner(record))
+    assert op.success is True
+    joined = [" ".join(c) for c in record]
+    assert any("lwa-gateway" in c for c in joined)
+    assert not any("lwa-daemon" in c for c in joined)
+    assert not any("lwa-manager" in c for c in joined)
+
+
+def test_enable_scoped_rejects_unknown_service(tmp_path, monkeypatch) -> None:
+    """BUG-647：未知服务名直接失败并说明可选值，不触碰任何单元。"""
+    _root, ws, config = _install_all_services(tmp_path, monkeypatch)
+
+    record: list[list[str]] = []
+    op = asm.enable(ws, config, services=["nosuch"], runner=_fake_runner(record))
+    assert op.success is False
+    assert record == []  # 未执行任何真实命令
+    assert any("未知服务" in o.stderr for o in op.outcomes)
+
+
+def test_enable_scoped_rejects_not_installed_service(tmp_path, monkeypatch) -> None:
+    """BUG-647：目标服务未安装时失败并提示先 install，而不是静默跳过。"""
+    root, ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "linux")
+    monkeypatch.setattr(asm, "systemd_available", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    asm.install(ws, config, with_caddy=False, enable=False)  # 不含 gateway
+
+    op = asm.enable(ws, config, services=["gateway"], runner=_fake_runner())
+    assert op.success is False
+    assert any("未安装" in o.stderr for o in op.outcomes)
+
+
+def test_cli_autostart_enable_passes_service_scope(monkeypatch, capsys) -> None:
+    """BUG-647：`lwa autostart enable --service manager` 把范围传给模块层。"""
+    from local_webpage_access.cli import autostart as cli_asm
+
+    captured: dict = {}
+
+    class _Reg:
+        def close(self) -> None:
+            pass
+
+    def fake_enable(ws, config, *, services=None, runner=None):  # noqa: ANN001
+        captured["services"] = services
+        return asm.OpResult([], True)
+
+    monkeypatch.setattr(
+        "local_webpage_access.cli.autostart.open_workspace_registry",
+        lambda: (None, None, _Reg()),
+    )
+    monkeypatch.setattr("local_webpage_access.autostart.enable", fake_enable)
+    cli_asm.autostart_enable(service="manager")
+    out = capsys.readouterr().out
+    assert captured["services"] == ["manager"]
+    assert "manager" in out
+    cli_asm.autostart_enable(service=None)
+    assert captured["services"] is None

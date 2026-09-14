@@ -9,13 +9,19 @@
 
 ```bash
 lwa autostart install [--with-caddy/--no-with-caddy] [--no-enable] [--linger/--no-linger]
-lwa autostart enable | disable                                  # 加载/卸载单元
+lwa autostart enable | disable [--service manager|daemon|gateway]   # 加载/卸载单元
 lwa autostart status [--json]                                   # 单元 + 前台进程 + 运行模式
 lwa autostart check [--json]                                    # 完备性深检
 lwa autostart repair [--with-caddy/--no-with-caddy]             # 重写路径/迁移旧单元/重新启用
 lwa autostart uninstall [--purge-linger]                        # 停服务 + 删单元
 lwa autostart doctor-hints                                      # 人工待办（Docker Desktop/WSL）
 ```
+
+**`--service`（BUG-647）**：`enable` / `disable` 不带参数时作用于**全部已安装**
+单元；带 `--service` 时只操作指定服务，保留其他服务的原启用状态。适用于
+`lwa manager off` 等单服务操作后的恢复——off 会停用该服务的自启单元，
+恢复时请用 `lwa autostart enable --service manager`，避免全局 enable 顺带
+启用原本停用的其他服务。
 
 **IMP-061 缺省值（V0.8.0 起，缺省安全、显式退出）**：
 

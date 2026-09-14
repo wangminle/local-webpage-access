@@ -659,10 +659,12 @@ def _service_ready(name: str, ws: Workspace, config: Config) -> bool:
 
             return bool(is_gateway_running(ws, config))
         if name == "manager":
-            from local_webpage_access.manager_service import _fetch_health
+            from local_webpage_access.manager_service import health_matches_workspace
 
-            data = _fetch_health(config.managerHost, config.managerPort, timeout=0.5)
-            return bool(data and data.get("ok"))
+            # issue #32 取舍：端口上的健康响应属于其他工作区时不算本工作区就绪
+            return health_matches_workspace(
+                config.managerHost, config.managerPort, ws.root, timeout=0.5
+            )
     except Exception:  # noqa: BLE001 - 探测异常按未就绪处理，交给轮询
         return False
     return False
@@ -678,9 +680,11 @@ def _wait_services_ready(
 ) -> tuple[bool, float, list[str]]:
     """重启后等待服务就绪（issue #5 / L3：禁止 stop->start 后立即探测一次定终身）。
 
-    manager 的 health 在 ``restart_manager`` 内已轮询校验过，一般不需要再等；
     daemon（锁+心跳）与 gateway（admin :2019 绑定）在监督器重启后需要数百毫秒
-    到数秒才真正就绪。轮询直至全部就绪或超时；返回 (是否就绪, 等待秒数, 未就绪列表)。
+    到数秒才真正就绪。manager 的 health 在 ``restart_manager`` 内已轮询校验过，
+    调用方仅在 manager 实际被重启/拉起时才把它纳入等待（issue #32 取舍），
+    且就绪判定要求健康响应属于本工作区。轮询直至全部就绪或超时；
+    返回 (是否就绪, 等待秒数, 未就绪列表)。
     """
     import time as time_mod
 
@@ -718,6 +722,25 @@ def _reconcile_circuit_blocked(service: str, ws: Workspace, read_state_fn: Any) 
     return (
         f"{service} {note}，已暂停 update 自动拉起（熔断）；"
         f"请 `lwa {service} on` 手动恢复（手动启动不受熔断限制）"
+    )
+
+
+def _off_on_recovery_hint(service: str) -> str:
+    """BUG-643/647：重启失败后的恢复指引。
+
+    ``lwa X off`` 会先停用自启动单元，``lwa X on`` 不会恢复——旧文案推荐
+    off/on 会让用户照做后丢失自启状态（重启机器后服务不再拉起）。改为：
+    优先重试 ``lwa update``（经自启动单元协调重启，保留自启状态）；确需
+    off/on 时明确说明其副作用。恢复自启必须**只恢复目标服务**（BUG-647）：
+    全局 ``lwa autostart enable`` 会启用全部已安装单元，可能顺带开启原本
+    停用的其他服务，故指引用带 ``--service`` 的范围恢复并先核对原状态。
+    """
+    return (
+        "可优先重试 `lwa update`（经自启动单元协调重启，保留自启状态）；"
+        f"若改用 `lwa {service} off` 后 `lwa {service} on`，注意 off 会停用自启动，"
+        f"完成后请先用 `lwa autostart status` 核对原状态，仅恢复本服务用 "
+        f"`lwa autostart enable --service {service}`"
+        "（不带 --service 会启用全部已安装服务的自启动单元）"
     )
 
 
@@ -771,7 +794,7 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
             if not ok:
                 raise RuntimeError(
                     f"管理页拉起后版本不一致：期望 {display_version()}，"
-                    f"实际 {actual or '未知'}；可 `lwa manager off` 后 `lwa manager on`"
+                    f"实际 {actual or '未知'}；{_off_on_recovery_hint('manager')}"
                 )
             msg = f"管理页意外未运行{down_note}，已恢复（{note or '通过自启动单元拉起'}）"
             if actual:
@@ -799,7 +822,7 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
         if not ok:
             raise RuntimeError(
                 f"管理页拉起后版本不一致：期望 {display_version()}，"
-                f"实际 {actual or '未知'}；可 `lwa manager off` 后重试 `lwa manager on`"
+                f"实际 {actual or '未知'}；{_off_on_recovery_hint('manager')}"
             )
         return {
             "wasRunning": False,
@@ -822,7 +845,7 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
         if not ok:
             raise RuntimeError(
                 f"管理页自启动重启后版本不一致：期望 {display_version()}，"
-                f"实际 {actual or '未知'}；可 `lwa manager off` 后 `lwa manager on`"
+                f"实际 {actual or '未知'}；{_off_on_recovery_hint('manager')}"
             )
         msg = note or "管理页已通过自启动重启"
         if actual:
@@ -838,7 +861,7 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
     if not stop_manager_internal(ws):
         raise RuntimeError(
             "管理页停止失败（旧进程可能仍在运行），已跳过重启；"
-            "可 `lwa manager off` 后重试 `lwa manager on`"
+            + _off_on_recovery_hint("manager")
         )
     pid = start_manager(ws, config, source="update-restart")
     ok, actual = verify_manager_version(config)
@@ -854,7 +877,7 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
     if not ok:
         raise RuntimeError(
             f"管理页重启后版本不一致：期望 {display_version()}，"
-            f"实际 {actual or '未知'}；可 `lwa manager off` 后重试 `lwa manager on`"
+            f"实际 {actual or '未知'}；{_off_on_recovery_hint('manager')}"
         )
     ver_note = f", version={actual}" if actual else ""
     return {
@@ -923,7 +946,8 @@ def restart_daemon(ws: Workspace, config: Config, *, reconcile: bool = True) -> 
     # IMP-064.03：内部停止原语——SIGTERM 终止，不写 enabled=False。
     if not daemon_mod.stop_daemon_internal(ws):
         raise RuntimeError(
-            "daemon 停止失败（pid 仍存活），已跳过重启；可 `lwa daemon off` 后重试 `lwa daemon on`"
+            "daemon 停止失败（pid 仍存活），已跳过重启；"
+            + _off_on_recovery_hint("daemon")
         )
     pid = daemon_mod.start_daemon(ws, config, source="update-restart")
     return {"wasRunning": True, "pid": pid, "message": f"daemon 已重启（pid={pid}）"}
@@ -1002,7 +1026,7 @@ def restart_gateway(ws: Workspace, config: Config, *, reconcile: bool = True) ->
     if not stop_gateway_internal(ws, config):
         raise RuntimeError(
             "Gateway 停止失败（Caddy master 可能仍在运行），已跳过重启；"
-            "可 `lwa gateway off` 后重试 `lwa gateway on`"
+            + _off_on_recovery_hint("gateway")
         )
     pid = start_gateway(ws, config, source="update-restart")
     return {"wasRunning": True, "pid": pid, "message": f"Gateway 已重启（pid={pid}）"}
@@ -1274,10 +1298,12 @@ def _run_runtime_phase(
 
             options = dataclasses.replace(options, restart_manager=False, restart_daemon=False)
 
+    manager_restarted = False
     if options.restart_manager:
         try:
             info = restart_manager(workspace, config, reconcile=options.reconcile_services)
             status = "ok" if (info.get("wasRunning") or info.get("reconciled")) else "skipped"
+            manager_restarted = status == "ok"
             report.steps.append(StepResult("restartManager", status, info["message"], extra=info))
             if info["pid"]:
                 report.manager_url = f"http://127.0.0.1:{config.managerPort}/"
@@ -1286,7 +1312,7 @@ def _run_runtime_phase(
                 StepResult(
                     "restartManager",
                     "failed",
-                    f"{exc}（pip 已更新；查 run/manager.json、logs/ 后可手动 lwa manager on）",
+                    f"{exc}（pip 已更新；排查 run/manager.json 与 logs/manager.log；{_off_on_recovery_hint('manager')}）",
                 )
             )
 
@@ -1333,6 +1359,10 @@ def _run_runtime_phase(
         wait_names.append("daemon")
     if options.restart_gateway:
         wait_names.append("gateway")
+    if manager_restarted:
+        # issue #32 取舍：manager 实际被重启/拉起过才纳入就绪等待——显式关闭、
+        # 熔断跳过或原本未运行的 manager 不阻塞 update；就绪判定区分本工作区。
+        wait_names.append("manager")
     if wait_names:
         ready, waited, pending = _wait_services_ready(workspace, config, names=wait_names)
         if ready:

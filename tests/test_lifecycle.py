@@ -1508,6 +1508,71 @@ def test_remove_redundant_allow_config_loss_overrides(workspace, registry, confi
     assert registry.get_instance("keep") is not None
 
 
+# ---- BUG-644：独立 buildHooks/preStart 计入冗余清理配置保护 --------------------
+
+
+def _hook_manifest_for(workspace, iid: str, *, hooks: bool = False, pre_start: bool = False):
+    """给实例 manifest 写入独立构建/启动钩子，模拟「删除即丢配置」场景。"""
+    from local_webpage_access.models import InstanceManifest
+
+    path = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(path)
+    if hooks:
+        manifest.buildHooks = ["echo custom-build"]
+    if pre_start:
+        manifest.preStart = "echo custom-start"
+    manifest.save(path)
+
+
+def test_redundant_config_loss_includes_build_hooks(workspace, registry, config) -> None:
+    """BUG-644：独立 buildHooks 计入配置保护——无 allow_config_loss 时 purge 也跳过。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "hooked", _SAME_ZIP, "2026-07-02T10:00:00")
+    _hook_manifest_for(workspace, "hooked", hooks=True)
+
+    # 预览与删除共用同一判定：configLossReasons 必须带上 buildHooks
+    redundant = {r["id"]: r for r in list_redundant_instances(workspace, registry)}
+    assert any("buildHooks" in r for r in redundant["hooked"]["configLossReasons"])
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["hooked"]
+    assert any("buildHooks" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("hooked") is not None
+    assert workspace.app_manifest_path("hooked").exists()  # 未被 purge
+
+
+def test_redundant_config_loss_includes_pre_start(workspace, registry, config) -> None:
+    """BUG-644：独立 preStart 计入配置保护——无 allow_config_loss 时 purge 也跳过。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "prestart", _SAME_ZIP, "2026-07-02T10:00:00")
+    _hook_manifest_for(workspace, "prestart", pre_start=True)
+
+    redundant = {r["id"]: r for r in list_redundant_instances(workspace, registry)}
+    assert any("preStart" in r for r in redundant["prestart"]["configLossReasons"])
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["prestart"]
+    assert any("preStart" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("prestart") is not None
+    assert workspace.app_manifest_path("prestart").exists()
+
+
+def test_redundant_hooks_allow_config_loss_overrides(workspace, registry, config) -> None:
+    """BUG-644：用户显式 allow_config_loss 时钩子保护可覆盖（可删除）。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "hooked", _SAME_ZIP, "2026-07-02T10:00:00")
+    _hook_manifest_for(workspace, "hooked", hooks=True, pre_start=True)
+
+    outcome = remove_redundant(
+        workspace, config, registry, purge=True, force=True, allow_config_loss=True
+    )
+    assert outcome["removed"] == ["hooked"]
+    assert outcome["skipped"] == []
+    assert registry.get_instance("hooked") is None
+
+
 # ---- BUG-639：锁内候选复核不得退化为逐目标全库指纹重算 ---------------------
 
 
