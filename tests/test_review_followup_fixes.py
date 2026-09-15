@@ -244,3 +244,60 @@ def test_configure_cli_persists_and_shows_settings(workspace, registry, config, 
     saved = InstanceManifest.load(workspace.app_manifest_path("demo"))
     assert saved.buildEnv is None
     assert not saved.buildBaseFromAlias and not saved.redundancyAcknowledged
+
+
+def test_configure_cli_system_deps_for_container(workspace, registry, config, monkeypatch):
+    from local_webpage_access.models import ContainerConfig, ServingMode
+    from local_webpage_access.registry import Registry
+
+    workspace.ensure_app_dirs("demo")
+    m = manifest()
+    m.kind = Kind.PYTHON
+    m.runtime = Runtime.DOCKER_COMPOSE
+    m.servingMode = ServingMode.CONTAINER
+    m.container = ContainerConfig(
+        projectName="demo",
+        internalPort=8000,
+        composePath="docker/compose.yml",
+        dockerfilePath="docker/Dockerfile",
+    )
+    m.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(m)
+
+    def open_env():
+        reg = Registry(workspace.db_path)
+        reg.open()
+        return workspace, config, reg
+
+    monkeypatch.setattr("local_webpage_access.cli.configure.open_workspace_registry", open_env)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["configure", "demo", "--system-deps", "ffmpeg", "--build-hook", "echo ok"],
+    )
+    assert result.exit_code == 0, result.output
+    saved = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    assert saved.systemDeps == ["ffmpeg"]
+    assert saved.buildHooks == ["echo ok"]
+
+
+def test_node_container_rejects_system_deps(workspace, registry) -> None:
+    """BUG-664：Node/Alpine 不得保存 systemDeps。"""
+    from local_webpage_access.instance_settings import update_instance_settings
+    from local_webpage_access.models import ContainerConfig, ServingMode
+
+    workspace.ensure_app_dirs("demo")
+    m = manifest()
+    m.kind = Kind.NODE
+    m.runtime = Runtime.DOCKER_COMPOSE
+    m.servingMode = ServingMode.CONTAINER
+    m.container = ContainerConfig(
+        projectName="demo",
+        internalPort=8000,
+        composePath="docker/compose.yml",
+        dockerfilePath="docker/Dockerfile",
+    )
+    m.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(m)
+    with pytest.raises(ValueError, match="Alpine"):
+        update_instance_settings(workspace, registry, "demo", {"systemDeps": ["ffmpeg"]})

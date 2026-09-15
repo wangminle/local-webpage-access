@@ -84,7 +84,7 @@ DEFAULT_CAPABILITY_REFRESH_INTERVAL = 300.0
 DEFAULT_CAPABILITY_INITIAL_DELAY = 15.0
 # issue #29 短退避常量从 capability 再导出，供测试与 __all__ 兼容。
 RECONCILE_BACKOFF_BASE_SECONDS = 60.0
-RECONCILE_BACKOFF_MAX_SECONDS = 1800.0
+RECONCILE_BACKOFF_MAX_SECONDS = 3600.0
 STATE_FILENAME = "daemon.json"
 LOCK_FILENAME = "daemon.lock"
 START_LOCK_FILENAME = "daemon-start.lock"
@@ -183,6 +183,9 @@ class DaemonState:
     poll_interval: float = DEFAULT_POLL_INTERVAL
     last_start_error: LastStartError | None = None
     consecutive_start_failures: int = 0
+    # issue #33：进程启动时绑定的代码版本 / 提交，供 doctor 比对磁盘新代码。
+    bind_version: str | None = None
+    bind_revision: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -242,15 +245,36 @@ def read_state(workspace: Workspace) -> DaemonState | None:
             # IMP-064.01：旧文件缺字段读默认值，不做 schema 迁移
             last_start_error=parse_last_start_error(data),
             consecutive_start_failures=parse_consecutive_failures(data),
+            bind_version=(
+                str(data["bind_version"]) if data.get("bind_version") else None
+            ),
+            bind_revision=(
+                str(data["bind_revision"]) if data.get("bind_revision") else None
+            ),
         )
     except (TypeError, ValueError):
         return None
 
 
+def _bind_version() -> str:
+    from local_webpage_access.version_info import bind_process_version
+
+    return bind_process_version()
+
+
+def _bind_revision() -> str | None:
+    from local_webpage_access.version_info import bind_process_revision
+
+    return bind_process_revision()
+
+
 def write_state(workspace: Workspace, state: DaemonState) -> None:
     """写入 daemon 状态（WBS-21.04）。"""
+    from local_webpage_access.version_info import fill_missing_bind_version
+
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
+    fill_missing_bind_version(state, path)
     path.write_text(
         json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -794,6 +818,76 @@ def _mirror_recovery_to_lwa_log(
     append_global_log(workspace.logs, message, level=level)
 
 
+def _load_instance_manifest(workspace: Workspace, instance_id: str):
+    from local_webpage_access.models import InstanceManifest
+
+    path = workspace.app_manifest_path(instance_id)
+    if not path.is_file():
+        return None
+    try:
+        return InstanceManifest.load(path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _reconcile_circuit_blocks(workspace: Workspace, instance_id: str) -> bool:
+    from local_webpage_access.reconcile_circuit import is_blocked, status_note
+
+    manifest = _load_instance_manifest(workspace, instance_id)
+    if manifest is None or not is_blocked(manifest):
+        return False
+    note = status_note(manifest) or "构建熔断中"
+    log.info("daemon reconcile: 跳过实例 %s（%s）", instance_id, note)
+    return True
+
+
+def _reconcile_failure_is_expensive(workspace: Workspace, instance_id: str) -> bool:
+    """CHK-326：仅昂贵构建失败才持久化熔断；轻量 start 失败走内存退避。"""
+    from local_webpage_access.lifecycle import (
+        _compute_deployment_fingerprints,
+        _fingerprint_change_action,
+        _is_deployed_container,
+    )
+
+    manifest = _load_instance_manifest(workspace, instance_id)
+    if manifest is None:
+        return True
+    if not _is_deployed_container(manifest):
+        return True
+    stored = getattr(manifest, "deploymentFingerprints", None) or {}
+    if not stored:
+        return True
+    try:
+        current = _compute_deployment_fingerprints(workspace, manifest)
+        action, _changed = _fingerprint_change_action(stored, current)
+    except Exception:  # noqa: BLE001
+        return True
+    return action == "full_rebuild"
+
+
+def _reconcile_circuit_record(workspace: Workspace, instance_id: str) -> None:
+    from local_webpage_access.reconcile_circuit import persist_circuit, record_failure
+
+    if not _reconcile_failure_is_expensive(workspace, instance_id):
+        log.info("daemon reconcile: 实例 %s 轻量恢复失败，不持久化构建熔断", instance_id)
+        return
+    manifest = _load_instance_manifest(workspace, instance_id)
+    if manifest is None:
+        return
+    record_failure(manifest)
+    persist_circuit(workspace, instance_id, manifest)
+
+
+def _reconcile_circuit_clear(workspace: Workspace, instance_id: str) -> None:
+    from local_webpage_access.reconcile_circuit import clear_circuit, persist_circuit
+
+    manifest = _load_instance_manifest(workspace, instance_id)
+    if manifest is None:
+        return
+    clear_circuit(manifest)
+    persist_circuit(workspace, instance_id, manifest)
+
+
 def reconcile(
     workspace: Workspace,
     config: Config,
@@ -832,7 +926,15 @@ def reconcile(
         log.debug("daemon reconcile LAN refresh 失败", exc_info=True)
 
     # start_instance 返回 Manifest；类型上宽于 Optional restarter 形参，故用局部绑定。
-    do_restart: Callable[[Workspace, Config, Registry, str], object] = restarter or start_instance
+    if restarter is None:
+        def _reconcile_start(
+            ws: Workspace, cfg: Config, reg: Registry, iid: str
+        ) -> object:
+            return start_instance(ws, cfg, reg, iid, from_reconcile=True)
+
+        do_restart: Callable[[Workspace, Config, Registry, str], object] = _reconcile_start
+    else:
+        do_restart = restarter
     # Full Profile：后台能力闭环未 ready 时，容器自动纠正整轮 fail-closed；
     # 静态实例仍可按自身网关状态恢复。
     full_containers_blocked = False
@@ -884,10 +986,12 @@ def reconcile(
             continue
         iid = row["id"]
         failure_key = (str(workspace.root), iid)
+        runtime = row.get("runtime")
+        if runtime == "docker-compose" and _reconcile_circuit_blocks(workspace, iid):
+            continue
         failure_state = _reconcile_failures.get(failure_key)
         if failure_state is not None and monotonic() < failure_state[1]:
             continue
-        runtime = row.get("runtime")
         registry_status = row.get("status")
         if runtime == "docker-compose" and full_containers_blocked:
             continue
@@ -981,6 +1085,8 @@ def reconcile(
             )
             do_restart(workspace, config, registry, iid)
             _reconcile_failures.pop(failure_key, None)
+            if runtime == "docker-compose":
+                _reconcile_circuit_clear(workspace, iid)
             restarted.append(iid)
             log.info("daemon reconcile: 恢复实例 %s（%s → running）", iid, actual_status or "?")
             if actual_status == "failed":
@@ -1008,6 +1114,8 @@ def reconcile(
                 RECONCILE_BACKOFF_MAX_SECONDS,
             )
             _reconcile_failures[failure_key] = (failures, monotonic() + delay)
+            if runtime == "docker-compose":
+                _reconcile_circuit_record(workspace, iid)
             log.warning("daemon reconcile: 恢复 %s 失败：%s", iid, exc)
             _mirror_recovery_to_lwa_log(
                 workspace,
@@ -1605,6 +1713,8 @@ def _main() -> int:
                     pid=os.getpid(),
                     started_at=now_iso(),
                     poll_interval=args.poll,
+                    bind_version=_bind_version(),
+                    bind_revision=_bind_revision(),
                 ),
             )
             # BUG-298：先拿运行锁再做可能阻塞 10s+ 的 Docker capability 探测，

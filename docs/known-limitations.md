@@ -244,6 +244,16 @@ swap=4GB
   任何变更都会全量重新下载（BuildKit `/root/.cache/pip` 挂载在位也不改变该行为）。
 * uv / pipenv 项目同样走源链（`UV_DEFAULT_INDEX` / `PIPENV_PYPI_MIRROR` 逐源 `||`）。
 
+## apt 构建源链（issue #34 / #35）
+
+* **`||` 切源同样只覆盖硬故障**：主源慢但能通时不会切走；`aptRetries` / `aptTimeout`
+  只缩短假死窗口。阿里云个别大包（如 `libllvm19`）connection failed 时依赖 fallback。
+* **Docker Desktop VM 内存**：长 apt 下载 + 解包会把构建容器顶到 OOM；这不是宿主
+  `lwa doctor` 内存检查能单独覆盖的，需在 Desktop 设置里加内存，并保持 `buildConcurrency: 1`。
+* **`buildHooks` 含 apt-get**：钩子原样写入 Dockerfile，**不会**自动注入 apt 镜像。
+  系统包请迁到 `systemDeps`（`lwa configure <id> --system-deps ffmpeg`），以便切源、
+  重试与层缓存命中。旧 hook 示例：删掉 `apt-get install … ffmpeg`，改配 `systemDeps: [ffmpeg]`。
+
 * **导入预览（#30）**：`lwa import --dry-run` 仅支持带 `--update <id>` 的原地更新。全新 zip、folder、git 导入传该选项会在打开工作区/下载前以退出码 2 拒绝，不会静默执行真实导入。
 * **构建环境**：`buildEnv` / `buildBaseFromAlias` 仅供宿主前端安装和构建使用，不支持 Docker 镜像构建或容器运行环境。Vite 项目须主动读取 `VITE_BASE`；别名跟随仅在下次构建生效，不会自动重构建或改写源码。手改 `entry.build --base` 不属于重扫保留清单，请优先使用 `lwa configure` 的持久配置。
 * **冗余清理**：运行中、期望运行、构建/排队/验证/取消中等过渡态以及配置不可读的实例始终跳过，`allowConfigLoss` 和 `force` 不绕过这条保护。请先停止，或明确选择单实例删除；`redundancyAcknowledged` 实例不会进入冗余候选。

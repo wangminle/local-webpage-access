@@ -240,6 +240,7 @@ def instance_status(
     # C.01：兼容性预检摘要（最高等级 + 条数；不读 DB，直接读 manifest）
     compatibility_severity: str | None = None
     compatibility_count = 0
+    circuit_note: str | None = None
     manifest_path = workspace.app_manifest_path(instance_id)
     if manifest_path.is_file():
         try:
@@ -260,6 +261,9 @@ def instance_status(
             if findings:
                 compatibility_severity = _highest_compatibility_severity(findings)
                 compatibility_count = len(findings)
+            from local_webpage_access.reconcile_circuit import status_note
+
+            circuit_note = status_note(manifest)
         except Exception:  # noqa: BLE001 - manifest 读取失败不阻断状态
             pass
 
@@ -308,6 +312,7 @@ def instance_status(
         verification_overall=verification_overall,
         compatibility_severity=compatibility_severity,
         compatibility_count=compatibility_count,
+        extra={"reconcileCircuit": circuit_note} if circuit_note else {},
     )
 
 

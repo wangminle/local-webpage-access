@@ -36,6 +36,13 @@ def test_default_config_values() -> None:
     ]
     assert resolved.pipRetries == 3
     assert resolved.pipTimeout == 60
+    assert resolved.aptMirror == "mirrors.aliyun.com"
+    assert resolved.aptFallbacks == [
+        "mirrors.tuna.tsinghua.edu.cn",
+        "deb.debian.org",
+    ]
+    assert resolved.aptRetries == 2
+    assert resolved.aptTimeout == 30
 
 
 def test_build_mirrors_disabled_resolves_empty() -> None:
@@ -45,6 +52,8 @@ def test_build_mirrors_disabled_resolves_empty() -> None:
     assert m.enabled is False
     assert m.pip is None
     assert m.nodeDistBase is None
+    assert m.aptMirror is None
+    assert m.aptFallbacks == []
 
 
 def test_port_pool_range() -> None:

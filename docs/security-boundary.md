@@ -52,6 +52,8 @@
 > Dockerfile 审计是高危模式门禁，**不是 shell 语义分析器或构建沙箱**。
 > 它不承诺识别所有变形；自定义 `entry.install`、`entry.build` 和
 > `buildHooks` 仍应视为会在容器构建期执行的代码，只导入信任的项目。
+> manifest `systemDeps`（V0.8.16，issue #35）只接受 Debian 包名字符集
+> （`[A-Za-z0-9][A-Za-z0-9.+-]*`），内插进 `apt-get install`，不接受 shell 元素。
 
 > V1 生成的 Dockerfile 默认非 root（`node:24-alpine` 用 `node` 用户，
 > `python:3.13-slim` 创建 `app` 用户并切换）。warn/info 仍记录日志但不阻断写出。

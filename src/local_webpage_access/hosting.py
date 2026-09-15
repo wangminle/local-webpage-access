@@ -1085,19 +1085,23 @@ def _recreate_failed_rollback(
     旧容器在 recreate 前已 stop 且身份已清空，不可恢复；如实记录为
     failed（清空容器身份，下次 start 走完整重建），而不是留下
     manifest/registry/实际容器三方分叉。与 :func:`_liveness_failed_rollback`
-    对称。
+    对称。CHK-326：先保存 inspect/日志再 down。
     """
+    from local_webpage_access.build_diagnostics import format_probe_failure
+
+    extra = _container_probe_context(workspace, registry, instance_id)
+    diag = format_probe_failure(str(exc), stage="runtime_recreate", **extra)
     with contextlib.suppress(Exception):
         runtime.down(instance_id)
     if manifest.container is not None:
         manifest.container.containerId = None
         manifest.container.imageId = None
-    _mark_failed(workspace, registry, instance_id, manifest, exc)
+    _mark_failed(workspace, registry, instance_id, manifest, Exception(diag))
     with contextlib.suppress(Exception):
         registry.add_event(
             instance_id,
             "lifecycle_stage",
-            f"runtime recreate 失败已回滚（新容器已清理）：{str(exc)[:200]}",
+            f"runtime recreate 失败已回滚（新容器已清理）：{diag[:200]}",
         )
 
 
@@ -1408,6 +1412,30 @@ def _side_effects_auto_recoverable(records: list[Any]) -> bool:
     return all(getattr(r, "autoRecoverable", False) for r in records)
 
 
+def _container_probe_context(
+    workspace: Workspace, registry: Registry, instance_id: str
+) -> dict[str, Any]:
+    """探针失败时采集容器状态、inspect 与日志尾部（issue #35 / CHK-326）。"""
+    extra: dict[str, Any] = {}
+    try:
+        runtime = DockerRuntime(workspace, registry)
+        st = runtime.status(instance_id)
+        if st is not None:
+            extra["container_state"] = st.state
+        ins = runtime.inspect_state(instance_id)
+        if ins.get("exit_code") is not None:
+            extra["exit_code"] = ins["exit_code"]
+        if ins.get("oom_killed") is not None:
+            extra["oom_killed"] = bool(ins["oom_killed"])
+        if isinstance(ins.get("restart_count"), int):
+            extra["restart_count"] = ins["restart_count"]
+        extra["logs"] = runtime.logs(instance_id, tail=80)
+        extra["build_log"] = str(workspace.app_dir(instance_id) / "logs" / "build.log")
+    except Exception:  # noqa: BLE001
+        log.debug("采集容器探针上下文失败", exc_info=True)
+    return extra
+
+
 def _evaluate_container_verification(
     host_port: int,
     manifest: InstanceManifest,
@@ -1431,13 +1459,19 @@ def _evaluate_container_verification(
     # 与测试中 monkeypatch _http_ok 对齐）
     liveness_ok = _wait_for_http(host_port)
     if not liveness_ok:
+        extra = _container_probe_context(workspace, registry, instance_id)
+        from local_webpage_access.build_diagnostics import format_probe_failure
+
         return {
             "overall_status": "failed",
             "liveness_passed": False,
             "mandatory_all_passed": False,
             "optional_warnings": [],
             "observed_capabilities": [],
-            "error": f"基础存活探针超时（host_port={host_port}，{_CONTAINER_HEALTH_ATTEMPTS} 次未响应）",
+            "error": format_probe_failure(
+                f"基础存活探针超时（host_port={host_port}，{_CONTAINER_HEALTH_ATTEMPTS} 次未响应）",
+                **extra,
+            ),
         }
 
     # 基础存活通过 -> 收集能力
@@ -1620,6 +1654,10 @@ def _liveness_failed_rollback(
     """Gate-C C.04：必选探针失败时回滚容器与端口。"""
     import contextlib
 
+    extra = _container_probe_context(workspace, registry, instance_id)
+    from local_webpage_access.build_diagnostics import format_probe_failure
+
+    saved = format_probe_failure(error, stage="liveness", **extra)
     # 停止容器
     with contextlib.suppress(Exception):
         runtime = DockerRuntime(workspace, registry)
@@ -1632,15 +1670,15 @@ def _liveness_failed_rollback(
             PortAllocator(config=config, registry=registry).release_instance(instance_id)
 
     manifest.status = Status.FAILED
-    manifest.lastError = error[:500]
+    manifest.lastError = saved[:1800]
     manifest.touch()
     with contextlib.suppress(Exception):
         manifest.save(workspace.app_manifest_path(instance_id))
-    registry.update_status(instance_id, Status.FAILED.value, last_error=error[:500])
+    registry.update_status(instance_id, Status.FAILED.value, last_error=saved[:1800])
     registry.add_event(
         instance_id,
         "lifecycle_stage",
-        f"Gate-C 必选探针失败：{error[:200]}",
+        f"Gate-C 必选探针失败：{saved[:200]}",
     )
 
 
@@ -2095,7 +2133,9 @@ def _mark_failed(
     exc: Exception,
 ) -> None:
     """把实例标记为 failed，写 error summary 与事件。"""
-    error_summary = str(exc)[:500]
+    from local_webpage_access.docker_runtime import _error_summary_with_hint
+
+    error_summary = _error_summary_with_hint(str(exc), limit=1200) or str(exc)[:500]
     manifest.status = Status.FAILED
     manifest.lastError = error_summary
     manifest.touch()

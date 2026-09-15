@@ -52,6 +52,8 @@ CLI, web manager, inbox auto-import, import-time security checks, and `lwa docto
 - **Manager locks are kernel-enforced (V0.8.14, issue #32)** — the manager single-instance and start locks now use kernel file locks (flock): dead PIDs and PIDs reused by unrelated processes no longer block startup (empty/corrupt records are briefly watched and self-heal by inode age), and no signal is ever sent to an unrelated process; lock files are never unlinked, and a live holder can no longer be stolen by file age. A lock conflict is classified by health at the service entry: a healthy same-workspace duplicate exits 0, while unhealthy holders or lock I/O failures exit non-zero with the holder PID, lock path, and log location (no more silent offline). Handover from ≤V0.8.13 processes uses a protocol marker plus a bounded wait that ends when the old flow unlinks the lock path (not when its process exits — a released lock is never falsely reported as held); an empty record from the old version's create-before-write window is watched, never pre-claimed (the old version would clobber the record and unlink the new holder's path), and is claimed once its inode age reaches the old 60-second staleness window. The lock layer itself never terminates processes; stopping an old-version manager is left to the coordinated restart (`lwa update`) or `lwa manager off`.
 - **Recovery guidance keeps autostart; scoped enable/disable (V0.8.14)** — update failure hints now lead with retrying `lwa update` (supervisor-coordinated restart preserves autostart); if `off`→`on` is used, the hint states it disables autostart and how to restore exactly that service: `lwa autostart enable|disable --service manager|daemon|gateway` touches only the target unit and keeps every other service's original state (a bare `lwa autostart enable` enables all installed units). `lwa update`'s waitReady step now also waits for the manager when it was actually restarted, with workspace-scoped readiness.
 - **Redundant cleanup protects `buildHooks` / `preStart` (V0.8.14)** — instances carrying their own build hooks or pre-start commands join the config-loss guard alongside path alias / `buildEnv`: batch purge skips them by default with concrete reasons, `--allow-config-loss` still overrides, and the preview and the in-lock recheck share the same policy.
+- **Agent collaboration foundation (V0.8.15, AGC M0+M1)** — discovery endpoints `/llms.txt` / `/agent-info.json` / `/agent-guide` let AI assistants find this LWA; strict request/response contracts with 13 tool metadata specs serve as the single source for OpenAPI and MCP schemas; agent endpoints authenticate the local owner only (loopback + Bearer/X-LWA-Token) and validate `allowedSourceRoots` deny-by-default; registry schema v3 adds `workspace_meta` / `agent_plans` / `agent_operations` with an idempotent DAO. See [docs/agent-guide.md](docs/agent-guide.md).
+- **Complex-deployment hardening (V0.8.16, issues #33–#35)** — `lwa doctor` gains `service_version_drift` (flags running services left on older code; align with `lwa services restart`, a coordinated manager/daemon/gateway restart that keeps autostart and pulls no code, reporting restarted / skipped / circuit-blocked per service). Container builds get an apt source chain symmetric with pip (`aptFallbacks` / `aptRetries` / `aptTimeout`; the official source snapshot is written once and every candidate switches from that immutable original) and a manifest `systemDeps` layer rendered **before** `COPY current/` with a BuildKit apt cache mount (`lwa configure --system-deps / --build-hook`, rejected on Node/Alpine images); `buildHooks` render verbatim — move system packages to `systemDeps`. A reusable pip dependency layer is split only when the install command is exactly `pip install .` (extras, extra flags, or compound commands fall back to a full copy that preserves the original command, BUG-660). Build failures are classified into `lastError` (network / memory / disk; bare `Killed` stays "uncertain"), probe failures attach container log tails and inspect evidence (`RestartCount` read from the container top level, unknown never faked), `desiredAlias` survives alias live-verification rollback and is auto-registered after a successful start/rebuild (`alias clear` also clears it; auto-restore re-reads the on-disk intent first), and daemon self-healing honors a build circuit breaker (≈3 consecutive failures → hourly backoff, ≈5 → manual intervention; `lwa start` / `lwa rebuild` resets it, visible in `lwa status` and the manager page).
 - **Host setup and autostart** — Docker/Caddy install scripts (China mirrors by default); launchd / systemd units; Ubuntu LTS, Debian Stable, Fedora, WSL2, macOS only.
 - **Move the workspace, update LWA, talk to an agent** — `lwa workspace relocate`, `lwa update` (fast-forward only), 20 SKILL.md files for AI assistants.
 
@@ -121,7 +123,7 @@ Use `lwa <command> --help` for flags. Global `-v` turns on DEBUG logs.
 | `lwa recover <ID>` | One-shot recovery (pulls Caddy up if needed, then restart) |
 | `lwa rebuild [--sync] <ID>` | Force-rebuild through the build queue; `--sync` refreshes folder/git sources first (stale sources are detected and warned) |
 | `lwa cancel-build <ID>` | Cancel a queued or running build (keeps caches / images / data) |
-| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy]` | Show or change per-instance settings: replace (repeatable, whole-map) or clear `buildEnv`, derive `VITE_BASE` from the current alias at build time, or mark an intentional duplicate (each toggle has a `--no-` inverse); host builds only — apply with `lwa rebuild` |
+| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks]` | Show or change per-instance settings: `buildEnv`, alias-base follow, intentional duplicate, container `systemDeps` (apt fallback chain before `COPY current/`), and `buildHooks` (each list flag is a whole-map replace, repeatable); apply with `lwa rebuild` |
 | `lwa remove <ID> [--purge] [--force]` | Remove instance; `--purge` deletes disk (non-empty `data/` needs `--force`) |
 | `lwa remove --redundant [--purge] [--allow-config-loss]` | Drop duplicate zips, keep the earliest; skips curated (alias / `buildEnv`) and running instances — `--allow-config-loss` opts in for curated ones |
 | `lwa logs <ID> [-c CATEGORY] [-n TAIL]` | Logs: build / run / gateway / import / scan |
@@ -140,6 +142,7 @@ Use `lwa <command> --help` for flags. Global `-v` turns on DEBUG logs.
 | `lwa manager on` / `off` / `status` / `start` / `logs` | Web UI (`:17800`); `start` is foreground |
 | `lwa manager token [--json]` | Show token, issued-at, next rotation (168h) |
 | `lwa daemon on` / `off` / `status` | Watch `inbox/`; import and self-heal |
+| `lwa services restart [--no-reconcile]` | Coordinated restart of manager / daemon / gateway so running services load current code (keeps autostart; no pull / pip; V0.8.16, issue #33) |
 
 ### Autostart
 
@@ -183,6 +186,10 @@ buildMirrors:
   # pipFallbacks: []        # empty list → primary only
   # pipRetries: 3
   # pipTimeout: 60
+  # apt source chain (V0.8.16, issues #34/#35): systemDeps layers; aliyun → tuna → debian.org.
+  # aptFallbacks: []        # empty list → primary only
+  # aptRetries: 2
+  # aptTimeout: 30
 lanIpStrategy: auto         # auto | manual
 manualLanIp: null
 logLevel: INFO
@@ -291,6 +298,8 @@ CLI、管理页、inbox 自动导入、导入期安全检查、`lwa doctor` 均�
 - **manager 两把锁内核化（V0.8.14，issue #32）** — manager 单实例锁与启动锁改用内核文件锁（flock）：死 PID、被无关进程复用的 PID 都不再拒启（空/损坏记录改为限时观察、按 inode 年龄自愈认领），也绝不向无关进程发信号；锁文件永不删除，存活持有者不再被按文件年龄抢占。锁冲突由服务入口按健康分类：同工作区健康重复实例 exit 0，不健康持锁或锁 I/O 故障非零退出并给出持有 PID、锁路径与日志位置（不再静默离线）。对 ≤V0.8.13 旧版进程的交接用协议标记 + 有限等待，等待以旧版流程 unlink 锁路径为临界区结束标志（不是其进程退出——已释放的锁不再被误报占用）；旧版「已建文件、未写 PID」窗口留下的空记录只观察、绝不提前认领（旧版恢复后会覆写记录并 unlink 新版持锁路径），超时仍空按 inode 年龄达到旧版 60 秒陈旧阈值后才认领。锁层自身不终止任何进程，旧版 manager 的停止交给协调重启（`lwa update`）或 `lwa manager off`。
 - **恢复指引保留自启；按服务启用/停用自启（V0.8.14）** — 更新失败指引优先建议重试 `lwa update`（监督器协调重启保留自启状态）；确需 off→on 时明示 off 会停用自启，并按服务恢复：`lwa autostart enable|disable --service manager|daemon|gateway` 只动目标单元、保留其他服务原状态（不带 `--service` 会启用全部已安装单元）。`lwa update` 的 waitReady 在 manager 实际被重启过时也纳入就绪等待，且就绪判定区分本工作区。
 - **冗余清理保护 buildHooks / preStart（V0.8.14）** — 携带独立构建钩子或启动前命令的实例与路径别名 / buildEnv 同入配置保护：批量 purge 默认跳过并给出具体理由，`--allow-config-loss` 仍可显式覆盖；预览与删除锁内复核共用同一判定。
+- **Agent 协作基座（V0.8.15，AGC M0+M1）** — 发现入口 `/llms.txt` / `/agent-info.json` / `/agent-guide` 供 AI 助手自动找到本 LWA；严格请求/响应契约与 13 个工具元数据规格作为 OpenAPI 与 MCP schema 的共源；agent 端点仅认本机 owner（回环 + Bearer/X-LWA-Token），`allowedSourceRoots` 源根校验默认拒绝；registry schema v3 新增 `workspace_meta` / `agent_plans` / `agent_operations` 与幂等 DAO。见 [docs/agent-guide.md](docs/agent-guide.md)。
+- **复杂实例部署加固（V0.8.16，issues #33–#35）** — `lwa doctor` 新增 `service_version_drift`（发现运行中服务仍跑旧代码；用 `lwa services restart` 协调重启 manager/daemon/gateway 对齐，保留自启、不拉代码，并按服务区分已重启/跳过/熔断）。容器构建获得与 pip 对称的 apt 源链（`aptFallbacks` / `aptRetries` / `aptTimeout`；官方源快照一次写入不可变，每个候选源都从原始源独立切换）与 manifest `systemDeps` 层——渲染在 `COPY current/` **之前**并带 BuildKit apt cache mount（`lwa configure --system-deps / --build-hook`，Node/Alpine 镜像拒绝）；`buildHooks` 原样渲染，系统包请迁 `systemDeps`。仅当安装命令精确为 `pip install .` 时才拆可复用依赖层（extras、附加参数或复合命令回退整包 COPY 并保留原命令，BUG-660）。构建失败分类写入 `lastError`（网络 / 内存 / 磁盘；单凭 `Killed` 标注「不确定」），探针失败附容器日志尾部与 inspect 证据（`RestartCount` 取容器顶层，未知不伪造），`desiredAlias` 在别名活验证回滚后保留并在 start/rebuild 成功后自动补登记（显式 `alias clear` 一并清空；自动恢复先重读磁盘意图），daemon 自愈遵循构建熔断（连续失败约 3 次小时级退避、约 5 次转人工；`lwa start` / `lwa rebuild` 清熔断，`lwa status` 与管理页可见）。
 - **宿主机装配与自启** — Docker/Caddy 安装脚本（默认国内源）；launchd / systemd；仅 Ubuntu LTS、Debian Stable、Fedora、WSL2、macOS。
 - **搬工作区、升级 LWA、交给 Agent** — `lwa workspace relocate`、`lwa update`（只允许快进）、20 份 SKILL.md。
 
@@ -360,7 +369,7 @@ lwa status
 | `lwa recover <ID>` | 一键恢复（必要时先拉起 Caddy） |
 | `lwa rebuild [--sync] <ID>` | 经构建队列强制重建；`--sync` 先同步 folder/git 源码（漂移时自动警告） |
 | `lwa cancel-build <ID>` | 取消排队/进行中的构建（不删缓存/镜像/数据） |
-| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy]` | 查看/修改实例配置：整组替换（可重复）或清空 `buildEnv`、构建期按当前别名推导 `VITE_BASE`、标记有意保留的重复实例（每个开关均有 `--no-` 反向形式）；仅宿主构建生效，`lwa rebuild` 应用 |
+| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks]` | 查看/修改实例配置：`buildEnv`、别名 base 跟随、有意保留重复实例、容器 `systemDeps`（COPY 前走 apt 切源链）与 `buildHooks`（列表选项均为整组替换、可重复）；`lwa rebuild` 生效 |
 | `lwa remove <ID> [--purge] [--force]` | 移除实例；`--purge` 删磁盘（非空 `data/` 需 `--force`） |
 | `lwa remove --redundant [--purge] [--allow-config-loss]` | 按 zip 指纹去重，保留最早者；带独立配置（别名 / `buildEnv`）或运行中的实例默认跳过，`--allow-config-loss` 显式覆盖 |
 | `lwa logs <ID> [-c CATEGORY] [-n TAIL]` | 日志：build / run / gateway / import / scan |
@@ -379,6 +388,7 @@ lwa status
 | `lwa manager on` / `off` / `status` / `start` / `logs` | 管理页（`:17800`）；`start` 为前台 |
 | `lwa manager token [--json]` | 查看 token、颁发时间、下次轮换（168h） |
 | `lwa daemon on` / `off` / `status` | 监听 `inbox/`，导入并自愈 |
+| `lwa services restart [--no-reconcile]` | 协调重启 manager / daemon / gateway，使运行中服务加载当前代码（保留自启；不拉源码 / 不重装 pip；V0.8.16，issue #33） |
 
 ### 自启
 
@@ -422,6 +432,10 @@ buildMirrors:
   # pipFallbacks: []        # empty list → primary only
   # pipRetries: 3
   # pipTimeout: 60
+  # apt source chain (V0.8.16, issues #34/#35): systemDeps layers; aliyun → tuna → debian.org.
+  # aptFallbacks: []        # empty list → primary only
+  # aptRetries: 2
+  # aptTimeout: 30
 lanIpStrategy: auto         # auto | manual
 manualLanIp: null
 logLevel: INFO

@@ -273,6 +273,31 @@ def test_rebuild_no_drift_no_warning(
     )
 
 
+def test_rebuild_reverify_alias_after_sync(workspace, registry, config, stub_hosting, monkeypatch) -> None:
+    """CHK-326：rebuild 同步路由后必须重验别名，不能只 restore。"""
+    calls: list[str] = []
+
+    def fake_verify(*_args, **_kwargs):
+        calls.append("verify")
+        return True
+
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.maybe_verify_alias_after_start",
+        fake_verify,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.path_alias.maybe_restore_desired_alias_after_start",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle._sync_alias_port",
+        lambda *_a, **_k: None,
+    )
+    _seed_instance(workspace, registry)
+    rebuild_instance(workspace, config, registry, "api")
+    assert calls == ["verify"]
+
+
 def test_rebuild_zip_source_no_warning(
     workspace, registry, config, stub_hosting
 ) -> None:

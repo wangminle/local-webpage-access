@@ -25,6 +25,22 @@ def configure(
         "--acknowledge-redundancy/--no-acknowledge-redundancy",
         help="将重复实例标记为有意保留，退出冗余候选；可撤销",
     ),
+    system_deps: list[str] | None = typer.Option(
+        None,
+        "--system-deps",
+        help="替换系统依赖包列表（可重复）；仅 Debian 系 Python 容器走 apt 切源链，Node/Alpine 请用 --build-hook",
+    ),
+    clear_system_deps: bool = typer.Option(
+        False, "--clear-system-deps", help="清空 systemDeps"
+    ),
+    build_hook: list[str] | None = typer.Option(
+        None,
+        "--build-hook",
+        help="替换构建钩子（可重复）；系统包请优先用 --system-deps",
+    ),
+    clear_build_hooks: bool = typer.Option(
+        False, "--clear-build-hooks", help="清空 buildHooks"
+    ),
 ) -> None:
     """配置实例；不带选项时显示当前配置，修改后需 rebuild 生效。"""
     try:
@@ -45,6 +61,18 @@ def configure(
             changes["buildBaseFromAlias"] = follow_alias_base
         if acknowledge_redundancy is not None:
             changes["redundancyAcknowledged"] = acknowledge_redundancy
+        if system_deps and clear_system_deps:
+            raise ValueError("--system-deps 与 --clear-system-deps 互斥")
+        if system_deps:
+            changes["systemDeps"] = system_deps
+        if clear_system_deps:
+            changes["systemDeps"] = []
+        if build_hook and clear_build_hooks:
+            raise ValueError("--build-hook 与 --clear-build-hooks 互斥")
+        if build_hook:
+            changes["buildHooks"] = build_hook
+        if clear_build_hooks:
+            changes["buildHooks"] = []
         ws, _, reg = open_workspace_registry()
         try:
             if changes:
@@ -55,7 +83,13 @@ def configure(
                 json.dumps(
                     {
                         k: getattr(manifest, k)
-                        for k in ("buildEnv", "buildBaseFromAlias", "redundancyAcknowledged")
+                        for k in (
+                            "buildEnv",
+                            "buildBaseFromAlias",
+                            "redundancyAcknowledged",
+                            "systemDeps",
+                            "buildHooks",
+                        )
                     },
                     ensure_ascii=False,
                     indent=2,

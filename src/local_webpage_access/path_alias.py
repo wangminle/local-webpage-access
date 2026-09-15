@@ -747,6 +747,10 @@ def _set_instance_path_alias_locked(
         )
 
     current = _current_alias(manifest)
+    if alias is None and getattr(manifest, "desiredAlias", None):
+        manifest.desiredAlias = None
+        with contextlib.suppress(Exception):
+            manifest.save(mpath)
     if alias == current:
         route_url = manifest.network.routeUrl if manifest.network else None
         return PathAliasResult(
@@ -850,9 +854,18 @@ def _set_instance_path_alias_locked(
                     had_fragment=had_fragment,
                     previous_fragment=previous_fragment,
                 )
+                if alias is not None:
+                    manifest.desiredAlias = alias
+                    with contextlib.suppress(Exception):
+                        manifest.save(mpath)
                 raise
 
     _apply_manifest_alias(manifest, config, alias)
+    # issue #35：期望别名独立于当前 routeHost，活验证失败回滚后仍可自动补登记。
+    if alias is not None:
+        manifest.desiredAlias = alias
+    else:
+        manifest.desiredAlias = None
     # issue #21：运行中设置且活验证通过 → 落验证标记（须在 _apply_manifest_alias
     # 之后，否则新别名会被判为「标记不匹配」而清空）。
     if alias is not None and live_verified:
@@ -949,7 +962,10 @@ def _rollback_deferred_alias_after_failed_live_verify(
         gateway.reload_all()
     except GatewayError as exc:
         log.warning("别名 deferred 活验证失败后回滚 reload 失败：%s", exc)
+    desired = (getattr(manifest, "desiredAlias", None) or "").strip() or _current_alias(manifest)
     _apply_manifest_alias(manifest, config, None)
+    if desired:
+        manifest.desiredAlias = desired
     manifest.save(workspace.app_manifest_path(instance_id))
     if manifest.runtime == Runtime.DOCKER_COMPOSE and manifest.container is not None:
         registry.upsert_container(instance_id, manifest.container.model_dump())
@@ -963,8 +979,44 @@ def _rollback_deferred_alias_after_failed_live_verify(
     )
 
 
+def maybe_restore_desired_alias_after_start(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+) -> bool:
+    """issue #35 建议 4：部署成功后若有期望别名但未登记，自动补登记。
+
+    BUG-662：必须重读磁盘上的 ``desiredAlias``，避免解锁前快照把用户已 clear 的别名挂回。
+    """
+    try:
+        latest = InstanceManifest.load(workspace.app_manifest_path(instance_id))
+    except Exception:  # noqa: BLE001
+        latest = manifest
+    desired = (getattr(latest, "desiredAlias", None) or "").strip()
+    if not desired:
+        return False
+    if _current_alias(latest) == desired:
+        return False
+    try:
+        set_instance_path_alias(workspace, config, registry, instance_id, desired)
+        refreshed = InstanceManifest.load(workspace.app_manifest_path(instance_id))
+        manifest.container = refreshed.container
+        manifest.static = refreshed.static
+        manifest.network = refreshed.network
+        manifest.desiredAlias = refreshed.desiredAlias
+        manifest.aliasLiveVerifiedAt = refreshed.aliasLiveVerifiedAt
+        manifest.aliasLiveVerifiedFor = refreshed.aliasLiveVerifiedFor
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("实例 %s 自动补登记别名 /%s/ 失败：%s", instance_id, desired, exc)
+        return False
+
+
 __all__ = [
     "PathAliasResult",
+    "maybe_restore_desired_alias_after_start",
     "maybe_verify_alias_after_start",
     "path_alias_lock",
     "reject_alias_if_absolute_spa_assets",

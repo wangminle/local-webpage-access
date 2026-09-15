@@ -31,6 +31,7 @@ def _mk_manifest(
     database_type: str | None = None,
     build_hooks: list[str] | None = None,
     pre_start: str | None = None,
+    system_deps: list[str] | None = None,
 ) -> InstanceManifest:
     kwargs: dict = dict(
         id=mid,
@@ -52,6 +53,7 @@ def _mk_manifest(
         database=DatabaseConfig(type=database_type) if has_database and database_type else None,
         buildHooks=build_hooks or [],
         preStart=pre_start,
+        systemDeps=system_deps or [],
     )
     return InstanceManifest(**kwargs)
 
@@ -681,13 +683,15 @@ def test_pyzbar_in_requirements_triggers_apt_install(workspace: Workspace) -> No
     )
     m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
-    assert "apt-get install -y --no-install-recommends libzbar0" in content
+    assert "libzbar0" in content
+    assert "--no-install-recommends" in content
+    assert "--fix-missing" in content
     # apt 块在 WORKDIR 之后、pip install 之前（用 RUN 行定位，跳过注释头）
     idx_workdir = content.index("WORKDIR /app")
-    idx_apt = content.index("apt-get install", idx_workdir)
-    idx_pip = content.index("RUN", idx_apt)
-    assert "pip install" in content[idx_pip:]
-    assert idx_workdir < idx_apt < idx_pip
+    idx_apt = content.index("libzbar0", idx_workdir)
+    idx_copy = content.index("COPY current/", idx_apt)
+    assert idx_workdir < idx_apt < idx_copy
+    assert "Acquire::Retries" in content
 
 
 def test_no_apt_deps_when_requirements_clean(workspace: Workspace) -> None:
@@ -715,8 +719,8 @@ def test_multiple_apt_deps_dedup_and_merge(workspace: Workspace) -> None:
     assert "libgl1" in content
     assert "libglib2.0-0" in content
     assert "libzbar0" in content
-    # 只有一个 apt-get update（去重后单条 RUN）
-    assert content.count("apt-get update") == 1
+    # 系统包装入单条带 cache mount 的 apt RUN（切源链会多次写 apt-get）
+    assert content.count("--mount=type=cache,target=/var/cache/apt") == 1
 
 
 def test_apt_deps_with_extras_and_version_constraints(workspace: Workspace) -> None:
@@ -766,15 +770,16 @@ def test_apt_deps_strips_comments_and_environment_markers(workspace: Workspace) 
     assert "libzbar0" in content
 
 
-def test_apt_deps_block_cleans_lists(workspace: Workspace) -> None:
-    """IMP-054：apt 块末尾 rm -rf /var/lib/apt/lists/* 保持镜像精简。"""
+def test_apt_deps_block_uses_cache_mount(workspace: Workspace) -> None:
+    """issue #35：apt 块使用 BuildKit cache mount，不再 rm lists。"""
     workspace.ensure_app_dirs("api")
     (workspace.app_current("api") / "requirements.txt").write_text(
         "pyzbar>=0.1.9\n", encoding="utf-8"
     )
     m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
     content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
-    assert "rm -rf /var/lib/apt/lists/*" in content
+    assert "--mount=type=cache,target=/var/cache/apt,sharing=locked" in content
+    assert "rm -rf /var/lib/apt/lists/*" not in content
 
 
 def test_apt_deps_respect_apt_mirror(workspace: Workspace) -> None:
@@ -1060,3 +1065,107 @@ def test_generated_dockerfile_carries_pip_resilience(workspace: Workspace) -> No
     assert "--retries 3" in content
     assert "--timeout 60" in content
     assert "--extra-index-url" not in content
+
+
+def test_system_deps_render_before_copy(workspace: Workspace) -> None:
+    """issue #35：systemDeps 在 COPY current/ 之前，并带 apt 切源链。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+        system_deps=["ffmpeg"],
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "ffmpeg" in content
+    idx_apt = content.index("ffmpeg")
+    idx_copy = content.index("COPY current/ ./")
+    assert idx_apt < idx_copy
+    assert "mirrors.tuna.tsinghua.edu.cn" in content
+    assert "Acquire::Retries" in content
+
+
+def test_apt_build_hook_is_not_auto_rewritten(workspace: Workspace) -> None:
+    """CHK-326：不因 hook 含 apt-get 自动改写；系统包走 systemDeps。"""
+    workspace.ensure_app_dirs("api")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+        build_hooks=["apt-get update && apt-get install -y --no-install-recommends ffmpeg"],
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg" in content
+    # 未套 apt 切源链（那是 systemDeps 的职责）
+    hook_idx = content.index("RUN apt-get update && apt-get install")
+    hook_line = content[hook_idx : content.index("\n", hook_idx)]
+    assert "debian.sources" not in hook_line
+    assert "Acquire::Retries" not in hook_line
+
+
+def test_pip_install_dot_splits_when_pyproject_exists(workspace: Workspace) -> None:
+    """issue #35 建议 6：pip install . 且有 [project] 时拆依赖层。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "pyproject.toml").write_text(
+        '[project]\nname="demo"\nversion="0.1.0"\ndependencies=["fastapi"]\n',
+        encoding="utf-8",
+    )
+    (workspace.app_current("api") / "package.json").write_text("{}", encoding="utf-8")
+    m = _mk_manifest(install="pip install .", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "COPY current/pyproject.toml ./" in content
+    assert "pip install . --no-deps" in content
+    assert "COPY current/package*.json ./" in content
+    first_full = content.index("COPY current/ ./")
+    assert content.index("COPY current/pyproject.toml ./") < first_full
+    assert content.index("COPY current/package*.json ./") < first_full
+    assert content.index("pip install . --no-deps") > first_full
+
+
+def test_pip_install_dot_keeps_full_copy_for_path_deps(workspace: Workspace) -> None:
+    """CHK-326：路径/动态依赖不能安全拆层，保留整包 COPY + pip install .。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "pyproject.toml").write_text(
+        '[project]\nname="demo"\nversion="0.1.0"\n'
+        'dependencies=["local-lib @ file://localhost/tmp/lib"]\n',
+        encoding="utf-8",
+    )
+    m = _mk_manifest(install="pip install .", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "COPY current/pyproject.toml ./" not in content
+    assert "pip install . --no-deps" not in content
+    assert "COPY current/ ./" in content
+    assert "pip install ." in content
+
+
+def test_pip_install_dot_extras_not_split(workspace: Workspace) -> None:
+    """BUG-660：extras / 附加参数 / 后续 shell 必须保留，不能改成 pip install . --no-deps。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "pyproject.toml").write_text(
+        '[project]\nname="demo"\nversion="0.1.0"\ndependencies=["fastapi"]\n',
+        encoding="utf-8",
+    )
+    install = (
+        "pip install .[worker] --config-settings editable_mode=compat && touch /app/setup-done"
+    )
+    m = _mk_manifest(install=install, start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "pip install .[worker]" in content
+    assert "editable_mode=compat" in content
+    assert "touch /app/setup-done" in content
+    assert "pip install . --no-deps" not in content
+
+
+def test_second_apt_layer_restores_official_sources(workspace: Workspace) -> None:
+    """BUG-661：官方源备份只写一次，后续层不得用已切镜像覆盖。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "package.json").write_text("{}", encoding="utf-8")
+    (workspace.app_current("api") / "requirements.txt").write_text("pyzbar\n", encoding="utf-8")
+    m = _mk_manifest(
+        install="pip install -r requirements.txt",
+        start="uvicorn main:app",
+        system_deps=["ffmpeg"],
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "[ ! -f /tmp/lwa-official-debian.sources ]" in content
+    assert "cp /tmp/lwa-official-debian.sources /etc/apt/sources.list.d/debian.sources" in content
+    # 可变备份路径不得每层无条件覆盖官方快照
+    assert "cp /etc/apt/sources.list.d/debian.sources /tmp/lwa-debian.sources" not in content

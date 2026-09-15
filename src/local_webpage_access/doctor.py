@@ -2152,6 +2152,136 @@ def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
     )
 
 
+def _read_manager_health_version(ws: Workspace, config: Config) -> str | None:
+    """读取运行中 manager ``/api/health`` 的进程绑定版本。"""
+    from local_webpage_access.manager_service import read_state
+    from local_webpage_access.probe import urlopen_direct
+
+    state = read_state(ws)
+    if state is None or not state.port:
+        return None
+    url = f"http://127.0.0.1:{int(state.port)}/api/health"
+    try:
+        with urlopen_direct(url, timeout=2.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get("version")
+    return str(version) if version else None
+
+
+def check_service_version_drift(ws: Workspace, config: Config) -> CheckResult:
+    """issue #33：运行中服务绑定版本/提交 vs 当前安装版本。"""
+    from local_webpage_access.version_info import (
+        bind_process_revision,
+        display_version,
+        normalize_version_label,
+    )
+
+    code = display_version()
+    code_rev = bind_process_revision()
+    code_n = normalize_version_label(code)
+    lines: list[str] = []
+    drifted: list[str] = []
+    unknown: list[str] = []
+
+    def _label(name: str) -> str:
+        if name == "gateway":
+            return "gateway 监管进程（LWA，非 Caddy 二进制）"
+        return name
+
+    def _identity(version: str | None, revision: str | None) -> str:
+        if not version:
+            return "未知"
+        rev = revision or "未知"
+        return f"{version}+{rev}"
+
+    def _compare(name: str, bound_ver: str | None, bound_rev: str | None) -> None:
+        running_id = _identity(bound_ver, bound_rev)
+        code_id = _identity(code, code_rev)
+        lines.append(f"{_label(name)}: 运行版本 {running_id} → 当前安装版本 {code_id}")
+        if not bound_ver:
+            unknown.append(name)
+            return
+        bound_n = normalize_version_label(bound_ver)
+        version_mismatch = bool(bound_n and code_n and bound_n != code_n)
+        revision_mismatch = bool(bound_rev and code_rev and bound_rev != code_rev)
+        missing_rev = bool(code_rev and not bound_rev)
+        if version_mismatch or revision_mismatch:
+            drifted.append(name)
+        elif missing_rev:
+            unknown.append(name)
+
+    manager_running = _service_observed_running("manager", ws, config)
+    if manager_running:
+        from local_webpage_access.manager_service import read_state as _rm
+
+        st_mgr = _rm(ws)
+        health_ver = _read_manager_health_version(ws, config)
+        _compare(
+            "manager",
+            health_ver or (getattr(st_mgr, "bind_version", None) if st_mgr else None),
+            getattr(st_mgr, "bind_revision", None) if st_mgr else None,
+        )
+
+    daemon_running = _service_observed_running("daemon", ws, config)
+    if daemon_running:
+        from local_webpage_access.daemon import read_state as _rd
+
+        st_daemon = _rd(ws)
+        _compare(
+            "daemon",
+            getattr(st_daemon, "bind_version", None) if st_daemon else None,
+            getattr(st_daemon, "bind_revision", None) if st_daemon else None,
+        )
+
+    gateway_running = _service_observed_running("gateway", ws, config)
+    if gateway_running:
+        from local_webpage_access.gateway_service import read_state as _rg
+
+        st_gateway = _rg(ws)
+        _compare(
+            "gateway",
+            getattr(st_gateway, "bind_version", None) if st_gateway else None,
+            getattr(st_gateway, "bind_revision", None) if st_gateway else None,
+        )
+
+    suggestion = (
+        "执行 `lwa services restart` 协调重启自有服务（复用 updater 编排，保留自启动意图）；"
+        "若还需拉取源码并刷新安装，使用 `lwa update`"
+    )
+    if not lines:
+        return CheckResult(
+            "service_version_drift",
+            STATUS_OK,
+            "无运行中的自有服务，跳过版本漂移检查",
+        )
+    if drifted:
+        return CheckResult(
+            "service_version_drift",
+            STATUS_WARN,
+            f"运行中服务版本与当前代码不一致：{', '.join(drifted)}（代码 {code}）",
+            detail="\n".join(lines),
+            suggestion=suggestion,
+        )
+    if unknown:
+        return CheckResult(
+            "service_version_drift",
+            STATUS_WARN,
+            f"运行中服务版本未知，无法确认是否已加载当前代码：{', '.join(unknown)}（代码 {code}）",
+            detail="\n".join(lines),
+            suggestion=suggestion,
+        )
+    return CheckResult(
+        "service_version_drift",
+        STATUS_OK,
+        "运行中服务版本与当前代码一致",
+        detail="\n".join(lines),
+    )
+
+
 def _container_restart_policy_mismatch() -> tuple[list[str], str | None]:
     """运行中的 ``lwa-<id>`` 容器 restart 策略与模板期望 ``unless-stopped`` 对照。
 
@@ -2362,6 +2492,7 @@ def run_doctor(
             check_static_gateway(ws),
             # IMP-060：自有服务运行态（FAIL 级）+ 重启韧性（WARN 级）
             check_service_runtime_state(ws, config),
+            check_service_version_drift(ws, config),
             check_restart_resilience(ws, config),
             check_caddy_health(ws, config, runner=runner, registry=caddy_probe_registry),
             check_lan_url_stale(ws, config, caddy_probe_registry)
@@ -2635,6 +2766,7 @@ __all__ = [
     "check_registry",
     "check_static_gateway",
     "check_service_runtime_state",
+    "check_service_version_drift",
     "check_restart_resilience",
     "check_caddy_health",
     "check_workspace_path_consistency",

@@ -275,6 +275,22 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 - 调整参数：`buildMirrors.pipFallbacks`（`[]` 只走主源）/ `pipRetries` /
   `pipTimeout`；改完 `lwa rebuild <id>` 生效。
 
+### 构建慢 / apt 系统包失败（issue #34 / #35）
+
+系统包请用 `lwa configure <id> --system-deps ffmpeg`（渲染在 `COPY current/` 之前，
+带 apt 源链与 cache mount），不要只写 `buildHooks` 里的裸 `apt-get`。china 默认
+阿里云 → 清华 → `deb.debian.org`，每源快速失败后 `||` 切源。排障口径：
+
+- **镜像源不可达**（`Failed to fetch` / `Connection failed`）→ 调 `aptFallbacks` /
+  `aptRetries` / `aptTimeout`，或把包装入 `systemDeps` 后 rebuild。
+- **cannot allocate memory / OOMKilled** → 提高 Docker Desktop 内存，避免并发构建。
+- **仅出现 Killed** → 原因未确认，结合 ExitCode / OOMKilled 与日志，不要直接当成 VM 内存不足。
+- **No space left on device** → `docker builder prune`。
+- **运行中服务版本落后于磁盘代码** → `lwa doctor` 的 `service_version_drift`；对齐用
+  `lwa services restart`（保留自启动意图），需要拉代码时再用 `lwa update`。
+- **daemon 反复自动重建** → 连续**构建**失败会小时级熔断，5 次后需 `lwa start` / `lwa rebuild`
+  人工清熔断。轻量 `compose start` 失败只走内存退避。`lwa status` 与管理页详情「构建熔断」字段可见。
+
 ---
 
 ## 三、容器实例路径别名（IMP-014）

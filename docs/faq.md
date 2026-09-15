@@ -265,6 +265,10 @@ warning 不阻断，提示稍后 `lwa doctor` 复核。若仍见瞬时 FAIL，�
    `lwa manager on` 等恢复命令），对**已停用但进程残留**的服务 WARN（建议 `lwa X off` 清理）；
    `restart_resilience` 对任一 enabled 服务缺自启单元（逐项差集，含 gateway）/ 单元已装未启用 /
    无 linger / 容器 restart 策略不符给出 **WARN** 与实证修复命令。
+   **issue #33**：`service_version_drift` 比对管理页 `/api/health` 与 daemon/gateway 状态文件里的
+   绑定版本 vs 当前代码。`lwa update` 后未重启时会 WARN（doctor 不再全绿），建议再执行
+   `lwa update`（无代码更新时仍会协调重启运行中的服务），或用更轻的
+   `lwa services restart`（只协调重启三服务，不拉源码 / 不重装 pip）。
 3. 缺省安全（IMP-061）：`lwa autostart install` 在 caddy 环境默认纳入 gateway 单元、默认
    尝试 linger；`lwa init`/`setup` 收尾在 Linux systemd 环境 TTY 交互引导安装。一条命令修复：
    `lwa autostart install --with-caddy --linger`。
@@ -347,6 +351,50 @@ privileged / Docker socket 等为 **critical**，
 * 已知事实：requirements 变更后重构建会**全量重新下载**（实测镜像源响应头使 pip
   HTTP 缓存未命中，BuildKit cache mount 在位也不救）——加一个小包也要等全部依赖
   下载完成，这不是源切换能解决的问题。
+
+### 容器构建 apt / 系统包失败或极慢？（issue #34 / #35）
+
+ffmpeg 等**运行时**系统包请写入 `systemDeps`（不要只塞进 `buildHooks`），会渲染到
+`COPY current/` **之前**，并走与 pip 对称的 apt 源链（china 默认阿里云 → 清华 →
+官方 `deb.debian.org`，每源 `Acquire::Retries=2` / 超时 30s，带 BuildKit apt cache mount）。
+
+```bash
+lwa configure <id> --system-deps ffmpeg
+lwa rebuild <id>
+```
+
+含 `apt-get` 的 `buildHooks` **不会**自动改写（通用 shell 可能含条件分支或自管源）。
+请把系统包迁到 `systemDeps`：
+
+```json
+{
+  "systemDeps": ["ffmpeg"],
+  "buildHooks": []
+}
+```
+
+原先写在 hook 里的 `apt-get install -y ffmpeg` 删除即可，由 LWA 统一做包名校验、
+镜像选择、有限重试与 cache mount。构建失败时 `lastError` 会给出分类（apt / 内存 /
+磁盘）以及 **不确定** 的 Killed 证据，不会单凭 `Killed` 断言 Docker VM 内存不足。
+
+* 可在 `buildMirrors` 调整 `aptMirror` / `aptFallbacks`（`[]` 只走主源）/
+  `aptRetries` / `aptTimeout`。
+* 长 apt 下载会抬高 Docker Desktop VM 内存；并发构建更容易 OOM。提高 Desktop 内存上限，
+  或把 `buildConcurrency` 保持为 1。
+* 连续失败约 3 次后 daemon 自愈进入小时级熔断，约 5 次后停止自动重试；`lwa status`
+  与管理页详情会提示。清熔断：`lwa start` / `lwa rebuild`。
+
+### 存活探针超时但其实是应用启动即崩？（issue #35）
+
+探针失败会附带容器状态与 `docker logs` 尾部。若容器 `restarting` / 反复退出，文案会
+写明「启动即崩，见容器日志」——常见原因是非 root 用户无法在 `/app` 下建目录（LWA 默认
+只 `chown` `/app/data`）。把运行时目录改到 data 卷，或在构建钩子里 `mkdir` + `chown`。
+
+### 别名设过一次、活验证 502 后入口 404？（issue #35）
+
+期望别名会记在 `desiredAlias`。容器健康探针通过后，`lwa start` / `lwa rebuild` 会自动
+补登记并再做活验证。也可手动 `lwa alias set <id> <slug>`。显式 `lwa alias clear` 会
+清空期望别名，不再自动补登记。
 
 ### 设置过的路径别名会因启动检查被清掉吗？（V0.8.9 / issue #21）
 

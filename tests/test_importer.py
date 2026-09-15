@@ -2357,6 +2357,12 @@ def test_rescan_preserves_build_hooks_and_prestart(
     manifest = InstanceManifest.load(mpath)
     manifest.buildHooks = ["chown -R 1000:1000 /app/runtime"]
     manifest.preStart = "echo hi"
+    manifest.systemDeps = ["ffmpeg"]
+    manifest.desiredAlias = "funasr-workbench"
+    manifest.aliasLiveVerifiedAt = "2026-09-15T15:23:00Z"
+    manifest.aliasLiveVerifiedFor = "funasr-workbench"
+    manifest.consecutiveReconcileFailures = 3
+    manifest.reconcileCircuitManual = True
     manifest.save(mpath)
 
     scanner = Scanner()
@@ -2366,6 +2372,11 @@ def test_rescan_preserves_build_hooks_and_prestart(
     )
     assert fresh.buildHooks == ["chown -R 1000:1000 /app/runtime"]
     assert fresh.preStart == "echo hi"
+    assert fresh.systemDeps == ["ffmpeg"]
+    assert fresh.desiredAlias == "funasr-workbench"
+    assert fresh.aliasLiveVerifiedFor == "funasr-workbench"
+    assert fresh.consecutiveReconcileFailures == 3
+    assert fresh.reconcileCircuitManual is True
 
 
 def test_update_preserves_build_hooks_and_prestart(

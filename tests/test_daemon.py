@@ -1384,6 +1384,70 @@ def test_reconcile_continues_on_individual_failure(
     assert restarted == ["ok"]
 
 
+def test_reconcile_skips_manual_circuit_container(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """issue #35：人工熔断的容器实例不得被 daemon 自动重试。"""
+    from local_webpage_access.models import InstanceManifest, Status
+
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.observe_status",
+        lambda ws, cfg, reg, iid: Status.STOPPED,
+    )
+    _seed_instance(
+        registry, workspace, "fused", runtime="docker-compose", status="stopped"
+    )
+    _seed_instance(
+        registry, workspace, "okc", runtime="docker-compose", status="stopped"
+    )
+    path = workspace.app_manifest_path("fused")
+    manifest = InstanceManifest.load(path)
+    manifest.reconcileCircuitManual = True
+    manifest.consecutiveReconcileFailures = 5
+    manifest.save(path)
+    restarted: list[str] = []
+    daemon_mod.reconcile(
+        workspace,
+        config,
+        registry,
+        restarter=lambda ws, cfg, reg, iid: restarted.append(iid),
+    )
+    assert restarted == ["okc"]
+
+
+def test_reconcile_lightweight_failure_does_not_persist_circuit(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    """CHK-326：轻量重启失败只走内存退避，不把构建熔断持久化。"""
+    from local_webpage_access.models import InstanceManifest
+
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle.observe_status",
+        lambda ws, cfg, reg, iid: __import__(
+            "local_webpage_access.models", fromlist=["Status"]
+        ).Status.STOPPED,
+    )
+    _seed_instance(
+        registry, workspace, "lite", runtime="docker-compose", status="stopped"
+    )
+    path = workspace.app_manifest_path("lite")
+    manifest = InstanceManifest.load(path)
+    assert manifest.container is not None
+    manifest.container.containerId = "abc123"
+    from local_webpage_access.lifecycle import _compute_deployment_fingerprints
+
+    manifest.deploymentFingerprints = _compute_deployment_fingerprints(workspace, manifest)
+    manifest.save(path)
+
+    def fail(ws, cfg, reg, iid):
+        raise RuntimeError("compose start failed")
+
+    daemon_mod.reconcile(workspace, config, registry, restarter=fail)
+    after = InstanceManifest.load(path)
+    assert after.consecutiveReconcileFailures == 0
+    assert after.reconcileCircuitManual is False
+
+
 def test_reconcile_applies_backoff_after_repeated_failure(
     workspace: Workspace, config: Config, registry: Registry
 ) -> None:

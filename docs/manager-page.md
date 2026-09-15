@@ -289,6 +289,7 @@ Content-Type: application/json
 | `lanUrlSource` | `live` / `manual` / `manifest` |
 | `redundant` | 是否为同 zip 指纹分组中的冗余实例（非最早者，IMP-019） |
 | `configLossReasons` | 冗余实例携带的「删除即丢失」独立配置清单（路径别名 / buildEnv，issue #31；非冗余实例为空数组） |
+| `reconcileCircuit` | 构建熔断提示（issue #35）：连续构建失败进入小时级退避、达人工阈值后停止自动重试；`lwa start` / `lwa rebuild` 清熔断。仅熔断激活时返回，详情面板显示为「构建熔断」 |
 
 详情中的 `manifest.nameSource` 为 `user` / `html_title` / `slug`（或旧数据 `null`），用于判断是否允许 title 回填。
 
@@ -442,8 +443,12 @@ Authorization: Bearer <token>
 经现有 API 鉴权的 `PATCH /api/instances/<id>/settings` 接受以下字段的部分更新，拒绝未知字段：
 
 ```json
-{"buildEnv":{"VITE_BASE":"/demo/"},"buildBaseFromAlias":false,"redundancyAcknowledged":true}
+{"buildEnv":{"VITE_BASE":"/demo/"},"buildBaseFromAlias":false,"redundancyAcknowledged":true,"systemDeps":["ffmpeg"],"buildHooks":["apt-get update"]}
 ```
 
-`buildEnv` 为整组替换，null 清空；布尔字段必须是真正布尔值。构建配置仅支持宿主前端，
-不适用于容器；接口不会自动 rebuild。也可通过 `lwa configure` 操作，无需手改 JSON。
+`buildEnv` 为整组替换，null 清空；布尔字段必须是真正布尔值。`buildEnv` / 别名 base
+跟随仅支持宿主前端构建，不适用于容器；`systemDeps` 仅支持 Debian 系 Python 容器
+（走 apt 源链），Node/Alpine 容器保存时拒绝并提示改用 `buildHooks`（issue #35，BUG-664）。
+`systemDeps` / `buildHooks` 为整组替换（数组），接口不会自动 rebuild。设置弹窗暂未
+暴露 `systemDeps` / `buildHooks`，推荐用 `lwa configure <id> --system-deps /
+--build-hook`（含 `--clear-*` 清空变体）操作。

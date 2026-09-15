@@ -1074,7 +1074,7 @@ def test_build_hub_timeout_error_carries_hint(workspace, registry, monkeypatch) 
     assert "registry-mirrors" in summary
     assert "python:3.13-slim" in summary  # 分类器提取的失败镜像
     assert "build.log" in summary
-    assert len(summary) <= 500
+    assert len(summary) <= 1200
 
 
 def test_build_normal_failure_has_no_hub_hint(workspace, registry, monkeypatch) -> None:
@@ -1095,6 +1095,24 @@ def test_build_normal_failure_has_no_hub_hint(workspace, registry, monkeypatch) 
     assert "npm error" in summary
 
 
+def test_build_apt_fetch_failure_classified(workspace, registry, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(
+        args=[],
+        returncode=1,
+        stderr="E: Unable to fetch some archives, maybe run apt-get update\n",
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    build_id = registry.add_build("api", status="running")
+    rt = DockerRuntime(workspace, registry)
+    with pytest.raises(DockerError, match="镜像源不可达"):
+        rt.build("api", build_id=build_id)
+    summary = registry.list_builds("api")[0]["error_summary"]
+    assert "aptFallbacks" in summary
+
+
 def test_execute_streaming_timeout_classifies_hub_unreachable(tmp_path: Path) -> None:
     """issue #14 路径二（LWA 总超时）：已捕获的部分输出进分类器，异常带指引。"""
     log = tmp_path / "build.log"
@@ -1112,3 +1130,31 @@ def test_execute_streaming_timeout_classifies_hub_unreachable(tmp_path: Path) ->
     # build.log 保留 BuildKit 原文（不被摘要覆盖）
     content = log.read_text(encoding="utf-8")
     assert "registry-1.docker.io" in content
+
+
+def test_inspect_state_reads_restart_count_from_top_level(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-665：RestartCount 在 inspect 顶层，不在 .State。"""
+    payload = {
+        "RestartCount": 4,
+        "State": {"ExitCode": 137, "OOMKilled": True, "Status": "exited", "Error": ""},
+    }
+    fake = _FakeExecute()
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=0, stdout=json.dumps(payload) + "\n"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    monkeypatch.setattr(
+        DockerRuntime,
+        "status",
+        lambda self, iid: ContainerStatus(container_id="abc123", state="exited"),
+    )
+    rt = DockerRuntime(workspace, registry)
+    ins = rt.inspect_state("api")
+    assert ins["restart_count"] == 4
+    assert ins["exit_code"] == 137
+    assert ins["oom_killed"] is True
+    assert "inspect" in fake.calls[-1]["args"]
+    assert "{{json .}}" in fake.calls[-1]["args"]
+    assert "{{json .State}}" not in fake.calls[-1]["args"]

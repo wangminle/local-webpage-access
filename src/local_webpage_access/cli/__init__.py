@@ -7,6 +7,7 @@
 * :mod:`local_webpage_access.cli.lifecycle`   —— start / stop / restart / rebuild / cancel-build / remove / logs
 * :mod:`local_webpage_access.cli.status`      —— status / stats / list
 * :mod:`local_webpage_access.cli.system`      —— setup / doctor / update
+* :mod:`local_webpage_access.cli.services`    —— ``lwa services restart`` 协调重启自有服务
 * :mod:`local_webpage_access.cli.alias`       —— ``lwa alias set/clear`` 子命令组
 * :mod:`local_webpage_access.cli.probe`       —— ``lwa probe show/set/reset`` 子命令组
 * :mod:`local_webpage_access.cli.daemon`      —— ``lwa daemon on/off/status`` 子命令组
@@ -60,7 +61,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.8.14-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.8.16-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -242,6 +243,7 @@ def _register_all() -> None:
         manager,
         probe,
         registry,
+        services,
         workspace,
     )
 
@@ -253,6 +255,7 @@ def _register_all() -> None:
     app.add_typer(manager.app, name="manager")
     app.add_typer(gateway.app, name="gateway")
     app.add_typer(registry.app, name="registry")
+    app.add_typer(services.app, name="services")
     app.add_typer(workspace.app, name="workspace")
 
 

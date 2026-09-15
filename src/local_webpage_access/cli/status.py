@@ -93,6 +93,9 @@ def status(
                 typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
             if s.last_error:
                 typer.secho(f"  ↳ lastError: {s.last_error}", fg=typer.colors.RED)
+            circuit = (s.extra or {}).get("reconcileCircuit")
+            if circuit:
+                typer.secho(f"  ↳ {circuit}", fg=typer.colors.YELLOW)
         _echo_service_modes(instance_id)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)

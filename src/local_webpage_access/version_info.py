@@ -1,17 +1,19 @@
-"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.8.14-Build...`` 前缀。"""
+"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.8.16-Build...`` 前缀。"""
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import tomllib
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
+from typing import Any
 
 _VERSION_PREFIX = re.compile(r"^V(\d+\.\d+\.\d+)", re.IGNORECASE)
 _PACKAGE_NAME = "local-webpage-access"
-_FALLBACK_VERSION = "0.8.14"
+_FALLBACK_VERSION = "0.8.16"
 
 
 def _is_lwa_repo(path: Path) -> bool:
@@ -78,7 +80,7 @@ def _version_from_metadata() -> str | None:
 
 @lru_cache(maxsize=1)
 def resolve_version() -> str:
-    """返回 semver 字符串（如 ``0.8.14``），不含 ``V`` 前缀。"""
+    """返回 semver 字符串（如 ``0.8.16``），不含 ``V`` 前缀。"""
     git_ver = _version_from_git(_repo_root())
     if git_ver:
         return git_ver
@@ -89,7 +91,7 @@ def resolve_version() -> str:
 
 
 def version_from_subject(subject: str | None) -> str | None:
-    """从 commit 主题解析 ``V0.8.14-Build...`` 前缀（IMP-063）。
+    """从 commit 主题解析 ``V0.8.16-Build...`` 前缀（IMP-063）。
 
     主题不含 ``Vx.y.z`` 时返回 ``None``——不伪造版本号，报告降级为短 SHA。
     """
@@ -100,7 +102,7 @@ def version_from_subject(subject: str | None) -> str | None:
 
 
 def display_version() -> str:
-    """UI/CLI 展示用（如 ``V0.8.14``）。"""
+    """UI/CLI 展示用（如 ``V0.8.16``）。"""
     return f"V{resolve_version()}"
 
 
@@ -113,6 +115,46 @@ def bind_process_version() -> str:
     """
     resolve_version.cache_clear()
     return display_version()
+
+
+def bind_process_revision() -> str | None:
+    """进程启动时记录的短提交标识；无 git 仓库时返回 ``None``。"""
+    root = _repo_root()
+    if root is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=root,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    rev = (result.stdout or "").strip()
+    return rev or None
+
+
+def fill_missing_bind_version(state: Any, path: Path) -> None:
+    """写状态文件时若未显式设置 bind_version / bind_revision，保留盘上已有值。"""
+    missing_ver = not getattr(state, "bind_version", None)
+    missing_rev = not getattr(state, "bind_revision", None)
+    if not missing_ver and not missing_rev:
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    if missing_ver and data.get("bind_version"):
+        state.bind_version = str(data["bind_version"])
+    if missing_rev and data.get("bind_revision"):
+        state.bind_revision = str(data["bind_revision"])
 
 
 def normalize_version_label(value: str | None) -> str | None:
@@ -131,6 +173,8 @@ __all__ = [
     "resolve_version",
     "display_version",
     "bind_process_version",
+    "bind_process_revision",
+    "fill_missing_bind_version",
     "normalize_version_label",
     "version_from_subject",
 ]

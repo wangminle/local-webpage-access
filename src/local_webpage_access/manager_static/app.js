@@ -231,6 +231,7 @@
           ["lanUrl", "访问地址"], ["hostPort", "宿主端口"], ["internalPort", "内部端口"],
           ["portMappingLabel", "端口映射"], ["routeHost", "路径别名"],
           ["routeUrl", "路径入口"], ["lastError", "最近错误"],
+          ["reconcileCircuit", "构建熔断"],
           ["observedState", "观测状态"], ["runtimeAccess", "运行时访问"],
           ["observationError", "观测错误"], ["lastTrustedState", "最后可信状态"],
           ["lastHealthCheckAt", "最近健康检查"], ["updatedAt", "更新时间"],

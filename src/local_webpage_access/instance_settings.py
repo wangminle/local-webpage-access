@@ -4,7 +4,7 @@ from typing import Any
 
 from local_webpage_access.errors import LwaError
 from local_webpage_access.lifecycle import instance_lock
-from local_webpage_access.models import InstanceManifest, Runtime
+from local_webpage_access.models import InstanceManifest, Kind, Runtime
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 
@@ -22,9 +22,18 @@ def effective_build_env(manifest: InstanceManifest) -> dict[str, str]:
 def update_instance_settings(
     workspace: Workspace, registry: Registry, instance_id: str, changes: dict[str, Any]
 ) -> InstanceManifest:
-    allowed = {"buildEnv", "buildBaseFromAlias", "redundancyAcknowledged"}
+    allowed = {
+        "buildEnv",
+        "buildBaseFromAlias",
+        "redundancyAcknowledged",
+        "systemDeps",
+        "buildHooks",
+    }
     if not changes or set(changes) - allowed:
-        raise ValueError("仅允许设置 buildEnv、buildBaseFromAlias、redundancyAcknowledged")
+        raise ValueError(
+            "仅允许设置 buildEnv、buildBaseFromAlias、redundancyAcknowledged、"
+            "systemDeps、buildHooks"
+        )
     for key in ("buildBaseFromAlias", "redundancyAcknowledged"):
         if key in changes and not isinstance(changes[key], bool):
             raise ValueError(f"{key} 必须是布尔值")
@@ -40,6 +49,13 @@ def update_instance_settings(
                 updated.buildEnv or updated.buildBaseFromAlias
             ) and old.runtime != Runtime.SHARED_STATIC:
                 raise ValueError("buildEnv / 别名 base 跟随仅支持宿主前端构建；容器构建不支持")
+        if "systemDeps" in changes and old.runtime != Runtime.DOCKER_COMPOSE:
+            raise ValueError("systemDeps 仅支持容器实例")
+        if "systemDeps" in changes and (changes.get("systemDeps") or []) and old.kind != Kind.PYTHON:
+            raise ValueError(
+                "systemDeps 使用 apt，仅支持 Debian 系 Python 容器；"
+                "Node 镜像为 Alpine，请改用 buildHooks"
+            )
         updated.touch()
         updated.save(path)
         registry.add_event(instance_id, "config", "更新实例配置：" + "、".join(sorted(changes)))

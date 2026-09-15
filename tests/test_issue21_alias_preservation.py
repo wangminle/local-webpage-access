@@ -243,6 +243,136 @@ def test_deferred_alias_without_marker_still_rolls_back(
     assert reloaded.container.routeMode == "port"
     assert reloaded.container.routeHost is None
     assert not ws.app_alias_config(iid).is_file()
+    # issue #35：当前别名回滚后仍保留期望别名，供部署成功后自动补登记。
+    assert reloaded.desiredAlias == "prd-review"
+
+
+def test_maybe_restore_desired_alias_after_start(
+    ws, cfg, reg, container_instance, monkeypatch
+) -> None:
+    """issue #35：期望别名与当前 routeHost 不一致时自动补登记。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    assert manifest.container is not None
+    manifest.container.routeMode = "port"
+    manifest.container.routeHost = None
+    manifest.desiredAlias = "prd-review"
+    manifest.save(mpath)
+
+    calls: list[str] = []
+
+    def fake_set(workspace, config, registry, instance_id, alias, **kwargs):
+        calls.append(alias)
+        m = InstanceManifest.load(workspace.app_manifest_path(instance_id))
+        assert m.container is not None
+        m.container.routeMode = "name"
+        m.container.routeHost = alias
+        m.desiredAlias = alias
+        m.save(workspace.app_manifest_path(instance_id))
+        return pa.PathAliasResult(
+            instance_id=instance_id,
+            alias=alias,
+            route_url=None,
+            alias_entry_enabled=True,
+            gateway_reloaded=False,
+            unchanged=False,
+            live_verified=True,
+        )
+
+    monkeypatch.setattr(pa, "set_instance_path_alias", fake_set)
+    assert pa.maybe_restore_desired_alias_after_start(ws, cfg, reg, iid, manifest) is True
+    assert calls == ["prd-review"]
+    reloaded = InstanceManifest.load(mpath)
+    assert reloaded.container is not None
+    assert reloaded.container.routeHost == "prd-review"
+
+
+def test_maybe_restore_noop_when_alias_already_matches(
+    ws, cfg, reg, container_instance, monkeypatch
+) -> None:
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    manifest.desiredAlias = "prd-review"
+    manifest.save(mpath)
+    monkeypatch.setattr(
+        pa,
+        "set_instance_path_alias",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应补登记")),
+    )
+    assert pa.maybe_restore_desired_alias_after_start(ws, cfg, reg, iid, manifest) is False
+
+
+def test_alias_clear_stops_auto_restore(ws, cfg, reg, container_instance, monkeypatch) -> None:
+    """CHK-326：用户 alias clear 后不得凭历史期望别名自动挂回。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    manifest.desiredAlias = None
+    if manifest.container is not None:
+        manifest.container.routeHost = None
+        manifest.container.routeMode = "port"
+    manifest.save(mpath)
+    cleared = InstanceManifest.load(mpath)
+    assert cleared.desiredAlias is None
+    monkeypatch.setattr(
+        pa,
+        "set_instance_path_alias",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("clear 后不应自动恢复")),
+    )
+    assert pa.maybe_restore_desired_alias_after_start(ws, cfg, reg, iid, cleared) is False
+
+
+def test_alias_clear_clears_desired_even_when_route_already_empty(
+    ws, cfg, reg, container_instance
+) -> None:
+    """BUG-662：当前无别名时 clear 仍须清掉 desiredAlias。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    assert manifest.container is not None
+    manifest.container.routeMode = "port"
+    manifest.container.routeHost = None
+    manifest.desiredAlias = "prd-review"
+    manifest.save(mpath)
+    result = pa.set_instance_path_alias(ws, cfg, reg, iid, None)
+    after = InstanceManifest.load(mpath)
+    assert after.desiredAlias is None
+    assert result.alias is None
+
+
+def test_maybe_restore_rereads_desired_alias_from_disk(
+    ws, cfg, reg, container_instance, monkeypatch
+) -> None:
+    """BUG-662：自动恢复必须重读磁盘意图，不得用解锁前快照把已 clear 的别名挂回。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    stale = InstanceManifest.load(mpath)
+    stale.desiredAlias = "prd-review"
+    if stale.container is not None:
+        stale.container.routeMode = "port"
+        stale.container.routeHost = None
+    disk = InstanceManifest.load(mpath)
+    disk.desiredAlias = None
+    if disk.container is not None:
+        disk.container.routeMode = "port"
+        disk.container.routeHost = None
+    disk.save(mpath)
+    calls: list[object] = []
+
+    def fake_set(*a, **k):
+        calls.append(a[4] if len(a) > 4 else k.get("alias"))
+        raise AssertionError("磁盘已 clear，不应补登记")
+
+    monkeypatch.setattr(pa, "set_instance_path_alias", fake_set)
+    assert pa.maybe_restore_desired_alias_after_start(ws, cfg, reg, iid, stale) is False
+    assert calls == []
 
 
 def test_marker_for_other_alias_does_not_protect(

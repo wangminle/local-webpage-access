@@ -631,6 +631,16 @@ class InstanceManifest(BaseModel):
     # 使 CMD 变为 ``sh -c "<preStart> && exec <start>"``。均拒绝换行符（防注入）。
     buildHooks: list[str] = Field(default_factory=list)
     preStart: str | None = None
+    # issue #35：系统级 apt 包（如 ffmpeg）。渲染到 COPY current/ 之前，走
+    # aptMirror / aptFallbacks / 重试；与 buildHooks 同属重扫保留清单。
+    systemDeps: list[str] = Field(default_factory=list)
+    # issue #35 建议 4：用户期望的路径别名。活验证失败回滚 routeHost 后仍保留，
+    # 部署成功后可自动补登记。显式 alias clear 时清空。
+    desiredAlias: str | None = None
+    # issue #35 建议 5：daemon 自愈构建熔断（连续失败退避 / 人工介入）。
+    consecutiveReconcileFailures: int = 0
+    reconcileNextRetryAt: str | None = None
+    reconcileCircuitManual: bool = False
     # DEV-132：实例级构建环境变量（如 {"VITE_BASE": "/<alias>/"}）。用户显式
     # 配置，不从源码推导；前端构建/安装命令执行时注入（{**os.environ,
     # **buildEnv}——subprocess env 是整体替换语义，须以 os.environ 为底）。
@@ -722,6 +732,28 @@ class InstanceManifest(BaseModel):
             if isinstance(item, str) and ("\n" in item or "\r" in item):
                 raise ValueError(f"buildHooks/preStart 不允许包含换行符：{item!r}")
         return v
+
+    @field_validator("systemDeps")
+    @classmethod
+    def _check_system_deps(cls, v: Any) -> Any:
+        """issue #35：systemDeps 内插进 apt-get install，仅允许 Debian 包名字符。"""
+        import re
+
+        values = v if isinstance(v, list) else [v]
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            if not isinstance(item, str):
+                raise ValueError("systemDeps 必须是字符串列表")
+            name = item.strip()
+            if not name:
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]*", name):
+                raise ValueError(f"非法 systemDeps 包名：{item!r}")
+            if name not in seen:
+                seen.add(name)
+                cleaned.append(name)
+        return cleaned
 
     @field_validator("sourceSubdir")
     @classmethod

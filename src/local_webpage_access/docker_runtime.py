@@ -157,19 +157,20 @@ def registry_timeout_hint(text: str | None) -> str:
     return "\n".join(lines)
 
 
-def _error_summary_with_hint(text: str | None, limit: int = 500) -> str:
-    """失败摘要：原始尾部 + （命中时）Hub 指引，总量不超过 limit。
+def _error_summary_with_hint(text: str | None, limit: int = 1200) -> str:
+    """失败摘要：分类诊断优先，其次 Hub 指引，再附原始尾部。"""
+    from local_webpage_access.build_diagnostics import classify_build_failure
 
-    指引在尾部截断中优先保留——原始 buildkit 输出在 build.log 有完整
-    原文，摘要里让出空间给可操作信息。
-    """
     blob = (text or "").strip()
+    classified = classify_build_failure(blob)
     hint = registry_timeout_hint(blob)
-    if not hint:
+    extras = [str(p) for p in (classified, hint) if p]
+    extra = "\n".join(extras)
+    if not extra:
         return blob[-limit:] if blob else ""
-    room = max(0, limit - len(hint) - 4)
+    room = max(0, limit - len(extra) - 4)
     head = blob[-room:] if room else ""
-    summary = f"{head}\n——\n{hint}" if head else hint
+    summary = f"{extra}\n——\n{head}" if head else extra
     return summary[:limit]
 
 
@@ -537,12 +538,9 @@ def _require_ok(result: ComposeResult, *, action: str, instance_id: str) -> Comp
     """非零退出统一转 :class:`DockerError`，带 stderr 摘要。"""
     if result.ok:
         return result
-    tail = (result.stderr or result.stdout).strip().splitlines()
-    summary = "\n".join(tail[-10:]) if tail else f"exit {result.returncode}"
-    # issue #14：Docker Hub 不可达的超时原文可读性差，统一追加分类器指引。
-    hint = registry_timeout_hint(result.stderr or result.stdout)
-    if hint:
-        summary += "\n——\n" + hint
+    summary = _error_summary_with_hint(result.stderr or result.stdout) or (
+        f"exit {result.returncode}"
+    )
     raise DockerError(
         f"Docker {action} 失败（实例 {instance_id}，exit {result.returncode}）：{summary}",
         instance_id=instance_id,
@@ -1051,6 +1049,41 @@ class DockerRuntime:
                 raw=data,
             )
         return None
+
+    def inspect_state(self, instance_id: str) -> dict:
+        """读取容器 ``.State``（ExitCode / OOMKilled / RestartCount）。失败返回空 dict。"""
+        cid = None
+        st = self.status(instance_id)
+        if st is not None:
+            cid = st.container_id
+        if not cid:
+            with contextlib.suppress(Exception):
+                cid = self.container_id(instance_id)
+        if not cid:
+            return {}
+        result = _execute(
+            ["docker", "inspect", cid, "--format", "{{json .}}"],
+            cwd=self.workspace.app_dir(instance_id),
+            timeout=_QUERY_TIMEOUT,
+        )
+        if not result.ok:
+            return {}
+        try:
+            data = json.loads(result.stdout or "")
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        raw_state = data.get("State")
+        state = raw_state if isinstance(raw_state, dict) else {}
+        restart_count = data.get("RestartCount")
+        return {
+            "exit_code": state.get("ExitCode"),
+            "oom_killed": state.get("OOMKilled"),
+            "restart_count": restart_count,
+            "error": state.get("Error"),
+            "status": state.get("Status"),
+        }
 
     def is_running(self, instance_id: str) -> bool:
         """容器是否处于 running 状态。

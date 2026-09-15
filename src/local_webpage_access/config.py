@@ -95,6 +95,8 @@ _CHINA_PIP = "https://mirrors.aliyun.com/pypi/simple/"
 _CHINA_NPM = "https://registry.npmmirror.com"
 _CHINA_NODE_DIST = "https://mirrors.aliyun.com/nodejs-release"
 _CHINA_APT = "mirrors.aliyun.com"
+# issue #35：阿里主源失败后切清华，再回落官方。清华在国内大包场景实测更稳。
+_CHINA_APT_FALLBACKS = ("mirrors.tuna.tsinghua.edu.cn", "deb.debian.org")
 # issue #18：pip || 切源链——阿里（主源）→ 官方 PyPI → 腾讯云。
 # extra-index-url 不能在主源慢但包存在时切走；硬故障才走下一段。
 _OFFICIAL_PYPI = "https://pypi.org/simple"
@@ -112,6 +114,9 @@ class BuildMirrors(BaseModel):
     官方 PyPI → 腾讯云）；``pipRetries`` / ``pipTimeout`` 写入每段 pip 命令。
     显式 ``pipFallbacks: []`` 关闭切源。``pipExtraIndex`` 保留解析兼容，
     默认不再注入 ``--extra-index-url``（同版本包不会因主源慢而切走）。
+
+    issue #34 / #35：``aptFallbacks`` / ``aptRetries`` / ``aptTimeout`` 与 pip
+    同构；china 默认清华 → 官方。显式 ``aptFallbacks: []`` 关闭切源。
     """
 
     enabled: bool = True
@@ -124,6 +129,11 @@ class BuildMirrors(BaseModel):
     npm: str | None = None
     nodeDistBase: str | None = None
     aptMirror: str | None = None
+    # issue #34 / #35：apt 与 pip 对称。china 默认阿里主源，失败切清华再官方。
+    # 重试/超时取较小值，让主源快速失败后切源，避免在坏 IP 上耗尽长时间重试。
+    aptFallbacks: list[str] | None = None
+    aptRetries: int = Field(default=2, ge=0, le=20)
+    aptTimeout: int = Field(default=30, ge=1, le=600)
 
     @field_validator("preset")
     @classmethod
@@ -148,11 +158,19 @@ class BuildMirrors(BaseModel):
                 npm=None,
                 nodeDistBase=None,
                 aptMirror=None,
+                aptFallbacks=[],
+                aptRetries=self.aptRetries,
+                aptTimeout=self.aptTimeout,
             )
         fallbacks = (
             [u.rstrip("/") for u in self.pipFallbacks]
             if self.pipFallbacks is not None
             else [u.rstrip("/") for u in _CHINA_PIP_FALLBACKS]
+        )
+        apt_fallbacks = (
+            [h.strip() for h in self.aptFallbacks]
+            if self.aptFallbacks is not None
+            else list(_CHINA_APT_FALLBACKS)
         )
         return BuildMirrors(
             enabled=True,
@@ -165,6 +183,9 @@ class BuildMirrors(BaseModel):
             npm=self.npm or _CHINA_NPM,
             nodeDistBase=(self.nodeDistBase or _CHINA_NODE_DIST).rstrip("/"),
             aptMirror=self.aptMirror or _CHINA_APT,
+            aptFallbacks=apt_fallbacks,
+            aptRetries=self.aptRetries,
+            aptTimeout=self.aptTimeout,
         )
 
 
@@ -417,6 +438,11 @@ buildMirrors:
   # npm: https://registry.npmmirror.com
   # nodeDistBase: https://mirrors.aliyun.com/nodejs-release
   # aptMirror: mirrors.aliyun.com
+  # aptFallbacks:
+  #   - mirrors.tuna.tsinghua.edu.cn
+  #   - deb.debian.org
+  # aptRetries: 2
+  # aptTimeout: 30
 
 # 局域网 IP 获取策略：auto（自动探测）| manual（手动指定）
 lanIpStrategy: auto

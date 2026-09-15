@@ -92,6 +92,21 @@ def test_compute_deployment_fingerprints_includes_split_hashes() -> None:
     assert "runtimeConfigHash" in fps
 
 
+def test_system_deps_change_build_config_hash(tmp_path: Path) -> None:
+    from local_webpage_access.lifecycle import _compute_build_config_fingerprint
+
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.13-slim\n", encoding="utf-8")
+    empty = _compute_build_config_fingerprint(dockerfile)
+    with_ffmpeg = _compute_build_config_fingerprint(dockerfile, system_deps=["ffmpeg"])
+    with_both = _compute_build_config_fingerprint(
+        dockerfile, system_deps=["ffmpeg", "libzbar0"]
+    )
+    assert empty != with_ffmpeg
+    assert with_ffmpeg != with_both
+    assert empty == _compute_build_config_fingerprint(dockerfile, system_deps=[])
+
+
 def _minimal_container() -> ContainerConfig:
     return ContainerConfig(
         projectName="lwa-test",

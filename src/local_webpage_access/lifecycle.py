@@ -336,6 +336,7 @@ def start_instance(
     instance_id: str,
     *,
     fallback_policy: str = _FALLBACK_CONFIRM,
+    from_reconcile: bool = False,
 ) -> InstanceManifest:
     """启动实例（WBS-17.01）。
 
@@ -358,11 +359,17 @@ def start_instance(
     6. 全部失败时输出 Layer 4 诊断报告。
 
     最终 ``desiredState=running``。
+    ``from_reconcile=True`` 时不在入口清熔断（由 daemon 按熔断窗口决定是否调用）。
     """
     from local_webpage_access.hosting import host_instance, start_container
+    from local_webpage_access.reconcile_circuit import clear_circuit
 
     with instance_lock(workspace, instance_id):
         manifest = _load(workspace, instance_id)
+        if not from_reconcile:
+            clear_circuit(manifest)
+            with contextlib.suppress(Exception):
+                manifest.save(workspace.app_manifest_path(instance_id))
         if _is_deployed_container(manifest):
             # C.R06 / CHK-252：指纹变化 → full rebuild / runtime recreate / 轻量 start
             current_fps = _compute_deployment_fingerprints(workspace, manifest)
@@ -434,7 +441,17 @@ def start_instance(
             manifest,
             alias_fragment_preexisting=alias_fragment_preexisting,
         )
-        return manifest
+        clear_circuit(manifest)
+        with contextlib.suppress(Exception):
+            manifest.save(workspace.app_manifest_path(instance_id))
+
+    from local_webpage_access.path_alias import maybe_restore_desired_alias_after_start
+
+    if maybe_restore_desired_alias_after_start(
+        workspace, config, registry, instance_id, manifest
+    ):
+        manifest = InstanceManifest.load(workspace.app_manifest_path(instance_id))
+    return manifest
 
 
 def _try_host_with_fallback(
@@ -894,8 +911,12 @@ def _compute_config_fingerprint(
     return h.hexdigest()
 
 
-def _compute_build_config_fingerprint(dockerfile_path: Path | None) -> str:
-    """CHK-252：仅 Dockerfile 的构建指纹。"""
+def _compute_build_config_fingerprint(
+    dockerfile_path: Path | None,
+    *,
+    system_deps: list[str] | None = None,
+) -> str:
+    """CHK-252 / CHK-326：Dockerfile + systemDeps 的构建指纹。"""
     h = hashlib.sha256()
     h.update(b"dockerfile\0")
     if dockerfile_path and isinstance(dockerfile_path, Path) and dockerfile_path.is_file():
@@ -905,6 +926,12 @@ def _compute_build_config_fingerprint(dockerfile_path: Path | None) -> str:
             h.update(b"<read-error>")
     else:
         h.update(b"<missing>")
+    deps = [str(d).strip() for d in (system_deps or []) if str(d).strip()]
+    if deps:
+        h.update(b"systemDeps\0")
+        for dep in deps:
+            h.update(dep.encode("utf-8"))
+            h.update(b"\0")
     return h.hexdigest()
 
 
@@ -960,7 +987,10 @@ def _compute_deployment_fingerprints(
             dockerfile_path = Path(manifest.container.dockerfilePath)
         env_path = workspace.app_env_path(manifest.id)
     config_hash = _compute_config_fingerprint(compose_path, dockerfile_path, env_path)
-    build_hash = _compute_build_config_fingerprint(dockerfile_path)
+    build_hash = _compute_build_config_fingerprint(
+        dockerfile_path,
+        system_deps=list(getattr(manifest, "systemDeps", None) or []),
+    )
     runtime_hash = _compute_runtime_config_fingerprint(compose_path, env_path)
 
     # image fingerprint
@@ -2008,9 +2038,13 @@ def rebuild_instance(
     """
     from local_webpage_access.build_queue import get_build_queue
     from local_webpage_access.hosting import host_container, host_instance
+    from local_webpage_access.reconcile_circuit import clear_circuit
 
     with instance_lock(workspace, instance_id):
         manifest = _load(workspace, instance_id)
+        clear_circuit(manifest)
+        with contextlib.suppress(Exception):
+            manifest.save(workspace.app_manifest_path(instance_id))
         # issue #8：源码陈旧警告不阻断重建
         warning = check_source_staleness(workspace, config, manifest)
         if warning:
@@ -2029,9 +2063,31 @@ def rebuild_instance(
 
         queue = get_build_queue(config, registry)
         manifest = queue.run(instance_id, _builder)
+        alias_conf_path = workspace.app_alias_config(instance_id)
+        alias_fragment_preexisting = alias_conf_path.is_file()
         # IMP-021：重建后端口可能漂移，同步别名片段（容器别名 reverse_proxy hostPort）。
         _sync_alias_port(workspace, config, instance_id, manifest)
-        return manifest
+        from local_webpage_access.path_alias import maybe_verify_alias_after_start
+
+        maybe_verify_alias_after_start(
+            workspace,
+            config,
+            registry,
+            instance_id,
+            manifest,
+            alias_fragment_preexisting=alias_fragment_preexisting,
+        )
+        clear_circuit(manifest)
+        with contextlib.suppress(Exception):
+            manifest.save(workspace.app_manifest_path(instance_id))
+
+    from local_webpage_access.path_alias import maybe_restore_desired_alias_after_start
+
+    if maybe_restore_desired_alias_after_start(
+        workspace, config, registry, instance_id, manifest
+    ):
+        manifest = InstanceManifest.load(workspace.app_manifest_path(instance_id))
+    return manifest
 
 
 def cancel_build(
@@ -2506,6 +2562,8 @@ def _redundant_config_loss_reasons(workspace: Workspace, instance_id: str) -> li
         reasons.append("配置了构建环境变量 buildEnv")
     if getattr(manifest, "buildHooks", None):
         reasons.append("配置了构建钩子 buildHooks")
+    if getattr(manifest, "systemDeps", None):
+        reasons.append("配置了系统依赖 systemDeps")
     if manifest.preStart:
         reasons.append("配置了启动前命令 preStart")
     return reasons

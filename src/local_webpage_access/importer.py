@@ -2194,6 +2194,8 @@ def build_manifest_from_detection(
             container_kwargs["routeHost"] = path_alias
         kwargs["container"] = ContainerConfig(**container_kwargs)
 
+    if path_alias is not None:
+        kwargs["desiredAlias"] = path_alias
     manifest = InstanceManifest(**kwargs)
     if zip_hash:
         manifest.sourceZipHash = zip_hash  # type: ignore[attr-defined]
@@ -2328,6 +2330,17 @@ def apply_detection_to_manifest(
     # _update_zip_locked）静默清空。list() 拷贝避免与旧 manifest 共享可变列表。
     fresh.buildHooks = list(getattr(manifest, "buildHooks", None) or [])
     fresh.preStart = getattr(manifest, "preStart", None)
+    fresh.systemDeps = list(getattr(manifest, "systemDeps", None) or [])
+    fresh.desiredAlias = getattr(manifest, "desiredAlias", None)
+    fresh.aliasLiveVerifiedAt = getattr(manifest, "aliasLiveVerifiedAt", None)
+    fresh.aliasLiveVerifiedFor = getattr(manifest, "aliasLiveVerifiedFor", None)
+    fresh.consecutiveReconcileFailures = int(
+        getattr(manifest, "consecutiveReconcileFailures", 0) or 0
+    )
+    fresh.reconcileNextRetryAt = getattr(manifest, "reconcileNextRetryAt", None)
+    fresh.reconcileCircuitManual = bool(
+        getattr(manifest, "reconcileCircuitManual", False)
+    )
     # DEV-132：buildEnv（实例级构建环境变量，如 {"VITE_BASE": "/<alias>/"}）是
     # 用户显式配置，不从源码推导；重建默认 None，不透传会让 scan / import
     # --update / update_from_git（汇入 _update_zip_locked）静默清空——与 entry.build

@@ -230,7 +230,7 @@ def _render_node(
     if manifest.entry.build:
         build_step = f"RUN {manifest.entry.build}\n"
     # issue#7：构建钩子在依赖安装/构建层之后、CMD 之前逐条执行（WORKDIR=/app）。
-    hooks_block = _build_hooks_block(manifest)
+    hooks_block = _build_hooks_block(manifest, mirrors=mirrors)
     cpfx = _copy_prefix(manifest)
     dependency_copy = _node_dependency_copy_block(install, source_dir=source_dir, copy_prefix=cpfx)
     install_run = _with_npm_registry(install, mirrors)
@@ -417,7 +417,7 @@ def _validate_apt_mirror_host(host: str) -> str:
 
 
 def _apt_mirror_prefix(mirrors: BuildMirrors | None) -> str:
-    """在 apt-get 前切换 Debian 源（可选）。"""
+    """在 apt-get 前切换 Debian 源（可选）。保留给单源路径与既有测试。"""
     if not mirrors or not mirrors.aptMirror:
         return ""
     host = _validate_apt_mirror_host(mirrors.aptMirror)
@@ -426,6 +426,183 @@ def _apt_mirror_prefix(mirrors: BuildMirrors | None) -> str:
         "/etc/apt/sources.list.d/debian.sources 2>/dev/null || "
         f"sed -i 's/deb.debian.org/{host}/g' /etc/apt/sources.list || true; \\\n  "
     )
+
+
+_APT_RETRIES = 2
+_APT_TIMEOUT = 30
+_APT_FAIL_HINT = (
+    "lwa: apt 安装失败。可能是镜像源不可达或过慢——可在 local-web.yml 的 "
+    "buildMirrors 中调整 aptMirror / aptFallbacks / aptRetries / aptTimeout，"
+    "或把系统包装入 systemDeps 后重试"
+)
+_APT_CACHE_MOUNTS = (
+    "--mount=type=cache,target=/var/cache/apt,sharing=locked "
+    "--mount=type=cache,target=/var/lib/apt,sharing=locked"
+)
+
+
+def _apt_retry_opts(mirrors: BuildMirrors | None) -> str:
+    retries = _APT_RETRIES
+    timeout = _APT_TIMEOUT
+    if mirrors is not None:
+        retries = mirrors.aptRetries
+        timeout = mirrors.aptTimeout
+    return f"-o Acquire::Retries={retries} -o Acquire::http::Timeout={timeout}"
+
+
+def _apt_hosts(mirrors: BuildMirrors | None) -> list[str]:
+    """主源 + aptFallbacks（去重、校验 hostname）。无配置时走官方源。"""
+    hosts: list[str] = []
+    if mirrors and mirrors.aptMirror:
+        hosts.append(_validate_apt_mirror_host(mirrors.aptMirror))
+    for raw in getattr(mirrors, "aptFallbacks", None) or []:
+        host = _validate_apt_mirror_host(str(raw))
+        if host not in hosts:
+            hosts.append(host)
+    return hosts or ["deb.debian.org"]
+
+
+def _apt_switch_prefix(host: str) -> str:
+    """从不可变官方源备份恢复后再切到 ``host``（官方源则只恢复）。"""
+    host = _validate_apt_mirror_host(host)
+    restore = (
+        "cp /tmp/lwa-official-debian.sources /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; "
+        "cp /tmp/lwa-official-sources.list /etc/apt/sources.list 2>/dev/null || true; "
+    )
+    if host == "deb.debian.org":
+        return restore
+    return (
+        restore
+        + f"sed -i 's/deb.debian.org/{host}/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || "
+        f"sed -i 's/deb.debian.org/{host}/g' /etc/apt/sources.list || true; "
+    )
+
+
+def _render_apt_run(body: str, mirrors: BuildMirrors | None) -> str:
+    """带 cache mount、快速失败重试与 || 切源的 apt RUN（issue #34 / #35）。
+
+    官方源快照只写一次（``/tmp/lwa-official-*``），后续层不得用已切镜像覆盖。
+    """
+    hosts = _apt_hosts(mirrors)
+    attempts = [f"( {_apt_switch_prefix(host)}{body} )" for host in hosts]
+    chain = " || ".join(attempts) if len(attempts) > 1 else attempts[0]
+    return (
+        f"RUN {_APT_CACHE_MOUNTS} \\\n"
+        "  set -eux; \\\n"
+        "  rm -f /etc/apt/apt.conf.d/docker-clean; \\\n"
+        '  echo \'Binary::apt::APT::Keep-Downloaded-Packages "true";\''
+        " > /etc/apt/apt.conf.d/keep-cache; \\\n"
+        "  if [ ! -f /tmp/lwa-official-debian.sources ]; then \\\n"
+        "    cp /etc/apt/sources.list.d/debian.sources /tmp/lwa-official-debian.sources 2>/dev/null || true; \\\n"
+        "    cp /etc/apt/sources.list /tmp/lwa-official-sources.list 2>/dev/null || true; \\\n"
+        "  fi; \\\n"
+        f"  ( {chain} ) || ( echo '{_APT_FAIL_HINT}' && exit 1 ); \\\n"
+        "  cp /tmp/lwa-official-debian.sources /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \\\n"
+        "  cp /tmp/lwa-official-sources.list /etc/apt/sources.list 2>/dev/null || true\n"
+    )
+
+
+def _render_apt_deps_block(apt_deps: list[str], mirrors: BuildMirrors | None) -> str:
+    """渲染 apt-get install 系统依赖的 RUN 指令（IMP-054 / issue #35）。
+
+    带 BuildKit apt cache mount、Acquire 重试/超时、aptFallbacks 切源。
+    不再 ``rm -rf /var/lib/apt/lists``——lists 在 cache mount 内跨构建复用。
+    """
+    if not apt_deps:
+        return ""
+    opts = _apt_retry_opts(mirrors)
+    pkgs = " ".join(apt_deps)
+    body = (
+        f"apt-get {opts} update && "
+        f"apt-get {opts} install -y --no-install-recommends --fix-missing {pkgs}"
+    )
+    return _render_apt_run(body, mirrors)
+
+
+def _collect_apt_packages(
+    manifest: InstanceManifest,
+    source_dir: Path | None,
+    install: str,
+) -> list[str]:
+    """自动探测 + ``systemDeps`` 去重合并。"""
+    pkgs = _detect_apt_deps(source_dir, install)
+    seen = set(pkgs)
+    for name in getattr(manifest, "systemDeps", None) or []:
+        item = str(name).strip()
+        if item and item not in seen:
+            seen.add(item)
+            pkgs.append(item)
+    return pkgs
+
+
+_PYPROJECT_DEPS_EXTRACT = (
+    "python -c 'import pathlib,tomllib;"
+    "d=tomllib.loads(pathlib.Path(\"pyproject.toml\").read_text());"
+    "pathlib.Path(\"/tmp/lwa-pyproject-deps.txt\").write_text("
+    "chr(10).join((d.get(\"project\") or {}).get(\"dependencies\") or []))'"
+)
+
+
+_UNSAFE_PYPROJECT_DEP_RE = re.compile(
+    r"""(?ix)
+    @\s*(file:|https?://|git\+|ssh://|git@)
+    | \bpath\s*=
+    """
+)
+
+
+def _pyproject_split_safe(source_dir: Path | None) -> bool:
+    """CHK-326：仅在 PEP 621 依赖清单完整且无路径/git/动态依赖时拆层。"""
+    if source_dir is None:
+        return False
+    path = source_dir / "pyproject.toml"
+    if not path.is_file():
+        return False
+    try:
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 解析失败则不拆层
+        return False
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return False
+    dynamic = project.get("dynamic") or []
+    if isinstance(dynamic, list) and "dependencies" in dynamic:
+        return False
+    deps = project.get("dependencies") or []
+    if not isinstance(deps, list) or not deps:
+        return False
+    for item in deps:
+        text = str(item)
+        if _UNSAFE_PYPROJECT_DEP_RE.search(text) or text.strip().startswith((".", "/")):
+            return False
+    return True
+
+
+def _is_plain_pip_install_dot(install: str) -> bool:
+    """CHK-326 / BUG-660：仅精确 ``pip install .`` 才拆层，保留 extras 与后续命令。"""
+    return install.strip() == "pip install ."
+
+
+def _pip_dot_layers(
+    cpfx: str,
+    install: str,
+    source_dir: Path | None,
+    mirrors: BuildMirrors | None,
+) -> tuple[str, bool]:
+    """``pip install .``：清单完整且可拆时先装依赖，否则整包 COPY。"""
+    if not _pyproject_split_safe(source_dir):
+        return f"COPY {cpfx} ./\n" + _pip_run(install, mirrors=mirrors) + "\n", True
+    deps_block = (
+        f"COPY {cpfx}pyproject.toml ./\n"
+        + _pip_run(
+            f"{_PYPROJECT_DEPS_EXTRACT} && pip install -r /tmp/lwa-pyproject-deps.txt",
+            mirrors=mirrors,
+        )
+        + "\n"
+    )
+    return deps_block, False
 
 
 def _node_dist_base(mirrors: BuildMirrors | None) -> str:
@@ -487,25 +664,6 @@ def _detect_apt_deps(source_dir: Path | None, install: str) -> list[str]:
     return apt_deps
 
 
-def _render_apt_deps_block(apt_deps: list[str], mirrors: BuildMirrors | None) -> str:
-    """渲染 apt-get install 系统依赖的 RUN 指令（IMP-054）。
-
-    与 node_toolchain 的 apt 块对称：使用 ``_apt_mirror_prefix``，
-    ``--no-install-recommends``，结束后 ``rm -rf /var/lib/apt/lists/*``。
-    """
-    if not apt_deps:
-        return ""
-    apt_prefix = _apt_mirror_prefix(mirrors)
-    pkgs = " ".join(apt_deps)
-    return (
-        "RUN set -eux; \\\n"
-        f"  {apt_prefix}"
-        "apt-get update; \\\n"
-        f"  apt-get install -y --no-install-recommends {pkgs}; \\\n"
-        "  rm -rf /var/lib/apt/lists/*\n"
-    )
-
-
 def _render_python(
     manifest: InstanceManifest,
     internal_port: int,
@@ -550,9 +708,13 @@ def _render_python(
         run_prefix = "uv run "
         if not start.startswith("uv run"):
             start = run_prefix + start
+    elif _is_plain_pip_install_dot(install):
+        deps_block, needs_early_full_copy = _pip_dot_layers(
+            cpfx, install, source_dir, mirrors
+        )
     elif install.startswith("pip install ."):
-        needs_early_full_copy = True
         deps_block = f"COPY {cpfx} ./\n" + _pip_run(install, mirrors=mirrors) + "\n"
+        needs_early_full_copy = True
     elif "pipenv" in install:
         install_cmd = install
         if install_cmd.startswith("pipenv "):
@@ -606,22 +768,20 @@ def _render_python(
     npm_block = ""
     if source_dir is not None and (source_dir / "package.json").is_file():
         node_base = _node_dist_base(mirrors)
-        apt_prefix = _apt_mirror_prefix(mirrors)
-        node_toolchain = (
-            "RUN set -eux; \\\n"
-            f"  {apt_prefix}"
-            "apt-get update; \\\n"
-            "  apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \\\n"
-            '  ARCH="$(dpkg --print-architecture)"; \\\n'
-            '  case "$ARCH" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;'
-            ' *) echo "unsupported arch: $ARCH" >&2; exit 1;; esac; \\\n'
-            "  curl -fsSL"
+        opts = _apt_retry_opts(mirrors)
+        node_body = (
+            f"apt-get {opts} update && "
+            f"apt-get {opts} install -y --no-install-recommends ca-certificates curl xz-utils; "
+            'ARCH="$(dpkg --print-architecture)"; '
+            'case "$ARCH" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;'
+            ' *) echo "unsupported arch: $ARCH" >&2; exit 1;; esac; '
+            "curl -fsSL"
             f' "{node_base}/v{_NODE_DIST_VERSION}/'
             f'node-v{_NODE_DIST_VERSION}-linux-${{NODE_ARCH}}.tar.xz"'
-            " | tar -xJ -C /usr/local --strip-components=1; \\\n"
-            "  rm -rf /var/lib/apt/lists/*; \\\n"
-            "  node -v && npm -v\n"
+            " | tar -xJ -C /usr/local --strip-components=1; "
+            "node -v && npm -v"
         )
+        node_toolchain = _render_apt_run(node_body, mirrors)
         npm_install = _with_npm_registry("npm ci --omit=dev || npm install --omit=dev", mirrors)
         if needs_early_full_copy:
             # 源码已整包拷入，只需 npm 安装。
@@ -643,15 +803,19 @@ def _render_python(
     if source_dir is not None and (source_dir / "src" / "main.py").is_file():
         pythonpath_env = "ENV PYTHONPATH=src\n"
 
-    # IMP-054：探测 requirements.txt 中需要系统库的 Python 包，自动追加 apt-get install。
-    # 放在 WORKDIR 之后、pip 依赖层之前，确保系统库先于 Python 包安装。
-    apt_deps_block = _render_apt_deps_block(_detect_apt_deps(source_dir, install), mirrors)
+    # IMP-054 / issue #35：探测 + systemDeps，放在 COPY current/ 之前。
+    apt_deps_block = _render_apt_deps_block(
+        _collect_apt_packages(manifest, source_dir, install), mirrors
+    )
 
     # 分层顺序：系统库 -> Node 工具链（最稳）-> Python 依赖 -> npm 依赖 -> 完整源码。
     final_copy = "" if needs_early_full_copy else f"COPY {cpfx} ./\n"
+    project_install = ""
+    if _is_plain_pip_install_dot(install) and not needs_early_full_copy:
+        project_install = _pip_run("pip install . --no-deps", mirrors=mirrors) + "\n"
     # issue#7：构建钩子在依赖安装层之后、CMD 之前逐条执行（WORKDIR=/app，
-    # 源码已由 final_copy / 早期整包 COPY 就位）。
-    hooks_block = _build_hooks_block(manifest)
+    # 源码已由 final_copy / 早期整包 COPY 就位）。含 apt-get 的钩子注入镜像与重试。
+    hooks_block = _build_hooks_block(manifest, mirrors=mirrors)
 
     lines = [
         header,
@@ -662,6 +826,7 @@ def _render_python(
         deps_block,
         npm_block,
         final_copy,
+        project_install,
         sqlite_mkdir,
         hooks_block,
         pythonpath_env,
@@ -715,7 +880,7 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
         "WORKDIR /app",
         f"COPY {_copy_prefix(manifest)} ./",
         # issue#7：与 node/python 渲染器对齐，支持构建钩子与启动前命令。
-        _build_hooks_block(manifest),
+        _build_hooks_block(manifest, mirrors=None),
         f"EXPOSE {internal_port}",
         f"CMD {_cmd_line(manifest, start)}",
     ]
@@ -778,15 +943,21 @@ def _has_shell_operators(cmd: str) -> bool:
     return bool(_SHELL_OPERATOR_RE.search(cmd))
 
 
-def _build_hooks_block(manifest: InstanceManifest) -> str:
-    """issue#7：把 ``manifest.buildHooks`` 逐条渲染为 ``RUN <hook>``。
+def _build_hooks_block(
+    manifest: InstanceManifest, *, mirrors: BuildMirrors | None = None
+) -> str:
+    """issue#7 / CHK-326：把 ``manifest.buildHooks`` 逐条原样渲染为 ``RUN <hook>``。
 
-    钩子声明在 ``apps/<id>/local-web.json``，rebuild 重生成 Dockerfile 时保留
-    （手工改 Dockerfile 会被抹掉）。换行符在 manifest 校验阶段已拒绝；含
-    下载后直接解释执行的供应链风险指令会被
-    ``audit_dockerfile`` 拒绝落盘。
+    不因字符串含 ``apt-get`` 自动改写。系统包请用 ``systemDeps``。
     """
-    return "".join(f"RUN {hook.strip()}\n" for hook in manifest.buildHooks if hook.strip())
+    del mirrors  # 保留签名兼容 generate_dockerfile 调用
+    chunks: list[str] = []
+    for hook in manifest.buildHooks:
+        text = hook.strip()
+        if not text:
+            continue
+        chunks.append(f"RUN {text}\n")
+    return "".join(chunks)
 
 
 def _cmd_line(manifest: InstanceManifest, start: str) -> str:

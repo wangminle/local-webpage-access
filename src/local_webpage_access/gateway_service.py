@@ -82,6 +82,8 @@ class GatewayState:
     admin_port: int = ADMIN_PORT
     last_start_error: LastStartError | None = None
     consecutive_start_failures: int = 0
+    bind_version: str | None = None
+    bind_revision: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -116,14 +118,31 @@ def read_state(workspace: Workspace) -> GatewayState | None:
             # IMP-064.01：旧文件缺字段读默认值，不做 schema 迁移
             last_start_error=parse_last_start_error(data),
             consecutive_start_failures=parse_consecutive_failures(data),
+            bind_version=str(data["bind_version"]) if data.get("bind_version") else None,
+            bind_revision=str(data["bind_revision"]) if data.get("bind_revision") else None,
         )
     except (TypeError, ValueError):
         return None
 
 
+def _gateway_bind_version() -> str:
+    from local_webpage_access.version_info import bind_process_version
+
+    return bind_process_version()
+
+
+def _gateway_bind_revision() -> str | None:
+    from local_webpage_access.version_info import bind_process_revision
+
+    return bind_process_revision()
+
+
 def write_state(workspace: Workspace, state: GatewayState) -> None:
+    from local_webpage_access.version_info import fill_missing_bind_version
+
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
+    fill_missing_bind_version(state, path)
     path.write_text(
         json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -460,6 +479,8 @@ def start_gateway(
             started_at=now_iso(),
             port=config.staticGatewayPort,
             admin_port=ADMIN_PORT,
+            bind_version=_gateway_bind_version(),
+            bind_revision=_gateway_bind_revision(),
         )
         # IMP-064.02/064.06：启动成功清零失败计数。
         write_state(workspace, state)
