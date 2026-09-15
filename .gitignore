@@ -12,6 +12,9 @@ build/
 *.egg
 pip-wheel-metadata/
 
+# 源码发布 zip（scripts/pack-release-zip.sh 无参执行时的默认输出在仓库根，BUG-202）
+/归档.zip
+
 # 虚拟环境
 .venv/
 venv/
@@ -30,7 +33,9 @@ htmlcov/
 tmp-test/
 
 # ---- 编辑器与 IDE -----------------------------------------------------------
-.vscode/
+# 注意：目录整目录排除（.vscode/）会让下面的 ! 反向包含失效（git 不能重新包含
+# 父目录已被排除的文件），必须用 /* 通配内容再排除 extensions.json
+.vscode/*
 !.vscode/extensions.json
 .idea/
 *.swp

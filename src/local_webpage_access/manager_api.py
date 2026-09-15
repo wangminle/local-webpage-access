@@ -441,6 +441,21 @@ def _body_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
     )
 
 
+def _hostname_from_host_header(host: str) -> str:
+    """从 Host 头取出主机名。支持 ``[::1]:17800`` 标准 IPv6 括号形式（BUG-657）。"""
+    raw = host.strip()
+    if raw.startswith("["):
+        close = raw.find("]")
+        if close == -1:
+            return raw.strip("[]").lower()
+        return raw[1:close].lower()
+    if raw.count(":") == 1:
+        name, maybe_port = raw.rsplit(":", 1)
+        if maybe_port.isdigit():
+            return name.lower()
+    return raw.lower()
+
+
 def _host_header_is_local(request: Request) -> bool:
     """评审-组4：Host 头主机名是否为本机（DNS rebinding 加固）。
 
@@ -451,8 +466,8 @@ def _host_header_is_local(request: Request) -> bool:
     host = (request.headers.get("host") or "").strip()
     if not host:
         return True
-    hostname = host.split(":", 1)[0].strip("[]").lower()
-    return hostname in {"127.0.0.1", "localhost", "::1", "[::1]"}
+    hostname = _hostname_from_host_header(host)
+    return hostname in {"127.0.0.1", "localhost", "::1"}
 
 
 def _is_localhost_client(request: Request) -> bool:
@@ -746,6 +761,11 @@ def create_app(
         )
 
     _register_routes(app)
+
+    # Agent 产品发现入口（AGC-W03）：必须在 SPA catch-all 之前注册
+    from local_webpage_access.agent.discovery import register_agent_discovery
+
+    register_agent_discovery(app)
 
     # 静态资源（管理页前端，WBS-22.02 / WBS-23）
     _mount_static(app)

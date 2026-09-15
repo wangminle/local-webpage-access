@@ -25,6 +25,11 @@ from local_webpage_access.registry.connection import (
 
 log = get_logger("registry.dao")
 
+
+def _canonical_json(payload: Any) -> str:
+    """规范化 JSON（与 agent.contracts.canonical_json 同规则；registry 不反向依赖 agent 包）。"""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
 # BUG-473：instance 子表（列 instance_id 引用 instances.id）。
 # delete_instance 显式清理这些表，不再依赖外键级联；find/purge_orphan_rows
 # 也按此清单扫描存量孤儿。
@@ -657,6 +662,160 @@ class Registry:
         if row is None:
             return 0
         return int(row["n"])
+
+    # ---- Agent 协作（AGC-W05，schema v3）----------------------------------
+
+    _AGENT_OP_COLS = (
+        "operation_id, principal_id, workspace_id, action, target_instance_id, "
+        "request_hash, idempotency_key, plan_id, status, phase, created_at, "
+        "updated_at, worker_identity, lease_until, build_token, result_json, error_json"
+    )
+
+    def get_or_create_workspace_id(self) -> str:
+        """返回本工作区稳定 UUID（R01：两工作区不误连的判据）。
+
+        首次调用生成并写入 ``workspace_meta``；``INSERT OR IGNORE`` 保证
+        多进程并发时只有一个 UUID 胜出，随后统一读回。
+        """
+        import uuid
+
+        candidate = uuid.uuid4().hex
+        with self.txn() as tx:
+            tx.execute(
+                "INSERT OR IGNORE INTO workspace_meta(key, value) VALUES ('workspace_id', ?)",
+                (candidate,),
+            )
+        row = self._fetchone("SELECT value FROM workspace_meta WHERE key = 'workspace_id'")
+        assert row is not None  # INSERT OR IGNORE 后必有值
+        return str(row["value"])
+
+    @staticmethod
+    def _agent_op_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["result"] = json.loads(data.pop("result_json")) if data.get("result_json") else None
+        data["error"] = json.loads(data.pop("error_json")) if data.get("error_json") else None
+        return data
+
+    def create_agent_operation(self, record: dict[str, Any]) -> dict[str, Any]:
+        """幂等创建操作记录（§6.3）。
+
+        - 相同 ``request_hash`` 复用键：返回既有记录（调用方生成的 operationId 被丢弃）；
+        - 不同 ``request_hash`` 复用键：抛 ``RegistryError(code="idempotency_conflict")``；
+        - 并发安全依赖 UNIQUE(principal_id, workspace_id, idempotency_key)——
+          落败方进入事务重读路径，两连接同键并发只产生一行。
+        """
+        row = {
+            "operation_id": record["operation_id"],
+            "principal_id": record["principal_id"],
+            "workspace_id": record["workspace_id"],
+            "action": record["action"],
+            "target_instance_id": record.get("target_instance_id"),
+            "request_hash": record["request_hash"],
+            "idempotency_key": record["idempotency_key"],
+            "plan_id": record.get("plan_id"),
+            "status": record["status"],
+            "phase": record.get("phase"),
+            "created_at": record["created_at"],
+            "updated_at": record["updated_at"],
+            "worker_identity": record.get("worker_identity"),
+            "lease_until": record.get("lease_until"),
+            "build_token": record.get("build_token"),
+            "result_json": (
+                None if record.get("result") is None else _canonical_json(record["result"])
+            ),
+            "error_json": (
+                None if record.get("error") is None else _canonical_json(record["error"])
+            ),
+        }
+        cols = ", ".join(row.keys())
+        placeholders = ", ".join(["?"] * len(row))
+        try:
+            with self.txn() as tx:
+                tx.execute(
+                    f"INSERT INTO agent_operations ({cols}) VALUES ({placeholders})",
+                    tuple(row.values()),
+                )
+        except RegistryError:
+            # txn() 会把 UNIQUE 冲突包成通用 RegistryError；以"同键行是否存在"
+            # 判定语义（不匹配异常文本）。不存在则属其他完整性问题，原样上抛。
+            existing = self.get_agent_operation_by_idempotency(
+                row["principal_id"], row["workspace_id"], row["idempotency_key"]
+            )
+            if existing is None:
+                raise
+            if existing["request_hash"] != row["request_hash"]:
+                raise RegistryError(
+                    "幂等键已绑定不同请求内容",
+                    code="idempotency_conflict",
+                    idempotency_key=row["idempotency_key"],
+                ) from None
+            return existing
+        inserted = self._fetchone(
+            "SELECT * FROM agent_operations WHERE operation_id = ?", (row["operation_id"],)
+        )
+        assert inserted is not None  # 刚插入必存在
+        return self._agent_op_row_to_dict(inserted)
+
+    def get_agent_operation(self, operation_id: str) -> dict[str, Any] | None:
+        row = self._fetchone(
+            f"SELECT {self._AGENT_OP_COLS} FROM agent_operations WHERE operation_id = ?",
+            (operation_id,),
+        )
+        return self._agent_op_row_to_dict(row) if row else None
+
+    def get_agent_operation_by_idempotency(
+        self, principal_id: str, workspace_id: str, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        row = self._fetchone(
+            f"SELECT {self._AGENT_OP_COLS} FROM agent_operations"
+            " WHERE principal_id = ? AND workspace_id = ? AND idempotency_key = ?",
+            (principal_id, workspace_id, idempotency_key),
+        )
+        return self._agent_op_row_to_dict(row) if row else None
+
+    def update_agent_operation(
+        self, operation_id: str, *, updated_at: str, **fields: Any
+    ) -> bool:
+        """更新操作的可变列；``updated_at`` 必传以维持 §6.3 的更新时间语义。
+
+        返回是否命中（operation 不存在返回 False）。
+        """
+        allowed = {
+            "status", "phase", "worker_identity", "lease_until",
+            "build_token", "result", "error",
+        }
+        illegal = set(fields) - allowed
+        if illegal:
+            raise RegistryError(f"不允许更新的列: {sorted(illegal)}", code="AGENT_OP_FIELD")
+        sets = ["updated_at = ?"]
+        params: list[Any] = [updated_at]
+        for key, value in fields.items():
+            if key in ("result", "error"):
+                sets.append(f"{key}_json = ?")
+                params.append(_canonical_json(value) if value is not None else None)
+            else:
+                sets.append(f"{key} = ?")
+                params.append(value)
+        params.append(operation_id)
+        with self.txn() as tx:
+            cur = tx.execute(
+                f"UPDATE agent_operations SET {', '.join(sets)} WHERE operation_id = ?",
+                tuple(params),
+            )
+            return cur.rowcount > 0
+
+    def insert_agent_plan(self, record: dict[str, Any]) -> None:
+        cols = ", ".join(record.keys())
+        placeholders = ", ".join(["?"] * len(record))
+        with self.txn() as tx:
+            tx.execute(
+                f"INSERT INTO agent_plans ({cols}) VALUES ({placeholders})",
+                tuple(record.values()),
+            )
+
+    def get_agent_plan(self, plan_id: str) -> dict[str, Any] | None:
+        row = self._fetchone("SELECT * FROM agent_plans WHERE plan_id = ?", (plan_id,))
+        return dict(row) if row else None
 
 
 __all__ = ["Registry"]

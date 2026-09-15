@@ -230,6 +230,7 @@ Code: `src/local_webpage_access/`. Tests: `tests/` (fake runtimes; set `LWA_RUN_
 | [docs/faq.md](docs/faq.md) | Troubleshooting (symptom → log) |
 | [docs/operations-playbook.md](docs/operations-playbook.md) | Day-2 ops: setup, logs, gateway, inbox, Caddy |
 | [docs/manager-page.md](docs/manager-page.md) | Manager API and auth |
+| [docs/agent-guide.md](docs/agent-guide.md) | Agent/LLM onboarding: auth, input limits, safety rules |
 | [docs/autostart.md](docs/autostart.md) | launchd / systemd |
 | [docs/runtime-workspace.md](docs/runtime-workspace.md) | Directories, ports, resource tiers |
 | [docs/workspace-rename.md](docs/workspace-rename.md) | Relocate handbook |
@@ -468,6 +469,7 @@ python3 -m pytest           # 不依赖真实 Docker
 | [docs/faq.md](docs/faq.md) | 排障（症状 → 日志） |
 | [docs/operations-playbook.md](docs/operations-playbook.md) | 日常运维：装配、日志、网关、inbox、Caddy |
 | [docs/manager-page.md](docs/manager-page.md) | 管理页 API 与鉴权 |
+| [docs/agent-guide.md](docs/agent-guide.md) | Agent/LLM 接入指南：鉴权、输入限制、操作红线 |
 | [docs/autostart.md](docs/autostart.md) | launchd / systemd |
 | [docs/runtime-workspace.md](docs/runtime-workspace.md) | 目录、端口、资源档位 |
 | [docs/workspace-rename.md](docs/workspace-rename.md) | 迁移手册 |

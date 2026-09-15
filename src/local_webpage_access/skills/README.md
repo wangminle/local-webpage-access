@@ -10,6 +10,10 @@
 
 日常运维（网关选型、冗余清理、容器别名、浏览量）见仓库 [`docs/operations-playbook.md`](../../../docs/operations-playbook.md)。
 
+**Agent（LLM）接入必读**：鉴权方式、API 与部署输入限制、并发/重试约束与操作红线见仓库
+[`docs/agent-guide.md`](../../../docs/agent-guide.md)。本目录 skills 只覆盖导入后的
+"判断与修复"环节；接入与鉴权以该指南为准。
+
 ## 总览
 
 | Skill | 触发场景 | 输出 |

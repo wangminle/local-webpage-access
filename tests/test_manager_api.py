@@ -771,6 +771,34 @@ def test_health_endpoint_no_auth(manager_env: EnvBundle) -> None:
     assert "workspaceRoot" not in body
 
 
+def test_host_header_is_local_accepts_ipv6_loopback_with_port() -> None:
+    """BUG-657：Host: [::1]:17800 是标准 IPv6 回环，不得按首个冒号切开后判为远程。"""
+    from starlette.requests import Request
+
+    from local_webpage_access.manager_api import _host_header_is_local
+
+    def req(host_header: str) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/",
+                "raw_path": b"/",
+                "query_string": b"",
+                "headers": [(b"host", host_header.encode())],
+                "client": ("::1", 54321),
+                "server": ("::1", 17800),
+            }
+        )
+
+    for header in ("[::1]:17800", "[::1]", "::1", "localhost:17800", "127.0.0.1:17800"):
+        assert _host_header_is_local(req(header)) is True, header
+    assert _host_header_is_local(req("evil.example")) is False
+
+
 def test_is_loopback_host_handles_ipv4_mapped_ipv6() -> None:
     """BUG-194：::ffff:127.0.0.1 与整个 127.x 段都判为回环，不再仅认字面集合。"""
     from local_webpage_access.manager_api import _is_loopback_host

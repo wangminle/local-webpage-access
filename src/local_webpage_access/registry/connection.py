@@ -19,7 +19,7 @@ from local_webpage_access.logging import get_logger
 
 log = get_logger("registry")
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # ---- DDL --------------------------------------------------------------------
 
@@ -146,6 +146,58 @@ _SCHEMAS: dict[int, list[str]] = {
         "ALTER TABLE instances ADD COLUMN last_trusted_state TEXT",
         "ALTER TABLE instances ADD COLUMN last_observed_at TEXT",
         "ALTER TABLE instances ADD COLUMN runtime_access TEXT",
+    ],
+    # AGC-W05：Agent 协作存储——工作区稳定身份、部署计划、持久操作。
+    # 不在既有 builds 表混装业务 operation（设计 §4.2）：一次 deploy 的
+    # operationId 与 buildToken 在 agent_operations 内关联保存。
+    3: [
+        """
+        CREATE TABLE IF NOT EXISTS workspace_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS agent_plans (
+            plan_id            TEXT PRIMARY KEY,
+            principal_id       TEXT NOT NULL,
+            workspace_id       TEXT NOT NULL,
+            intent             TEXT NOT NULL,
+            source_json        TEXT NOT NULL,
+            source_digest      TEXT NOT NULL,
+            target_instance_id TEXT,
+            expected_revision  INTEGER,
+            display_name       TEXT,
+            options_json       TEXT NOT NULL DEFAULT '{}',
+            policy_version     TEXT NOT NULL,
+            request_hash       TEXT NOT NULL,
+            created_at         TEXT NOT NULL,
+            expires_at         TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS agent_operations (
+            operation_id       TEXT PRIMARY KEY,
+            principal_id       TEXT NOT NULL,
+            workspace_id       TEXT NOT NULL,
+            action             TEXT NOT NULL,
+            target_instance_id TEXT,
+            request_hash       TEXT NOT NULL,
+            idempotency_key    TEXT NOT NULL,
+            plan_id            TEXT,
+            status             TEXT NOT NULL,
+            phase              TEXT,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL,
+            worker_identity    TEXT,
+            lease_until        TEXT,
+            build_token        TEXT,
+            result_json        TEXT,
+            error_json         TEXT,
+            UNIQUE (principal_id, workspace_id, idempotency_key)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_agent_operations_plan ON agent_operations(plan_id)",
     ],
 }
 

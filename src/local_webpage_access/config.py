@@ -168,6 +168,26 @@ class BuildMirrors(BaseModel):
         )
 
 
+class AgentConfig(BaseModel):
+    """Agent 协作配置（AGC-W06，M1）。
+
+    ``allowedSourceRoots``：管理员显式授权给 ``server_directory`` 部署源的
+    受控目录根（必须绝对路径）。默认为空 = 全部拒绝（安全默认，§6.2）。
+    """
+
+    allowedSourceRoots: list[Path] = Field(default_factory=list)
+
+    @field_validator("allowedSourceRoots")
+    @classmethod
+    def _validate_absolute(cls, v: list[Path]) -> list[Path]:
+        for item in v:
+            if not item.is_absolute():
+                raise ValueError(
+                    f"agent.allowedSourceRoots 必须是绝对路径，得到 {str(item)!r}"
+                )
+        return v
+
+
 class Config(BaseModel):
     """``local-web.yml`` 的完整配置模型。"""
 
@@ -190,6 +210,8 @@ class Config(BaseModel):
     lanIpStrategy: str = "auto"
     manualLanIp: str | None = None
     logLevel: str = "INFO"
+    # AGC-W06：Agent 协作（M1 仅本机 owner；默认空源根=拒绝 server_directory）
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     # IMP-033：安装档位与运行身份（缺省 default；full 由 setup --full 写入）
     profile: str = "default"
     serviceUser: str | None = None
@@ -298,7 +320,9 @@ class Config(BaseModel):
         return cls.from_dict(raw)
 
     def to_yaml(self) -> str:
-        data = self.model_dump()
+        # BUG-653：mode="json" 把 Path 等不可 YAML 表示的类型转成原生标量，
+        # 避免 allowedSourceRoots 配置后 save/网关切换写回失败。
+        data = self.model_dump(mode="json")
         return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
     def save(self, path: Path) -> None:
