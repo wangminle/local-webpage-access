@@ -447,7 +447,8 @@ Authorization: Bearer <token>
 ```
 
 `buildEnv` 为整组替换，null 清空；布尔字段必须是真正布尔值。`buildEnv` / 别名 base
-跟随仅支持宿主前端构建，不适用于容器；`systemDeps` 仅支持 Debian 系 Python 容器
+跟随支持宿主前端构建，也支持 docker-compose 容器构建（Dockerfile ARG/ENV + Compose
+`build.args`，issue #39）；`systemDeps` 仅支持 Debian 系 Python 容器
 （走 apt 源链），Node/Alpine 容器保存时拒绝并提示改用 `buildHooks`（issue #35，BUG-664）。
 `systemDeps` / `buildHooks` 为整组替换（数组），接口不会自动 rebuild。设置弹窗暂未
 暴露 `systemDeps` / `buildHooks`，推荐用 `lwa configure <id> --system-deps /

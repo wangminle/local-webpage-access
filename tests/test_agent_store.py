@@ -55,10 +55,10 @@ def _op_record(**over) -> dict:
 # ---- 1/2. 旧库升级与重复迁移 ------------------------------------------------------
 
 
-def test_fresh_db_at_schema_v3(workspace_root: Path) -> None:
+def test_fresh_db_at_schema_v4(workspace_root: Path) -> None:
     reg = Registry(workspace_root / "registry.db")
     reg.open()
-    assert get_schema_version(reg.conn) == 3
+    assert get_schema_version(reg.conn) == 4
     tables = {
         r[0] for r in reg.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -88,7 +88,7 @@ def test_v2_db_upgrades_with_data_intact(workspace_root: Path) -> None:
 
     reg = Registry(db_path)
     reg.open()
-    assert get_schema_version(reg.conn) == 3
+    assert get_schema_version(reg.conn) == 4
     tables = {
         r[0] for r in reg.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -98,12 +98,12 @@ def test_v2_db_upgrades_with_data_intact(workspace_root: Path) -> None:
     reg.close()
 
 
-def test_migrate_idempotent_at_v3(workspace_root: Path) -> None:
+def test_migrate_idempotent_at_v4(workspace_root: Path) -> None:
     reg = Registry(workspace_root / "registry.db")
     reg.open()
     before = get_schema_version(reg.conn)
     migrate(reg.conn)
-    assert get_schema_version(reg.conn) == before == 3
+    assert get_schema_version(reg.conn) == before == 4
     reg.close()
 
 

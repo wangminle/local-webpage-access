@@ -5,15 +5,25 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+_REGISTRY_RE = re.compile(
+    r"auth\.docker\.io|registry-1\.docker\.io|registry\.docker\.io|"
+    r"failed to fetch anonymous token",
+    re.IGNORECASE,
+)
+_FAIL_MARK_RE = re.compile(
+    r"(?:^|\n)(?:#\d+\s+ERROR:|ERROR:|failed to solve|E: )",
+    re.IGNORECASE,
+)
+# 收窄：不得把 Docker Hub「failed to fetch anonymous token」误判为 apt（issue #36）。
 _APT_FETCH_RE = re.compile(
-    r"Failed to fetch|Connection failed|Unable to fetch some archives",
+    r"Unable to fetch some archives|Err:\d+|Failed to fetch \S+://",
     re.IGNORECASE,
 )
 _OOM_RE = re.compile(
     r"cannot allocate memory|ResourceExhausted|OOMKilled",
     re.IGNORECASE,
 )
-_KILLED_RE = re.compile(r"\bKilled\b")
+_KILLED_RE = re.compile(r"\bKilled\b", re.IGNORECASE)
 _DISK_RE = re.compile(r"No space left on device", re.IGNORECASE)
 
 
@@ -37,13 +47,49 @@ def _clip_evidence(blob: str, limit: int = 400) -> str:
     return text[-limit:]
 
 
+def _failure_region(blob: str) -> str:
+    """BUG-682/687：取失败步骤上下文，避免成功 registry 日志抢归因。
+
+    ``failed to solve`` 常只是摘要行，证据在其前；优先从最后一次
+    ``#N ERROR:`` / ``ERROR:`` / ``E: `` 截取。真实失败特征（如 ``Killed``）
+    常出现在**同一步骤**的 ERROR 行之前——按步骤号保留该步骤此前的有界
+    前文；无步骤编号时保留有界前文。其它步骤的日志（如成功的 registry
+    拉取）仍被排除，维持 BUG-682 的收窄意图。
+    """
+    matches = list(_FAIL_MARK_RE.finditer(blob))
+    if not matches:
+        return blob
+    error_marks = [
+        m
+        for m in matches
+        if re.search(r"(?:#\d+\s+ERROR:|ERROR:|E: )", m.group(0), re.IGNORECASE)
+    ]
+    if not error_marks:
+        start = matches[-1].start()
+        prefix_lines = blob[:start].splitlines()
+        keep = "\n".join(prefix_lines[-8:])
+        return f"{keep}\n{blob[start:]}" if keep else blob[start:]
+    last_error = error_marks[-1]
+    start = last_error.start()
+    prefix = blob[:start]
+    step_m = re.search(r"#(\d+)\s+ERROR:", last_error.group(0))
+    if step_m:
+        step_tag = f"#{step_m.group(1)} "
+        step_lines = [ln for ln in prefix.splitlines() if ln.startswith(step_tag)]
+    else:
+        step_lines = prefix.splitlines()
+    keep = "\n".join(step_lines[-8:])
+    return f"{keep}\n{blob[start:]}" if keep else blob[start:]
+
+
 def classify_build_failure(text: str | None) -> FailureHint | None:
     """从构建输出识别可行动根因；未命中返回 ``None``。"""
     blob = (text or "").strip()
     if not blob:
         return None
-    evidence = _clip_evidence(blob)
-    if _APT_FETCH_RE.search(blob):
+    region = _failure_region(blob)
+    evidence = _clip_evidence(region)
+    if _APT_FETCH_RE.search(region):
         return FailureHint(
             kind="apt",
             summary=(
@@ -54,7 +100,7 @@ def classify_build_failure(text: str | None) -> FailureHint | None:
             confidence="likely",
             evidence=evidence,
         )
-    if _OOM_RE.search(blob):
+    if _OOM_RE.search(region):
         return FailureHint(
             kind="oom",
             summary=(
@@ -64,7 +110,7 @@ def classify_build_failure(text: str | None) -> FailureHint | None:
             confidence="likely",
             evidence=evidence,
         )
-    if _DISK_RE.search(blob):
+    if _DISK_RE.search(region):
         return FailureHint(
             kind="disk",
             summary=(
@@ -74,7 +120,7 @@ def classify_build_failure(text: str | None) -> FailureHint | None:
             confidence="likely",
             evidence=evidence,
         )
-    if _KILLED_RE.search(blob):
+    if _KILLED_RE.search(region):
         return FailureHint(
             kind="killed",
             summary=(
@@ -82,6 +128,17 @@ def classify_build_failure(text: str | None) -> FailureHint | None:
                 "不能单凭该词断言 Docker VM OOM。请结合 ExitCode / OOMKilled 与日志尾部。"
             ),
             confidence="uncertain",
+            evidence=evidence,
+        )
+    if _REGISTRY_RE.search(region):
+        return FailureHint(
+            kind="registry",
+            summary=(
+                "镜像仓库不可达：拉取 Docker Hub / registry token 失败"
+                "（auth.docker.io / failed to fetch anonymous token）。"
+                "请检查本机到 Docker Hub 的网络、代理或镜像加速，然后重试构建。"
+            ),
+            confidence="likely",
             evidence=evidence,
         )
     return None

@@ -753,6 +753,7 @@ class Importer:
         old_hash = getattr(old_manifest, "sourceZipHash", None)
         was_running = old_manifest.desiredState == DesiredState.RUNNING
         app_dir = self.ws.app_dir(instance_id)
+        expected_revision = self.registry.get_revision(instance_id)
 
         # 2. hash 未变化 → 跳过（dry-run 零写入：连事件也不记，CHK-239）
         if new_hash == old_hash:
@@ -1052,6 +1053,18 @@ class Importer:
             needs_rebuild,
             needs_restart,
         )
+        if not dry_run and expected_revision is not None:
+            from local_webpage_access.errors import RegistryError
+
+            try:
+                self.registry.cas_increment_revision(instance_id, expected_revision)
+            except RegistryError as exc:
+                if exc.code == "revision_conflict":
+                    raise ZipImportError(
+                        f"实例 {instance_id} 已被其他通道更新（revision 冲突）",
+                        instance_id=instance_id,
+                    ) from exc
+                raise
         return UpdateResult(
             instance_id=instance_id,
             manifest=manifest,
@@ -2334,6 +2347,8 @@ def apply_detection_to_manifest(
     fresh.desiredAlias = getattr(manifest, "desiredAlias", None)
     fresh.aliasLiveVerifiedAt = getattr(manifest, "aliasLiveVerifiedAt", None)
     fresh.aliasLiveVerifiedFor = getattr(manifest, "aliasLiveVerifiedFor", None)
+    fresh.aliasGuardCheckedAt = getattr(manifest, "aliasGuardCheckedAt", None)
+    fresh.aliasGuardResult = getattr(manifest, "aliasGuardResult", None)
     fresh.consecutiveReconcileFailures = int(
         getattr(manifest, "consecutiveReconcileFailures", 0) or 0
     )

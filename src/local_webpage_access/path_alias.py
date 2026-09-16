@@ -287,7 +287,17 @@ def verify_alias_live(
             f"别名入口 {entry_url} 未返回 HTML（Content-Type={ctype!r}）",
             instance_id=instance_id,
         )
-    html = entry_html or body.decode("utf-8", "replace")
+    live_html = body.decode("utf-8", "replace")
+    # BUG-678：始终以本次别名 HTTP 响应做守卫与探针；传入的直达 HTML 只能加严，
+    # 不得覆盖实际入口（直达正常、别名仍引用 /assets/... 时会误盖章）。
+    reject_alias_if_absolute_spa_assets(
+        html=live_html, alias=alias, instance_id=instance_id
+    )
+    if entry_html:
+        reject_alias_if_absolute_spa_assets(
+            html=entry_html, alias=alias, instance_id=instance_id
+        )
+    html = live_html
     for path in _collect_alias_live_probe_paths(html, alias):
         url = urljoin(base + "/", path.lstrip("/"))
         rok, rcode, rctype, rbody = _http_probe_alias_resource(url)
@@ -318,6 +328,20 @@ def _alias_previously_verified(manifest: InstanceManifest, alias: str) -> bool:
     )
 
 
+def _stamp_alias_guard(manifest: InstanceManifest, result: str) -> None:
+    """记录别名内容守卫结果（passed / failed / skipped），不单独落盘。"""
+    manifest.aliasGuardCheckedAt = now_iso()
+    manifest.aliasGuardResult = result
+
+
+def _persist_alias_guard(
+    workspace: Workspace, instance_id: str, manifest: InstanceManifest, result: str
+) -> None:
+    _stamp_alias_guard(manifest, result)
+    with contextlib.suppress(OSError):
+        manifest.save(workspace.app_manifest_path(instance_id))
+
+
 def maybe_verify_alias_after_start(
     workspace: Workspace,
     config: Config,
@@ -340,10 +364,15 @@ def maybe_verify_alias_after_start(
       BUG-586 收敛行为——删除片段、清 manifest/registry 并抛错。
     """
     alias = _current_alias(manifest)
-    if not alias or skip_compat_check:
+    if not alias:
+        return False
+    if skip_compat_check:
+        _persist_alias_guard(workspace, instance_id, manifest, "skipped")
         return False
     gateway = StaticGateway(workspace, config)
     if gateway.detect_backend() != "caddy":
+        # BUG-679：本次未跑活验证，不得沿用旧 passed。
+        _persist_alias_guard(workspace, instance_id, manifest, "skipped")
         return False
     host_port, _ = _resolve_host_port(manifest)
     html = _fetch_entrypoint_html_for_alias_guard(
@@ -352,24 +381,28 @@ def maybe_verify_alias_after_start(
     try:
         verify_alias_live(config, alias, entry_html=html, instance_id=instance_id)
     except RecognitionError as exc:
+        hinted = _append_lwa_build_hint(exc, manifest, alias)
+        _stamp_alias_guard(manifest, "failed")
         if _alias_previously_verified(manifest, alias) or alias_fragment_preexisting:
             log.warning(
                 "实例 %s 别名 /%s/ 启动后活验证失败（%s）；"
                 "别名此前已验证/已在用，保留别名配置，请检查应用入口",
                 instance_id,
                 alias,
-                exc,
+                hinted,
             )
             registry.add_event(
                 instance_id,
                 "path-alias",
-                f"别名 /{alias}/ 启动后活验证失败（已保留别名配置）：{str(exc)[:200]}",
+                f"别名 /{alias}/ 启动后活验证失败（已保留别名配置）：{str(hinted)[:200]}",
             )
+            with contextlib.suppress(OSError):
+                manifest.save(workspace.app_manifest_path(instance_id))
             return False
         _rollback_deferred_alias_after_failed_live_verify(
             workspace, config, registry, instance_id, manifest, host_port=host_port
         )
-        raise
+        raise hinted from exc
     except Exception as exc:  # noqa: BLE001
         if _alias_previously_verified(manifest, alias) or alias_fragment_preexisting:
             log.warning(
@@ -384,6 +417,7 @@ def maybe_verify_alias_after_start(
                 "path-alias",
                 f"别名 /{alias}/ 启动后活验证异常（已保留别名配置）：{str(exc)[:200]}",
             )
+            _persist_alias_guard(workspace, instance_id, manifest, "failed")
             return False
         _rollback_deferred_alias_after_failed_live_verify(
             workspace, config, registry, instance_id, manifest, host_port=host_port
@@ -395,6 +429,7 @@ def maybe_verify_alias_after_start(
     # issue #21：验证通过即落标记，后续启动的活验证失败走「保留」分支。
     manifest.aliasLiveVerifiedAt = now_iso()
     manifest.aliasLiveVerifiedFor = alias
+    _stamp_alias_guard(manifest, "passed")
     with contextlib.suppress(OSError):
         manifest.save(workspace.app_manifest_path(instance_id))
     registry.add_event(instance_id, "path-alias", f"别名 /{alias}/ 启动后活验证通过")
@@ -428,6 +463,8 @@ def _apply_manifest_alias(
     if manifest.aliasLiveVerifiedFor != alias:
         manifest.aliasLiveVerifiedAt = None
         manifest.aliasLiveVerifiedFor = None
+        manifest.aliasGuardCheckedAt = None
+        manifest.aliasGuardResult = None
     if manifest.runtime == Runtime.DOCKER_COMPOSE:
         # IMP-014：容器别名写入 container.routeMode/routeHost，registry 容器表据此联动。
         if manifest.container is not None:
@@ -612,6 +649,7 @@ def set_instance_path_alias(
     alias: str | None,
     *,
     skip_compat_check: bool = False,
+    require_desired_alias: str | None = None,
 ) -> PathAliasResult:
     """设置或清除实例的路径别名 slug（IMP-006 静态站点 / IMP-014 容器实例）。
 
@@ -619,6 +657,7 @@ def set_instance_path_alias(
     避免并发「先查后写」写入重复别名或丢失 manifest 更新。
 
     ``skip_compat_check=True`` 跳过别名入口活验证（审计事件仍会记录）。
+    ``require_desired_alias``：锁内重读后若期望别名已变（用户并发 clear），则中止。
     """
     from local_webpage_access.lifecycle import instance_lock
 
@@ -634,6 +673,7 @@ def set_instance_path_alias(
                 instance_id,
                 alias,
                 skip_compat_check=skip_compat_check,
+                require_desired_alias=require_desired_alias,
             )
 
 
@@ -688,12 +728,49 @@ def _append_lwa_build_hint(
     ``--no-follow-alias-base`` 关闭跟随，完成目标 base 构建与别名变更后再
     重新开启，否则指引本身会陷入重复失败。
     """
-    if manifest.runtime != Runtime.SHARED_STATIC:
+    if manifest.runtime not in (Runtime.SHARED_STATIC, Runtime.DOCKER_COMPOSE):
         return exc
     stack_lower = {s.lower() for s in manifest.stack}
     if "vite" not in stack_lower:
         return exc
-    # LwaError.__str__ 自带 [CODE] 前缀；拼接须用原始 message（同 _enrich_alias_rejection_with_findings）。
+    from local_webpage_access.models import Kind
+
+    # LwaError.__str__ 自带 [CODE] 前缀；拼接须用原始 message。
+    if manifest.runtime == Runtime.DOCKER_COMPOSE and manifest.kind == Kind.PYTHON:
+        # BUG-685：开启跟随时 effective_build_env 仍用当前别名（无别名则 /）
+        # 覆盖手动 VITE_BASE——直接 configure + rebuild 迁移不到目标 base，
+        # 须复用「先关跟随 → 设目标 base → 重建切别名 → 恢复跟随」的顺序。
+        if manifest.buildBaseFromAlias:
+            steps = [
+                f"  1. lwa configure {manifest.id} --no-follow-alias-base"
+                f" --build-env VITE_BASE=/{alias}/"
+                "（当前已开启别名跟随，手动 VITE_BASE 会被当前别名或 / 覆盖——"
+                "先关跟随再设目标 base；buildEnv 整组替换，其他变量需一并传入）",
+                f"  2. lwa rebuild {manifest.id}（执行前端构建并复制产物）",
+                f"  3. 重新设置别名 /{alias}/ 即可通过本守卫",
+                f"  4. lwa configure {manifest.id} --follow-alias-base"
+                "（迁移完成后重新开启跟随，后续构建按新别名推导 base）",
+            ]
+        else:
+            steps = [
+                f"  1. lwa configure {manifest.id} --build-env VITE_BASE=/{alias}/",
+                "     （可选再加 --build-hook 'cd frontend && npm ci && npm run build'）",
+                f"  2. lwa rebuild {manifest.id} 后重新设置别名 /{alias}/",
+            ]
+        lines = [
+            exc.message or str(exc),
+            "",
+            "—— Python 容器前端（Dockerfile 不会执行 manifest 里的构建命令字段）——",
+            "  仅注入 VITE_BASE 不会改写已编译进镜像的静态产物。",
+            "  需要真实的前端构建及产物复制：源码须含 frontend/（或 web/、client/）"
+            "且具备 npm 锁文件与 build 脚本，LWA 会在 COPY 之后执行 "
+            "npm ci && npm run build；其余情况用 buildHooks 自定义。",
+            *steps,
+            "  预编译 backend/static 不会因环境变量自行带上别名前缀。",
+        ]
+        enriched = RecognitionError("\n".join(lines))
+        enriched.context = dict(getattr(exc, "context", {}) or {})
+        return enriched
     if manifest.buildBaseFromAlias:
         lines = [
             exc.message or str(exc),
@@ -734,6 +811,7 @@ def _set_instance_path_alias_locked(
     alias: str | None,
     *,
     skip_compat_check: bool = False,
+    require_desired_alias: str | None = None,
 ) -> PathAliasResult:
     """锁内实现：重新加载 manifest 后校验并落盘。"""
     mpath = workspace.app_manifest_path(instance_id)
@@ -746,12 +824,31 @@ def _set_instance_path_alias_locked(
             instance_id=instance_id,
         )
 
+    if require_desired_alias is not None:
+        latest_desired = (getattr(manifest, "desiredAlias", None) or "").strip()
+        if latest_desired != require_desired_alias.strip():
+            route_url = manifest.network.routeUrl if manifest.network else None
+            return PathAliasResult(
+                instance_id=instance_id,
+                alias=_current_alias(manifest),
+                route_url=route_url,
+                alias_entry_enabled=False,
+                gateway_reloaded=False,
+                unchanged=True,
+                html_verified=True,
+                live_verified=True,
+            )
+
     current = _current_alias(manifest)
     if alias is None and getattr(manifest, "desiredAlias", None):
         manifest.desiredAlias = None
         with contextlib.suppress(Exception):
             manifest.save(mpath)
     if alias == current:
+        if alias is not None and (getattr(manifest, "desiredAlias", None) or "").strip() != alias:
+            manifest.desiredAlias = alias
+            with contextlib.suppress(Exception):
+                manifest.save(mpath)
         route_url = manifest.network.routeUrl if manifest.network else None
         return PathAliasResult(
             instance_id=instance_id,
@@ -789,6 +886,7 @@ def _set_instance_path_alias_locked(
     # issue #10：结构化扫描按 /{alias}/ 前缀豁免；提示型引用只警告不拦截。
     html_verified = False
     html_warnings: tuple[str, ...] = ()
+    html: str | None = None
     if alias is not None:
         html = _fetch_entrypoint_html_for_alias_guard(
             workspace=workspace, manifest=manifest, host_port=host_port
@@ -806,6 +904,12 @@ def _set_instance_path_alias_locked(
                 # DEV-132：Vite 实例再附加 LWA 侧解法（buildEnv / --base + rebuild）。
                 enriched = _enrich_alias_rejection_with_findings(exc, manifest)
                 raise _append_lwa_build_hint(enriched, manifest, alias) from exc
+        else:
+            log.warning(
+                "实例 %s 设置别名 /%s/ 时探不到入口 HTML，守卫记为 skipped（不硬失败）",
+                instance_id,
+                alias,
+            )
 
     # BUG-586：活验证失败回滚需恢复「变更前」片段，快照必须在新片段写入
     # 之前捕获；回滚时再读文件拿到的已是刚写入的新片段，恢复等于没恢复。
@@ -871,6 +975,13 @@ def _set_instance_path_alias_locked(
     if alias is not None and live_verified:
         manifest.aliasLiveVerifiedAt = now_iso()
         manifest.aliasLiveVerifiedFor = alias
+    if alias is not None:
+        if live_verified:
+            _stamp_alias_guard(manifest, "passed")
+        elif html is None:
+            _stamp_alias_guard(manifest, "skipped")
+        elif html_verified:
+            _stamp_alias_guard(manifest, "passed")
     manifest.save(mpath)
 
     # 持久化别名到对应子表：静态站点 / 容器实例（IMP-014 容器别名落 containers 表）
@@ -1000,7 +1111,14 @@ def maybe_restore_desired_alias_after_start(
     if _current_alias(latest) == desired:
         return False
     try:
-        set_instance_path_alias(workspace, config, registry, instance_id, desired)
+        set_instance_path_alias(
+            workspace,
+            config,
+            registry,
+            instance_id,
+            desired,
+            require_desired_alias=desired,
+        )
         refreshed = InstanceManifest.load(workspace.app_manifest_path(instance_id))
         manifest.container = refreshed.container
         manifest.static = refreshed.static
@@ -1008,6 +1126,8 @@ def maybe_restore_desired_alias_after_start(
         manifest.desiredAlias = refreshed.desiredAlias
         manifest.aliasLiveVerifiedAt = refreshed.aliasLiveVerifiedAt
         manifest.aliasLiveVerifiedFor = refreshed.aliasLiveVerifiedFor
+        manifest.aliasGuardCheckedAt = refreshed.aliasGuardCheckedAt
+        manifest.aliasGuardResult = refreshed.aliasGuardResult
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning("实例 %s 自动补登记别名 /%s/ 失败：%s", instance_id, desired, exc)

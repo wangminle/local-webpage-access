@@ -2154,13 +2154,18 @@ def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
 
 def _read_manager_health_version(ws: Workspace, config: Config) -> str | None:
     """读取运行中 manager ``/api/health`` 的进程绑定版本。"""
-    from local_webpage_access.manager_service import read_state
+    from local_webpage_access.manager_service import _health_check_host, read_state
+    from local_webpage_access.ports import format_http_host
     from local_webpage_access.probe import urlopen_direct
 
     state = read_state(ws)
     if state is None or not state.port:
         return None
-    url = f"http://127.0.0.1:{int(state.port)}/api/health"
+    bind = str(
+        getattr(config, "managerHost", None) or getattr(state, "host", None) or "0.0.0.0"
+    )
+    host = format_http_host(_health_check_host(bind))
+    url = f"http://{host}:{int(state.port)}/api/health"
     try:
         with urlopen_direct(url, timeout=2.0) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -2178,6 +2183,7 @@ def check_service_version_drift(ws: Workspace, config: Config) -> CheckResult:
         bind_process_revision,
         display_version,
         normalize_version_label,
+        revisions_equivalent,
     )
 
     code = display_version()
@@ -2207,7 +2213,9 @@ def check_service_version_drift(ws: Workspace, config: Config) -> CheckResult:
             return
         bound_n = normalize_version_label(bound_ver)
         version_mismatch = bool(bound_n and code_n and bound_n != code_n)
-        revision_mismatch = bool(bound_rev and code_rev and bound_rev != code_rev)
+        revision_mismatch = bool(
+            bound_rev and code_rev and not revisions_equivalent(bound_rev, code_rev)
+        )
         missing_rev = bool(code_rev and not bound_rev)
         if version_mismatch or revision_mismatch:
             drifted.append(name)
@@ -2215,7 +2223,10 @@ def check_service_version_drift(ws: Workspace, config: Config) -> CheckResult:
             unknown.append(name)
 
     manager_running = _service_observed_running("manager", ws, config)
-    if manager_running:
+    if manager_running is None:
+        unknown.append("manager")
+        lines.append(f"{_label('manager')}: 运行状态未知，无法比对版本")
+    elif manager_running:
         from local_webpage_access.manager_service import read_state as _rm
 
         st_mgr = _rm(ws)
@@ -2227,7 +2238,10 @@ def check_service_version_drift(ws: Workspace, config: Config) -> CheckResult:
         )
 
     daemon_running = _service_observed_running("daemon", ws, config)
-    if daemon_running:
+    if daemon_running is None:
+        unknown.append("daemon")
+        lines.append(f"{_label('daemon')}: 运行状态未知，无法比对版本")
+    elif daemon_running:
         from local_webpage_access.daemon import read_state as _rd
 
         st_daemon = _rd(ws)
@@ -2238,7 +2252,10 @@ def check_service_version_drift(ws: Workspace, config: Config) -> CheckResult:
         )
 
     gateway_running = _service_observed_running("gateway", ws, config)
-    if gateway_running:
+    if gateway_running is None:
+        unknown.append("gateway")
+        lines.append(f"{_label('gateway')}: 运行状态未知，无法比对版本")
+    elif gateway_running:
         from local_webpage_access.gateway_service import read_state as _rg
 
         st_gateway = _rg(ws)

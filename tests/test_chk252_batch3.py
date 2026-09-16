@@ -176,7 +176,7 @@ def test_verify_alias_live_rejects_html_for_js(
 
     def fake_probe(url, *, timeout=3.0):
         if url.endswith("/demo/"):
-            return True, 200, "text/html", b"<!doctype html><html></html>"
+            return True, 200, "text/html", ("<!doctype html>" + html).encode()
         if "app.js" in url:
             return True, 200, "text/html", b"<!doctype html><html></html>"
         return True, 200, "application/javascript", b"console.log(1)"
@@ -745,10 +745,12 @@ def test_verify_alias_live_probes_relative_script_under_alias(config, monkeypatc
 
     probed: list[str] = []
 
+    html = '<script src="assets/app.js"></script>'
+
     def fake_probe(url, *, timeout=3.0):
         probed.append(url)
         if url.endswith("/demo/"):
-            return True, 200, "text/html", b"<!doctype html><html></html>"
+            return True, 200, "text/html", ("<!doctype html>" + html).encode()
         return True, 200, "application/javascript", b"console.log(1)"
 
     monkeypatch.setattr(path_alias, "_http_probe_alias_resource", fake_probe)
@@ -756,7 +758,7 @@ def test_verify_alias_live_probes_relative_script_under_alias(config, monkeypatc
     verify_alias_live(
         config,
         "demo",
-        entry_html='<script src="assets/app.js"></script>',
+        entry_html=html,
         instance_id="x",
     )
     assert "http://127.0.0.1:8080/demo/assets/app.js" in probed

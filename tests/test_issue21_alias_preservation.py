@@ -100,6 +100,7 @@ class _CaddyFakeGW:
 
     def __init__(self, workspace, config) -> None:
         self.ws = workspace
+        self.config = config
 
     def detect_backend(self) -> str:
         return "caddy"
@@ -344,6 +345,48 @@ def test_alias_clear_clears_desired_even_when_route_already_empty(
     after = InstanceManifest.load(mpath)
     assert after.desiredAlias is None
     assert result.alias is None
+
+
+def test_alias_same_as_current_backfills_desired_alias(
+    ws, cfg, reg, container_instance
+) -> None:
+    """BUG-673：存量实例 alias==current 早退时仍须补登记 desiredAlias。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    assert manifest.container is not None
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "prd-review"
+    manifest.desiredAlias = None
+    manifest.save(mpath)
+    result = pa.set_instance_path_alias(ws, cfg, reg, iid, "prd-review")
+    assert result.unchanged is True
+    after = InstanceManifest.load(mpath)
+    assert after.desiredAlias == "prd-review"
+
+
+def test_restore_aborts_if_desired_cleared_under_lock(
+    ws, cfg, reg, container_instance
+) -> None:
+    """BUG-673：锁内发现 desiredAlias 已变则不得补登记。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    assert manifest.container is not None
+    manifest.container.routeMode = "port"
+    manifest.container.routeHost = None
+    manifest.desiredAlias = None
+    manifest.save(mpath)
+    result = pa.set_instance_path_alias(
+        ws, cfg, reg, iid, "prd-review", require_desired_alias="prd-review"
+    )
+    assert result.unchanged is True
+    after = InstanceManifest.load(mpath)
+    assert after.desiredAlias is None
+    assert after.container is not None
+    assert after.container.routeHost is None
 
 
 def test_maybe_restore_rereads_desired_alias_from_disk(

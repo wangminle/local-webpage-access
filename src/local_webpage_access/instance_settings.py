@@ -8,6 +8,18 @@ from local_webpage_access.models import InstanceManifest, Kind, Runtime
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 
+# BUG-680：与 compose / 容器运行管理键隔离，禁止经 buildEnv 改写。
+_BUILD_ENV_RESERVED_KEYS = frozenset(
+    {
+        "HOST_PORT",
+        "INTERNAL_PORT",
+        "MEMORY_LIMIT",
+        "CPU_LIMIT",
+        "DATABASE_URL",
+        "PORT",
+    }
+)
+
 
 def effective_build_env(manifest: InstanceManifest) -> dict[str, str]:
     from local_webpage_access.path_alias import _current_alias
@@ -16,6 +28,8 @@ def effective_build_env(manifest: InstanceManifest) -> dict[str, str]:
     if manifest.buildBaseFromAlias:
         alias = _current_alias(manifest)
         result["VITE_BASE"] = f"/{alias}/" if alias else "/"
+    for reserved in _BUILD_ENV_RESERVED_KEYS:
+        result.pop(reserved, None)
     return result
 
 
@@ -47,8 +61,17 @@ def update_instance_settings(
         if set(changes) & {"buildEnv", "buildBaseFromAlias"}:
             if (
                 updated.buildEnv or updated.buildBaseFromAlias
-            ) and old.runtime != Runtime.SHARED_STATIC:
-                raise ValueError("buildEnv / 别名 base 跟随仅支持宿主前端构建；容器构建不支持")
+            ) and old.runtime not in (Runtime.SHARED_STATIC, Runtime.DOCKER_COMPOSE):
+                raise ValueError(
+                    "buildEnv / 别名 base 跟随仅支持宿主前端构建与 docker-compose 容器构建"
+                )
+            reserved = sorted(
+                key for key in (updated.buildEnv or {}) if key in _BUILD_ENV_RESERVED_KEYS
+            )
+            if reserved:
+                raise ValueError(
+                    "buildEnv 不得覆盖 LWA 运行管理参数：" + "、".join(reserved)
+                )
         if "systemDeps" in changes and old.runtime != Runtime.DOCKER_COMPOSE:
             raise ValueError("systemDeps 仅支持容器实例")
         if "systemDeps" in changes and (changes.get("systemDeps") or []) and old.kind != Kind.PYTHON:

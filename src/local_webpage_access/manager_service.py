@@ -158,9 +158,9 @@ def write_state(workspace: Workspace, state: ManagerState) -> None:
 
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fill_missing_bind_version(state, path)
+    payload = fill_missing_bind_version(state, path)
     path.write_text(
-        json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 

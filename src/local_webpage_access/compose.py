@@ -74,7 +74,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: lwa-{instance_id}
+{build_args_block}    container_name: lwa-{instance_id}
 {user_block}    ports:
       - "${{HOST_PORT}}:${{INTERNAL_PORT}}"
     env_file:
@@ -148,6 +148,24 @@ def container_data_paths(source_dir: Path, manifest: InstanceManifest) -> list[s
     if _uses_runtime_root(source_dir, manifest):
         return ["/app/runtime/data", "/app/data"]
     return ["/app/data", "/app/runtime/data"]
+
+
+def _build_args_block(manifest: InstanceManifest) -> str:
+    """issue #39 / BUG-681：compose build.args 写入字面值，避免宿主环境与 $ 二次展开。"""
+    from local_webpage_access.instance_settings import effective_build_env
+
+    env = effective_build_env(manifest)
+    if not env:
+        return ""
+    lines = ["      args:"]
+    for key, value in env.items():
+        lines.append(f"        {key}: {_compose_literal_scalar(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def _compose_literal_scalar(value: str) -> str:
+    """Compose 仍会插值 YAML 中的 ``$``；写成 ``$$`` 并 JSON 引号，保持字面值。"""
+    return json.dumps(value, ensure_ascii=False).replace("$", "$$")
 
 
 def generate_compose(
@@ -228,6 +246,7 @@ def generate_compose(
         env_local_block=_ENV_LOCAL_BLOCK,
         extra_environment=extra_environment,
         user_block=user_block,
+        build_args_block=_build_args_block(manifest),
     )
     # WBS-25.03/04/05：自检生成的 compose 是否含 critical 安全问题
     # （模板本身安全；此检查防止模板被改动或 skill 覆盖后引入风险）。
@@ -396,7 +415,15 @@ def generate_env(
     # 再覆盖写入，杜绝整文件覆盖吞掉用户手写的业务键。DATABASE_URL 仅在
     # SQLite 实例下算 LWA 管理键（BUG-491 保留逻辑）；非 SQLite 实例 LWA
     # 从不写它，视为用户业务键迁移到 .env.local。
-    existing = _parse_existing_env(out_path, database_url_managed=_is_sqlite(manifest))
+    from local_webpage_access.instance_settings import effective_build_env
+
+    # 旧 .env 里残留的 buildEnv 键视为管理键丢弃，避免再被当业务键迁入 .env.local。
+    build_env = effective_build_env(manifest)
+    existing = _parse_existing_env(
+        out_path,
+        database_url_managed=_is_sqlite(manifest),
+        extra_managed_keys=frozenset(build_env),
+    )
 
     if _is_sqlite(manifest):
         # A.R01：只有当证据表明应用消费 DATABASE_URL 时才自动注入。
@@ -513,6 +540,9 @@ def generate_env(
             lines.append("# A.R01: 未检测到应用消费 DATABASE_URL，未自动注入。")
             lines.append("# 如需注入，请在应用 config 中使用 os.getenv('DATABASE_URL')。")
 
+    # BUG-680 / BUG-681：buildEnv 不写入 docker/.env，避免覆盖 HOST_PORT 等管理键，
+    # 以及被宿主同名环境 / dotenv 插值改写。构建参数只走 compose build.args 字面值。
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # issue #11：先迁业务键再覆盖 .env——迁移中断时旧 .env 原样保留；覆盖
     # 中断时业务键已在 .env.local（两处冗余无害，下次迁移按同名冲突幂等收敛）。
@@ -560,7 +590,20 @@ class _ExistingEnv:
     unparseable_lines: list[tuple[int, str]] = field(default_factory=list)
 
 
-def _parse_existing_env(env_path: Path, *, database_url_managed: bool = True) -> _ExistingEnv:
+def _format_env_assignment(key: str, value: str) -> str:
+    """写出 KEY=VALUE；含空白或注释符时加双引号。"""
+    if re.search(r'[\s#"\'\\$]', value):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{key}="{escaped}"'
+    return f"{key}={value}"
+
+
+def _parse_existing_env(
+    env_path: Path,
+    *,
+    database_url_managed: bool = True,
+    extra_managed_keys: frozenset[str] | None = None,
+) -> _ExistingEnv:
     """把已有 ``.env`` 拆成管理键 / 业务键 / 无法解析的行（issue #11）。
 
     ``database_url_managed=False``（非 SQLite 实例）时 ``DATABASE_URL`` 按业务键处理。
@@ -591,10 +634,11 @@ def _parse_existing_env(env_path: Path, *, database_url_managed: bool = True) ->
             # 报错，绝不能原样迁入 .env.local--归入坏行，走备份+告警。
             existing.unparseable_lines.append((lineno, raw))
             continue
+        managed = _ENV_MANAGED_KEYS | (extra_managed_keys or frozenset())
         if key == "DATABASE_URL" and database_url_managed:
             # BUG-491：SQLite 分支特殊保留逻辑的输入。
             existing.database_url = value
-        elif key not in _ENV_MANAGED_KEYS or key == "DATABASE_URL":
+        elif key not in managed or key == "DATABASE_URL":
             existing.business_lines.append((key, raw))
     return existing
 

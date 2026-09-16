@@ -937,7 +937,7 @@ def start_container(
         )
     else:
         manifest.status = Status.FAILED
-        manifest.lastError = verification.get("error", "必选探针未通过")[:500]
+        manifest.lastError = verification.get("error", "必选探针未通过")[:1800]
         status_detail = "FAILED（必选探针未通过）"
         registry.add_event(
             instance_id,
@@ -1416,7 +1416,9 @@ def _container_probe_context(
     workspace: Workspace, registry: Registry, instance_id: str
 ) -> dict[str, Any]:
     """探针失败时采集容器状态、inspect 与日志尾部（issue #35 / CHK-326）。"""
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = {
+        "build_log": str(workspace.app_dir(instance_id) / "logs" / "build.log"),
+    }
     try:
         runtime = DockerRuntime(workspace, registry)
         st = runtime.status(instance_id)
@@ -1430,7 +1432,6 @@ def _container_probe_context(
         if isinstance(ins.get("restart_count"), int):
             extra["restart_count"] = ins["restart_count"]
         extra["logs"] = runtime.logs(instance_id, tail=80)
-        extra["build_log"] = str(workspace.app_dir(instance_id) / "logs" / "build.log")
     except Exception:  # noqa: BLE001
         log.debug("采集容器探针上下文失败", exc_info=True)
     return extra

@@ -366,6 +366,11 @@ def _enable_running_builtin(
     gateway: StaticGateway,
 ) -> list[str]:
     enabled: list[str] = []
+    # BUG-686：与切 Caddy 方向对称，别名实例须记录本次守卫结论——builtin 不做
+    # 同等 HTML 活验证，写 skipped + 本次时间，避免沿用切换前的 passed/旧时间。
+    from local_webpage_access.models import InstanceManifest
+    from local_webpage_access.path_alias import _persist_alias_guard
+
     for iid, manifest in _iter_static_instances(workspace, registry):
         row = registry.get_instance(iid)
         if not _is_running_static(manifest, row):
@@ -389,6 +394,12 @@ def _enable_running_builtin(
             alias=alias,
         )
         enabled.append(iid)
+        if alias:
+            try:
+                fresh = InstanceManifest.load(workspace.app_manifest_path(iid))
+                _persist_alias_guard(workspace, iid, fresh, "skipped")
+            except Exception as exc:  # noqa: BLE001 — 守卫记录不阻断网关切换
+                log.warning("切 builtin 后实例 %s 记录守卫 skipped 失败：%s", iid, exc)
     return enabled
 
 
@@ -420,6 +431,24 @@ def _rebuild_caddy_aliases(
             except Exception as exc2:  # noqa: BLE001
                 log.warning("sync/reload 别名主配置失败：%s", exc2)
                 raise
+        config = getattr(gateway, "config", None)
+        if config is not None:
+            from local_webpage_access.models import InstanceManifest
+            from local_webpage_access.path_alias import maybe_verify_alias_after_start
+
+            for iid in rebuilt:
+                try:
+                    manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+                    maybe_verify_alias_after_start(
+                        workspace,
+                        config,
+                        registry,
+                        iid,
+                        manifest,
+                        alias_fragment_preexisting=True,
+                    )
+                except Exception as exc:  # noqa: BLE001 — 不阻断网关切换
+                    log.warning("网关切换后实例 %s 别名守卫失败：%s", iid, exc)
     return rebuilt
 
 

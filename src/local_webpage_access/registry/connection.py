@@ -19,7 +19,7 @@ from local_webpage_access.logging import get_logger
 
 log = get_logger("registry")
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # ---- DDL --------------------------------------------------------------------
 
@@ -198,6 +198,12 @@ _SCHEMAS: dict[int, list[str]] = {
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_agent_operations_plan ON agent_operations(plan_id)",
+    ],
+    # AGC-W08/W09：实例 revision CAS；计划落盘风险与能力缺口。
+    4: [
+        "ALTER TABLE instances ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE agent_plans ADD COLUMN risks_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE agent_plans ADD COLUMN required_capabilities_json TEXT NOT NULL DEFAULT '[]'",
     ],
 }
 

@@ -55,6 +55,31 @@ def test_classify_disk_full() -> None:
     assert "磁盘不足" in hint.summary
 
 
+def test_classify_docker_hub_token_is_registry_not_apt() -> None:
+    """issue #36：failed to fetch anonymous token 不得归为 apt。"""
+    text = (
+        "failed to solve: failed to fetch anonymous token:\n"
+        'Get "https://auth.docker.io/token?scope=repository%3Alibrary%2Fpython'
+        '%3Apull&service=registry.docker.io": dial tcp 3.3.3.3:443: i/o timeout'
+    )
+    hint = classify_build_failure(text)
+    assert hint is not None
+    assert hint.kind == "registry"
+    assert "apt" not in hint.summary.lower()
+    assert "Docker Hub" in hint.summary or "registry" in hint.summary.lower()
+
+
+def test_classify_apt_still_wins_on_real_apt_log() -> None:
+    text = (
+        "Err:4 http://mirrors.aliyun.com/debian trixie/main arm64 Packages\n"
+        "  Connection failed [IP: 27.221.122.14 80]\n"
+        "E: Unable to fetch some archives, maybe run apt-get update\n"
+    )
+    hint = classify_build_failure(text)
+    assert hint is not None
+    assert hint.kind == "apt"
+
+
 def test_classify_unknown_returns_none() -> None:
     assert classify_build_failure("Syntax error: unexpected token") is None
     assert classify_build_failure("") is None

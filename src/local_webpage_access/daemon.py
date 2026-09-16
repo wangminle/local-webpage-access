@@ -274,9 +274,9 @@ def write_state(workspace: Workspace, state: DaemonState) -> None:
 
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fill_missing_bind_version(state, path)
+    payload = fill_missing_bind_version(state, path)
     path.write_text(
-        json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -830,6 +830,10 @@ def _load_instance_manifest(workspace: Workspace, instance_id: str):
         return None
 
 
+_circuit_skip_log_at: dict[str, float] = {}
+_CIRCUIT_SKIP_LOG_INTERVAL = 600.0
+
+
 def _reconcile_circuit_blocks(workspace: Workspace, instance_id: str) -> bool:
     from local_webpage_access.reconcile_circuit import is_blocked, status_note
 
@@ -837,7 +841,14 @@ def _reconcile_circuit_blocks(workspace: Workspace, instance_id: str) -> bool:
     if manifest is None or not is_blocked(manifest):
         return False
     note = status_note(manifest) or "构建熔断中"
-    log.info("daemon reconcile: 跳过实例 %s（%s）", instance_id, note)
+    key = f"{workspace.root}:{instance_id}"
+    now = time.monotonic()
+    last = _circuit_skip_log_at.get(key, 0.0)
+    if now - last >= _CIRCUIT_SKIP_LOG_INTERVAL:
+        log.info("daemon reconcile: 跳过实例 %s（%s）", instance_id, note)
+        _circuit_skip_log_at[key] = now
+    else:
+        log.debug("daemon reconcile: 跳过实例 %s（%s）", instance_id, note)
     return True
 
 

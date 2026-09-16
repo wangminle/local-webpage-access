@@ -1,4 +1,4 @@
-"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.8.16-Build...`` 前缀。"""
+"""应用版本解析：优先从 Git 最新 commit 主题读取 ``V0.8.17-Build...`` 前缀。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 
 _VERSION_PREFIX = re.compile(r"^V(\d+\.\d+\.\d+)", re.IGNORECASE)
 _PACKAGE_NAME = "local-webpage-access"
-_FALLBACK_VERSION = "0.8.16"
+_FALLBACK_VERSION = "0.8.17"
 
 
 def _is_lwa_repo(path: Path) -> bool:
@@ -80,7 +80,7 @@ def _version_from_metadata() -> str | None:
 
 @lru_cache(maxsize=1)
 def resolve_version() -> str:
-    """返回 semver 字符串（如 ``0.8.16``），不含 ``V`` 前缀。"""
+    """返回 semver 字符串（如 ``0.8.17``），不含 ``V`` 前缀。"""
     git_ver = _version_from_git(_repo_root())
     if git_ver:
         return git_ver
@@ -91,7 +91,7 @@ def resolve_version() -> str:
 
 
 def version_from_subject(subject: str | None) -> str | None:
-    """从 commit 主题解析 ``V0.8.16-Build...`` 前缀（IMP-063）。
+    """从 commit 主题解析 ``V0.8.17-Build...`` 前缀（IMP-063）。
 
     主题不含 ``Vx.y.z`` 时返回 ``None``——不伪造版本号，报告降级为短 SHA。
     """
@@ -102,7 +102,7 @@ def version_from_subject(subject: str | None) -> str | None:
 
 
 def display_version() -> str:
-    """UI/CLI 展示用（如 ``V0.8.16``）。"""
+    """UI/CLI 展示用（如 ``V0.8.17``）。"""
     return f"V{resolve_version()}"
 
 
@@ -124,7 +124,7 @@ def bind_process_revision() -> str | None:
         return None
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short=12", "HEAD"],
+            ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -136,25 +136,39 @@ def bind_process_revision() -> str | None:
     if result.returncode != 0:
         return None
     rev = (result.stdout or "").strip()
-    return rev or None
+    if not rev or any(c not in "0123456789abcdefABCDEF" for c in rev):
+        return None
+    return rev[:12] if len(rev) >= 12 else None
 
 
-def fill_missing_bind_version(state: Any, path: Path) -> None:
-    """写状态文件时若未显式设置 bind_version / bind_revision，保留盘上已有值。"""
-    missing_ver = not getattr(state, "bind_version", None)
-    missing_rev = not getattr(state, "bind_revision", None)
+def revisions_equivalent(left: str | None, right: str | None) -> bool:
+    """同一提交的短 hash 可能 12 或更长（``--short`` 为消歧会加长）。"""
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    n = min(len(left), len(right))
+    return n >= 12 and left[:n] == right[:n]
+
+
+def fill_missing_bind_version(state: Any, path: Path) -> dict[str, Any]:
+    """序列化状态；缺 bind 字段时只填进返回的 dict，不修改入参（BUG-667）。"""
+    payload = dict(state.to_dict())
+    missing_ver = not payload.get("bind_version")
+    missing_rev = not payload.get("bind_revision")
     if not missing_ver and not missing_rev:
-        return
+        return payload
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return
+        return payload
     if not isinstance(data, dict):
-        return
+        return payload
     if missing_ver and data.get("bind_version"):
-        state.bind_version = str(data["bind_version"])
+        payload["bind_version"] = str(data["bind_version"])
     if missing_rev and data.get("bind_revision"):
-        state.bind_revision = str(data["bind_revision"])
+        payload["bind_revision"] = str(data["bind_revision"])
+    return payload
 
 
 def normalize_version_label(value: str | None) -> str | None:
@@ -176,5 +190,6 @@ __all__ = [
     "bind_process_revision",
     "fill_missing_bind_version",
     "normalize_version_label",
+    "revisions_equivalent",
     "version_from_subject",
 ]

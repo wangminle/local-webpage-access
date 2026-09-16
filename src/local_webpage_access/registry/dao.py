@@ -221,6 +221,45 @@ class Registry:
         row = self._fetchone("SELECT 1 FROM instances WHERE id = ?", (instance_id,))
         return row is not None
 
+    def get_revision(self, instance_id: str) -> int | None:
+        """读取实例 revision；实例不存在返回 None。缺列时按 1。"""
+        row = self.get_instance(instance_id)
+        if row is None:
+            return None
+        raw = row.get("revision")
+        return 1 if raw is None else int(raw)
+
+    def cas_increment_revision(self, instance_id: str, expected: int) -> int:
+        """锁内 CAS：仅当当前 revision 等于 ``expected`` 时 +1。
+
+        冲突抛 ``RegistryError(code="revision_conflict")``；实例不存在抛
+        ``code="not_found"``。观测刷新不得调用本方法。
+        """
+        with self.txn() as tx:
+            cur = tx.execute(
+                "UPDATE instances SET revision = revision + 1, updated_at = ? "
+                "WHERE id = ? AND revision = ?",
+                (now_iso(), instance_id, expected),
+            )
+            if cur.rowcount == 1:
+                row = tx.execute(
+                    "SELECT revision FROM instances WHERE id = ?", (instance_id,)
+                ).fetchone()
+                assert row is not None
+                return int(row["revision"])
+            existing = tx.execute(
+                "SELECT revision FROM instances WHERE id = ?", (instance_id,)
+            ).fetchone()
+        if existing is None:
+            raise RegistryError("实例不存在，无法更新 revision", code="not_found", instance_id=instance_id)
+        raise RegistryError(
+            "实例 revision 与期望不符",
+            code="revision_conflict",
+            instance_id=instance_id,
+            expected=expected,
+            actual=int(existing["revision"]),
+        )
+
     def update_status(
         self,
         instance_id: str,
@@ -663,7 +702,7 @@ class Registry:
             return 0
         return int(row["n"])
 
-    # ---- Agent 协作（AGC-W05，schema v3）----------------------------------
+    # ---- Agent 协作（AGC-W05 schema v3；W09 revision 见 schema v4）--------
 
     _AGENT_OP_COLS = (
         "operation_id, principal_id, workspace_id, action, target_instance_id, "
@@ -816,6 +855,16 @@ class Registry:
     def get_agent_plan(self, plan_id: str) -> dict[str, Any] | None:
         row = self._fetchone("SELECT * FROM agent_plans WHERE plan_id = ?", (plan_id,))
         return dict(row) if row else None
+
+    def get_latest_agent_operation_for_instance(
+        self, instance_id: str
+    ) -> dict[str, Any] | None:
+        row = self._fetchone(
+            f"SELECT {self._AGENT_OP_COLS} FROM agent_operations"
+            " WHERE target_instance_id = ? ORDER BY updated_at DESC, operation_id DESC LIMIT 1",
+            (instance_id,),
+        )
+        return self._agent_op_row_to_dict(row) if row else None
 
 
 __all__ = ["Registry"]

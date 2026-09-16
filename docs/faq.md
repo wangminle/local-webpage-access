@@ -522,7 +522,7 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 
 ### 前端构建需要注入环境变量怎么办？（buildEnv，DEV-132）
 
-推荐使用 `lwa configure <id> --build-env KEY=VALUE`（整组替换，可重复），详细选项见本页末尾。仅宿主前端构建生效，不用于容器构建。
+推荐使用 `lwa configure <id> --build-env KEY=VALUE`（整组替换，可重复），详细选项见本页末尾。宿主前端构建注入安装/构建命令环境；容器实例则写入 Dockerfile `ARG`/`ENV` 与 Compose `build.args`（issue #39）。
 
 前端项目的构建产物常依赖部署期参数（最典型：路径别名下的 Vite `base`）。
 此前只能在 `entry.build` 里烤命令前缀（如 `VITE_BASE=/<alias>/ npm run build`），
@@ -533,8 +533,9 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 "buildEnv": {"VITE_BASE": "/my-alias/"}
 ```
 
-* `lwa rebuild` / 启动构建时以 `{**os.environ, **buildEnv}` 注入安装与构建命令
+* 宿主前端：`lwa rebuild` / 启动构建时以 `{**os.environ, **buildEnv}` 注入安装与构建命令
   （subprocess env 是整体替换语义，故以 `os.environ` 为底，PATH 不丢）。
+* 容器实例：生成 Dockerfile 时声明同名 `ARG`/`ENV`；Compose `build.args` 写入 **manifest 字面值**（`$$` 转义 `$`），不走 `docker/.env`、也不被宿主同名环境覆盖。`HOST_PORT` / `INTERNAL_PORT` 等运行管理键禁止写入 `buildEnv`。
 * `buildEnv` 与 `buildHooks` / `preStart` 同属重扫保留清单，`lwa scan` /
   `import --update` / git 更新不会清空。
 * 项目侧需自行读取：如 Vite 在 `vite.config.js` 用
@@ -697,6 +698,7 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
 
 * **根因 A — SPA 绝对路径（IMP-023 / IMP-055）**：Vite/Vue/React 等构建产物若用默认 `base: '/'`，HTML 里是 `/assets/app.js`（绝对）。别名 `/<alias>/` 是子路径，绝对路径会绕过别名打到入口根，常见结果是**空 200**、**404**，或被 SPA/回落页吃成 **200 + text/html** -> JS 无法执行 -> 白屏。同样地，前端 API 客户端若用绝对 `/api/v1`，也会打到入口根而非后端。
   * **设别名时拦截**：`lwa alias set` / 管理页设别名时，对 **shared-static 与 docker-compose** 实例均跑守卫；若检出绝对 `src`/`href`，会直接失败并提示改造步骤（探不到入口时不拦但提示「未验证入口 HTML」）。
+  * **运行期复验（V0.8.17，issue #37/#38）**：活验证读取**别名实际服务**的 HTML（不是传入的入口 HTML），空探针集不再盖 `aliasLiveVerified` 印章；`lwa restart` / `lwa recover` 与**双向**网关切换（`gateway switch`）也会复跑守卫——切回 builtin 时记 `aliasGuardResult=skipped` 与本次时间，不再沿用切换前的 `passed`/旧时间。
   * 自查：`curl -i http://127.0.0.1:8080/<alias>/`，看 HTML 里 `src=` 是 `/assets/...`（绝对＝有问题）还是 `./assets/...`（相对＝正常）；再分别 `curl -i` 无前缀与带 `/<alias>` 前缀的资源 URL，对照状态码 / Content-Length / Content-Type。
   * **修复（方案 B - 显式、可配置的 base path）**：
     - Vite 构建：`vite build --base=/<alias>/`，同步重建静态产物后重新设置别名
@@ -803,6 +805,13 @@ lwa rebuild demo
 若跟随**已经开启**，须先 `lwa configure <id> --no-follow-alias-base` 关闭跟随（此时手动 `VITE_BASE` 才不会被
 当前别名覆盖），完成目标 base 构建与别名变更后再重新开启跟随——拒绝提示中的四步指引即按此顺序给出。
 
-这些参数仅用于 **宿主前端构建的安装/构建命令**，不注入 Docker 镜像构建或容器运行环境；
-容器请使用项目 Dockerfile/Compose 提供的构建参数。`buildEnv` 值禁止 CR、LF、NUL，变量名须合法。
+宿主前端构建把这些参数注入安装/构建命令环境；容器实例写入 Dockerfile `ARG`/`ENV`
+与 Compose `build.args` 字面值（不写入 `docker/.env`，以免覆盖 `HOST_PORT` 等管理键）。
+Python 容器若源码含 `frontend/`（或 `web/`、`client/`）的 `package.json`，且**契约完整**
+（有 `build` 脚本并带 `package-lock.json` / `npm-shrinkwrap.json`），镜像会在 COPY 后执行
+`npm ci && npm run build` 并尝试把 `dist` 复制到 `backend/static`；缺锁文件、用 pnpm/yarn
+或无 `build` 脚本时**跳过自动构建**（Dockerfile 留注释说明），请用 `buildHooks` 显式构建
+（自定义输出目录同理）。Python 容器开启跟随时同样遵循上面的四步迁移顺序（提示与宿主一致）。
+仅注入 `VITE_BASE` 不会改写已编译产物。
+`buildEnv` 值禁止 CR、LF、NUL，变量名须合法。
 `buildEnv`、别名跟随开关和重复实例保留标记均会在 scan、更新、rebuild 的配置重建时保留。

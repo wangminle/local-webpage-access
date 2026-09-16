@@ -107,7 +107,7 @@ def test_migrate_runs_on_fresh_db(workspace_root: Path) -> None:
     workspace_root.mkdir(parents=True, exist_ok=True)
     reg = Registry(db_path)
     reg.open()
-    assert get_schema_version(reg.conn) == 3
+    assert get_schema_version(reg.conn) == 4
     reg.close()
 
 
@@ -153,7 +153,7 @@ def test_concurrent_migrate_serializes_schema_version_check(tmp_path: Path, monk
     assert errors == []
     verify = connection_mod.connect(db_path)
     try:
-        assert original_get(verify) == 3
+        assert original_get(verify) == 4
     finally:
         verify.close()
 

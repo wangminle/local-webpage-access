@@ -1051,39 +1051,45 @@ class DockerRuntime:
         return None
 
     def inspect_state(self, instance_id: str) -> dict:
-        """读取容器 ``.State``（ExitCode / OOMKilled / RestartCount）。失败返回空 dict。"""
-        cid = None
-        st = self.status(instance_id)
-        if st is not None:
-            cid = st.container_id
-        if not cid:
-            with contextlib.suppress(Exception):
-                cid = self.container_id(instance_id)
-        if not cid:
-            return {}
-        result = _execute(
-            ["docker", "inspect", cid, "--format", "{{json .}}"],
-            cwd=self.workspace.app_dir(instance_id),
-            timeout=_QUERY_TIMEOUT,
-        )
-        if not result.ok:
-            return {}
+        """读取容器 inspect JSON：顶层 RestartCount，State 内 ExitCode/OOMKilled。
+
+        失败（含 ``status()`` 抛错）返回空 dict。
+        """
         try:
-            data = json.loads(result.stdout or "")
-        except json.JSONDecodeError:
+            cid = None
+            st = self.status(instance_id)
+            if st is not None:
+                cid = st.container_id
+            if not cid:
+                with contextlib.suppress(Exception):
+                    cid = self.container_id(instance_id)
+            if not cid:
+                return {}
+            result = _execute(
+                ["docker", "inspect", cid, "--format", "{{json .}}"],
+                cwd=self.workspace.app_dir(instance_id),
+                timeout=_QUERY_TIMEOUT,
+            )
+            if not result.ok:
+                return {}
+            try:
+                data = json.loads(result.stdout or "")
+            except json.JSONDecodeError:
+                return {}
+            if not isinstance(data, dict):
+                return {}
+            raw_state = data.get("State")
+            state = raw_state if isinstance(raw_state, dict) else {}
+            restart_count = data.get("RestartCount")
+            return {
+                "exit_code": state.get("ExitCode"),
+                "oom_killed": state.get("OOMKilled"),
+                "restart_count": restart_count,
+                "error": state.get("Error"),
+                "status": state.get("Status"),
+            }
+        except Exception:  # noqa: BLE001
             return {}
-        if not isinstance(data, dict):
-            return {}
-        raw_state = data.get("State")
-        state = raw_state if isinstance(raw_state, dict) else {}
-        restart_count = data.get("RestartCount")
-        return {
-            "exit_code": state.get("ExitCode"),
-            "oom_killed": state.get("OOMKilled"),
-            "restart_count": restart_count,
-            "error": state.get("Error"),
-            "status": state.get("Status"),
-        }
 
     def is_running(self, instance_id: str) -> bool:
         """容器是否处于 running 状态。

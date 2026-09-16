@@ -2,7 +2,7 @@
 
 daemon 自愈对失败构建若按固定短间隔重试，长 apt 构建会在内存紧张时放大 OOM。
 连续失败达到小时级退避；达到人工阈值后停止自动重试，直到 ``lwa start`` /
-``lwa rebuild`` 清熔断。
+``lwa rebuild`` / ``lwa restart`` 清熔断。
 """
 
 from __future__ import annotations
@@ -31,11 +31,8 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 
 def _now(now: datetime | None) -> datetime:
-    if now is not None:
-        if now.tzinfo is None:
-            return now.replace(tzinfo=timezone.utc)
-        return now
-    return datetime.now(timezone.utc)
+    stamp = datetime.now() if now is None else now
+    return stamp.astimezone()
 
 
 def record_failure(manifest: Any, *, now: datetime | None = None) -> None:
@@ -75,22 +72,41 @@ def status_note(manifest: Any, *, now: datetime | None = None) -> str | None:
     if getattr(manifest, "reconcileCircuitManual", False):
         return (
             f"构建连续失败熔断中（{count} 次），已停止自动重试，需人工介入："
-            "执行 lwa start / lwa rebuild 清除熔断并重试"
+            "执行 lwa start / lwa rebuild / lwa restart 清除熔断并重试"
         )
     if not is_blocked(manifest, now=now):
         return None
     until = getattr(manifest, "reconcileNextRetryAt", None) or ""
     return (
         f"构建连续失败熔断中（{count} 次），下次自动重试 {until}；"
-        "也可执行 lwa start / lwa rebuild 立即重试"
+        "也可执行 lwa start / lwa rebuild / lwa restart 立即重试"
     )
 
 
 def persist_circuit(workspace: Any, instance_id: str, manifest: Any) -> None:
-    """把熔断字段落盘（失败静默，不阻断自愈主流程）。"""
+    """把熔断字段落盘（失败静默，不阻断自愈主流程）。
+
+    BUG-668：持 ``instance_lock``，在锁内重读最新 manifest 只合并熔断字段。
+    实例已被删除则跳过，避免 ``save()`` mkdir 把幽灵文件写回。
+    """
     try:
-        manifest.touch()
-        manifest.save(workspace.app_manifest_path(instance_id))
+        from local_webpage_access.lifecycle import instance_lock
+        from local_webpage_access.models import InstanceManifest
+
+        with instance_lock(workspace, instance_id):
+            path = workspace.app_manifest_path(instance_id)
+            if not path.is_file():
+                return
+            latest = InstanceManifest.load(path)
+            latest.consecutiveReconcileFailures = int(
+                getattr(manifest, "consecutiveReconcileFailures", 0) or 0
+            )
+            latest.reconcileCircuitManual = bool(
+                getattr(manifest, "reconcileCircuitManual", False)
+            )
+            latest.reconcileNextRetryAt = getattr(manifest, "reconcileNextRetryAt", None)
+            latest.touch()
+            latest.save(path)
     except Exception:  # noqa: BLE001
         pass
 

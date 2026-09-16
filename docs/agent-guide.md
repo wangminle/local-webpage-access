@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.8.16 当前实际可用的接入方式。**
+> **状态：本文描述 V0.8.17 当前实际可用的接入方式。**
 > LWA 尚未提供 MCP 服务器与 `/api/agent/v1/*` 等专用 Agent 接口——相关能力处于规划实施阶段（见[第 9 节](#9-规划中的-agent-通道未实现)）。在它们落地前，Agent 通过本文所述的既有 HTTP API 与 CLI 工作；**不要**按第 9 节的命令操作，它们尚不存在。V0.8.15 起管理页提供公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -130,11 +130,11 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 4. 部署来源仅限 §5 允许的类型；不尝试绕过 Git host 白名单。
 5. 遇到能力缺口（如缺 Docker）如实报告，不自行安装基础设施。
 
-## 9. 规划中的 Agent 通道（未实现）
+## 9. 规划中的 Agent 通道（入口未实现）
 
-以下能力已列入实施计划（设计文档：`design/3-plans/2026-09-15-lwa-agent-collaboration-design.md`），**当前版本均未实现，相关命令与端点尚不存在**：
+以下能力已列入实施计划（设计文档：`design/3-plans/2026-09-15-lwa-agent-collaboration-design.md`），**相关命令与端点尚不存在**：
 
-- **M1（本机协作）**：`lwa mcp --workspace <path>` stdio MCP 适配器、`lwa agent connection-info`、`/api/agent/v1/*` 新路由（plan/apply + 持久 operation + 幂等键）。
+- **M1（本机协作）**：`lwa mcp --workspace <path>` stdio MCP 适配器、`lwa agent connection-info`、`/api/agent/v1/*` 新路由（plan/apply + 持久 operation + 幂等键）。V0.8.17 起 M1 的**内部服务层**已入库（`agent/service.py` 只读查询/能力映射/部署计划 + registry schema v4 revision CAS，AGC W07–W09），但 HTTP/MCP 入口仍未实施——对 Agent 而言本节能力依旧不可用。
 - **M2（局域网协作）**：HTTPS 远程 MCP（Streamable HTTP）、独立 Agent 授权（scope/ACL）、zip 制品上传 API。
 - 协议兼容性验证（AGC-W01）已完成：目标 MCP 协议版本 2026-07-28，兼容旧握手至 2024-11-05。
 

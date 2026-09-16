@@ -255,5 +255,5 @@ swap=4GB
   重试与层缓存命中。旧 hook 示例：删掉 `apt-get install … ffmpeg`，改配 `systemDeps: [ffmpeg]`。
 
 * **导入预览（#30）**：`lwa import --dry-run` 仅支持带 `--update <id>` 的原地更新。全新 zip、folder、git 导入传该选项会在打开工作区/下载前以退出码 2 拒绝，不会静默执行真实导入。
-* **构建环境**：`buildEnv` / `buildBaseFromAlias` 仅供宿主前端安装和构建使用，不支持 Docker 镜像构建或容器运行环境。Vite 项目须主动读取 `VITE_BASE`；别名跟随仅在下次构建生效，不会自动重构建或改写源码。手改 `entry.build --base` 不属于重扫保留清单，请优先使用 `lwa configure` 的持久配置。
+* **构建环境**：`buildEnv` / `buildBaseFromAlias` 用于宿主前端安装/构建命令，容器实例则经 Docker `ARG`/`ENV` 与 Compose `build.args` **字面值**注入（issue #39；不写入 `docker/.env`，也不能用 `HOST_PORT` 等管理键覆盖 LWA 分配的端口）。这不是容器**运行期**环境（运行期仍用 `docker/.env` / `.env.local`）。Vite 项目须主动读取 `VITE_BASE`；Python 模板不执行 `entry.build`，预编译 `backend/static` 需在含 `frontend/` 的源码上走镜像内 `npm run build`（或 `buildHooks`）。别名跟随仅在下次构建生效，不会自动重构建或改写源码。手改 `entry.build --base` 不属于重扫保留清单，请优先使用 `lwa configure` 的持久配置。
 * **冗余清理**：运行中、期望运行、构建/排队/验证/取消中等过渡态以及配置不可读的实例始终跳过，`allowConfigLoss` 和 `force` 不绕过这条保护。请先停止，或明确选择单实例删除；`redundancyAcknowledged` 实例不会进入冗余候选。

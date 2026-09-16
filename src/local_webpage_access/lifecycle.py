@@ -1875,8 +1875,12 @@ def _restart_instance_locked(
         start_container,
         stop_instance,
     )
+    from local_webpage_access.reconcile_circuit import clear_circuit
 
     manifest = _load(workspace, instance_id)
+    clear_circuit(manifest)
+    with contextlib.suppress(Exception):
+        manifest.save(workspace.app_manifest_path(instance_id))
     deployed_container = _is_deployed_container(manifest)
     # 先停：容忍"本来就没在跑"的噪声（含 Docker/网关不可用等 stop 失败）
     try:
@@ -1890,6 +1894,17 @@ def _restart_instance_locked(
         manifest = host_instance(workspace, config, registry, instance_id)
     # IMP-021：容器别名入口 reverse_proxy 到 hostPort，端口漂移时同步别名片段。
     _sync_alias_port(workspace, config, instance_id, manifest)
+    from local_webpage_access.path_alias import maybe_verify_alias_after_start
+
+    # BUG-679：restart/recover 不走 start_instance，须在此补跑守卫并记录三态。
+    maybe_verify_alias_after_start(
+        workspace,
+        config,
+        registry,
+        instance_id,
+        manifest,
+        alias_fragment_preexisting=True,
+    )
     return manifest
 
 
@@ -2037,9 +2052,11 @@ def rebuild_instance(
     列表时警告同时追加进去，供 CLI / 管理页透出。
     """
     from local_webpage_access.build_queue import get_build_queue
+    from local_webpage_access.errors import RegistryError
     from local_webpage_access.hosting import host_container, host_instance
     from local_webpage_access.reconcile_circuit import clear_circuit
 
+    expected_revision = registry.get_revision(instance_id)
     with instance_lock(workspace, instance_id):
         manifest = _load(workspace, instance_id)
         clear_circuit(manifest)
@@ -2080,6 +2097,17 @@ def rebuild_instance(
         clear_circuit(manifest)
         with contextlib.suppress(Exception):
             manifest.save(workspace.app_manifest_path(instance_id))
+        if expected_revision is not None:
+            try:
+                registry.cas_increment_revision(instance_id, expected_revision)
+            except RegistryError as exc:
+                if exc.code == "revision_conflict":
+                    raise LifecycleError(
+                        f"实例 {instance_id} 已被其他通道更新（revision 冲突）",
+                        code="revision_conflict",
+                        instance_id=instance_id,
+                    ) from exc
+                raise
 
     from local_webpage_access.path_alias import maybe_restore_desired_alias_after_start
 

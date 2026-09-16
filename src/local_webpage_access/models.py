@@ -705,6 +705,10 @@ class InstanceManifest(BaseModel):
     # aliasLiveVerifiedFor 记录验证通过时的别名 slug，换别名后标记失效。
     aliasLiveVerifiedAt: str | None = None
     aliasLiveVerifiedFor: str | None = None
+    # issue #38：别名内容守卫（IMP-055）最近一次检查。passed/failed/skipped，
+    # 探不到入口 HTML 时记 skipped，不得与活验证通过印章混用。
+    aliasGuardCheckedAt: str | None = None
+    aliasGuardResult: str | None = None
 
     @field_validator("kind", "runtime", "servingMode", "resourceProfile", "desiredState", "status")
     @classmethod

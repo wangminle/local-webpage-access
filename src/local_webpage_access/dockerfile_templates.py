@@ -240,6 +240,7 @@ def _render_node(
     lines = [
         header,
         f"FROM {_NODE_IMAGE}",
+        _build_env_arg_block(manifest),
         "WORKDIR /app",
         dependency_copy,
         f"RUN {install_run}",
@@ -611,6 +612,52 @@ def _node_dist_base(mirrors: BuildMirrors | None) -> str:
     return _OFFICIAL_NODE_DIST
 
 
+_NPMMIRROR_NODE_DIST = "https://npmmirror.com/mirrors/node"
+
+
+def _node_dist_bases(mirrors: BuildMirrors | None) -> list[str]:
+    """主 nodeDistBase + 国内/官方兜底，供 tarball 下载（BUG-670）。"""
+    bases: list[str] = []
+    primary = _node_dist_base(mirrors)
+    if primary:
+        bases.append(primary.rstrip("/"))
+    extras: tuple[str, ...]
+    if mirrors and mirrors.enabled and getattr(mirrors, "preset", "") == "china":
+        extras = (_NPMMIRROR_NODE_DIST, _OFFICIAL_NODE_DIST)
+    else:
+        extras = (_OFFICIAL_NODE_DIST,)
+    for extra in extras:
+        extra = extra.rstrip("/")
+        if extra not in bases:
+            bases.append(extra)
+    return bases or [_OFFICIAL_NODE_DIST]
+
+
+def _render_node_tarball_run(mirrors: BuildMirrors | None) -> str:
+    """与 apt 切源链分离：每次尝试使用不同的 Node 发行包 URL。"""
+    curls = []
+    for base in _node_dist_bases(mirrors):
+        url = (
+            f"{base}/v{_NODE_DIST_VERSION}/"
+            f"node-v{_NODE_DIST_VERSION}-linux-${{NODE_ARCH}}.tar.xz"
+        )
+        curls.append(f'curl -fsSL "{url}"')
+    chain = " || ".join(curls)
+    hint = (
+        "Node 发行包下载失败，请在 local-web.yml 调整 buildMirrors.nodeDistBase"
+        "（与 aptMirror 无关）"
+    )
+    return (
+        "RUN set -eux; \\\n"
+        '  ARCH="$(dpkg --print-architecture)"; \\\n'
+        '  case "$ARCH" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;'
+        ' *) echo "unsupported arch: $ARCH" >&2; exit 1;; esac; \\\n'
+        f"  ( {chain} ) | tar -xJ -C /usr/local --strip-components=1 || "
+        f"( echo '{hint}' && exit 1 ); \\\n"
+        "  node -v && npm -v\n"
+    )
+
+
 def _parse_requirements_packages(req_text: str) -> set[str]:
     """从 requirements.txt 文本提取包名集合（小写、去 extras / 版本约束）。
 
@@ -766,28 +813,24 @@ def _render_python(
     # 否则任意源码改动都会打掉 Node 下载层（约 30MB）与 npm 依赖层。
     node_toolchain = ""
     npm_block = ""
-    if source_dir is not None and (source_dir / "package.json").is_file():
-        node_base = _node_dist_base(mirrors)
+    frontend_pkg = _frontend_package_dir(source_dir)
+    if source_dir is not None and (
+        (source_dir / "package.json").is_file() or frontend_pkg
+    ):
         opts = _apt_retry_opts(mirrors)
-        node_body = (
+        node_apt = (
             f"apt-get {opts} update && "
-            f"apt-get {opts} install -y --no-install-recommends ca-certificates curl xz-utils; "
-            'ARCH="$(dpkg --print-architecture)"; '
-            'case "$ARCH" in amd64) NODE_ARCH=x64;; arm64) NODE_ARCH=arm64;;'
-            ' *) echo "unsupported arch: $ARCH" >&2; exit 1;; esac; '
-            "curl -fsSL"
-            f' "{node_base}/v{_NODE_DIST_VERSION}/'
-            f'node-v{_NODE_DIST_VERSION}-linux-${{NODE_ARCH}}.tar.xz"'
-            " | tar -xJ -C /usr/local --strip-components=1; "
-            "node -v && npm -v"
+            f"apt-get {opts} install -y --no-install-recommends ca-certificates curl xz-utils"
         )
-        node_toolchain = _render_apt_run(node_body, mirrors)
-        npm_install = _with_npm_registry("npm ci --omit=dev || npm install --omit=dev", mirrors)
-        if needs_early_full_copy:
-            # 源码已整包拷入，只需 npm 安装。
-            npm_block = f"RUN {npm_install}\n"
-        else:
-            npm_block = f"COPY {cpfx}package*.json ./\nRUN {npm_install}\n"
+        node_toolchain = _render_apt_run(node_apt, mirrors) + _render_node_tarball_run(mirrors)
+        if (source_dir / "package.json").is_file():
+            npm_install = _with_npm_registry(
+                "npm ci --omit=dev || npm install --omit=dev", mirrors
+            )
+            if needs_early_full_copy:
+                npm_block = f"RUN {npm_install}\n"
+            else:
+                npm_block = f"COPY {cpfx}package*.json ./\nRUN {npm_install}\n"
 
     sqlite_mkdir = ""
     if _is_sqlite(manifest):
@@ -816,10 +859,12 @@ def _render_python(
     # issue#7：构建钩子在依赖安装层之后、CMD 之前逐条执行（WORKDIR=/app，
     # 源码已由 final_copy / 早期整包 COPY 就位）。含 apt-get 的钩子注入镜像与重试。
     hooks_block = _build_hooks_block(manifest, mirrors=mirrors)
+    frontend_build = _frontend_build_block(manifest, source_dir, mirrors=mirrors)
 
     lines = [
         header,
         f"FROM {_PYTHON_IMAGE}",
+        _build_env_arg_block(manifest),
         "WORKDIR /app",
         apt_deps_block,
         node_toolchain,
@@ -827,6 +872,7 @@ def _render_python(
         npm_block,
         final_copy,
         project_install,
+        frontend_build,
         sqlite_mkdir,
         hooks_block,
         pythonpath_env,
@@ -836,6 +882,72 @@ def _render_python(
         f"CMD {_cmd_line(manifest, start)}",
     ]
     return "\n".join(line for line in lines if line) + "\n"
+
+
+def _frontend_package_dir(source_dir: Path | None) -> str | None:
+    """Python 全栈常见前端子目录。"""
+    if source_dir is None:
+        return None
+    for name in ("frontend", "web", "client"):
+        if (source_dir / name / "package.json").is_file():
+            return name
+    return None
+
+
+def _frontend_package_json(fe_dir: Path) -> dict:
+    """安全解析前端 ``package.json``；缺失/损坏返回空 dict。"""
+    import json
+
+    try:
+        data = json.loads((fe_dir / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _frontend_build_block(
+    manifest: InstanceManifest,
+    source_dir: Path | None,
+    *,
+    mirrors: BuildMirrors | None,
+) -> str:
+    """BUG-683/684：契约完整（npm 锁文件 + build 脚本）才自动前端构建。
+
+    无锁文件 / pnpm·yarn / 无 build 脚本 → 跳过并留注释说明，前端构建交给
+    manifest ``buildHooks`` 显式执行（钩子在本块之后、CMD 之前，可完整替代）；
+    自定义输出目录（默认假定 ``dist`` → ``backend/static``）同样走 buildHooks。
+    """
+    del manifest  # 签名与其它渲染块对齐，构建参数已由 ARG/ENV 注入。
+    fe = _frontend_package_dir(source_dir)
+    if not fe or source_dir is None:
+        return ""
+    fe_dir = source_dir / fe
+    raw_scripts = _frontend_package_json(fe_dir).get("scripts")
+    scripts = raw_scripts if isinstance(raw_scripts, dict) else {}
+    has_build_script = bool(scripts.get("build"))
+    has_npm_lock = (fe_dir / "package-lock.json").is_file() or (
+        fe_dir / "npm-shrinkwrap.json"
+    ).is_file()
+    other_lock = (fe_dir / "pnpm-lock.yaml").is_file() or (fe_dir / "yarn.lock").is_file()
+    if not has_build_script or not has_npm_lock or other_lock:
+        reasons: list[str] = []
+        if not has_build_script:
+            reasons.append("package.json 无 build 脚本")
+        if other_lock:
+            reasons.append("检测到 pnpm/yarn 锁文件（暂只支持 npm）")
+        elif not has_npm_lock:
+            reasons.append("缺少 package-lock.json（npm ci 需要）")
+        return (
+            "# 前端自动构建跳过：" + "；".join(reasons)
+            + "。需要构建请用 manifest buildHooks 显式执行（见 docs/faq.md）。\n"
+        )
+    npm_build = _with_npm_registry("npm ci && npm run build", mirrors)
+    copy_dist = (
+        f"RUN if [ -d /app/{fe}/dist ]; then "
+        f"mkdir -p /app/backend/static && cp -a /app/{fe}/dist/. /app/backend/static/; "
+        "fi"
+    )
+    return f"WORKDIR /app/{fe}\nRUN {npm_build}\n{copy_dist}\nWORKDIR /app\n"
 
 
 def _uses_runtime_root_layout(manifest: InstanceManifest, source_dir: Path | None) -> bool:
@@ -877,6 +989,7 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
     lines = [
         header,
         f"FROM {_PYTHON_IMAGE}",
+        _build_env_arg_block(manifest),
         "WORKDIR /app",
         f"COPY {_copy_prefix(manifest)} ./",
         # issue#7：与 node/python 渲染器对齐，支持构建钩子与启动前命令。
@@ -885,6 +998,20 @@ def _render_generic(manifest: InstanceManifest, internal_port: int) -> str:
         f"CMD {_cmd_line(manifest, start)}",
     ]
     return "\n".join(line for line in lines if line) + "\n"
+
+
+def _build_env_arg_block(manifest: InstanceManifest) -> str:
+    """issue #39：把 effective_build_env 声明为 Docker ARG + ENV（值由 compose build.args 注入）。"""
+    from local_webpage_access.instance_settings import effective_build_env
+
+    env = effective_build_env(manifest)
+    if not env:
+        return ""
+    lines: list[str] = []
+    for key in env:
+        lines.append(f"ARG {key}=")
+        lines.append(f"ENV {key}=${{{key}}}")
+    return "\n".join(lines) + "\n"
 
 
 # ---- 辅助 --------------------------------------------------------------------

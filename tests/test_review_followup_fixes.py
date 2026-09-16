@@ -150,7 +150,7 @@ def test_invalid_settings_do_not_change_manifest(workspace, registry):
         assert workspace.app_manifest_path("demo").read_bytes() == before
 
 
-def test_container_build_env_refused_but_ack_allowed(workspace, registry):
+def test_container_build_env_allowed_and_ack_allowed(workspace, registry):
     from local_webpage_access.instance_settings import update_instance_settings
 
     workspace.ensure_app_dirs("demo")
@@ -167,8 +167,10 @@ def test_container_build_env_refused_but_ack_allowed(workspace, registry):
     )
     m.save(workspace.app_manifest_path("demo"))
     registry.upsert_from_manifest(m)
-    with pytest.raises(ValueError, match="容器"):
-        update_instance_settings(workspace, registry, "demo", {"buildEnv": {"X": "yes"}})
+    updated = update_instance_settings(
+        workspace, registry, "demo", {"buildEnv": {"X": "yes"}}
+    )
+    assert updated.buildEnv == {"X": "yes"}
     assert update_instance_settings(
         workspace, registry, "demo", {"redundancyAcknowledged": True}
     ).redundancyAcknowledged

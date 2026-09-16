@@ -12,7 +12,7 @@ from local_webpage_access.models import InstanceManifest
 def configure(
     instance_id: str = typer.Argument(..., help="实例 ID"),
     build_env: list[str] | None = typer.Option(
-        None, "--build-env", help="替换构建环境映射，可重复 KEY=VALUE；仅宿主前端构建"
+        None, "--build-env", help="替换构建环境映射，可重复 KEY=VALUE；宿主前端命令环境与容器 Docker ARG/ENV"
     ),
     clear_build_env: bool = typer.Option(False, "--clear-build-env", help="清空构建环境映射"),
     follow_alias_base: bool | None = typer.Option(

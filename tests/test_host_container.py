@@ -597,6 +597,53 @@ def test_start_container_reruns_required_capabilities(
     assert started.status == Status.FAILED
 
 
+def test_start_container_keeps_long_probe_last_error(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-669：轻量 start 探针失败保留完整诊断（与部署路径 1800 对齐）。"""
+    m = _seed_container_instance(workspace, registry, "api")
+    m.container.containerId = "cid-keep"
+    m.container.imageId = "sha256:keep"
+    m.container.hostPort = 21000
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+    registry.upsert_container(
+        "api",
+        {
+            "projectName": "lwa-api",
+            "internalPort": 8000,
+            "composePath": "x",
+            "dockerfilePath": "y",
+            "hostPort": 21000,
+        },
+    )
+    monkeypatch.setattr(
+        fake_runtime,
+        "container_id",
+        lambda self, iid, *, all_containers=False: "cid-keep" if all_containers else None,
+    )
+    monkeypatch.setattr(fake_runtime, "image_id", lambda self, iid: None)
+    long_error = "探针失败 " + ("x" * 700) + " RestartCount=3 容器日志尾部"
+    monkeypatch.setattr(
+        "local_webpage_access.hosting._evaluate_container_verification",
+        lambda *a, **k: {
+            "overall_status": "failed",
+            "liveness_passed": False,
+            "mandatory_all_passed": False,
+            "optional_warnings": [],
+            "probe_notes": [],
+            "observed_capabilities": [],
+            "error": long_error,
+        },
+    )
+    started = start_container(workspace, config, registry, "api")
+    assert started.status == Status.FAILED
+    assert started.lastError is not None
+    assert len(started.lastError) > 500
+    assert "RestartCount=3" in started.lastError
+    assert started.lastError.endswith("容器日志尾部") or "容器日志尾部" in started.lastError
+
+
 def test_host_container_rejects_non_container_manifest(
     workspace, registry, config, fake_runtime
 ) -> None:
