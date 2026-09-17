@@ -198,6 +198,10 @@ class AgentConfig(BaseModel):
 
     allowedSourceRoots: list[Path] = Field(default_factory=list)
 
+    # AGC-W10：本 workspace 待执行操作上限（queued + running + cancelling 均占名额），
+    # 超限受理返回 busy。cancelling 仍占用执行器，计入上限避免在取消窗口继续灌入。
+    maxPendingOperations: int = Field(default=32, ge=1, le=1024)
+
     @field_validator("allowedSourceRoots")
     @classmethod
     def _validate_absolute(cls, v: list[Path]) -> list[Path]:

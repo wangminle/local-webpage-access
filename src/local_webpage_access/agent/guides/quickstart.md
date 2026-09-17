@@ -1,6 +1,6 @@
 # LWA Agent 接入快速指南
 
-> 适用版本：V0.8.14。本指南面向代表用户操作 LWA 的 LLM Agent。
+> 适用版本：{{PRODUCT_VERSION}}。本指南面向代表用户操作 LWA 的 LLM Agent。
 > LWA（Local Webpage Access，CLI `lwa`）是局域网小主机上的本地网页部署基座：
 > 导入静态站点 / 前端项目 / 容器化后端，自动构建、托管并生成访问地址。
 > 完整版见仓库 `docs/agent-guide.md`。
@@ -54,6 +54,17 @@
 
 返回的访问地址是**服务器视角**观测；`localhost` 地址仅服务器本机有效；远程 Agent 拿 LAN 地址后应自行验证可达性。
 
-## 6. 规划中（未实现，勿调用）
+## 6. M1 本机 Agent 专用通道（本机可用）
 
-`lwa mcp`（stdio MCP）、`/api/agent/v1/*`（plan/apply + operation）、远程 MCP、上传 API 均在实施计划中，当前版本不存在。以 `/agent-info.json` 的 `apiBase`/`mcp.enabled` 为准。
+同机 Agent 优先使用专用通道（仅回环 + token）：
+
+- 接入引导：`lwa agent connection-info --workspace <绝对路径> --json` → `apiBase`/`workspaceId`/契约版本/配置自检；响应 `workspaceId` 须与其一致。
+- 鉴权：仅回环连接 + 有效管理 token（`Authorization: Bearer` 头；回环**不**免 token；非回环一律 `403`）。
+- HTTP：基址 `/api/agent/v1`——`GET /capabilities|/instances|/instances/{id}|/instances/{id}/access-urls|/logs?instanceId=…`，`POST /plans`（计划）→ `POST /deployments`（应用，202+operation），`POST /instances/{id}/start|stop|restart|rebuild`，`GET /operations/{id}`、`POST /operations/{id}/cancel`。
+- MCP stdio：`lwa mcp --workspace <绝对路径>`（工具与端点一一对应；需 `pip install 'local-webpage-access[mcp]'`）。
+- 写操作必带 `idempotencyKey`（同键同内容安全重试）；update/生命周期带 `expectedRevision`（冲突得 `revision_conflict`，先取最新 revision）。
+- 部署源：`server_directory` 限 `agent.allowedSourceRoots` 内；`git` 仅 HTTPS github.com；`artifact` 属 M2 未开放。
+
+## 7. 规划中（M2 未实现，勿调用）
+
+远程 MCP（Streamable HTTP）、独立 Agent 授权、上传 API 均在实施计划中，当前版本不存在。以 `/agent-info.json` 的 `apiBase`/`mcp.enabled` 为准。

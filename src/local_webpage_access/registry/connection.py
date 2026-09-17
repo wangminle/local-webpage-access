@@ -19,7 +19,7 @@ from local_webpage_access.logging import get_logger
 
 log = get_logger("registry")
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 # ---- DDL --------------------------------------------------------------------
 
@@ -204,6 +204,11 @@ _SCHEMAS: dict[int, list[str]] = {
         "ALTER TABLE instances ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE agent_plans ADD COLUMN risks_json TEXT NOT NULL DEFAULT '{}'",
         "ALTER TABLE agent_plans ADD COLUMN required_capabilities_json TEXT NOT NULL DEFAULT '[]'",
+    ],
+    # AGC-W10/W11：操作请求载荷持久化（worker 执行/恢复所需）；按状态轮询索引。
+    5: [
+        "ALTER TABLE agent_operations ADD COLUMN payload_json TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_agent_operations_status ON agent_operations(status)",
     ],
 }
 

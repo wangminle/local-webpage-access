@@ -4,7 +4,7 @@
 1. `/llms.txt`、`/agent-info.json`、`/agent-guide` 返回正确媒体类型；
 2. 秘密零暴露：token、工作区绝对路径、实例 ID、用户名哨兵不出现在任何发现响应；
 3. SPA catch-all 不吞发现路由（静态目录存在时 StaticFiles 挂载 "/" 也不影响）；
-4. 未实现的 Agent API 返回 404，不被 SPA 吞成 HTML。
+4. W12 起 `/api/agent/v1` 已挂载：LAN 来源被 403 拒绝，不被 SPA 吞成 HTML 假路由。
 
 泄漏判定（BUG-652 修正后）为两级：响应与静态模板**共源相等**（markdown 逐字节、
 JSON 结构）是强保证；敏感值子串断言只对不与静态文案合法重合的值生效——真实
@@ -182,8 +182,9 @@ def test_spa_still_serves_root(discovery_env) -> None:
     assert resp.status_code == 200
 
 
-def test_unimplemented_agent_api_returns_404(discovery_env) -> None:
-    """/api/agent/v1 尚未实现（M1）：应 404，不得回退成 SPA HTML 造成假路由。"""
+def test_agent_api_mounted_and_rejects_lan_client(discovery_env) -> None:
+    """W12 起 /api/agent/v1 已挂载：LAN 来源被 403 拒绝，不得回退成 SPA HTML 假路由。"""
     resp = discovery_env["client"].get("/api/agent/v1/capabilities")
-    assert resp.status_code == 404
+    assert resp.status_code == 403
     assert not resp.headers["content-type"].startswith("text/html")
+    assert resp.json()["error"]["code"] == "permission_denied"

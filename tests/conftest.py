@@ -86,13 +86,20 @@ def config(workspace_root: Path):
 
 
 # ---- 测试套件进程泄漏兜底网（BUG：测试不幂等 / BUG-450）-------------------
-# 1) StaticGateway 可能留下 ``http.server`` 占住端口池 [21000, 21050]；
+# 1) StaticGateway 可能留下 ``http.server`` 占住测试端口池；
+#    原范围仅 [21000, 21050]。Agent 验收另用 22000/23000 段，operations 测试
+#    曾走默认 18000 段——命令行带 pytest 工作区路径，须按路径回收，不得误杀正式实例。
 # 2) ``init_workspace`` → ``maybe_start_manager`` 可能留下
 #    ``manager_service`` / ``daemon``（工作区在 pytest 临时目录，常占 :17800/:17801），
 #    旧泄漏网扫不到 → 曾存活十余天（OPS-071）。
 # 会话起止清理，保证套件幂等；正式工作区路径不含 pytest 标记，不会被误杀。
 _TEST_PORT_POOL_START = 21000
 _TEST_PORT_POOL_END = 21050
+_TEST_HTTP_PORT_RANGES = (
+    (_TEST_PORT_POOL_START, _TEST_PORT_POOL_END),
+    (22000, 22050),
+    (23000, 23050),
+)
 # pytest 临时工作区路径特征（含跨 session 已删目录仍留在 cmdline 的孤儿）
 _PYTEST_WS_MARK = re.compile(
     r"(?:[/\\]pytest-of-[^/\\ \"']+|/pytest-\d+|\\pytest-\d+)",
@@ -153,20 +160,34 @@ def _pgrep_lf(pattern: str) -> str:
 
 
 def _list_http_server_pids_on_test_ports() -> set[int]:
-    """枚举本机监听测试端口池且命令行命中 ``http.server`` 的进程 PID。
+    """枚举测试泄漏的 ``http.server`` 进程 PID。
 
-    仅匹配同时满足以下两条的进程，避免误杀：
-    1. 命令行包含 ``http.server``；
-    2. 通过 ``http.server <port>`` 启动且端口落在 ``[21000, 21050]``。
+    命中任一即纳入（避免误杀正式工作区实例）：
+    1. 命令行 ``http.server <port>`` 且端口落在测试端口池（21000/22000/23000 段）；
+    2. 命令行同时含 ``http.server`` 与 pytest 临时工作区路径标记（operations
+       测试默认 18000 段也走这条，正式 ``/opt/.../apps`` 不命中）。
     """
     pids: set[int] = set()
     port_pat = re.compile(r"http\.server\s+(\d+)\b")
     out = _pgrep_lf(r"http\.server" if os.name == "nt" else "http.server")
     for pid, cmdline in _parse_pid_cmdline_lines(out):
+        in_pytest_ws = bool(_PYTEST_WS_MARK.search(cmdline))
+        in_pool = False
         mport = port_pat.search(cmdline)
-        if mport and _TEST_PORT_POOL_START <= int(mport.group(1)) <= _TEST_PORT_POOL_END:
+        if mport:
+            port = int(mport.group(1))
+            in_pool = any(lo <= port <= hi for lo, hi in _TEST_HTTP_PORT_RANGES)
+        if in_pool or in_pytest_ws:
             pids.add(pid)
     return pids
+
+
+def stop_workspace_test_builtins(workspace: Workspace) -> None:
+    """停掉本工作区测试拉起的 builtin ``http.server``（夹具 teardown 用）。"""
+    from local_webpage_access.config import Config
+    from local_webpage_access.static_gateway import StaticGateway
+
+    StaticGateway(workspace, Config(staticGateway="builtin")).stop_all_builtin()
 
 
 def _list_lwa_service_pids_on_pytest_workspaces(

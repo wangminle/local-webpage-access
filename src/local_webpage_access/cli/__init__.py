@@ -17,6 +17,8 @@
 * :mod:`local_webpage_access.cli.autostart`   —— ``lwa autostart install/enable/.../check`` 子命令组（IMP-030）
 * :mod:`local_webpage_access.cli.workspace`   —— ``lwa workspace relocate`` 工作区迁移（IMP-042）
 * :mod:`local_webpage_access.cli.registry`    —— ``lwa registry check/repair`` 孤儿数据维护（BUG-473）
+* :mod:`local_webpage_access.cli.agent`       —— ``lwa agent connection-info`` Agent 接入引导（AGC-W14）
+* :mod:`local_webpage_access.cli.mcp`         —— ``lwa mcp`` stdio MCP 适配器（AGC-W13）
 
 命令语义见 V1 设计说明第 10 节。拆分前后 CLI 行为完全一致（验收：全量 pytest）。
 """
@@ -61,7 +63,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.8.17-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.8.18-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -235,6 +237,7 @@ def _register_all() -> None:
 
     # 子命令组（保持 ``lwa <group> <sub>`` 形式不变）
     from local_webpage_access.cli import (
+        agent,
         alias,
         access,
         autostart,
@@ -246,6 +249,10 @@ def _register_all() -> None:
         services,
         workspace,
     )
+    from local_webpage_access.cli import mcp as mcp_cmd
+
+    agent.register(app)
+    mcp_cmd.register(app)
 
     app.add_typer(alias.app, name="alias")
     app.add_typer(probe.app, name="probe")

@@ -26,6 +26,10 @@ from local_webpage_access.paths import Workspace
 #: M1 本机 owner 的固定主体标识（M2 引入独立 Agent 身份后扩展）
 LOCAL_OWNER_PRINCIPAL_ID = "local-owner"
 
+#: 判定 manager 回环可达的主机名集合（BUG-694）：CLI connection-info 与
+#: MCP stdio bridge 共用，口径必须一致——``localhost`` 绑定同样回环可达。
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
 #: M1 授权 scope 集（设计 §7.2；artifacts:write 属 M2，不在内）
 M1_LOCAL_OWNER_SCOPES = frozenset(
     {

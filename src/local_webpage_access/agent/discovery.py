@@ -32,8 +32,8 @@ LLMS_TXT_ROUTE = "/llms.txt"
 AGENT_INFO_ROUTE = "/agent-info.json"
 GUIDE_ROUTE = "/agent-guide"
 
-#: Agent 专用 HTTP API 基址。None = 尚未开放（M1 落地 ``/api/agent/v1`` 后改值）。
-AGENT_API_BASE: str | None = None
+#: Agent 专用 HTTP API 基址（AGC-W12 落地）。None = 尚未开放。
+AGENT_API_BASE: str | None = "/api/agent/v1"
 
 
 def build_agent_info() -> dict[str, Any]:
@@ -64,9 +64,15 @@ def build_llms_txt() -> str:
 
 
 def load_guide_markdown() -> str:
-    """读取包内精简指南（``agent/guides/quickstart.md``，随包分发）。"""
+    """读取包内精简指南（``agent/guides/quickstart.md``，随包分发）。
+
+    ``{{PRODUCT_VERSION}}`` 占位符在响应时替换为当前解析版本，
+    避免指南版本号随发布滞后（H3-4 审查发现）。
+    """
+    from local_webpage_access.version_info import display_version
+
     guide = resources.files("local_webpage_access.agent.guides") / "quickstart.md"
-    return guide.read_text(encoding="utf-8")
+    return guide.read_text(encoding="utf-8").replace("{{PRODUCT_VERSION}}", display_version())
 
 
 def register_agent_discovery(app: FastAPI) -> None:

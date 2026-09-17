@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Collection
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -29,6 +30,18 @@ log = get_logger("registry.dao")
 def _canonical_json(payload: Any) -> str:
     """规范化 JSON（与 agent.contracts.canonical_json 同规则；registry 不反向依赖 agent 包）。"""
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+#: 操作终态（与 agent.contracts.OperationStatus 同步；registry 不反向依赖 agent 包）。
+#: needs_input 是终态：继续须新计划/新 operation，只能再被取消。
+TERMINAL_OPERATION_STATUSES: tuple[str, ...] = (
+    "succeeded",
+    "failed",
+    "cancelled",
+    "cancel_failed",
+    "needs_input",
+    "interrupted",
+)
 
 # BUG-473：instance 子表（列 instance_id 引用 instances.id）。
 # delete_instance 显式清理这些表，不再依赖外键级联；find/purge_orphan_rows
@@ -707,8 +720,14 @@ class Registry:
     _AGENT_OP_COLS = (
         "operation_id, principal_id, workspace_id, action, target_instance_id, "
         "request_hash, idempotency_key, plan_id, status, phase, created_at, "
-        "updated_at, worker_identity, lease_until, build_token, result_json, error_json"
+        "updated_at, worker_identity, lease_until, build_token, payload_json, "
+        "result_json, error_json"
     )
+
+    def get_workspace_id(self) -> str | None:
+        """只读返回工作区 UUID；尚未生成时返回 ``None``（不写入，供只读连接）。"""
+        row = self._fetchone("SELECT value FROM workspace_meta WHERE key = 'workspace_id'")
+        return str(row["value"]) if row else None
 
     def get_or_create_workspace_id(self) -> str:
         """返回本工作区稳定 UUID（R01：两工作区不误连的判据）。
@@ -733,6 +752,8 @@ class Registry:
         data = dict(row)
         data["result"] = json.loads(data.pop("result_json")) if data.get("result_json") else None
         data["error"] = json.loads(data.pop("error_json")) if data.get("error_json") else None
+        payload_raw = data.pop("payload_json", None)
+        data["payload"] = json.loads(payload_raw) if payload_raw else None
         return data
 
     def create_agent_operation(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -759,6 +780,9 @@ class Registry:
             "worker_identity": record.get("worker_identity"),
             "lease_until": record.get("lease_until"),
             "build_token": record.get("build_token"),
+            "payload_json": (
+                None if record.get("payload") is None else _canonical_json(record["payload"])
+            ),
             "result_json": (
                 None if record.get("result") is None else _canonical_json(record["result"])
             ),
@@ -821,7 +845,7 @@ class Registry:
         """
         allowed = {
             "status", "phase", "worker_identity", "lease_until",
-            "build_token", "result", "error",
+            "build_token", "result", "error", "target_instance_id",
         }
         illegal = set(fields) - allowed
         if illegal:
@@ -865,6 +889,157 @@ class Registry:
             (instance_id,),
         )
         return self._agent_op_row_to_dict(row) if row else None
+
+    # ---- AGC-W10/W11：worker 租约、恢复与清理 --------------------------------
+
+    def list_agent_operations(
+        self, *, statuses: Collection[str] | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """按状态列出操作（默认全部，按受理时间升序）。"""
+        sql = f"SELECT {self._AGENT_OP_COLS} FROM agent_operations"
+        params: list[Any] = []
+        if statuses:
+            sql += " WHERE status IN (" + ", ".join("?" for _ in statuses) + ")"
+            params.extend(statuses)
+        sql += " ORDER BY created_at, operation_id LIMIT ?"
+        params.append(limit)
+        rows = self._fetchall(sql, params)
+        return [self._agent_op_row_to_dict(row) for row in rows]
+
+    def count_agent_operations(self, *, statuses: Collection[str]) -> int:
+        """统计指定状态的操作数（受理队列上限判定）。"""
+        marks = ", ".join("?" for _ in statuses)
+        row = self._fetchone(
+            f"SELECT COUNT(*) AS n FROM agent_operations WHERE status IN ({marks})",
+            tuple(statuses),
+        )
+        assert row is not None
+        return int(row["n"])
+
+    def claim_next_agent_operation(
+        self, *, worker_identity: str, now: str, lease_until: str
+    ) -> dict[str, Any] | None:
+        """认领最早的 queued 操作：事务内置 running + 身份 + 租约（BEGIN IMMEDIATE 串行化）。
+
+        多进程误启 manager 时只有一个能领到同一任务；无任务返回 None。
+        """
+        with self.txn() as tx:
+            row = tx.execute(
+                "SELECT operation_id FROM agent_operations WHERE status = 'queued'"
+                " ORDER BY created_at, operation_id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            cur = tx.execute(
+                "UPDATE agent_operations SET status = 'running', phase = 'validate',"
+                " worker_identity = ?, lease_until = ?, updated_at = ?"
+                " WHERE operation_id = ? AND status = 'queued'",
+                (worker_identity, lease_until, now, row["operation_id"]),
+            )
+            if cur.rowcount != 1:
+                return None
+        return self.get_agent_operation(str(row["operation_id"]))
+
+    def renew_agent_operation_lease(
+        self, operation_id: str, *, worker_identity: str, now: str, lease_until: str
+    ) -> bool:
+        """续约租约；操作仍处 running/cancelling 且身份匹配时成功。
+
+        身份不符 = 已被接管/恢复。BUG-692：``cancelling`` 期间同样续约——
+        长取消窗口若停止续约，租约过期会被恢复路径判 ``interrupted``，
+        操作占死队列名额。
+        """
+        with self.txn() as tx:
+            cur = tx.execute(
+                "UPDATE agent_operations SET lease_until = ?, updated_at = ?"
+                " WHERE operation_id = ? AND status IN ('running', 'cancelling')"
+                " AND worker_identity = ?",
+                (lease_until, now, operation_id, worker_identity),
+            )
+            return cur.rowcount == 1
+
+    def cas_agent_operation_status(
+        self,
+        operation_id: str,
+        *,
+        expected_statuses: Collection[str],
+        new_status: str,
+        now: str,
+        phase: str | None = None,
+        error: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        target_instance_id: str | None = None,
+    ) -> bool:
+        """状态机 CAS：仅当当前状态在 ``expected_statuses`` 内时迁移。
+
+        worker 收尾与取消共用此入口，避免并发把已终态的操作改写回活跃态。
+        """
+        marks = ", ".join("?" for _ in expected_statuses)
+        sets = ["status = ?", "updated_at = ?"]
+        params: list[Any] = [new_status, now]
+        if phase is not None:
+            sets.append("phase = ?")
+            params.append(phase)
+        if error is not None:
+            sets.append("error_json = ?")
+            params.append(_canonical_json(error))
+        if result is not None:
+            sets.append("result_json = ?")
+            params.append(_canonical_json(result))
+        if target_instance_id is not None:
+            sets.append("target_instance_id = ?")
+            params.append(target_instance_id)
+        params.extend(expected_statuses)
+        params.append(operation_id)
+        with self.txn() as tx:
+            cur = tx.execute(
+                f"UPDATE agent_operations SET {', '.join(sets)}"
+                f" WHERE status IN ({marks}) AND operation_id = ?",
+                tuple(params),
+            )
+            return cur.rowcount == 1
+
+    def sweep_terminal_agent_operations(self, *, before: str, limit: int = 200) -> int:
+        """删除 ``updated_at`` 早于 ``before`` 的终态操作（未结束任务永不清理）。"""
+        terminal = tuple(TERMINAL_OPERATION_STATUSES)
+        marks = ", ".join("?" for _ in terminal)
+        rows = self._fetchall(
+            "SELECT operation_id FROM agent_operations"
+            f" WHERE status IN ({marks}) AND updated_at < ? LIMIT ?",
+            (*terminal, before, limit),
+        )
+        if not rows:
+            return 0
+        ids = [str(r["operation_id"]) for r in rows]
+        with self.txn() as tx:
+            tx.execute(
+                "DELETE FROM agent_operations"
+                f" WHERE operation_id IN ({', '.join('?' for _ in ids)})",
+                tuple(ids),
+            )
+        return len(ids)
+
+    def delete_expired_agent_plans(self, *, now: str, limit: int = 100) -> list[str]:
+        """删除已过期且未被非终态操作引用的计划，返回被删 plan_id（供快照清理）。"""
+        terminal = tuple(TERMINAL_OPERATION_STATUSES)
+        marks = ", ".join("?" for _ in terminal)
+        rows = self._fetchall(
+            "SELECT plan_id FROM agent_plans WHERE expires_at < ?"
+            " AND plan_id NOT IN ("
+            "   SELECT plan_id FROM agent_operations"
+            f"  WHERE plan_id IS NOT NULL AND status NOT IN ({marks})"
+            " ) LIMIT ?",
+            (now, *terminal, limit),
+        )
+        ids = [str(r["plan_id"]) for r in rows]
+        if not ids:
+            return []
+        with self.txn() as tx:
+            tx.execute(
+                f"DELETE FROM agent_plans WHERE plan_id IN ({', '.join('?' for _ in ids)})",
+                tuple(ids),
+            )
+        return ids
 
 
 __all__ = ["Registry"]

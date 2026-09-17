@@ -34,6 +34,36 @@ def test_list_helpers_accept_empty_process_table(monkeypatch) -> None:
     assert cf._list_lwa_service_pids_on_pytest_workspaces() == set()
 
 
+def test_list_http_server_covers_agent_acceptance_pool(monkeypatch) -> None:
+    """Agent 验收端口池 23000–23050 的 http.server 必须被泄漏网看见。"""
+    out = (
+        "111\t/usr/bin/python -m http.server 23001 --directory "
+        "/tmp/pytest-of-u/pytest-1/test_acc/ws/apps/acc-site/current\n"
+    )
+    monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
+    assert cf._list_http_server_pids_on_test_ports() == {111}
+
+
+def test_list_http_server_covers_pytest_workspace_default_pool(monkeypatch) -> None:
+    """operations 测试默认端口池 18000 落在 pytest 临时工作区时也要回收。"""
+    out = (
+        "222\t/usr/bin/python -m http.server 18001 --directory "
+        "/tmp/pytest-of-u/pytest-1/test_ops0/ws/apps/site-y/current\n"
+    )
+    monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
+    assert cf._list_http_server_pids_on_test_ports() == {222}
+
+
+def test_list_http_server_ignores_production_default_pool(monkeypatch) -> None:
+    """正式工作区 18000 段 http.server 不得被测试泄漏网误杀。"""
+    out = (
+        "333\t/usr/bin/python -m http.server 18001 --directory "
+        "/opt/local-webpage-access/apps/prod/current\n"
+    )
+    monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
+    assert cf._list_http_server_pids_on_test_ports() == set()
+
+
 def test_list_lwa_services_only_pytest_workspaces(monkeypatch) -> None:
     out = (
         "111\tpython -m local_webpage_access.manager_service "

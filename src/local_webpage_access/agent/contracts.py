@@ -262,12 +262,18 @@ class ServerDirectorySource(StrictModel):
 
 
 class GitSource(StrictModel):
-    """Git 源：复用现有 HTTPS github.com 限制（W08 解析 ref 与快照）。"""
+    """Git 源：复用现有 HTTPS github.com 限制（W08 解析 ref 与快照）。
+
+    ``commit`` / ``refKind`` 在计划快照时随克隆解析写入（BUG-690：apply 时
+    据此写回 git 源身份）；旧计划记录缺省 ``None``，按 ref 语义回退。
+    """
 
     type: Literal["git"]
     url: str
     ref: str | None = None
     subdir: str | None = None
+    commit: str | None = None
+    refKind: str | None = None
 
 
 class ArtifactSource(StrictModel):
@@ -456,12 +462,17 @@ def _logs_input_json_schema(schema: dict[str, Any]) -> None:
 
 
 class GetLogsInput(PageRequest):
-    """``lwa_get_logs``：instanceId 与 operationId 二选一（§6.1）。"""
+    """``lwa_get_logs``：instanceId 与 operationId 二选一（§6.1）。
+
+    ``category`` 可选定向日志类别（BUG-695）：build / run / gateway / import /
+    scan；缺省时读 mtime 最新的一个日志文件（既有行为）。
+    """
 
     model_config = ConfigDict(json_schema_extra=_logs_input_json_schema)
 
     instanceId: str | None = None
     operationId: str | None = None
+    category: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> GetLogsInput:

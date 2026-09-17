@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shutil
 import uuid
 from collections.abc import Callable
@@ -31,11 +32,13 @@ from local_webpage_access.agent.contracts import (
     CapabilitiesResult,
     DeploySource,
     GetAccessUrlsInput,
+    GetLogsInput,
     GitSource,
     InstanceDetail,
     InstanceListResult,
     InstanceSummary,
     ListInstancesInput,
+    LogsPage,
     OperationAction,
     OperationPhase,
     OperationStatus,
@@ -67,9 +70,20 @@ _GIT_SOURCE_DENIED = frozenset(
     {"invalid_url", "host_not_allowed", "userinfo_forbidden", "source_mismatch"}
 )
 
+#: get_logs 可定向的日志类别（= logs/<id>/ 下日志文件名 stem，BUG-695）
+_LOG_CATEGORIES = frozenset({"build", "run", "gateway", "import", "scan"})
+
 
 class AgentServiceError(LwaError):
     """Agent 查询/计划失败；``code`` 取契约错误码。"""
+
+
+def agent_exc_message(exc: BaseException) -> str:
+    """契约/操作 ``error.message``：LwaError 用裸 ``message``，避免 ``[CODE] `` 前缀。"""
+    message = getattr(exc, "message", None)
+    if isinstance(message, str) and message:
+        return message
+    return str(exc)
 
 
 def _rfc3339(moment: datetime) -> str:
@@ -108,6 +122,32 @@ def _decode_cursor(cursor: str) -> str:
     if not text:
         raise AgentServiceError("分页 cursor 无效", code=AgentErrorCode.needs_input.value)
     return text
+
+
+def _encode_log_cursor(skip: int) -> str:
+    return base64.urlsafe_b64encode(f"skip:{skip}".encode("utf-8")).decode("ascii")
+
+
+def _decode_log_cursor(cursor: str) -> int:
+    text = _decode_cursor(cursor)
+    if not text.startswith("skip:"):
+        raise AgentServiceError("分页 cursor 无效", code=AgentErrorCode.needs_input.value)
+    try:
+        value = int(text[len("skip:"):])
+    except ValueError as exc:
+        raise AgentServiceError("分页 cursor 无效", code=AgentErrorCode.needs_input.value) from exc
+    if value < 0:
+        raise AgentServiceError("分页 cursor 无效", code=AgentErrorCode.needs_input.value)
+    return value
+
+
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}")
+
+
+def _redact_log_line(line: str) -> str:
+    """日志脱敏：Bearer 头值与 ``?token=`` 参数掩码（§6.1）。"""
+    line = _BEARER_RE.sub(r"\1***", line)
+    return re.sub(r"(?i)(token=)[^&\s]+", r"\1***", line)
 
 
 class AgentService:
@@ -238,6 +278,67 @@ class AgentService:
             )
         return AccessUrlsResult(instanceId=request.instanceId, urls=urls)
 
+    def get_logs(self, request: GetLogsInput) -> LogsPage:
+        """分页读取实例日志（``logs:read``；向更早方向翻页，cursor 不透明）。
+
+        内容经脱敏（管理 token / Bearer 头值）；单次响应行数受 ``limit`` 限制，
+        更早内容用 ``nextCursor`` 继续拉取。
+        """
+        from local_webpage_access.logs import list_logs, tail_text_file
+
+        self._require("logs:read")
+        instance_id = request.instanceId
+        if not instance_id:
+            assert request.operationId is not None
+            op = self.registry.get_agent_operation(request.operationId)
+            if op is None or op["principal_id"] != self.principal.principal_id:
+                raise AgentServiceError(
+                    f"操作 {request.operationId} 不存在",
+                    code=AgentErrorCode.needs_input.value,
+                    operationId=request.operationId,
+                )
+            instance_id = op.get("target_instance_id")
+            if not instance_id:
+                raise AgentServiceError(
+                    f"操作 {request.operationId} 尚未关联实例",
+                    code=AgentErrorCode.needs_input.value,
+                    operationId=request.operationId,
+                )
+        if self.registry.get_instance(str(instance_id)) is None:
+            raise AgentServiceError(
+                f"实例 {instance_id} 不存在",
+                code=AgentErrorCode.needs_input.value,
+                instanceId=str(instance_id),
+            )
+        skip = _decode_log_cursor(request.cursor) if request.cursor else 0
+        infos = [info for info in list_logs(self.workspace, str(instance_id)) if info.size > 0]
+        if not infos:
+            return LogsPage(lines=[], nextCursor=None, truncated=False)
+        category = (request.category or "").strip() or None
+        if category is not None:
+            # BUG-695：按类别定向读取，不再被 mtime 更新的其它日志挡住
+            # （构建日志比运行日志旧时 Agent 也能读到）。
+            if category not in _LOG_CATEGORIES:
+                raise AgentServiceError(
+                    f"未知日志类别 {category!r}（可选：{'/'.join(sorted(_LOG_CATEGORIES))}）",
+                    code=AgentErrorCode.needs_input.value,
+                    instanceId=str(instance_id),
+                )
+            chosen = next(
+                (info for info in infos if info.category == category), None
+            )
+            if chosen is None:
+                return LogsPage(lines=[], nextCursor=None, truncated=False)
+        else:
+            chosen = max(infos, key=lambda info: info.mtime)
+        raw = tail_text_file(chosen.path, skip + request.limit + 1)
+        lines = raw.splitlines() if raw else []
+        has_more = len(lines) > skip + request.limit
+        window = lines[: len(lines) - skip] if skip else lines
+        page = [_redact_log_line(line) for line in window[-request.limit :]]
+        next_cursor = _encode_log_cursor(skip + request.limit) if has_more else None
+        return LogsPage(lines=page, nextCursor=next_cursor, truncated=has_more)
+
     def plan_deployment(self, request: PlanDeploymentInput) -> PlanRecord:
         if request.intent == "create":
             self._require("deploy:create")
@@ -255,12 +356,28 @@ class AgentService:
                 )
             if current != request.expectedRevision:
                 raise AgentServiceError(
-                    "实例 revision 与期望不符",
+                    "实例 revision 与计划不符",
                     code=AgentErrorCode.revision_conflict.value,
                     instanceId=request.targetInstanceId,
                     expected=request.expectedRevision,
                     actual=current,
                 )
+            # BUG-690：git 源实例禁用 Agent zip 内容通道更新（update_zip 对
+            # sourceKind=git 硬拒），在计划期就说清而不是受理后执行失败。
+            manifest_path = self.workspace.app_manifest_path(request.targetInstanceId)
+            if manifest_path.is_file():
+                from local_webpage_access.models import InstanceManifest
+
+                existing = InstanceManifest.load(manifest_path)
+                if getattr(existing, "sourceKind", "zip") == "git":
+                    raise AgentServiceError(
+                        f"实例 {request.targetInstanceId} 是 GitHub 源实例"
+                        "（sourceKind='git'），Agent 通道暂不支持其更新；"
+                        f"请用 `lwa import --from-git --update {request.targetInstanceId}`"
+                        " 或管理页 update-from-git 流程",
+                        code=AgentErrorCode.needs_input.value,
+                        instanceId=request.targetInstanceId,
+                    )
 
         plan_id = f"plan_{uuid.uuid4().hex}"
         snapshot = self.plan_snapshot_path(plan_id)
@@ -325,6 +442,44 @@ class AgentService:
         )
         log.info("已生成部署计划 %s（intent=%s，ttl=%ss）", plan_id, request.intent, PLAN_TTL_SECONDS)
         return record
+
+    def load_plan(self, plan_id: str) -> PlanRecord:
+        """读回持久化计划并复原为契约模型（apply 预检入口）。
+
+        不存在抛 ``needs_input``；JSON 列损坏同样视为不可用（不泄露内部异常）。
+        """
+        row = self.registry.get_agent_plan(plan_id)
+        if row is None:
+            raise AgentServiceError(
+                f"计划 {plan_id} 不存在或已过期清理",
+                code=AgentErrorCode.needs_input.value,
+                planId=plan_id,
+            )
+        try:
+            return PlanRecord(
+                planId=str(row["plan_id"]),
+                principalId=str(row["principal_id"]),
+                workspaceId=str(row["workspace_id"]),
+                intent=row["intent"],
+                source=json.loads(row["source_json"]),
+                sourceDigest=str(row["source_digest"]),
+                targetInstanceId=row.get("target_instance_id"),
+                expectedRevision=row.get("expected_revision"),
+                displayName=row.get("display_name"),
+                options=json.loads(row["options_json"] or "{}"),
+                policyVersion=str(row["policy_version"]),
+                requestHash=str(row["request_hash"]),
+                createdAt=str(row["created_at"]),
+                expiresAt=str(row["expires_at"]),
+                risks=json.loads(row.get("risks_json") or "{}"),
+                requiredCapabilities=json.loads(row.get("required_capabilities_json") or "[]"),
+            )
+        except (KeyError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise AgentServiceError(
+                f"计划 {plan_id} 数据不可用，请重新计划",
+                code=AgentErrorCode.needs_input.value,
+                planId=plan_id,
+            ) from exc
 
     def assert_plan_fresh(self, plan: PlanRecord) -> None:
         """W08/W10：过期计划必须重新 plan，不得继续 apply。"""
@@ -414,6 +569,9 @@ class AgentService:
                     url=target.url,
                     ref=cloned.ref,
                     subdir=source.subdir,
+                    # BUG-690：apply 时据此写回 git 源身份（§17.2.1 全字段）
+                    commit=cloned.commit,
+                    refKind=cloned.ref_kind,
                 )
         except AgentServiceError:
             raise

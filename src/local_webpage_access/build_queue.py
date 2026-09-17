@@ -946,6 +946,18 @@ class BuildQueue:
         with self._guard:
             return [iid for iid, t in self._tasks.items() if t.status == "queued"]
 
+    def current_build_token(self, instance_id: str) -> str | None:
+        """读取实例当前构建代次 token（内存任务优先，否则查持久行）。
+
+        供 Agent operation 关联 build token（AGC-W11：崩溃恢复/审计依据）。
+        """
+        with self._guard:
+            task = self._tasks.get(instance_id)
+            if task is not None:
+                return task.build_token
+        row = self._gate.get_build_task(instance_id)
+        return str(row["build_token"]) if row else None
+
     # ---- 内部 ---------------------------------------------------------------
 
     def _cancel_pending(self, task: BuildTask, instance_id: str) -> bool:

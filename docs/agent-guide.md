@@ -1,7 +1,7 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.8.17 当前实际可用的接入方式。**
-> LWA 尚未提供 MCP 服务器与 `/api/agent/v1/*` 等专用 Agent 接口——相关能力处于规划实施阶段（见[第 9 节](#9-规划中的-agent-通道未实现)）。在它们落地前，Agent 通过本文所述的既有 HTTP API 与 CLI 工作；**不要**按第 9 节的命令操作，它们尚不存在。V0.8.15 起管理页提供公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
+> **状态：本文描述 V0.8.18 当前实际可用的接入方式。**
+> V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
 
@@ -89,7 +89,7 @@ token 由 LWA 工作区管理员提供，存放于服务器工作区 `run/manage
 
 ### 4.3 重试与并发的现状（重要）
 
-当前写操作**没有** operation 对象与幂等键：请求超时后重试同一创建操作可能产生重复实例。稳妥做法是——写之前先 `GET /api/instances` 查目标是否已存在；超时后先查询实际结果再决定重试。多客户端并发由内部实例锁串行化，不会损坏数据，但"最后写入获胜"，更新前应确认实例当前状态符合预期。专门的 plan/apply + operation 语义是规划能力（§9），尚未提供。
+当前写操作**没有** operation 对象与幂等键：请求超时后重试同一创建操作可能产生重复实例。稳妥做法是——写之前先 `GET /api/instances` 查目标是否已存在；超时后先查询实际结果再决定重试。多客户端并发由内部实例锁串行化，不会损坏数据，但"最后写入获胜"，更新前应确认实例当前状态符合预期。**本机 Agent 应优先使用 §9.1 的 `/api/agent/v1/*`**：它提供 plan/apply 两段式部署、持久 operation、幂等键与 revision 乐观锁，不存在上述重试隐患。
 
 ## 5. 部署输入类型与硬限制
 
@@ -130,15 +130,66 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 4. 部署来源仅限 §5 允许的类型；不尝试绕过 Git host 白名单。
 5. 遇到能力缺口（如缺 Docker）如实报告，不自行安装基础设施。
 
-## 9. 规划中的 Agent 通道（入口未实现）
+## 9. Agent 专用通道（M1 本机已落地）
 
-以下能力已列入实施计划（设计文档：`design/3-plans/2026-09-15-lwa-agent-collaboration-design.md`），**相关命令与端点尚不存在**：
+### 9.1 M1 本机协作（V0.8.18 起可用）
 
-- **M1（本机协作）**：`lwa mcp --workspace <path>` stdio MCP 适配器、`lwa agent connection-info`、`/api/agent/v1/*` 新路由（plan/apply + 持久 operation + 幂等键）。V0.8.17 起 M1 的**内部服务层**已入库（`agent/service.py` 只读查询/能力映射/部署计划 + registry schema v4 revision CAS，AGC W07–W09），但 HTTP/MCP 入口仍未实施——对 Agent 而言本节能力依旧不可用。
-- **M2（局域网协作）**：HTTPS 远程 MCP（Streamable HTTP）、独立 Agent 授权（scope/ACL）、zip 制品上传 API。
+面向**与 LWA 同机运行**的 Agent。鉴权规则：仅接受本机回环连接（127.0.0.1 / ::1，Host 头为本机名），非回环来源一律 `403 permission_denied`（远程主体属 M2）；**回环同样必须携带有效管理 token**（仅 `Authorization: Bearer` 或 `X-LWA-Token` 头，无 `?token=` 通道，缺失/无效 → `401 unauthenticated`）。token 由管理员在服务器本机用 `lwa manager token` 查看后提供给 Agent。
+
+**接入步骤：**
+
+1. `lwa agent connection-info --workspace <工作区绝对路径> [--json]`：获取 `apiBase`（回环 URL）、`workspaceId`、契约版本与配置自检（manager 在线性、回环可达性、`agent.allowedSourceRoots`）。输出不含任何凭据。
+2. 以 `apiBase` 调用下述端点；响应中的 `workspaceId` 须与第 1 步一致，不一致说明连错了工作区。
+3. 或配置 MCP 客户端执行 `lwa mcp --workspace <工作区绝对路径>`（stdio 传输，工具与 HTTP 端点一一对应；需 `pip install 'local-webpage-access[mcp]'`）。
+
+**HTTP 端点（基址 `/api/agent/v1`）：**
+
+| 方法与路径 | 工具名（MCP） | 用途 |
+| --- | --- | --- |
+| `GET /capabilities` | `lwa_get_capabilities` | 工作区能力快照（只读缓存；无缓存时 `overall=unknown`） |
+| `GET /instances` | `lwa_list_instances` | 实例分页列表（cursor 分页） |
+| `GET /instances/{id}` | `lwa_get_instance` | 实例详情，含 `revision` 与最近 operation |
+| `GET /instances/{id}/access-urls` | `lwa_get_access_urls` | 已落盘访问地址（`clientReachability=unknown`，不发探活） |
+| `GET /logs?instanceId=…&category=…` | `lwa_get_logs` | 日志分页（向更早翻页；敏感串脱敏；`category` 可选定向 build/run/gateway/import/scan，缺省读最新一个日志，V0.8.18 BUG-695） |
+| `POST /plans` | `lwa_plan_deployment` | 生成部署计划（快照源码、算 digest；不构建不导入；TTL 30 分钟） |
+| `POST /deployments` | `lwa_apply_deployment` | 应用计划 → 202 + operation（异步执行） |
+| `GET /operations/{id}` | `lwa_get_operation` | 轮询 operation 状态/相位/结果 |
+| `POST /operations/{id}/cancel` | `lwa_cancel_operation` | 请求取消（queued 直接取消；running 仅在 build 相位可中断） |
+| `POST /instances/{id}/start` | `lwa_start_instance` | 启动（异步 operation，下同） |
+| `POST /instances/{id}/stop` | `lwa_stop_instance` | 停止 |
+| `POST /instances/{id}/restart` | `lwa_restart_instance` | 重启 |
+| `POST /instances/{id}/rebuild` | `lwa_rebuild_instance` | 重建（成功后 revision +1） |
+
+**语义要点：**
+
+- **幂等**：所有写操作要求 `idempotencyKey`。同键同内容重试返回**同一** `operationId`；同键不同内容 → `409 idempotency_conflict`。
+- **revision 乐观锁**：update 类计划与生命周期操作带 `expectedRevision`；不符 → `409 revision_conflict`（先 `lwa_get_instance` 取最新 revision 再决定）。rebuild/部署成功 +1；start/stop/restart 与状态观测不改 revision。
+- **异步执行**：部署与生命周期返回 202 + operation；轮询 `lwa_get_operation` 至 `succeeded`/`failed`/`needs_input` 等终态。manager 重启后未完成任务标记 `interrupted`，核对后可重新提交（同幂等键安全）。
+- **部署源限制**：`server_directory` 仅限 `agent.allowedSourceRoots` 之内；`git` 仅 HTTPS github.com；`artifact` 上传属 M2，当前一律 `source_not_allowed`。git 源**实例**（`sourceKind=git`）的 update 在计划期即被拒绝（`needs_input`，指引走 `lwa import --from-git --update` / 管理页 update-from-git）；folder/git 源部署（create 与 update）完成后源身份写回 manifest（folder 带 `sourceSyncHash`、git 带 §17.2.1 全字段），CLI/管理页按原源更新可对上（V0.8.18 BUG-690）。
+- **队列上限**：待执行 operation 超限 → `429 busy`（带 `retryAfterMs`，有界退避重试）。
+
+**错误表（`{"error": {code, message, detail, retryable, ...}}`）：**
+
+| code | HTTP | 可重试 | 含义 |
+| --- | --- | --- | --- |
+| `unauthenticated` | 401 | 否 | 凭据无效或缺失（回环同样需 token） |
+| `permission_denied` | 403 | 否 | 非回环来源（M1 仅本机）或越权操作 |
+| `revision_conflict` | 409 | 否 | 实例 revision 与期望不符 |
+| `idempotency_conflict` | 409 | 否 | 幂等键复用但请求内容不同 |
+| `source_not_allowed` | 400 | 否 | 部署来源不在允许范围 |
+| `quota_exceeded` | 429 | 是 | 资源配额已满 |
+| `capability_unavailable` | 409 | 否 | 所需运行能力不可用（如缺 Docker） |
+| `needs_input` | 422 | 否 | 需要补充输入或人工确认（如计划过期、update 目标不存在） |
+| `manager_unavailable` | 503 | 是 | manager 不在线（MCP 桥侧） |
+| `busy` | 429 | 是 | 待执行队列满，按 `retryAfterMs` 退避 |
+| `build_failed` / `healthcheck_failed` / `interrupted` | —（operation 终态错误） | 否 | 体现在 operation 的 `error` 字段 |
+
+### 9.2 M2 局域网协作（规划，未实现）
+
+- HTTPS 远程 MCP（Streamable HTTP）、独立 Agent 授权（scope/ACL）、zip 制品上传 API。
 - 协议兼容性验证（AGC-W01）已完成：目标 MCP 协议版本 2026-07-28，兼容旧握手至 2024-11-05。
 
-本文将在上述能力落地时更新，未实现条目不会混入前述操作章节。
+未实现条目不会混入前述操作章节。
 
 ## 10. 参考
 

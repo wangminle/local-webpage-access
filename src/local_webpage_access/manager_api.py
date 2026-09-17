@@ -712,9 +712,27 @@ def create_app(
         token_thread.start()
         app.state.token_rotate_thread = token_thread
 
+        # AGC-W10/W11：Agent 持久操作 worker（单线程轮询 registry 租约，
+        # 不占 FastAPI 事件循环；崩溃恢复与过期清理由其周期执行）。
+        from local_webpage_access.agent.operations import AgentWorker
+
+        agent_worker = AgentWorker(workspace, config, registry)
+        agent_worker_stop = _threading.Event()
+        agent_worker_thread = _threading.Thread(
+            target=agent_worker.run_forever,
+            args=(agent_worker_stop,),
+            name="lwa-agent-worker",
+            daemon=True,
+        )
+        agent_worker_thread.start()
+        app.state.agent_worker = agent_worker
+        app.state.agent_worker_stop = agent_worker_stop
+
         try:
             yield
         finally:
+            agent_worker_stop.set()
+            agent_worker_thread.join(timeout=2.0)
             stop_event.set()
             probe_thread.join(timeout=_CAPABILITY_STOP_JOIN_TIMEOUT)
             token_stop_event.set()
@@ -766,6 +784,11 @@ def create_app(
     from local_webpage_access.agent.discovery import register_agent_discovery
 
     register_agent_discovery(app)
+
+    # Agent HTTP API（AGC-W12，/api/agent/v1/*）：同样先于 SPA catch-all
+    from local_webpage_access.agent.http_api import register_agent_api
+
+    register_agent_api(app)
 
     # 静态资源（管理页前端，WBS-22.02 / WBS-23）
     _mount_static(app)
