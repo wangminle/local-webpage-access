@@ -26,7 +26,12 @@ from urllib.parse import quote, urlencode
 
 from pydantic import ValidationError
 
-from local_webpage_access.agent.contracts import ERROR_SPECS, TOOL_SPECS, AgentErrorCode
+from local_webpage_access.agent.contracts import (
+    ERROR_SPECS,
+    TOOL_SPECS,
+    AgentErrorCode,
+    json_safe_issues,
+)
 from local_webpage_access.agent.auth import LOOPBACK_HOSTS as _LOOPBACK_HOSTS
 from local_webpage_access.errors import LwaError
 from local_webpage_access.logging import get_logger
@@ -227,7 +232,8 @@ class AgentBridge:
             return None, _error(
                 AgentErrorCode.needs_input,
                 "工具参数不符合契约",
-                detail={"issues": exc.errors(include_url=False)},
+                # BUG-708：ctx 可能携带 ValueError 对象，JSON 安全化避免序列化失败
+                detail={"issues": json_safe_issues(exc.errors(include_url=False))},
             )
         payload = parsed.model_dump(mode="json")
 

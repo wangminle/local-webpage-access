@@ -585,13 +585,15 @@ class AgentService:
             raise AgentServiceError(exc.message, code=code, **exc.context) from exc
         return digest, stored
 
-    def _capability_requirements(self, snapshot: Path) -> tuple[list[str], list[str]]:
-        from local_webpage_access.scanner import Scanner
+    def capability_gaps_now(self, required: list[str]) -> list[str]:
+        """按**当前**能力缓存复验所需能力（设计 §6.2 apply 再次验证 / §6.4）。
 
-        detection = Scanner().detect(snapshot)
-        required: list[str] = []
-        if detection.runtime == Runtime.DOCKER_COMPOSE:
-            required.append("docker")
+        计划期算出的 ``capabilityGaps`` 只反映当时状态；apply 受理与 worker
+        执行前都要以当下缓存复核，缺口返回错误码 ``capability_unavailable``，
+        不让计划进入导入等副作用后才失败（CHK-349/350）。
+        """
+        if not required:
+            return []
         runtime, _observed = self._runtime_from_cache()
         raw_caps = runtime.get("capabilities")
         caps: dict[str, Any] = raw_caps if isinstance(raw_caps, dict) else {}
@@ -600,7 +602,16 @@ class AgentService:
             docker_state = caps.get("dockerEngine") or caps.get("dockerAccess")
             if docker_state != "ready":
                 gaps.append("docker")
-        return required, gaps
+        return gaps
+
+    def _capability_requirements(self, snapshot: Path) -> tuple[list[str], list[str]]:
+        from local_webpage_access.scanner import Scanner
+
+        detection = Scanner().detect(snapshot)
+        required: list[str] = []
+        if detection.runtime == Runtime.DOCKER_COMPOSE:
+            required.append("docker")
+        return required, self.capability_gaps_now(required)
 
     @staticmethod
     def _summary_from_row(row: dict[str, Any]) -> InstanceSummary:

@@ -163,6 +163,31 @@ def _lock_timeout_message(instance_id: str, lock_path: Path, timeout: float) -> 
     )
 
 
+def _ensure_revision_locked(
+    registry: Registry, instance_id: str, expected_revision: int | None
+) -> None:
+    """BUG-706（设计 §6.3）：在实例锁内复验调用方期望的 revision。
+
+    仅在已持有 :func:`instance_lock` 时调用——受理/认领时的锁外预检与
+    实际执行之间，CLI/daemon 等通道的更新可能已递增 revision；不在锁内
+    复验会让旧请求操作到并发更新后的实例。Agent 生命周期操作传入
+    ``expected_revision``，既有调用缺省 None 行为不变。
+    """
+    if expected_revision is None:
+        return
+    current = registry.get_revision(instance_id)
+    if current is None or int(current) != int(expected_revision):
+        raise LifecycleError(
+            f"实例 {instance_id} revision 与期望不符"
+            f"（期望 {int(expected_revision)}，当前 {current}），操作被拒绝；"
+            "请重新读取实例状态后再试",
+            code="revision_conflict",
+            instance_id=instance_id,
+            expected=int(expected_revision),
+            actual=current,
+        )
+
+
 @contextlib.contextmanager
 def instance_lock(
     workspace: Workspace,
@@ -337,6 +362,7 @@ def start_instance(
     *,
     fallback_policy: str = _FALLBACK_CONFIRM,
     from_reconcile: bool = False,
+    expected_revision: int | None = None,
 ) -> InstanceManifest:
     """启动实例（WBS-17.01）。
 
@@ -365,6 +391,7 @@ def start_instance(
     from local_webpage_access.reconcile_circuit import clear_circuit
 
     with instance_lock(workspace, instance_id):
+        _ensure_revision_locked(registry, instance_id, expected_revision)
         manifest = _load(workspace, instance_id)
         if not from_reconcile:
             clear_circuit(manifest)
@@ -1837,6 +1864,8 @@ def stop_instance_op(
     config: Config,
     registry: Registry,
     instance_id: str,
+    *,
+    expected_revision: int | None = None,
 ) -> InstanceManifest:
     """停止实例（WBS-17.02）。最终 ``desiredState=stopped``。
 
@@ -1845,6 +1874,7 @@ def stop_instance_op(
     from local_webpage_access.hosting import stop_instance
 
     with instance_lock(workspace, instance_id):
+        _ensure_revision_locked(registry, instance_id, expected_revision)
         return stop_instance(workspace, config, registry, instance_id)
 
 
@@ -1853,6 +1883,8 @@ def restart_instance(
     config: Config,
     registry: Registry,
     instance_id: str,
+    *,
+    expected_revision: int | None = None,
 ) -> InstanceManifest:
     """重启实例（WBS-17.03）：先 stop 再 start。
 
@@ -1860,6 +1892,7 @@ def restart_instance(
     IMP-021：重启后若实例有路径别名且 hostPort 发生漂移，重写别名片段并 reload。
     """
     with instance_lock(workspace, instance_id):
+        _ensure_revision_locked(registry, instance_id, expected_revision)
         return _restart_instance_locked(workspace, config, registry, instance_id)
 
 
@@ -2034,6 +2067,7 @@ def rebuild_instance(
     instance_id: str,
     *,
     out: list[str] | None = None,
+    expected_revision: int | None = None,
 ) -> InstanceManifest:
     """重建实例（WBS-17.04）：强制重新构建。
 
@@ -2056,8 +2090,11 @@ def rebuild_instance(
     from local_webpage_access.hosting import host_container, host_instance
     from local_webpage_access.reconcile_circuit import clear_circuit
 
-    expected_revision = registry.get_revision(instance_id)
+    # BUG-706 前的旧局部名 expected_revision 改为 observed：让位给
+    # 「调用方锁定的期望 revision」参数语义（收尾 CAS 基准同 BUG-704 importer）
+    observed_revision = registry.get_revision(instance_id)
     with instance_lock(workspace, instance_id):
+        _ensure_revision_locked(registry, instance_id, expected_revision)
         manifest = _load(workspace, instance_id)
         clear_circuit(manifest)
         with contextlib.suppress(Exception):
@@ -2097,9 +2134,9 @@ def rebuild_instance(
         clear_circuit(manifest)
         with contextlib.suppress(Exception):
             manifest.save(workspace.app_manifest_path(instance_id))
-        if expected_revision is not None:
+        if observed_revision is not None:
             try:
-                registry.cas_increment_revision(instance_id, expected_revision)
+                registry.cas_increment_revision(instance_id, observed_revision)
             except RegistryError as exc:
                 if exc.code == "revision_conflict":
                     raise LifecycleError(

@@ -859,7 +859,9 @@ def _render_python(
     # issue#7：构建钩子在依赖安装层之后、CMD 之前逐条执行（WORKDIR=/app，
     # 源码已由 final_copy / 早期整包 COPY 就位）。含 apt-get 的钩子注入镜像与重试。
     hooks_block = _build_hooks_block(manifest, mirrors=mirrors)
-    frontend_build = _frontend_build_block(manifest, source_dir, mirrors=mirrors)
+    frontend_build = _frontend_build_block(
+        manifest, source_dir, mirrors=mirrors, copy_prefix=cpfx
+    )
 
     lines = [
         header,
@@ -910,12 +912,23 @@ def _frontend_build_block(
     source_dir: Path | None,
     *,
     mirrors: BuildMirrors | None,
+    copy_prefix: str = "current/",
 ) -> str:
     """BUG-683/684：契约完整（npm 锁文件 + build 脚本）才自动前端构建。
 
     无锁文件 / pnpm·yarn / 无 build 脚本 → 跳过并留注释说明，前端构建交给
     manifest ``buildHooks`` 显式执行（钩子在本块之后、CMD 之前，可完整替代）；
     自定义输出目录（默认假定 ``dist`` → ``backend/static``）同样走 buildHooks。
+
+    BUG-700（issue #42）：构建目录必须与 COPY 前缀对齐。前端目录探测扫的是
+    仓库根，而镜像内容物由 ``copy_prefix`` 决定，二者有三种位置关系——只有
+    根布局下 final_copy 会顺带把前端子树带进镜像：
+
+    - 前缀即前端目录（如 ``sourceSubdir=frontend``）→ final_copy 已拷到
+      ``/app``，构建目录用 ``/app``；
+    - 前端在前缀之内（根布局）→ 沿用 ``/app/<fe>``；
+    - 前端在前缀之外（如 ``sourceSubdir=backend``）→ 显式 ``COPY`` 前端子树，
+      否则 ``/app/<fe>`` 是空目录，``npm ci`` 必败（EUSAGE 无锁文件）。
     """
     del manifest  # 签名与其它渲染块对齐，构建参数已由 ARG/ENV 注入。
     fe = _frontend_package_dir(source_dir)
@@ -941,13 +954,25 @@ def _frontend_build_block(
             "# 前端自动构建跳过：" + "；".join(reasons)
             + "。需要构建请用 manifest buildHooks 显式执行（见 docs/faq.md）。\n"
         )
+    prefix_dir = (copy_prefix or "current/").rstrip("/")
+    if prefix_dir == f"current/{fe}":
+        # 前缀即前端目录：final_copy / 早期整包 COPY 已把子树拷到 /app
+        workdir = "/app"
+        copy_fe = ""
+    else:
+        workdir = f"/app/{fe}"
+        if prefix_dir != "current":
+            # 前端在拷贝前缀之外：显式带进镜像（构建上下文仍含整个 current/）
+            copy_fe = f"COPY current/{fe}/ /app/{fe}/\n"
+        else:
+            copy_fe = ""
     npm_build = _with_npm_registry("npm ci && npm run build", mirrors)
     copy_dist = (
-        f"RUN if [ -d /app/{fe}/dist ]; then "
-        f"mkdir -p /app/backend/static && cp -a /app/{fe}/dist/. /app/backend/static/; "
+        f"RUN if [ -d {workdir}/dist ]; then "
+        f"mkdir -p /app/backend/static && cp -a {workdir}/dist/. /app/backend/static/; "
         "fi"
     )
-    return f"WORKDIR /app/{fe}\nRUN {npm_build}\n{copy_dist}\nWORKDIR /app\n"
+    return f"{copy_fe}WORKDIR {workdir}\nRUN {npm_build}\n{copy_dist}\nWORKDIR /app\n"
 
 
 def _uses_runtime_root_layout(manifest: InstanceManifest, source_dir: Path | None) -> bool:

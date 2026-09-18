@@ -91,11 +91,19 @@ def gateway_on(
             lan_ip = resolve_lan_ip(config) or "127.0.0.1"
             typer.secho(f"网关已启动（pid={pid}）", fg=typer.colors.GREEN)
             typer.echo("  admin：http://127.0.0.1:2019/")
-            port = config.staticGatewayPort
-            if port:
-                from local_webpage_access.ports import format_http_host
+            # BUG-721：TLS 模式下明文 :8080 已关闭——入口提示跟随实际 scheme/端口
+            from local_webpage_access.ports import (
+                entry_scheme,
+                format_http_host,
+                lan_entry_port,
+            )
 
-                typer.echo(f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/")
+            port = lan_entry_port(config)
+            if port:
+                typer.echo(
+                    f"  别名入口：{entry_scheme(config)}://"
+                    f"{format_http_host(lan_ip)}:{port}/<alias>/"
+                )
             typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
             typer.echo("  刷新地址：lwa access refresh")
             # G6：交接收尾后默认复核访问；可选自动 rebuild。

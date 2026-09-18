@@ -73,6 +73,7 @@ def test_llms_txt_is_markdown_with_guide_link(discovery_env) -> None:
     body = resp.text
     assert body.startswith("# "), "llms.txt 应以 H1 标题开头"
     assert "(/agent-guide)" in body, "llms.txt 应链接指南路径"
+    assert "lwa mcp --workspace" in body, "issue #40：llms.txt 应含 MCP stdio 命令形态"
     assert "http://" not in body and "https://" not in body, "只允许相对链接，不生成主机绝对地址"
 
 
@@ -84,9 +85,32 @@ def test_agent_info_json_fields(discovery_env) -> None:
     assert data["product"] == "local-webpage-access"
     assert data["discoveryVersion"] == "1"
     assert data["guide"] == "/agent-guide"
-    assert data["mcp"]["enabled"] is False, "MCP 未开放时必须如实返回 false"
+    assert isinstance(data["mcp"]["enabled"], bool), "mcp.enabled 必须是探测出的布尔值"
     assert data["authentication"]["required"] is True
     assert isinstance(data["authentication"]["contact"], str) and data["authentication"]["contact"]
+
+
+def test_agent_info_mcp_enabled_follows_runtime_probe(discovery_env, monkeypatch) -> None:
+    """issue #40：mcp.enabled 按运行环境探测，不得硬编码 false。
+
+    SDK 缺失 → enabled=false 且不带 transport/command（不夸大能力）；
+    SDK 在场 → enabled=true 并携带 stdio 接入命令占位模板（不含部署期路径）。
+    """
+    from local_webpage_access.agent import discovery
+
+    monkeypatch.setattr(discovery, "_mcp_stdio_available", lambda: False)
+    data = discovery_env["client"].get("/agent-info.json").json()
+    assert data["mcp"]["enabled"] is False
+    assert "transport" not in data["mcp"] and "command" not in data["mcp"]
+
+    monkeypatch.setattr(discovery, "_mcp_stdio_available", lambda: True)
+    data = discovery_env["client"].get("/agent-info.json").json()
+    assert data["mcp"]["enabled"] is True
+    assert data["mcp"]["transport"] == "stdio"
+    assert data["mcp"]["command"].startswith("lwa mcp --workspace ")
+    assert str(discovery_env["ws"].root) not in data["mcp"]["command"], (
+        "command 只是占位模板，不得携带部署期 workspace 路径"
+    )
 
 
 def test_agent_guide_served_as_markdown(discovery_env) -> None:

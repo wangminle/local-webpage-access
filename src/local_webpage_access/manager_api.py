@@ -475,11 +475,41 @@ def _is_localhost_client(request: Request) -> bool:
 
     评审-组4：client 地址是 loopback **且** Host 头也是本机名——后者挡 DNS
     rebinding（外部域名解析到 127.0.0.1 冒充同源）。
+
+    HTTPS 首版交付（W09）：TLS 模式下 manager 在 Caddy 反代之后，直连 peer
+    恒为 127.0.0.1——「peer 回环」不再等价「客户端本机」。此时追加
+    X-Forwarded-For 链校验：仅当链不存在（直连）或全链回环（本机客户端经
+    反代）才按本机对待；LAN 客户端伪造 ``Host: 127.0.0.1`` 不得免鉴权。
     """
     client = request.client
     if client is None:
         return False
-    return _is_loopback_host(client.host) and _host_header_is_local(request)
+    if not _is_loopback_host(client.host):
+        return False
+    if _request_from_trusted_proxy_chain(request):
+        return _host_header_is_local(request)
+    return False
+
+
+def _request_from_trusted_proxy_chain(request: Request) -> bool:
+    """W09：TLS 模式下 peer 回环的请求，其 XFF 链是否全回环（或无 XFF）。
+
+    非反代路径（M1 stdio 严格回环 HTTP、CLI）不带 X-Forwarded-For——
+    视为直连本机。XFF 链中任一地址非回环 → 远程客户端经反代，不享受
+    本机免鉴权。仅 gatewayTls=internal 时启用该判定（app.state.gateway_tls）。
+    """
+    if not getattr(request.app.state, "gateway_tls", False):
+        return True  # 非反代部署：维持既有「peer 即客户端」语义
+    forwarded = request.headers.get("x-forwarded-for")
+    if not forwarded:
+        return True  # 直连本机（无反代跳）
+    for hop in forwarded.split(","):
+        hop = hop.strip()
+        if not hop:
+            continue
+        if not _is_loopback_host(hop):
+            return False
+    return True
 
 
 def require_token(request: Request) -> None:
@@ -752,6 +782,11 @@ def create_app(
     app.state.token = token
     app.state.app_version = app_version  # BUG-451：供 /api/health 闭包外读取
     app.state.pageview_store = None  # IMP-024：懒加载的 PageviewStore 单例
+    # W09：TLS 模式标志——manager 位于 Caddy 反代之后，回环免鉴权判定
+    # 需追加 X-Forwarded-For 链校验（防 LAN 客户端伪造 Host 冒充本机）。
+    from local_webpage_access.config import tls_enabled as _tls_enabled
+
+    app.state.gateway_tls = _tls_enabled(config)
     # BUG-254：health 只读缓存；优先已有 capability-manager.json，否则 unknown 占位
     app.state.capability_fragment = read_capability_health_fragment(workspace.root) or {
         "profile": getattr(config, "profile", None) or "default",
@@ -2269,10 +2304,34 @@ def run_manager(
     """``lwa manager start``：打开 registry、确保 token、启动 uvicorn（阻塞）。
 
     返回前关闭 registry。Ctrl+C 由 uvicorn 处理后正常退出。
+
+    HTTPS 首版交付（W05）：``gatewayTls=internal`` 时绑定强制回环——
+    LAN 经 Caddy ``https://<ip>:<managerTlsPort>`` 反代访问，manager 明文
+    面不再暴露 LAN（D5：明文只存在于回环）。显式 ``--host`` 覆盖以调试
+    为目的放行：仅打 WARNING 提示且**不**收敛绑定（明文面将直接暴露，
+    token 可被在径嗅探），生产不要使用。
     """
     import uvicorn
 
+    from local_webpage_access.config import tls_enabled
+
     bind_host = host or config.managerHost
+    if tls_enabled(config) and not _is_loopback_host(bind_host):
+        forced = "127.0.0.1"
+        if host is not None:
+            log.warning(
+                "HTTPS 模式下 manager 显式绑定 %s（--host 调试用途）——"
+                "明文管理面将直接暴露，token 可被在径嗅探；生产请移除 --host",
+                bind_host,
+            )
+        else:
+            log.info(
+                "gatewayTls=internal：manager 绑定收敛为回环 %s（LAN 经"
+                " https://<LAN-IP>:%d/ 反代访问）",
+                forced,
+                config.managerTlsPort,
+            )
+            bind_host = forced
     bind_port = port if port is not None else config.managerPort
 
     reg = Registry(workspace.db_path)

@@ -164,8 +164,59 @@ class AgentOperationService:
                 code=AgentErrorCode.permission_denied.value,
             )
 
+    def _replay_existing(
+        self,
+        *,
+        action: str,
+        idempotency_key: str,
+        matches,
+    ) -> OperationAccepted | None:
+        """BUG-707（§6.3）：幂等重放先于易变前置校验（计划 TTL / 当前 revision）。
+
+        保留期内同键重试必须能取回原 operation——即使计划已过期或被 sweep
+        清理、实例 revision 已被其他通道递增。重放等价性用「与首次受理相同
+        的不可变请求字段」判定（apply 用 planId：计划不可变，同 planId 必同
+        requestHash；lifecycle 用 action+instanceId+expectedRevision 原三元组），
+        不匹配仍报 idempotency_conflict。无既有行返回 None 走正常受理。
+        """
+        existing = self.registry.get_agent_operation_by_idempotency(
+            self.principal.principal_id,
+            self.registry.get_or_create_workspace_id(),
+            idempotency_key,
+        )
+        if existing is None:
+            return None
+        if str(existing["action"]) != action or not matches(existing):
+            raise AgentServiceError(
+                "幂等键已绑定不同请求内容",
+                code=AgentErrorCode.idempotency_conflict.value,
+                idempotency_key=idempotency_key,
+            )
+        log.info(
+            "幂等重放操作 %s（action=%s，status=%s，前置校验前命中）",
+            existing["operation_id"],
+            action,
+            existing["status"],
+        )
+        return OperationAccepted(
+            operationId=str(existing["operation_id"]),
+            status=OperationStatus(str(existing["status"])),
+            instanceId=existing.get("target_instance_id"),
+        )
+
     def apply_deployment(self, request: ApplyDeploymentInput) -> OperationAccepted:
-        """受理部署：校验计划归属/有效期，落库 queued 操作后返回（§6.3）。"""
+        """受理部署：校验计划归属/有效期，落库 queued 操作后返回（§6.3）。
+
+        幂等重放先于计划校验（BUG-707）：同键同 plan 重试在计划过期/被清理
+        后仍可取回原 operation。
+        """
+        replay = self._replay_existing(
+            action=OperationAction.deploy.value,
+            idempotency_key=request.idempotencyKey,
+            matches=lambda row: row.get("plan_id") == request.planId,
+        )
+        if replay is not None:
+            return replay
         plan = self._service.load_plan(request.planId)
         self._require("deploy:create" if plan.intent == "create" else "deploy:update")
         self._service.assert_plan_fresh(plan)
@@ -180,6 +231,19 @@ class AgentOperationService:
                 "计划不属于本工作区",
                 code=AgentErrorCode.permission_denied.value,
                 planId=plan.planId,
+            )
+        # CHK-349/350（设计 §6.2 apply 再次验证 / §6.4）：所需能力以**当前**
+        # 缓存复核——计划期已记录的缺口、或计划后失效的能力，都不得受理进入
+        # 执行路径；返回 capability_unavailable，不自动安装基础设施。
+        gaps = self._service.capability_gaps_now(plan.requiredCapabilities)
+        if gaps:
+            raise AgentServiceError(
+                "所需运行能力不可用: " + "、".join(gaps)
+                + "（如 Docker 未就绪）；请管理员恢复能力后重新 apply，"
+                "LWA 不自动安装基础设施",
+                code=AgentErrorCode.capability_unavailable.value,
+                planId=plan.planId,
+                gaps=gaps,
             )
         payload = {
             "action": OperationAction.deploy.value,
@@ -204,13 +268,31 @@ class AgentOperationService:
     def submit_lifecycle(
         self, action: OperationAction, request: LifecycleInput
     ) -> OperationAccepted:
-        """受理 start/stop/restart/rebuild：先做 revision 预检（§6.3）。"""
+        """受理 start/stop/restart/rebuild：先做 revision 预检（§6.3）。
+
+        幂等重放先于 revision 预检（BUG-707）：同键同参数重试在实例被其他
+        通道更新后仍取回原 operation，而不是 revision_conflict。
+        """
         if action not in _LIFECYCLE_SCOPES:
             raise AgentServiceError(
                 f"不支持的操作动作: {action}",
                 code=AgentErrorCode.needs_input.value,
             )
         self._require(_LIFECYCLE_SCOPES[action])
+
+        def _same_lifecycle(row: dict[str, Any]) -> bool:
+            payload = row.get("payload") or {}
+            return payload.get("instanceId") == request.instanceId and (
+                payload.get("expectedRevision") == request.expectedRevision
+            )
+
+        replay = self._replay_existing(
+            action=action.value,
+            idempotency_key=request.idempotencyKey,
+            matches=_same_lifecycle,
+        )
+        if replay is not None:
+            return replay
         current = self.registry.get_revision(request.instanceId)
         if current is None:
             raise AgentServiceError(
@@ -547,6 +629,16 @@ class AgentWorker:
             )
             return
         target = plan.targetInstanceId
+        # CHK-349/350（设计 §6.4）：apply 与执行之间能力可能失效（如 Docker
+        # 停了）——worker 复验，缺口在导入副作用之前终止。
+        gaps = self._service().capability_gaps_now(plan.requiredCapabilities)
+        if gaps:
+            raise AgentServiceError(
+                "所需运行能力不可用: " + "、".join(gaps)
+                + "（如 Docker 未就绪）；请管理员恢复能力后以新计划重试",
+                code=AgentErrorCode.capability_unavailable.value,
+                gaps=gaps,
+            )
         if plan.intent == "update":
             assert target is not None
             current = self.registry.get_revision(target)
@@ -615,11 +707,15 @@ class AgentWorker:
                 was_running = False
             else:
                 assert target is not None
+                # BUG-704：计划锁定的 expectedRevision 必须传入 update_zip——
+                # importer 会在实例锁内复核（设计 §6.3），锁外预检与本调用之间
+                # CLI/daemon 的更新不再被旧计划静默覆盖。
                 updated = importer.update_zip(
                     tmp_zip,
                     target,
                     restart=True,
                     yes=True,
+                    expected_revision=plan.expectedRevision,
                 )
                 instance_id = target
                 needs_rebuild = updated.needs_rebuild
@@ -723,7 +819,15 @@ class AgentWorker:
                 f"不支持的操作动作: {action}",
                 code=AgentErrorCode.needs_input.value,
             )
-        handler(self.workspace, self.config, self.registry, instance_id)
+        # BUG-706（设计 §6.3）：期望 revision 传入生命周期函数，在实例锁内
+        # 复验——上方预检与执行之间 CLI/daemon 的更新不得被旧请求操作。
+        handler(
+            self.workspace,
+            self.config,
+            self.registry,
+            instance_id,
+            expected_revision=int(expected) if expected is not None else None,
+        )
         self._abort_if_cancelling(op_id)
         self._finish(
             op_id,
@@ -886,6 +990,14 @@ class AgentWorker:
     ) -> None:
         if isinstance(exc, (BuildError, DockerError)):
             code = AgentErrorCode.build_failed
+        elif (
+            isinstance(exc, (ZipImportError, LifecycleError))
+            and str(exc.code) == "revision_conflict"
+        ):
+            # BUG-704/706：update_zip / 生命周期函数锁内复核（或收尾 CAS）判定
+            # 的冲突按契约语义上报——revision_conflict（重新读取状态），不是
+            # needs_input / interrupted。
+            code = AgentErrorCode.revision_conflict
         elif isinstance(exc, HostingError) and current_phase in (
             OperationPhase.start.value,
             OperationPhase.healthcheck.value,

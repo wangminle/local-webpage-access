@@ -669,6 +669,7 @@ class Importer:
         yes: bool = False,  # noqa: ARG002 — 交互确认由 CLI 层处理；数据层非交互
         dry_run: bool = False,
         force_kind_change: bool = False,
+        expected_revision: int | None = None,
     ) -> UpdateResult:
         """用新 zip 原地更新已存在的实例（IMP-009）。
 
@@ -681,6 +682,9 @@ class Importer:
         2. 计算新 hash 与 ``sourceZipHash`` 比较 —— 相同则跳过（``skipped=True``）；
         3. ``dry_run`` 时仅解压到系统临时目录、扫描、报告差异，不触碰工作区；
         4. 持 :func:`~local_webpage_access.lifecycle.instance_lock` 期间：
+           - BUG-704：调用方锁定的 ``expected_revision``（如 Agent 计划）在锁内
+             复核，不符即拒绝——锁外预检与本方法读取之间，CLI/daemon 的更新
+             可能已落地，不复核会让旧计划静默覆盖较新内容（设计 §6.3）；
            - 解压到 ``current.new/`` 暂存区（current/ 原封不动）；
            - 重新扫描；kind/runtime 变化时拒绝（除非 ``force_kind_change``）；
            - ``data/`` 位于 ``current/`` 外，默认保留；``keep_data=False`` 时清空；
@@ -690,13 +694,17 @@ class Importer:
            - 重建 manifest（保留 id/createdAt/desiredState/status/路径别名），
              刷 ``sourceZipHash`` / ``updatedAt``，registry 同步 + 事件。
 
+        ``expected_revision`` 提供时，收尾 CAS 也以该值为基准（锁内已复核）；
+        缺省 None 保持既有行为——以进入时读到的当前 revision 为基准。
+
         本方法不启动 / 重启 / 重建进程；``needs_rebuild=True`` 时由调用方执行
         :func:`lifecycle.rebuild_instance`，``needs_restart=True`` 时执行
         :func:`lifecycle.restart_instance`。hostPort 由 hosting 在重启时复用。
 
         Raises:
             ZipImportError: zip 非法 / 实例不存在 / 形态变化被拒绝 / 解压失败 /
-                git 源实例用 zip 更新（IMP-065 065.18）。
+                git 源实例用 zip 更新（IMP-065 065.18）/ ``expected_revision``
+                锁内复核不符（``code="revision_conflict"``）。
         """
         with import_activity_lock(self.ws):
             # IMP-065（065.18）：git 源实例禁止用 zip 覆盖更新——否则内容来自
@@ -720,6 +728,7 @@ class Importer:
                 yes=yes,
                 dry_run=dry_run,
                 force_kind_change=force_kind_change,
+                expected_revision=expected_revision,
             )
 
     def _update_zip_locked(
@@ -732,6 +741,7 @@ class Importer:
         yes: bool = False,
         dry_run: bool = False,
         force_kind_change: bool = False,
+        expected_revision: int | None = None,
     ) -> UpdateResult:
         src = Path(zip_path).resolve()
         validate_zip(src)
@@ -753,7 +763,25 @@ class Importer:
         old_hash = getattr(old_manifest, "sourceZipHash", None)
         was_running = old_manifest.desiredState == DesiredState.RUNNING
         app_dir = self.ws.app_dir(instance_id)
-        expected_revision = self.registry.get_revision(instance_id)
+        # CHK-353：hash 未变跳过路径同样受期望 revision 约束——过期计划拿到
+        # revision_conflict 而不是"skipped"（锁外预检，与锁内复核之间存在
+        # 极窄 TOCTOU；跳过路径无任何写副作用，残余风险仅为罕见的晚到冲突）。
+        if expected_revision is not None:
+            pre_revision = self.registry.get_revision(instance_id)
+            if pre_revision is not None and int(pre_revision) != int(expected_revision):
+                raise ZipImportError(
+                    f"实例 {instance_id} revision 与期望不符"
+                    f"（期望 {expected_revision}，当前 {pre_revision}），"
+                    "更新被拒绝；请重新读取实例状态后再更新",
+                    code="revision_conflict",
+                    instance_id=instance_id,
+                    expected=int(expected_revision),
+                    actual=pre_revision,
+                )
+        observed_revision = self.registry.get_revision(instance_id)
+        # BUG-704：调用方锁定期望 revision 时，CAS 基准跟随该值（锁内已复核）；
+        # 缺省沿用既有语义——以进入时读到的当前 revision 为基准。
+        cas_base = expected_revision if expected_revision is not None else observed_revision
 
         # 2. hash 未变化 → 跳过（dry-run 零写入：连事件也不记，CHK-239）
         if new_hash == old_hash:
@@ -822,6 +850,21 @@ class Importer:
         from local_webpage_access.lifecycle import instance_lock
 
         with instance_lock(self.ws, instance_id):
+            # BUG-704（设计 §6.3）：实例 mutation 在锁内检查 expectedRevision。
+            # 调用方（Agent 计划）锁定的期望值若已被 CLI/daemon 等通道递增，
+            # 必须在任何换入/写registry副作用之前拒绝，而不是事后 CAS 才发现。
+            if expected_revision is not None:
+                locked_revision = self.registry.get_revision(instance_id)
+                if locked_revision is None or int(locked_revision) != int(expected_revision):
+                    raise ZipImportError(
+                        f"实例 {instance_id} revision 与期望不符"
+                        f"（期望 {expected_revision}，当前 {locked_revision}），"
+                        "更新被拒绝；请重新读取实例状态后再更新",
+                        code="revision_conflict",
+                        instance_id=instance_id,
+                        expected=expected_revision,
+                        actual=locked_revision,
+                    )
             current_dir = self.ws.app_current(instance_id)
             parent = current_dir.parent
             staging = parent / f"{current_dir.name}.new"
@@ -1053,15 +1096,16 @@ class Importer:
             needs_rebuild,
             needs_restart,
         )
-        if not dry_run and expected_revision is not None:
+        if not dry_run and cas_base is not None:
             from local_webpage_access.errors import RegistryError
 
             try:
-                self.registry.cas_increment_revision(instance_id, expected_revision)
+                self.registry.cas_increment_revision(instance_id, cas_base)
             except RegistryError as exc:
                 if exc.code == "revision_conflict":
                     raise ZipImportError(
                         f"实例 {instance_id} 已被其他通道更新（revision 冲突）",
+                        code="revision_conflict",
                         instance_id=instance_id,
                     ) from exc
                 raise

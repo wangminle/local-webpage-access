@@ -562,7 +562,7 @@ def host_container(
         host_port, fresh_port = _ensure_container_port(config, registry, instance_id)
 
         # 5. 生成 Compose + .env（含 SQLite DATABASE_URL / RUNTIME_ROOT 与 data/ 挂载）
-        generate_compose(manifest, workspace, host_port=host_port)
+        generate_compose(manifest, workspace, host_port=host_port, config=config)
         generate_env(manifest, workspace, host_port=host_port)
         _stage("compose_ready")
 

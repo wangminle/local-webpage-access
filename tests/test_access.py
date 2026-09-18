@@ -1110,7 +1110,7 @@ def test_fetch_text_marks_probe_param(monkeypatch) -> None:
         def __exit__(self, *a):
             return False
 
-    def fake_urlopen(req, timeout=None):
+    def fake_urlopen(req, timeout=None, ssl_context=None):  # W08：ssl_context kwarg
         captured["url"] = req.full_url
         return _Resp()
 

@@ -13,6 +13,7 @@ LWA 自身为启动等待、健康检查、访问复核发起的 HTTP 请求不�
 
 from __future__ import annotations
 
+import ssl
 import urllib.request
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -37,9 +38,26 @@ def mark_probe_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
-def urlopen_direct(url: str | urllib.request.Request, *, timeout: float | None = None) -> Any:
-    """``urllib.request.urlopen`` 的直连封装：忽略环境代理（BUG-380）。"""
-    return _DIRECT_OPENER.open(url, timeout=timeout)
+def urlopen_direct(
+    url: str | urllib.request.Request,
+    *,
+    timeout: float | None = None,
+    ssl_context: ssl.SSLContext | None = None,
+) -> Any:
+    """``urllib.request.urlopen`` 的直连封装：忽略环境代理（BUG-380）。
+
+    HTTPS 首版交付（W08）：``ssl_context`` 提供时启用**完整证书验证**
+    （错误证书必须拒绝——禁止 verify=False 降级）。未提供时 urllib 默认
+    验证 https。返回的对象据此需要 ``context`` 传递——
+    :class:`urllib.request.HTTPSHandler` 按 URL scheme 自动接管。
+    """
+    if ssl_context is None:
+        return _DIRECT_OPENER.open(url, timeout=timeout)
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ssl_context),
+    )
+    return opener.open(url, timeout=timeout)
 
 
 __all__ = [

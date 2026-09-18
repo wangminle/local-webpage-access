@@ -54,6 +54,9 @@ def test_instance_table_matches_v069_layout_except_two_line_name_clamp() -> None
 
     ADJ-048：名称列 max-width 220→440（访问地址改两行排版后宽度让渡），
     其余「自动布局 + 无显式 width」约束不变。
+    2026-09-17 排版优化（用户要求列表可读性）：名称列允许 min-width 防挤压
+    下限——13 列全 nowrap 时压缩全落在唯一可换行的名称列，中文逐字换行成
+    竖条（行高 130px+）。下限只防退化，不参与宽度分配，仍非显式 width。
     """
     css = STYLE_CSS.read_text(encoding="utf-8")
     app_js = APP_JS.read_text(encoding="utf-8")
@@ -69,8 +72,11 @@ def test_instance_table_matches_v069_layout_except_two_line_name_clamp() -> None
     assert "col-name" not in app_js
     assert "max-width: 440px" in name_cell_rule
     assert not any(line.startswith("width:") for line in name_cell_declarations)
-    assert not any(line.startswith("min-width:") for line in name_cell_declarations)
-    assert "min-width: 200px" in ops_column_rule
+    assert any(
+        line.startswith("min-width: 200px") for line in name_cell_declarations
+    )
+    # ADJ-050：操作列 200→300px（9 按钮两行收纳；技术栈网格 3→2 列让渡宽度）
+    assert "min-width: 300px" in ops_column_rule
     assert "width: 240px" not in ops_column_rule
     assert "display: -webkit-box" in name_button_rule
     assert "max-width: 100%" in name_button_rule

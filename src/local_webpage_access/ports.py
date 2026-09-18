@@ -203,15 +203,60 @@ def format_http_host(host: str) -> str:
     return raw
 
 
-def build_lan_url(lan_ip: str | None, port: int) -> str | None:
-    """生成局域网访问 URL。无法确定 IP 时返回 ``None``。"""
+def entry_scheme(config: Config | None = None) -> str:
+    """HTTPS 首版交付（W07）：对外入口 URL 的 scheme。
+
+    ``gatewayTls=internal`` → ``https``；否则 ``http``（现状）。
+    """
+    if config is not None:
+        from local_webpage_access.config import tls_enabled
+
+        if tls_enabled(config):
+            return "https"
+    return "http"
+
+
+def lan_entry_port(config: Config) -> int | None:
+    """W07：对外别名入口端口——TLS 开启时为 gatewayTlsPort，否则 staticGatewayPort。"""
+    from local_webpage_access.config import tls_enabled
+
+    if tls_enabled(config):
+        return config.gatewayTlsPort
+    return config.staticGatewayPort
+
+
+def manager_entry_url(config: Config, lan_ip: str | None) -> str | None:
+    """W07：管理面对外入口 URL。
+
+    TLS 关闭（现状）：``http://<ip>:<managerPort>``（直连 manager）。
+    TLS 开启：``https://<ip>:<managerTlsPort>``（Caddy 独立 origin 反代——
+    manager 本体已收敛为仅回环监听）。
+    """
     if not lan_ip:
         return None
-    return f"http://{format_http_host(lan_ip)}:{port}"
+    from local_webpage_access.config import tls_enabled
+
+    if tls_enabled(config):
+        return f"https://{format_http_host(lan_ip)}:{config.managerTlsPort}/"
+    return f"http://{format_http_host(lan_ip)}:{config.managerPort}/"
+
+
+def build_lan_url(
+    lan_ip: str | None, port: int, *, config: Config | None = None
+) -> str | None:
+    """生成局域网访问 URL。无法确定 IP 时返回 ``None``。
+
+    W07：提供 ``config`` 且 TLS 开启时合成 https（网关入口语义；实例
+    直连口在收敛部署中仅回环可达）。
+    """
+    if not lan_ip:
+        return None
+    scheme = entry_scheme(config)
+    return f"{scheme}://{format_http_host(lan_ip)}:{port}"
 
 
 def build_health_url(port: int, *, host: str = _HEALTH_HOST) -> str:
-    """生成健康检查 URL（本机回环）。"""
+    """生成健康检查 URL（本机回环——回环上游保持明文 HTTP，D5）。"""
     return f"http://{format_http_host(host)}:{port}"
 
 
@@ -219,18 +264,23 @@ def build_route_url(
     lan_ip: str | None,
     gateway_port: int | None,
     alias: str,
+    *,
+    config: Config | None = None,
 ) -> str | None:
     """生成路径别名的统一入口 URL（IMP-006）。
 
-    形如 ``http://<lan_ip>:8080/<alias>/``。``lan_ip`` 无法确定或
+    形如 ``http://<lan_ip>:8080/<alias>/``（TLS 开启时
+    ``https://<lan_ip>:8443/<alias>/``，W07）。``lan_ip`` 无法确定或
     ``gateway_port`` 为 ``None``（别名入口关闭）时返回 ``None``——此时只能
-    通过 hostPort 访问。端口为 80 时省略显式端口，输出干净的 ``http://ip/<alias>/``。
+    通过 hostPort 访问。端口为 80（http）/443（https）时省略显式端口。
     """
     if not lan_ip or gateway_port is None:
         return None
+    scheme = entry_scheme(config)
+    default_port = 443 if scheme == "https" else 80
     host = format_http_host(lan_ip)
-    port_part = "" if gateway_port == 80 else f":{gateway_port}"
-    return f"http://{host}{port_part}/{alias}/"
+    port_part = "" if gateway_port == default_port else f":{gateway_port}"
+    return f"{scheme}://{host}{port_part}/{alias}/"
 
 
 class PortAllocator:
@@ -320,13 +370,20 @@ def build_network_entry(
 
     对应 WBS-06.07~09。``path_alias`` 非 ``None`` 时（IMP-006）写入
     ``routeMode="name"`` + ``routeHost=<alias>`` + ``routeUrl``（统一入口 URL）。
+
+    HTTPS 首版交付（W07）：``routeUrl`` 按 TLS 入口合成（https + tlsPort）；
+    ``lanUrl`` 保持 ``http://<ip>:<hostPort>`` 直连语义（BUG-713：实例直连口
+    始终是明文 HTTP——TLS 只覆盖网关入口，合成 https 会让 access review 恒
+    误报探活失败）；``host`` 记录 ``instanceBindHost`` 实际绑定。
     """
     if lan_ip is None:
         lan_ip = resolve_lan_ip(config)
+    bind_host = getattr(config, "instanceBindHost", "0.0.0.0") or "0.0.0.0"
+    entry_port = lan_entry_port(config)
     if path_alias is not None:
-        route_url = build_route_url(lan_ip, config.staticGatewayPort, path_alias)
+        route_url = build_route_url(lan_ip, entry_port, path_alias, config=config)
         return {
-            "host": "0.0.0.0",
+            "host": bind_host,
             "internalPort": internal_port,
             "hostPort": host_port,
             "routeMode": "name",
@@ -336,7 +393,7 @@ def build_network_entry(
             "healthUrl": build_health_url(host_port),
         }
     return {
-        "host": "0.0.0.0",
+        "host": bind_host,
         "internalPort": internal_port,
         "hostPort": host_port,
         "routeMode": "port",
@@ -358,4 +415,7 @@ __all__ = [
     "build_health_url",
     "build_route_url",
     "build_network_entry",
+    "entry_scheme",
+    "lan_entry_port",
+    "manager_entry_url",
 ]

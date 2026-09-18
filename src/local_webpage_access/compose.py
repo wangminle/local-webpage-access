@@ -32,6 +32,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from local_webpage_access.errors import ConfigError, PathError
+
+try:  # 仅类型引用，避免运行期循环导入
+    from local_webpage_access.config import Config
+except ImportError:  # pragma: no cover
+    Config = None  # type: ignore[assignment, misc]
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest
 from local_webpage_access.paths import Workspace, resolve_source_workdir
@@ -76,7 +81,7 @@ services:
       dockerfile: docker/Dockerfile
 {build_args_block}    container_name: lwa-{instance_id}
 {user_block}    ports:
-      - "${{HOST_PORT}}:${{INTERNAL_PORT}}"
+      - {ports_line}
     env_file:
       - .env
 {env_local_block}{extra_environment}{volumes_block}    mem_limit: ${{MEMORY_LIMIT:-{memory}}}
@@ -173,8 +178,12 @@ def generate_compose(
     workspace: Workspace,
     *,
     host_port: int,
+    config: Config | None = None,
 ) -> Path:
     """渲染 ``docker/compose.yaml``（WBS-13.01~10）。
+
+    ``config`` 提供时按 ``instanceBindHost`` 收敛端口发布（W06）；缺省
+    保持通配发布（既有调用兼容）。
 
     Args:
         manifest: 实例元数据（需有 container 配置）。
@@ -234,12 +243,29 @@ def generate_compose(
     identity = resolve_container_identity(manifest, workspace)
     user_block = f'    user: "{identity.docker_user()}"\n' if identity is not None else ""
 
+    # W06（HTTPS 首版交付）：instanceBindHost 收敛时端口发布带 host IP——
+    # Docker 显式 host-ip 发布只绑该地址（绕过 ufw 的 caveat 也随之收窄，
+    # 见 docs/https.md）；IPv6 需方括号。默认 0.0.0.0 保持既有通配发布。
+    import ipaddress as _ipaddress
+
+    bind_host = getattr(config, "instanceBindHost", "0.0.0.0") or "0.0.0.0"
+    if bind_host in ("0.0.0.0", "::"):
+        ports_line = '"${HOST_PORT}:${INTERNAL_PORT}"'
+    else:
+        try:
+            ver = _ipaddress.ip_address(bind_host).version
+        except ValueError:
+            ver = 4
+        host_part = f"[{bind_host}]" if ver == 6 else bind_host
+        ports_line = f'"{host_part}:${{HOST_PORT}}:${{INTERNAL_PORT}}"'
+
     content = _COMPOSE_TEMPLATE.format(
         project_name=project_name,
         instance_id=manifest.id,
         service=_SERVICE_NAME,
         host_port=host_port,
         internal_port=container.internalPort,
+        ports_line=ports_line,
         volumes_block=volumes_block,
         memory=limits.memory,
         cpus=limits.cpus,

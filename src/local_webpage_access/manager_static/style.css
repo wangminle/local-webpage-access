@@ -37,6 +37,8 @@
   --shadow: 0 1px 2px oklch(0.2 0.02 264 / 0.06);
   --shadow-lg: 0 8px 24px oklch(0.2 0.02 264 / 0.12);
   --monospace: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", monospace;
+  /* 表格行分隔线：比面板描边深一档（列表靠它逐行扫读，过淡会失去行边界） */
+  --table-line: oklch(0.87 0.006 255);
 
   /* —— 节奏 —— */
   --pad-x: 20px;
@@ -70,6 +72,8 @@
 
     --shadow: 0 1px 2px oklch(0 0 0 / 0.4);
     --shadow-lg: 0 8px 24px oklch(0 0 0 / 0.5);
+
+    --table-line: oklch(0.37 0.015 264);
   }
 }
 
@@ -88,16 +92,17 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+    "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
 
 h1, h2 { margin: 0; font-weight: 600; }
-h1 { font-size: 16px; }
-h2 { font-size: 14px; }
+h1 { font-size: 17px; letter-spacing: -0.01em; }
+h2 { font-size: 15px; }
 
 code, pre { font-family: var(--monospace); }
 
@@ -302,7 +307,10 @@ select:focus-visible,
 .table-wrap { overflow-x: auto; }
 table.instances {
   width: 100%;
-  border-collapse: collapse;
+  /* separate + spacing 0：sticky 表头的边框随滚动固定（collapse 下 th 边框
+     滚动时会消失）；本表只有横向分隔线，separate 无双边框问题 */
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
@@ -311,21 +319,28 @@ table.instances td {
   padding: 9px 12px;
   text-align: left;
   white-space: nowrap;
+  vertical-align: middle; /* 徽章/双行单元格与基线默认值错位，统一垂直居中 */
 }
 table.instances thead th {
   background: var(--panel-2);
   color: var(--text-muted);
-  font-weight: 500;
+  font-weight: 600;
   font-size: 12px;
-  border-bottom: 1px solid var(--border);
+  letter-spacing: 0.05em; /* 中文表头字距略放宽，配合加粗建立列标签的存在感 */
+  border-bottom: 2px solid var(--border-strong);
   position: sticky;
   top: 0;
+  z-index: 1;
 }
-table.instances tbody td { border-bottom: 1px solid var(--border); }
+table.instances tbody td { border-bottom: 1px solid var(--table-line); }
 table.instances tbody tr:last-child td { border-bottom: none; }
+table.instances tbody tr { transition: background-color 0.1s ease; }
 table.instances tbody tr:hover { background: var(--gray-bg); }
+/* 首列左缘留出呼吸位（窄列时名称几乎贴边） */
+table.instances th:first-child,
+table.instances td:first-child { padding-left: 16px; }
 .empty-row td { text-align: center; color: var(--text-muted); padding: 32px; }
-.col-ops { min-width: 200px; }
+.col-ops { min-width: 300px; } /* ADJ-050：9 按钮两行收纳（原 200px 挤成 4-6 行） */
 
 /* 状态徽章：圆点 + 文字（色盲友好，不仅靠颜色）*/
 .badge {
@@ -335,13 +350,13 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 550;
   line-height: 1.4;
 }
 .badge::before {
   content: "";
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: currentColor;
   flex: none;
@@ -425,6 +440,9 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
 
 .cell-name {
   font-weight: 500;
+  /* 名称列下限：列被其余 12 列挤压时避免中文逐字换行成竖条；
+     超长名交给 cell-name-btn 的两行截断 */
+  min-width: 200px;
   max-width: 440px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -477,7 +495,7 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
-.ops { display: flex; gap: 4px; flex-wrap: wrap; }
+.ops { display: flex; gap: 3px 4px; flex-wrap: wrap; }
 
 .stack-tag {
   display: inline-block;
@@ -497,7 +515,8 @@ table.instances tbody tr:hover { background: var(--gray-bg); }
    各行共用同一组列轨道（每列取最宽标签），第二行及以后与第一行等宽对齐。 */
 .stack-tags {
   display: inline-grid;
-  grid-template-columns: repeat(3, max-content);
+  /* ADJ-050：3→2 列——列宽让渡给操作列（纵向多一行可接受，横向宽度更贵） */
+  grid-template-columns: repeat(2, max-content);
   gap: 2px 3px;
   vertical-align: middle;
 }

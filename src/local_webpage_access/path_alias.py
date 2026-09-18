@@ -6,6 +6,7 @@ import contextlib
 import os
 import threading
 import time
+import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -234,9 +235,12 @@ def _collect_alias_live_probe_paths(html: str, alias: str, *, limit: int = 6) ->
 
 
 def _http_probe_alias_resource(
-    url: str, *, timeout: float = 3.0
+    url: str, *, timeout: float = 3.0, ssl_context: ssl.SSLContext | None = None
 ) -> tuple[bool, int | None, str | None, bytes]:
-    """GET 别名下资源；返回 (ok, status, content_type, body_prefix)。"""
+    """GET 别名下资源；返回 (ok, status, content_type, body_prefix)。
+
+    W08：https 入口提供验证上下文（错误证书按失败呈现，不降级）。
+    """
     from local_webpage_access.probe import mark_probe_url, urlopen_direct
 
     req = urllib.request.Request(  # noqa: S310 — 本机 loopback 活验证
@@ -244,7 +248,7 @@ def _http_probe_alias_resource(
         headers={"User-Agent": "lwa-alias-live-verify"},
     )
     try:
-        with urlopen_direct(req, timeout=timeout) as resp:
+        with urlopen_direct(req, timeout=timeout, ssl_context=ssl_context) as resp:
             code = int(getattr(resp, "status", None) or resp.getcode())
             ctype = resp.headers.get("Content-Type", "")
             body = resp.read(4096)
@@ -262,21 +266,32 @@ def verify_alias_live(
     *,
     entry_html: str | None,
     instance_id: str,
+    workspace: Workspace | None = None,
 ) -> None:
     """别名入口与关键静态资源的活验证（CHK-252 第三批）。
 
     设置别名并 reload 后，通过统一网关端口请求 ``/{alias}/`` 及 HTML 中引用的
     JS/CSS；若资源返回 SPA HTML 兜底或不可达则失败。
     """
-    port = _gateway_port(config)
+    from local_webpage_access.ports import entry_scheme, lan_entry_port
+
+    port = lan_entry_port(config)
     if port is None:
         raise RecognitionError(
-            "路径别名活验证需要启用 staticGatewayPort（Caddy 统一入口端口）",
+            "路径别名活验证需要启用别名入口端口"
+            "（staticGatewayPort 或 gatewayTls 的 gatewayTlsPort）",
             instance_id=instance_id,
         )
-    base = f"http://127.0.0.1:{port}"
+    # W07/W08：TLS 模式下入口为 https 且探活走证书验证——错误证书即失败。
+    scheme = entry_scheme(config)
+    ssl_ctx: ssl.SSLContext | None = None
+    if scheme == "https" and workspace is not None:
+        from local_webpage_access.static_gateway import make_https_ssl_context
+
+        ssl_ctx = make_https_ssl_context(workspace)
+    base = f"{scheme}://127.0.0.1:{port}"
     entry_url = f"{base}/{alias}/"
-    ok, code, ctype, body = _http_probe_alias_resource(entry_url)
+    ok, code, ctype, body = _http_probe_alias_resource(entry_url, ssl_context=ssl_ctx)
     if not ok or not body:
         raise RecognitionError(
             f"别名入口 {entry_url} 活验证失败（HTTP {code}）",
@@ -300,7 +315,7 @@ def verify_alias_live(
     html = live_html
     for path in _collect_alias_live_probe_paths(html, alias):
         url = urljoin(base + "/", path.lstrip("/"))
-        rok, rcode, rctype, rbody = _http_probe_alias_resource(url)
+        rok, rcode, rctype, rbody = _http_probe_alias_resource(url, ssl_context=ssl_ctx)
         if not rok:
             raise RecognitionError(
                 f"别名资源 {path} 活验证失败（HTTP {rcode}，URL {url}）",
@@ -379,7 +394,9 @@ def maybe_verify_alias_after_start(
         workspace=workspace, manifest=manifest, host_port=host_port
     )
     try:
-        verify_alias_live(config, alias, entry_html=html, instance_id=instance_id)
+        verify_alias_live(
+            config, alias, entry_html=html, instance_id=instance_id, workspace=workspace
+        )
     except RecognitionError as exc:
         hinted = _append_lwa_build_hint(exc, manifest, alias)
         _stamp_alias_guard(manifest, "failed")
@@ -945,6 +962,7 @@ def _set_instance_path_alias_locked(
                     alias,
                     entry_html=html if html_verified else None,
                     instance_id=instance_id,
+                    workspace=workspace,
                 )
                 live_verified = True
             except RecognitionError:

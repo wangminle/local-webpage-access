@@ -43,9 +43,16 @@ def manager_on() -> None:
         lan_ip = resolve_lan_ip(config) or "127.0.0.1"
         from local_webpage_access.ports import format_http_host
 
+        from local_webpage_access.ports import manager_entry_url
+
+        lan_entry = manager_entry_url(config, lan_ip) or (
+            f"http://{format_http_host(lan_ip)}:{config.managerPort}/"
+        )
         typer.secho(f"管理页已启动（pid={pid}）", fg=typer.colors.GREEN)
+        # W05/W07：TLS 模式下 manager 收敛回环，本机仍可直连明文回环口；
+        # 局域网入口为 https 反代（独立 origin 端口）
         typer.echo(f"  本机：http://127.0.0.1:{config.managerPort}/")
-        typer.echo(f"  局域网：http://{format_http_host(lan_ip)}:{config.managerPort}/")
+        typer.echo(f"  局域网：{lan_entry}")
         typer.echo(f"  token：{token}")
         typer.echo("  停止：lwa manager off")
     except LwaError as exc:
@@ -108,7 +115,12 @@ def manager_status_cmd() -> None:
             typer.echo(f"  pid：{st['pid']}")
         from local_webpage_access.ports import format_http_host
 
-        typer.echo(f"  地址：http://{format_http_host(lan_ip)}:{st['port']}/")
+        from local_webpage_access.ports import manager_entry_url
+
+        lan_entry = manager_entry_url(config, lan_ip) or (
+            f"http://{format_http_host(lan_ip)}:{st['port']}/"
+        )
+        typer.echo(f"  地址：{lan_entry}")
         token = read_token(ws)
         if token:
             typer.echo(f"  token：{token}")

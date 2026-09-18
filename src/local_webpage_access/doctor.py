@@ -644,10 +644,18 @@ def check_port_pool(
     """
     allocated = allocated_ports or set()
     exclude = exclude_ports or set()
-    # 合法自用端口：管理端口始终自用；别名入口端口由 caddy 网关自用。
+    # 合法自用端口：管理端口始终自用；别名入口端口（含 TLS/可选明文口）与
+    # 管理面 TLS 口由 caddy/manager 自用（HTTPS 首版交付补齐覆盖面）。
+    from local_webpage_access.config import tls_enabled as _tls_on
+
     self_ports: set[int] = {config.managerPort}
     if config.staticGatewayPort is not None:
         self_ports.add(config.staticGatewayPort)
+    if _tls_on(config):
+        self_ports.add(config.gatewayTlsPort)
+        self_ports.add(config.managerTlsPort)
+        if config.gatewayPlainPort is not None:
+            self_ports.add(config.gatewayPlainPort)
     skip = allocated | exclude | self_ports
 
     conflicts: list[int] = []
@@ -837,14 +845,29 @@ def check_caddy_health(
             aliases = registry.list_route_hosts()
         except Exception:  # noqa: BLE001 — registry 不可用则跳过入口/站点探测
             aliases = {}
-        entry_port = config.staticGatewayPort
+        # BUG-720：TLS 模式下明文 :8080 站点块不再生成——入口端口与 scheme
+        # 必须跟随 lan_entry_port/entry_scheme，且 https 探活走证书验证，
+        # 否则 doctor 恒报"别名入口不可达"误 WARN。
+        from local_webpage_access.ports import entry_scheme, lan_entry_port
+        from local_webpage_access.static_gateway import make_https_ssl_context
+
+        entry_port = lan_entry_port(config)
+        entry_scheme_now = entry_scheme(config)
+        entry_ctx = (
+            make_https_ssl_context(ws) if entry_scheme_now == "https" else None
+        )
         if aliases and entry_port is not None:
             # BUG-080：入口根路径 / 无路由（仅 /<alias>/ 有），必须探别名子路径，
             # 否则恒 404 误报 WARN。
             # 评审-组5：原只探首别名，部分别名 404（reload 未生效/片段缺失）会漏报；
             # 改为全量探测（别名多于 5 个时截断，防探测成本失控）。
             for probe_alias in list(aliases)[:5]:
-                if not gateway.health_check(int(entry_port), path=f"/{probe_alias}/"):
+                if not gateway.health_check(
+                    int(entry_port),
+                    path=f"/{probe_alias}/",
+                    scheme=entry_scheme_now,
+                    ssl_context=entry_ctx,
+                ):
                     entry_unreachable = True
                     findings.append(
                         f"别名入口 :{entry_port}/{probe_alias}/ 不可达"
@@ -1657,10 +1680,19 @@ def check_port_contention(
                 f":2019 存在非本工作区 caddy.pid 记录的监听者"
                 f"（{', '.join(sorted({n for n, _ in non_self}))}）"
             )
-    # :staticGatewayPort（别名入口）：caddy 后端下应仅 caddy 监听。
-    # 只要存在非 caddy 监听者即 FAIL（含 caddy+python 混合），不得因「有 caddy」放行。
-    entry_port = config.staticGatewayPort
-    if entry_port is not None:
+    # 别名入口（TLS 模式为 gatewayTlsPort + 可选 gatewayPlainPort；明文模式
+    # 为 staticGatewayPort）：caddy 后端下应仅 caddy 监听。存在非 caddy 监听者
+    # 即 FAIL（含 caddy+python 混合），不得因「有 caddy」放行。
+    from local_webpage_access.config import tls_enabled as _tls_on
+
+    entry_ports: set[int] = set()
+    if _tls_on(config):
+        entry_ports.add(int(config.gatewayTlsPort))
+        if config.gatewayPlainPort is not None:
+            entry_ports.add(int(config.gatewayPlainPort))
+    elif config.staticGatewayPort is not None:
+        entry_ports.add(int(config.staticGatewayPort))
+    for entry_port in sorted(entry_ports):
         entry_listeners = _list_listeners(int(entry_port))
         if entry_listeners:
             probed += 1
@@ -2512,6 +2544,8 @@ def run_doctor(
             check_service_version_drift(ws, config),
             check_restart_resilience(ws, config),
             check_caddy_health(ws, config, runner=runner, registry=caddy_probe_registry),
+            # HTTPS 首版交付（W10）：TLS 状态/根证书/明文收敛检查
+            check_gateway_tls(ws, config),
             check_lan_url_stale(ws, config, caddy_probe_registry)
             if caddy_probe_registry is not None
             else CheckResult("lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"),
@@ -2577,11 +2611,101 @@ def run_doctor(
     return report
 
 
+# ---- HTTPS 首版交付（W10）：TLS 状态检查 ----------------------------------------
+
+def check_gateway_tls(ws: Workspace, config: Config) -> CheckResult:
+    """gatewayTls=internal 部署的 TLS 健康检查。
+
+    * 根证书存在 + 指纹可计算（客户端安装比对依据）；
+    * https 入口证书验证（复用 W04b 判定，错误证书=FAIL 不降级）；
+    * 明文收敛观察（gatewayPlainPort 未设 → OK；保留 → WARN 非安全边界）；
+    * manager 绑定收敛（TLS 模式应回环；外露 → FAIL）。
+    TLS 关闭时 SKIP（现状兼容）。
+    """
+    from local_webpage_access.config import tls_enabled
+
+    if not tls_enabled(config):
+        return CheckResult(
+            "gateway_tls", STATUS_SKIP, "gatewayTls=off（明文 HTTP 现状）；"
+            "开启 HTTPS 见 docs/https.md"
+        )
+    from local_webpage_access.static_gateway import (
+        caddy_root_cert_fingerprint,
+        caddy_root_cert_path,
+    )
+
+    notes: list[str] = []
+    # 显式严重度排序：ok < warn < fail（字符串 max 是字典序陷阱）
+    rank = {STATUS_OK: 0, STATUS_WARN: 1, STATUS_FAIL: 2, STATUS_SKIP: 0}
+
+    def _worse(current: str, candidate: str) -> str:
+        return candidate if rank[candidate] > rank[current] else current
+
+    worst = STATUS_OK
+    cert = caddy_root_cert_path(ws)
+    fingerprint = caddy_root_cert_fingerprint(ws)
+    if fingerprint is None:
+        notes.append(
+            f"根证书缺失（{cert}）——网关以 TLS 启动并签发后生成，"
+            "或 run/caddy-data 权限异常"
+        )
+        worst = _worse(worst, STATUS_FAIL)
+    else:
+        notes.append(f"根证书就绪，SHA-256 指纹 {fingerprint[:23]}…（lwa ca export 导出）")
+
+    from local_webpage_access.gateway_service import verify_tls_entries
+
+    # 小参数限流：doctor 交互场景不做 5×5s 长重试（启动路径才用全量默认）
+    tls_error = verify_tls_entries(
+        ws, config, attempts=2, timeout=2.0, retry_delay=0.5
+    )
+    if tls_error is not None:
+        notes.append(tls_error)
+        worst = _worse(worst, STATUS_FAIL)
+    else:
+        notes.append(
+            f"https 入口验证通过（别名 :{config.gatewayTlsPort}，管理面 :{config.managerTlsPort}）"
+        )
+
+    if config.gatewayPlainPort is None:
+        notes.append("明文入口已关闭（gatewayPlainPort 未设置）")
+    else:
+        notes.append(f"明文入口保留在 :{config.gatewayPlainPort}（非安全边界）")
+        worst = _worse(worst, STATUS_WARN)
+
+    bind = getattr(config, "managerHost", "0.0.0.0")
+    if bind in ("127.0.0.1", "localhost", "::1"):
+        notes.append(f"manager 绑定已收敛回环（{bind}）")
+    else:
+        # W05 在 run_manager 强制收敛，但配置值仍外露时提示对齐（重启后生效值即回环）
+        notes.append(
+            f"managerHost={bind} 将在 manager 重启时被强制收敛为 127.0.0.1（W05）"
+        )
+        worst = _worse(worst, STATUS_WARN)
+
+    instance_bind = getattr(config, "instanceBindHost", "0.0.0.0")
+    if instance_bind in ("0.0.0.0", "::"):
+        notes.append("instanceBindHost=0.0.0.0：实例直连口对 LAN 开放（旁路面，建议收敛 127.0.0.1）")
+        worst = _worse(worst, STATUS_WARN)
+    else:
+        notes.append(f"实例直连已收敛绑定 {instance_bind}")
+
+    return CheckResult(
+        "gateway_tls",
+        worst,
+        "; ".join(notes),
+        suggestion="两台设备验收清单见 docs/https.md" if worst != STATUS_OK else None,
+    )
+
+
 # ---- IMP-062：版本滞后可发现性 ------------------------------------------------
 
-# 24h 缓存：命中则不 fetch；所有状态（含 unavailable）都缓存，避免离线家庭
-# 服务器每次 doctor 都等待 fetch 超时。
+# 24h 缓存：确定性结论（upToDate / updateAvailable / blocked，均出自真实
+# fetch）命中则不重复触网。unavailable 是瞬态网络失败，只短缓存（issue #41：
+# 一次 60s 超时被 24h TTL 固化成整天 SKIP，网络恢复后 doctor 反而最不可用）；
+# 离线环境至多每 30 分钟重等一次 fetch 超时。
 _VERSION_CHECK_CACHE_TTL = 24 * 3600
+_VERSION_CHECK_UNAVAILABLE_TTL = 30 * 60
 _VERSION_CHECK_CACHE = "version-check.json"
 
 
@@ -2610,11 +2734,14 @@ def check_version_freshness(ws: Workspace) -> CheckResult:
 
     * 复用 :func:`update_source.run_source_check`（同 repo 锁、同 fetch 语义），
       **不**重复实现 git ls-remote / GitHub API 探测；
-    * 24h 缓存（``run/version-check.json``）：命中即用缓存结论，不触网；
+    * 分级缓存（``run/version-check.json``，issue #41）：确定性结论
+      （upToDate / updateAvailable / blocked）24h；``unavailable`` 是瞬态
+      网络失败，仅缓存 30 分钟后自动重试，SKIP 文案附删缓存自助路径；
     * 状态映射：``updateAvailable`` → WARN（提示 ``lwa update``）；``upToDate``
       → OK；``unavailable``（网络/代理失败）→ **SKIP**（家庭服务器可能长期
       内网，网络问题不升为 doctor FAIL）；``blocked``（detached/dirty/ahead
-      等本地仓库问题）→ SKIP 并附原因；
+      等本地仓库问题）→ SKIP，但**同时报告版本关系与快进前提**（dirty 是
+      常态，已算出的 behind/ahead 不被状态语义吞掉）；
     * 非 git 克隆安装（locate_repo 无果）→ SKIP。
     """
     import os as os_mod
@@ -2644,28 +2771,49 @@ def check_version_freshness(ws: Workspace) -> CheckResult:
         cached = None
 
     ts = _parse_iso_to_ts(cached.get("checkedAt")) if cached else None
-    if cached is not None and ts is not None and (time_mod.time() - ts) < _VERSION_CHECK_CACHE_TTL:
+    if cached is not None and ts is not None:
         status = str(cached.get("status") or "")
-        detail = f"（24h 缓存，checkedAt={cached.get('checkedAt')}）"
-        if status == "updateAvailable":
-            behind = int(cached.get("behindBy") or 0)
-            target_ver = (cached.get("target") or {}).get("version")
-            msg = f"有新版本可更新：落后 {behind} 个提交"
-            if target_ver:
-                msg += f"（远端 {target_ver}）"
-            return CheckResult(
-                "version_freshness",
-                STATUS_WARN,
-                msg + detail,
-                suggestion="执行 `lwa update` 一键升级（fetch → 快进 → Runtime 刷新）",
-            )
-        if status == "upToDate":
-            return CheckResult("version_freshness", STATUS_OK, f"已是最新版本{detail}")
-        if status == "unavailable":
-            return _skip(f"远端版本探测不可达{detail}（网络/代理问题不构成 doctor FAIL）")
-        if status == "blocked":
-            reason = ((cached.get("error") or {}).get("message")) or "本地仓库状态不允许判定"
-            return _skip(f"版本判定被阻断：{reason}{detail}")
+        ttl = (
+            _VERSION_CHECK_UNAVAILABLE_TTL
+            if status == "unavailable"
+            else _VERSION_CHECK_CACHE_TTL
+        )
+        if (time_mod.time() - ts) < ttl:
+            detail = f"（缓存命中，checkedAt={cached.get('checkedAt')}）"
+            if status == "updateAvailable":
+                behind = int(cached.get("behindBy") or 0)
+                target_ver = (cached.get("target") or {}).get("version")
+                msg = f"有新版本可更新：落后 {behind} 个提交"
+                if target_ver:
+                    msg += f"（远端 {target_ver}）"
+                return CheckResult(
+                    "version_freshness",
+                    STATUS_WARN,
+                    msg + detail,
+                    suggestion="执行 `lwa update` 一键升级（fetch → 快进 → Runtime 刷新）",
+                )
+            if status == "upToDate":
+                return CheckResult("version_freshness", STATUS_OK, f"已是最新版本{detail}")
+            if status == "unavailable":
+                return _skip(
+                    f"远端版本探测不可达{detail}（网络/代理问题不构成 doctor FAIL；"
+                    "多为瞬态失败，缓存仅 30 分钟后自动重试）",
+                    suggestion=f"删除 {cache_path} 可立即重试",
+                )
+            if status == "blocked":
+                return _skip(
+                    _blocked_freshness_message(
+                        relation=str(cached.get("relation") or ""),
+                        ahead_by=int(cached.get("aheadBy") or 0),
+                        behind_by=int(cached.get("behindBy") or 0),
+                        target=cached.get("target"),
+                        reason=(
+                            (cached.get("error") or {}).get("message")
+                            or cached.get("blockerMessage")
+                        ),
+                    )
+                    + detail
+                )
 
     repo = locate_repo()
     if repo is None:
@@ -2688,16 +2836,21 @@ def check_version_freshness(ws: Workspace) -> CheckResult:
             os_mod.close(repo_fd)
 
     data = report.to_dict()
-    # 写缓存（含 unavailable——避免离线环境每次 doctor 等 fetch 超时）
+    # 写缓存（含 unavailable——但 issue #41 后其 TTL 仅 30 分钟，瞬态失败不再
+    # 固化 24h；离线环境至多每 30 分钟重等一次 fetch 超时）
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         slim = {
             "status": data["status"],
             "checkedAt": data["checkedAt"],
+            "relation": data.get("relation") or "",
+            "aheadBy": data.get("aheadBy") or 0,
             "behindBy": data.get("behindBy") or 0,
             "target": data.get("target"),
             "error": data.get("error"),
         }
+        if data.get("blockers"):
+            slim["blockerMessage"] = str((data["blockers"][0] or {}).get("message") or "")
         cache_path.write_text(
             json.dumps(slim, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
@@ -2718,9 +2871,58 @@ def check_version_freshness(ws: Workspace) -> CheckResult:
     if report.status == "upToDate":
         return CheckResult("version_freshness", STATUS_OK, "已是最新版本")
     if report.status == "unavailable":
-        return _skip("远端版本探测不可达（网络/代理问题不构成 doctor FAIL）")
-    reason = ((data.get("error") or {}).get("message")) or "本地仓库状态不允许判定"
-    return _skip(f"版本判定被阻断：{reason}")
+        return _skip(
+            "远端版本探测不可达（网络/代理问题不构成 doctor FAIL；多为瞬态失败，"
+            "缓存仅 30 分钟后自动重试）",
+            suggestion=f"删除 {cache_path} 可立即重试",
+        )
+    blockers = getattr(report, "blockers", None) or []
+    blocker_reason = None
+    if blockers:
+        blocker_reason = str((blockers[0] or {}).get("message") or "")
+    return _skip(
+        _blocked_freshness_message(
+            relation=str(getattr(report, "relation", "") or ""),
+            ahead_by=int(getattr(report, "ahead_by", 0) or 0),
+            behind_by=int(report.behind_by or 0),
+            target=data.get("target"),
+            reason=((data.get("error") or {}).get("message") or blocker_reason),
+        )
+    )
+
+
+def _blocked_freshness_message(
+    *,
+    relation: str,
+    ahead_by: int,
+    behind_by: int,
+    target: dict | None,
+    reason: str | None,
+) -> str:
+    """issue #41：blocked 只说明「不宜快进」，已算出的版本关系仍须如实报告。
+
+    dirty/detached 是常态而非例外（ledger 日常未提交），把版本关系一并吞掉
+    会让这条检查在正常工作流下长期不可用。探测未完成（resolve 失败、无
+    target 数据）时没有可报告的关系，退回单句阻断说明。
+    """
+    why = reason or "本地仓库状态不允许快进"
+    target = target or {}
+    target_version = target.get("version")
+    if relation == "ahead":
+        rel = f"本地领先远端 {ahead_by} 个提交"
+    elif relation == "diverged":
+        rel = f"与远端分叉（ahead {ahead_by} / behind {behind_by}）"
+    elif behind_by > 0:
+        note = f"（远端 {target_version}）" if target_version else ""
+        rel = f"落后远端 {behind_by} 个提交{note}"
+    elif relation == "equal" or target.get("head"):
+        rel = "版本已是最新（behind 0）"
+    else:
+        return f"版本判定被阻断：{why}"
+    return (
+        f"版本关系：{rel}；当前不宜快进——{why}"
+        "（处理上述 blocker 后 `lwa update` 才会快进）"
+    )
 
 
 def _allocated_ports_for_workspace(ws: Workspace) -> set[int]:

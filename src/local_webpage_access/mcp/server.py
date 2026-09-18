@@ -34,12 +34,17 @@ _GUIDE_RESOURCES: dict[str, tuple[str, str]] = {
 
 
 def tool_to_mcp(spec: ToolSpec) -> types.Tool:
-    """契约 ToolSpec → MCP Tool（schema 共源，annotations 按真实标注）。"""
+    """契约 ToolSpec → MCP Tool（schema 共源，annotations 按真实标注）。
+
+    BUG-709（AGC-W04 / 设计 §6.1、§8）：输入**和输出** JSON Schema 都从
+    TOOL_SPECS 共源发布——自动客户端不翻文档即可生成调用与解析代码。
+    """
     return types.Tool(
         name=spec.name,
         title=spec.title,
         description=spec.description,
         input_schema=spec.input_model.model_json_schema(),
+        output_schema=spec.output_model.model_json_schema(),
         annotations=types.ToolAnnotations(
             title=spec.title,
             read_only_hint=spec.read_only,

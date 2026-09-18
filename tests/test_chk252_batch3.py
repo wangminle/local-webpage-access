@@ -174,7 +174,7 @@ def test_verify_alias_live_rejects_html_for_js(
 
     html = '<script src="/demo/assets/app.js"></script>'
 
-    def fake_probe(url, *, timeout=3.0):
+    def fake_probe(url, *, timeout=3.0, ssl_context=None):  # W08：探活签名新增 ssl_context
         if url.endswith("/demo/"):
             return True, 200, "text/html", ("<!doctype html>" + html).encode()
         if "app.js" in url:
@@ -747,7 +747,7 @@ def test_verify_alias_live_probes_relative_script_under_alias(config, monkeypatc
 
     html = '<script src="assets/app.js"></script>'
 
-    def fake_probe(url, *, timeout=3.0):
+    def fake_probe(url, *, timeout=3.0, ssl_context=None):  # W08：探活签名新增 ssl_context
         probed.append(url)
         if url.endswith("/demo/"):
             return True, 200, "text/html", ("<!doctype html>" + html).encode()

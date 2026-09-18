@@ -24,7 +24,7 @@ def test_verify_alias_live_uses_alias_http_body_not_entry_html(config, monkeypat
     """BUG-678：别名实际返回坏 HTML 时，不得因传入的直达 HTML 而通过。"""
     from local_webpage_access import path_alias
 
-    def fake_probe(url, *, timeout=3.0):
+    def fake_probe(url, *, timeout=3.0, ssl_context=None):  # W08：探活签名新增 ssl_context
         if url.rstrip("/").endswith("funasr-workbench"):
             return True, 200, "text/html", ("<!doctype html>" + _ABS_HTML).encode()
         return True, 200, "application/javascript", b"ok"
@@ -329,7 +329,7 @@ def test_frontend_source_build_alias_assets_e2e(monkeypatch) -> None:
     assert "/funasr/assets/app.js" in html
     assert b"export default 1" in js
 
-    def fake_probe(url, *, timeout=3.0):
+    def fake_probe(url, *, timeout=3.0, ssl_context=None):  # W08：探活签名新增 ssl_context
         if url.rstrip("/").endswith("funasr"):
             return True, 200, "text/html", html.encode()
         if url.endswith("/funasr/assets/app.js"):

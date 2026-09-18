@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.8.18 当前实际可用的接入方式。**
+> **状态：本文描述 V0.8.19 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -119,6 +119,7 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 ## 7. 部署结果与访问 URL
 
 - 部署/查询返回的访问地址（`lanUrl`、别名等）是**服务器视角**的观测结果（含服务端探活）。
+- **路径别名 + SPA 绝对资源路径 = 白屏高发区**：Vite 等前端项目用相对 `base: './'` 可直接过别名；若产物必须用绝对 base，构建前先 `lwa configure <id> --build-env VITE_BASE=/<别名>/`（项目须读取 `process.env.VITE_BASE`，容器实例经 Docker `ARG`/`ENV` 注入）再 rebuild。被别名守卫拒绝时错误文案会附上同样的补救命令；完整排障见 FAQ「别名入口白屏」。
 - `localhost`/`127.0.0.1` 形式的地址只在服务器本机有效；远程 Agent 应使用 LAN 地址，且**自行验证**从自己机器是否真的可达（服务器可达 ≠ 客户端可达，可能隔防火墙）。
 - 访问地址依赖的网络环境变化后可能陈旧，可触发 `/api/access/refresh` 后重新获取。
 

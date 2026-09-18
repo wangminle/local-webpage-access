@@ -49,7 +49,7 @@ def test_collect_probes_empty_for_absolute_assets() -> None:
 def test_verify_alias_live_rejects_absolute_assets_empty_probes(config, monkeypatch) -> None:
     from local_webpage_access import path_alias
 
-    def fake_probe(url, *, timeout=3.0):
+    def fake_probe(url, *, timeout=3.0, ssl_context=None):  # W08：探活签名新增 ssl_context
         if url.rstrip("/").endswith("funasr-workbench"):
             return True, 200, "text/html", ("<!doctype html>" + _ABS_HTML).encode()
         return True, 200, "application/javascript", b"ok"
@@ -67,7 +67,7 @@ def test_verify_alias_live_plain_html_without_assets_still_passes(config, monkey
 
     html = "<!doctype html><html><body><h1>hi</h1></body></html>"
 
-    def fake_probe(url, *, timeout=3.0):
+    def fake_probe(url, *, timeout=3.0, ssl_context=None):  # W08：探活签名新增 ssl_context
         return True, 200, "text/html", html.encode()
 
     monkeypatch.setattr(path_alias, "_http_probe_alias_resource", fake_probe)

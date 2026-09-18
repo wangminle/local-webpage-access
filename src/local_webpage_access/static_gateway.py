@@ -14,10 +14,12 @@ V1 静态托管的两条路径：
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -30,7 +32,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
 
-from local_webpage_access.config import Config
+from local_webpage_access.config import Config, tls_enabled
 from local_webpage_access.daemon import pid_cmdline_contains
 from local_webpage_access.errors import GatewayError
 from local_webpage_access.file_lock import (
@@ -146,6 +148,93 @@ _CADDY_START_TIMEOUT = 20
 _MIN_CADDYFILE = "# lwa bootstrap：仅保证 Caddy admin 在线，真实站点由 reload_all 注入\n"
 
 
+# ---- HTTPS 首版交付（2026-09-18 WBS W02/W08）--------------------------------
+
+def caddy_data_root(workspace: Workspace) -> Path:
+    """Caddy 数据目录（internal CA 归属工作区，D2）。
+
+    master 由 LWA spawn 时注入 ``XDG_DATA_HOME=<run>/caddy-data``，Caddy 的
+    数据目录即本路径——根证书、中间证书与私钥全部落在其 ``pki/`` 下，
+    随 workspace 备份/迁移，权限 0700。
+    """
+    return workspace.run / "caddy-data" / "caddy"
+
+
+def caddy_config_root(workspace: Workspace) -> Path:
+    """Caddy 配置目录（autosave 状态，同样归属工作区）。"""
+    return workspace.run / "caddy-config" / "caddy"
+
+
+def caddy_root_cert_path(workspace: Workspace) -> Path:
+    """Caddy internal CA 根证书路径（首次 ``tls internal`` 签发后生成）。"""
+    return caddy_data_root(workspace) / "pki" / "authorities" / "local" / "root.crt"
+
+
+def caddy_root_cert_fingerprint(workspace: Workspace) -> str | None:
+    """根证书 SHA-256 指纹（hex，冒号分组）；证书缺失返回 None。
+
+    供客户端安装时人工比对（防导出环节被替换）。
+    """
+    cert = caddy_root_cert_path(workspace)
+    try:
+        der = cert.read_bytes()
+    except OSError:
+        return None
+    digest = hashlib.sha256(_pem_to_der(der)).hexdigest().upper()
+    return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2))
+
+
+def _pem_to_der(pem: bytes) -> bytes:
+    """PEM → DER（指纹按 DER 计算，与 openssl x509 -fingerprint 口径一致）。"""
+    begin = pem.find(b"-----BEGIN CERTIFICATE-----")
+    end = pem.find(b"-----END CERTIFICATE-----")
+    if begin == -1 or end == -1:
+        return pem  # 已是 DER 或损坏——原样参与摘要，由上层呈现
+    import base64
+
+    b64 = b"".join(pem[begin + len(b"-----BEGIN CERTIFICATE-----") : end].split())
+    try:
+        return base64.b64decode(b64)
+    except ValueError:
+        return pem
+
+
+def caddy_spawn_env(workspace: Workspace) -> dict[str, str]:
+    """spawn Caddy master 的环境（D2：CA/状态归属工作区）。"""
+    xdg_dirs = (
+        caddy_data_root(workspace).parent,
+        caddy_data_root(workspace),
+        caddy_config_root(workspace).parent,
+        caddy_config_root(workspace),
+    )
+    for path in xdg_dirs:
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.chmod(0o700)  # CA 私钥所在目录链仅属主可访问
+        except OSError:
+            pass
+    env = dict(os.environ)
+    env["XDG_DATA_HOME"] = str(caddy_data_root(workspace).parent)
+    env["XDG_CONFIG_HOME"] = str(caddy_config_root(workspace).parent)
+    return env
+
+
+def make_https_ssl_context(workspace: Workspace) -> ssl.SSLContext:
+    """https 探活用的证书验证上下文（D7：错误证书必须拒绝）。
+
+    系统信任库 + 工作区 Caddy internal CA 根证书——服务器本机对
+    ``https://127.0.0.1:<tlsPort>`` 的探活同样走完整验证（IP SAN 覆盖回环）。
+    """
+    context = ssl.create_default_context()
+    root = caddy_root_cert_path(workspace)
+    if root.is_file():
+        try:
+            context.load_verify_locations(cafile=str(root))
+        except ssl.SSLError as exc:
+            log.warning("加载 LWA 根证书失败（%s）：%s", root, exc)
+    return context
+
+
 def _refuse_caddy_admin_in_pytest(action: str) -> None:
     """BUG-121：pytest 下默认拒绝真实 caddy reload/start，防止覆盖生产 :2019。"""
     if not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -160,12 +249,13 @@ def _refuse_caddy_admin_in_pytest(action: str) -> None:
 
 # builtin 模式回退用的 Caddy 配置模板（也用于 Caddy 模式渲染）
 # {rate_limit_block} 占位符由 _rate_limit_directive 填充（IMP-005）；
+# {bind_directive} 由 instanceBindHost 决定（W06：收敛时空，绑定时 bind <ip>）；
 # 未启用限流时为空串，留下一行空行（Caddyfile 忽略）。
 _FALLBACK_TEMPLATE = """\
 # Local Webpage Access — Caddy 静态站点配置
 # 由 lwa 自动生成，请勿手动编辑。
 :{host_port} {{
-\troot * {root}
+{bind_directive}\troot * {root}
 \tfile_server
 \tencode gzip
 {rate_limit_block}
@@ -398,6 +488,7 @@ class StaticGateway:
         try:
             content = template.format(
             host_port=host_port,
+            bind_directive=self._site_bind_directive(),
             root=_caddy_quote(str(root).replace("\\", "/")),
             site_id=instance_id,
             rate_limit_block=self._rate_limit_directive(instance_id),
@@ -413,6 +504,17 @@ class StaticGateway:
         path.write_text(content, encoding="utf-8")
         log.info("已生成站点配置：%s", path)
         return path
+
+    def _site_bind_directive(self) -> str:
+        """W06：instanceBindHost 收敛时站点块显式 bind（否则通配全接口）。
+
+        返回带缩进的完整指令行（含换行）；用户自定义模板若未包含
+        ``{bind_directive}`` 占位符则不生效（format 忽略未用 kwarg）。
+        """
+        bind = getattr(self.config, "instanceBindHost", "0.0.0.0") or "0.0.0.0"
+        if bind in ("0.0.0.0", "::"):
+            return ""
+        return f"\tbind {bind}\n"
 
     def remove_site_config(self, instance_id: str) -> None:
         path = self.site_config_path(instance_id)
@@ -703,16 +805,24 @@ class StaticGateway:
     # ---- 健康检查 -----------------------------------------------------------
 
     def health_check(
-        self, host_port: int, *, timeout: float = _HEALTH_TIMEOUT, path: str = "/"
+        self,
+        host_port: int,
+        *,
+        timeout: float = _HEALTH_TIMEOUT,
+        path: str = "/",
+        scheme: str = "http",
+        ssl_context: Any = None,
     ) -> bool:
-        """HTTP GET ``path`` 检查站点是否在服务（WBS-09.08）。
+        """HTTP(S) GET ``path`` 检查站点是否在服务（WBS-09.08）。
 
-        默认探 ``/``；别名统一入口端口（:staticGatewayPort）的根路径不提供服务
-        （仅 ``/<alias>/`` 有路由），探测入口时应传 ``path="/<alias>/"``（BUG-080）。
+        默认探 ``/``；别名统一入口端口的根路径不提供服务（仅 ``/<alias>/``
+        有路由），探测入口时应传 ``path="/<alias>/"``（BUG-080）。
+        TLS 入口（gatewayTls=internal）由调用方传 ``scheme="https"`` 与
+        证书验证上下文（实例直连口保持明文回环，默认 http 不变）。
         """
-        url = mark_probe_url(f"http://127.0.0.1:{host_port}{path}")
+        url = mark_probe_url(f"{scheme}://127.0.0.1:{host_port}{path}")
         try:
-            resp = urlopen_direct(url, timeout=timeout)
+            resp = urlopen_direct(url, timeout=timeout, ssl_context=ssl_context)
             return 200 <= resp.status < 400
         except Exception:  # noqa: BLE001
             return False
@@ -895,13 +1005,28 @@ class StaticGateway:
         的歧义。无别名或端口关闭时不追加该块，保持端口不被占用。
         """
         lines: list[str] = []
+        # BUG-710：TLS 模式必须先声明全局选项块（Caddyfile 首块）——
+        # skip_install_trust：禁止 Caddy 自动 sudo 安装根证书到系统信任库
+        #   （无 tty 挂起约 90s / 交互终端弹密码；根证书只经 `lwa ca export`
+        #   手动分发 + 客户端显式信任）；
+        # auto_https disable_redirects：关掉 HTTP→HTTPS 重定向服务器——它
+        #   会额外监听明文 :80，非 root 的 Linux 上 permission denied 导致
+        #   整份配置加载失败。
+        if tls_enabled(self.config):
+            lines.append("{")
+            lines.append("\tauto_https disable_redirects")
+            lines.append("\tskip_install_trust")
+            lines.append("}")
+            lines.append("")
         sites = sorted(self.ws.static_sites.glob("*.conf"))
         for site in sites:
             lines.append(f"import {_caddy_quote(site.as_posix())}")
 
         aliases = sorted(self.ws.static_aliases.glob("*.conf"))
         port = self.config.staticGatewayPort
-        if aliases and port is not None:
+        # W04：TLS 开启时默认明文入口关闭——staticGatewayPort 块不再生成
+        #（保留明文须显式配置 gatewayPlainPort，见 _tls_blocks）。
+        if aliases and port is not None and not tls_enabled(self.config):
             lines.append("")
             lines.append(f"# IMP-006 路径别名统一入口（端口 {port}，去前缀反向代理）")
             lines.append(f":{port} {{")
@@ -935,7 +1060,96 @@ class StaticGateway:
                 "（仅 hostPort 可达）；请在 local-web.yml 设置 staticGatewayPort",
                 len(aliases),
             )
+        # ---- HTTPS 首版交付（W04）：TLS 入口与管理面独立 origin -----------------
+        if tls_enabled(self.config):
+            lines.extend(self._tls_blocks(aliases))
         return "\n".join(lines) + "\n"
+
+    def _tls_addresses(self, tls_port: int) -> str:
+        """D4：TLS 站点地址——回环 + 当前 LAN IP（internal CA 按地址签 IP SAN）。
+
+        LAN IP 解析失败时仅保留回环（本机仍可验收），并告警提示配置
+        ``lanIpStrategy: manual``。
+        """
+        from local_webpage_access.ports import format_http_host, resolve_lan_ip
+
+        addresses = [f"https://127.0.0.1:{tls_port}"]
+        lan_ip = resolve_lan_ip(self.config)
+        if lan_ip:
+            addresses.append(f"https://{format_http_host(lan_ip)}:{tls_port}")
+        else:
+            log.warning(
+                "gatewayTls=internal 但无法解析 LAN IP——TLS 站点仅覆盖 127.0.0.1，"
+                "局域网客户端无法访问；请在 local-web.yml 配置 lanIpStrategy: manual"
+                " + manualLanIp 后重启网关",
+            )
+        return ", ".join(addresses)
+
+    def _tls_blocks(self, aliases: list[Path]) -> list[str]:
+        """W04：别名 HTTPS 入口块 + 管理面独立 HTTPS origin 反代块。
+
+        - 别名入口在 ``gatewayTlsPort`` 上重复统一入口语义（log/404 兜底不变，
+          浏览量统计共享同一 access log）；
+        - 管理面按 CHK-352 修订用**独立端口**（managerTlsPort）反代回环
+          manager，不与实例入口同源；
+        - 明文入口仅在 ``gatewayPlainPort`` 显式配置时保留（默认 None=关闭）。
+        """
+        lines: list[str] = []
+        tls_port = self.config.gatewayTlsPort
+        if aliases:
+            lines.append("")
+            lines.append(f"# HTTPS 别名统一入口（W04，端口 {tls_port}，Caddy internal CA）")
+            lines.append(f"{self._tls_addresses(tls_port)} {{")
+            lines.append("\ttls internal")
+            access_log = self.ws.logs / "static-access.log"
+            access_log.parent.mkdir(parents=True, exist_ok=True)
+            lines.append("\tlog {")
+            lines.append(f"\t\toutput file {_caddy_quote(access_log.as_posix())} {{")
+            lines.append("\t\t\troll_size 10mb")
+            lines.append("\t\t\troll_keep 3")
+            lines.append("\t\t}")
+            lines.append("\t\tformat json")
+            lines.append("\t}")
+            for alias_conf in aliases:
+                lines.append(f"\timport {_caddy_quote(alias_conf.as_posix())}")
+            lines.append("\thandle {")
+            lines.append("\t\trespond 404")
+            lines.append("\t}")
+            lines.append("}")
+        # 管理面独立 origin：独立端口反代回环 manager（manager 已被 W05 收敛为
+        # 仅回环监听）。上游保持明文 HTTP——明文只存在于回环（D5）。
+        manager_port = self.config.managerPort
+        manager_tls = self.config.managerTlsPort
+        lines.append("")
+        lines.append(
+            f"# HTTPS 管理面独立 origin（W04/W05，端口 {manager_tls} →"
+            f" 回环 manager:{manager_port}）"
+        )
+        lines.append(f"{self._tls_addresses(manager_tls)} {{")
+        lines.append("\ttls internal")
+        lines.append(f"\treverse_proxy 127.0.0.1:{manager_port}")
+        lines.append("}")
+        # 明文入口按需保留（默认关闭；保留时非安全边界，见 docs/https.md）
+        plain_port = self.config.gatewayPlainPort
+        if plain_port is not None and aliases:
+            lines.append("")
+            lines.append(f"# 明文别名入口（gatewayPlainPort={plain_port}，非安全边界）")
+            lines.append(f":{plain_port} {{")
+            access_log = self.ws.logs / "static-access.log"
+            lines.append("\tlog {")
+            lines.append(f"\t\toutput file {_caddy_quote(access_log.as_posix())} {{")
+            lines.append("\t\t\troll_size 10mb")
+            lines.append("\t\t\troll_keep 3")
+            lines.append("\t\t}")
+            lines.append("\t\tformat json")
+            lines.append("\t}")
+            for alias_conf in aliases:
+                lines.append(f"\timport {_caddy_quote(alias_conf.as_posix())}")
+            lines.append("\thandle {")
+            lines.append("\t\trespond 404")
+            lines.append("\t}")
+            lines.append("}")
+        return lines
 
     # ---- Caddy master 生命周期（IMP-010 / BUG-070）--------------------------
 
@@ -1021,6 +1235,9 @@ class StaticGateway:
         popen_kwargs: dict[str, Any] = {
             "stdout": subprocess.DEVNULL,
             "stderr": err_fh if err_fh is not None else subprocess.DEVNULL,
+            # W02（D2）：internal CA 与 autosave 状态归属工作区（0700），
+            # 根证书随 workspace 备份/迁移，`lwa ca export` 从此读取。
+            "env": caddy_spawn_env(self.ws),
         }
         if os.name == "nt":
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
@@ -1513,7 +1730,8 @@ class StaticGateway:
             "--directory",
             str(root),
             "--bind",
-            "0.0.0.0",
+            # W06：实例直连绑定跟随 instanceBindHost（收敛场景 127.0.0.1）
+            getattr(self.config, "instanceBindHost", "0.0.0.0") or "0.0.0.0",
         ]
         popen_kwargs: dict = {
             "stdout": log_fh,

@@ -721,7 +721,7 @@ def format_source_check_report(report) -> str:
     status_label = {
         "upToDate": "已是最新",
         "updateAvailable": "有新版本可更新",
-        "blocked": "探测完成但不宜快进（blocked）",
+        "blocked": "探测完成，但当前不宜快进（blocked；版本关系见下方「关系」行，前提见 blocker）",
         "unavailable": "远端不可达",
     }.get(report.status, report.status)
     lines.append(f"  状态       {status_label}")

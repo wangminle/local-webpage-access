@@ -8,9 +8,10 @@
 
 安全边界（设计 §5.1 / §7.3）：
 
-- 响应只含静态元信息与包内模板，**不读** workspace、registry、token、主机信息；
+- 响应只含静态产品事实与包内模板，**不读** workspace、registry、token、主机信息；
 - 链接一律站点相对路径（以 ``/`` 开头），不信任 Host / X-Forwarded-* 生成绝对地址；
-- MCP 未开放时必须如实返回 ``enabled: false``（不夸大能力）。
+- MCP 能力按运行环境探测（issue #40）：SDK 缺失时如实返回 ``enabled: false``
+  （不夸大能力）；``command`` 只是占位命令模板，不含部署期 workspace 路径。
 
 这些端点不进入 ``/api`` 命名空间，也不复用回环免 token 规则：它们本来就没有秘密。
 """
@@ -36,14 +37,35 @@ GUIDE_ROUTE = "/agent-guide"
 AGENT_API_BASE: str | None = "/api/agent/v1"
 
 
+def _mcp_stdio_available() -> bool:
+    """探测当前环境能否启动 MCP stdio 适配器（issue #40）。
+
+    ``lwa mcp`` 与 manager 通常同源安装（同一 site-packages），以
+    ``importlib.util.find_spec("mcp")`` 命中与否近似 SDK 可用性。探测本身
+    不触网、不读 workspace/主机信息；失败一律按未启用处理（不夸大能力）。
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("mcp") is not None
+    except (ImportError, ValueError):  # pragma: no cover - find_spec 环境异常兜底
+        return False
+
+
 def build_agent_info() -> dict[str, Any]:
-    """构造 ``/agent-info.json`` 响应体（纯静态，无实例/主机数据）。"""
+    """构造 ``/agent-info.json`` 响应体（静态产品事实 + 本进程能力探测）。"""
+    mcp: dict[str, Any] = {"enabled": _mcp_stdio_available()}
+    if mcp["enabled"]:
+        # 占位模板：让 agent 从发现一步拿到接入命令形态，不泄漏部署期路径
+        # （真实 workspace 绝对路径由 `lwa agent connection-info` 输出）。
+        mcp["transport"] = "stdio"
+        mcp["command"] = "lwa mcp --workspace <workspace-absolute-path>"
     return {
         "product": PRODUCT,
         "discoveryVersion": DISCOVERY_VERSION,
         "guide": GUIDE_ROUTE,
         "apiBase": AGENT_API_BASE,
-        "mcp": {"enabled": False},
+        "mcp": mcp,
         "authentication": {"required": True, "contact": "LWA 工作区管理员"},
     }
 
@@ -58,6 +80,8 @@ def build_llms_txt() -> str:
         "",
         "- [Agent 接入快速指南](/agent-guide): 鉴权方式、部署输入限制、现有 API 与操作红线",
         "- [机器可读发现信息](/agent-info.json): 产品、发现契约版本、入口与鉴权要求",
+        "- [MCP stdio 接入](/agent-guide): 同机 Agent 可用 lwa mcp --workspace <工作区绝对路径> "
+        "启动 stdio 服务器（需 [mcp] extra；能力以 /agent-info.json 的 mcp.enabled 为准）",
         "",
     ]
     return "\n".join(lines)

@@ -63,7 +63,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.8.18-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.8.19-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -241,6 +241,7 @@ def _register_all() -> None:
         alias,
         access,
         autostart,
+        ca,
         daemon,
         gateway,
         manager,
@@ -254,6 +255,7 @@ def _register_all() -> None:
     agent.register(app)
     mcp_cmd.register(app)
 
+    app.add_typer(ca.app, name="ca")
     app.add_typer(alias.app, name="alias")
     app.add_typer(probe.app, name="probe")
     app.add_typer(access.app, name="access")

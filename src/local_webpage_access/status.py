@@ -652,12 +652,17 @@ def _resolve_network_urls(
         empty["persisted_lan_ip"] = persisted_lan
         return empty
 
+    from local_webpage_access.ports import lan_entry_port
+
     current_ip = resolve_lan_ip(config)
     source = "manual" if config.lanIpStrategy == "manual" else "live"
     if current_ip:
+        # BUG-714：读时合成同样按 TLS 入口（lan_entry_port + config）——
+        # 否则 TLS 模式下管理页展示指向已关闭的 8080 明文入口死链接；
+        # lanUrl 保持直连明文语义（BUG-713 口径一致）。
         lan_url = build_lan_url(current_ip, host_port)
         route_url = (
-            build_route_url(current_ip, config.staticGatewayPort, route_host)
+            build_route_url(current_ip, lan_entry_port(config), route_host, config=config)
             if route_mode_name and route_host
             else None
         )

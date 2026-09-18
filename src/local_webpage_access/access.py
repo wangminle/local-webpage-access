@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -32,7 +33,8 @@ from urllib.parse import urlparse
 from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
-from local_webpage_access.ports import resolve_lan_ip
+from local_webpage_access.ports import entry_scheme as _entry_scheme_of
+from local_webpage_access.ports import lan_entry_port, resolve_lan_ip
 from local_webpage_access.probe import mark_probe_url, urlopen_direct
 from local_webpage_access.registry import Registry
 
@@ -532,13 +534,19 @@ def refresh_network_entries(
 # ---- 访问可用性复核（G2 / G5）----------------------------------------------
 
 
-def _http_get(url: str, *, timeout: float = _PROBE_TIMEOUT) -> UrlProbe:
-    """对 ``url`` 做 GET，返回 :class:`UrlProbe`（不抛异常）。"""
+def _http_get(
+    url: str, *, timeout: float = _PROBE_TIMEOUT, ssl_context: ssl.SSLContext | None = None
+) -> UrlProbe:
+    """对 ``url`` 做 GET，返回 :class:`UrlProbe`（不抛异常）。
+
+    W08：https URL 提供验证上下文（LWA internal CA 根证书 + 系统 CA）——
+    错误证书按 UNREACHABLE/ERROR 呈现，绝不降级 verify=False。
+    """
     probe = UrlProbe(url=url)
     # 实际请求带 __lwa_probe=1（不计入浏览量），UrlProbe 仍展示干净 URL
     req = urllib.request.Request(mark_probe_url(url), headers={"User-Agent": "lwa-access-review"})
     try:
-        with urlopen_direct(req, timeout=timeout) as resp:
+        with urlopen_direct(req, timeout=timeout, ssl_context=ssl_context) as resp:
             body = resp.read()
             probe.status_code = resp.status
             probe.content_length = _content_length(resp.headers) or len(body)
@@ -982,6 +990,7 @@ def _check_api_paths(
     html: str | None,
     *,
     host_port: int | None = None,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> None:
     """IMP-055：对照绝对 API 路径在别名入口根 vs 带前缀的可用性。
 
@@ -996,9 +1005,10 @@ def _check_api_paths(
       返回非空 JSON 404——说明绝对请求落到错误网关，带前缀到达应用后端。
       默认兜底探针**不得**据此告警（无 API 项目会误报）。
     """
-    entry_port = config.staticGatewayPort
+    entry_port = lan_entry_port(config)
     if entry_port is None:
         return
+    _entry_scheme = _entry_scheme_of(config)
 
     # BUG-467：先从入口 HTML + JS bundle 汇总 API 路径；都没有才用默认兜底。
     discovered = _collect_api_paths(
@@ -1011,8 +1021,13 @@ def _check_api_paths(
     api_paths = discovered if discovered else _DEFAULT_API_PATHS[:]
 
     for api_path in api_paths[:5]:  # 最多探测 5 条（含具体端点）
-        absolute = _http_get(f"http://127.0.0.1:{entry_port}{api_path}")
-        prefixed = _http_get(f"http://127.0.0.1:{entry_port}/{path_alias}{api_path}")
+        absolute = _http_get(
+            f"{_entry_scheme}://127.0.0.1:{entry_port}{api_path}", ssl_context=ssl_context
+        )
+        prefixed = _http_get(
+            f"{_entry_scheme}://127.0.0.1:{entry_port}/{path_alias}{api_path}",
+            ssl_context=ssl_context,
+        )
         # 判定 mismatch：绝对路径空 200 或失败，且带前缀有内容
         abs_empty_200 = absolute.ok and (absolute.content_length == 0)
         abs_failed = absolute.status_code is not None and not absolute.ok
@@ -1160,6 +1175,11 @@ def _review_instance(
         instance_id=iid,
         runtime=row.get("runtime"),
     )
+    # W08：TLS 模式下对外 URL（lanUrl/routeUrl 为 https）的探活走证书验证
+    from local_webpage_access.config import tls_enabled
+    from local_webpage_access.static_gateway import make_https_ssl_context
+
+    entry_ctx = make_https_ssl_context(workspace) if tls_enabled(config) else None
     manifest_path = workspace.app_manifest_path(iid)
     if not manifest_path.is_file():
         rep.status = "skip"
@@ -1213,7 +1233,7 @@ def _review_instance(
                 f"lanUrl host={lan_host} 与当前 LAN IP={lan_ip} 不一致（地址漂移，"
                 "运行 `lwa access refresh` 刷新）"
             )
-        rep.lan_probe = _http_get(rep.lan_url)
+        rep.lan_probe = _http_get(rep.lan_url, ssl_context=entry_ctx)
         if not rep.lan_probe.ok and not rep.lan_url_stale:
             rep.findings.append(
                 f"lanUrl {rep.lan_url} 探活失败（{rep.lan_probe.note or '非 2xx'}）"
@@ -1221,12 +1241,16 @@ def _review_instance(
 
     # 3. 别名入口 + SPA 子资源空 200 检测（IMP-023）。
     # I2：routeUrl 为空但仍有 path_alias（或磁盘别名元数据）时，用回环合成入口探测。
-    entry_port = config.staticGatewayPort
+    # W07/W08：入口端口与 scheme 跟随 TLS 配置；回环入口探活同样验证证书
+    from local_webpage_access.ports import entry_scheme, lan_entry_port
+
+    entry_port = lan_entry_port(config)
+    entry_scheme_now = entry_scheme(config)
     route_target = rep.route_url
     if not route_target and path_alias and entry_port is not None:
-        route_target = f"http://127.0.0.1:{entry_port}/{path_alias}/"
+        route_target = f"{entry_scheme_now}://127.0.0.1:{entry_port}/{path_alias}/"
     if route_target and path_alias:
-        route_probe = _http_get(route_target)
+        route_probe = _http_get(route_target, ssl_context=entry_ctx)
         rep.route_probe = route_probe
         if not rep.route_url:
             # 合成探测：便于报告展示实际检查的 URL
@@ -1237,16 +1261,22 @@ def _review_instance(
                 f"routeUrl {route_target} 探活失败（{route_probe.note or '非 2xx'}）"
             )
         elif route_probe.content_length and route_probe.content_length > 0:
-            _check_subresources(rep, config, path_alias)
+            _check_subresources(rep, config, path_alias, ssl_context=entry_ctx)
             # IMP-055：对照绝对 API 路径在别名入口根 vs 带前缀
             # 评审-组8：staticGatewayPort=None 时不再拼 :None URL（死路径）
             entry_html = (
-                _fetch_text(f"http://127.0.0.1:{config.staticGatewayPort}/{path_alias}/")
-                if config.staticGatewayPort is not None
+                _fetch_text(
+                    f"{entry_scheme_now}://127.0.0.1:{entry_port}/{path_alias}/",
+                    ssl_context=entry_ctx,
+                )
+                if entry_port is not None
                 else None
             )
             # BUG-467：内部从别名入口前缀 fetch JS bundle 抽取 API 路径
-            _check_api_paths(rep, config, path_alias, entry_html, host_port=host_port)
+            _check_api_paths(
+                rep, config, path_alias, entry_html, host_port=host_port,
+                ssl_context=entry_ctx,
+            )
 
     _fill_port_listener(rep, host_port)
 
@@ -1275,18 +1305,28 @@ def _check_subresources(
     rep: InstanceAccessReport,
     config: Config,
     path_alias: str,
+    *,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> None:
     """解析别名入口 HTML，对照绝对路径 vs 带前缀子资源（IMP-023 / BUG-381）。"""
-    entry_port = config.staticGatewayPort
+    entry_port = lan_entry_port(config)
     if entry_port is None:
         return
-    html = _fetch_text(f"http://127.0.0.1:{entry_port}/{path_alias}/")
+    _entry_scheme = _entry_scheme_of(config)
+    html = _fetch_text(
+        f"{_entry_scheme}://127.0.0.1:{entry_port}/{path_alias}/", ssl_context=ssl_context
+    )
     if not html:
         return
     resources = _extract_absolute_resources(html)
     for path in resources:
-        absolute = _http_get(f"http://127.0.0.1:{entry_port}{path}")
-        prefixed = _http_get(f"http://127.0.0.1:{entry_port}/{path_alias}{path}")
+        absolute = _http_get(
+            f"{_entry_scheme}://127.0.0.1:{entry_port}{path}", ssl_context=ssl_context
+        )
+        prefixed = _http_get(
+            f"{_entry_scheme}://127.0.0.1:{entry_port}/{path_alias}{path}",
+            ssl_context=ssl_context,
+        )
         empty_200, mismatch = _alias_resource_mismatch(path, absolute, prefixed)
         finding = SubresourceFinding(
             path=path,
@@ -1321,15 +1361,18 @@ def _check_subresources(
                 rep.status = "warn"
 
 
-def _fetch_text(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | None:
+def _fetch_text(
+    url: str, *, timeout: float = _PROBE_TIMEOUT, ssl_context: ssl.SSLContext | None = None
+) -> str | None:
     """GET url 返回响应正文文本；失败返回 None。
 
     BUG-179：带 ``__lwa_probe=1`` 探针标记，避免 access review / gateway on /
     rebuild 复检拉取别名入口 HTML 时被 pageviews 计为真实浏览（与 _http_get 一致）。
+    W08：https URL 提供验证上下文（错误证书拒绝）。
     """
     req = urllib.request.Request(mark_probe_url(url), headers={"User-Agent": "lwa-access-review"})
     try:
-        with urlopen_direct(req, timeout=timeout) as resp:
+        with urlopen_direct(req, timeout=timeout, ssl_context=ssl_context) as resp:
             if not (200 <= resp.status < 300):
                 return None
             return resp.read().decode("utf-8", "replace")
@@ -1360,24 +1403,41 @@ def instance_still_has_imp023(
     config: Config,
     *,
     path_alias: str,
+    workspace: Workspace | None = None,
 ) -> bool:
     """rebuild 后简要复检：别名入口是否仍存在 IMP-023 别名资源不匹配。
 
     与 :func:`_check_subresources` 同口径；拉不到 HTML / 无绝对路径资源 → False
     （无法证明仍坏，不当作 still_imp023）。
+
+    BUG-712：入口 scheme/端口跟随 TLS 配置，https 入口走证书验证——否则
+    明文打 https 端口必失败，G6 防假绿复检在 TLS 部署下恒为"通过"。
     """
-    entry_port = config.staticGatewayPort
+    entry_port = lan_entry_port(config)
     if entry_port is None or not path_alias:
         return False
-    html = _fetch_text(f"http://127.0.0.1:{entry_port}/{path_alias}/")
+    scheme = _entry_scheme_of(config)
+    ssl_ctx: ssl.SSLContext | None = None
+    if scheme == "https" and workspace is not None:
+        from local_webpage_access.static_gateway import make_https_ssl_context
+
+        ssl_ctx = make_https_ssl_context(workspace)
+    html = _fetch_text(
+        f"{scheme}://127.0.0.1:{entry_port}/{path_alias}/", ssl_context=ssl_ctx
+    )
     if not html:
         return False
     resources = _extract_absolute_resources(html)
     if not resources:
         return False
     for path in resources:
-        absolute = _http_get(f"http://127.0.0.1:{entry_port}{path}")
-        prefixed = _http_get(f"http://127.0.0.1:{entry_port}/{path_alias}{path}")
+        absolute = _http_get(
+            f"{scheme}://127.0.0.1:{entry_port}{path}", ssl_context=ssl_ctx
+        )
+        prefixed = _http_get(
+            f"{scheme}://127.0.0.1:{entry_port}/{path_alias}{path}",
+            ssl_context=ssl_ctx,
+        )
         _, mismatch = _alias_resource_mismatch(path, absolute, prefixed)
         if mismatch:
             return True
@@ -1422,7 +1482,9 @@ def maybe_rebuild_after_review(
         still = False
         if alias:
             try:
-                still = instance_still_has_imp023(config, path_alias=alias)
+                still = instance_still_has_imp023(
+                    config, path_alias=alias, workspace=workspace
+                )
             except Exception as exc:  # noqa: BLE001 — 复检失败不掩盖 rebuild 成功
                 log.warning("G6：rebuild 后复检 %s 失败（不阻断）：%s", iid, exc)
                 still = False

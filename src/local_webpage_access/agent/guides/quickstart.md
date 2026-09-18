@@ -67,4 +67,4 @@
 
 ## 7. 规划中（M2 未实现，勿调用）
 
-远程 MCP（Streamable HTTP）、独立 Agent 授权、上传 API 均在实施计划中，当前版本不存在。以 `/agent-info.json` 的 `apiBase`/`mcp.enabled` 为准。
+远程 MCP（Streamable HTTP）、独立 Agent 授权、上传 API 均在实施计划中，当前版本不存在。本机 MCP stdio 通道的可用性以实际探测为准：`/agent-info.json` 的 `mcp.enabled` 按运行环境探测得出（为 false 时先 `pip install 'local-webpage-access[mcp]'` 再复核，不要仅凭一次 false 放弃接入）；接入命令模板见同响应的 `mcp.command`，接入引导用 `lwa agent connection-info`。

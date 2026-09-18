@@ -234,6 +234,20 @@ class Config(BaseModel):
     buildMirrors: BuildMirrors = Field(default_factory=BuildMirrors)
     lanIpStrategy: str = "auto"
     manualLanIp: str | None = None
+    # ---- HTTPS 首版交付（2026-09-18 WBS / CHK-352）---------------------------
+    # gatewayTls：别名入口与管理的传输加密。仅 staticGateway=caddy 支持
+    # （internal = Caddy 内嵌 CA 自动签发，根证书经 `lwa ca export` 分发）。
+    gatewayTls: str = "off"
+    # HTTPS 别名入口端口（gatewayTls=internal 时生效；证书 SAN 覆盖回环+LAN IP）
+    gatewayTlsPort: int = Field(default=8443, ge=1, le=65535)
+    # 管理面独立 HTTPS origin 端口（独立端口而非同源 /manager/，CHK-352 修订 H1-B5）
+    managerTlsPort: int = Field(default=9443, ge=1, le=65535)
+    # TLS 开启后的明文入口端口：None=默认关闭（推荐）；设为端口号可保留明文
+    # （非安全边界——IP 访问无 HSTS，重定向可被在径剥离，见 docs/https.md）
+    gatewayPlainPort: int | None = Field(default=None, ge=1, le=65535)
+    # 实例直连绑定地址：0.0.0.0（默认，兼容现状）/ 127.0.0.1（收敛——
+    # LAN 仅剩网关入口；影响 builtin --bind、Caddy 站点块、Docker 端口发布）
+    instanceBindHost: str = "0.0.0.0"
     logLevel: str = "INFO"
     # AGC-W06：Agent 协作（M1 仅本机 owner；默认空源根=拒绝 server_directory）
     agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -285,6 +299,51 @@ class Config(BaseModel):
         except ValueError as exc:
             raise ValueError(f"manualLanIp 不是合法 IP 地址：{value!r}") from exc
 
+    @field_validator("gatewayTls", mode="before")
+    @classmethod
+    def _validate_gateway_tls(cls, v: Any) -> str:
+        # YAML 1.1 陷阱：未加引号的 ``off`` 会被解析成布尔 False——
+        # 手写配置几乎必然踩中，按语义归一（False=off，True=internal）。
+        if isinstance(v, bool):
+            v = "internal" if v else "off"
+        allowed = {"off", "internal"}
+        if v not in allowed:
+            raise ValueError(f"gatewayTls 必须是 {allowed} 之一，得到 {v!r}")
+        return v
+
+    @field_validator("instanceBindHost")
+    @classmethod
+    def _validate_instance_bind_host(cls, v: str) -> str:
+        # CHK-353/BUG-719：仅允许 IPv4 通配或 IPv4 回环——别名反代上游、
+        # 健康探测与 access 复核固定走 127.0.0.1，::/::1 绑定会让全部回环
+        # 上游与探活失效（IPv6-only 收敛暂不支持，待上游链路整体 v6 化）。
+        try:
+            normalized = str(ipaddress.ip_address(v.strip()))
+        except ValueError as exc:
+            raise ValueError(
+                f"instanceBindHost 必须是合法 IP 地址，得到 {v!r}"
+            ) from exc
+        allowed = {"0.0.0.0", "127.0.0.1"}
+        if normalized not in allowed:
+            raise ValueError(
+                f"instanceBindHost 仅支持 0.0.0.0（通配）或 127.0.0.1（回环收敛），"
+                f"得到 {normalized!r}——网关别名反代/健康探测固定走 IPv4 回环，"
+                "绑定其他地址（含 ::/::1）会使上游与探活失效"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def _check_tls_compatibility(self) -> Config:
+        # 支持矩阵（D3）：builtin 是 http.server，无 TLS 能力；nginx 在白名单
+        # 但无实现分支。TLS 仅 caddy。
+        if self.gatewayTls == "internal" and self.staticGateway != "caddy":
+            raise ValueError(
+                f"gatewayTls=internal 仅支持 staticGateway=caddy"
+                f"（当前 {self.staticGateway!r}）；builtin 网关不支持 TLS，"
+                "请切换网关或保持 gatewayTls=off",
+            )
+        return self
+
     @model_validator(mode="after")
     def _check_manager_port_not_in_pool(self) -> Config:
         if self.portPool.start <= self.managerPort <= self.portPool.end:
@@ -305,6 +364,48 @@ class Config(BaseModel):
             if self.portPool.start <= self.staticGatewayPort <= self.portPool.end:
                 raise ValueError(
                     f"staticGatewayPort({self.staticGatewayPort}) 不能落在端口池 "
+                    f"[{self.portPool.start}, {self.portPool.end}] 内",
+                )
+        # HTTPS 首版：TLS 端口互斥且不与管理口/入口口/端口池冲突（W01）
+        tls_ports = {
+            "gatewayTlsPort": self.gatewayTlsPort,
+            "managerTlsPort": self.managerTlsPort,
+        }
+        occupied = {"managerPort": self.managerPort}
+        if self.staticGatewayPort is not None:
+            occupied["staticGatewayPort"] = self.staticGatewayPort
+        for plain_name, plain_port in occupied.items():
+            for tls_name, tls_port in tls_ports.items():
+                if plain_port == tls_port:
+                    raise ValueError(
+                        f"{tls_name}({tls_port}) 不能与 {plain_name}({plain_port}) 相同",
+                    )
+        if self.gatewayTlsPort == self.managerTlsPort:
+            raise ValueError(
+                f"gatewayTlsPort 与 managerTlsPort 不能相同（{self.gatewayTlsPort}）",
+            )
+        for name, port in tls_ports.items():
+            if self.portPool.start <= port <= self.portPool.end:
+                raise ValueError(
+                    f"{name}({port}) 不能落在端口池 "
+                    f"[{self.portPool.start}, {self.portPool.end}] 内",
+                )
+        if self.gatewayTls == "internal" and self.gatewayPlainPort is not None:
+            plain = self.gatewayPlainPort
+            # BUG-722：与 staticGatewayPort 同规格查全——撞 managerPort 时
+            # Caddy 抢不到端口，落端口池则与实例直连冲突。
+            if plain == self.managerPort:
+                raise ValueError(
+                    f"gatewayPlainPort({plain}) 不能与管理页端口"
+                    f"({self.managerPort}) 相同",
+                )
+            if plain in tls_ports.values():
+                raise ValueError(
+                    f"gatewayPlainPort({plain}) 不能与 TLS 端口相同",
+                )
+            if self.portPool.start <= plain <= self.portPool.end:
+                raise ValueError(
+                    f"gatewayPlainPort({plain}) 不能落在端口池 "
                     f"[{self.portPool.start}, {self.portPool.end}] 内",
                 )
         return self
@@ -353,6 +454,16 @@ class Config(BaseModel):
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.to_yaml(), encoding="utf-8")
+
+
+def tls_enabled(config: Config) -> bool:
+    """HTTPS 首版交付（WBS W01/W07）：网关 TLS 是否生效。
+
+    权威定义置于 config（避免 ports ↔ static_gateway 循环导入）——
+    ``gatewayTls=internal`` 且网关为 caddy（支持矩阵 D3，Config 校验
+    已拒绝 builtin+TLS 组合）。
+    """
+    return config.gatewayTls == "internal" and config.staticGateway == "caddy"
 
 
 def default_config() -> Config:
@@ -413,6 +524,21 @@ staticGateway: caddy
 # 才在此端口监听并按 /<alias>/ 反向代理到各实例 hostPort。设为 null 关闭别名入口。
 staticGatewayPort: 8080
 
+# HTTPS 传输加密（仅 staticGateway=caddy 支持；详见 docs/https.md）。
+# off：现状——全部明文 HTTP。
+# internal：Caddy 内嵌 CA 自动签发——别名入口与管理面走 HTTPS，manager 收敛为
+#   仅回环监听（managerHost 被强制 127.0.0.1），根证书用 `lwa ca export` 导出
+#   并在客户端安装信任；未安装根证书的浏览器会得到证书告警（不要点穿告警）。
+gatewayTls: off
+gatewayTlsPort: 8443      # HTTPS 别名入口端口
+managerTlsPort: 9443      # 管理面独立 HTTPS origin 端口（https://<LAN-IP>:9443/）
+# TLS 开启后的明文入口端口：默认 null=关闭（推荐）。保留明文不是安全边界。
+# gatewayPlainPort: 8080
+# 实例直连绑定地址：0.0.0.0（默认，LAN 可直连 hostPort）/ 127.0.0.1（收敛——
+# LAN 仅剩网关入口，Docker 发布与 builtin/Caddy 站点同步绑定回环；
+# 仅支持这两个值，IPv6 回环暂不支持——别名反代/探活固定走 IPv4 回环）
+instanceBindHost: 0.0.0.0
+
 # 构建并发数（小主机建议保持 1）
 buildConcurrency: 1
 
@@ -471,4 +597,5 @@ __all__ = [
     "PORT_POOL_START_DEFAULT",
     "PORT_POOL_END_DEFAULT",
     "STATIC_GATEWAY_PORT_DEFAULT",
+    "tls_enabled",
 ]

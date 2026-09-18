@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, Mapping, Sequence, Union
 
 from pydantic import (
     AfterValidator,
@@ -141,6 +141,26 @@ class AgentError(StrictModel):
     operationId: str | None = None
     nextActions: list[str] = Field(default_factory=list)
     retryAfterMs: StrictInt | None = Field(default=None, ge=0)
+
+
+def json_safe_issues(issues: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """BUG-708：``ValidationError.errors()`` 的 ctx 可能携带 ValueError 等对象。
+
+    跨字段校验（``model_validator``）的 issue 会带 ``ctx.error`` 原始异常；
+    直接放进 JSONResponse / ``json.dumps`` 会 500 / TypeError。递归转成
+    JSON 安全值（非基础类型降级为 ``str``），HTTP 与 MCP 通道共源使用。
+    """
+
+    def _convert(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(k): _convert(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_convert(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    return [_convert(issue) for issue in issues]
 
 
 # ---- 分页 ---------------------------------------------------------------------

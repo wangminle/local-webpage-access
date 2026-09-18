@@ -40,6 +40,7 @@ from local_webpage_access.file_lock import (
 )
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.paths import Workspace
+from local_webpage_access.ports import lan_entry_port
 from local_webpage_access.registry import Registry
 from local_webpage_access.service_failures import (
     LastStartError,
@@ -303,6 +304,89 @@ def _restore_stopped_builtin(
             log.warning("恢复 builtin 静态服务 %s 失败（忽略）：%s", iid, exc)
 
 
+def verify_tls_entries(
+    workspace,
+    config,
+    *,
+    attempts: int = 5,
+    timeout: float = 5.0,
+    retry_delay: float = 1.0,
+) -> str | None:
+    """W04b：TLS 入口证书验证（错误证书/不可达 → 错误消息；TLS 层健康返回 None）。
+
+    ``attempts/timeout/retry_delay`` 可调：doctor 等交互场景传小值避免长阻塞
+    （启动路径默认最坏 5 次 × 5s；doctor 用 2 × 2s）。
+
+    仅 gatewayTls=internal 时执行，验证走完整证书链（internal CA 根证书 +
+    系统 CA）——「能连上但证书错」立即失败，这是与静默回退的本质区别。
+
+    BUG-711：启动顺序是 gateway → manager → daemon——本验证运行时 manager
+    很可能尚未启动，Caddy 反代会回 502。**任何经完整 TLS 握手收到的 HTTP
+    响应（含 502/503）都证明 TLS 终止层工作正常**，按成功处理；只有连接层
+    失败（Caddy 未就绪，短暂重试）与证书校验失败（立即）才报错。
+    manager 自身健康由 doctor / manager on 的 wait_for_health 负责。
+
+    BUG-716：别名入口（存在别名片段时）也纳入验证，使 doctor 文案与
+    实际探测范围一致。
+    """
+    from local_webpage_access.config import tls_enabled
+
+    if not tls_enabled(config):
+        return None
+    import ssl
+    import time as time_mod
+    import urllib.error
+
+    from local_webpage_access.probe import urlopen_direct
+    from local_webpage_access.static_gateway import (
+        caddy_root_cert_path,
+        make_https_ssl_context,
+    )
+
+    probes = {
+        f"管理面入口 https://127.0.0.1:{config.managerTlsPort}/":
+            f"https://127.0.0.1:{config.managerTlsPort}/api/health",
+    }
+    alias_confs = sorted(workspace.static_aliases.glob("*.conf"))
+    if alias_confs:
+        first_alias = alias_confs[0].stem
+        probes[f"别名入口 https://127.0.0.1:{config.gatewayTlsPort}/{first_alias}/"] = (
+            f"https://127.0.0.1:{config.gatewayTlsPort}/{first_alias}/"
+        )
+    for label, url in probes.items():
+        last_reason: object = None
+        for attempt in range(attempts):
+            # BUG-719（首启竞态）：internal CA 在 Caddy 加载配置时才生成——
+            # 每次尝试重建验证上下文，root.crt 落盘后的下一次尝试即可通过。
+            context = make_https_ssl_context(workspace)
+            try:
+                with urlopen_direct(url, timeout=timeout, ssl_context=context):
+                    pass  # 2xx/3xx/4xx：TLS 层已证明可用
+                break
+            except urllib.error.HTTPError:
+                break  # 任何 HTTP 响应（含 502/503 反代上游未起）= TLS 层健康
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                reason = getattr(exc, "reason", exc)
+                if isinstance(reason, (ssl.SSLCertVerificationError, ssl.CertificateError)):
+                    if not caddy_root_cert_path(workspace).is_file():
+                        # 根证书尚未落盘：上下文里只有系统 CA，验证必失败——
+                        # 属首启竞态而非真证书错误，按可重试处理。
+                        last_reason = reason
+                        if attempt < attempts - 1:
+                            time_mod.sleep(retry_delay)
+                        continue
+                    return (
+                        f"{label} 证书验证失败（{reason}）——不降级明文，"
+                        "请检查 run/caddy-data 证书状态后重试 `lwa gateway on`"
+                    )
+                last_reason = reason
+                if attempt < attempts - 1:
+                    time_mod.sleep(retry_delay)  # Caddy 刚拉起，监听尚在绑定
+        else:
+            return f"{label} 不可达（{last_reason}）"
+    return None
+
+
 def start_gateway(
     workspace: Workspace,
     config: Config,
@@ -334,7 +418,7 @@ def start_gateway(
             # FAIL 并附原因，而不是「已按意图停用」。
             fail_state = read_state(workspace) or GatewayState(
                 enabled=True,
-                port=config.staticGatewayPort,
+                port=lan_entry_port(config),
                 admin_port=ADMIN_PORT,
             )
             fail_state.enabled = True
@@ -365,7 +449,7 @@ def start_gateway(
                         enabled=True,
                         pid=pid,
                         started_at=now_iso(),
-                        port=config.staticGatewayPort,
+                        port=lan_entry_port(config),
                         admin_port=ADMIN_PORT,
                     ),
                 )
@@ -406,6 +490,16 @@ def start_gateway(
                 gateway.reload_all()
             except Exception as exc:  # noqa: BLE001 — reload 失败不阻断已在线网关
                 log.warning("已在线网关写盘后 reload 失败（不阻断）：%s", exc)
+            # BUG-717：已在线路径同样执行 TLS 入口验证——「TLS 失败不得静默
+            # 回退」的承诺不能只在冷启动分支生效；reload 后证书/入口异常
+            # 必须显式报错（reload 失败本身可容忍，TLS 层失败不可）。
+            tls_error = verify_tls_entries(workspace, config)
+            if tls_error is not None:
+                raise LifecycleError(
+                    f"网关已在线但 HTTPS 入口验证失败：{tls_error}；"
+                    "TLS 失败不降级明文——请检查 logs/caddy-runtime.log 与"
+                    " run/caddy-data/ 证书状态后重试 `lwa gateway on`",
+                )
             _post_switch_finalize(
                 workspace,
                 config,
@@ -440,7 +534,7 @@ def start_gateway(
             enabled=True,
             pid=state.pid if state else None,
             started_at=state.started_at if state else None,
-            port=config.staticGatewayPort,
+            port=lan_entry_port(config),
             admin_port=ADMIN_PORT,
             last_start_error=state.last_start_error if state else None,
             consecutive_start_failures=(
@@ -477,13 +571,24 @@ def start_gateway(
             enabled=True,
             pid=pid,
             started_at=now_iso(),
-            port=config.staticGatewayPort,
+            port=lan_entry_port(config),
             admin_port=ADMIN_PORT,
             bind_version=_gateway_bind_version(),
             bind_revision=_gateway_bind_revision(),
         )
         # IMP-064.02/064.06：启动成功清零失败计数。
         write_state(workspace, state)
+        # W04b（HTTPS 首版交付）：TLS 模式下验证 https 入口可用——证书链完整
+        # 才算启动成功。**失败显式报错，绝不静默回退明文**（CHK-352 §3.2）。
+        tls_error = verify_tls_entries(workspace, config)
+        if tls_error is not None:
+            record_start_failure(state, tls_error, source=source)
+            write_state(workspace, state)
+            raise LifecycleError(
+                f"gatewayTls=internal 但 HTTPS 入口验证失败：{tls_error}；"
+                "TLS 失败不降级明文——请检查 logs/caddy-runtime.log 与"
+                " run/caddy-data/ 证书状态后重试 `lwa gateway on`",
+            )
         log.info(
             "网关已启动（pid=%s，admin=127.0.0.1:%d，entry=%s）",
             pid if pid else "?",
@@ -666,7 +771,10 @@ def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
     if running and pid is None:
         # 服务态缺失但 master 在线：补读 caddy.pid 便于展示。
         pid = _read_caddy_pid(gateway)
-    configured_port = config.staticGatewayPort
+    from local_webpage_access.ports import lan_entry_port as _effective_entry
+
+    # 实际别名入口端口（TLS 开启时为 gatewayTlsPort；旧状态文件记的 8080 仅兜底）
+    configured_port = _effective_entry(config) or config.staticGatewayPort
     from local_webpage_access.service_failures import failure_note
 
     return {

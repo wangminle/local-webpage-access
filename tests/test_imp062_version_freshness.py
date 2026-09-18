@@ -1,15 +1,17 @@
-"""IMP-062 回归：doctor 版本滞后提示（复用 ``lwa update --check`` + 24h 缓存）。
+"""IMP-062 回归：doctor 版本滞后提示（复用 ``lwa update --check`` + 分级缓存）。
 
 * 复用 update_source.run_source_check（不重复实现远端探测）；
-* 24h 缓存命中不触网；所有状态都缓存（含 unavailable，离线环境不反复等超时）；
+* 分级缓存（issue #41）：确定性结论 24h 命中不触网；unavailable 是瞬态网络
+  失败，仅缓存 30 分钟，SKIP 文案附删缓存自助路径；
 * updateAvailable → WARN（提示 lwa update）；upToDate → OK；
   unavailable / blocked / 非 git 安装 / 锁忙 → SKIP（网络与源码管理问题不升
-  doctor FAIL）。
+  doctor FAIL）。blocked（dirty 等常态）仍如实报告版本关系 + 快进前提。
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -45,13 +47,23 @@ def _write_cache(ws: Workspace, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def _minutes_ago(minutes: int) -> str:
+    return (
+        datetime.now().astimezone() - timedelta(minutes=minutes)
+    ).isoformat(timespec="seconds")
+
+
 class _Report:
     """SourceCheckReport 替身（to_dict 契约子集）。"""
 
-    def __init__(self, status: str, *, behind_by: int = 0, target: dict | None = None,
-                 error: dict | None = None) -> None:
+    def __init__(self, status: str, *, behind_by: int = 0, ahead_by: int = 0,
+                 relation: str = "", target: dict | None = None,
+                 error: dict | None = None, blockers: list | None = None) -> None:
         self.status = status
         self.behind_by = behind_by
+        self.ahead_by = ahead_by
+        self.relation = relation
+        self.blockers = blockers or []
         self._target = target
         self._error = error
 
@@ -59,9 +71,12 @@ class _Report:
         return {
             "status": self.status,
             "checkedAt": "2026-08-31T12:00:00+08:00",
+            "relation": self.relation,
+            "aheadBy": self.ahead_by,
             "behindBy": self.behind_by,
             "target": self._target,
             "error": self._error,
+            "blockers": self.blockers,
         }
 
 
@@ -137,11 +152,67 @@ def test_unavailable_is_skip_not_fail(ws, monkeypatch) -> None:
     result = check_version_freshness(ws)
     assert result.status == "skip"
     assert "不可达" in result.message
+    assert "version-check.json" in (result.suggestion or ""), (
+        "issue #41：SKIP 文案须附删缓存自助路径"
+    )
     cached = json.loads((ws.run / "version-check.json").read_text(encoding="utf-8"))
     assert cached["status"] == "unavailable"
 
 
-def test_blocked_is_skip(ws, monkeypatch) -> None:
+def test_unavailable_cache_hit_uses_short_ttl(ws, monkeypatch) -> None:
+    """issue #41 问题①：10 分钟前的 unavailable 缓存仍命中（30 分钟短 TTL）。"""
+    import local_webpage_access.update_source as us
+
+    _write_cache(
+        ws,
+        {
+            "status": "unavailable",
+            "checkedAt": _minutes_ago(10),
+            "behindBy": 0,
+            "error": {"kind": "fetch_failed", "message": "connection timeout"},
+        },
+    )
+    called: list[str] = []
+    monkeypatch.setattr(
+        "local_webpage_access.updater.locate_repo",
+        lambda: called.append("locate") or Path("/repo"),
+    )
+    monkeypatch.setattr(us, "acquire_repo_lock", lambda repo, workspace=None: called.append("lock") or 1)
+
+    result = check_version_freshness(ws)
+    assert result.status == "skip"
+    assert "30 分钟" in result.message, "文案须说明短 TTL 会自动重试"
+    assert "version-check.json" in (result.suggestion or "")
+    assert called == [], "短 TTL 内同样不触网"
+
+
+def test_unavailable_cache_expires_after_30min(ws, monkeypatch) -> None:
+    """issue #41 问题①：31 分钟前的 unavailable 缓存已过期，重新探测。
+
+    实战现场：一次 60s fetch 超时被 24h TTL 放大成整天 SKIP，网络恢复后
+    doctor 反而最不可用。
+    """
+    import local_webpage_access.update_source as us
+
+    _write_cache(
+        ws,
+        {
+            "status": "unavailable",
+            "checkedAt": _minutes_ago(31),
+            "behindBy": 0,
+            "error": {"kind": "fetch_failed", "message": "connection timeout"},
+        },
+    )
+    monkeypatch.setattr("local_webpage_access.updater.locate_repo", lambda: Path("/repo"))
+    monkeypatch.setattr(us, "acquire_repo_lock", lambda repo, workspace=None: 1)
+    monkeypatch.setattr(us, "run_source_check", lambda repo, **kw: _Report("upToDate"))
+
+    result = check_version_freshness(ws)
+    assert result.status == "ok", "网络恢复后下一次 doctor 应自动重试并得出真实结论"
+
+
+def test_blocked_without_target_stays_single_reason(ws, monkeypatch) -> None:
+    """issue #41：blocked 但探测未完成（无 target/relation，如 resolve 失败）→ 单句阻断。"""
     import local_webpage_access.update_source as us
 
     monkeypatch.setattr("local_webpage_access.updater.locate_repo", lambda: Path("/repo"))
@@ -156,6 +227,63 @@ def test_blocked_is_skip(ws, monkeypatch) -> None:
     result = check_version_freshness(ws)
     assert result.status == "skip"
     assert "本地修改" in result.message
+    assert "版本关系：" not in result.message, "无版本数据时不得编造关系"
+
+
+def test_blocked_reports_relation_and_prerequisite(ws, monkeypatch) -> None:
+    """issue #41 问题②：dirty 是常态，blocked 时已算出的版本关系不得被吞掉。
+
+    实战现场：ledger（task-list.md）日常未提交 → blocked，但 behindBy 已是 0。
+    """
+    import local_webpage_access.update_source as us
+
+    monkeypatch.setattr("local_webpage_access.updater.locate_repo", lambda: Path("/repo"))
+    monkeypatch.setattr(us, "acquire_repo_lock", lambda repo, workspace=None: 1)
+    monkeypatch.setattr(
+        us,
+        "run_source_check",
+        lambda repo, **kw: _Report(
+            "blocked",
+            relation="equal",
+            behind_by=0,
+            target={"version": "V0.8.18-test", "head": "8540700deadbeef"},
+            blockers=[
+                {
+                    "kind": "dirty",
+                    "message": "tracked 文件有本地修改（1 个）",
+                    "action": "git commit / git stash 后重试",
+                }
+            ],
+        ),
+    )
+    result = check_version_freshness(ws)
+    assert result.status == "skip"
+    assert "已是最新" in result.message, "behind 0 的版本关系要如实报告"
+    assert "本地修改" in result.message, "快进前提（blocker）同样在场"
+    assert "不宜快进" in result.message
+    # 缓存补充 relation / blockerMessage，命中缓存后双报告仍可用
+    cached = json.loads((ws.run / "version-check.json").read_text(encoding="utf-8"))
+    assert cached["relation"] == "equal"
+    assert cached["blockerMessage"] == "tracked 文件有本地修改（1 个）"
+
+
+def test_blocked_cache_hit_keeps_dual_report(ws) -> None:
+    """issue #41：缓存命中的 blocked 同样双报告（老缓存缺 relation 时按 behindBy 推断）。"""
+    _write_cache(
+        ws,
+        {
+            "status": "blocked",
+            "checkedAt": _minutes_ago(5),
+            "behindBy": 3,
+            "target": {"version": "V0.9.0-test", "head": "abc123"},
+            "blockerMessage": "HEAD 处于 detached 状态",
+            "error": None,
+        },
+    )
+    result = check_version_freshness(ws)
+    assert result.status == "skip"
+    assert "落后远端 3 个提交" in result.message
+    assert "detached" in result.message
 
 
 def test_lock_busy_skips(ws, monkeypatch) -> None:
