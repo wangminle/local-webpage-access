@@ -1,6 +1,6 @@
 # LWA Agent 错误处置指南
 
-> 适用版本：V0.8.19。所有错误统一为
+> 适用版本：V0.9.0。所有错误统一为
 > `{"error": {"code", "message", "detail?", "retryable", "retryAfterMs?", "nextActions?"}}`。
 > `retryable=true` 才可自动重试；重试须有界（建议按 `retryAfterMs`，无则指数退避，≤3 次）。
 

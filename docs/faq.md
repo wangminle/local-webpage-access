@@ -694,7 +694,7 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
 
 ### 别名入口白屏（页面空白 / 资源空 200 或 404）
 
-经路径别名访问 `http://<LAN-IP>:8080/<alias>/` 白屏，但端口直连 `http://<LAN-IP>:<hostPort>/` 正常：
+经路径别名访问白屏，但端口直连 `http://<LAN-IP>:<hostPort>/` 正常。明文入口默认 `http://<LAN-IP>:8080/<alias>/`；`gatewayTls: internal` 时改为 `https://<LAN-IP>:8443/<alias>/`（见下「如何开启 HTTPS」）。
 
 * **根因 A — SPA 绝对路径（IMP-023 / IMP-055）**：Vite/Vue/React 等构建产物若用默认 `base: '/'`，HTML 里是 `/assets/app.js`（绝对）。别名 `/<alias>/` 是子路径，绝对路径会绕过别名打到入口根，常见结果是**空 200**、**404**，或被 SPA/回落页吃成 **200 + text/html** -> JS 无法执行 -> 白屏。同样地，前端 API 客户端若用绝对 `/api/v1`，也会打到入口根而非后端。
   * **设别名时拦截**：`lwa alias set` / 管理页设别名时，对 **shared-static 与 docker-compose** 实例均跑守卫；若检出绝对 `src`/`href`，会直接失败并提示改造步骤（探不到入口时不拦但提示「未验证入口 HTML」）。
@@ -747,6 +747,14 @@ lwa gateway switch builtin --dry-run     # 只看将影响的实例
 - `--json` / `POST /api/gateway/switch` 返回中：`ok=true` 表示切换事务本身成功，但 **`ok` ≠ `fullyOk`**；`accessOk=false` 表示后端已切成功、访问复核仍有风险（不假绿）。`fullyOk` 需切换与访问复核均通过。
 - **主动停止的实例**（`desiredState=stopped`）在 access review 中标 `[SKIP]`，不会因回环 REFUSED 拖垮 switch/review 的 overall（BUG-301）。
 - 管理页等价：`POST /api/gateway/switch`（body `{"backend":"caddy"|"builtin"}`）。
+
+### 如何开启 HTTPS / 浏览器报证书不受信任
+
+V0.9.0 起在 **Caddy** 网关下设置 `gatewayTls: internal`，别名走 `https://<LAN-IP>:8443/`、管理页走独立 origin `https://<LAN-IP>:9443/`（manager 本身仅回环）。builtin 网关无 TLS，配置会直接拒绝。完整步骤、根证书安装与真机验收见 [https.md](https.md)。
+
+* 先 `lwa gateway on` 再 `lwa ca export`，按打印的 SHA-256 指纹把根证书装进客户端信任库——**不要**点穿浏览器告警。
+* TLS 失败会显式报错，**不会**静默回退明文。`lwa doctor` 有 `gateway_tls` 检查。
+* Let's Encrypt / 公网 ACME / 自定义域名证书不在范围内。
 
 ## 数据与清理
 

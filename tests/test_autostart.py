@@ -18,10 +18,7 @@ from local_webpage_access import autostart as asm
 
 
 # ---- 平台识别 --------------------------------------------------------------
-
-
-def test_detect_platform_returns_known_value() -> None:
-    assert asm.detect_platform() in {"macos", "linux", "wsl", "windows", "unknown"}
+# detect_platform 返回值烟测见 test_setup.py（autostart 只是再导出同一函数）。
 
 
 def test_is_wsl_via_proc_version(monkeypatch) -> None:

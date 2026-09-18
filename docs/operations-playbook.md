@@ -322,6 +322,7 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 | `caddy validate` 报悬空 import | BUG-069 类残留（已根治，偶发于历史脏配置） | `lwa gateway off` 再 `on`，会基于实际存在的 conf 重组主 Caddyfile |
 | 切 builtin 后 Caddy 还在跑 | stale pid / 旧 master | `lwa gateway off`（不校验版本，强制 `caddy stop` + 清 `run/gateway.json`） |
 | `lwa doctor` 报 Caddy 健康 FAIL | admin/validate/站点端口探测 | 按 doctor 提示处置；常见为 master 未起（`lwa gateway on`） |
+| `run/caddy.pid` 丢失但 :2019 仍在监听 | 孤儿 master（进程在、pidfile 无） | `lwa gateway on` 会在四重安全闸通过后自动认领并补写 pidfile；不要先 `kill` |
 
 健康探针（IMP-020）：`lwa doctor` 在 caddy 模式会探 admin :2019 + 主 Caddyfile `caddy validate` + 别名入口 / 各 enabled 站点 hostPort 可达性 + stale pid 提示。
 
@@ -495,6 +496,7 @@ cd /abs/NEW && lwa workspace relocate --verify
 - [开机自启](autostart.md) — launchd / systemd；WSL 唤醒与可选 mirrored
 - [已知限制](known-limitations.md) — 含 WSL2 宿主准备（内存 / 防火墙 / 文件系统）
 - [排障 FAQ](faq.md) — 含 Full Profile / `setup --full --resume` / 症状→日志 / 内置安装脚本
+- [HTTPS 传输加密](https.md) — `gatewayTls: internal`、根证书导出与信任、明文收敛
 
 ### 导入预览和清理前确认
 

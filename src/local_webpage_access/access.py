@@ -26,6 +26,7 @@ import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from functools import partial
 from html.parser import HTMLParser
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -907,15 +908,18 @@ def _is_javascript_content_type(content_type: str | None) -> bool:
     return "javascript" in base
 
 
-def _fetch_javascript(url: str, *, timeout: float = _PROBE_TIMEOUT) -> str | None:
+def _fetch_javascript(
+    url: str, *, timeout: float = _PROBE_TIMEOUT, ssl_context: ssl.SSLContext | None = None
+) -> str | None:
     """GET url，仅当 Content-Type 为 JavaScript 时返回正文；否则 None。
 
     FastAPI/SPA fallback 常对错误路径返回 ``text/html`` 200，若当 bundle
     解析会抽到入口页里的误导性 ``/api/...`` 或静默失败。
+    BUG-726：https 入口候选须经证书验证上下文（http URL 自动忽略该参数）。
     """
     req = urllib.request.Request(mark_probe_url(url), headers={"User-Agent": "lwa-access-review"})
     try:
-        with urlopen_direct(req, timeout=timeout) as resp:
+        with urlopen_direct(req, timeout=timeout, ssl_context=ssl_context) as resp:
             if not (200 <= resp.status < 300):
                 return None
             if not _is_javascript_content_type(_content_type(resp.headers)):
@@ -932,6 +936,8 @@ def _collect_api_paths(
     entry_port: int | None = None,
     path_alias: str | None = None,
     fetch_text=None,
+    entry_scheme: str = "http",
+    ssl_context: ssl.SSLContext | None = None,
 ) -> list[str]:
     """汇总入口 HTML 及其引用 JS bundle 中的绝对 API 路径（BUG-467）。
 
@@ -949,8 +955,13 @@ def _collect_api_paths(
     if not entry_html:
         return []
     # 延迟解析：默认走 JS Content-Type 校验；测试可注入 fetch_text 覆盖。
+    # BUG-726：提供证书上下文时默认 fetch 绑定之（注入的 fetch_text 不受影响）。
     if fetch_text is None:
-        fetch_text = _fetch_javascript
+        fetch_text = (
+            partial(_fetch_javascript, ssl_context=ssl_context)
+            if ssl_context is not None
+            else _fetch_javascript
+        )
     api_paths = _extract_api_paths(entry_html)
     for src in _extract_js_bundle_paths(entry_html):
         backend_path, gateway_path = _resolve_alias_aware_script_urls(src, path_alias=path_alias)
@@ -962,7 +973,9 @@ def _collect_api_paths(
                 seen_urls.add(url)
                 candidates.append(url)
         if entry_port is not None and gateway_path:
-            url = f"http://127.0.0.1:{entry_port}{gateway_path}"
+            # BUG-726：别名入口候选跟随 entry_scheme（TLS 下 https+证书验证）；
+            # host_port 候选保持 http——实例直连口本就明文（BUG-713 口径）。
+            url = f"{entry_scheme}://127.0.0.1:{entry_port}{gateway_path}"
             if url not in seen_urls:
                 seen_urls.add(url)
                 candidates.append(url)
@@ -1016,6 +1029,8 @@ def _check_api_paths(
         host_port=host_port,
         entry_port=entry_port,
         path_alias=path_alias,
+        entry_scheme=_entry_scheme,
+        ssl_context=ssl_context,
     )
     from_default = not discovered
     api_paths = discovered if discovered else _DEFAULT_API_PATHS[:]

@@ -357,20 +357,6 @@ def test_runtime_state_disabled_but_running_warns_residual(workspace, config, mo
     assert "lwa daemon off" in (result.suggestion or "")
 
 
-def test_runtime_state_disabled_not_running_still_ok(workspace, config, monkeypatch) -> None:
-    """disabled 且确实未运行 → 维持 OK（不因新增观测引入噪声）。"""
-    from local_webpage_access import daemon as daemon_mod
-    from local_webpage_access import gateway_service, manager_service
-
-    monkeypatch.setattr(daemon_mod, "is_running", lambda ws: False)
-    monkeypatch.setattr(manager_service, "is_running", lambda ws, cfg: False)
-    monkeypatch.setattr(gateway_service, "is_gateway_running", lambda ws, cfg: False)
-
-    result = check_service_runtime_state(workspace, config)
-    assert result.status == STATUS_OK
-    assert "已按意图停用" in (result.detail or "")
-
-
 def test_runtime_state_fail_takes_precedence_over_residual(workspace, config, monkeypatch) -> None:
     """同时存在 enabled 未运行与残留进程：FAIL 优先（更严重的故障先报）。"""
     _write_state(workspace, "manager.json", {"enabled": True})

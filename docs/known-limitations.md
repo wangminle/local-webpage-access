@@ -118,7 +118,7 @@ swap=4GB
 * **不纳管外部既有站点**：已在机上的 nginx+systemd、独立进程、非本工作区 Caddy 等，**不能** `adopt` / 登记进 lwa 生命周期。`lwa autostart` 只监管 **本工作区** 的 manager/daemon/gateway；要把旧站纳入 lwa，须改为 zip 导入并由 lwa 重新部署（静态走网关，全栈走 Compose）。与 Full Profile「禁止静默复用系统 caddy.service / 外部 `:2019`」一致。
 * **静态网关**：默认 Caddy 优先；Default 档无 Caddy 时可降级内置 `http.server`。
   Full Profile 要求可用的 LWA 托管 Caddy（见上）。`staticGateway=nginx` 枚举保留但未实现（无 nginx 模板），会降级 builtin（Full/严格模式则拒绝降级）。
-* **HTTPS**：V1 仅 HTTP。HTTPS / 证书自动化（Let's Encrypt）不在范围内。
+* **HTTPS**：V0.9.0 起 Caddy 可用 `gatewayTls: internal` 打开传输加密（内嵌 CA，别名 `:8443`、管理面 `:9443`；详见 [https.md](https.md)）。**builtin 网关无 TLS**；Let's Encrypt / 公网 ACME / 自定义域名证书自动化仍不在范围内。客户端须 `lwa ca export` 后手动信任根证书，禁止点穿告警。
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
 * **数据持久化**：仅自动 bind mount `data/` 目录。其他路径（如日志、上传目录）需用户在项目内处理。
@@ -197,7 +197,7 @@ swap=4GB
 
 ## 大模型 Skills
 
-* 当前内置的 **19** 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
+* 当前内置的 **20** 个 SKILL.md 覆盖常见场景，但**不保证**特定 AI 工具能正确消费；
   Skills 是提示工程资产，效果取决于模型与上下文窗口。
 * Skills 不会自动执行带副作用的操作，所有变更需人工确认。
 * Full Profile / 宿主机装配排障优先走 [`lwa-setup-host-environment`](../src/local_webpage_access/skills/lwa-setup-host-environment/SKILL.md) 与 FAQ。

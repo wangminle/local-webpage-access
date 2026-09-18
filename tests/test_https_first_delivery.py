@@ -531,3 +531,110 @@ def test_doctor_caddy_health_probes_tls_entry(workspace: Workspace, registry, mo
     assert captured["path"] == "/demo/"
     assert captured["ctx"] is not None, "https 探活必须带证书验证上下文"
     assert result.status in ("ok", "warn", "fail"), result.message
+
+
+# ---- BUG-726：JS bundle 抓取 TLS 适配 --------------------------------------------
+
+
+def test_collect_api_paths_gateway_candidate_follows_tls(monkeypatch) -> None:
+    """BUG-726：别名入口 bundle 候选走 https + 证书上下文；直连候选保持 http。"""
+    import ssl as ssl_mod
+
+    import local_webpage_access.access as access_mod
+
+    html = (
+        '<!doctype html><script type="module" src="/demo/assets/index.js"></script>'
+    )
+    captured: list[tuple[str, object]] = []
+
+    def fake_fetch_js(url, *, timeout=5.0, ssl_context=None):
+        captured.append((url, ssl_context))
+        return 'fetch("/api/v1/users")'
+
+    monkeypatch.setattr(access_mod, "_fetch_javascript", fake_fetch_js)
+    ctx = ssl_mod.create_default_context()
+
+    paths = access_mod._collect_api_paths(
+        html,
+        host_port=18001,
+        entry_port=8443,
+        path_alias="demo",
+        entry_scheme="https",
+        ssl_context=ctx,
+    )
+    assert "/api/v1/users" in paths
+    urls = [u for u, _ in captured]
+    assert any(u.startswith("https://127.0.0.1:8443/demo") for u in urls), (
+        "别名入口候选必须是 https（TLS 入口）"
+    )
+    assert any(u.startswith("http://127.0.0.1:18001") for u in urls), (
+        "直连候选保持明文（BUG-713 口径）"
+    )
+    https_ctx = [c for (u, c) in captured if u.startswith("https")]
+    assert https_ctx and all(c is ctx for c in https_ctx)
+
+
+def test_fetch_javascript_passes_ssl_context_to_urlopen(monkeypatch) -> None:
+    """BUG-726：https bundle 抓取必须把证书上下文交给 urlopen_direct。"""
+    import ssl as ssl_mod
+
+    import local_webpage_access.access as access_mod
+
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status = 200
+        headers = {"Content-Type": "application/javascript"}
+
+        def read(self):
+            return b'fetch("/api/v1/users")'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None, ssl_context=None):
+        captured["ssl_context"] = ssl_context
+        captured["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(access_mod, "urlopen_direct", fake_urlopen)
+    ctx = ssl_mod.create_default_context()
+    body = access_mod._fetch_javascript(
+        "https://127.0.0.1:8443/demo/assets/index.js", ssl_context=ctx
+    )
+    assert body is not None and "/api/v1/users" in body
+    assert captured["ssl_context"] is ctx
+
+
+def test_check_api_paths_forwards_tls_scheme_and_context(monkeypatch) -> None:
+    """BUG-726：生产调用点必须把 https scheme、8443 与证书上下文交给 bundle 抓取。"""
+    import ssl as ssl_mod
+
+    import local_webpage_access.access as access_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_collect(html, **kwargs):
+        captured.update(kwargs)
+        return ["/api/v1/users"]
+
+    def fake_http_get(url, *, timeout=3.0, ssl_context=None):
+        return access_mod.UrlProbe(url=url, status_code=200, content_length=12, ok=True)
+
+    monkeypatch.setattr(access_mod, "_collect_api_paths", fake_collect)
+    monkeypatch.setattr(access_mod, "_http_get", fake_http_get)
+
+    ctx = ssl_mod.create_default_context()
+    rep = access_mod.InstanceAccessReport(instance_id="demo")
+    html = '<script src="/demo/assets/index.js"></script>'
+    access_mod._check_api_paths(
+        rep, _tls_config(), "demo", html, host_port=18001, ssl_context=ctx
+    )
+
+    assert captured.get("entry_scheme") == "https"
+    assert captured.get("ssl_context") is ctx
+    assert captured.get("entry_port") == 8443
+    assert captured.get("host_port") == 18001

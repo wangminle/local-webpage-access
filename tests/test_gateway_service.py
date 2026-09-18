@@ -103,12 +103,17 @@ def fake_gateway(monkeypatch, workspace):
         "pid": 12345,
         "owner": "lwa_service_user",
         "workspace_match": True,
+        # issue #43：认领结果（None=不认领→维持 fail-closed 拒绝；pid=认领成功）
+        "adopt_pid": None,
     }
 
     class _Fake:
         def __init__(self, ws: Workspace, cfg: Config) -> None:
             self.ws = ws
             self.cfg = cfg
+
+        def adopt_orphan_master(self):
+            return state["adopt_pid"]
 
         def detect_backend(self) -> str:
             return state["backend"]
@@ -365,6 +370,65 @@ def test_start_gateway_noop_when_already_running_and_state_present(
     assert pid == 4321  # 读 caddy.pid（替身未写则用既有 state.pid）
     # state 未被改写（started_at 不变）
     assert read_state(workspace).started_at == "t"
+
+
+@pytest.mark.parametrize(
+    ("tls_error", "expect_error"),
+    [
+        (None, False),
+        ("管理面入口 https://127.0.0.1:9443/ 不可达（拒绝连接）", True),
+    ],
+    ids=["tls_healthy", "tls_verify_failed"],
+)
+def test_start_gateway_already_running_goes_through_tls_gate(
+    workspace: Workspace,
+    fake_gateway,
+    monkeypatch: pytest.MonkeyPatch,
+    tls_error: str | None,
+    expect_error: bool,
+) -> None:
+    """BUG-717：已在线分支 reload 后必须过 TLS 验证闸门——失败抛错+落失败观测。
+
+    此前该分支 reload 失败仅记 warning 后直接返回成功，且从不调用 TLS 验证，
+    「TLS 失败不得静默回退」只在冷启动分支生效。回归断言三点：
+    已在线也调用 verify_tls_entries（限流参数）；失败抛 LifecycleError；
+    失败观测写入 gateway.json（doctor 可见），enabled 意图不翻转。
+    """
+    import local_webpage_access.gateway_service as gs
+    from local_webpage_access.config import Config, PortPool
+
+    tls_config = Config(
+        staticGateway="caddy",
+        gatewayTls="internal",
+        portPool=PortPool(start=21000, end=21050),
+    )
+    fake_gateway["admin_alive"] = True
+    write_state(
+        workspace,
+        GatewayState(enabled=True, pid=4321, started_at="t", port=8443),
+    )
+    verify_calls: list[dict] = []
+    monkeypatch.setattr(
+        gs, "verify_tls_entries", lambda ws, cfg, **kw: (verify_calls.append(kw), tls_error)[1]
+    )
+    monkeypatch.setattr(gs, "_refresh_gateway_capability", lambda *a, **k: None)
+
+    if expect_error:
+        with pytest.raises(LifecycleError, match="HTTPS 入口验证失败"):
+            start_gateway(workspace, tls_config)
+    else:
+        assert start_gateway(workspace, tls_config) == 4321
+    assert fake_gateway["start_calls"] == 0  # 已在线，不重复 caddy start
+    # 已在线分支用限流参数：maybe_start_gateway 联动高频走此路径（BUG-728）
+    assert verify_calls == [{"attempts": 2, "timeout": 2.0, "retry_delay": 0.5}]
+    st = read_state(workspace)
+    assert st is not None
+    assert st.enabled is True  # 失败只写观测，不翻用户意图（IMP-064.02）
+    if expect_error:
+        assert st.last_start_error is not None
+        assert "9443" in st.last_start_error.message
+    else:
+        assert st.last_start_error is None
 
 
 def test_start_gateway_rejects_foreign_admin_before_stopping_builtin(

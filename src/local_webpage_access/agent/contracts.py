@@ -438,7 +438,7 @@ class InstanceListResult(StrictModel):
 
 
 class GetInstanceInput(StrictModel):
-    instanceId: str
+    instanceId: str = Field(description="实例 ID——参数标准名是 instanceId（不接受 instance/id 变体）；取值来自 lwa_list_instances / GET /instances 返回的 instanceId 字段")
 
 
 class ApplyDeploymentInput(StrictModel):
@@ -490,8 +490,15 @@ class GetLogsInput(PageRequest):
 
     model_config = ConfigDict(json_schema_extra=_logs_input_json_schema)
 
-    instanceId: str | None = None
-    operationId: str | None = None
+    instanceId: str | None = Field(
+        default=None,
+        description="实例 ID——参数标准名是 instanceId（不接受 instance/id 变体）；"
+        "取值来自 lwa_list_instances / GET /instances；与 operationId 二选一",
+    )
+    operationId: str | None = Field(
+        default=None,
+        description="操作 ID（lwa_apply_deployment 受理返回的 operationId）；与 instanceId 二选一",
+    )
     category: str | None = None
 
     @model_validator(mode="after")
@@ -508,7 +515,7 @@ class LogsPage(StrictModel):
 
 
 class GetAccessUrlsInput(StrictModel):
-    instanceId: str
+    instanceId: str = Field(description="实例 ID——参数标准名是 instanceId（不接受 instance/id 变体）；取值来自 lwa_list_instances / GET /instances 返回的 instanceId 字段")
     perspective: Literal["localhost", "lan"] | None = None
 
 
@@ -567,7 +574,7 @@ class ListInstancesInput(PageRequest):
 class LifecycleInput(StrictModel):
     """start/stop/restart/rebuild 共有形状（§6.1：独立工具便于逐项授权）。"""
 
-    instanceId: str
+    instanceId: str = Field(description="实例 ID——参数标准名是 instanceId（不接受 instance/id 变体）；取值来自 lwa_list_instances / GET /instances 返回的 instanceId 字段")
     expectedRevision: StrictInt = Field(ge=1)
     idempotencyKey: str
 

@@ -87,40 +87,8 @@ class TestVersionGate:
         assert version_ge("2.41.0-rc1", "2.40.2") is True  # 主版本更高仍放行
 
 
-# ---- API 参数校验（组 4）------------------------------------------------------
-
-
-class TestApiValidation:
-    @staticmethod
-    def _app():
-        from local_webpage_access.config import Config, PortPool
-        from local_webpage_access.paths import Workspace
-
-        ws = Workspace(Path("/tmp/lwa-chk245-ws"))
-        return ws, Config(portPool=PortPool(start=22000, end=22050))
-
-    def test_body_bool_string_false_not_truthy(self) -> None:
-        """评审-组4：`"dryRun": "false"` 字符串不再被 bool() 判 True。
-
-        评审-P1 追加：键存在但非 bool 一律 400，不再回落默认——否则
-        default=True 的字段（restart/keepData）收到 "false" 仍为 True。
-        """
-        import pytest
-        from fastapi import HTTPException
-
-        from local_webpage_access.manager_api import _body_bool
-
-        assert _body_bool({"dryRun": True}, "dryRun", False) is True
-        assert _body_bool({}, "dryRun", True) is True
-        with pytest.raises(HTTPException) as exc_info:
-            _body_bool({"dryRun": "false"}, "dryRun", False)
-        assert exc_info.value.status_code == 400
-        with pytest.raises(HTTPException) as exc_info:
-            _body_bool({"restart": 1}, "restart", False)
-        assert exc_info.value.status_code == 400  # 非 bool 拒绝，不回落默认
-
-
 # ---- daemon（组 4）------------------------------------------------------------
+# API 布尔字段校验见 test_manager_api.py::test_body_bool_strict_rejects_non_bool。
 
 
 class TestDaemonStable:

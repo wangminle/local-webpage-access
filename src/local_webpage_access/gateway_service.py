@@ -413,28 +413,43 @@ def start_gateway(
 
     with gateway_start_lock(workspace):
         if gateway._admin_alive() and not is_gateway_running(workspace, config):
-            owner = gateway.inspect_caddy_owner()
-            # IMP-064.02：拒绝启动同样写失败观测（意图保持开），doctor 据此报
-            # FAIL 并附原因，而不是「已按意图停用」。
-            fail_state = read_state(workspace) or GatewayState(
-                enabled=True,
-                port=lan_entry_port(config),
-                admin_port=ADMIN_PORT,
-            )
-            fail_state.enabled = True
-            record_start_failure(
-                fail_state,
-                f"Caddy admin :{ADMIN_PORT} 被非本工作区进程占用，启动被拒绝",
-                source=source,
-            )
-            write_state(workspace, fail_state)
-            raise LifecycleError(
-                "Caddy admin :2019 已被非本工作区进程占用，拒绝停止 builtin "
-                f"或认领外部网关（owner={owner.get('owner')}, pid={owner.get('pid')}）；"
-                "注意 run/caddy.pid 缺失也会触发本判定（CHK-280：重复 master 退出时 "
-                "Caddy 会删除共享 pidfile）——若 master 实为本工作区所有，"
-                "重建 pidfile 后重试",
-            )
+            # issue #43（BUG-729）：pidfile 被 CHK-280 共享删除时，本工作区的
+            # 健康 master 会被误判 system_caddy，off/on 双向卡死成熔断终局。
+            # 先尝试「认领」——admin 在线 + pidfile 缺失/死 + holder 命令行含
+            # 本工作区 Caddyfile/pidfile 路径 + 进程用户匹配，四重安全闸全过
+            # 才重建 pidfile（adopt_orphan_master 内实现），随后走下方已在线
+            # 恢复路径；认领失败才维持 fail-closed 拒绝。
+            adopted_pid = gateway.adopt_orphan_master()
+            if adopted_pid is None:
+                owner = gateway.inspect_caddy_owner()
+                # IMP-064.02：拒绝启动同样写失败观测（意图保持开），doctor 据此报
+                # FAIL 并附原因，而不是「已按意图停用」。
+                fail_state = read_state(workspace) or GatewayState(
+                    enabled=True,
+                    port=lan_entry_port(config),
+                    admin_port=ADMIN_PORT,
+                )
+                fail_state.enabled = True
+                record_start_failure(
+                    fail_state,
+                    f"Caddy admin :{ADMIN_PORT} 被非本工作区进程占用，启动被拒绝",
+                    source=source,
+                )
+                write_state(workspace, fail_state)
+                raise LifecycleError(
+                    "Caddy admin :2019 已被非本工作区进程占用，拒绝停止 builtin "
+                    f"或认领外部网关（owner={owner.get('owner')}, pid={owner.get('pid')}）；"
+                    "注意 run/caddy.pid 缺失也会触发本判定（CHK-280：重复 master 退出时 "
+                    "Caddy 会删除共享 pidfile）——若 master 实为本工作区所有，"
+                    "`lwa gateway on` 现已支持自动认领（命令行含本工作区"
+                    " Caddyfile 且进程用户匹配时重建 pidfile）",
+                )
+            else:
+                log.info(
+                    "检测到 pidfile 丢失的孤儿 master，已认领（pid=%s）并重建"
+                    " pidfile，走已在线恢复路径",
+                    adopted_pid,
+                )
         if is_gateway_running(workspace, config):
             state = read_state(workspace)
             # pid 优先取 live master 的 caddy.pid，缺失时回退服务态记录的最后 pid
@@ -493,8 +508,34 @@ def start_gateway(
             # BUG-717：已在线路径同样执行 TLS 入口验证——「TLS 失败不得静默
             # 回退」的承诺不能只在冷启动分支生效；reload 后证书/入口异常
             # 必须显式报错（reload 失败本身可容忍，TLS 层失败不可）。
-            tls_error = verify_tls_entries(workspace, config)
+            # BUG-728：已在线分支用限流参数——maybe_start_gateway 联动
+            # （lwa manager on / reconcile）高频走此路径，5×5s 全量重试会
+            # 平添约 25s 阻塞；诊断精度交给 doctor 的 gateway_tls 检查。
+            tls_error = verify_tls_entries(
+                workspace, config, attempts=2, timeout=2.0, retry_delay=0.5
+            )
             if tls_error is not None:
+                # BUG-728：失败路径与冷启动分支对称——失败观测落盘（doctor
+                # 可见）、能力缓存刷新（否则 Full Profile 假红）、地址刷新，
+                # 全部完成后再抛错；绝不在收尾前 raise 丢下不一致状态。
+                fail_state = read_state(workspace) or GatewayState(
+                    enabled=True,
+                    pid=pid,
+                    started_at=now_iso(),
+                    port=lan_entry_port(config),
+                    admin_port=ADMIN_PORT,
+                )
+                record_start_failure(fail_state, tls_error, source=source)
+                write_state(workspace, fail_state)
+                _post_switch_finalize(
+                    workspace,
+                    config,
+                    registry,
+                    pid,
+                    started=False,
+                    stopped_builtin=stopped_builtin,
+                )
+                _refresh_gateway_capability(workspace, config)
                 raise LifecycleError(
                     f"网关已在线但 HTTPS 入口验证失败：{tls_error}；"
                     "TLS 失败不降级明文——请检查 logs/caddy-runtime.log 与"

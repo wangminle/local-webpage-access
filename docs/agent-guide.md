@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.8.19 当前实际可用的接入方式。**
+> **状态：本文描述 V0.9.0 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -134,6 +134,8 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 ## 9. Agent 专用通道（M1 本机已落地）
 
 ### 9.1 M1 本机协作（V0.8.18 起可用）
+
+> 接入前先装 MCP extra：`pip install 'local-webpage-access[mcp]'`（这是安装步骤不是排错步骤——缺它时 `lwa mcp` 无法启动，MCP 客户端只见「服务器无响应」；stderr 里的 `lwaMcpFatal` JSON 行可 grep 定位，`lwa doctor` 的 mcp_dependency 检查也会报出）。
 
 面向**与 LWA 同机运行**的 Agent。鉴权规则：仅接受本机回环连接（127.0.0.1 / ::1，Host 头为本机名），非回环来源一律 `403 permission_denied`（远程主体属 M2）；**回环同样必须携带有效管理 token**（仅 `Authorization: Bearer` 或 `X-LWA-Token` 头，无 `?token=` 通道，缺失/无效 → `401 unauthenticated`）。token 由管理员在服务器本机用 `lwa manager token` 查看后提供给 Agent。
 

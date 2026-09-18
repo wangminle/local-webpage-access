@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-webpage-access"
-version = "0.8.19"
+version = "0.9.0"
 description = "Local Webpage Access — 面向局域网小主机的本地网页部署基座"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -45,8 +45,13 @@ addopts = "-ra -q"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-# ADJ-033：门禁命令为 `ruff check src tests`（默认规则 E4/E7/E9/F）。
+
+[tool.ruff.lint]
+# ADJ-033：门禁命令为 `ruff check src tests`（规则 E4/E7/E9/F）。
 # 扩展规则集前须先清零再纳入 CI，避免再次假绿。
+# ruff 0.16 起版本默认规则集扩大（I/UP/RUF/SIM 等纳入默认）——若依赖默认值，
+# 锁内 ruff 升级会静默改变门禁口径（2026-09-18 实测 600+ 新增告警），故显式固定。
+select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 python_version = "3.13"

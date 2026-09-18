@@ -2140,6 +2140,26 @@ def check_service_runtime_state(ws: Workspace, config: Config) -> CheckResult:
 
     if not_running:
         fixes = "；".join(f"{_SERVICE_START_CMD[n]}（恢复 {n}）" for n in not_running)
+        # issue #43：pidfile 被 CHK-280 共享删除时，gateway on/off 会卡死——
+        # 识别该场景并在建议中给出针对性指引（on 已支持自动认领重建 pidfile）
+        from local_webpage_access.static_gateway import StaticGateway
+
+        try:
+            _gw = StaticGateway(ws, config)
+            _pidfile_missing = (
+                config.staticGateway == "caddy"
+                and _gw._admin_alive()
+                and not _gw._workspace_caddy_pid_alive()
+                and not _gw.caddy_pid_path().is_file()
+            )
+        except Exception:  # noqa: BLE001 — 探测失败不影响主判定
+            _pidfile_missing = False
+        if _pidfile_missing:
+            fixes += (
+                "；检测到 run/caddy.pid 缺失（CHK-280 共享删除）——"
+                "`lwa gateway on` 已支持自动认领（master 命令行含本工作区"
+                " Caddyfile 且进程用户匹配时重建 pidfile 并恢复）"
+            )
         message = f"自有服务运行态与期望不一致：{', '.join(not_running)} enabled 但未运行"
         # IMP-064.05（规则 6）：FAIL 文案追加 lastStartError.message（若有）
         first_failure = next(
@@ -2529,6 +2549,8 @@ def run_doctor(
         report.checks = [
             check_python_version(),
             check_python_packages(),
+            # issue #40：MCP 依赖可发现性（WARN 级，可选通道）
+            check_mcp_dependency(),
             check_docker(runner=runner),
             check_docker_compose(runner=runner),
             # issue #14：基础镜像就绪度（纯本地，WARN 级）
@@ -2609,6 +2631,31 @@ def run_doctor(
                 )
             ]
     return report
+
+
+# ---- issue #40 问题 1：MCP 依赖可发现性 -------------------------------------------
+
+def check_mcp_dependency() -> CheckResult:
+    """``[mcp]`` extra（MCP SDK）安装状态——缺依赖是 agent 接入的高频首障。
+
+    ``lwa mcp`` 缺 SDK 时退出码 1 + stderr 双通道诊断（含 ``lwaMcpFatal``
+    JSON 行），但 MCP 客户端默认不展示 stderr——doctor 在例行巡检中把
+    该缺口显式报出（WARN 级：MCP 是可选通道，不影响部署功能）。
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("mcp") is not None:
+        return CheckResult(
+            "mcp_dependency", STATUS_OK, "[mcp] extra 已安装（lwa mcp stdio 可用）"
+        )
+    return CheckResult(
+        "mcp_dependency",
+        STATUS_WARN,
+        "未安装 [mcp] extra——`lwa mcp`（stdio MCP 适配器）无法启动，"
+        "MCP 客户端只会看到「服务器无响应」",
+        suggestion="pip install 'local-webpage-access[mcp]'（缺依赖时 `lwa mcp` "
+        "会在 stderr 写 lwaMcpFatal JSON 诊断行，可 grep 定位）",
+    )
 
 
 # ---- HTTPS 首版交付（W10）：TLS 状态检查 ----------------------------------------

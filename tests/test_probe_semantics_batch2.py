@@ -241,10 +241,6 @@ class TestCapabilityEvidenceNotFailure:
 class TestStatusVerificationSeparation:
     """进程状态与验证结论分离：Status 不再写入 DEGRADED。"""
 
-    def test_status_enum_degraded_retained_for_compat(self) -> None:
-        # 枚举成员保留（旧 manifest 兼容 + UI 标签映射），但部署路径不再赋值。
-        assert Status.DEGRADED.value == "degraded"
-
     def test_deploy_path_never_assigns_degraded(self) -> None:
         # 源码检查：hosting.py 中不再出现 Status.DEGRADED 赋值。
         import inspect

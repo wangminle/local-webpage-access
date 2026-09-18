@@ -27,13 +27,26 @@ from __future__ import annotations
 
 import contextlib
 import sys
+from enum import StrEnum
 
-import click
 import typer
 
 from local_webpage_access import PRODUCT_NAME
 from local_webpage_access.cli._common import bootstrap, log
 from local_webpage_access.errors import LwaError
+
+
+class StaticGatewayChoice(StrEnum):
+    """``--static-gateway`` 取值域。
+
+    用 typer 原生 Enum 而非 ``click_type=click.Choice``：typer 0.27 + click 8.5
+    组合下后者校验失败会以未处理 ``BadParameter`` 冒出（exit 1 + traceback），
+    Enum 路径保持干净 usage error（exit 2）。
+    """
+
+    caddy = "caddy"
+    nginx = "nginx"
+    builtin = "builtin"
 
 app = typer.Typer(
     name="lwa",
@@ -63,7 +76,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.8.19-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.9.0-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())
@@ -99,10 +112,9 @@ def init(
         "--no-install-docker",
         help="default 档：跳过 Docker 安装询问",
     ),
-    static_gateway: str | None = typer.Option(
+    static_gateway: StaticGatewayChoice | None = typer.Option(
         None,
         "--static-gateway",
-        click_type=click.Choice(["caddy", "nginx", "builtin"]),
         help="写入 local-web.yml 的 staticGateway（full 默认 caddy）",
     ),
 ) -> None:
@@ -130,7 +142,7 @@ def init(
         )
         raise typer.Exit(code=2)
 
-    gateway = static_gateway
+    gateway = static_gateway.value if static_gateway is not None else None
     if gateway is None and profile == "full":
         gateway = "caddy"
 

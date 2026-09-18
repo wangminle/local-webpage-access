@@ -1597,10 +1597,14 @@ def test_attach_daemon_log_handler_writes_daemon_log(workspace: Workspace) -> No
     import logging
 
     logger = logging.getLogger("local_webpage_access")
-    before = set(id(h) for h in logger.handlers)
+    # 持强引用而非只存 id：setup_logging(force=True) 会移除旧 handler，若旧对象
+    # 被 GC，其 id 可被新分配的 handler 复用，id 差集会误判「无新增」（曾致
+    # 全量套件下偶发失败）。保持引用阻止 GC → id 不复用。
+    before_handlers = list(logger.handlers)
+    before_ids = {id(h) for h in before_handlers}
     try:
         daemon_mod.attach_daemon_log_handler(workspace)
-        added = [h for h in logger.handlers if id(h) not in before]
+        added = [h for h in logger.handlers if id(h) not in before_ids]
         assert any(
             isinstance(h, logging.FileHandler)
             and str(workspace.logs / daemon_mod.LOG_FILENAME) == h.baseFilename
@@ -1615,7 +1619,7 @@ def test_attach_daemon_log_handler_writes_daemon_log(workspace: Workspace) -> No
     finally:
         # 清理：移除本测试追加的 handler，避免污染后续用例
         for h in list(logger.handlers):
-            if id(h) not in before:
+            if id(h) not in before_ids:
                 logger.removeHandler(h)
                 with contextlib.suppress(Exception):
                     h.close()

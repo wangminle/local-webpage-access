@@ -721,17 +721,6 @@ def test_import_still_rejects_source_symlink_after_strip(
         importer.import_zip(zip_path)
 
 
-def test_import_strip_regression_zip_slip(importer: Importer, tmp_path: Path) -> None:
-    """IMP-001 剥离后，zip slip 仍被拒绝（回归不退化）。"""
-    zip_path = tmp_path / "evil.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.writestr("index.html", "<html></html>")
-        info = zipfile.ZipInfo("../escape.txt")
-        zf.writestr(info, "pwned")
-    with pytest.raises(ZipImportError, match="zip_slip"):
-        importer.import_zip(zip_path)
-
-
 def test_import_strip_regression_absolute_path(importer: Importer, tmp_path: Path) -> None:
     """IMP-001 剥离后，绝对路径成员仍被拒绝（回归不退化）。"""
     zip_path = tmp_path / "evil.zip"

@@ -1378,12 +1378,18 @@ class StaticGateway:
             self._clear_stale_caddy_pid()
             return True
         if not self._workspace_caddy_pid_alive():
-            log.warning(
-                "admin :2019 在线但非本工作区 Caddy（caddy.pid 不指向存活进程），"
-                "跳过 POST /stop 以免关停外部/其他工作区 Caddy（BUG-176）"
-            )
-            self._clear_stale_caddy_pid()
-            return True
+            # issue #43（BUG-729）：pidfile 被 CHK-280 共享删除时，自己的
+            # master 会落在该分支——先按四重安全闸尝试认领，认领成功即可
+            # 正常 POST /stop（gateway off 不再卡死）；认领失败维持 BUG-176
+            # 的 fail-closed（不关停外部/其他工作区 Caddy）。
+            if self.adopt_orphan_master() is None:
+                log.warning(
+                    "admin :2019 在线但非本工作区 Caddy（caddy.pid 不指向存活进程），"
+                    "跳过 POST /stop 以免关停外部/其他工作区 Caddy（BUG-176）"
+                )
+                self._clear_stale_caddy_pid()
+                return True
+            log.info("pidfile 丢失但已认领本工作区 master，继续执行 POST /stop")
         try:
             req = urllib.request.Request(_ADMIN_STOP_URL, method="POST")
             urlopen_direct(req, timeout=_CADDY_OP_TIMEOUT)
@@ -1538,6 +1544,109 @@ class StaticGateway:
         except OSError:
             return "write_denied"
         return None
+
+    def _admin_holder_pid(self) -> int | None:
+        """issue #43：探测 :2019 监听进程 PID（best-effort，lsof → ss）。"""
+        try:
+            out = subprocess.run(
+                ["lsof", "-tiTCP:2019", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            for line in (out.stdout or "").splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    return int(line)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if sys.platform.startswith("linux"):
+            try:
+                out = subprocess.run(
+                    ["ss", "-tlnp"], capture_output=True, text=True, timeout=5, check=False
+                )
+                for line in (out.stdout or "").splitlines():
+                    if ":2019 " in line:
+                        m = re.search(r"pid=(\d+)", line)
+                        if m:
+                            return int(m.group(1))
+            except (OSError, subprocess.SubprocessError):
+                pass
+        return None
+
+    @staticmethod
+    def _pid_cmdline(pid: int) -> str:
+        """进程命令行（Linux /proc cmdline；其余 POSIX ``ps -o command=``）。"""
+        cmdline_path = Path(f"/proc/{pid}/cmdline")
+        if sys.platform.startswith("linux") and cmdline_path.is_file():
+            try:
+                return cmdline_path.read_bytes().replace(b"\0", b" ").decode(
+                    "utf-8", "replace"
+                )
+            except OSError:
+                return ""
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return (out.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def adopt_orphan_master(self) -> int | None:
+        """issue #43（BUG-729）：认领确属本工作区的孤儿 Caddy master。
+
+        CHK-280：重复 master 退出时 Caddy 会删除共享 pidfile——之后本工作区
+        的健康 master 会被 :meth:`inspect_caddy_owner` 误判 ``system_caddy``，
+        ``gateway off/on`` 双向卡死成熔断终局。本方法在**四重安全闸**全部
+        满足时重建 ``run/caddy.pid``（返回 pid），否则返回 None（维持
+        fail-closed，绝不认领真外来 Caddy）：
+
+        1. admin :2019 在线；
+        2. pidfile 缺失或指向已死进程（健在则无需认领）；
+        3. :2019 holder 命令行包含本工作区主/引导 Caddyfile 或 pidfile 路径
+           （``--config``/``--pidfile`` 参数实证，相对/绝对路径都接受）；
+        4. holder 进程用户 == serviceUser（缺省当前用户）。
+        """
+        import getpass
+
+        if not self._admin_alive():
+            return None
+        if self._workspace_caddy_pid_alive():
+            return None
+        pid = self._admin_holder_pid()
+        if pid is None or not self._pid_alive(pid):
+            return None
+        service_user = getattr(self.config, "serviceUser", None) or getpass.getuser()
+        proc_user = self._process_user_for_pid(pid)
+        if proc_user is None or str(proc_user) != str(service_user):
+            return None
+        cmdline = self._pid_cmdline(pid)
+        if not cmdline:
+            return None  # 拿不到命令行就无法证明归属，fail-closed
+        candidates = []
+        for target in (
+            self.main_config_path(),
+            self._bootstrap_config_path(),
+            self.caddy_pid_path(),
+        ):
+            candidates.append(str(target))
+            with contextlib.suppress(OSError):
+                candidates.append(str(target.resolve()))
+        if not any(path in cmdline for path in candidates if path):
+            return None
+        path = self.caddy_pid_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{pid}\n", encoding="utf-8")
+        log.info(
+            "已认领本工作区 Caddy master（pid=%s）并重建 pidfile（issue #43）", pid
+        )
+        return pid
 
     def _clear_stale_caddy_pid(self) -> None:
         """清理指向已死进程的 Caddy master pid 文件（BUG-070）。"""
