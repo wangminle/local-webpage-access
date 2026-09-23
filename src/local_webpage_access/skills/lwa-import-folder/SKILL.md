@@ -26,7 +26,7 @@ description: >-
    `~/lwa-workspace` 再 `lwa init`（会与现网管理页抢端口、实例列表分裂）。
 1. **关联 ≠ 运行根**：Caddy root、compose bind、builtin 静态根、构建 cwd **不得**指向用户目录。
 2. 只读复制源；LWA **不**往关联目录写运行产物。
-3. 路径必须是**绝对路径**（拒绝 `./x`、`.` 等相对路径）。
+3. **新建导入**必须是绝对路径（拒绝 `./x`、`.`）。`--update` 传入的相对路径会先按当前工作目录解析：与已记录目录相同则按原绝对路径更新；`--allow-source-change` 换新目录时写入解析后的绝对路径。
 4. **反向转换（folder/git → zip）未实现**（归 IMP-048）；正向（zip/git → folder）自
    V0.8.12 起支持原地切换（issue #28），见下「更新」节。
 
@@ -42,8 +42,12 @@ lwa import --from-dir /abs/path/to/my-site --name "My App" --path-alias myapp
 ## 更新
 
 ```bash
-# folder 实例常规更新：路径须与实例关联目录一致（不一致会 Exit 2，不会静默改用别的目录）
+# folder 实例常规更新：路径须与实例关联目录一致（不一致默认 Exit 2，不会静默改用别的目录）
 lwa import --from-dir /abs/path/to/my-site --update <instance-id>
+
+# folder 实例更换关联目录（V0.9.1 / issue #45）：保留 id / 端口 / 别名 / data/
+lwa import --from-dir /abs/path/to/new-site --update <instance-id> --allow-source-change
+lwa import --from-dir /abs/path/to/new-site --update <instance-id> --dry-run
 
 # zip/git 实例原地切换为 folder 源（V0.8.12 / issue #28，「换源不换实例」：
 # 保留实例 id / hostPort / 路径别名 / data/，仅覆盖 current/ 并登记新源身份）
@@ -56,7 +60,7 @@ lwa import --from-dir /abs/path/to/my-site --update <instance-id>
 - **切换语义**（zip/git → folder）：即使目录内容与当前版本完全一致，也会完成
   源身份切换（事件注明「仅切换源身份」）；切换会清掉旧 git 身份字段。
   不带目录的 `--from-dir --update` 仍仅对 folder 源实例有效。
-- 更换关联目录（folder 实例换另一个目录）：先 `lwa remove`（按需）再对新路径重新 `--from-dir` 导入；`--update` 传不同目录会被一致性预检拒绝。
+- **更换关联目录**（V0.9.1 / issue #45）：加 `--allow-source-change`（交互终端可确认；`--dry-run` 只展示计划）。保留实例 id / hostPort / 路径别名 / data/，只覆盖 current/。不要 `lwa remove` 后再导入。
 
 ## 与 zip skill 分工
 

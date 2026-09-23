@@ -6,6 +6,8 @@ DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 from __future__ import annotations
 
 import contextlib
+import os
+import sys
 from pathlib import Path
 
 import typer
@@ -35,7 +37,8 @@ def import_cmd(
         "--from-dir",
         help="IMP-047：从本机文件夹源导入（复制进工作区，非就地运行）。"
         "与 zip_path 互斥；加 --update <id> 时从关联源目录更新，"
-        "zip/git 源实例则原地切换为文件夹源（issue #28，换源不换实例）。",
+        "zip/git 源实例则原地切换为文件夹源（issue #28，换源不换实例）。"
+        "folder 源要换关联目录时加 --allow-source-change（issue #45）。",
     ),
     from_git: str = typer.Option(
         None,
@@ -57,7 +60,9 @@ def import_cmd(
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="非交互确认（CI / daemon 调用）"),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="仅与 --update 使用：预演更新的 hash 差异与形态变化，不写盘；全新导入不支持"
+        False,
+        "--dry-run",
+        help="仅与 --update 使用：预演更新的 hash 差异与形态变化，不写盘；全新导入不支持",
     ),
     no_restart: bool = typer.Option(
         False,
@@ -73,6 +78,12 @@ def import_cmd(
         False,
         "--force-kind-change",
         help="允许新 zip 的 kind/runtime 与原实例不同（默认拒绝；确认迁移时仍保留 hostPort 登记）",
+    ),
+    allow_source_change: bool = typer.Option(
+        False,
+        "--allow-source-change",
+        help="issue #45：folder 源更换关联目录，保留 instance id / 端口 / 路径别名 / data/。"
+        "非交互终端必须显式加上；交互终端也可在确认提示中继续。",
     ),
 ) -> None:
     """导入一个 zip 包、本机文件夹源或 GitHub 仓库：解压、识别、登记实例。
@@ -130,8 +141,11 @@ def import_cmd(
             )
             raise typer.Exit(code=2)
         if dry_run and update is None:
-            typer.secho("全新导入不支持 --dry-run；仅可与 --update <id> 一起预演更新。",
-                        fg=typer.colors.RED, err=True)
+            typer.secho(
+                "全新导入不支持 --dry-run；仅可与 --update <id> 一起预演更新。",
+                fg=typer.colors.RED,
+                err=True,
+            )
             raise typer.Exit(code=2)
         ws, config, reg = open_workspace_registry()
         try:
@@ -189,6 +203,7 @@ def import_cmd(
                         yes=yes,
                         dry_run=dry_run,
                         force_kind_change=force_kind_change,
+                        allow_source_change=allow_source_change,
                     )
                 else:
                     result = importer.import_from_dir(
@@ -474,8 +489,7 @@ def _do_update_from_git(
     # 单独一行展示，不得混标（BUG-553）。
     typer.echo(f"  远端 OID：{prev_oid} -> {new_oid or '未知'}")
     typer.echo(
-        f"  打包内容指纹：{(result.prev_hash or '')[:12] or '∅'} -> "
-        f"{(result.zip_hash or '')[:12]}"
+        f"  打包内容指纹：{(result.prev_hash or '')[:12] or '∅'} -> {(result.zip_hash or '')[:12]}"
     )
     if result.detection is not None:
         typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
@@ -499,6 +513,36 @@ def _do_update_from_git(
         typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
 
 
+def _source_dir_brief(path: Path) -> str:
+    """换源确认用的目录摘要：计入的文件数 + 内容指纹前 12 位。"""
+    from local_webpage_access.folder_source import compute_source_hash
+
+    if not path.is_dir():
+        return "目录不可读"
+    count = 0
+    for _root, dirs, files in os.walk(path, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "__pycache__", ".venv"}]
+        count += sum(1 for name in files if name != ".DS_Store")
+    try:
+        digest = compute_source_hash(path)[:12]
+    except OSError:
+        digest = "不可读"
+    return f"{count} 个文件，指纹 {digest}"
+
+
+def _confirm_source_dir_change(instance_id: str, recorded: str, new_dir: str) -> bool:
+    """交互终端才询问；非 TTY 返回 False，由调用方要求 --allow-source-change。"""
+    if not sys.stdin.isatty():
+        return False
+    return typer.confirm(
+        f"实例 {instance_id} 将更换关联目录：\n"
+        f"  旧：{recorded}（{_source_dir_brief(Path(recorded))}）\n"
+        f"  新：{new_dir}（{_source_dir_brief(Path(new_dir))}）\n"
+        "instance id、端口、路径别名与 data/ 会保留，仅覆盖 current/。是否继续？",
+        default=False,
+    )
+
+
 def _do_update_from_dir(
     importer,
     ws,
@@ -512,13 +556,15 @@ def _do_update_from_dir(
     yes: bool,
     dry_run: bool,
     force_kind_change: bool,
+    allow_source_change: bool = False,
 ) -> None:
     """IMP-047：``lwa import --from-dir --update <id>`` 的编排。
 
-    ``from_dir`` 是用户在命令行传入的目录；folder 源实例若提供则须与
-    manifest 中记录的 ``sourceDirPath`` 一致，否则拒绝（防止更新时误传
-    另一个目录）。zip/git 源实例无关联目录（issue #28）：传入的目录
-    交给 ``update_from_dir`` 原地切换为文件夹源（换源不换实例）。
+    ``from_dir`` 是用户在命令行传入的目录。folder 源若与 manifest 的
+    ``sourceDirPath`` 不一致：``--dry-run`` 只展示更换计划；``--allow-source-change``
+    或交互确认后才换目录（issue #45，保留 id/端口/别名/data/）。不加确认则拒绝，
+    且不再建议删实例重导。zip/git 源无关联目录（issue #28）：传入的目录交给
+    ``update_from_dir`` 原地切换为文件夹源。
     """
     if from_dir is not None:
         from local_webpage_access.models import InstanceManifest
@@ -528,13 +574,23 @@ def _do_update_from_dir(
             manifest = InstanceManifest.load(manifest_path)
             recorded = getattr(manifest, "sourceDirPath", None)
             if recorded and str(Path(from_dir).resolve()) != str(Path(recorded).resolve()):
-                typer.secho(
-                    f"传入的目录 {from_dir} 与实例 {instance_id} 关联的源目录 {recorded} 不一致。\n"
-                    "如需更换关联目录，请先删除实例再用新目录重新导入。",
-                    fg=typer.colors.RED,
-                    err=True,
-                )
-                raise typer.Exit(code=2)
+                if (
+                    not dry_run
+                    and not allow_source_change
+                    and not _confirm_source_dir_change(instance_id, recorded, from_dir)
+                ):
+                    typer.secho(
+                        f"传入的目录 {from_dir} 与实例 {instance_id} 关联的源目录 {recorded} 不一致。\n"
+                        "未更换关联目录（instance id、端口、路径别名与 data/ 均保持不变）。\n"
+                        "若确要换到新目录并保留上述身份，请加上 --allow-source-change 后重试"
+                        "（交互终端也可在确认提示中选择继续）。\n"
+                        "删除实例后重新导入会丢失 instance id、hostPort、路径别名和 data/，"
+                        "不要用它来换目录。",
+                        fg=typer.colors.RED,
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
+                allow_source_change = True
 
     result = importer.update_from_dir(
         instance_id,
@@ -544,23 +600,22 @@ def _do_update_from_dir(
         yes=yes,
         dry_run=dry_run,
         force_kind_change=force_kind_change,
+        allow_source_dir_change=allow_source_change,
     )
 
     prev_short = result.prev_hash[:12] if result.prev_hash else "∅"
     new_short = result.zip_hash[:12]
-
-    if result.skipped:
-        typer.secho(
-            f"实例 {instance_id} 的文件夹源内容未变化（指纹 {new_short}），已跳过更新。",
-            fg=typer.colors.YELLOW,
-        )
-        return
 
     if result.dry_run:
         typer.secho(
             f"[dry-run] 实例 {instance_id}：文件夹源指纹 {prev_short} -> {new_short}",
             fg=typer.colors.CYAN,
         )
+        if result.source_dir_changed:
+            typer.secho(
+                f"  将更换关联目录：{result.prev_source_dir} → {result.new_source_dir}",
+                fg=typer.colors.YELLOW,
+            )
         if result.detection is not None:
             typer.echo(f"  新形态：{result.detection.form}")
         if result.kind_changed:
@@ -570,8 +625,23 @@ def _do_update_from_dir(
             )
         return
 
+    if result.skipped and not result.source_dir_changed:
+        typer.secho(
+            f"实例 {instance_id} 的文件夹源内容未变化（指纹 {new_short}），已跳过更新。",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    if result.source_dir_changed and result.skipped:
+        typer.secho(f"已更换实例 {instance_id} 的关联目录", fg=typer.colors.GREEN)
+        typer.echo(f"  关联目录：{result.prev_source_dir} → {result.new_source_dir}")
+        typer.echo("  目录内容与当前版本一致，仅更换关联目录。")
+        return
+
     typer.secho(f"已从文件夹源更新实例：{instance_id}", fg=typer.colors.GREEN)
     typer.echo(f"  指纹：{prev_short} -> {new_short}")
+    if result.source_dir_changed:
+        typer.echo(f"  关联目录：{result.prev_source_dir} → {result.new_source_dir}")
     if result.detection is not None:
         typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
     typer.echo(f"  目录：{result.app_dir}")

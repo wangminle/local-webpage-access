@@ -253,16 +253,12 @@ def build_and_host_frontend(
             write_instance_log(
                 workspace.apps, instance_id, "build", f"安装：{manifest.entry.install}"
             )
-            run_command(
-                manifest.entry.install, cwd=work_dir, log_path=build_log, env=build_env
-            )
+            run_command(manifest.entry.install, cwd=work_dir, log_path=build_log, env=build_env)
         if manifest.entry.build:
             write_instance_log(
                 workspace.apps, instance_id, "build", f"构建：{manifest.entry.build}"
             )
-            run_command(
-                manifest.entry.build, cwd=work_dir, log_path=build_log, env=build_env
-            )
+            run_command(manifest.entry.build, cwd=work_dir, log_path=build_log, env=build_env)
         else:
             raise BuildError(
                 "缺少 build 脚本，无法构建前端项目",
@@ -457,9 +453,7 @@ def _managed_sqlite_data_mount_drifted(
     return False
 
 
-def _mirror_stage_to_global_log(
-    workspace: Workspace, instance_id: str, stage: str
-) -> None:
+def _mirror_stage_to_global_log(workspace: Workspace, instance_id: str, stage: str) -> None:
     """issue #16 / BUG-603：daemon 进程内把 lifecycle_stage 镜像到 ``lwa.log``。
 
     CLI 触发的重建本就把阶段写进 lwa.log（进程日志落点）；daemon 触发
@@ -1034,9 +1028,7 @@ def recreate_container_runtime(
             with contextlib.suppress(Exception):
                 PortAllocator(config, registry).release_instance(instance_id)
         failure = HostingError(error, instance_id=instance_id)
-        _recreate_failed_rollback(
-            workspace, registry, instance_id, manifest, runtime, failure
-        )
+        _recreate_failed_rollback(workspace, registry, instance_id, manifest, runtime, failure)
         raise failure
 
     # 第二批 CHK-252：验证警告不再降级进程状态（failed 已在上面 raise）。
@@ -1223,7 +1215,114 @@ def _ensure_container_port(
     return allocator.allocate(instance_id), True
 
 
+def _listen_process_names(port: int) -> list[str] | None:
+    """列出端口上的监听进程名。lsof 不可用或没有结论时返回 None。"""
+    if shutil.which("lsof") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 and not (proc.stdout or "").strip():
+        return None
+    names: list[str] = []
+    for line in (proc.stdout or "").splitlines()[1:]:
+        parts = line.split()
+        if parts:
+            names.append(parts[0])
+    return names or None
+
+
+def _site_config_binds_port(text: str, port: int) -> bool:
+    """站点片段是否把 ``port`` 写成监听地址（``:port`` 后是空白或块起始）。"""
+    marker = f":{port}"
+    start = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx < 0:
+            return False
+        after = text[idx + len(marker) : idx + len(marker) + 1]
+        if after in ("", " ", "\t", "\n", "\r", "{"):
+            return True
+        start = idx + len(marker)
+
+
+def _gateway_holds_static_port(
+    workspace: Workspace,
+    config: Config,
+    instance_id: str,
+    port: int,
+) -> bool:
+    """本工作区网关是否仍实际持有该静态端口（BUG-737）。
+
+    登记为 enabled 不够：Caddy 已停止时，外部进程可以占着原端口。
+    Caddy 后端要求 admin 在线、站点片段仍绑该端口，且 lsof 能看清时监听者是 caddy。
+    builtin 后端要求本实例 http.server 仍存活且命令行对得上端口与 public 目录。
+    """
+    from local_webpage_access.daemon import pid_cmdline_contains
+    from local_webpage_access.errors import GatewayError
+
+    gateway = StaticGateway(workspace, config)
+    try:
+        backend = gateway.detect_backend()
+    except GatewayError:
+        return False
+    names = _listen_process_names(port)
+    if backend == "caddy":
+        if not gateway._admin_alive():
+            return False
+        site = gateway.site_config_path(instance_id)
+        try:
+            text = site.read_text(encoding="utf-8") if site.is_file() else ""
+        except OSError:
+            return False
+        if not _site_config_binds_port(text, port):
+            return False
+        if names is None:
+            return True
+        return any("caddy" in name.lower() for name in names)
+    pid = gateway._read_pid(instance_id)
+    if pid is None or not StaticGateway._pid_alive(pid):
+        return False
+    public = str(workspace.app_public(instance_id))
+    if not pid_cmdline_contains(pid, "http.server", str(port), public):
+        return False
+    if names is None:
+        return True
+    return any("python" in name.lower() or "http.server" in name.lower() for name in names)
+
+
+def _static_port_is_own_live_site(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    port: int,
+) -> bool:
+    """监听中的端口是否仍是本实例自己的活跃静态站点（BUG-631 / BUG-737）。
+
+    登记仍归本实例、站点仍启用、``host_port`` 就是该端口，并且本网关仍实际
+    持有监听。Caddy 已停止而外部进程占用原端口时，不得仅凭登记复用。
+    """
+    row = registry.get_static_site(instance_id)
+    if not row or not row.get("enabled"):
+        return False
+    host_port = row.get("host_port")
+    if host_port is None or int(host_port) != port:
+        return False
+    if registry.port_owner(port) != instance_id:
+        return False
+    return _gateway_holds_static_port(workspace, config, instance_id, port)
+
+
 def _ensure_static_port(
+    workspace: Workspace,
     config: Config,
     registry: Registry,
     instance_id: str,
@@ -1235,7 +1334,9 @@ def _ensure_static_port(
     所有、且无活跃监听者（``is_port_listening`` 为 False），:meth:`allocate_port`
     的并发安全语义确认归属后直接复用，保持 lanUrl 稳定。
 
-    若旧端口被外部进程占用或归属已丢失（极端情况），回退到全新分配。
+    BUG-631：rebuild 期间旧站点仍在监听。若该监听者就是本网关仍持有的本实例
+    站点，同样复用。Caddy 已停止、或 lsof 看到的不是本网关进程时，按外部占用
+    重新分配（BUG-737）。
 
     返回 ``(port, fresh)``：``fresh=False`` 表示复用了上一轮成功部署的登记，
     调用方在本次启用失败时**不得**释放它（否则破坏 BUG-045 端口保留语义、
@@ -1244,15 +1345,25 @@ def _ensure_static_port(
     allocator = PortAllocator(config, registry)
     row = registry.get_static_site(instance_id)
     existing = row.get("host_port") if row else None
-    if existing and not is_port_listening(int(existing)):
-        if registry.allocate_port(instance_id, int(existing)):
-            log.info("复用静态实例 %s 的端口 %d", instance_id, existing)
-            return int(existing), False
-        log.warning(
-            "实例 %s 的旧端口 %d 已被其他实例占用，重新分配",
-            instance_id,
-            existing,
-        )
+    if existing:
+        port = int(existing)
+        listening = is_port_listening(port)
+        own_live = _static_port_is_own_live_site(workspace, config, registry, instance_id, port)
+        if (not listening or own_live) and registry.allocate_port(instance_id, port):
+            log.info("复用静态实例 %s 的端口 %d", instance_id, port)
+            return port, False
+        if listening and not own_live:
+            log.warning(
+                "实例 %s 的旧端口 %d 被占用且不是本实例活跃站点，重新分配",
+                instance_id,
+                port,
+            )
+        else:
+            log.warning(
+                "实例 %s 的旧端口 %d 已被其他实例占用，重新分配",
+                instance_id,
+                port,
+            )
     # 全新分配：先清掉该实例可能残留的端口登记
     allocator.release_instance(instance_id)
     return allocator.allocate(instance_id), True
@@ -1732,7 +1843,7 @@ def _enable_static(
     ):
         path_alias = existing_static.routeHost
     # 端口分配：优先复用已登记端口（stop 后保留），否则全新分配（BUG-045）
-    host_port, fresh_port = _ensure_static_port(config, registry, instance_id)
+    host_port, fresh_port = _ensure_static_port(workspace, config, registry, instance_id)
     allocator = PortAllocator(config, registry)
 
     # 不在 enable 前 disable：enable 会覆盖站点配置并停掉残留 builtin；

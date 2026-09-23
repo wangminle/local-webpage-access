@@ -404,6 +404,93 @@ def test_stop_static_then_restart_reuses_port(
     stop_instance(workspace, config, registry, "demo")
 
 
+def test_rehost_static_while_listening_reuses_port(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """BUG-631：静态站点仍在监听时再次 host（rebuild 路径）必须复用原端口。"""
+    _seed_static_instance(workspace, registry, "demo")
+    first = host_static(workspace, config, registry, "demo")
+    port = first.network.hostPort
+    assert port is not None
+
+    second = host_static(workspace, config, registry, "demo")
+    assert second.network.hostPort == port
+    assert registry.port_owner(port) == "demo"
+    stop_instance(workspace, config, registry, "demo")
+
+
+def test_rehost_static_reallocates_when_live_port_is_not_own_site(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """端口上有监听者、但登记已不是本实例活跃站点时，不得把该端口当成可复用。"""
+    _seed_static_instance(workspace, registry, "demo")
+    first = host_static(workspace, config, registry, "demo")
+    port = first.network.hostPort
+    assert port is not None
+    registry.set_static_enabled("demo", False)
+
+    second = host_static(workspace, config, registry, "demo")
+    assert second.network.hostPort != port
+    stop_instance(workspace, config, registry, "demo")
+
+
+def test_ensure_static_port_skips_foreign_listener_when_caddy_is_down(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-737：Caddy 已停、登记仍 enabled，外部进程占端口时不得复用。"""
+    from local_webpage_access.hosting import _ensure_static_port
+    from local_webpage_access.static_gateway import StaticGateway
+
+    _seed_static_instance(workspace, registry, "demo")
+    registry.upsert_static_site(
+        "demo",
+        {"root": "public", "gateway": "caddy", "hostPort": 21000, "enabled": True},
+    )
+    assert registry.allocate_port("demo", 21000)
+    site = StaticGateway(workspace, config).site_config_path("demo")
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_text(":21000 {\n\troot * /tmp\n}\n", encoding="utf-8")
+    monkeypatch.setattr("local_webpage_access.hosting.is_port_listening", lambda _p: True)
+    monkeypatch.setattr("local_webpage_access.ports.is_port_in_use", lambda _p, **_k: False)
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
+    monkeypatch.setattr(StaticGateway, "_admin_alive", lambda self, **_k: False)
+
+    port, fresh = _ensure_static_port(workspace, config, registry, "demo")
+
+    assert fresh is True
+    assert registry.port_owner(port) == "demo"
+
+
+def test_ensure_static_port_reuses_when_caddy_still_holds_port(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """本网关仍在线且站点配置绑着该端口时，监听中的端口可以复用。"""
+    from local_webpage_access.hosting import _ensure_static_port
+    from local_webpage_access.static_gateway import StaticGateway
+
+    _seed_static_instance(workspace, registry, "demo")
+    registry.upsert_static_site(
+        "demo",
+        {"root": "public", "gateway": "caddy", "hostPort": 21000, "enabled": True},
+    )
+    assert registry.allocate_port("demo", 21000)
+    site = StaticGateway(workspace, config).site_config_path("demo")
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_text(":21000 {\n\troot * /tmp\n}\n", encoding="utf-8")
+    monkeypatch.setattr("local_webpage_access.hosting.is_port_listening", lambda _p: True)
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
+    monkeypatch.setattr(StaticGateway, "_admin_alive", lambda self, **_k: True)
+    monkeypatch.setattr(
+        "local_webpage_access.hosting._listen_process_names",
+        lambda _p: ["caddy"],
+    )
+
+    port, fresh = _ensure_static_port(workspace, config, registry, "demo")
+
+    assert fresh is False
+    assert port == 21000
+
+
 def test_stopped_static_port_not_reassigned(
     workspace: Workspace, registry: Registry, config: Config
 ) -> None:

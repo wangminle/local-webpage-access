@@ -122,6 +122,10 @@ class UpdateResult:
     needs_rebuild: bool = False
     kind_changed: bool = False
     sanitized: ZipSanitizeResult | None = None
+    # issue #45：folder → folder 更换了关联目录（含 dry-run 计划）。
+    source_dir_changed: bool = False
+    prev_source_dir: str | None = None
+    new_source_dir: str | None = None
 
 
 # ---- slug 工具 --------------------------------------------------------------
@@ -1216,6 +1220,7 @@ class Importer:
         yes: bool = False,  # noqa: ARG002 - 交互确认由 CLI 层处理
         dry_run: bool = False,
         force_kind_change: bool = False,
+        allow_source_dir_change: bool = False,
     ) -> UpdateResult:
         """从关联文件夹源更新实例（IMP-047）。
 
@@ -1224,15 +1229,19 @@ class Importer:
            例外（issue #28）：非 folder 源（zip/git）实例显式传 ``source_dir``
            时，原地切换为文件夹源——「换源不换实例」，保留 id/hostPort/
            路径别名/data/，仅覆盖 current/ 并登记新源身份。
+           例外（issue #45）：folder 源传入的目录与 ``sourceDirPath`` 不一致时，
+           仅当 ``allow_source_dir_change=True`` 才更换关联目录（同样保留身份）；
+           否则拒绝，避免把「手滑传错目录」当成换源。
         2. 校验源目录仍存在/可读；缺失 -> 明确错误（禁止挂载回退）。
         3. 计算当前源目录指纹，与 ``sourceSyncHash`` 比较：
            - 相同 -> ``skipped=True``（无需更新），不 rebuild / 不重启。
            - 不同 -> 打包为临时 zip，调用 :meth:`update_zip`。
+           - 换目录时不走指纹短路（旧指纹属于旧目录）。
         4. 更新成功后写回新的 ``sourceSyncHash``。
 
         Raises:
             ZipImportError: 实例不存在、非 folder 源且未传 ``source_dir``、
-                源目录缺失、更新失败。
+                源目录缺失、未允许的换目录、更新失败。
         """
         with import_activity_lock(self.ws):
             return self._update_from_dir_locked(
@@ -1243,6 +1252,7 @@ class Importer:
                 yes=yes,
                 dry_run=dry_run,
                 force_kind_change=force_kind_change,
+                allow_source_dir_change=allow_source_dir_change,
             )
 
     def _update_from_dir_locked(
@@ -1255,6 +1265,7 @@ class Importer:
         yes: bool = False,
         dry_run: bool = False,
         force_kind_change: bool = False,
+        allow_source_dir_change: bool = False,
     ) -> UpdateResult:
         from local_webpage_access.folder_source import (
             compute_source_hash,
@@ -1279,6 +1290,8 @@ class Importer:
         source_kind = getattr(old_manifest, "sourceKind", "zip")
         source_dir_str = getattr(old_manifest, "sourceDirPath", None)
         switching_to_folder = False
+        changing_source_dir = False
+        prev_source_dir: str | None = None
         if source_kind != "folder" or not source_dir_str:
             if source_dir is None:
                 if source_kind == "git":
@@ -1307,6 +1320,43 @@ class Importer:
                 source_kind,
                 source_dir_str,
             )
+        elif source_dir is not None:
+            # issue #45 / BUG-736：先按 resolve 后的绝对路径比较。相对路径若指回
+            # 已记录目录，沿用 manifest 里的绝对路径，不把相对字符串送进
+            # validate_source_dir（该函数拒绝相对路径）。确要换目录时，再校验
+            # resolve 后的绝对路径。
+            raw_source = str(source_dir).strip()
+            if not raw_source:
+                raise ZipImportError(
+                    "源目录路径为空",
+                    instance_id=instance_id,
+                )
+            try:
+                candidate_resolved = Path(raw_source).resolve()
+            except OSError as exc:
+                raise ZipImportError(
+                    f"源目录路径无法解析：{raw_source}",
+                    instance_id=instance_id,
+                ) from exc
+            recorded_resolved = str(Path(source_dir_str).resolve())
+            if str(candidate_resolved) != recorded_resolved:
+                resolved_new = validate_source_dir(candidate_resolved, workspace_root=self.ws.root)
+                if not allow_source_dir_change:
+                    raise ZipImportError(
+                        f"传入的目录 {resolved_new} 与实例 {instance_id} 关联的源目录 "
+                        f"{source_dir_str} 不一致。如需更换并保留实例身份，"
+                        "请加上 --allow-source-change。",
+                        instance_id=instance_id,
+                    )
+                prev_source_dir = source_dir_str
+                source_dir_str = str(resolved_new)
+                changing_source_dir = True
+                log.info(
+                    "实例 %s 关联源目录更换：%s -> %s",
+                    instance_id,
+                    prev_source_dir,
+                    source_dir_str,
+                )
 
         source_dir = Path(source_dir_str)
         try:
@@ -1322,7 +1372,7 @@ class Importer:
         old_sync_hash = getattr(old_manifest, "sourceSyncHash", None)
 
         # 无变更短路（切源场景恒走全量更新：旧指纹属于另一源类型，不可比）
-        if new_sync_hash == old_sync_hash and not switching_to_folder:
+        if new_sync_hash == old_sync_hash and not switching_to_folder and not changing_source_dir:
             log.info(
                 "实例 %s 的文件夹源内容未变化（指纹 %s），跳过更新",
                 instance_id,
@@ -1379,7 +1429,9 @@ class Importer:
         # _update_zip_locked 按 zip 指纹判 skipped，若随之跳过身份写回，
         # 「换源不换实例」会静默失败（issue #28 典型场景：原 zip 解压成目录
         # 再切换）。与 git 切换路径「skipped 仍刷新身份」的约定对齐。
-        if not result.dry_run and (not result.skipped or switching_to_folder):
+        if not result.dry_run and (
+            not result.skipped or switching_to_folder or changing_source_dir
+        ):
             updated_manifest = InstanceManifest.load(manifest_path)
             updated_manifest.sourceKind = "folder"
             updated_manifest.sourceDirPath = str(source_dir)
@@ -1396,12 +1448,23 @@ class Importer:
                 if result.skipped:
                     switch_note += "；内容与当前版本一致，仅切换源身份"
                 self.registry.add_event(instance_id, "update", switch_note)
+            if changing_source_dir and prev_source_dir:
+                self.registry.add_event(
+                    instance_id,
+                    "update",
+                    f"关联源目录更换：{prev_source_dir} → {source_dir}",
+                )
             updated_manifest.touch()
             updated_manifest.save(manifest_path)
-            if switching_to_folder:
+            if switching_to_folder or changing_source_dir:
                 # 返回值与磁盘身份保持一致（skipped 分支的 result.manifest
-                # 仍是旧 zip 身份，调用方按其展示会误导）
+                # 仍是旧身份，调用方按其展示会误导）
                 result.manifest = updated_manifest
+
+        if changing_source_dir:
+            result.source_dir_changed = True
+            result.prev_source_dir = prev_source_dir
+            result.new_source_dir = str(source_dir)
 
         return result
 
@@ -1521,18 +1584,11 @@ class Importer:
                     # 内存结果与磁盘身份保持一致（folder 路径的历史行为是留旧的
                     # in-memory manifest；git 路径消费方更多，不留陈旧对象）
                     result.manifest = manifest
-                    identity = (
-                        f"{target.url}（{clone.ref_kind} {clone.ref}"
-                        f" @ {clone.commit[:12]}）"
-                    )
+                    identity = f"{target.url}（{clone.ref_kind} {clone.ref} @ {clone.commit[:12]}）"
                 except Exception as exc:
-                    log.error(
-                        "写回 git 身份失败，回滚实例 %s：%s", result.instance_id, exc
-                    )
+                    log.error("写回 git 身份失败，回滚实例 %s：%s", result.instance_id, exc)
                     self._cleanup_failed(result.instance_id)
-                    raise ZipImportError(
-                        f"GitHub 源身份写回失败，已清理半成品：{exc}"
-                    ) from exc
+                    raise ZipImportError(f"GitHub 源身份写回失败，已清理半成品：{exc}") from exc
                 except BaseException:
                     log.error("写回 git 身份被中断，回滚实例 %s", result.instance_id)
                     self._cleanup_failed(result.instance_id)
@@ -1625,7 +1681,9 @@ class Importer:
         stored_commit = getattr(old_manifest, "sourceGitCommit", None)
         stored_subdir = getattr(old_manifest, "sourceGitSubdir", None)
         switching_to_git = False
-        if source_kind != "git" or not (stored_url and stored_ref and stored_kind and stored_commit):
+        if source_kind != "git" or not (
+            stored_url and stored_ref and stored_kind and stored_commit
+        ):
             if url is None:
                 raise ZipImportError(
                     f"实例 {instance_id} 不是 git 源实例（sourceKind={source_kind!r}）"
@@ -1709,9 +1767,7 @@ class Importer:
         os.close(fd)
         tmp_zip = Path(tmp_zip_path)
         try:
-            with git_source.stage_git_clone(
-                target, ref=stored_ref, clone_url=clone_url
-            ) as clone:
+            with git_source.stage_git_clone(target, ref=stored_ref, clone_url=clone_url) as clone:
                 pack_root = clone.directory
                 if stored_subdir:
                     # BUG-557：存量 manifest 可能被手改，join 前过安全解析
@@ -2351,9 +2407,7 @@ def apply_detection_to_manifest(
     # BUG-584 / CHK-252：verificationOverrides 是用户显式配置（lwa probe /
     # 管理页），不从 zip 推导，scan / update 重建不得清空。深拷贝避免与
     # 旧 manifest 共享可变结构。
-    fresh.verificationOverrides = copy.deepcopy(
-        getattr(manifest, "verificationOverrides", None)
-    )
+    fresh.verificationOverrides = copy.deepcopy(getattr(manifest, "verificationOverrides", None))
     # CHK-178/P2：路径别名是用户/CLI 选择，不从 zip 推导，重扫不得清空。
     # ``build_manifest_from_detection`` 默认 ``path_alias=None``，不透传会把
     # static/container 的 routeMode=name、routeHost 重置为 port/None，导致
@@ -2397,9 +2451,7 @@ def apply_detection_to_manifest(
         getattr(manifest, "consecutiveReconcileFailures", 0) or 0
     )
     fresh.reconcileNextRetryAt = getattr(manifest, "reconcileNextRetryAt", None)
-    fresh.reconcileCircuitManual = bool(
-        getattr(manifest, "reconcileCircuitManual", False)
-    )
+    fresh.reconcileCircuitManual = bool(getattr(manifest, "reconcileCircuitManual", False))
     # DEV-132：buildEnv（实例级构建环境变量，如 {"VITE_BASE": "/<alias>/"}）是
     # 用户显式配置，不从源码推导；重建默认 None，不透传会让 scan / import
     # --update / update_from_git（汇入 _update_zip_locked）静默清空——与 entry.build

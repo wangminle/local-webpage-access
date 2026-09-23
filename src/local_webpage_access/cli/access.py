@@ -47,6 +47,13 @@ def access_refresh() -> None:
                 typer.echo(f"    · {item.instance_id}：{item.new_host or '(无)'}（未漂移）")
         if report.skipped:
             typer.echo(f"  跳过：{', '.join(report.skipped)}（无 hostPort 或 manifest 缺失）")
+        if report.caddy_reloaded:
+            typer.secho("  已按当前 LAN IP 重载 Caddy TLS 站点绑定", fg=typer.colors.GREEN)
+        elif report.caddy_reload_error:
+            typer.secho(
+                f"  Caddy TLS 绑定未重载：{report.caddy_reload_error}（可手动 lwa gateway on）",
+                fg=typer.colors.YELLOW,
+            )
         typer.echo("  下一步：lwa access review 复核可用性")
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)

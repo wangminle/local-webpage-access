@@ -300,6 +300,189 @@ def test_refresh_skips_instance_without_hostport(workspace, registry, config, mo
     assert "noport" in report.skipped
 
 
+def _tls_config(config):
+    """issue #44：TLS 站点块按 LAN IP 绑定，刷新后必须能重载 Caddy。"""
+    config.gatewayTls = "internal"
+    config.staticGateway = "caddy"
+    return config
+
+
+def _write_caddyfile(workspace, text: str) -> None:
+    path = workspace.static_gateway / "Caddyfile"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _patch_caddy_reload(monkeypatch):
+    """挡住真实 caddy reload / admin 探测，只记录是否被调用。"""
+    from local_webpage_access.static_gateway import StaticGateway
+
+    calls: list[str] = []
+
+    def reload_all(self) -> None:
+        calls.append("reload")
+
+    def admin_alive(self, **kwargs) -> bool:
+        return True
+
+    def detect_backend(self) -> str:
+        return "caddy"
+
+    monkeypatch.setattr(StaticGateway, "reload_all", reload_all)
+    monkeypatch.setattr(StaticGateway, "_admin_alive", admin_alive)
+    monkeypatch.setattr(StaticGateway, "detect_backend", detect_backend)
+    return calls
+
+
+def test_refresh_reloads_caddy_when_tls_bind_drifts(workspace, registry, config, monkeypatch):
+    """issue #44：manifest 漂移且主 Caddyfile 仍绑旧 IP 时，重载在线 Caddy。"""
+    _tls_config(config)
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://10.0.0.99:21000")
+    _write_caddyfile(
+        workspace,
+        "https://127.0.0.1:8443, https://10.0.0.99:8443 {\n\ttls internal\n}\n",
+    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    calls = _patch_caddy_reload(monkeypatch)
+
+    report = refresh_network_entries(workspace, config, registry)
+
+    assert report.drifted_count == 1
+    assert calls == ["reload"]
+    assert report.caddy_reloaded is True
+    assert report.caddy_reload_error is None
+
+
+def test_refresh_reloads_caddy_when_manifest_already_matches(
+    workspace, registry, config, monkeypatch
+):
+    """issue #44：manifest 已是新 IP、Caddyfile 仍是旧 IP 时，显式刷新也要重载。"""
+    _tls_config(config)
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://192.168.1.50:21000")
+    _write_caddyfile(
+        workspace,
+        "https://127.0.0.1:8443, https://10.181.239.168:8443 {\n\ttls internal\n}\n"
+        "https://127.0.0.1:9443, https://10.181.239.168:9443 {\n\ttls internal\n}\n",
+    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    calls = _patch_caddy_reload(monkeypatch)
+
+    report = refresh_network_entries(workspace, config, registry)
+
+    assert report.drifted_count == 0
+    assert calls == ["reload"]
+    assert report.caddy_reloaded is True
+
+
+def test_refresh_does_not_start_stopped_caddy(workspace, registry, config, monkeypatch):
+    """issue #44：网关已关闭时只记下陈旧绑定，不把 Caddy 拉起来。"""
+    from local_webpage_access.static_gateway import StaticGateway
+
+    _tls_config(config)
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://10.0.0.99:21000")
+    _write_caddyfile(
+        workspace,
+        "https://127.0.0.1:8443, https://10.0.0.99:8443 {\n\ttls internal\n}\n",
+    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    calls: list[str] = []
+    monkeypatch.setattr(StaticGateway, "reload_all", lambda self: calls.append("reload"))
+    monkeypatch.setattr(StaticGateway, "_admin_alive", lambda self, **kwargs: False)
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
+
+    report = refresh_network_entries(workspace, config, registry)
+
+    assert report.drifted_count == 1
+    assert calls == []
+    assert report.caddy_reloaded is False
+
+
+def test_refresh_continues_when_full_profile_caddy_missing(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-738：Full Profile 暂时找不到 caddy 时，地址刷新仍返回，reload 只记警告。"""
+    import local_webpage_access.static_gateway as static_gateway
+    from local_webpage_access.models import InstanceManifest
+
+    _tls_config(config)
+    config.profile = "full"
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://10.0.0.99:21000")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    real_which = static_gateway.shutil.which
+
+    def which(cmd, *args, **kwargs):
+        if cmd == "caddy":
+            return None
+        return real_which(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(static_gateway.shutil, "which", which)
+
+    report = refresh_network_entries(workspace, config, registry)
+
+    assert report.lan_ip == "192.168.1.50"
+    assert report.caddy_reloaded is False
+    assert report.caddy_reload_error
+    saved = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    assert saved.network.lanUrl == "http://192.168.1.50:21000"
+
+
+def test_refresh_skips_caddy_reload_when_tls_off(workspace, registry, config, monkeypatch):
+    """明文网关的站点块不绑 LAN IP，地址刷新不得触发 Caddy reload。"""
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://10.0.0.99:21000")
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    calls = _patch_caddy_reload(monkeypatch)
+
+    report = refresh_network_entries(workspace, config, registry)
+
+    assert report.drifted_count == 1
+    assert calls == []
+    assert report.caddy_reloaded is False
+
+
+def test_caddyfile_tls_bind_stale_ignores_current_ip() -> None:
+    from local_webpage_access.access import caddyfile_tls_bind_stale
+
+    current = "https://127.0.0.1:8443, https://192.168.1.50:8443 {\n"
+    assert caddyfile_tls_bind_stale(current, "192.168.1.50", {8443, 9443}) is False
+    stale = "https://127.0.0.1:8443, https://10.0.0.99:8443 {\n"
+    assert caddyfile_tls_bind_stale(stale, "192.168.1.50", {8443, 9443}) is True
+    loopback_only = "https://127.0.0.1:8443 {\n"
+    assert caddyfile_tls_bind_stale(loopback_only, "192.168.1.50", {8443, 9443}) is True
+    assert caddyfile_tls_bind_stale(":8080 {\n", "192.168.1.50", {8443, 9443}) is False
+    # 8443 已是新 IP 不得掩盖 9443 仍只绑回环：两个端口各自判断。
+    split = (
+        "https://127.0.0.1:8443, https://192.168.1.50:8443 {\n\ttls internal\n}\n"
+        "https://127.0.0.1:9443 {\n\ttls internal\n}\n"
+    )
+    assert caddyfile_tls_bind_stale(split, "192.168.1.50", {8443, 9443}) is True
+    both_current = (
+        "https://127.0.0.1:8443, https://192.168.1.50:8443 {\n"
+        "https://127.0.0.1:9443, https://192.168.1.50:9443 {\n"
+    )
+    assert caddyfile_tls_bind_stale(both_current, "192.168.1.50", {8443, 9443}) is False
+
+
+def test_refresh_reloads_when_only_manager_tls_port_is_stale(
+    workspace, registry, config, monkeypatch
+):
+    """issue #44：别名入口已绑新 IP、管理面仍只绑回环时，仍须重载 Caddy。"""
+    _tls_config(config)
+    _seed_static(workspace, registry, "demo", host_port=21000, lan_url="http://192.168.1.50:21000")
+    _write_caddyfile(
+        workspace,
+        "https://127.0.0.1:8443, https://192.168.1.50:8443 {\n\ttls internal\n}\n"
+        "https://127.0.0.1:9443 {\n\ttls internal\n}\n",
+    )
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    calls = _patch_caddy_reload(monkeypatch)
+
+    report = refresh_network_entries(workspace, config, registry)
+
+    assert report.drifted_count == 0
+    assert calls == ["reload"]
+    assert report.caddy_reloaded is True
+
+
 def test_refresh_skips_write_when_lan_ip_unavailable(
     workspace, registry, config, monkeypatch
 ) -> None:

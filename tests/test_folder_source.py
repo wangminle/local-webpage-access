@@ -711,8 +711,236 @@ class TestCliFromDirUpdatePathGuard:
             )
             assert cli.exit_code == 2, cli.output
             assert "不一致" in cli.output
+            assert "请先删除" not in cli.output
+            assert "--allow-source-change" in cli.output
+            assert "data/" in cli.output
         finally:
             reg.close()
+
+
+# ---- issue #45：folder → folder 更换关联目录 --------------------------------
+
+
+class TestIssue45ChangeSourceDir:
+    """folder 源换目录保留实例身份；未确认则拒绝且不再建议删实例重导。"""
+
+    def test_allow_flag_preserves_identity(
+        self,
+        importer: Importer,
+        source_dir: Path,
+        workspace: Workspace,
+        registry: Registry,
+        tmp_path: Path,
+    ) -> None:
+        from local_webpage_access.cli.importing import _do_update_from_dir
+
+        result = importer.import_from_dir(source_dir)
+        iid = result.instance_id
+        data_dir = workspace.app_data(iid)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "app.db").write_text("business-data", encoding="utf-8")
+        manifest_path = workspace.app_manifest_path(iid)
+        manifest = InstanceManifest.load(manifest_path)
+        assert manifest.static is not None
+        manifest.static.routeMode = "name"
+        manifest.static.routeHost = "kept-alias"
+        manifest.static.hostPort = 48091
+        manifest.save(manifest_path)
+        importer.registry.upsert_from_manifest(manifest)
+
+        new_dir = tmp_path / "v5-output"
+        new_dir.mkdir()
+        new_dir.joinpath("index.html").write_text("<html>v5</html>", encoding="utf-8")
+
+        _do_update_from_dir(
+            importer,
+            workspace,
+            Config(),
+            registry,
+            instance_id=iid,
+            from_dir=str(new_dir),
+            restart=False,
+            keep_data=True,
+            yes=True,
+            dry_run=False,
+            force_kind_change=False,
+            allow_source_change=True,
+        )
+
+        saved = InstanceManifest.load(manifest_path)
+        assert saved.id == iid
+        assert saved.sourceKind == "folder"
+        assert saved.sourceDirPath == str(new_dir.resolve())
+        assert saved.static is not None
+        assert saved.static.routeHost == "kept-alias"
+        assert saved.static.hostPort == 48091
+        assert (data_dir / "app.db").read_text(encoding="utf-8") == "business-data"
+        assert "v5" in (workspace.app_current(iid) / "index.html").read_text(encoding="utf-8")
+        events = registry.list_events(iid)
+        assert any(
+            "关联源目录更换" in e["message"] and str(new_dir.resolve()) in e["message"]
+            for e in events
+        )
+
+    def test_same_content_still_rewrites_source_dir(
+        self,
+        importer: Importer,
+        source_dir: Path,
+        workspace: Workspace,
+        tmp_path: Path,
+    ) -> None:
+        """旧指纹属于旧目录，内容碰巧相同也不得走指纹短路把换源吞掉。"""
+        result = importer.import_from_dir(source_dir)
+        iid = result.instance_id
+        new_dir = tmp_path / "same-bytes"
+        new_dir.mkdir()
+        for src in source_dir.rglob("*"):
+            if src.is_file():
+                dest = new_dir / src.relative_to(source_dir)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(src.read_bytes())
+
+        updated = importer.update_from_dir(iid, source_dir=new_dir, allow_source_dir_change=True)
+        saved = InstanceManifest.load(workspace.app_manifest_path(iid))
+        assert saved.sourceDirPath == str(new_dir.resolve())
+        assert updated.source_dir_changed is True
+        assert updated.prev_source_dir == str(source_dir.resolve())
+
+    def test_without_flag_importer_rejects(
+        self, importer: Importer, source_dir: Path, tmp_path: Path
+    ) -> None:
+        result = importer.import_from_dir(source_dir)
+        other = tmp_path / "other"
+        other.mkdir()
+        other.joinpath("index.html").write_text("x", encoding="utf-8")
+        with pytest.raises(ZipImportError, match="不一致"):
+            importer.update_from_dir(result.instance_id, source_dir=other)
+
+    def test_dry_run_shows_plan_without_writing(
+        self,
+        importer: Importer,
+        source_dir: Path,
+        workspace: Workspace,
+        registry: Registry,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from local_webpage_access.cli.importing import _do_update_from_dir
+
+        result = importer.import_from_dir(source_dir)
+        other = tmp_path / "planned"
+        other.mkdir()
+        other.joinpath("index.html").write_text("<html>next</html>", encoding="utf-8")
+        _do_update_from_dir(
+            importer,
+            workspace,
+            Config(),
+            registry,
+            instance_id=result.instance_id,
+            from_dir=str(other),
+            restart=False,
+            keep_data=True,
+            yes=False,
+            dry_run=True,
+            force_kind_change=False,
+            allow_source_change=False,
+        )
+        captured = capsys.readouterr().out
+        assert "将更换关联目录" in captured
+        saved = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
+        assert saved.sourceDirPath == str(source_dir.resolve())
+        assert "next" not in (workspace.app_current(result.instance_id) / "index.html").read_text(
+            encoding="utf-8"
+        )
+
+    def test_interactive_confirm_includes_summary(
+        self,
+        importer: Importer,
+        source_dir: Path,
+        workspace: Workspace,
+        registry: Registry,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import typer
+
+        from local_webpage_access.cli import importing as importing_cli
+
+        result = importer.import_from_dir(source_dir)
+        other = tmp_path / "confirmed"
+        other.mkdir()
+        other.joinpath("index.html").write_text("<html>yes</html>", encoding="utf-8")
+        seen: dict[str, str] = {}
+
+        def fake_confirm(message: str, default: bool = False) -> bool:
+            seen["message"] = message
+            return True
+
+        monkeypatch.setattr(typer, "confirm", fake_confirm)
+        monkeypatch.setattr(
+            importing_cli.sys, "stdin", type("S", (), {"isatty": lambda self: True})()
+        )
+        importing_cli._do_update_from_dir(
+            importer,
+            workspace,
+            Config(),
+            registry,
+            instance_id=result.instance_id,
+            from_dir=str(other),
+            restart=False,
+            keep_data=True,
+            yes=False,
+            dry_run=False,
+            force_kind_change=False,
+            allow_source_change=False,
+        )
+        assert "个文件" in seen["message"]
+        assert "指纹" in seen["message"]
+        saved = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
+        assert saved.sourceDirPath == str(other.resolve())
+
+
+class TestIssue45RelativeSourceDir:
+    """BUG-736：相对路径在 resolve 后与记录目录相同，或显式换源，都不得被绝对路径校验提前拒绝。"""
+
+    def test_relative_same_dir_updates(
+        self,
+        importer: Importer,
+        source_dir: Path,
+        workspace: Workspace,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = importer.import_from_dir(source_dir)
+        monkeypatch.chdir(source_dir.parent)
+        updated = importer.update_from_dir(result.instance_id, source_dir=source_dir.name)
+        assert updated.skipped is True
+        saved = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
+        assert saved.sourceDirPath == str(source_dir.resolve())
+
+    def test_relative_new_dir_with_allow_resolves_absolute(
+        self,
+        importer: Importer,
+        source_dir: Path,
+        workspace: Workspace,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = importer.import_from_dir(source_dir)
+        new_dir = tmp_path / "v5-output"
+        new_dir.mkdir()
+        new_dir.joinpath("index.html").write_text("<html>v5</html>", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        updated = importer.update_from_dir(
+            result.instance_id,
+            source_dir=new_dir.name,
+            allow_source_dir_change=True,
+        )
+        assert updated.source_dir_changed is True
+        saved = InstanceManifest.load(workspace.app_manifest_path(result.instance_id))
+        assert saved.sourceDirPath == str(new_dir.resolve())
+        assert "v5" in (workspace.app_current(result.instance_id) / "index.html").read_text(
+            encoding="utf-8"
+        )
 
 
 # ---- lwa scan 不得抹除文件夹源元数据 ----------------------------------------

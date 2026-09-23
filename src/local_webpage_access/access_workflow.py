@@ -145,9 +145,7 @@ class DebouncedReviewResult:
         }
 
 
-def _review_needs_debounce_retry(
-    review: AccessReviewReport | None, error: str | None
-) -> bool:
+def _review_needs_debounce_retry(review: AccessReviewReport | None, error: str | None) -> bool:
     """是否值得防抖重试（DEV-114）：探测**异常**或存在 **FAIL**。
 
     WARN（LAN 漂移 / IMP-023 别名资源错位等）是真实发现，不是启动窗口
@@ -189,9 +187,7 @@ def review_access_with_debounce(
                 attempts=index + 1,
                 passed_on_attempt=index + 1,
             )
-        result = DebouncedReviewResult(
-            review=review, review_error=error, attempts=index + 1
-        )
+        result = DebouncedReviewResult(review=review, review_error=error, attempts=index + 1)
         if index < len(delays):
             log.info(
                 "access review 第 %d/%d 次仍有 FAIL，%.1fs 后防抖重试（DEV-114 启动窗口）",
@@ -260,13 +256,23 @@ def maybe_throttled_lan_refresh(
                 drifted = True
         if not drifted:
             _last_resolved_lan_ip = lan_ip
-            return None
-        now = time.monotonic()
-        if not force and _last_refresh_mono and (now - _last_refresh_mono) < min_interval:
-            return None
-        if _inflight:
-            return None
-        _inflight = True
+            heal_caddy_only = True
+        else:
+            heal_caddy_only = False
+            now = time.monotonic()
+            if not force and _last_refresh_mono and (now - _last_refresh_mono) < min_interval:
+                return None
+            if _inflight:
+                return None
+            _inflight = True
+
+    if heal_caddy_only:
+        # issue #44：manifest 已是新 IP 时不再全量刷新，但在线 Caddy 的 TLS
+        # 站点块可能仍绑旧 IP（上次刷新漏了 reload，或开机时网络未就绪）。
+        from local_webpage_access.access import sync_caddy_tls_bind
+
+        sync_caddy_tls_bind(workspace, config, lan_ip)
+        return None
 
     try:
         report = refresh_network_entries(workspace, config, registry)

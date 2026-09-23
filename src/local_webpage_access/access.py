@@ -320,6 +320,9 @@ class RefreshReport:
     lan_ip: str | None = None
     refreshed: list[RefreshedInstance] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    # issue #44：TLS 站点块仍绑旧 LAN IP 时是否已重载在线 Caddy。
+    caddy_reloaded: bool = False
+    caddy_reload_error: str | None = None
 
     @property
     def drifted_count(self) -> int:
@@ -341,6 +344,8 @@ class RefreshReport:
                 for r in self.refreshed
             ],
             "skipped": self.skipped,
+            "caddyReloaded": self.caddy_reloaded,
+            "caddyReloadError": self.caddy_reload_error,
         }
 
 
@@ -455,6 +460,10 @@ def refresh_network_entries(
 
     BUG-109：别名仅在 ``routeMode=name`` 时传入 ``build_network_entry``，避免把
     端口模式下残留的 ``routeHost`` 误写回 ``routeMode=name`` / ``routeUrl``。
+
+    issue #44：``gatewayTls=internal`` 时主 Caddyfile 的 HTTPS 站点块绑定当前
+    LAN IP。manifest 写完后若磁盘上的绑定仍是旧 IP（或仅回环），且 Caddy admin
+    已在线，则 ``reload_all``。网关被关掉时不拉起。
     """
     from local_webpage_access.models import InstanceManifest, NetworkConfig
     from local_webpage_access.ports import build_network_entry
@@ -529,7 +538,92 @@ def refresh_network_entries(
         len(report.refreshed),
         report.drifted_count,
     )
+    reloaded, reload_error = sync_caddy_tls_bind(workspace, config, lan_ip)
+    report.caddy_reloaded = reloaded
+    report.caddy_reload_error = reload_error
     return report
+
+
+_CADDY_HTTPS_BIND = re.compile(r"https://(\[[^\]]+\]|[^,\s/:]+):(\d+)")
+_LOOPBACK_HTTPS_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
+
+
+def caddyfile_tls_bind_stale(text: str, lan_ip: str, ports: set[int]) -> bool:
+    """主 Caddyfile 的 HTTPS 站点是否还没绑到当前 LAN IP。
+
+    只看 ``ports`` 里的端口（别名入口与管理面），并且**逐端口**判断：某个端口
+    已经出现当前 LAN IP，不能抵消另一个端口仍只绑回环或仍绑旧 IP。没有任何
+    HTTPS 站点块时不算陈旧（明文 ``:port`` 块不绑 LAN IP）。某一端口完全没有
+    HTTPS 地址时跳过该端口。
+    """
+    from local_webpage_access.ports import format_http_host
+
+    expected = format_http_host(lan_ip)
+    hosts_by_port: dict[int, set[str]] = {}
+    for host, port_s in _CADDY_HTTPS_BIND.findall(text):
+        try:
+            port = int(port_s)
+        except ValueError:
+            continue
+        if port not in ports:
+            continue
+        hosts_by_port.setdefault(port, set()).add(host)
+    for hosts in hosts_by_port.values():
+        lan_hosts = hosts - _LOOPBACK_HTTPS_HOSTS
+        if expected not in lan_hosts or any(host != expected for host in lan_hosts):
+            return True
+    return False
+
+
+def sync_caddy_tls_bind(
+    workspace: Workspace, config: Config, lan_ip: str | None
+) -> tuple[bool, str | None]:
+    """issue #44：在线 Caddy 的 TLS 站点仍绑旧 LAN IP 时重写主配置并 reload。
+
+    返回 ``(是否已 reload, 失败说明)``。TLS 未开启、Caddy 未在跑、绑定已是当前
+    IP 时返回 ``(False, None)``——不调用 ``reload_all``，因此不会把用户关掉的
+    网关重新拉起。reload 失败只记警告，不回滚已经写好的 manifest。
+    """
+    from local_webpage_access.config import tls_enabled
+
+    if not lan_ip or not tls_enabled(config):
+        return False, None
+    from local_webpage_access.errors import GatewayError
+    from local_webpage_access.static_gateway import StaticGateway
+
+    try:
+        gateway = StaticGateway(workspace, config)
+        if gateway.detect_backend() != "caddy":
+            return False, None
+        main = gateway.main_config_path()
+        if not main.is_file():
+            return False, None
+        try:
+            text = main.read_text(encoding="utf-8")
+        except OSError as exc:
+            log.warning("读取主 Caddyfile 失败，跳过 TLS 绑定同步：%s", exc)
+            return False, str(exc)
+        ports = {int(config.gatewayTlsPort), int(config.managerTlsPort)}
+        if not caddyfile_tls_bind_stale(text, lan_ip, ports):
+            return False, None
+        if not gateway._admin_alive():
+            log.info("LAN IP 已变但 Caddy 未在线，跳过 reload（不拉起已关闭的网关）")
+            return False, None
+        gateway.reload_all()
+    except GatewayError as exc:
+        log.warning(
+            "LAN IP 漂移后重载 Caddy 失败（manifest 已更新，可手动 lwa gateway on）：%s",
+            exc,
+        )
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001 — 探测或 reload 失败不得推翻已落盘的地址刷新
+        log.warning(
+            "LAN IP 漂移后重载 Caddy 失败（manifest 已更新，可手动 lwa gateway on）：%s",
+            exc,
+        )
+        return False, str(exc)
+    log.info("LAN IP 漂移后已重载 Caddy（TLS 站点绑定 %s）", lan_ip)
+    return True, None
 
 
 # ---- 访问可用性复核（G2 / G5）----------------------------------------------
@@ -703,9 +797,7 @@ class _AbsoluteResourceCollector(HTMLParser):
         # 绝对路径判定：单个 ``/`` 开头，排除协议相对 ``//cdn…``。
         if not value or not value.startswith("/") or value.startswith("//"):
             return
-        bucket, seen = (
-            (self._load, self._seen_load) if load else (self._warn, self._seen_warn)
-        )
+        bucket, seen = (self._load, self._seen_load) if load else (self._warn, self._seen_warn)
         if value not in seen:
             seen.add(value)
             bucket.append(value)
@@ -747,9 +839,7 @@ class _AbsoluteResourceCollector(HTMLParser):
     # <script src> 偶见自闭合写法，按开始标签同等处理即可。
 
     def result(self) -> SpaAbsoluteResourceScan:
-        return SpaAbsoluteResourceScan(
-            load_paths=tuple(self._load), warn_paths=tuple(self._warn)
-        )
+        return SpaAbsoluteResourceScan(load_paths=tuple(self._load), warn_paths=tuple(self._warn))
 
 
 def _alias_exempt(path: str, alias: str | None) -> bool:
@@ -765,9 +855,7 @@ def _alias_exempt(path: str, alias: str | None) -> bool:
     return bare == prefix or bare.startswith(prefix + "/")
 
 
-def scan_absolute_spa_resources(
-    html: str, *, alias: str | None = None
-) -> SpaAbsoluteResourceScan:
+def scan_absolute_spa_resources(html: str, *, alias: str | None = None) -> SpaAbsoluteResourceScan:
     """结构化扫描入口 HTML 的绝对路径资源并按语义分类（issue #10）。
 
     先完整解析、分类（不截断），再按 ``alias`` 豁免 ``/{alias}`` /
@@ -1289,7 +1377,11 @@ def _review_instance(
             )
             # BUG-467：内部从别名入口前缀 fetch JS bundle 抽取 API 路径
             _check_api_paths(
-                rep, config, path_alias, entry_html, host_port=host_port,
+                rep,
+                config,
+                path_alias,
+                entry_html,
+                host_port=host_port,
                 ssl_context=entry_ctx,
             )
 
@@ -1437,18 +1529,14 @@ def instance_still_has_imp023(
         from local_webpage_access.static_gateway import make_https_ssl_context
 
         ssl_ctx = make_https_ssl_context(workspace)
-    html = _fetch_text(
-        f"{scheme}://127.0.0.1:{entry_port}/{path_alias}/", ssl_context=ssl_ctx
-    )
+    html = _fetch_text(f"{scheme}://127.0.0.1:{entry_port}/{path_alias}/", ssl_context=ssl_ctx)
     if not html:
         return False
     resources = _extract_absolute_resources(html)
     if not resources:
         return False
     for path in resources:
-        absolute = _http_get(
-            f"{scheme}://127.0.0.1:{entry_port}{path}", ssl_context=ssl_ctx
-        )
+        absolute = _http_get(f"{scheme}://127.0.0.1:{entry_port}{path}", ssl_context=ssl_ctx)
         prefixed = _http_get(
             f"{scheme}://127.0.0.1:{entry_port}/{path_alias}{path}",
             ssl_context=ssl_ctx,
@@ -1497,9 +1585,7 @@ def maybe_rebuild_after_review(
         still = False
         if alias:
             try:
-                still = instance_still_has_imp023(
-                    config, path_alias=alias, workspace=workspace
-                )
+                still = instance_still_has_imp023(config, path_alias=alias, workspace=workspace)
             except Exception as exc:  # noqa: BLE001 — 复检失败不掩盖 rebuild 成功
                 log.warning("G6：rebuild 后复检 %s 失败（不阻断）：%s", iid, exc)
                 still = False
@@ -1658,7 +1744,9 @@ __all__ = [
     "RebuildAfterReviewReport",
     "RefreshedInstance",
     "RefreshReport",
+    "caddyfile_tls_bind_stale",
     "refresh_network_entries",
+    "sync_caddy_tls_bind",
     "review_access",
     "instances_needing_rebuild",
     "instance_still_has_imp023",

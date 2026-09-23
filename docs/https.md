@@ -1,6 +1,6 @@
 # HTTPS 传输加密（gatewayTls）
 
-> 适用版本：V0.9.0+（HTTPS 首版交付，依据 CHK-352 审查提前立项）。
+> 适用版本：V0.9.1（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
 > 目标：保护 LAN 管理凭据与应用登录的传输安全——明文只存在于回环。
 
 ## 1. 支持矩阵
@@ -79,7 +79,7 @@ curl / Agent 客户端：`curl --cacert lwa-root-ca.crt https://…`；Python：
 
 ## 7. LAN IP 变化与运维
 
-证书 SAN 覆盖签发时的 LAN IP；IP 变化后运行 `lwa access refresh` 并 `lwa gateway on`（或 `lwa services restart`）重生成 Caddyfile 与证书。固定 IP 环境建议 `lanIpStrategy: manual` + `manualLanIp`。
+证书 SAN 覆盖签发时的 LAN IP。`lanIpStrategy: auto` 时，地址刷新（管理页列表节流、daemon 周期检查或 `lwa access refresh`）若发现主 Caddyfile 的 8443/9443 仍绑旧 IP 或只剩回环，且 Caddy 已在线，会按当前 LAN IP 重写并 reload；两个端口分别判断，不会因为别名入口已更新就放过管理面。网关处于关闭状态时不会被这次检查重新拉起，下次 `lwa gateway on` 会按当前 IP 重写。reload 失败时 manifest 已更新，可再执行 `lwa gateway on`。固定 IP 环境建议 `lanIpStrategy: manual` + `manualLanIp`。
 
 验收清单（至少两台设备）：
 

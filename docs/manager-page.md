@@ -38,7 +38,7 @@ lwa manager off         # 停止
 * **本机调试例外（IMP-003 / BUG-295）**：从 `127.0.0.1` / `localhost` / `::1` 访问时，**读请求**（GET/HEAD/OPTIONS）免 token；**写请求**无有效 token 时须 `Sec-Fetch-Site: same-origin` 或 `Origin` 与请求 host 一致，否则 **403 `csrf_forbidden`**。浏览器打开同源管理页仍可正常操作；裸 `curl`/跨站脚本对本机写 API 须带 token。局域网 IP 访问仍须 token。loopback 免鉴权还要求 **Host 头主机名为 `127.0.0.1` / `localhost` / `::1`**（BUG-576 DNS rebinding 加固：外部域名解析到 127.0.0.1 冒充同源的请求一律按非本机处理）。
 * `/api/health` **无需 token 即可探活**；但完整 CapabilityReport（`capabilities` / `action` 等）仅对本机客户端或**携带有效 token** 的局域网请求返回（BUG-236）。未鉴权 LAN 仅见 `profile` / `overall`；`workspaceRoot` 仍仅本机可见（BUG-169）。
 * 缺失或错误 token 返回 `401`，统一错误格式 `{"error": {"code": "unauthorized", "message": "..."}}`。
-* **HTTPS 模式（V0.9.0）**：`gatewayTls: internal` 时本页经 `https://<LAN-IP>:<managerTlsPort>/` 访问（独立 HTTPS origin，manager 收敛仅回环监听），实例访问地址按 TLS 入口显示 `https://…:8443/<别名>/`（lanUrl 直连地址保持明文语义）；客户端需先 `lwa ca export` 导出并信任根证书——见 [https.md](https.md)。
+* **HTTPS 模式（V0.9.0）**：`gatewayTls: internal` 时本页经 `https://<LAN-IP>:<managerTlsPort>/` 访问（独立 HTTPS origin，manager 收敛仅回环监听），实例访问地址按 TLS 入口显示 `https://…:8443/<别名>/`（lanUrl 直连地址保持明文语义）；客户端需先 `lwa ca export` 导出并信任根证书——见 [https.md](https.md)。V0.9.1 起 LAN IP 变化后，在线 Caddy 会随地址刷新重载 8443/9443 绑定，不必再手工 `gateway on` 才能恢复别名入口。
 * **Agent 端点（V0.8.18）**：`/api/agent/v1/*` 不继承回环免 token，也不接受 `?token=`——仅回环 + Header 凭据双条件，缺失任一即 401/403；见 [Agent 指南](agent-guide.md) §9。
 * token 为一次性生成的随机串，仅在本工作区有效；重置方式：删除 `run/` 下的 token 文件后重启管理页。
 * 管理页登录框默认隐藏输入；可用眼睛图标切换可见/隐藏，便于核对粘贴结果。

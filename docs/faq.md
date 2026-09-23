@@ -426,7 +426,7 @@ status: pending
 * **daemon 自动导入（IMP-011）**：slug 冲突时记 `import_conflict` 事件并提示 `--update`，**不再**自动追加 `-2/-3`；导入成功后 zip 会移入 `inbox/processed/`。
 * **连续失败死信（BUG-297）**：同一 zip 指纹连续失败默认 5 次后移入 `inbox/failed/`；修好后移回 `inbox/` 根目录即可再试。
 * **`--update` 后容器仍是旧版？**：容器实例必须 **rebuild 镜像** 才会跑新源码。V0.5.2 起，running 容器的 `--update` 默认走 `lwa rebuild`（不再轻量 `restart`）。若用了 `--no-restart`，请手动 `lwa rebuild <id>`。
-* **`rebuild` 后跑的还是旧版？**（issue #8）：`rebuild` 只重建镜像 / 产物，不同步上游源码——folder / git 源在导入后再有改动时，重建出来的还是 `current/` 里的旧内容。`rebuild` 前会自动做源码陈旧检测（folder 比对内容指纹，git 短超时 `ls-remote` 比对 OID；检出时打印黄色警告并写 `source_stale` 事件，不阻断；git 离线不警告）。修法：`lwa rebuild --sync <id>`（先同步源码再重建，仅 folder/git 源）或 `lwa import --from-dir/--from-git --update <id>`。`lwa doctor` 的 `source_freshness` 检查（WARN 级、纯离线）可批量列出漂移的 folder 源实例。
+* **`rebuild` 后跑的还是旧版？**（issue #8）：`rebuild` 只重建镜像 / 产物，不同步上游源码——folder / git 源在导入后再有改动时，重建出来的还是 `current/` 里的旧内容。`rebuild` 前会自动做源码陈旧检测（folder 比对内容指纹，git 短超时 `ls-remote` 比对 OID；检出时打印黄色警告并写 `source_stale` 事件，不阻断；git 离线不警告）。修法：`lwa rebuild --sync <id>`（先同步源码再重建，仅 folder/git 源）或 `lwa import --from-dir/--from-git --update <id>`。`lwa doctor` 的 `source_freshness` 检查（WARN 级、纯离线）可批量列出漂移的 folder 源实例。静态实例 rebuild 时若原端口仍由本实例站点监听，会复用该端口（V0.9.1），不会再换一个 hostPort。
 * **更新后数据库指向空库？**：**V0.7.8** 起 `generate_env` 重新生成 `.env` 时会保留已有 `DATABASE_URL`，不再被源目录占位 SQLite 文件（如 `_empty_check.db`）覆盖。若需手动修改 `DATABASE_URL`，直接编辑 `docker/.env` 后 `lwa rebuild <id>`。
 * **Gate-C 报 database 能力未通过？**：**V0.7.8** 起 `_verify_sqlite_database` 在 manifest 声明的文件未命中时，回退扫描 `data/` 目录下所有 `.db`/`.sqlite`/`.sqlite3` 文件，只要存在一个有效 SQLite 数据库即视为能力满足。
 * **同包重复导入**：同一 zip 指纹（`sourceZipHash`）会产生冗余实例。清理：
@@ -445,10 +445,10 @@ lwa import --from-dir /abs/path/to/my-site
 lwa import --from-dir /abs/path/to/my-site --update <id>
 ```
 
-* 路径必须是**绝对路径**；相对路径会被拒绝。
+* 路径建议写**绝对路径**。相对路径会先按当前工作目录解析：解析后与已记录目录相同则按原绝对路径更新；`--allow-source-change` 换到新目录时，写入的是解析后的绝对路径。解析进工作区内部仍会被拒绝。
 * 请选**项目根或 `dist/`**（含 `index.html` / `package.json`），不要只选 `src/`——否则易落入「待识别」且无法启动。
 * LWA **复制**进 `apps/<id>/`，不会在关联目录就地运行。
-* `--update` 时传入的目录须与实例关联路径一致，否则 Exit 2（不会静默改用别的目录）。
+* `--update` 时传入的目录默认须与实例关联路径一致，否则 Exit 2（不会静默改用别的目录）。确要更换关联目录并保留 id、端口、路径别名和 `data/`，加 `--allow-source-change`（交互终端会先确认新旧目录与指纹）；`--dry-run` 只展示计划、不写盘。不要删实例再导入来换目录。
 * 内容未变会跳过更新。详见 [运维手册 · 文件夹源](operations-playbook.md) 与 Skill `lwa-import-folder`。
 * **管理页「选择文件夹」**（IMP-051）：仅用 `http://127.0.0.1:…` 打开管理页时可用；局域网访问须手输 LWA 机器上的绝对路径。
 * 识别失败（pending）时管理页会报错并保持对话框打开，不会冒充「导入成功」。
@@ -688,6 +688,7 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
 
 * **即时可用**：管理页列表的「端口」链接按**当前** LAN IP 读时合成（IMP-040），一般无需手动操作即可点开。
 * **落盘自愈**：列表轮询会节流调用 `access refresh`；也可 `POST /api/access/refresh` 或 CLI `lwa access refresh`。
+* **HTTPS 别名入口（V0.9.1）**：`gatewayTls: internal` 且 Caddy 已在线时，刷新会在 8443 或 9443 仍绑旧 IP / 只剩回环时重载主 Caddyfile（两个端口分开判断）。网关已关闭则不拉起；reload 失败再执行 `lwa gateway on`。
 * **升级后**：`lwa update` 在重启 manager/daemon 之后固定 refresh（可选 `--no-review-access` 跳过轻量复核）。
 * **诊断**：`lwa doctor --json` 含 `currentLanIp` / `driftedInstanceIds`；深度探活用 `lwa doctor --access` 或 `lwa access review`（与 update report 同源）。
 * **`lanIpStrategy=manual`**：不会自动改写落盘；请确认 `manualLanIp` 仍正确。

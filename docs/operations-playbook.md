@@ -207,8 +207,8 @@ lwa import --from-dir /home/user/my-site --update my-app --dry-run
 
 注意事项：
 - 请选**项目根或 dist/**，不要只选 `src/`。
-- 源目录必须为绝对路径；`node_modules/`、`.git/`、`__pycache__/` 等会被自动剥离。
-- `--update` 时传入的 `--from-dir` 路径须与实例关联目录一致，否则 Exit 2（不会静默用错目录）；更换关联目录请删实例后重新导入。
+- 源目录建议写绝对路径。相对路径会先解析：与已记录目录相同则按原绝对路径更新；`--allow-source-change` 换新目录时写入解析后的绝对路径。`node_modules/`、`.git/`、`__pycache__/` 等会被自动剥离。
+- `--update` 时传入的 `--from-dir` 路径默认须与实例关联目录一致，否则 Exit 2（不会静默用错目录）。确要更换关联目录并保留 instance id、端口、路径别名和 `data/` 时，加 `--allow-source-change`（交互终端会先确认）；`--dry-run` 只展示「将更换关联目录」，不写盘。不要用删除实例再重新导入来换目录，那会丢掉上述身份。
 - 源目录被删除 / 移动后 update 会**报错**（不会回退到 mount 模式）；需确认路径或改用 zip 更新。
 - `sourceKind=zip`/`git` 的实例可用 `--from-dir <目录> --update <id>` 原地切换为文件夹源（issue #28，换源不换实例：保留 id / 端口 / 别名 / data/）；不带目录的 `--from-dir --update` 仍仅对 folder 源有效。
 - 导入进行中勿立刻 `lwa update`（会等待或跳过重启，避免打断导入）。
@@ -245,6 +245,7 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
   指纹（`sourceSyncHash`）；git 源做短超时 `ls-remote` 比对远端 OID。检出
   陈旧时打印黄色警告 + 写 registry `source_stale` 事件，**不阻断重建**；
   git 探测离线 / 失败时不警告、不阻断（网络问题不会变成 rebuild 障碍）。
+- 静态实例 rebuild 不会先停旧站点。原端口若仍由本实例自己的站点监听，会复用该端口（V0.9.1），不释放登记、不换新 hostPort。站点已停用或端口已被别的进程占用时才重新分配。
 - 检出陈旧后的两种修法：
 
   ```bash
@@ -307,7 +308,7 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
    ```
 
 4. **访问**：`http://<LAN-IP>:<staticGatewayPort>/<slug>/`。
-5. **端口漂移**：容器 restart 后 hostPort 若变化，`_sync_alias_port`（IMP-021）会自动重写别名片段并 reload，无需手动处理。
+5. **端口漂移**：容器 restart 后 hostPort 若变化，`_sync_alias_port`（IMP-021）会自动重写别名片段并 reload，无需手动处理。静态实例 rebuild 在本站点仍监听时复用原端口（V0.9.1）。
 
 > SPA 子路径提示（IMP-023）：Vue/React 等用绝对资源路径（`/assets/…`）在 `/<slug>/` 下会 404 白屏；构建时设相对 base（Vite `base: './'`）或 `--base=/<slug>/`。纯静态 HTML 不受影响。
 
@@ -408,7 +409,7 @@ lwa list                 # 实例清单
 ### 7.2 访问地址刷新（G1 / IMP-038 / IMP-040）
 
 ```bash
-lwa access refresh   # 用当前 LAN IP 重算所有实例 lanUrl/routeUrl 并落盘
+lwa access refresh   # 用当前 LAN IP 重算所有实例 lanUrl/routeUrl 并落盘；TLS 开启且 Caddy 在线时同步重载站点绑定（V0.9.1）
 lwa update           # 一键升级（V0.8.0 含源码快进）收尾：后台重启 -> 等待就绪（V0.8.2）-> refresh（+ 默认轻量 review）
 lwa doctor --access  # 诊断同时复用 access review
 ```

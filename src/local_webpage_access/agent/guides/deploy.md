@@ -1,6 +1,6 @@
 # LWA Agent 部署闭环指南
 
-> 适用版本：V0.9.0。面向通过 `/api/agent/v1/*`（或 `lwa mcp` 适配器）操作 LWA 的 Agent。
+> 适用版本：V0.9.1。面向通过 `/api/agent/v1/*`（或 `lwa mcp` 适配器）操作 LWA 的 Agent。
 > 前置阅读：`quickstart.md`（三条底线与工作区确认）。
 
 ## 1. 部署是一个两段式闭环：plan → apply → 轮询 operation

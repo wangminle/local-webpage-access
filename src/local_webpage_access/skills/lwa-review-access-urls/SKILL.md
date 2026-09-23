@@ -25,7 +25,7 @@ description: >-
 
 | 操作 | 默认 | 说明 |
 | --- | --- | --- |
-| `lwa access refresh` | 写盘 | 仅重写 `lanUrl`/`routeUrl`，**不** rebuild、不改业务代码 |
+| `lwa access refresh` | 写盘 | 重写 `lanUrl`/`routeUrl`；`gatewayTls: internal` 且 Caddy 已在线时，还会重载仍绑旧 IP 的 8443/9443。不 rebuild、不改业务代码。关掉的网关不会被拉起 |
 | `lwa access review` | **只读** | HTTP 探活 + SPA 别名资源错位检测（空 200 / 404 / 错误 MIME）；不改文件 |
 | `lwa doctor --access` | 只读复核 | 复用同一套 `review_access()`，不另写探测 |
 | `--rebuild-if-needed` | **显式才写** | 仅对 IMP-023 命中实例 rebuild；**必须**经用户确认 |

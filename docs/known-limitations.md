@@ -86,7 +86,7 @@ swap=4GB
   2. Windows `localhost:<port>` —— 证明宿主/WSL localhost 互通；
   3. Windows **自身 NIC IP** —— 只记录现场结果，**不作为最终 LAN 结论**（本机自测假阴性暂缺充分官方证据，只能写作观察）；
   4. **另一台物理机/手机**访问 `http://<共享 LAN IP>:<port>` —— 最终 LAN 验收。
-* 换网 / DHCP 后 LAN IP 可能变：执行 `lwa access refresh` 与 `lwa access review`（见 [运维手册](operations-playbook.md#72-访问地址刷新g1--imp-038--imp-040)）。可选 mirrored 网络模式见 [开机自启 · WSL 网络](autostart.md#wsl-网络可选-mirrored)。
+* 换网 / DHCP 后 LAN IP 可能变：执行 `lwa access refresh` 与 `lwa access review`（见 [运维手册](operations-playbook.md#72-访问地址刷新g1--imp-038--imp-040)）。`gatewayTls: internal` 且 Caddy 已在线时，刷新会重载仍绑旧 IP 的 TLS 站点（V0.9.1）。可选 mirrored 网络模式见 [开机自启 · WSL 网络](autostart.md#wsl-网络可选-mirrored)。
 * **代理**：WSL `autoProxy=true` 便于发行版访问互联网依赖源；LWA **内部**健康/access/Caddy admin 探针走直连，不依赖用户 `unset http_proxy`。人工 `curl` 仍可能受代理影响。
 
 ### PATH / interop（可选精简）
@@ -150,7 +150,7 @@ swap=4GB
 
 * **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。**V0.6.13** 起 Caddy `-size.log.gz` 多轮转/旧游标迁移/归档暂时不可读时的补读逻辑已加固（避免双计或永久漏计）。
 * **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），**V0.6.13** 起容器查询失败禁止绕过挂载 fail-safe、registry 不可读时一致性检查 SKIP，但仍不能替代正式 relocate 事务。
-* **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>`、`lwa rebuild --sync <id>`（V0.8.5，先同步源码再重建）或管理页「从源更新」同步；`lwa rebuild` 与 `lwa doctor`（`source_freshness` 检查，WARN 级纯离线）会提示源码已漂移的实例。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。`sourceKind=zip`/`git` 的实例可用 `--from-dir <目录> --update <id>` **原地切换为文件夹源**（issue #28，「换源不换实例」：保留实例 id / hostPort / 路径别名 / data/，仅覆盖 current/ 并登记新源身份）；不带目录的 `--from-dir --update` 仍仅对 folder 源有效（`rebuild --sync` 同样仅支持 folder/git 源）。请选项目根或 `dist/`，不要只选 `src/`。
+* **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>`、`lwa rebuild --sync <id>`（V0.8.5，先同步源码再重建）或管理页「从源更新」同步；`lwa rebuild` 与 `lwa doctor`（`source_freshness` 检查，WARN 级纯离线）会提示源码已漂移的实例。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。folder 源更换关联目录用 `--allow-source-change`（V0.9.1，保留 id / 端口 / 别名 / data/；相对路径先解析，写回绝对路径）。`sourceKind=zip`/`git` 的实例可用 `--from-dir <目录> --update <id>` **原地切换为文件夹源**（issue #28，「换源不换实例」：保留实例 id / hostPort / 路径别名 / data/，仅覆盖 current/ 并登记新源身份）；不带目录的 `--from-dir --update` 仍仅对 folder 源有效（`rebuild --sync` 同样仅支持 folder/git 源）。请选项目根或 `dist/`，不要只选 `src/`。静态实例 rebuild 在本站点仍监听原端口时复用该端口（V0.9.1）。
 * **GitHub 源导入的锁语义（IMP-065 / CHK-239）**：git 导入/更新在
   `import_activity` 全局锁内完成探测（ls-remote ≤30s）与克隆（≤180s）——设计取舍：
   并发导入按既有闸门排队、staging 互不干扰。窗口内其它导入（zip/文件夹）会等待；

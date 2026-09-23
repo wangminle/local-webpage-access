@@ -139,6 +139,44 @@ def test_throttled_refresh_single_flight(env, monkeypatch) -> None:
     assert sum(1 for r in results if r is not None) == 1
 
 
+def test_throttled_refresh_reloads_stale_caddy_without_manifest_drift(env, monkeypatch) -> None:
+    """issue #44：manifest 已对齐、Caddyfile 仍绑旧 IP 时，节流路径也要重载在线 Caddy。"""
+    from local_webpage_access import access_workflow as aw
+    from local_webpage_access.static_gateway import StaticGateway
+
+    ws, cfg, reg = env
+    cfg.gatewayTls = "internal"
+    cfg.staticGateway = "caddy"
+    _seed(ws, reg, lan_url="http://192.168.1.50:21000")
+    caddyfile = ws.static_gateway / "Caddyfile"
+    caddyfile.parent.mkdir(parents=True, exist_ok=True)
+    caddyfile.write_text(
+        "https://127.0.0.1:8443, https://10.181.239.168:8443 {\n\ttls internal\n}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.access_workflow.resolve_lan_ip", lambda c: "192.168.1.50"
+    )
+    aw.reset_lan_refresh_throttle_state()
+    calls = {"refresh": 0, "reload": 0}
+    real = aw.refresh_network_entries
+
+    def counting(*a, **k):
+        calls["refresh"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(aw, "refresh_network_entries", counting)
+    monkeypatch.setattr(
+        StaticGateway, "reload_all", lambda self: calls.__setitem__("reload", calls["reload"] + 1)
+    )
+    monkeypatch.setattr(StaticGateway, "_admin_alive", lambda self, **kwargs: True)
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
+
+    assert aw.maybe_throttled_lan_refresh(ws, cfg, reg, min_interval=60.0) is None
+    assert calls["refresh"] == 0
+    assert calls["reload"] == 1
+
+
 def test_manual_strategy_does_not_auto_refresh(env, monkeypatch) -> None:
     from local_webpage_access import access_workflow as aw
 
@@ -170,8 +208,7 @@ class TestReviewAccessDebounce:
 
         return AccessReviewReport(
             instances=[
-                InstanceAccessReport(instance_id=f"i{n}", status=s)
-                for n, s in enumerate(statuses)
+                InstanceAccessReport(instance_id=f"i{n}", status=s) for n, s in enumerate(statuses)
             ]
         )
 
@@ -209,9 +246,7 @@ class TestReviewAccessDebounce:
 
     def test_fail_fail_then_ok_passes_on_third_attempt(self, deb_env) -> None:
         ws, cfg, reg, aw, sleeps = deb_env
-        outcomes = iter(
-            [self._report("fail"), self._report("fail"), self._report("ok")]
-        )
+        outcomes = iter([self._report("fail"), self._report("fail"), self._report("ok")])
         holder = pytest.MonkeyPatch()
         holder.setattr(aw, "review_access", lambda *a, **k: next(outcomes))
         try:
@@ -280,9 +315,7 @@ class TestReviewAccessDebounce:
         holder = pytest.MonkeyPatch()
         holder.setattr(aw, "review_access", lambda *a, **k: next(outcomes))
         try:
-            result = aw.review_access_with_debounce(
-                ws, cfg, reg, delays=(0.0, 0.0, 0.0)
-            )
+            result = aw.review_access_with_debounce(ws, cfg, reg, delays=(0.0, 0.0, 0.0))
         finally:
             holder.undo()
         assert result.attempts == 4
