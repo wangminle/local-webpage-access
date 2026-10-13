@@ -312,6 +312,8 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 
 > SPA 子路径提示（IMP-023）：Vue/React 等用绝对资源路径（`/assets/…`）在 `/<slug>/` 下会 404 白屏；构建时设相对 base（Vite `base: './'`）或 `--base=/<slug>/`。纯静态 HTML 不受影响。
 
+> 无斜杠访问排障：`http://<LAN-IP>:<staticGatewayPort>/<slug>`（不带结尾 `/`）应返回 `301`，`Location` 为 `/<slug>/`。若返回 `200` 且响应体为空（浏览器白屏），通常是旧版本写下的片段 `redir /<slug>/ permanent`，被 Caddy 当成路径匹配器。V0.9.2 起修复写法为 `redir * /<slug>/ permanent`；升级后执行 `lwa update`（收尾会重写存量片段）或 `lwa gateway on`，再用 `curl -sI http://127.0.0.1:<staticGatewayPort>/<slug>` 确认 `301` 与 `Location: /<slug>/`。
+
 ---
 
 ## 四、Caddy master 排障

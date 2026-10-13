@@ -28,6 +28,7 @@ import re
 from pathlib import Path
 
 from local_webpage_access.logging import get_logger
+from local_webpage_access.paths import frontend_artifact_dest
 from local_webpage_access.models import (
     CapabilityContract,
     CommandSpec,
@@ -552,12 +553,18 @@ def generate_plans(evidence: ProjectEvidence) -> list[DeploymentPlan]:
                     frontend,
                     role="build",
                 )
-                # C.03：前端构建产物传递到后端静态目录
-                frontend_component.artifactTarget = "backend/static"
+                # C.03：前端构建产物传递到后端静态目录（与 Dockerfile 构建块同一规则，S1-02）
+                backend_prefix = (
+                    f"current/{backend.sourceSubdir}/" if backend.sourceSubdir else "current/"
+                )
+                frontend_component.artifactTarget = frontend_artifact_dest(
+                    backend_prefix, Path(evidence.root)
+                ).removeprefix("/app/")
                 components.append(frontend_component)
                 contract.servesUi = True
                 reasoning.append(
-                    f"前端构建组件（{frontend.sourceSubdir or 'root'}）产物传递到 backend/static"
+                    f"前端构建组件（{frontend.sourceSubdir or 'root'}）产物传递到 "
+                    f"{frontend_component.artifactTarget}"
                 )
                 evidence_refs.append("frontend_candidate")
 
@@ -722,11 +729,16 @@ _NODE_ROUTE_RE = re.compile(
     r"""(?<![\"'])\b(?:app|router|server|api|rest)\s*\.\s*(get|head)\s*\(\s*["']([^"']+)["']""",
     re.IGNORECASE,
 )
-# 仅把健康类路径当作可安全 GET 的门槛探针；其余路由可能需鉴权/仅 POST，探测会假红
+# 仅把健康类路径当作可安全 GET 的门槛探针；其余路由可能需鉴权/仅 POST，探测会假红。
+# S1-04：允许带前缀的命名（public-health、healthcheck、health-check、health_check）。
 _HEALTH_PATH_RE = re.compile(
-    r"(?:^|/)(?:health|healthz|ping|ready|readiness|livez|liveness)(?:$|/)",
+    r"(?:^|/)(?:[a-z0-9_]+[-_])?"
+    r"(?:health|healthz|healthcheck|health-check|health_check|ping|ready|readiness|livez|liveness)(?:$|/)",
     re.IGNORECASE,
 )
+# S1-04：源码发现的遍历深度与文件数上限（超出只告警，不报错）
+_DISCOVERY_MAX_DEPTH = 6
+_DISCOVERY_MAX_FILES = 3000
 _SKIP_DISCOVERY_DIRS = {
     "node_modules",
     ".git",
@@ -796,15 +808,23 @@ def _discover_health_probes(
     extensions = (".py",) if backend.kind == "python" else (".js", ".ts", ".mjs", ".cjs")
     found: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for file_path in _walk_source_files(scan_root, extensions, max_depth=3):
+    files_read = 0
+    routes_total = 0
+    truncated = False
+    for file_path in _walk_source_files(scan_root, extensions, max_depth=_DISCOVERY_MAX_DEPTH):
+        if files_read >= _DISCOVERY_MAX_FILES:
+            truncated = True
+            break
         try:
             text = _strip_code_comments(file_path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
+        files_read += 1
         if backend.kind == "python":
             matches = _PY_ROUTE_DECORATOR_RE.findall(text)
         else:
             matches = _NODE_ROUTE_RE.findall(text)
+        routes_total += len(matches)
         for method, route in matches:
             route = route.strip()
             if not route.startswith("/") or "{" in route or "<" in route:
@@ -816,6 +836,23 @@ def _discover_health_probes(
                 continue
             seen.add(key)
             found.append(key)
+
+    # S1-04：零读取或零路由声明通常意味着扫描根/深度不对，留痕便于定位（不改变探针结果）
+    if truncated:
+        log.warning(
+            "健康探针源码发现达到文件数上限 %d（root=%s，深度上限 %d），其余文件未扫描",
+            _DISCOVERY_MAX_FILES,
+            scan_root,
+            _DISCOVERY_MAX_DEPTH,
+        )
+    if files_read == 0 or routes_total == 0:
+        log.warning(
+            "健康探针源码发现：读取 %d 个文件，解析到 %d 条路由声明（root=%s，深度上限 %d）",
+            files_read,
+            routes_total,
+            scan_root,
+            _DISCOVERY_MAX_DEPTH,
+        )
 
     return [
         ProbeSpec(

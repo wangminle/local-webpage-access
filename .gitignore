@@ -12,7 +12,7 @@ build/
 *.egg
 pip-wheel-metadata/
 
-# 源码发布 zip（scripts/pack-release-zip.sh 无参执行时的默认输出在仓库根，BUG-202）
+# 历史源码发布包（保留忽略规则，避免旧产物误提交）
 /归档.zip
 
 # 虚拟环境
@@ -86,3 +86,11 @@ _review_reports/
 # ---- design 本地目录（issues/reviews 不同步到 GitHub）------------------------
 design/4-issues/
 design/5-reviews/
+
+# ---- 真实应用 Eval 本地源码（版本与配置见 tests/evals/evals-readme.md）---------
+# 通配排除全部评测应用目录（新增应用自动覆盖），仅反向包含 readme
+/tests/evals/*
+!/tests/evals/evals-readme.md
+
+# 台账工具锁文件（本地并发控制，勿提交）
+/task-list.md.lock

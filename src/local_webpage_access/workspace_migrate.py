@@ -15,10 +15,12 @@ import re
 import shutil
 import sqlite3
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from functools import partial
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from local_webpage_access.config import Config, load_config
 from local_webpage_access.errors import MigrateError
@@ -732,6 +734,132 @@ def rebind_workspace_paths(workspace: Workspace, old: str, new: str) -> list[str
 # ---- quiesce / move / regenerate / restore / verify ------------------------
 
 
+@dataclass
+class QuiesceResult:
+    """停机结果（#53 / PLN-052 S1-05）。
+
+    - ``actions``：动作清单（dry-run 与执行共用）；
+    - ``errors``：各步骤抛出的异常，仅作留痕；是否真正停住以后置校验为准；
+    - ``failures``：停机后仍在运行或无法确认已停止的对象。非空时迁移必须中止（D6）。
+    """
+
+    actions: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
+def _quiesce_step(result: QuiesceResult, label: str, fn: Callable[[], Any]) -> None:
+    """执行一个停机步骤；布尔 False 视为终止失败，异常记入 ``errors`` 并告警。"""
+    try:
+        ok = fn()
+    except Exception as exc:  # noqa: BLE001 — 每步独立，失败须可见
+        msg = f"{label}：{exc}"
+        result.errors.append(msg)
+        log.warning("停机步骤异常（以后置校验为准）：%s", msg)
+        return
+    if ok is False:
+        result.failures.append(f"{label}：终止失败")
+        log.warning("停机步骤未成功终止：%s", label)
+
+
+def _compose_down(workspace: Workspace, registry: Registry, iid: str) -> None:
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    DockerRuntime.ensure_available()
+    DockerRuntime(workspace, registry).down(iid)
+
+
+def _service_pid_snapshot(workspace: Workspace) -> dict[str, int | None]:
+    """停机前记录各服务状态文件中的 PID，供后置校验做归属三分（BUG-776）。"""
+    from local_webpage_access import daemon, gateway_service, manager_service
+
+    snapshot: dict[str, int | None] = {}
+    for name, read in (
+        ("daemon", daemon.read_state),
+        ("manager", manager_service.read_state),
+        ("gateway", gateway_service.read_state),
+    ):
+        state = read(workspace)
+        snapshot[name] = state.pid if state else None
+    return snapshot
+
+
+def _pid_exit_state(workspace: Workspace, pid: int | None, *needles: str) -> str:
+    """停机前 PID 的退出确认（BUG-776）：返回 ``exited`` / ``running`` /
+    ``foreign``（明确属于其他进程）/ ``unknown``（命令行不可读，归属无法确认）。"""
+    from local_webpage_access import daemon
+
+    if not pid or not daemon.is_pid_alive(pid):
+        return "exited"
+    cmdline = daemon.read_pid_cmdline(pid)
+    if cmdline is None:
+        return "unknown"
+    if all(not needle or needle in cmdline for needle in needles):
+        return "running"
+    return "foreign"
+
+
+def _verify_quiesced(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    result: QuiesceResult,
+    pids: dict[str, int | None] | None = None,
+) -> None:
+    """停机后置校验（#53）：所有带 compose 的实例与 daemon/manager/gateway 均已退出。
+
+    无法确认状态（如 docker 查询失败/超时）同样计为失败，避免在不确定时迁移目录。
+    进程退出以停机前 PID 快照的存活 + 工作区归属事实为准；已退出 / 明确属于其他
+    进程 / 归属无法确认三者分开，归属无法确认按未退出阻断（BUG-776）；enabled/HTTP
+    健康只作辅助信号，不得单独作为"已退出"的证据（BUG-763）。
+    """
+    from local_webpage_access import daemon, gateway_service, manager_service
+    from local_webpage_access.docker_runtime import DockerRuntime
+
+    for row in registry.list_instances():
+        iid = row["id"]
+        if not workspace.app_compose_path(iid).is_file():
+            continue
+        try:
+            # BUG-764：严格查询——仅"查询成功且无运行容器"视为已停止；
+            # 查询错误/超时/Compose 无法解析必须阻断迁移。
+            still_up = DockerRuntime(workspace, registry).container_id_strict(iid)
+        except Exception as exc:  # noqa: BLE001
+            result.failures.append(f"实例 {iid}：无法确认已停止（{exc}）")
+            continue
+        if still_up:
+            result.failures.append(f"实例 {iid}：容器仍在运行")
+
+    if pids is None:
+        pids = _service_pid_snapshot(workspace)
+
+    checks = (
+        (
+            "daemon",
+            ("local_webpage_access.daemon", str(workspace.root)),
+            lambda: daemon.is_running(workspace),
+        ),
+        (
+            "manager",
+            ("local_webpage_access.manager_service", str(workspace.root)),
+            lambda: manager_service.is_running(workspace, config),
+        ),
+        ("gateway", (str(workspace.root),), lambda: gateway_service.is_gateway_running(workspace, config)),
+    )
+    for name, needles, check in checks:
+        try:
+            kind = _pid_exit_state(workspace, pids.get(name), *needles)
+            if kind == "unknown":
+                result.failures.append(f"{name}：无法确认进程归属（命令行不可读），按未退出处理")
+            elif kind == "running" or check():
+                result.failures.append(f"{name} 仍在运行")
+        except Exception as exc:  # noqa: BLE001
+            result.failures.append(f"{name}：无法确认已停止（{exc}）")
+
+    for failure in result.failures:
+        log.warning("迁移停机后置校验未通过：%s", failure)
+
+
 def quiesce_workspace(
     workspace: Workspace,
     config: Config,
@@ -739,78 +867,65 @@ def quiesce_workspace(
     snapshot: MigrateSnapshot,
     *,
     dry_run: bool = False,
-) -> list[str]:
-    """停业务实例、down 容器、停自启/gateway。不删 daemon-processed.json。"""
-    actions: list[str] = []
+) -> QuiesceResult:
+    """停业务实例、down 容器、停自启与 daemon/manager/gateway。不删 daemon-processed.json。
+
+    #53 / S1-05：每一步独立执行，异常不再被 ``suppress`` 吞掉；执行结束后做后置校验，
+    仍在运行或无法确认的对象进入 ``failures``，由调用方决定是否中止迁移。
+    """
+    result = QuiesceResult()
     from local_webpage_access.lifecycle import stop_instance_op
 
     for iid in snapshot.restore_instance_ids:
-        actions.append(f"stop:{iid}")
+        result.actions.append(f"stop:{iid}")
         if dry_run:
             continue
-        with contextlib.suppress(Exception):
-            stop_instance_op(workspace, config, registry, iid)
+        _quiesce_step(
+            result,
+            f"stop:{iid}",
+            partial(stop_instance_op, workspace, config, registry, iid),
+        )
 
     for iid in snapshot.restore_instance_ids:
         compose = workspace.app_compose_path(iid)
         if not compose.is_file():
             continue
-        actions.append(f"compose_down:{iid}")
+        result.actions.append(f"compose_down:{iid}")
         if dry_run:
             continue
-        try:
-            from local_webpage_access.docker_runtime import DockerRuntime
-
-            DockerRuntime.ensure_available()
-            DockerRuntime(workspace, registry).down(iid)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("compose down %s 失败（继续）：%s", iid, exc)
+        _quiesce_step(
+            result,
+            f"compose_down:{iid}",
+            partial(_compose_down, workspace, registry, iid),
+        )
 
     # 评审-组6：动作清单须在 dry-run 下也完整（原三个 stop 只在执行分支里
     # append，预演计划漏列）；执行仍受 not dry_run 保护。
-    actions.append("autostart_disable")
-    actions.append("stop:daemon")
-    actions.append("stop:manager")  # 评审-组6：清单在 dry-run 也完整
-    actions.append("stop:gateway")
-    if not dry_run:
-        try:
-            from local_webpage_access import autostart as asm
+    result.actions.extend(
+        ["autostart_disable", "stop:daemon", "stop:manager", "stop:gateway"]
+    )
+    if dry_run:
+        return result
 
-            with contextlib.suppress(Exception):
-                asm.disable(workspace, config)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("autostart disable 失败（继续）：%s", exc)
+    from local_webpage_access import autostart as asm
+    from local_webpage_access.daemon import stop_daemon
+    from local_webpage_access.gateway_service import stop_gateway
+    from local_webpage_access.manager_service import stop_manager
 
-        try:
-            from local_webpage_access.daemon import stop_daemon
+    pids = _service_pid_snapshot(workspace)
 
-            with contextlib.suppress(Exception):
-                stop_daemon(workspace)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("stop daemon 失败（继续）：%s", exc)
+    _quiesce_step(result, "autostart_disable", partial(asm.disable, workspace, config))
+    _quiesce_step(result, "stop:daemon", partial(stop_daemon, workspace))
+    _quiesce_step(result, "stop:manager", partial(stop_manager, workspace))
+    _quiesce_step(result, "stop:gateway", partial(stop_gateway, workspace, config))
 
-        try:
-            from local_webpage_access.manager_service import stop_manager
+    # 显式保留 daemon-processed.json
+    processed = workspace.run / "daemon-processed.json"
+    if processed.is_file():
+        result.actions.append("keep:daemon-processed.json")
 
-            with contextlib.suppress(Exception):
-                stop_manager(workspace)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("stop manager 失败（继续）：%s", exc)
-
-        try:
-            from local_webpage_access.gateway_service import stop_gateway
-
-            with contextlib.suppress(Exception):
-                stop_gateway(workspace, config)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("stop gateway 失败（继续）：%s", exc)
-
-        # 显式保留 daemon-processed.json
-        processed = workspace.run / "daemon-processed.json"
-        if processed.is_file():
-            actions.append("keep:daemon-processed.json")
-
-    return actions
+    _verify_quiesced(workspace, config, registry, result, pids)
+    return result
 
 
 def move_workspace_root(old: Path, new: Path) -> None:
@@ -1020,8 +1135,13 @@ def run_migrate(
     resume: bool = False,
     verify_only: bool = False,
     rollback: bool = False,
+    force_quiesce: bool = False,
 ) -> MigrateResult:
-    """执行或预演工作区迁移。"""
+    """执行或预演工作区迁移。
+
+    ``force_quiesce``（D6）：停机后置校验未通过时仍强行继续。默认 False，此时迁移中止，
+    journal 停在 QUIESCE 阶段，修复后可 ``--resume``。
+    """
     if verify_only:
         ws = Workspace(old if (old / "local-web.yml").is_file() else new)
         if not (ws.root / "local-web.yml").is_file():
@@ -1050,7 +1170,7 @@ def run_migrate(
         if not lock_ws.root.exists():
             raise MigrateError("回滚目标工作区不存在")
         with migrate_lock(lock_ws):
-            return _rollback_migrate(old, new)
+            return _rollback_migrate(old, new, force_quiesce=force_quiesce)
 
     old_r = old.resolve()
     new_r = new.resolve()
@@ -1080,9 +1200,8 @@ def run_migrate(
                     reg.open_readonly(immutable=True)
                     try:
                         snap = capture_snapshot(ws, reg, read_only=True)
-                        actions.extend(
-                            quiesce_workspace(ws, load_config(ws), reg, snap, dry_run=True)
-                        )
+                        preview = quiesce_workspace(ws, load_config(ws), reg, snap, dry_run=True)
+                        actions.extend(preview.actions)
                     finally:
                         reg.close()
             except Exception as exc:  # noqa: BLE001
@@ -1128,6 +1247,7 @@ def run_migrate(
             resume=resume,
             snapshot_out=snapshot_out,
             lock_holder=lock_holder,
+            force_quiesce=force_quiesce,
         )
 
 
@@ -1139,6 +1259,7 @@ def _run_migrate_locked(
     resume: bool,
     snapshot_out: Path | None,
     lock_holder: list[Path],
+    force_quiesce: bool = False,
 ) -> MigrateResult:
     ws = Workspace(old_r)
     journal = read_journal(ws) if (ws.run / JOURNAL_NAME).is_file() else None
@@ -1244,13 +1365,35 @@ def _run_migrate_locked(
 
         # QUIESCE
         if phase == MigratePhase.QUIESCE.value:
-            actions = quiesce_workspace(ws, config, reg, snapshot, dry_run=False)
-            _save(MigratePhase.QUIESCE.value, quiesce_actions=actions)
+            quiesced = quiesce_workspace(ws, config, reg, snapshot, dry_run=False)
+            if quiesced.failures and not force_quiesce:
+                # D6（#53）：未停住就 rename 会搬走仍在写入的数据。journal 停在 QUIESCE
+                # 阶段，修复后 --resume 从停机重试；--force-quiesce 可显式越过。
+                raise MigrateError(
+                    "迁移前停机未完成，已中止（journal 已保留，修复后可 --resume；"
+                    "或显式使用 --force-quiesce 越过）：" + "；".join(quiesced.failures),
+                    code="MIGRATE_QUIESCE_INCOMPLETE",
+                )
+            _save(
+                MigratePhase.QUIESCE.value,
+                quiesce_actions=quiesced.actions,
+                quiesce_failures=quiesced.failures,
+            )
             phase = MigratePhase.MOVE.value
 
         # MOVE
         if phase == MigratePhase.MOVE.value:
             if not (new_r / "local-web.yml").is_file():
+                if resume:
+                    # BUG-777：journal 停在 move（rename 前中断/失败）后旧目录服务
+                    # 可能已恢复；实际搬移前重新停机并后置校验，遵循同一 force 契约。
+                    requiesced = quiesce_workspace(ws, config, reg, snapshot, dry_run=False)
+                    if requiesced.failures and not force_quiesce:
+                        raise MigrateError(
+                            "迁移前停机未完成，已中止（journal 已保留，修复后可 --resume；"
+                            "或显式使用 --force-quiesce 越过）：" + "；".join(requiesced.failures),
+                            code="MIGRATE_QUIESCE_INCOMPLETE",
+                        )
                 _save(MigratePhase.MOVE.value, moving=True)
                 move_workspace_root(old_r, new_r)
             ws = Workspace(new_r)
@@ -1377,8 +1520,12 @@ def _rollback_notify_lock_moved(old: Path) -> None:
         with contextlib.suppress(Exception):
             cb(old)
 
-def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
-    """v1 回滚：rename 回 OLD，并反向改写路径 / 重生配置（BUG-386）。"""
+def _rollback_migrate(old: Path, new: Path, *, force_quiesce: bool = False) -> MigrateResult:
+    """v1 回滚：rename 回 OLD，并反向改写路径 / 重生配置（BUG-386）。
+
+    回滚搬移前与正向迁移共用同一停机安全门（BUG-765）：停机失败或无法确认
+    时保持 journal 与可恢复现场并中止，只有显式 ``force_quiesce`` 才继续搬移。
+    """
     old_r, new_r = old.resolve(), new.resolve()
     ws_new = Workspace(new_r) if (new_r / "local-web.yml").is_file() else None
     journal = read_journal(ws_new) if ws_new else None
@@ -1393,18 +1540,33 @@ def _rollback_migrate(old: Path, new: Path) -> MigrateResult:
     snap = MigrateSnapshot.from_dict(journal.get("snapshot") or {})
     notes: list[str] = []
     if j_new.exists() and not j_old.exists():
-        # quiesce best-effort on new then rename back
+        # quiesce on new then rename back；停机未确认成功时中止搬移（BUG-765）
+        stopped: QuiesceResult | None = None
         try:
             ws = Workspace(j_new)
             config = load_config(ws)
             reg = Registry(ws.db_path)
             reg.open()
             try:
-                quiesce_workspace(ws, config, reg, snap, dry_run=False)
+                stopped = quiesce_workspace(ws, config, reg, snap, dry_run=False)
             finally:
                 reg.close()
         except Exception as exc:  # noqa: BLE001
-            log.warning("回滚前停服失败：%s", exc)
+            if not force_quiesce:
+                raise MigrateError(
+                    "回滚前停机未完成，已中止搬移（journal 与现场已保留，"
+                    f"显式使用 --force-quiesce 可越过）：{exc}",
+                    code="MIGRATE_QUIESCE_INCOMPLETE",
+                ) from exc
+            log.warning("回滚前停服失败（--force-quiesce 越过）：%s", exc)
+        if stopped is not None and stopped.failures:
+            if not force_quiesce:
+                raise MigrateError(
+                    "回滚前停机未完成，已中止搬移（journal 与现场已保留，"
+                    "显式使用 --force-quiesce 可越过）：" + "；".join(stopped.failures),
+                    code="MIGRATE_QUIESCE_INCOMPLETE",
+                )
+            log.warning("回滚前停服未完成（--force-quiesce 越过）：%s", "；".join(stopped.failures))
         move_workspace_root(j_new, j_old)
         # 评审-组6：目录树已搬回 OLD，锁文件随之回到 OLD/run/；通知外层
         # migrate_lock 的 finally 按 OLD 路径释放（原按 NEW 删、静默失败留残留）
@@ -1477,6 +1639,7 @@ __all__ = [
     "move_workspace_root",
     "next_phase",
     "preflight_migrate",
+    "QuiesceResult",
     "quiesce_workspace",
     "read_journal",
     "rebind_workspace_paths",

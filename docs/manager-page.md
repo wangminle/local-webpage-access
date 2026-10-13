@@ -90,6 +90,8 @@ lwa manager off         # 停止
 | POST | `/api/import-from-dir` | 从本机文件夹导入新实例（IMP-047） |
 | POST | `/api/import-from-git` | 从 GitHub 仓库一键导入新实例（IMP-065；不限 loopback，LAN + token 可用；body：`url`/`ref`/`subdir`/`name`/`pathAlias`） |
 | POST | `/api/instances/{id}/update-from-git` | 从 GitHub 远端更新 git 源实例（IMP-065；`ls-remote` 无变更探测，OID 未变返回 `skipped=true`；仅 sourceKind=git） |
+| GET | `/api/instances/{id}/verification` | 读取实例验证探针覆盖层（继承探针 + 用户覆盖 + 合并后的有效探针，CHK-252） |
+| PATCH | `/api/instances/{id}/verification` | 更新实例 `verificationOverrides`（写入即持久化，重扫/rebuild 不覆盖；CLI：`lwa probe show\|set\|reset\|auto`） |
 | POST | `/api/pick-directory` | 在 **LWA 宿主机**打开原生目录选择器（IMP-051）；**仅 loopback** 客户端可用，成功返回 `{path}`；局域网即使有 token 也 403 `loopback_required` |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -249,26 +250,200 @@ def plan_full_install(
     return items
 
 
-def _default_subprocess_run(cmd: Sequence[str], **kwargs) -> subprocess.CompletedProcess[str]:
-    # 捕获输出以便失败时回流到 messages；同时回放到终端，保留用户可见进度。
-    result = subprocess.run(
-        list(cmd),
-        check=False,
-        text=True,
-        capture_output=True,
-        **kwargs,
-    )
-    if result.stdout:
-        sys.stdout.write(result.stdout)
-        if not result.stdout.endswith("\n"):
-            sys.stdout.write("\n")
+# S1-06 / #55：安装脚本总时限；超时后先 SIGTERM 进程组，宽限期后 SIGKILL。
+_SCRIPT_TOTAL_TIMEOUT = 1800
+_SCRIPT_KILL_GRACE = 5.0
+
+
+def _default_subprocess_run(
+    cmd: Sequence[str],
+    *,
+    timeout: float | None = None,
+    log_path: Path | None = None,
+    **kwargs,
+) -> subprocess.CompletedProcess[str]:
+    """运行安装脚本：逐行回放到终端并写入 ``log_path``，总时限到期后终止整个进程组。
+
+    输出同时汇总到 ``stdout`` 供失败时回流 messages；超时的返回码非零，且 stdout 末尾注明时限。
+    读取与清理一律以进程组是否仍存在为准（leader 退出不代表子进程已收尾）；
+    日志先于进程创建，初始化失败不会留下安装进程。
+    """
+    import contextlib
+    import os
+    import select
+    import signal
+    import threading
+    import time
+
+    limit = float(_SCRIPT_TOTAL_TIMEOUT if timeout is None else timeout)
+    deadline = time.monotonic() + limit
+    log_fh = None
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = log_path.open("a", encoding="utf-8")
+    timed_out = threading.Event()
+    proc: subprocess.Popen[str] | None = None
+    timer: threading.Timer | None = None
+
+    def _signal_group(sig: int) -> None:
+        if proc is None:
+            return
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(proc.pid, sig)
+
+    def _group_alive() -> bool:
+        if proc is None:
+            return False
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            # EPERM：组仍存在（如已交由 launchd 回收的僵尸），只是当前无权发信号
+            return True
+        return True
+
+    def _on_timeout() -> None:
+        timed_out.set()
+        _signal_group(signal.SIGTERM)
+        grace_deadline = time.monotonic() + _SCRIPT_KILL_GRACE
+        while time.monotonic() < grace_deadline and _group_alive():
+            time.sleep(0.02)
+        if _group_alive():
+            _signal_group(signal.SIGKILL)
+
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — 内置安装脚本，参数来自受控列表
+            list(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+            **kwargs,
+        )
+        timer = threading.Timer(limit, _on_timeout)
+        timer.daemon = True
+        timer.start()
+        assert proc.stdout is not None
+        chunks: list[str] = []
+        eof = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 0.1))
+            if not ready:
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                eof = True
+                break
+            chunks.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if log_fh is not None:
+                log_fh.write(line)
+                log_fh.flush()
+        if eof:
+            # stdout 提前 EOF 不代表工作完成（进程可能静默继续）：在剩余预算内
+            # 等待自然收尾；到期仍未退出才走下方终止路径（超时定时器同时兜底）。
+            while (proc.poll() is None or _group_alive()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+        if time.monotonic() >= deadline:
+            timed_out.set()
+        if proc.poll() is None or _group_alive():
+            # 读取到点或进程组仍有残留：TERM → 宽限 → KILL，按组是否仍存在判断
+            _signal_group(signal.SIGTERM)
+            grace_deadline = time.monotonic() + _SCRIPT_KILL_GRACE
+            while time.monotonic() < grace_deadline:
+                if proc.poll() is not None and not _group_alive():
+                    break
+                time.sleep(0.02)
+            if _group_alive():
+                _signal_group(signal.SIGKILL)
+            reap_deadline = time.monotonic() + 5.0
+            while (
+                proc.poll() is None or _group_alive()
+            ) and time.monotonic() < reap_deadline:
+                time.sleep(0.02)
+        returncode = proc.wait()
+    finally:
+        if timer is not None:
+            timer.cancel()
+        if proc is not None and _group_alive():
+            # 异常路径按整个进程组是否存活收尾，leader 已退出不代表同组子进程已结束
+            _signal_group(signal.SIGKILL)
+            reap_deadline = time.monotonic() + 5.0
+            while (proc.poll() is None or _group_alive()) and time.monotonic() < reap_deadline:
+                time.sleep(0.02)
+        if log_fh is not None:
+            log_fh.close()
+    output = "".join(chunks)
+    if timed_out.is_set():
+        note = f"安装脚本超过总时限 {limit:g}s，已终止进程组（可能卡在网络或 sudo 提示）。"
+        output = f"{output}\n{note}" if output else note
+        sys.stdout.write(note + "\n")
         sys.stdout.flush()
-    if result.stderr:
-        sys.stderr.write(result.stderr)
-        if not result.stderr.endswith("\n"):
-            sys.stderr.write("\n")
-        sys.stderr.flush()
-    return result
+        returncode = returncode or 124
+    return subprocess.CompletedProcess(list(cmd), returncode, stdout=output, stderr="")
+
+
+def _bootstrap_log_path(workspace_root: Path) -> Path:
+    """安装脚本输出日志：``<workspace>/logs/bootstrap-<时间戳>.log``（S1-06）。"""
+    from datetime import datetime
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path(workspace_root) / "logs" / f"bootstrap-{stamp}.log"
+
+
+_SUDO_INSTALL_SCRIPTS = frozenset(
+    {
+        "install-docker-linux.sh",
+        "install-caddy-linux.sh",
+    }
+)
+
+
+def _plan_requires_sudo(planned: Sequence[InstallPlanItem]) -> bool:
+    """按安装项目计算 sudo 需求（BUG-768）：仅 Linux/WSL 内置脚本调用 sudo。
+
+    macOS 脚本以普通用户执行 brew install/upgrade，不需要 sudo；
+    不得因预检要求密码而提前拒绝本可无人值守完成的 macOS 安装。
+    """
+    return any(item.script.name in _SUDO_INSTALL_SCRIPTS for item in planned)
+
+
+def _sudo_preflight() -> str | None:
+    """非 root 时的 sudo 预认证（S1-06 / #55）。
+
+    ``sudo -n true`` 通过即就绪；否则仅在交互终端下执行 ``sudo -v`` 让用户输入密码，
+    非交互环境直接返回拒绝原因，避免安装脚本在中途卡在密码提示。
+    返回 None 表示就绪，否则为应展示给用户的原因。
+    """
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and geteuid() == 0:
+        return None
+    if shutil.which("sudo") is None:
+        return "未找到 sudo，无法执行需要管理员权限的安装步骤"
+    try:
+        probe = subprocess.run(  # noqa: S603, S607
+            ["sudo", "-n", "true"], capture_output=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"sudo 检测失败：{exc}"
+    if probe.returncode == 0:
+        return None
+    if not _stdin_is_interactive():
+        return (
+            "安装需要 sudo 权限，但当前为非交互环境（sudo 需要密码）。"
+            "请在交互终端执行 sudo -v 后重试：lwa setup --full --resume"
+        )
+    try:
+        auth = subprocess.run(["sudo", "-v"], check=False)  # noqa: S603, S607
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"sudo 认证失败：{exc}"
+    return None if auth.returncode == 0 else "sudo 认证失败，已中止安装"
 
 
 def _script_failure_detail(result: subprocess.CompletedProcess[str], *, limit: int = 400) -> str:
@@ -440,8 +615,23 @@ def run_full_bootstrap(
                 exit_code=1,
                 service_user=service_user,
             )
-        run = runner or _default_subprocess_run
-        for item in planned:
+        if runner is None and _plan_requires_sudo(planned):
+            # S1-06 / #55：真实执行前完成 sudo 预认证，非交互环境提前拒绝
+            sudo_problem = _sudo_preflight()
+            if sudo_problem is not None:
+                messages.append(sudo_problem)
+                return FullBootstrapResult(
+                    ok=False,
+                    planned=planned,
+                    ran=ran,
+                    messages=messages,
+                    overall="unready",
+                    exit_code=1,
+                    service_user=service_user,
+                )
+        log_path = _bootstrap_log_path(workspace_root) if runner is None and workspace_root else None
+        run = runner or (lambda cmd: _default_subprocess_run(cmd, log_path=log_path))
+        for idx, item in enumerate(planned):
             messages.append(f"执行：bash {item.script}")
             result = run(["bash", str(item.script)])
             if result.returncode != 0:
@@ -449,6 +639,9 @@ def run_full_bootstrap(
                     f"脚本失败（exit {result.returncode}）：{item.script}"
                     + _script_failure_detail(result)
                 )
+                done_names = ", ".join(i.script.name for i in ran) or "无"
+                pending_names = ", ".join(i.script.name for i in planned[idx:])
+                messages.append(f"已完成阶段：{done_names}；未完成阶段：{pending_names}")
                 if workspace_root:
                     save_profile_state(
                         workspace_root,

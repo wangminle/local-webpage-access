@@ -42,6 +42,11 @@ def workspace_relocate(
     rollback: bool = typer.Option(
         False, "--rollback", help="在 journal 允许时回滚到旧路径（v1 同卷）"
     ),
+    force_quiesce: bool = typer.Option(
+        False,
+        "--force-quiesce",
+        help="停机后置校验未通过（仍有实例/服务在运行）时仍强行迁移（风险自担）",
+    ),
 ) -> None:
     """将 LWA 工作区同卷原子迁移到新路径（IMP-042）。"""
     mode_flags = sum(bool(x) for x in (resume, verify, rollback))
@@ -165,6 +170,7 @@ def workspace_relocate(
             resume=resume,
             verify_only=verify,
             rollback=rollback,
+            force_quiesce=force_quiesce,
         )
     except MigrateError as exc:
         log.error(str(exc), extra=exc.context)

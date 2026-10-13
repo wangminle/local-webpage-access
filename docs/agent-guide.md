@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.9.1 当前实际可用的接入方式。**
+> **状态：本文描述 V0.9.2 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -109,7 +109,8 @@ lwa import --from-git <url> [--ref <ref>] [--subdir <dir>]   # 新建导入
 lwa import --from-dir <绝对路径>                              # 新建导入
 lwa import --from-git <url> --update <实例ID>                # 更新既有实例（换源则原地切换）
 lwa rebuild <id> / lwa start|stop|restart <id>
-lwa access                        # 查看各实例访问地址
+lwa access refresh                # 刷新各实例 LAN 访问地址
+lwa access review                 # 复核各实例访问地址可用性
 lwa doctor                        # 环境与依赖诊断
 lwa configure <id> --build-env K=V  # 实例级构建环境变量
 ```
@@ -168,7 +169,7 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 - **幂等**：所有写操作要求 `idempotencyKey`。同键同内容重试返回**同一** `operationId`；同键不同内容 → `409 idempotency_conflict`。
 - **revision 乐观锁**：update 类计划与生命周期操作带 `expectedRevision`；不符 → `409 revision_conflict`（先 `lwa_get_instance` 取最新 revision 再决定）。rebuild/部署成功 +1；start/stop/restart 与状态观测不改 revision。
 - **异步执行**：部署与生命周期返回 202 + operation；轮询 `lwa_get_operation` 至 `succeeded`/`failed`/`needs_input` 等终态。manager 重启后未完成任务标记 `interrupted`，核对后可重新提交（同幂等键安全）。
-- **部署源限制**：`server_directory` 仅限 `agent.allowedSourceRoots` 之内；`git` 仅 HTTPS github.com；`artifact` 上传属 M2，当前一律 `source_not_allowed`。git 源**实例**（`sourceKind=git`）的 update 在计划期即被拒绝（`needs_input`，指引走 `lwa import --from-git --update` / 管理页 update-from-git）；folder/git 源部署（create 与 update）完成后源身份写回 manifest（folder 带 `sourceSyncHash`、git 带 §17.2.1 全字段），CLI/管理页按原源更新可对上（V0.8.18 BUG-690）。
+- **部署源限制**：`server_directory` 仅限 `agent.allowedSourceRoots` 之内；`git` 仅 HTTPS github.com；`artifact` 上传属 M2，当前一律 `source_not_allowed`。git 源**实例**（`sourceKind=git`）的 update 在计划期即被拒绝（`needs_input`，指引走 `lwa import --from-git --update` / 管理页 update-from-git）；folder/git 源部署（create 与 update）完成后源身份写回 manifest（folder 带 `sourceSyncHash`、git 带 `sourceGitUrl`/`sourceGitRef`/`sourceGitRefKind`/`sourceGitCommit`/`sourceGitSubdir` 五个字段），CLI/管理页按原源更新可对上（V0.8.18 BUG-690）。
 - **队列上限**：待执行 operation 超限 → `429 busy`（带 `retryAfterMs`，有界退避重试）。
 
 **错误表（`{"error": {code, message, detail, retryable, ...}}`）：**

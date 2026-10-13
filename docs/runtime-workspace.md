@@ -166,7 +166,7 @@ lwa restart <id>
 设置方式：
 
 ```bash
-# 导入时指定（仅静态/前端；容器请 start 后再设）
+# 导入时指定（静态/前端与容器均可；容器由导入器先写 routeHost，首次 start 生成别名片段）
 lwa import inbox/foo.zip --path-alias my-demo
 
 # 导入后修改（静态或 docker-compose）

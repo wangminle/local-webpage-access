@@ -1,0 +1,2142 @@
+"""生命周期编排测试（WBS-17）。
+
+用 fake DockerRuntime / fake gateway 验证 start / stop / restart / rebuild /
+remove / observe_status 的派发、desiredState 一致性、并发锁与数据保护。
+不依赖真实 Docker。
+"""
+
+from __future__ import annotations
+
+import contextlib
+import threading
+from pathlib import Path
+
+import pytest
+
+from local_webpage_access.errors import LifecycleError
+from local_webpage_access.lifecycle import (
+    _lock_is_stale,
+    _pid_alive,
+    instance_lock,
+    list_redundant_instances,
+    observe_status,
+    rebuild_instance,
+    remove_instance,
+    remove_redundant,
+    restart_instance,
+    start_instance,
+    stop_instance_op,
+)
+from local_webpage_access.models import (
+    ContainerConfig,
+    DesiredState,
+    InstanceManifest,
+    Kind,
+    ResourceProfile,
+    Runtime,
+    ServingMode,
+    Status,
+)
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
+
+
+# ---- 复用 fixtures ----------------------------------------------------------
+
+
+@pytest.fixture()
+def workspace(workspace_root: Path) -> Workspace:
+    ws = Workspace(workspace_root)
+    ws.ensure_workspace_dirs()
+    return ws
+
+
+class _FakeRuntime:
+    """记录调用的 DockerRuntime 替身。"""
+
+    calls: list[str] = []
+    _running = False
+    _has_container = True
+
+    def __init__(self, workspace=None, registry=None) -> None:
+        self.workspace = workspace
+        self.registry = registry
+
+    @classmethod
+    def ensure_available(cls) -> None:
+        return None
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return True
+
+    def is_running(self, iid):
+        return type(self)._running
+
+    def start(self, iid, **kw):
+        if not type(self)._has_container:
+            from local_webpage_access.errors import DockerError
+
+            raise DockerError('service "app" has no container to start', instance_id=iid)
+        type(self).calls.append("start")
+        type(self)._running = True
+
+    def stop(self, iid, **kw):
+        type(self).calls.append("stop")
+        type(self)._running = False
+
+    def down(self, iid, **kw):
+        type(self).calls.append("down")
+        type(self)._running = False
+        type(self)._has_container = False
+
+    def build(self, iid, *, build_id=None, **kw):
+        type(self).calls.append("build")
+        if build_id is not None and self.registry is not None:
+            self.registry.finish_build(build_id, status="success")
+
+    def up(self, iid, **kw):
+        type(self).calls.append("up")
+        type(self)._running = True
+        type(self)._has_container = True
+
+    def container_id(self, iid, *, all_containers: bool = False):
+        if type(self)._running:
+            return "cid-x"
+        if all_containers and type(self)._has_container:
+            return "cid-x"
+        return None
+
+    def image_id(self, iid):
+        return "sha256:img"
+
+    def remove_image(self, image):
+        type(self).calls.append(f"rmi:{image}")
+
+    def status(self, iid):
+        return None
+
+
+@pytest.fixture()
+def fake_runtime(monkeypatch):
+    _FakeRuntime.calls = []
+    _FakeRuntime._running = False
+    _FakeRuntime._has_container = True
+    # hosting 在模块顶层导入了 DockerRuntime；lifecycle 用局部 import 解析到
+    # docker_runtime.DockerRuntime。两处都要替换。
+    monkeypatch.setattr("local_webpage_access.hosting.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _FakeRuntime)
+    monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: True)
+    return _FakeRuntime
+
+
+def _seed_container(
+    workspace: Workspace,
+    registry: Registry,
+    iid: str = "api",
+    *,
+    deployed: bool = False,
+) -> InstanceManifest:
+    """构造容器实例；deployed=True 时模拟已部署（有 containerId、hostPort）。"""
+    workspace.ensure_app_dirs(iid)
+    current = workspace.app_current(iid)
+    (current / "main.py").write_text("app=None")
+    (current / "requirements.txt").write_text("fastapi")
+    manifest = InstanceManifest(
+        id=iid,
+        name=iid,
+        version="1",
+        kind=Kind.PYTHON,
+        stack=["fastapi"],
+        runtime=Runtime.DOCKER_COMPOSE,
+        servingMode=ServingMode.CONTAINER,
+        resourceProfile=ResourceProfile.SMALL,
+        container=ContainerConfig(
+            projectName=f"lwa-{iid}",
+            internalPort=8000,
+            composePath="docker/compose.yaml",
+            dockerfilePath="docker/Dockerfile",
+            containerId="cid-x" if deployed else None,
+            hostPort=21000 if deployed else None,
+        ),
+        status=Status.STOPPED if deployed else Status.PENDING,
+        desiredState=DesiredState.STOPPED,
+    )
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+    return manifest
+
+
+def _seed_static(workspace: Workspace, registry: Registry, iid: str = "demo") -> InstanceManifest:
+    workspace.ensure_app_dirs(iid)
+    (workspace.app_current(iid) / "index.html").write_text("<html>hi</html>")
+    from tests.scripts._helpers import make_static_manifest
+
+    manifest = make_static_manifest(iid)
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+    return manifest
+
+
+# ---- 并发锁（WBS-17.12）----------------------------------------------------
+
+
+def test_instance_lock_serializes_concurrent_ops(workspace) -> None:
+    """两线程争用同一实例锁：第二个必须等第一个释放。"""
+    order: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker(tag: str) -> None:
+        barrier.wait()
+        with instance_lock(workspace, "api", timeout=10):
+            order.append(f"{tag}-in")
+            # 持锁期间短暂休眠，让另一线程必然排队
+            for _ in range(1000):
+                pass
+            order.append(f"{tag}-out")
+
+    t1 = threading.Thread(target=worker, args=("a",))
+    t2 = threading.Thread(target=worker, args=("b",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    # 两个 in/out 互不交错（任一线程的 in 必须早于自己的 out，且与另一线程不交叉）
+    joined = "".join(order)
+    assert ("-in" in joined) and ("-out" in joined)
+    # a-in 必须在 b-in 之前或之后，但不能在 a-in..a-out 之间出现 b-in
+    assert order[0].endswith("-in")
+    assert order[1].endswith("-out")
+    assert order[2].endswith("-in")
+    assert order[3].endswith("-out")
+
+
+def test_instance_lock_timeout_raises(workspace) -> None:
+    """锁被其他持有者占用且超时 → LifecycleError。"""
+    import os
+    import time as time_mod
+
+    from local_webpage_access.file_lock import (
+        ensure_lockable,
+        release_exclusive,
+        try_acquire_exclusive,
+        write_lock_payload,
+    )
+
+    lock_path = workspace.run / "lifecycle-api.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # 真正持有跨平台文件锁，才能阻塞同路径的 instance_lock
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    write_lock_payload(fd, f"{os.getpid()}\n{time_mod.time():.3f}\n".encode())
+    try:
+        # issue#1 问题3 / BUG-604：错误信息带持有者 PID；持有者存活且心跳新鲜
+        # （本进程持有、刚写入时间戳）时提示耐心等待，不再输出"超时请重试"
+        with pytest.raises(LifecycleError, match=f"PID {os.getpid()}"):
+            with instance_lock(workspace, "api", timeout=0.3):
+                pass
+        with pytest.raises(LifecycleError, match="请耐心等待"):
+            with instance_lock(workspace, "api", timeout=0.3):
+                pass
+    finally:
+        release_exclusive(fd)
+        os.close(fd)
+
+
+def test_instance_lock_does_not_unlink_on_release(workspace) -> None:
+    """BUG-213：释放后保留锁文件 inode，避免新旧 inode 并行持锁。"""
+    lock_path = workspace.run / "lifecycle-keep.lock"
+    with instance_lock(workspace, "keep", timeout=2):
+        assert lock_path.exists()
+        inode = lock_path.stat().st_ino
+    assert lock_path.exists()
+    assert lock_path.stat().st_ino == inode
+    with instance_lock(workspace, "keep", timeout=2):
+        assert lock_path.stat().st_ino == inode
+
+
+def test_instance_lock_reclaims_stale(workspace, monkeypatch) -> None:
+    """无文件锁持有者时，残留锁文件可被立即获取（进程崩溃后内核已释锁）。"""
+    lock_path = workspace.run / "lifecycle-api.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # 用一个绝对不存在的 PID（仅残留文件内容，无人持锁）
+    lock_path.write_text("999999\n0.0\n", encoding="utf-8")
+    monkeypatch.setattr("local_webpage_access.lifecycle._STALE_LOCK_SECONDS", 999999)
+    with instance_lock(workspace, "api", timeout=2):
+        pass  # 不抛异常即说明可获取
+
+
+def test_lock_is_stale_dead_pid(tmp_path: Path) -> None:
+    p = tmp_path / "stale.lock"
+    p.write_text("999999\n0.0\n", encoding="utf-8")
+    assert _lock_is_stale(p) is True
+
+
+def test_lock_is_stale_corrupt(tmp_path: Path) -> None:
+    p = tmp_path / "bad.lock"
+    p.write_text("not-a-pid\n", encoding="utf-8")
+    assert _lock_is_stale(p) is True
+
+
+def test_pid_alive_current_process() -> None:
+    import os
+
+    assert _pid_alive(os.getpid()) is True
+    assert _pid_alive(0) is False
+    assert _pid_alive(999999) is False
+
+
+def test_pid_alive_permission_error_means_alive(monkeypatch) -> None:
+    """BUG-346：PermissionError 表示进程存在但不可访问，不得判死。"""
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("PermissionError 语义针对 POSIX os.kill(pid, 0)")
+
+    def boom(pid, sig):
+        raise PermissionError("EPERM")
+
+    monkeypatch.setattr(os, "kill", boom)
+    assert _pid_alive(4242) is True
+
+
+# ---- start -----------------------------------------------------------------
+
+
+def test_start_undeployed_container_goes_full_deploy(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """未部署容器（无 containerId）→ 全量 host_container（build+up）。"""
+    _seed_container(workspace, registry, "api", deployed=False)
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert manifest.desiredState == DesiredState.RUNNING
+    assert "build" in fake_runtime.calls
+    assert "up" in fake_runtime.calls
+    assert "start" not in fake_runtime.calls  # 没走轻量 start
+
+
+def test_start_deployed_container_uses_light_start(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """已部署容器（有 containerId）→ 轻量 compose start，不 build。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert "start" in fake_runtime.calls
+    assert "build" not in fake_runtime.calls
+    assert "up" not in fake_runtime.calls
+
+
+def test_start_recreates_via_up_when_container_removed_externally(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-382：外部 compose down 后仍有 containerId，应 up -d 重建而非 start。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    # 模拟此前部署留下的 compose / env / 镜像
+    docker_dir = workspace.app_docker("api")
+    docker_dir.mkdir(parents=True, exist_ok=True)
+    (docker_dir / "compose.yaml").write_text("services:\n  app:\n    image: x\n")
+    (docker_dir / ".env").write_text("HOST_PORT=21000\n")
+    fake_runtime._has_container = False
+    fake_runtime._running = False
+    fake_runtime.calls.clear()
+
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert "up" in fake_runtime.calls
+    assert "start" not in fake_runtime.calls
+    assert "build" not in fake_runtime.calls
+    assert manifest.container is not None
+    assert manifest.container.containerId == "cid-x"
+
+
+def test_start_falls_back_to_full_rebuild_when_compose_missing(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-382：容器与生成文件均缺失时，回退完整 build+up。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._has_container = False
+    fake_runtime._running = False
+    fake_runtime.calls.clear()
+
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert "build" in fake_runtime.calls
+    assert "up" in fake_runtime.calls
+    assert "start" not in fake_runtime.calls
+
+
+def test_start_recovers_via_full_rebuild_after_rebuild_failure(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-300：重建失败后旧 containerId 必须作废，下次 start 走完整 build+up。
+
+    否则轻量 ``compose start`` 会对着已 down 的陈旧容器身份失败，实例永不可恢复。
+    """
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.hosting import host_container
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._running = True
+
+    def fail_build(self, iid, *, build_id=None, **kw):
+        if build_id is not None and self.registry is not None:
+            self.registry.finish_build(build_id, status="failed", error_summary="rebuild boom")
+        raise DockerError("rebuild boom", instance_id=iid)
+
+    monkeypatch.setattr(fake_runtime, "build", fail_build)
+    with pytest.raises(DockerError, match="rebuild boom"):
+        host_container(workspace, config, registry, "api")
+
+    failed = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert failed.container is not None
+    assert failed.container.containerId is None
+    assert failed.container.imageId is None
+
+    # 恢复 build，模拟用户再次 start
+    fake_runtime.calls.clear()
+
+    def ok_build(self, iid, *, build_id=None, **kw):
+        self.calls.append("build")
+        if build_id is not None and self.registry is not None:
+            self.registry.finish_build(build_id, status="success")
+
+    monkeypatch.setattr(fake_runtime, "build", ok_build)
+    fake_runtime._running = False
+
+    manifest = start_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    assert "build" in fake_runtime.calls
+    assert "up" in fake_runtime.calls
+    assert "start" not in fake_runtime.calls
+
+
+def test_start_static_dispatches_to_host_static(workspace, registry, config, fake_runtime) -> None:
+    """静态实例 start → host_instance 的静态分支（不碰 Docker）。"""
+    _seed_static(workspace, registry, "demo")
+    manifest = start_instance(workspace, config, registry, "demo")
+    assert manifest.status == Status.RUNNING
+    assert fake_runtime.calls == []  # 静态不调用 DockerRuntime
+    # BUG：泄漏兜底——host_static 真起了一个 http.server 子进程，必须 stop
+    # 掉，否则端口池在跨用例累积下会耗尽（导致全量测试连跑即红）。
+    stop_instance_op(workspace, config, registry, "demo")
+
+
+# ---- stop ------------------------------------------------------------------
+
+
+def test_stop_container_marks_stopped_and_keeps_port(
+    workspace, registry, config, fake_runtime
+) -> None:
+    _seed_container(workspace, registry, "api", deployed=True)
+    registry.allocate_port("api", 21000)
+    stop_instance_op(workspace, config, registry, "api")
+    row = registry.get_instance("api")
+    assert row["status"] == "stopped"
+    assert row["desired_state"] == "stopped"
+    assert "stop" in fake_runtime.calls
+    # 端口保留
+    assert 21000 in registry.allocated_ports()
+
+
+# ---- restart ---------------------------------------------------------------
+
+
+def test_restart_container_stop_then_light_start(workspace, registry, config, fake_runtime) -> None:
+    _seed_container(workspace, registry, "api", deployed=True)
+    registry.allocate_port("api", 21000)
+    fake_runtime._running = True  # 模拟在跑
+    manifest = restart_instance(workspace, config, registry, "api")
+    assert manifest.status == Status.RUNNING
+    # 先 stop 再 start，不 build
+    assert fake_runtime.calls.index("stop") < fake_runtime.calls.index("start")
+    assert "build" not in fake_runtime.calls
+
+
+# ---- rebuild ---------------------------------------------------------------
+
+
+def test_rebuild_container_forces_full_rebuild(workspace, registry, config, fake_runtime) -> None:
+    """rebuild → host_container：down 旧 + build + up。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._running = True
+    rebuild_instance(workspace, config, registry, "api")
+    assert "down" in fake_runtime.calls
+    assert "build" in fake_runtime.calls
+    assert "up" in fake_runtime.calls
+
+
+def test_rebuild_writes_build_queue_events(workspace, registry, config, fake_runtime) -> None:
+    """rebuild 通过 BuildQueue 调度，应写入 build_start 事件（WBS-20.06）。"""
+    _seed_container(workspace, registry, "api", deployed=False)
+    rebuild_instance(workspace, config, registry, "api")
+    events = registry.list_events("api")
+    assert any(e["event_type"] == "build_start" for e in events)
+
+
+# ---- remove ----------------------------------------------------------------
+
+
+def test_remove_default_keeps_files_and_data(workspace, registry, config, fake_runtime) -> None:
+    _seed_container(workspace, registry, "api", deployed=True)
+    data_dir = workspace.app_data("api")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.sqlite").write_text("data")
+
+    remove_instance(workspace, config, registry, "api")
+
+    # registry 记录已删
+    assert registry.get_instance("api") is None
+    assert registry.get_container("api") is None
+    # 磁盘文件 + data 保留
+    assert workspace.app_dir("api").is_dir()
+    assert (data_dir / "app.sqlite").is_file()
+
+
+def test_remove_clears_pageviews(workspace, registry, config, fake_runtime) -> None:
+    """BUG-090：删除实例应清空其浏览量，避免残留 / 同 ID 复用串数据。"""
+    from local_webpage_access.pageviews import AccessHit, PageviewStore
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    store = PageviewStore.for_workspace(workspace)
+    store.record_hits(
+        "api", "container", [AccessHit("2026-07-09T10:00:00+08:00", "GET", "/", 200, "1.1.1.1")]
+    )
+    assert store.summary().get("api", {}).get("hits") == 1
+    store.close()
+
+    remove_instance(workspace, config, registry, "api")
+
+    store2 = PageviewStore.for_workspace(workspace)
+    assert store2.summary().get("api") is None  # 浏览量已随实例删除清空
+    store2.close()
+
+
+def test_remove_purge_deletes_files(workspace, registry, config, fake_runtime) -> None:
+    _seed_container(workspace, registry, "api", deployed=False)
+    remove_instance(workspace, config, registry, "api", purge=True, force=True)
+    assert registry.get_instance("api") is None
+    assert not workspace.app_dir("api").exists()
+
+
+def test_remove_purge_best_effort_removes_image(workspace, registry, config, fake_runtime) -> None:
+    """BUG-345：purge 时按 imageId/image 尽力 docker rmi，避免小主机磁盘泄漏。"""
+    m = _seed_container(workspace, registry, "api", deployed=True)
+    assert m.container is not None
+    m.container.imageId = "sha256:deadbeef"
+    m.container.image = "lwa-api:latest"
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+
+    remove_instance(workspace, config, registry, "api", purge=True, force=True)
+
+    assert any(c.startswith("rmi:") for c in fake_runtime.calls)
+    assert "rmi:sha256:deadbeef" in fake_runtime.calls
+    assert registry.get_instance("api") is None
+
+
+def test_remove_tolerates_corrupt_manifest(workspace, registry, config, fake_runtime) -> None:
+    """BUG-347：local-web.json 损坏时 remove 仍按 registry 降级清理，不得整段崩溃。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    workspace.app_manifest_path("api").write_text("{not-json", encoding="utf-8")
+
+    remove_instance(workspace, config, registry, "api")
+
+    assert "down" in fake_runtime.calls
+    assert registry.get_instance("api") is None
+
+
+def test_remove_purge_protects_nonempty_data(workspace, registry, config, fake_runtime) -> None:
+    """IMP-035：purge 但 data/ 非空且未 force → DataNonemptyError(code=data_nonempty)。"""
+    from local_webpage_access.errors import DataNonemptyError
+
+    _seed_container(workspace, registry, "api", deployed=False)
+    data_dir = workspace.app_data("api")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.sqlite").write_text("data")
+
+    with pytest.raises(DataNonemptyError, match="data/") as ei:
+        remove_instance(workspace, config, registry, "api", purge=True, force=False)
+    assert ei.value.code == "data_nonempty"
+    # 实例仍在（保护生效）
+    assert registry.get_instance("api") is not None
+
+
+def test_remove_purge_force_deletes_nonempty_data(
+    workspace, registry, config, fake_runtime
+) -> None:
+    _seed_container(workspace, registry, "api", deployed=False)
+    data_dir = workspace.app_data("api")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.sqlite").write_text("data")
+
+    remove_instance(workspace, config, registry, "api", purge=True, force=True)
+    assert registry.get_instance("api") is None
+    assert not workspace.app_dir("api").exists()
+
+
+def test_remove_container_calls_compose_down(workspace, registry, config, fake_runtime) -> None:
+    _seed_container(workspace, registry, "api", deployed=True)
+    remove_instance(workspace, config, registry, "api")
+    assert "stop" in fake_runtime.calls
+    assert "down" in fake_runtime.calls
+
+
+def test_remove_container_without_manifest_still_calls_compose_down(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """BUG-319：manifest 丢失时按 registry runtime 降级清理容器资源。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    workspace.app_manifest_path("api").unlink()
+
+    remove_instance(workspace, config, registry, "api")
+
+    assert "down" in fake_runtime.calls
+    assert registry.get_instance("api") is None
+
+
+def test_remove_static_without_manifest_still_disables_gateway(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-319：静态实例 manifest 缺失时仍按 registry 调用 gateway.disable。"""
+    _seed_static(workspace, registry, "demo")
+    workspace.app_manifest_path("demo").unlink()
+    calls: list[str] = []
+
+    class _FakeGW:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def disable(self, iid):
+            calls.append(f"disable:{iid}")
+
+        def cleanup_instance_routes(self, iid):
+            calls.append(f"cleanup:{iid}")
+
+    monkeypatch.setattr("local_webpage_access.static_gateway.StaticGateway", _FakeGW)
+
+    remove_instance(workspace, config, registry, "demo")
+
+    assert "disable:demo" in calls
+    assert registry.get_instance("demo") is None
+
+
+def test_remove_container_clears_path_alias_config(
+    workspace, registry, fake_runtime, monkeypatch
+) -> None:
+    """BUG-268：容器 remove/purge 后应清理 aliases/<id>.conf 并同步主 Caddyfile。"""
+    from local_webpage_access.config import Config, PortPool
+    from local_webpage_access.static_gateway import StaticGateway
+
+    caddy_config = Config(
+        staticGateway="caddy",
+        staticGatewayPort=8080,
+        portPool=PortPool(start=21000, end=21050),
+    )
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "caddy")
+    monkeypatch.setattr(StaticGateway, "_reload_with_self_heal", lambda self: (True, ""))
+
+    iid = "prd-workflow"
+    _seed_container(workspace, registry, iid, deployed=True)
+    alias_path = workspace.app_alias_config(iid)
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    alias_path.write_text(
+        f"# alias\nhandle_path /{iid}/* {{\n\treverse_proxy 127.0.0.1:21000\n}}\n",
+        encoding="utf-8",
+    )
+    gw = StaticGateway(workspace, caddy_config)
+    main = gw.main_config_path()
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(
+        f":8080 {{\n\timport {alias_path.as_posix()}\n}}\n",
+        encoding="utf-8",
+    )
+
+    remove_instance(workspace, caddy_config, registry, iid, purge=True, force=True)
+
+    assert not alias_path.exists()
+    main_text = main.read_text(encoding="utf-8") if main.is_file() else ""
+    assert iid not in main_text
+    assert "import" not in main_text or not main_text.strip()
+
+
+# ---- 回归测试：BUG-025 ----------------------------------------------------
+#
+# BUG-025：``lwa remove .. --purge --force`` 会 ``shutil.rmtree(app_dir(".."))``，
+#          越界删除工作区根。修复后非法 ID 在入口（instance_lock / app_dir）
+#          即被拦截，rmtree 永不执行。
+
+
+def test_remove_traversal_id_rejected_before_delete(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """``..`` 不得越界删除：调用前在工作区根留哨兵，必须原样保留。"""
+    from local_webpage_access.errors import LwaError
+
+    sentinel = workspace.root / "DO-NOT-DELETE.txt"
+    sentinel.write_text("workspace root sentinel")
+    # 预置 apps/ 下一个真实实例，证明合法路径不受影响
+    _seed_static(workspace, registry, "demo")
+
+    with pytest.raises(LwaError):
+        remove_instance(workspace, config, registry, "..", purge=True, force=True)
+
+    # 工作区根哨兵仍在；合法实例目录也仍在
+    assert sentinel.is_file()
+    assert workspace.app_dir("demo").is_dir()
+
+
+def test_remove_purge_valid_id_confined_to_apps(workspace, registry, config, fake_runtime) -> None:
+    """合法 purge 只删 apps/<id>/，不动 apps/ 同级与工作区根。"""
+    sentinel = workspace.root / "DO-NOT-DELETE.txt"
+    sentinel.write_text("workspace root sentinel")
+    sibling = workspace.apps / "keep-me"
+    sibling.mkdir(parents=True)
+    (sibling / "f.txt").write_text("kept")
+
+    _seed_static(workspace, registry, "demo")
+    remove_instance(workspace, config, registry, "demo", purge=True, force=True)
+
+    assert not workspace.app_dir("demo").exists()
+    assert sentinel.is_file()
+    assert (sibling / "f.txt").is_file()
+
+
+# ---- observe_status --------------------------------------------------------
+
+
+def test_observe_status_container_running(workspace, registry, config, fake_runtime) -> None:
+    _seed_container(workspace, registry, "api", deployed=True)
+    # manifest 落 stopped，但容器在跑 → observe 改写 running
+    fake_runtime._running = True
+    observed = observe_status(workspace, config, registry, "api")
+    assert observed == Status.RUNNING
+    assert registry.get_instance("api")["status"] == "running"
+
+
+def test_observe_status_container_stopped(workspace, registry, config, fake_runtime) -> None:
+    _seed_container(workspace, registry, "api", deployed=True)
+    # manifest 落 running，容器实际没跑 → 改写 stopped
+    from local_webpage_access.models import Status as S
+
+    m = InstanceManifest.load(workspace.app_manifest_path("api"))
+    m.status = S.RUNNING
+    m.save(workspace.app_manifest_path("api"))
+    registry.update_status("api", S.RUNNING.value)
+
+    fake_runtime._running = False
+    observed = observe_status(workspace, config, registry, "api")
+    assert observed == Status.STOPPED
+    assert registry.get_instance("api")["status"] == "stopped"
+
+
+def test_observe_container_docker_permission_preserves_running(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-230：docker.sock 权限不足时不得把 running 误标为 stopped。"""
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    m = InstanceManifest.load(workspace.app_manifest_path("api"))
+    m.status = S.RUNNING
+    m.save(workspace.app_manifest_path("api"))
+    registry.update_status("api", S.RUNNING.value)
+
+    class _PermDeniedRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            raise DockerError("Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`")
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime)
+    monkeypatch.setattr("local_webpage_access.health.http_ok", lambda port, **kw: (False, None))
+
+    observed = observe_status(workspace, config, registry, "api")
+    assert observed == Status.RUNNING
+    row = registry.get_instance("api")
+    assert row["status"] == "running"
+    assert row["last_error"] and "权限" in row["last_error"]
+    assert "newgrp" in row["last_error"] or "manager" in row["last_error"]
+    assert row.get("observed_state") == "unknown"
+    assert row.get("observation_error") == "permission_denied"
+    assert row.get("runtime_access") == "permission_denied"
+    assert row.get("last_trusted_state") == "running"
+
+
+def test_observe_container_docker_permission_http_fallback_running(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-230：Docker 权限不足但 hostPort HTTP 可达时按 running。"""
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    m = InstanceManifest.load(workspace.app_manifest_path("api"))
+    m.status = S.STOPPED
+    m.save(workspace.app_manifest_path("api"))
+    registry.update_status("api", S.STOPPED.value)
+
+    class _PermDeniedRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            raise DockerError("Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`")
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _PermDeniedRuntime)
+    monkeypatch.setattr("local_webpage_access.health.http_ok", lambda port, **kw: (True, 200))
+
+    observed = observe_status(workspace, config, registry, "api")
+    assert observed == Status.RUNNING
+    assert registry.get_instance("api")["status"] == "running"
+
+
+def test_observe_container_programming_error_preserves_trusted_state(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-240：TypeError 等编程异常不得伪装成干净 stopped。"""
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    registry.update_status("api", S.RUNNING.value)
+
+    class _BrokenRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            raise TypeError("programming bug")
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime.DockerRuntime", _BrokenRuntime)
+    observed = observe_status(workspace, config, registry, "api")
+    row = registry.get_instance("api")
+    assert observed == Status.RUNNING
+    assert row["status"] == "running"
+    assert row["observed_state"] == "unknown"
+    assert row["observation_error"] == "unknown"
+    assert row["runtime_access"] == "unknown"
+
+
+def test_observe_container_trusted_state_refresh_on_concurrent_update(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-369：观测降级写回前须重读 registry，保留并发更新的 last_trusted_state。"""
+    from local_webpage_access.errors import DockerError
+    from local_webpage_access.models import Status as S
+
+    _seed_container(workspace, registry, "api", deployed=True)
+    registry.update_status(
+        "api",
+        S.STOPPED.value,
+        last_trusted_state=S.STOPPED.value,
+    )
+
+    class _ConcurrentUpdateRuntime:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def is_running(self, iid):
+            # 观测入口已读到 stopped；抛错前模拟另一写者更新为 running。
+            registry.update_status(
+                iid,
+                S.RUNNING.value,
+                last_trusted_state=S.RUNNING.value,
+            )
+            raise DockerError("Docker 权限不足（无法访问 docker.sock）：请执行 `newgrp docker`")
+
+    monkeypatch.setattr(
+        "local_webpage_access.docker_runtime.DockerRuntime",
+        _ConcurrentUpdateRuntime,
+    )
+    monkeypatch.setattr("local_webpage_access.health.http_ok", lambda port, **kw: (False, None))
+
+    observed = observe_status(workspace, config, registry, "api")
+    row = registry.get_instance("api")
+    assert observed == Status.RUNNING
+    assert row["status"] == "running"
+    assert row.get("observed_state") == "unknown"
+    assert row.get("observation_error") == "permission_denied"
+    assert row.get("last_trusted_state") == "running"
+
+
+def test_observe_status_no_change_no_event(workspace, registry, config, fake_runtime) -> None:
+    """观测状态与现状一致时不写 status_change 事件。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._running = False  # 与 manifest stopped 一致
+    events_before = registry.list_events("api")
+    observe_status(workspace, config, registry, "api")
+    events_after = registry.list_events("api")
+    assert len(events_after) == len(events_before)
+
+
+def test_observe_status_holds_instance_lock_while_saving(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-320：观测回写 manifest 必须受同一实例生命周期锁保护。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    fake_runtime._running = True
+    lock_held = False
+    saved_under_lock = False
+    original_save = InstanceManifest.save
+
+    def checked_save(self, path):
+        # save 外包 suppress(Exception)，不能在此 assert；用标志事后校验。
+        nonlocal saved_under_lock
+        saved_under_lock = lock_held
+        return original_save(self, path)
+
+    @contextlib.contextmanager
+    def tracked_lock(*args, **kwargs):
+        nonlocal lock_held
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    monkeypatch.setattr("local_webpage_access.lifecycle.instance_lock", tracked_lock)
+    monkeypatch.setattr(InstanceManifest, "save", checked_save)
+    assert observe_status(workspace, config, registry, "api") == Status.RUNNING
+    assert saved_under_lock, "observe_status 保存时未持实例锁"
+
+
+def test_observe_static_status_uses_health_when_pid_missing(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-052：PID 文件缺失但 HTTP 仍可用时，观测应为 running。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+    from local_webpage_access.models import Status
+    from tests.scripts._helpers import make_static_manifest
+
+    workspace.ensure_app_dirs("demo")
+    m = make_static_manifest("demo")
+    m.status = Status.RUNNING
+    m.static.enabled = True
+    m.static.hostPort = 21100
+    m.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(m)
+    registry.set_static_enabled("demo", True)
+
+    monkeypatch.setattr(
+        "local_webpage_access.static_gateway.StaticGateway.health_check",
+        lambda self, port, **kw: port == 21100,
+    )
+
+    observed = _observe_static_status(workspace, config, registry, "demo")
+    assert observed == Status.RUNNING
+
+
+# ---- DEV-043 / BUG-071：状态模型区分 gateway_down / config_invalid ------------
+
+
+def _patch_gateway_for_observe(
+    monkeypatch,
+    *,
+    backend: str = "caddy",
+    admin_alive: bool = False,
+    health_ok: bool = False,
+    pid_alive: bool = False,
+) -> None:
+    """桩 StaticGateway 探测方法，供 _observe_static_status 的 Caddy 区分测试。"""
+    from local_webpage_access import static_gateway
+
+    class _FakeGW:
+        def __init__(self, *a, **kw):
+            pass
+
+        def detect_backend(self):
+            return backend
+
+        def _admin_alive(self, **kw):
+            return admin_alive
+
+        def health_check(self, port, **kw):
+            return health_ok
+
+        def _pid_alive(self, pid):
+            return pid_alive
+
+    monkeypatch.setattr(static_gateway, "StaticGateway", _FakeGW)
+
+
+def _seed_enabled_static(workspace, registry, iid="demo", host_port=21100):
+    from local_webpage_access.models import StaticConfig
+    from tests.scripts._helpers import make_static_manifest
+
+    workspace.ensure_app_dirs(iid)
+    m = make_static_manifest(
+        iid,
+        desiredState=DesiredState.RUNNING,
+        status=Status.RUNNING,
+        static=StaticConfig(hostPort=host_port),
+    )
+    m.static.enabled = True
+    m.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(m)
+    registry.set_static_enabled(iid, True)
+    return m
+
+
+def test_observe_distinguishes_gateway_down(workspace, registry, config, monkeypatch) -> None:
+    """BUG-071/DEV-043：Caddy master 挂掉时 enabled 实例标 gateway_down，不再误标 stopped。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=False, health_ok=False)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.GATEWAY_DOWN
+
+
+def test_observe_config_invalid_when_master_up_but_site_unreachable(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """DEV-043：master 在线但站点 hostPort 不通 → config_invalid（路由/配置问题）。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=True, health_ok=False)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.CONFIG_INVALID
+
+
+def test_observe_health_first_keeps_running_even_if_admin_down(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """健康优先：即便 admin 探测失败，只要 hostPort HTTP 可达仍判 running（向后兼容）。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=False, health_ok=True)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.RUNNING
+
+
+def test_recover_instance_brings_up_gateway_then_restarts(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """DEV-043 recover：Caddy 静态 + master 离线时，先 maybe_start_gateway 再 restart。"""
+    from local_webpage_access import gateway_service, lifecycle
+    from local_webpage_access import static_gateway as sg
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+
+    calls: list[str] = []
+
+    class _FakeGW:
+        def __init__(self, *a, **kw):
+            pass
+
+        def detect_backend(self):
+            return "caddy"
+
+        def _admin_alive(self, **kw):
+            return False
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(
+        gateway_service,
+        "maybe_start_gateway",
+        lambda *a, **kw: calls.append("gateway"),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_restart_instance_locked",
+        lambda *a, **kw: (
+            calls.append("restart") or _seed_enabled_static(workspace, registry, "demo")
+        ),
+    )
+
+    lifecycle.recover_instance(workspace, config, registry, "demo")
+    assert calls == ["gateway", "restart"]
+
+
+def test_recover_instance_skips_gateway_when_admin_already_up(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """recover：master 已在线时不重复拉网关，直接 restart。"""
+    from local_webpage_access import gateway_service, lifecycle
+    from local_webpage_access import static_gateway as sg
+
+    _seed_enabled_static(workspace, registry, "demo", host_port=21100)
+    calls: list[str] = []
+
+    class _FakeGW:
+        def __init__(self, *a, **kw):
+            pass
+
+        def detect_backend(self):
+            return "caddy"
+
+        def _admin_alive(self, **kw):
+            return True
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(
+        gateway_service, "maybe_start_gateway", lambda *a, **kw: calls.append("gateway")
+    )
+    monkeypatch.setattr(
+        lifecycle, "_restart_instance_locked", lambda *a, **kw: calls.append("restart")
+    )
+    lifecycle.recover_instance(workspace, config, registry, "demo")
+    assert calls == ["restart"]
+
+
+# ---- 回归测试：BUG-046 ----------------------------------------------------
+#
+# BUG-046：``instance_lock`` 在长耗时操作期间不刷新锁文件时间戳，
+#          超过 ``_STALE_LOCK_SECONDS``（30 分钟）后会被另一进程误回收，
+#          导致跨进程并发操作同一实例。修复后用后台心跳线程周期性刷新。
+
+
+def test_instance_lock_heartbeat_refreshes_timestamp(workspace) -> None:
+    """持锁期间心跳线程应刷新锁文件时间戳（BUG-046）。
+
+    构造一个持锁 2 个心跳间隔的场景，验证锁文件第二行（时间戳）在持锁期间
+    被刷新过（不是初始值）。
+    """
+    import os
+    import time as _t
+
+    from local_webpage_access import lifecycle
+
+    # 把心跳间隔压到很短，让测试快速验证刷新
+    monkeypatch_interval = 0.05
+    original = lifecycle._LOCK_HEARTBEAT_INTERVAL
+    lifecycle._LOCK_HEARTBEAT_INTERVAL = monkeypatch_interval
+    try:
+        lock_path = workspace.run / "lifecycle-hb.lock"
+        with instance_lock(workspace, "hb"):
+            ts_initial = lock_path.read_text(encoding="utf-8").strip().splitlines()[1]
+            # 等待至少 2 个心跳间隔，让后台线程刷新
+            _t.sleep(monkeypatch_interval * 4)
+            ts_after = lock_path.read_text(encoding="utf-8").strip().splitlines()[1]
+            # 时间戳应被刷新（增大）
+            assert float(ts_after) > float(ts_initial)
+            # 锁文件 PID 应仍是当前进程
+            pid_line = lock_path.read_text(encoding="utf-8").strip().splitlines()[0]
+            assert int(pid_line) == os.getpid()
+    finally:
+        lifecycle._LOCK_HEARTBEAT_INTERVAL = original
+
+
+def test_touch_lock_heartbeat_never_exposes_empty_payload(
+    workspace, monkeypatch
+) -> None:
+    """BUG-606：心跳刷新不得在写入新载荷前清空锁文件。"""
+    import os
+
+    from local_webpage_access import file_lock, lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-consistent.lock"
+    lock_path.write_text(f"{os.getpid()}\n1.000\n", encoding="utf-8")
+    original_ftruncate = file_lock.os.ftruncate
+    observed_during_truncate: list[str] = []
+
+    def _observing_ftruncate(fd: int, length: int) -> None:
+        # write_lock_payload 必须已先 os.write 完整载荷，才进入截断。
+        observed_during_truncate.append(lock_path.read_text(encoding="utf-8"))
+        original_ftruncate(fd, length)
+
+    monkeypatch.setattr(file_lock.os, "ftruncate", _observing_ftruncate)
+    lifecycle._touch_lock_heartbeat(lock_path)
+
+    assert observed_during_truncate, "心跳刷新必须经过写后截断观测点"
+    assert all(
+        len(content.strip().splitlines()) >= 2
+        for content in observed_during_truncate
+    )
+    content = lock_path.read_text(encoding="utf-8").strip().splitlines()
+    assert content[0] == str(os.getpid())
+    assert float(content[1]) > 1.0
+
+
+def test_read_lock_payload_retries_incomplete_read(workspace, monkeypatch) -> None:
+    """BUG-606：读取器遇到瞬时单行载荷时应重读完整载荷。"""
+    from local_webpage_access import lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-retry.lock"
+    reads = iter(["123\n", "123\n456.000\n"])
+
+    def _read_text(_self, *args, **kwargs):
+        return next(reads)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    assert lifecycle._read_lock_payload(lock_path) == (123, 456.0)
+
+
+def test_read_lock_payload_persistent_invalid_content_degrades_safely(
+    workspace, monkeypatch
+) -> None:
+    """BUG-606：持续无效的观测载荷不应向诊断路径抛异常。"""
+    from local_webpage_access import lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-invalid.lock"
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: "invalid\n")
+
+    assert lifecycle._read_lock_payload(lock_path) == (0, 0.0)
+
+
+def test_read_lock_payload_persistent_single_line_preserves_pid(
+    workspace, monkeypatch
+) -> None:
+    """BUG-606：持续单行时保留 PID，供调用方用 mtime 兜底。"""
+    from local_webpage_access import lifecycle
+
+    lock_path = workspace.run / "lifecycle-hb-single-line.lock"
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: "123\n")
+
+    assert lifecycle._read_lock_payload(lock_path) == (123, 0.0)
+
+
+def test_instance_lock_heartbeat_keeps_lock_fresh(workspace, monkeypatch) -> None:
+    """持锁超过 stale 阈值后锁仍不应被判为陈旧（BUG-046 核心）。
+
+    通过缩短 ``_STALE_LOCK_SECONDS`` + ``_LOCK_HEARTBEAT_INTERVAL``，模拟
+    长耗时 rebuild 场景：持锁时间 > stale 阈值，但因心跳刷新，
+    ``_lock_is_stale`` 返回 False。
+    """
+    import time as _t
+
+    from local_webpage_access import lifecycle
+
+    monkeypatch.setattr(lifecycle, "_STALE_LOCK_SECONDS", 0.5)
+    monkeypatch.setattr(lifecycle, "_LOCK_HEARTBEAT_INTERVAL", 0.1)
+    lock_path = workspace.run / "lifecycle-long.lock"
+    with instance_lock(workspace, "long", timeout=1):
+        # 持锁 1s（> stale 0.5s），心跳每 0.1s 刷新一次
+        _t.sleep(1.0)
+        # 锁不应被判为 stale（因为心跳在持续刷新）
+        assert lifecycle._lock_is_stale(lock_path) is False
+
+
+# ---- 回归测试：BUG-604（issue #17）----------------------------------------
+#
+# BUG-604：持锁者心跳正常时错误消息仍统一拼"等待超时 + 请稍候重试"，
+#          正常进行中的长构建被误读为死锁（现场：daemon 构建 34 分钟，CLI
+#          报"占用超时请重试"却注明"心跳仍在刷新"）。修复后
+#          _lock_timeout_message 按 PID 存活 × 心跳新鲜度三分支。
+
+
+def _write_lock_file(lock_path, pid: int, ts: float) -> None:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(f"{pid}\n{ts:.3f}\n", encoding="utf-8")
+
+
+def test_lock_timeout_message_fresh_heartbeat_waits_not_retries(workspace) -> None:
+    """BUG-604：持有者存活且心跳新鲜 → 提示耐心等待，不得出现超时/请重试。"""
+    import os
+    import time as _t
+
+    from local_webpage_access.lifecycle import _lock_timeout_message
+
+    lock_path = workspace.run / "lifecycle-i17f.lock"
+    _write_lock_file(lock_path, os.getpid(), _t.time())
+    msg = _lock_timeout_message("i17f", lock_path, 30.0)
+
+    assert "仍在刷新" in msg
+    assert "请耐心等待" in msg
+    # issue #17 的矛盾措辞不得再出现在"正常进行中"分支
+    assert "等待超时" not in msg
+    assert "稍候重试" not in msg
+
+
+def test_lock_timeout_message_stale_heartbeat_suspects_holder(workspace) -> None:
+    """BUG-604/605：持有者存活但心跳停滞 → 提示排查并安全终止持有进程。
+
+    项目无 unlock 命令，且 BUG-213 要求锁文件不 unlink（同 inode 互斥）；
+    文案不得出现"强制解锁"这类引导手工删锁文件的建议。
+    """
+    import os
+    import time as _t
+
+    from local_webpage_access import lifecycle
+    from local_webpage_access.lifecycle import _lock_timeout_message
+
+    lock_path = workspace.run / "lifecycle-i17s.lock"
+    _write_lock_file(
+        lock_path, os.getpid(), _t.time() - lifecycle._STALE_LOCK_SECONDS * 2
+    )
+    msg = _lock_timeout_message("i17s", lock_path, 30.0)
+
+    assert "停滞" in msg
+    assert "疑似" in msg
+    assert "安全终止" in msg  # flock 随进程退出释放，锁文件不动
+    assert "强制解锁" not in msg  # BUG-605：不得建议不可执行的强制解锁
+
+
+def test_lock_timeout_message_dead_pid_reports_residual_lock(workspace) -> None:
+    """BUG-604/605：持有者已退出 → 仅提示重试（锁已随进程退出释放）。"""
+    import time as _t
+
+    from local_webpage_access.lifecycle import _lock_timeout_message, _pid_alive
+
+    dead_pid = 4194304
+    assert _pid_alive(dead_pid) is False
+    lock_path = workspace.run / "lifecycle-i17d.lock"
+    _write_lock_file(lock_path, dead_pid, _t.time())
+    msg = _lock_timeout_message("i17d", lock_path, 30.0)
+
+    assert "已退出" in msg
+    assert "可稍候重试" in msg
+    assert "强制解锁" not in msg  # BUG-605：不得建议不可执行的强制解锁
+
+
+def test_lock_timeout_message_missing_lock_generic(workspace) -> None:
+    """BUG-604：锁文件缺失/不可读 → 保持通用占位消息（不抛异常）。"""
+    from local_webpage_access.lifecycle import _lock_timeout_message
+
+    msg = _lock_timeout_message("i17x", workspace.run / "no-such.lock", 30.0)
+    assert "等待超时" in msg
+
+
+# ---- 回归测试：BUG-047 ----------------------------------------------------
+#
+# BUG-047：``remove_instance`` 先写 remove 事件再删除实例，但 events 表
+#          ``ON DELETE CASCADE`` 会把事件一起删掉，审计链断裂。修复后
+#          remove 事件以 orphan event（instance_id=NULL）写入，不受级联影响。
+
+
+def test_remove_keeps_audit_event_as_orphan(workspace, registry, config, fake_runtime) -> None:
+    """remove 后 remove 事件应作为孤儿事件保留（BUG-047）。"""
+    _seed_container(workspace, registry, "api", deployed=True)
+    remove_instance(workspace, config, registry, "api")
+
+    # 实例已删
+    assert registry.get_instance("api") is None
+    # 但 remove 事件仍在（作为 instance_id=NULL 的孤儿事件）
+    all_events = registry.list_events(None)
+    remove_events = [e for e in all_events if e["event_type"] == "remove"]
+    assert len(remove_events) >= 1
+    # 孤儿事件的 instance_id 为 NULL
+    assert remove_events[-1]["instance_id"] is None
+    # message 中保留了实例 ID 文本，便于追溯
+    assert "api" in remove_events[-1]["message"]
+
+
+def test_remove_writes_stage_orphan_events(
+    workspace, registry, config, fake_runtime, caplog
+) -> None:
+    """IMP-041：remove 各阶段写 orphan remove_stage 事件与可 grep 日志。
+
+    不依赖全局 logging 配置：setup_logging 会把 ``local_webpage_access`` 父
+    logger 的 propagate 置 False 并跨测试残留，caplog 的 handler 挂在 root，
+    故必须把 handler 直接加到 lifecycle 子 logger 上，记录才不会被截断。
+    """
+    import logging
+
+    from local_webpage_access import lifecycle as lifecycle_mod
+
+    logger = lifecycle_mod.log
+    logger.addHandler(caplog.handler)
+    orig_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        _seed_container(workspace, registry, "api", deployed=True)
+        remove_instance(workspace, config, registry, "api", purge=False, force=False)
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(orig_level)
+
+    stages = [e for e in registry.list_events(None) if e["event_type"] == "remove_stage"]
+    names = []
+    for ev in stages:
+        assert ev["instance_id"] is None
+        assert "instance=api" in ev["message"]
+        assert "purge=false" in ev["message"]
+        m = ev["message"]
+        # message: remove stage=<name> ...
+        part = m.split("stage=", 1)[1].split(" ", 1)[0]
+        names.append(part)
+    for required in (
+        "begin",
+        "stop",
+        "compose_down",
+        "alias_cleanup",
+        "registry_delete",
+        "pageviews_clear",
+        "purge_tree",
+        "done",
+    ):
+        assert required in names, f"missing stage {required} in {names}"
+    assert any("stage=purge_tree" in e["message"] and "result=skip" in e["message"] for e in stages)
+    assert any("remove stage=begin" in r.message for r in caplog.records)
+    assert any("remove stage=done" in r.message for r in caplog.records)
+
+
+def test_remove_data_guard_logs_fail_stage(workspace, registry, config, fake_runtime) -> None:
+    """IMP-041：data_nonempty 拒绝前写 data_guard fail orphan event。"""
+    from local_webpage_access.errors import DataNonemptyError
+
+    _seed_container(workspace, registry, "api", deployed=False)
+    data_dir = workspace.app_data("api")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.sqlite").write_text("data")
+
+    with pytest.raises(DataNonemptyError):
+        remove_instance(workspace, config, registry, "api", purge=True, force=False)
+
+    stages = [e for e in registry.list_events(None) if e["event_type"] == "remove_stage"]
+    assert any("stage=data_guard" in e["message"] and "result=fail" in e["message"] for e in stages)
+    assert registry.get_instance("api") is not None
+
+
+# ---- IMP-012：冗余实例批量清理 --------------------------------------------
+
+
+def _seed_redundant(workspace, registry, iid: str, zip_bytes: bytes, created_at: str):
+    """构造一个带 original.zip 的实例，并固定 created_at 用于冗余排序判定。"""
+    _seed_container(workspace, registry, iid)
+    zip_path = workspace.app_original_zip(iid)
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    zip_path.write_bytes(zip_bytes)
+    row = registry.get_instance(iid)
+    row["created_at"] = created_at
+    registry.upsert_instance(row)
+    return row
+
+
+_SAME_ZIP = b"identical-zip-bytes-for-grouping"
+_OTHER_ZIP = b"different-content"
+
+
+def test_list_redundant_keeps_oldest(workspace, registry, config) -> None:
+    """IMP-012：同指纹分组保留 createdAt 最早者，其余为冗余。"""
+    _seed_redundant(workspace, registry, "oldest", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "newer", _SAME_ZIP, "2026-07-02T10:00:00")
+    _seed_redundant(workspace, registry, "unique", _OTHER_ZIP, "2026-07-03T10:00:00")
+
+    redundant = list_redundant_instances(workspace, registry)
+    ids = [r["id"] for r in redundant]
+    assert ids == ["newer"]  # oldest 保留；unique 唯一不参与
+    assert redundant[0]["sourceZipHash"]  # 带指纹
+    assert redundant[0]["configLossReasons"] == []  # 无独立配置（issue #31）
+
+
+def test_redundant_ignores_empty_hash(workspace, registry, config) -> None:
+    """IMP-012：无 original.zip 的实例不参与分组（空 hash 不参与）。"""
+    _seed_redundant(workspace, registry, "a", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "b", _SAME_ZIP, "2026-07-02T10:00:00")
+    # c 无 original.zip
+    _seed_container(workspace, registry, "c")
+    assert not workspace.app_original_zip("c").exists()
+
+    redundant = list_redundant_instances(workspace, registry)
+    assert [r["id"] for r in redundant] == ["b"]  # c 被排除
+
+
+def test_remove_redundant_keeps_oldest_and_purges(workspace, registry, config) -> None:
+    """IMP-012：remove_redundant 移除冗余、保留最早者并清理磁盘（purge）。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "drop", _SAME_ZIP, "2026-07-02T10:00:00")
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == ["drop"]
+    assert outcome["skipped"] == []
+    assert registry.get_instance("drop") is None
+    assert registry.get_instance("keep") is not None  # 最早者保留
+    assert not workspace.app_dir("drop").exists()  # purge 删了磁盘
+
+
+def test_remove_redundant_none_when_all_unique(workspace, registry, config) -> None:
+    """IMP-012：所有实例指纹唯一时无冗余可删。"""
+    _seed_redundant(workspace, registry, "a", b"aaa", "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "b", b"bbb", "2026-07-02T10:00:00")
+    assert list_redundant_instances(workspace, registry) == []
+    outcome = remove_redundant(workspace, config, registry)
+    assert outcome["removed"] == []
+    assert outcome["skipped"] == []
+
+
+# ---- issue #31：携带独立配置的冗余目标默认跳过 -----------------------------
+
+
+def _guard_manifest_for(workspace, iid: str) -> None:
+    """给实例的 manifest 写入路径别名 + buildEnv，模拟「删除即丢配置」场景。"""
+    from local_webpage_access.models import InstanceManifest, RouteMode
+
+    path = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(path)
+    manifest.container.routeMode = RouteMode.NAME.value
+    manifest.container.routeHost = "my-alias"
+    manifest.buildEnv = {"VITE_BASE": "/my-alias/"}
+    manifest.save(path)
+
+
+def test_redundant_list_reports_config_loss_reasons(workspace, registry, config) -> None:
+    """issue #31：list_redundant_instances 对带别名/buildEnv 的目标给出理由。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "plain", _SAME_ZIP, "2026-07-02T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-03T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    redundant = {r["id"]: r for r in list_redundant_instances(workspace, registry)}
+    assert set(redundant) == {"plain", "curated"}  # keep 为最早者保留
+    assert redundant["plain"]["configLossReasons"] == []
+    reasons = redundant["curated"]["configLossReasons"]
+    assert any("my-alias" in r for r in reasons)
+    assert any("buildEnv" in r for r in reasons)
+
+
+def test_remove_redundant_skips_config_loss_targets(workspace, registry, config) -> None:
+    """issue #31：携带独立配置的冗余目标默认跳过，不删除。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-02T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    outcome = remove_redundant(workspace, config, registry)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["curated"]
+    assert any("my-alias" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("curated") is not None  # 未被删除
+
+
+def test_remove_redundant_allow_config_loss_overrides(workspace, registry, config) -> None:
+    """issue #31：allow_config_loss=True 时携带独立配置的目标也可删除。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-02T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    outcome = remove_redundant(
+        workspace, config, registry, purge=True, force=True, allow_config_loss=True
+    )
+    assert outcome["removed"] == ["curated"]
+    assert outcome["skipped"] == []
+    assert registry.get_instance("curated") is None
+    assert registry.get_instance("keep") is not None
+
+
+# ---- BUG-644：独立 buildHooks/preStart 计入冗余清理配置保护 --------------------
+
+
+def _hook_manifest_for(workspace, iid: str, *, hooks: bool = False, pre_start: bool = False):
+    """给实例 manifest 写入独立构建/启动钩子，模拟「删除即丢配置」场景。"""
+    from local_webpage_access.models import InstanceManifest
+
+    path = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(path)
+    if hooks:
+        manifest.buildHooks = ["echo custom-build"]
+    if pre_start:
+        manifest.preStart = "echo custom-start"
+    manifest.save(path)
+
+
+def test_redundant_config_loss_includes_build_hooks(workspace, registry, config) -> None:
+    """BUG-644：独立 buildHooks 计入配置保护——无 allow_config_loss 时 purge 也跳过。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "hooked", _SAME_ZIP, "2026-07-02T10:00:00")
+    _hook_manifest_for(workspace, "hooked", hooks=True)
+
+    # 预览与删除共用同一判定：configLossReasons 必须带上 buildHooks
+    redundant = {r["id"]: r for r in list_redundant_instances(workspace, registry)}
+    assert any("buildHooks" in r for r in redundant["hooked"]["configLossReasons"])
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["hooked"]
+    assert any("buildHooks" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("hooked") is not None
+    assert workspace.app_manifest_path("hooked").exists()  # 未被 purge
+
+
+def test_redundant_config_loss_includes_pre_start(workspace, registry, config) -> None:
+    """BUG-644：独立 preStart 计入配置保护——无 allow_config_loss 时 purge 也跳过。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "prestart", _SAME_ZIP, "2026-07-02T10:00:00")
+    _hook_manifest_for(workspace, "prestart", pre_start=True)
+
+    redundant = {r["id"]: r for r in list_redundant_instances(workspace, registry)}
+    assert any("preStart" in r for r in redundant["prestart"]["configLossReasons"])
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["prestart"]
+    assert any("preStart" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("prestart") is not None
+    assert workspace.app_manifest_path("prestart").exists()
+
+
+def test_redundant_hooks_allow_config_loss_overrides(workspace, registry, config) -> None:
+    """BUG-644：用户显式 allow_config_loss 时钩子保护可覆盖（可删除）。"""
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "hooked", _SAME_ZIP, "2026-07-02T10:00:00")
+    _hook_manifest_for(workspace, "hooked", hooks=True, pre_start=True)
+
+    outcome = remove_redundant(
+        workspace, config, registry, purge=True, force=True, allow_config_loss=True
+    )
+    assert outcome["removed"] == ["hooked"]
+    assert outcome["skipped"] == []
+    assert registry.get_instance("hooked") is None
+
+
+# ---- BUG-639：锁内候选复核不得退化为逐目标全库指纹重算 ---------------------
+
+
+def test_remove_redundant_fingerprint_reads_are_linear(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-639：批量清理的 ZIP 指纹读取次数必须保持线性。
+
+    8 个同源实例全部因非空 data 目录跳过删除时，旧实现在每个目标的删除
+    锁内重新执行一次 list_redundant_instances（全库 ZIP 读取），本场景共
+    64 次全量读取（8 预览 + 7 目标 × 8 全库）；修复后预览全库扫描一次，
+    锁内每个目标仅复核自身与保留者两个 ZIP。断言上限 3N（N 次预览 +
+    2N 次锁内复核）。
+    """
+    from local_webpage_access import lifecycle as lc
+
+    for i in range(8):
+        iid = f"dup{i}"
+        _seed_redundant(workspace, registry, iid, _SAME_ZIP, f"2026-07-0{i + 1}T10:00:00")
+        data_dir = workspace.app_data(iid)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "keep.bin").write_bytes(b"x")
+
+    real_fp = lc._instance_zip_fingerprint
+    reads = {"n": 0}
+
+    def _counting_fp(ws, iid):
+        reads["n"] += 1
+        return real_fp(ws, iid)
+
+    monkeypatch.setattr(lc, "_instance_zip_fingerprint", _counting_fp)
+
+    outcome = remove_redundant(workspace, config, registry, purge=True)  # 无 force → data 保护全跳过
+
+    assert outcome["removed"] == []
+    assert len(outcome["skipped"]) == 7  # dup0 为保留者，不参与删除
+    assert reads["n"] <= 3 * 8  # 旧实现为 64
+
+
+def test_remove_redundant_recheck_rejects_replaced_target_zip(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-639：目标 ZIP 在预览后被替换时，锁内复核须拒绝删除。
+
+    复核仅重算目标与保留者指纹：目标指纹漂移即不再是冗余候选。
+    """
+    from local_webpage_access import lifecycle as lc
+
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "drop", _SAME_ZIP, "2026-07-02T10:00:00")
+
+    real_remove = lc.remove_instance
+
+    def _swap_target_zip_then_remove(*args, **kwargs):
+        workspace.app_original_zip("drop").write_bytes(b"replaced-after-preview")
+        return real_remove(*args, **kwargs)
+
+    monkeypatch.setattr(lc, "remove_instance", _swap_target_zip_then_remove)
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == []
+    assert [s["id"] for s in outcome["skipped"]] == ["drop"]
+    assert any("不再是冗余候选" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("drop") is not None
+
+
+def test_remove_redundant_recheck_falls_back_when_keeper_lost(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-639：保留者消失时退回全库复查，语义与旧实现一致。
+
+    保留者 original.zip 在预览后被移除：目标 drop 按全库复查成为新的
+    最早者（不再冗余，跳过），drop2 仍在其后（正常删除）。
+    """
+    from local_webpage_access import lifecycle as lc
+
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "drop", _SAME_ZIP, "2026-07-02T10:00:00")
+    _seed_redundant(workspace, registry, "drop2", _SAME_ZIP, "2026-07-03T10:00:00")
+
+    real_remove = lc.remove_instance
+
+    def _strip_keeper_zip_then_remove(*args, **kwargs):
+        keeper_zip = workspace.app_original_zip("keep")
+        if keeper_zip.exists():
+            keeper_zip.unlink()
+        return real_remove(*args, **kwargs)
+
+    monkeypatch.setattr(lc, "remove_instance", _strip_keeper_zip_then_remove)
+
+    outcome = remove_redundant(workspace, config, registry, purge=True, force=True)
+    assert outcome["removed"] == ["drop2"]  # drop 成为新的最早者，保留
+    assert [s["id"] for s in outcome["skipped"]] == ["drop"]
+    assert any("不再是冗余候选" in r for r in outcome["skipped"][0]["reasons"])
+    assert registry.get_instance("drop") is not None
+
+
+def test_cli_remove_redundant_preview_marks_deletion_when_allow_config_loss(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-634：--allow-config-loss 时预览不得再标「将跳过」（与实际处置一致）。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+    from local_webpage_access.registry import Registry
+
+    _seed_redundant(workspace, registry, "keep", _SAME_ZIP, "2026-07-01T10:00:00")
+    _seed_redundant(workspace, registry, "curated", _SAME_ZIP, "2026-07-02T10:00:00")
+    _guard_manifest_for(workspace, "curated")
+
+    def _fake_open():  # CLI 收尾会 close，故每次返回新打开的 Registry
+        reg = Registry(workspace.root / "registry" / "local-web.db")
+        reg.open()
+        return workspace, config, reg
+
+    monkeypatch.setattr(
+        "local_webpage_access.cli.lifecycle.open_workspace_registry",
+        _fake_open,
+    )
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["remove", "--redundant", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "将跳过" in res.output  # 默认护栏跳过
+
+    res2 = runner.invoke(app, ["remove", "--redundant", "--allow-config-loss", "--yes"])
+    assert res2.exit_code == 0, res2.output
+    assert "将跳过" not in res2.output  # 实删场景不得再标跳过
+    assert "将删除（含配置）" in res2.output
+    assert registry.get_instance("curated") is None
+
+
+# ---- IMP-014：容器实例路径别名 --------------------------------------------
+
+
+def test_container_path_alias(workspace, registry, config, monkeypatch) -> None:
+    """IMP-014：容器实例可设路径别名；_apply_gateway_alias 对容器跳过 is_enabled 守卫。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    _seed_container(workspace, registry, "api", deployed=True)  # hostPort=21000
+    calls = {"gen": 0, "reload": 0}
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def is_enabled(self, iid):
+            return False  # 容器无 static site conf；验证容器路径不依赖此守卫
+
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
+            calls["gen"] += 1
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            calls["reload"] += 1
+
+        def remove_alias_config(self, iid):
+            p = self.ws.app_alias_config(iid)
+            if p.is_file():
+                p.unlink()
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(path_alias, "verify_alias_live", lambda *a, **k: None)
+
+    result = set_instance_path_alias(workspace, config, registry, "api", "api-alias")
+    assert result.alias == "api-alias"
+    assert result.gateway_reloaded is True  # 容器别名触发了 reload
+    assert calls["gen"] == 1
+    assert calls["reload"] == 1
+
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert reloaded.container.routeMode == "name"
+    assert reloaded.container.routeHost == "api-alias"
+    # registry 容器表也记录了别名（IMP-014）
+    crow = registry.get_container("api")
+    assert crow["route_host"] == "api-alias"
+    assert crow["route_mode"] == "name"
+
+
+# ---- IMP-021：端口漂移同步别名片段 ----------------------------------------
+
+
+def test_sync_alias_port_rewrites_when_drifted(workspace, registry, config, monkeypatch) -> None:
+    """IMP-021：别名片段端口与当前 hostPort 不一致 → 重写 + reload。"""
+    from local_webpage_access import static_gateway as sg
+    from local_webpage_access.lifecycle import _sync_alias_port
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.container.hostPort = 21001  # 模拟漂移后的新端口
+    manifest.save(workspace.app_manifest_path("api"))
+
+    # 旧别名片段仍指向 21000
+    alias_conf = workspace.app_alias_config("api")
+    alias_conf.parent.mkdir(parents=True, exist_ok=True)
+    alias_conf.write_text("reverse_proxy 127.0.0.1:21000\n", encoding="utf-8")
+
+    calls = {"reload": 0, "gen": 0}
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
+            calls["gen"] += 1
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            calls["reload"] += 1
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+
+    assert _sync_alias_port(workspace, config, "api", manifest) is True
+    new_conf = workspace.app_alias_config("api").read_text(encoding="utf-8")
+    assert "127.0.0.1:21001" in new_conf
+    assert "127.0.0.1:21000" not in new_conf
+    assert calls["gen"] == 1
+    assert calls["reload"] == 1
+
+
+def test_sync_alias_port_noop_when_unchanged(workspace, registry, config, monkeypatch) -> None:
+    """IMP-021：别名片段端口与 hostPort 一致 → 不重写、不 reload。"""
+    from local_webpage_access import static_gateway as sg
+    from local_webpage_access.lifecycle import _sync_alias_port
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+
+    host_port = manifest.container.hostPort  # 21000
+    alias_conf = workspace.app_alias_config("api")
+    alias_conf.parent.mkdir(parents=True, exist_ok=True)
+    alias_conf.write_text(f"reverse_proxy 127.0.0.1:{host_port}\n", encoding="utf-8")
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            pass
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, *a, **kw):
+            raise AssertionError("端口未漂移不应重写别名片段")
+
+        def reload_all(self):
+            raise AssertionError("端口未漂移不应 reload")
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    assert _sync_alias_port(workspace, config, "api", manifest) is False
+
+
+def test_rebuild_syncs_drifted_alias_port(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """IMP-021：rebuild（host_container 重新分配端口）后别名片段跟随漂移。"""
+    from local_webpage_access import hosting
+    from local_webpage_access import static_gateway as sg
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    # 旧别名片段指向 21000（漂移前）
+    alias_conf = workspace.app_alias_config("api")
+    alias_conf.parent.mkdir(parents=True, exist_ok=True)
+    alias_conf.write_text("reverse_proxy 127.0.0.1:21000\n", encoding="utf-8")
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            pass
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+    # 模拟端口漂移：rebuild 时 host_container 分配到新端口 21001
+    monkeypatch.setattr(hosting, "_ensure_container_port", lambda *a, **kw: (21001, True))
+
+    rebuild_instance(workspace, config, registry, "api")
+
+    new_conf = workspace.app_alias_config("api").read_text(encoding="utf-8")
+    assert "127.0.0.1:21001" in new_conf
+    assert "127.0.0.1:21000" not in new_conf
+
+
+# ---- BUG-084：容器别名在 start/restart 后保留 + 首启生成片段 ---------------
+
+
+def _caddy_gateway_fake(monkeypatch, record):
+    """注册一个记录 generate/reload 的 Caddy StaticGateway 替身。"""
+    from local_webpage_access import static_gateway as sg
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
+            record["gen"].append((alias, hp))
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            record["reload"] += 1
+
+    monkeypatch.setattr(sg, "StaticGateway", _FakeGW)
+
+
+def test_start_container_preserves_alias_in_network(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-084：已部署容器 restart（轻量 start）后 network 仍保留别名，状态/API 可见。"""
+    record = {"gen": [], "reload": 0}
+    _caddy_gateway_fake(monkeypatch, record)
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    registry.upsert_container("api", manifest.container.model_dump())
+
+    fake_runtime._running = True
+    result = restart_instance(workspace, config, registry, "api")
+    # BUG-084：network 保留别名（不再被 build_network_entry 覆盖为 port）
+    assert result.network.routeMode == "name"
+    assert result.network.routeHost == "api-alias"
+    assert result.network.routeUrl is not None
+    # 状态层 _resolve_route 经 network 也能读到别名
+    from local_webpage_access.status import _resolve_route
+
+    alias, _url = _resolve_route(workspace, "api")
+    assert alias == "api-alias"
+
+
+def test_start_generates_alias_fragment_when_set_before_deploy(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-084：别名在首次启动前设置（无 hostPort）→ start 时生成别名片段。"""
+    record = {"gen": [], "reload": 0}
+    _caddy_gateway_fake(monkeypatch, record)
+
+    manifest = _seed_container(workspace, registry, "api", deployed=False)  # 无 hostPort
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    registry.upsert_container("api", manifest.container.model_dump())
+
+    result = start_instance(workspace, config, registry, "api")  # 首次部署
+    # network 保留别名
+    assert result.network.routeMode == "name"
+    assert result.network.routeHost == "api-alias"
+    # 别名片段已生成（start_instance 收尾 _sync_alias_port 触发）
+    assert record["gen"], "首次启动应生成别名片段"
+    assert workspace.app_alias_config("api").is_file()
+
+
+# ---- IMP-022：builtin 后端设别名被拦截 ------------------------------------
+
+
+def test_alias_set_blocks_builtin(workspace, registry, config, monkeypatch) -> None:
+    """IMP-022：builtin 后端设置别名应明确报错，不再无声写元数据。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.errors import RecognitionError
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    _seed_container(workspace, registry, "api", deployed=True)
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            pass
+
+        def detect_backend(self):
+            return "builtin"
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+
+    with pytest.raises(RecognitionError):
+        set_instance_path_alias(workspace, config, registry, "api", "api-alias")
+    # 别名未写入 manifest（未无声落盘）
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert reloaded.container.routeHost is None
+    assert reloaded.container.routeMode == "port"
+
+
+def test_alias_clear_allows_builtin(workspace, registry, config, monkeypatch) -> None:
+    """IMP-022：清除别名（alias=None）在 builtin 下仍允许（清除恒安全）。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    manifest = _seed_container(workspace, registry, "api", deployed=True)
+    manifest.container.routeMode = "name"
+    manifest.container.routeHost = "api-alias"
+    manifest.save(workspace.app_manifest_path("api"))
+    registry.upsert_container("api", manifest.container.model_dump())
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            pass
+
+        def detect_backend(self):
+            return "builtin"
+
+        def remove_alias_config(self, iid):
+            pass
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+
+    result = set_instance_path_alias(workspace, config, registry, "api", None)
+    assert result.alias is None
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert reloaded.container.routeHost is None
+    assert reloaded.container.routeMode == "port"
+
+
+# ---- BUG-167：路径别名并发唯一性 --------------------------------------------
+
+
+def test_concurrent_path_alias_rejects_duplicate(workspace, registry, config, monkeypatch) -> None:
+    """BUG-167：双线程同时设同一别名时，仅一方成功，另一方报冲突。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.errors import PathError
+    from local_webpage_access.path_alias import set_instance_path_alias
+
+    _seed_static(workspace, registry, "one")
+    _seed_static(workspace, registry, "two")
+
+    class _FakeGW:
+        def __init__(self, ws, cfg):
+            self.ws = ws
+
+        def detect_backend(self):
+            return "caddy"
+
+        def is_enabled(self, iid):
+            return True
+
+        def generate_alias_config(self, iid, alias, hp, *, runtime=None):
+            p = self.ws.app_alias_config(iid)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"reverse_proxy 127.0.0.1:{hp}\n", encoding="utf-8")
+
+        def reload_all(self):
+            pass
+
+        def remove_alias_config(self, iid):
+            p = self.ws.app_alias_config(iid)
+            if p.is_file():
+                p.unlink()
+
+    monkeypatch.setattr(path_alias, "StaticGateway", _FakeGW)
+    monkeypatch.setattr(path_alias, "verify_alias_live", lambda *a, **k: None)
+
+    # 拉长网关写入窗口，放大「先查后写」竞态（修复前双双成功）。
+    real_apply = path_alias._apply_gateway_alias
+
+    def slow_apply(*args, **kwargs):
+        import time as _t
+
+        _t.sleep(0.05)
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(path_alias, "_apply_gateway_alias", slow_apply)
+
+    successes: list[str] = []
+    errors: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker(iid: str) -> None:
+        barrier.wait()
+        try:
+            set_instance_path_alias(workspace, config, registry, iid, "same-alias")
+            successes.append(iid)
+        except PathError:
+            errors.append(iid)
+
+    t1 = threading.Thread(target=worker, args=("one",))
+    t2 = threading.Thread(target=worker, args=("two",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert len(successes) == 1, successes
+    assert len(errors) == 1, errors
+    hosts = registry.list_route_hosts()
+    assert hosts.get("same-alias") == successes[0]
+    assert list(hosts.values()).count(successes[0]) == 1
+
+
+def test_remove_purge_rmtree_failure_is_visible(
+    workspace, registry, config, fake_runtime, monkeypatch
+) -> None:
+    """BUG-279：purge 磁盘删除失败不得记 purge_tree/done=ok 并静默成功。"""
+    from local_webpage_access.errors import LifecycleError
+
+    _seed_container(workspace, registry, "api", deployed=False)
+    app_dir = workspace.app_dir("api")
+    assert app_dir.is_dir()
+
+    def fake_rmtree(path, *args, **kwargs):  # noqa: ANN001, ARG001
+        # 模拟删除失败：目录仍在
+        return None
+
+    monkeypatch.setattr("local_webpage_access.lifecycle.shutil.rmtree", fake_rmtree)
+
+    with pytest.raises(LifecycleError, match="磁盘删除失败|未能删除"):
+        remove_instance(workspace, config, registry, "api", purge=True, force=True)
+
+    assert app_dir.exists(), "失败时应保留 apps/<id> 供重试"
+    stages = [e for e in registry.list_events(None) if e["event_type"] == "remove_stage"]
+    assert any(
+        "stage=purge_tree" in e["message"] and "result=fail" in e["message"] for e in stages
+    ), stages
+    assert not any("stage=done" in e["message"] and "result=ok" in e["message"] for e in stages), (
+        "失败路径不得记 done=ok"
+    )
+
+
+def test_path_alias_lock_does_not_steal_live_holder_by_age(workspace, monkeypatch) -> None:
+    """BUG-327：持锁进程仍存活时，不得仅因锁文件年龄而抢走 path-alias.lock。"""
+    import os
+    import time
+
+    from local_webpage_access.errors import LifecycleError
+    from local_webpage_access.file_lock import ensure_lockable, try_acquire_exclusive
+    from local_webpage_access.path_alias import _alias_lock_path, path_alias_lock
+
+    workspace.ensure_workspace_dirs()
+    lock = _alias_lock_path(workspace)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
+    ensure_lockable(fd)
+    try_acquire_exclusive(fd)
+    # 伪装成「很久没心跳」的活锁
+    os.write(fd, f"{os.getpid()}\n{time.time() - 3600:.3f}\n".encode())
+    os.fsync(fd)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    try:
+        with pytest.raises(LifecycleError, match="路径别名锁"):
+            with path_alias_lock(workspace, timeout=0.0):
+                pass
+    finally:
+        os.close(fd)

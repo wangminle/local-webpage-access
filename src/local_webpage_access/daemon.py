@@ -1528,6 +1528,11 @@ def stop_daemon(workspace: Workspace) -> bool:
             "local_webpage_access.daemon",
             str(workspace.root),
         ):
+            # BUG-776：查询失败/不可读（None）≠ 明确不属于——归属无法确认时
+            # 不终止、不清 PID/锁，返回 False 由调用方阻断或重试。
+            if read_pid_cmdline(state.pid) is None:
+                log.warning("daemon PID %s 命令行不可读，归属无法确认，未终止", state.pid)
+                return False
             log.warning("daemon PID %s 身份不匹配，按陈旧状态清理", state.pid)
             stopped = True
         else:

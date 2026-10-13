@@ -25,6 +25,19 @@ LWA_PROBE_VALUE = "1"
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """禁止自动跟随 3xx：证据探针按原端点响应判定（BUG-770）。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN202, ARG002
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirectHandler(),
+)
+
+
 def mark_probe_url(url: str) -> str:
     """给 ``url`` 追加/覆盖 ``__lwa_probe=1``，保留其余 query 与 fragment。
 
@@ -60,9 +73,22 @@ def urlopen_direct(
     return opener.open(url, timeout=timeout)
 
 
+def urlopen_no_redirect(
+    url: str | urllib.request.Request, *, timeout: float | None = None
+) -> Any:
+    """直连且禁止自动跟随重定向的探测封装（BUG-770）。
+
+    与 :func:`urlopen_direct` 一样忽略环境代理（BUG-380），但 301/302/303/307
+    不自动跳转：3xx 原样变成 :class:`urllib.error.HTTPError` 返回，由调用方按
+    声明的期望状态判定。仅限证据探针使用；访问类请求不得改用本函数。
+    """
+    return _NO_REDIRECT_OPENER.open(url, timeout=timeout)
+
+
 __all__ = [
     "LWA_PROBE_PARAM",
     "LWA_PROBE_VALUE",
     "mark_probe_url",
     "urlopen_direct",
+    "urlopen_no_redirect",
 ]

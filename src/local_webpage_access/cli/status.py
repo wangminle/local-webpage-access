@@ -32,6 +32,11 @@ def _echo_source_lines(status: object) -> None:
     mapping = getattr(status, "port_mapping_label", None)
     if mapping:
         typer.echo(f"  ↳ 映射：{mapping}")
+    manifest_error = getattr(status, "manifest_error", None)
+    if manifest_error:
+        # S1-07 / #56-3：不再把缺失的来源类型显示成默认的 zip
+        typer.secho(f"  ↳ ⚠ manifest 读取失败：{manifest_error}", fg=typer.colors.RED)
+        return
     source_kind = getattr(status, "source_kind", None)
     if source_kind == "folder":
         typer.echo(f"  ↳ 来源：本机文件夹 {getattr(status, 'source_dir_path', None) or ''}")

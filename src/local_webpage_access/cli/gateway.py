@@ -60,6 +60,16 @@ def _require_caddy_version(config) -> None:
         )
 
 
+def _rewrite_stale_aliases(ws, reg, config) -> None:
+    """启动前重写存量别名片段（S1-01）；失败只告警，不阻断启动。"""
+    from local_webpage_access.gateway_switch import rewrite_alias_fragments
+
+    try:
+        rewrite_alias_fragments(ws, reg, config)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("重写存量别名片段失败：%s", exc)
+
+
 @app.command("on")
 def gateway_on(
     rebuild_if_needed: bool = typer.Option(
@@ -87,6 +97,7 @@ def gateway_on(
         ws, config, reg = open_workspace_registry()
         try:
             _require_caddy_version(config)
+            _rewrite_stale_aliases(ws, reg, config)
             pid = start_gateway(ws, config, registry=reg)
             lan_ip = resolve_lan_ip(config) or "127.0.0.1"
             typer.secho(f"网关已启动（pid={pid}）", fg=typer.colors.GREEN)

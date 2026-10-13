@@ -27,7 +27,7 @@ from pathlib import Path
 from local_webpage_access.config import BuildMirrors, Config, default_config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest, Kind
-from local_webpage_access.paths import Workspace
+from local_webpage_access.paths import Workspace, frontend_artifact_dest
 
 log = get_logger("dockerfile")
 
@@ -967,9 +967,12 @@ def _frontend_build_block(
         else:
             copy_fe = ""
     npm_build = _with_npm_registry("npm ci && npm run build", mirrors)
+    # #47 / S1-02：产物目录按后端实际位置推导；echo 出目标便于从 build.log 确认。
+    dest = frontend_artifact_dest(prefix_dir, source_dir)
     copy_dist = (
         f"RUN if [ -d {workdir}/dist ]; then "
-        f"mkdir -p /app/backend/static && cp -a {workdir}/dist/. /app/backend/static/; "
+        f"mkdir -p {dest} && cp -a {workdir}/dist/. {dest}/ "
+        f"&& echo \"frontend artifacts -> {dest}\"; "
         "fi"
     )
     return f"{copy_fe}WORKDIR {workdir}\nRUN {npm_build}\n{copy_dist}\nWORKDIR /app\n"

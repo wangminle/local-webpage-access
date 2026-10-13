@@ -1179,7 +1179,7 @@ IMP-056/057 的后置体验与 workspace 生态扩展，则从《导入预检与
 - 不做非 ff merge/rebase/reset/stash 代操作；不做 `--force` 类破坏性 flag。
 - 不接受 tag/任意 commit 作为 MVP `--ref`；仅支持远端分支。
 - 不内置代理与凭据管理（git 生态已有成熟机制，§14 事故实证环境变量代理即可用）。
-- 不做 GitHub API / Release 附件通道（仅 git 协议；pack-release-zip 辅通道维持现状）。
+- 不做 GitHub API / Release 附件通道（仅 git 协议；历史源码 ZIP 专用打包通道已于 2026-10-13 移除，不再列为发布步骤）。
 
 | ID | 关系 |
 | --- | --- |

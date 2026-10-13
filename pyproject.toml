@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-webpage-access"
-version = "0.9.1"
+version = "0.9.2"
 description = "Local Webpage Access — 面向局域网小主机的本地网页部署基座"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -40,7 +40,8 @@ packages = ["src/local_webpage_access"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-addopts = "-ra -q"
+# Eval 上游源码仅作为部署输入，避免收集其 conftest.py 和测试。
+addopts = "-ra -q --ignore=tests/evals"
 
 [tool.ruff]
 line-length = 100

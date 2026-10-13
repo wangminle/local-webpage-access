@@ -201,7 +201,7 @@ def _collect_alias_live_probe_paths(html: str, alias: str, *, limit: int = 6) ->
     from local_webpage_access.access import (
         _alias_exempt,
         _extract_js_bundle_paths,
-        _normalize_script_src,
+        classify_resource_ref,
         scan_absolute_spa_resources,
     )
 
@@ -221,15 +221,15 @@ def _collect_alias_live_probe_paths(html: str, alias: str, *, limit: int = 6) ->
             add(p)
 
     for src in _extract_js_bundle_paths(html, limit=limit):
-        # BUG-590：规范化前先记录是否相对路径——_normalize_script_src 恒返回
-        # "/" 前缀，规范化后再判 startswith('/') 的 else 分支永不可达，
-        # 相对资源会被当成绝对路径跳过、不参与别名活验证。
-        is_relative = not src.strip().startswith("/")
-        norm = _normalize_script_src(src)
-        if is_relative:
-            add(f"/{alias}/{norm.lstrip('/')}")
-        elif _alias_exempt(norm, alias):
-            add(norm)
+        # BUG-590：先记录是否相对路径，再解析——相对资源需拼上别名前缀参与活验证。
+        # #49：外部 CDN 与内联引用已由 classify_resource_ref 排除，不得当站内路径探测。
+        kind, path = classify_resource_ref(src, base_url="/")
+        if kind != "same_origin" or path is None:
+            continue
+        if not src.strip().startswith("/"):
+            add(f"/{alias}{path}")
+        elif _alias_exempt(path, alias):
+            add(path)
 
     return paths[:limit]
 

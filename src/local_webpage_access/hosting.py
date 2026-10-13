@@ -44,7 +44,7 @@ from local_webpage_access.models import (
     Status,
 )
 from local_webpage_access.paths import Workspace, resolve_source_workdir
-from local_webpage_access.probe import mark_probe_url, urlopen_direct
+from local_webpage_access.probe import mark_probe_url, urlopen_direct, urlopen_no_redirect
 from local_webpage_access.ports import PortAllocator, build_network_entry, is_port_listening
 from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
@@ -514,12 +514,19 @@ def host_container(
     _up_completed = False  # 评审-组2
     fresh_port = False
 
+    stage_event_warned = False
+
     def _stage(name: str) -> None:
+        nonlocal stage_event_warned
         msg = f"stage={name}"
         log.info("lifecycle_stage instance=%s %s", instance_id, msg)
         _mirror_stage_to_global_log(workspace, instance_id, name)
-        with contextlib.suppress(Exception):
+        try:
             registry.add_event(instance_id, "lifecycle_stage", msg)
+        except Exception as exc:  # noqa: BLE001 — 事件写失败不阻断操作，但须可见（#59-2）
+            if not stage_event_warned:
+                stage_event_warned = True
+                log.warning("lifecycle_stage 事件写入失败（instance=%s）：%s", instance_id, exc)
 
     try:
         _stage("host_start")
@@ -1607,14 +1614,31 @@ def _evaluate_container_verification(
     probe_notes: list[str] = []
     successful_business_probe = False
     for spec in contract.requiredProbes:
-        passed, code = _probe_path(
+        # BUG-769：declared（用户/项目显式声明）的期望状态严格精确匹配；
+        # discovered/guessed 自动探针保留 BUG-506 的 200 宽松族兼容。
+        passed, code, ctype = _probe_path(
             host_port,
             spec.path,
             expected_status=spec.expectedStatus,
+            lenient_status=spec.source in ("discovered", "guessed"),
         )
+        # N2（S1-04）/ BUG-772/779：状态门槛与 API 证据分层——状态码达标只说
+        # 明 HTTP 就绪；declared/discovered 探针要成为 API 证据还须响应有实质
+        # 内容：HTML（SPA 兜底页或路由前缀缺失）与纯重定向指令（3xx，无内容）
+        # 都不算证据。证据否决不撤销就绪结果，servesApi 是全应用能力声明，
+        # 不给单个探针制造非 HTML 内容契约，mandatory 探针返回 HTML 不判失败。
+        api_eligible = spec.source in ("declared", "discovered")
+        html_content = passed and api_eligible and _is_html_content_type(ctype)
+        redirect_only = passed and api_eligible and code is not None and 300 <= code < 400
+        if html_content:
+            probe_notes.append(f"{spec.path} 返回 HTML（疑似 SPA 兜底或缺少路由前缀）")
+        if redirect_only:
+            probe_notes.append(f"{spec.path} 返回重定向（code={code}），跳转目标不计入 API 证据")
         if passed:
-            if spec.source in ("declared", "discovered"):
+            if api_eligible and not html_content and not redirect_only:
                 successful_business_probe = True
+            elif api_eligible and not (spec.isMandatory and spec.source == "declared"):
+                optional_warnings.append(f"可选探针 {spec.path} 未计入 API 证据")
             continue
         if spec.isMandatory and spec.source == "declared":
             # 用户显式声明的就绪门槛：期望状态必须满足，失败 => failed。
@@ -1719,38 +1743,77 @@ def _load_capability_contract(
     return CapabilityContract(servesUi=True)
 
 
+def _status_matches(
+    code: int, expected_status: int | None, *, lenient_family: bool = False
+) -> bool:
+    """ProbeSpec 状态判定（PLN-052 S1-04 / N2 / BUG-769）。
+
+    用户显式声明（``source="declared"``）的期望状态严格精确匹配：
+    ``lwa probe set --expected-status 200`` 声明的是 200 本身，端点返回
+    204/302 不得判通过。只有自动探针（``lenient_family=True``，即
+    discovered/guessed）保留 BUG-506 的「健康 OK」哨兵兼容：期望 200 时
+    接受任意 2xx/3xx（静态扫描无法判断端点返回语义，避免假红）。
+    """
+    if expected_status is None or (lenient_family and expected_status == 200):
+        return 200 <= code < 400
+    return code == expected_status
+
+
+def _is_html_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    base = content_type.split(";", 1)[0].strip().lower()
+    return base in ("text/html", "application/xhtml+xml")
+
+
 def _probe_path(
     host_port: int,
     path: str,
     *,
     expected_status: int = 200,
     timeout: float = 2.0,
-) -> tuple[bool, int | None]:
+    lenient_status: bool = False,
+) -> tuple[bool, int | None, str | None]:
     """Gate-C C.05：对指定路径执行 HTTP GET 探针。
 
     CHK-192/P1：区别于 :func:`_http_ok`（固定命中 ``/``），本函数命中
     :class:`ProbeSpec` 声明的路径（如 ``/health``），作为 mandatory 探针门槛。
 
-    返回 ``(passed, status_code)``：
-    - 状态码等于 ``expected_status`` 或同为 2xx/3xx -> ``passed=True``
-    - 其它 -> ``passed=False``
+    BUG-770：禁止自动重定向（:func:`urlopen_no_redirect`），按原端点响应判定；
+    用户明确期望重定向状态时按 3xx 原样匹配，最终响应不得冒充原路径证据。
+    BUG-771：错误响应同样从 ``HTTPError.headers`` 保留 Content-Type，
+    成功与错误响应应用相同内容验证规则；``HTTPError`` 正确关闭。
+
+    返回 ``(passed, status_code, content_type)``：
+    - 状态码按 :func:`_status_matches` 判定；``passed`` 不含 Content-Type 判断，
+      API 证据的 HTML 判定由调用方完成（N2：SPA 兜底页不得冒充 API）。
+    - ``lenient_status=True`` 仅供自动探针（discovered/guessed）保留 BUG-506
+      宽松族；用户显式声明的探针严格精确匹配（BUG-769）。
+    - 连接失败 -> ``(False, None, None)``
     """
     url = mark_probe_url(f"http://127.0.0.1:{host_port}{path}")
     try:
-        resp = urlopen_direct(url, timeout=timeout)
-        code = getattr(resp, "status", None) or resp.getcode()
-        code_int = int(code)
-        if expected_status and code_int == expected_status:
-            return (True, code_int)
-        if not expected_status and 200 <= code_int < 400:
-            return (True, code_int)
-        if 200 <= code_int < 400:
-            return (True, code_int)
-        return (False, code_int)
+        with urlopen_no_redirect(url, timeout=timeout) as resp:
+            code_int = int(getattr(resp, "status", None) or resp.getcode())
+            ctype = resp.headers.get("Content-Type") if resp.headers is not None else None
+            return (
+                _status_matches(code_int, expected_status, lenient_family=lenient_status),
+                code_int,
+                ctype,
+            )
     except urllib.error.HTTPError as exc:
-        return (False, exc.code)
+        code_int = int(exc.code)
+        ctype = exc.headers.get("Content-Type") if exc.headers is not None else None
+        try:
+            return (
+                _status_matches(code_int, expected_status, lenient_family=lenient_status),
+                code_int,
+                ctype,
+            )
+        finally:
+            exc.close()
     except Exception:  # noqa: BLE001
-        return (False, None)
+        return (False, None, None)
 
 
 def _liveness_failed_rollback(
@@ -1762,36 +1825,52 @@ def _liveness_failed_rollback(
     host_port: int,
     fresh_port: bool,
     error: str,
-) -> None:
-    """Gate-C C.04：必选探针失败时回滚容器与端口。"""
-    import contextlib
+) -> list[str]:
+    """Gate-C C.04：必选探针失败时回滚容器与端口。
 
+    S1-05 / #53：每一项独立尝试，失败项作为残留返回并写 ``rollback_failed`` 事件，
+    同时追加到 ``lastError``，不再被 ``suppress`` 静默吞掉。
+    """
     extra = _container_probe_context(workspace, registry, instance_id)
     from local_webpage_access.build_diagnostics import format_probe_failure
 
     saved = format_probe_failure(error, stage="liveness", **extra)
-    # 停止容器
-    with contextlib.suppress(Exception):
+    residuals: list[str] = []
+
+    def _attempt(label: str, fn) -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — 回滚为尽力而为，失败须可见
+            residuals.append(f"{label}：{exc}")
+            log.warning("回滚残留（%s）：%s：%s", instance_id, label, exc)
+
+    def _stop_container() -> None:
         runtime = DockerRuntime(workspace, registry)
         if runtime.is_running(instance_id):
             runtime.down(instance_id)
 
-    # 释放端口
+    _attempt("停止容器", _stop_container)
     if fresh_port:
-        with contextlib.suppress(Exception):
-            PortAllocator(config=config, registry=registry).release_instance(instance_id)
+        _attempt(
+            "释放端口",
+            lambda: PortAllocator(config=config, registry=registry).release_instance(instance_id),
+        )
+    if residuals:
+        saved = f"{saved}（回滚残留：{'；'.join(residuals)}）"
 
     manifest.status = Status.FAILED
     manifest.lastError = saved[:1800]
     manifest.touch()
-    with contextlib.suppress(Exception):
-        manifest.save(workspace.app_manifest_path(instance_id))
+    _attempt("保存 manifest", lambda: manifest.save(workspace.app_manifest_path(instance_id)))
     registry.update_status(instance_id, Status.FAILED.value, last_error=saved[:1800])
     registry.add_event(
         instance_id,
         "lifecycle_stage",
         f"Gate-C 必选探针失败：{saved[:200]}",
     )
+    for item in residuals:
+        registry.add_event(instance_id, "rollback_failed", item[:300])
+    return residuals
 
 
 def _http_ok(host_port: int, *, timeout: float = 2.0) -> bool:

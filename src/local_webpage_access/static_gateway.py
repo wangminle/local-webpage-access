@@ -532,7 +532,33 @@ class StaticGateway:
         runtime: str | None = None,
         spa_fallback: bool = False,
     ) -> Path:
-        """渲染路径别名路由片段，写入 ``aliases/<id>.conf``（IMP-006）。
+        """渲染路径别名路由片段并写入 ``aliases/<id>.conf``（IMP-006）。
+
+        渲染规则见 :meth:`render_alias_fragment`。
+        """
+        content = self.render_alias_fragment(
+            instance_id, alias, host_port, runtime=runtime, spa_fallback=spa_fallback
+        )
+        path = self.ws.app_alias_config(instance_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        log.info("已生成路径别名路由：/%s/ → 127.0.0.1:%d", alias, host_port)
+        return path
+
+    def render_alias_fragment(
+        self,
+        instance_id: str,
+        alias: str,
+        host_port: int,
+        *,
+        runtime: str | None = None,
+        spa_fallback: bool = False,
+    ) -> str:
+        """返回别名片段的目标内容（不落盘）。
+
+        ``handle_path`` 去前缀；``handle /<alias>`` 无尾斜杠时 301 到 ``/<alias>/``。
+        注意 ``redir`` 的首参若是路径，Caddy 会把它当成匹配器（CHK-373 N1），
+        因此必须写成 ``redir * /<alias>/ permanent``。
 
            片段被主 Caddyfile 的统一入口块 ``import`` 进 ``:{staticGatewayPort}`` 站点。
            ``handle_path`` 自动去前缀——upstream 收到的是去掉 ``/<alias>`` 后的路径，
@@ -575,7 +601,7 @@ class StaticGateway:
             f"\t}}\n"
             f"}}\n"
             f"handle /{alias} {{\n"
-            f"\tredir /{alias}/ permanent\n"
+            f"\tredir * /{alias}/ permanent\n"
             f"}}\n"
         )
 
@@ -592,11 +618,7 @@ class StaticGateway:
                 f"\t}}\n"
                 f"}}\n"
             )
-        path = self.ws.app_alias_config(instance_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        log.info("已生成路径别名路由：/%s/ → 127.0.0.1:%d", alias, host_port)
-        return path
+        return content
 
     def remove_alias_config(self, instance_id: str) -> None:
         """删除实例的路径别名片段（IMP-006）。不存在时为空操作。"""

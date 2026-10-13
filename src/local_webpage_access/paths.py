@@ -133,6 +133,24 @@ def validate_source_subdir(source_subdir: str | None) -> str | None:
     return "/".join(parts)
 
 
+def frontend_artifact_dest(copy_prefix: str, source_dir: Path | None) -> str:
+    """前端构建产物在镜像内的目标目录（#47 / PLN-052 S1-02）。
+
+    产物写入后端代码目录下的 ``static/``；后端代码在镜像内的位置由拷贝前缀决定：
+
+    - 展平布局（前缀 ``current/<sub>/``）：后端位于 ``/app`` → ``/app/static``；
+    - 根布局且源码根下有 ``backend/``：后端位于 ``/app/backend`` → ``/app/backend/static``；
+    - 其他（根布局无 ``backend/``）：``/app/static``。
+
+    只推导路径，不删除目录：后端可能在 ``static/`` 中放有自己的文件，调用方用
+    ``cp -a`` 覆盖同名文件，不做 ``rm -rf``。
+    """
+    prefix = (copy_prefix or "current/").rstrip("/")
+    if prefix == "current" and source_dir is not None and (source_dir / "backend").is_dir():
+        return "/app/backend/static"
+    return "/app/static"
+
+
 def resolve_source_workdir(base: Path, source_subdir: str | None) -> Path:
     """把 ``sourceSubdir`` 解析为 ``base`` 内的工作目录（BUG-507）。
 

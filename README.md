@@ -127,6 +127,7 @@ Use `lwa <command> --help` for flags. Global `-v` turns on DEBUG logs.
 | `lwa recover <ID>` | One-shot recovery (pulls Caddy up if needed, then restart) |
 | `lwa rebuild [--sync] <ID>` | Force-rebuild through the build queue; `--sync` refreshes folder/git sources first (stale sources are detected and warned) |
 | `lwa cancel-build <ID>` | Cancel a queued or running build (keeps caches / images / data) |
+| `lwa probe show` / `set` / `reset` / `auto` `<ID>` | Readiness-probe overrides (`verificationOverrides`, CHK-252): `show` prints inherited + overrides + effective, `set <ID> <PATH> [--expected-status N]` adds a mandatory probe, `auto <ID> on\|off` toggles contract probes, `reset` clears overrides; kept across rescan / rebuild (same as `GET`/`PATCH /api/instances/{id}/verification`) |
 | `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks]` | Show or change per-instance settings: `buildEnv`, alias-base follow, intentional duplicate, container `systemDeps` (apt fallback chain before `COPY current/`), and `buildHooks` (each list flag is a whole-map replace, repeatable); apply with `lwa rebuild` |
 | `lwa remove <ID> [--purge] [--force]` | Remove instance; `--purge` deletes disk (non-empty `data/` needs `--force`) |
 | `lwa remove --redundant [--purge] [--allow-config-loss]` | Drop duplicate zips, keep the earliest; skips curated (alias / `buildEnv`) and running instances — `--allow-config-loss` opts in for curated ones |
@@ -385,6 +386,7 @@ lwa status
 | `lwa recover <ID>` | 一键恢复（必要时先拉起 Caddy） |
 | `lwa rebuild [--sync] <ID>` | 经构建队列强制重建；`--sync` 先同步 folder/git 源码（漂移时自动警告） |
 | `lwa cancel-build <ID>` | 取消排队/进行中的构建（不删缓存/镜像/数据） |
+| `lwa probe show` / `set` / `reset` / `auto` `<ID>` | 实例就绪探针覆盖层（`verificationOverrides`，CHK-252）：`show` 显示继承探针 + 用户覆盖 + 合并后的有效探针，`set <ID> <路径> [--expected-status N]` 添加 mandatory 探针，`auto <ID> on\|off` 开关契约自动探针，`reset` 清空覆盖；重扫/rebuild 不覆盖（同 `GET`/`PATCH /api/instances/{id}/verification`） |
 | `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks]` | 查看/修改实例配置：`buildEnv`、别名 base 跟随、有意保留重复实例、容器 `systemDeps`（COPY 前走 apt 切源链）与 `buildHooks`（列表选项均为整组替换、可重复）；`lwa rebuild` 生效 |
 | `lwa remove <ID> [--purge] [--force]` | 移除实例；`--purge` 删磁盘（非空 `data/` 需 `--force`） |
 | `lwa remove --redundant [--purge] [--allow-config-loss]` | 按 zip 指纹去重，保留最早者；带独立配置（别名 / `buildEnv`）或运行中的实例默认跳过，`--allow-config-loss` 显式覆盖 |

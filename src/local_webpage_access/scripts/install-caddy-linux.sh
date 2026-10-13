@@ -57,6 +57,15 @@ run_sudo() {
   fi
 }
 
+# #55：安装前一次性完成 sudo 认证，避免中途卡在密码提示（非交互环境直接失败）。
+ensure_sudo() {
+  if [[ "$(id -u)" -eq 0 ]]; then return 0; fi
+  need_cmd sudo
+  if sudo -n true 2>/dev/null; then return 0; fi
+  [[ -t 0 ]] || die "需要 sudo 密码，但当前为非交互环境。请在交互终端执行 sudo -v 后重试。"
+  sudo -v || die "sudo 认证失败，已中止安装。"
+}
+
 caddy_installed_version() {
   command -v caddy >/dev/null 2>&1 || { echo ""; return 0; }
   local raw
@@ -380,6 +389,7 @@ verify() {
 main() {
   need_cmd curl
   need_cmd tar
+  ensure_sudo
   detect_distro_family
   if [[ "$DISTRO_FAMILY" == "fedora" ]]; then
     need_cmd dnf

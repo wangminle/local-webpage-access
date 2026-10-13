@@ -2,7 +2,7 @@
 
 本清单覆盖 `lwa` V1 端到端验收的核心子任务（WBS-29.01~18），并增补浏览量 / 冗余清理抽查项（29.19~20）。
 其中**不依赖 Docker 守护进程**的部分已由自动化测试
-`tests/test_e2e_acceptance.py` 覆盖（见下表「自动化」列）；
+`tests/scripts/test_e2e_acceptance.py` 覆盖（见下表「自动化」列）；
 **依赖真实 Docker** 的容器构建/启动部分需按本清单手工验收。
 
 ## 验收前置
@@ -16,7 +16,7 @@ docker version
 docker compose version
 
 # 准备一个干净工作区
-lwa init ./acceptance-ws
+lwa init --workspace ./acceptance-ws
 cd ./acceptance-ws
 ```
 
@@ -34,7 +34,7 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 
 | WBS | 项 | 自动化 | 手工步骤 | 通过标准 |
 | --- | --- | --- | --- | --- |
-| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（**20** 个 SKILL.md） |
+| 29.01 | 干净工作区 init | ✓ `test_e2e_init_creates_clean_workspace` | `lwa init --workspace ./ws` | 生成 `local-web.yml`、`registry/local-web.db`、`apps/`、`inbox/`、`skills/`（**20** 个 SKILL.md） |
 | 29.02 | 导入静态 HTML | ✓ `test_e2e_static_html_import_and_structure` | `lwa import inbox/static_html.zip` | `apps/static-html/` 出现，`local-web.json` 的 `kind=static` |
 | 29.03 | 静态目录结构 | ✓ 同上 | 检查 `apps/static-html/{source,current,logs,data}/` | 四个子目录齐全，`current/index.html` 存在 |
 | 29.04 | 静态 HTTP 可访问 | ✓ `test_e2e_static_html_accessible_via_http` | `lwa start static-html`，浏览器访问分配端口 | 返回 HTML 内容，`lwa status` 显示 `running` |
@@ -69,8 +69,8 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 | 验收日期 | 2026-07-07 |
 | 验收人 | fenix-wangminle |
 | 环境 | macOS 26.6，Python 3.13.13，Node 24.16.0，Docker Desktop 4.55.0 / Engine 29.1.3，Docker Compose 2.40.3 |
-| 自动化结果 | `tests/test_e2e_acceptance.py` 全部通过（11/11） |
-| 全量回归 | `python3 -m pytest`：734 passed / 4 skipped；`LWA_RUN_DOCKER_TESTS=1 python3 -m pytest tests/test_docker_integration.py -q`：4 passed |
+| 自动化结果 | `tests/scripts/test_e2e_acceptance.py` 全部通过（11/11） |
+| 全量回归 | `python3 -m pytest`：734 passed / 4 skipped；`LWA_RUN_DOCKER_TESTS=1 python3 -m pytest tests/scripts/test_docker_integration.py -q`：4 passed |
 | Docker 手工验收 | 已通过 29.09 / 29.11 / 29.12；临时工作区 `/tmp/lwa-acceptance-oMtPaK`；Node 端口 18002，FastAPI 端口 18003，容器内 `/app/data/persist.txt` stop/start 后仍为 `persisted` |
 
 ## 问题清单
@@ -87,7 +87,7 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 
 ### 063.13 — 一键 GitHub 更新通道实机（IMP-063 / V0.8.0）
 
-自动化测试（`tests/test_update_source.py`，41 例）全部基于临时 bare remote 夹具；以下为**真实远端 + 真实代理环境**的实机验收（§14 事故机形态复现）。
+自动化测试（`tests/scripts/test_update_source.py`，41 例）全部基于临时 bare remote 夹具；以下为**真实远端 + 真实代理环境**的实机验收（§14 事故机形态复现）。
 
 | 项 | 手工步骤 | 通过标准 |
 | --- | --- | --- |
@@ -143,9 +143,9 @@ Windows 原生：任意实际 `lwa` 命令须在写工作区前 fail-fast（已�
 
 ```bash
 # 仅 E2E 验收
-python3 -m pytest tests/test_e2e_acceptance.py -v
+python3 -m pytest tests/scripts/test_e2e_acceptance.py -v
 
 # 含真实 Docker 的端到端（需 Docker 守护进程）
 export LWA_RUN_DOCKER_TESTS=1
-python3 -m pytest tests/test_docker_integration.py -v
+python3 -m pytest tests/scripts/test_docker_integration.py -v
 ```

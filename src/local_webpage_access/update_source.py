@@ -92,6 +92,24 @@ class UpdateLockBusy(Exception):
 # ---- git 基础 ----------------------------------------------------------------
 
 
+def _git_env() -> dict[str, str]:
+    """git 子进程环境：禁终端提示、强制 C locale（BUG-775）。
+
+    失败分类按英文 stderr 子串匹配（如 ``couldn't find remote ref``），
+    非英文 locale 下 git 输出本地化文案会误判错误类型；与
+    ``git_source._clone_env`` 同一处理。``GIT_TERMINAL_PROMPT=0``
+    （BUG-554）：daemon 等无 TTY 场景下 HTTPS 认证失败立即返回，
+    不阻塞等待终端输入。``LANGUAGE=C`` 兜底 gettext 优先级
+    （``LANGUAGE`` > ``LC_ALL`` > ``LANG``）。
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["LANGUAGE"] = "C"
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
 def _git(repo: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -99,6 +117,7 @@ def _git(repo: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Compl
         text=True,
         timeout=timeout,
         check=False,
+        env=_git_env(),
     )
 
 
@@ -680,7 +699,9 @@ def fetch_candidate(repo: Path, target: SourceTarget, *, timeout: int = FETCH_TI
         target.refspec,
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False, env=_git_env()
+        )
     except subprocess.TimeoutExpired as exc:
         raise FetchError(f"git fetch 超时（{timeout}s）") from exc
     except (OSError, subprocess.SubprocessError) as exc:

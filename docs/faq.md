@@ -487,8 +487,7 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 
 ### 容器需要额外挂载宿主目录（extraVolumes，issue#1）
 
-手工编辑 `docker/compose.yaml` 追加的挂载会在下次 `lwa start` 重生成时被
-抹掉。持久化的出口是 `apps/<id>/local-web.json` 的 `container.extraVolumes`
+挂载的正式出口是 `apps/<id>/local-web.json` 的 `container.extraVolumes`
 （字符串数组，compose 短格式 `宿主路径:容器路径[:ro]`）：
 
 ```json
@@ -498,8 +497,13 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 }
 ```
 
-改完后 `lwa restart <id>` 生效。安全边界仍在：家目录整体（`/home`、`/Users`）、
-`/etc`、`docker.sock`、`.ssh`/`.aws` 等凭据目录挂载会被 compose 安全审计拒绝。
+改完后执行 `lwa rebuild <id>` 才会生效：`docker/compose.yaml` 只在重建时重新生成，
+`lwa restart` 仍沿用旧的 compose，不会带上新挂载。安全边界仍在：家目录整体（`/home`、
+`/Users`）、`/etc`、`docker.sock`、`.ssh`/`.aws` 等凭据目录挂载会被 compose 安全审计拒绝。
+
+> 不要手工编辑 `docker/compose.yaml` 追加挂载。当前版本中，手改的 compose 会在容器
+> recreate 时直接生效，且**不经过安全审计**，这是已知缺陷（PLN-052 S2-04 计划改为重生成时
+> 覆盖手改内容）。请只使用上面的 `extraVolumes`。
 
 ### 应用需要构建钩子 / 启动前迁移怎么办？（buildHooks / preStart，issue#7）
 

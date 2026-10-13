@@ -107,13 +107,17 @@ def api_probe(
 # ---- Gate-C C.05：证据驱动探针 ----------------------------------------------
 
 
-def _probe_status_passed(status: int, expected_status: int | None) -> bool:
-    """ProbeSpec 通过语义：2xx/3xx 视为成功；否则需精确匹配 expectedStatus。
+def _probe_status_passed(
+    status: int, expected_status: int | None, *, lenient_family: bool = False
+) -> bool:
+    """ProbeSpec 通过语义：用户显式声明严格精确匹配（BUG-769）。
 
-    ``expectedStatus=200`` 是「健康 OK」哨兵，真实端点返回 204 不得假红（BUG-506）。
+    只有自动探针（``lenient_family=True``，discovered/guessed）保留
+    「健康 OK」哨兵兼容：期望 200 时接受任意 2xx/3xx（BUG-506，静态扫描
+    无法判断端点返回语义，避免假红）。
     """
-    if 200 <= status < 400:
-        return True
+    if expected_status is None or (lenient_family and expected_status == 200):
+        return 200 <= status < 400
     return expected_status is not None and status == expected_status
 
 
@@ -122,27 +126,32 @@ def run_probe_spec(
     spec: "ProbeSpec",
     *,
     timeout: float = _DEFAULT_TIMEOUT,
+    lenient_status: bool | None = None,
 ) -> tuple[bool, int | None]:
     """Gate-C C.05：执行单个 :class:`ProbeSpec` 探针。
 
     返回 ``(passed, status_code)``。
 
-    - ``passed=True``：状态码匹配 ``expectedStatus`` 或同为 2xx/3xx 范围。
+    - ``passed=True``：状态码匹配 ``expectedStatus``；自动探针
+      （``lenient_status=None`` 时按 ``spec.source`` 判定）期望 200 时
+      兼容任意 2xx/3xx（BUG-506），用户显式声明精确匹配（BUG-769）。
     - ``passed=False``：状态码不匹配或连接失败。
 
     区分于 :func:`api_probe` 的通用猜测探针——``ProbeSpec`` 有明确的路径、
     方法和预期状态，可作为成功门槛。
     """
+    if lenient_status is None:
+        lenient_status = spec.source in ("discovered", "guessed")
     path = spec.path or "/"
     url = mark_probe_url(f"http://127.0.0.1:{host_port}{path}")
     try:
         resp = urlopen_direct(url, timeout=timeout)
         code = getattr(resp, "status", None) or resp.getcode()
         code_int = int(code)
-        return (_probe_status_passed(code_int, spec.expectedStatus), code_int)
+        return (_probe_status_passed(code_int, spec.expectedStatus, lenient_family=lenient_status), code_int)
     except urllib.error.HTTPError as exc:
         code_int = int(exc.code)
-        return (_probe_status_passed(code_int, spec.expectedStatus), code_int)
+        return (_probe_status_passed(code_int, spec.expectedStatus, lenient_family=lenient_status), code_int)
     except Exception:  # noqa: BLE001
         return (False, None)
 

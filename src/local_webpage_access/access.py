@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from html.parser import HTMLParser
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlsplit
 
 from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
@@ -909,10 +909,11 @@ def _extract_api_paths(html: str, *, limit: int = 6) -> list[str]:
 
 
 def _extract_js_bundle_paths(html: str, *, limit: int = 4) -> list[str]:
-    """从入口 HTML 抽取 ``<script src>`` 引用的 JS bundle 路径。
+    """从入口 HTML 抽取 ``<script src>`` 引用的站内 JS bundle 路径。
 
     返回去重后的路径列表（HTML 中书写的原样：绝对 ``/assets/x.js``、
     相对 ``./assets/x.js`` 或 ``assets/x.js``），最多 ``limit`` 条。
+    外部（CDN）与内联引用在计数前即过滤（#49），不占样本名额。
     调用方据此拼装 URL fetch bundle 正文，再抽取其中的 ``/api/...``。
     """
     seen: set[str] = set()
@@ -921,6 +922,8 @@ def _extract_js_bundle_paths(html: str, *, limit: int = 4) -> list[str]:
         src = match.group(1).strip()
         if not src or src in seen:
             continue
+        if classify_resource_ref(src)[0] != "same_origin":
+            continue
         seen.add(src)
         out.append(src)
         if len(out) >= limit:
@@ -928,29 +931,56 @@ def _extract_js_bundle_paths(html: str, *, limit: int = 4) -> list[str]:
     return out
 
 
-def _normalize_script_src(src: str) -> str:
-    """把 script src 规范为以 ``/`` 开头的路径（去掉 ``./``、折叠 ``../``）。
+_INLINE_REF_PREFIXES = ("data:", "blob:", "javascript:")
 
-    评审-组8：``../assets/x.js`` 此前变成 ``/../assets/x.js`` 探测必 404，
-    该 bundle 的 API 路径抽不到；按站点根折叠 ``..`` 段。
+
+def classify_resource_ref(src: str, base_url: str = "/") -> tuple[str, str | None]:
+    """判定 HTML 资源引用的类别，并解析出站内路径（#49 / PLN-052 S1-03）。
+
+    返回 ``(kind, path)``：
+
+    - ``inline``：``data:``、``blob:``、``javascript:`` 等不发起站内请求的引用，path 为 None；
+    - ``external``：带 scheme 或 netloc 的跨站引用（含 ``//cdn.example/x.js``），path 为 None；
+    - ``same_origin``：其余引用，path 为 ``urljoin(base_url, src)`` 的路径部分（不含查询串）；
+    - ``invalid``：URL 无法解析的引用（无效 IPv6 host、异常 port 等），path 为 None。
+
+    旧实现把 ``//cdn.example/x.js`` 当作站内路径 ``/cdn.example/x.js`` 去探测，
+    且外部 CDN 脚本先占用样本名额。
     """
-    clean = src.strip()
-    if clean.startswith("./"):
-        clean = clean[2:]
-    if not clean.startswith("/"):
-        clean = "/" + clean
-    # 折叠路径中的 ".." 段（相对入口目录的上级引用一律回站点根）
-    parts: list[str] = []
-    for seg in clean.split("/"):
+    raw = (src or "").strip()
+    if not raw or raw.lower().startswith(_INLINE_REF_PREFIXES):
+        return "inline", None
+    try:
+        parts = urlsplit(raw)
+        _ = parts.port
+    except ValueError:
+        return "invalid", None
+    if parts.scheme or parts.netloc:
+        return "external", None
+    return "same_origin", _fold_site_path(urlsplit(urljoin(base_url, raw)).path or "/")
+
+
+def _fold_site_path(path: str) -> str:
+    """规范为以 ``/`` 开头的站内路径，折叠 ``.``/``..`` 段（越过根的 ``..`` 丢弃）。
+
+    ``urljoin`` 在根目录上解析 ``../x`` 会去掉前导 ``/``，故此处自行折叠。
+    """
+    segs: list[str] = []
+    for seg in path.split("/"):
         if seg == "..":
-            if parts:
-                parts.pop()
+            if segs:
+                segs.pop()
         elif seg not in ("", "."):
-            parts.append(seg)
-    return "/" + "/".join(parts)
+            segs.append(seg)
+    folded = "/" + "/".join(segs)
+    if path.endswith("/") and segs:
+        folded += "/"
+    return folded
 
 
-def _resolve_alias_aware_script_urls(src: str, *, path_alias: str | None) -> tuple[str, str | None]:
+def _resolve_alias_aware_script_urls(
+    src: str, *, path_alias: str | None
+) -> tuple[str | None, str | None]:
     """别名感知的 script URL 解析（BUG-467 / CHK-186）。
 
     覆盖三种 HTML 写法，生成去重后的后端直连路径与带单前缀网关路径：
@@ -962,8 +992,11 @@ def _resolve_alias_aware_script_urls(src: str, *, path_alias: str | None) -> tup
     | ``/<alias>/assets/...`` | ``/assets/...``  | ``/<alias>/assets/...``   |
 
     已带别名前缀时先剥离再拼接，**永远不会**产生 ``/<alias>/<alias>/...``。
+    非站内引用（外部 CDN、内联）返回 ``(None, None)``，调用方应跳过。
     """
-    clean = _normalize_script_src(src)
+    kind, clean = classify_resource_ref(src, base_url="/")
+    if kind != "same_origin" or clean is None:
+        return None, None
     if not path_alias:
         return clean, None
     alias = path_alias.strip("/")
@@ -1053,6 +1086,8 @@ def _collect_api_paths(
     api_paths = _extract_api_paths(entry_html)
     for src in _extract_js_bundle_paths(entry_html):
         backend_path, gateway_path = _resolve_alias_aware_script_urls(src, path_alias=path_alias)
+        if backend_path is None:
+            continue
         candidates: list[str] = []
         seen_urls: set[str] = set()
         if host_port is not None:

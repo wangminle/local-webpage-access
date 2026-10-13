@@ -1,0 +1,1160 @@
+"""Docker Runtime 封装测试（WBS-14）。
+
+绝大多数用例通过 monkeypatch ``docker_runtime._execute`` 模拟 docker 命令，
+不依赖真实 Docker。少量真实 subprocess 用例验证日志写入与超时路径。
+真实 Docker 集成测试见 ``tests/scripts/test_docker_integration.py``（skipif 守卫）。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from local_webpage_access.docker_runtime import (
+    ComposeResult,
+    ContainerStatus,
+    DockerRuntime,
+    _execute,
+    _extract_ports,
+    _iter_ps_json,
+    ensure_available,
+    is_available,
+)
+from local_webpage_access.errors import DockerError
+from local_webpage_access.paths import Workspace
+from local_webpage_access.registry import Registry
+
+
+# ---- fixtures ----------------------------------------------------------------
+
+
+@pytest.fixture()
+def workspace(workspace_root: Path) -> Workspace:
+    ws = Workspace(workspace_root)
+    ws.ensure_workspace_dirs()
+    return ws
+
+
+@pytest.fixture()
+def registry(workspace_root: Path) -> Registry:
+    workspace_root.joinpath("registry").mkdir(parents=True, exist_ok=True)
+    reg = Registry(workspace_root / "registry" / "local-web.db")
+    reg.open()
+    yield reg
+    reg.close()
+
+
+def _seed_compose_files(workspace: Workspace, iid: str = "api") -> None:
+    """放置 compose.yaml 与 .env，使 _compose_cmd 能识别 --env-file。"""
+    workspace.ensure_app_dirs(iid)
+    workspace.app_compose_path(iid).write_text("name: lwa-api\nservices: {}\n")
+    workspace.app_env_path(iid).write_text("HOST_PORT=18000\n")
+
+
+def _seed_instance(registry: Registry, iid: str = "api") -> None:
+    """向 instances 表插一条最小行，满足 events/builds 外键约束。"""
+    from local_webpage_access.logging import now_iso
+
+    registry.upsert_instance(
+        {
+            "id": iid,
+            "name": iid,
+            "version": "1",
+            "kind": "python",
+            "runtime": "docker-compose",
+            "serving_mode": "container",
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+    )
+
+
+class _FakeExecute:
+    """记录所有调用并按规则返回 ComposeResult。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        # 默认成功
+        self.default = ComposeResult(args=[], returncode=0, stdout="", stderr="")
+        # 按子命令定制返回
+        self.by_subcmd: dict[str, ComposeResult] = {}
+
+    def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+        self.calls.append(
+            {"args": list(args), "cwd": cwd, "log_path": log_path, "timeout": timeout}
+        )
+        if self.default.returncode != 0:
+            result = ComposeResult(
+                args=list(args),
+                returncode=self.default.returncode,
+                stdout=self.default.stdout,
+                stderr=self.default.stderr,
+            )
+        elif tuple(args[:2]) == ("docker", "version"):
+            result = ComposeResult(args=list(args), returncode=0, stdout="29.6.1\n", stderr="")
+        elif len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
+            result = ComposeResult(args=list(args), returncode=0, stdout="v5.2.0\n", stderr="")
+        else:
+            # 命令的子命令关键字（build/up/stop/start/restart/down/logs/ps/version/inspect/images）
+            for key, mapped in self.by_subcmd.items():
+                if key in args:
+                    result = ComposeResult(
+                        args=list(args),
+                        returncode=mapped.returncode,
+                        stdout=mapped.stdout,
+                        stderr=mapped.stderr,
+                    )
+                    break
+            else:
+                result = self.default
+        # 模拟真实 _execute：把命令与输出追加写入 log_path
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"$ {' '.join(args)}\n")
+                if result.stdout:
+                    fh.write(result.stdout)
+                if result.stderr:
+                    fh.write(result.stderr)
+        return result
+
+
+# ---- is_available / ensure_available（WBS-14.01）---------------------------
+
+
+def test_is_available_true(workspace, monkeypatch) -> None:
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert is_available() is True
+    assert fake.calls[0]["args"][:2] == ["docker", "version"]
+    assert fake.calls[1]["args"][:3] == ["docker", "compose", "version"]
+
+
+def test_is_available_false_when_nonzero(workspace, monkeypatch) -> None:
+    fake = _FakeExecute()
+    fake.default = ComposeResult(args=[], returncode=1)
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert is_available() is False
+
+
+def test_is_available_false_when_docker_missing(workspace, monkeypatch) -> None:
+    def boom(*a, **kw):
+        raise DockerError("docker 未找到")
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", boom)
+    assert is_available() is False
+
+
+def test_ensure_available_raises_when_unavailable(workspace, monkeypatch) -> None:
+    fake = _FakeExecute()
+    fake.default = ComposeResult(args=[], returncode=127)
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    with pytest.raises(DockerError, match="不可用"):
+        ensure_available()
+
+
+def test_status_raises_on_docker_permission_denied(workspace, monkeypatch) -> None:
+    """BUG-230：compose ps 权限失败须抛 DockerError，不得静默返回 None。"""
+    from local_webpage_access.docker_runtime import ComposeResult, DockerRuntime
+
+    def fake(args, *, cwd, log_path=None, timeout=60):
+        return ComposeResult(
+            args=list(args),
+            returncode=1,
+            stdout="",
+            stderr=(
+                "permission denied while trying to connect to the Docker daemon "
+                "socket at unix:///var/run/docker.sock"
+            ),
+        )
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    ws = workspace
+    ws.ensure_app_dirs("api")
+    (ws.app_dir("api") / "docker").mkdir(parents=True, exist_ok=True)
+    (ws.app_compose_path("api")).write_text("services: {}\n", encoding="utf-8")
+    rt = DockerRuntime(ws)
+    with pytest.raises(DockerError, match="权限不足|newgrp"):
+        rt.status("api")
+
+
+def test_ensure_available_permission_denied_suggests_newgrp(workspace, monkeypatch) -> None:
+    """BUG-204：docker.sock 权限不足时提示 newgrp docker。"""
+
+    class _PermFake(_FakeExecute):
+        def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+            if tuple(args[:2]) == ("docker", "version"):
+                return ComposeResult(
+                    args=list(args),
+                    returncode=1,
+                    stdout="",
+                    stderr="permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+                )
+            return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _PermFake())
+    with pytest.raises(DockerError, match="newgrp docker"):
+        ensure_available()
+
+
+def test_ensure_available_passes_when_available(workspace, monkeypatch) -> None:
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _FakeExecute())
+    ensure_available()  # 不抛异常
+
+
+def test_ensure_available_accepts_supported_compose_v2(workspace, monkeypatch) -> None:
+    class _ComposeV2Fake(_FakeExecute):
+        def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+            if len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
+                return ComposeResult(args=list(args), returncode=0, stdout="2.40.3\n", stderr="")
+            return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _ComposeV2Fake())
+    ensure_available()
+
+
+def test_ensure_available_raises_when_docker_version_too_low(workspace, monkeypatch) -> None:
+    class _LowDockerFake(_FakeExecute):
+        def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+            if tuple(args[:2]) == ("docker", "version"):
+                return ComposeResult(args=list(args), returncode=0, stdout="28.9.9\n", stderr="")
+            return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _LowDockerFake())
+    with pytest.raises(DockerError, match="29.0.0"):
+        ensure_available()
+
+
+def test_ensure_available_raises_when_compose_version_too_low(workspace, monkeypatch) -> None:
+    class _LowComposeFake(_FakeExecute):
+        def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+            if len(args) >= 3 and tuple(args[:3]) == ("docker", "compose", "version"):
+                return ComposeResult(args=list(args), returncode=0, stdout="2.39.9\n", stderr="")
+            return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _LowComposeFake())
+    with pytest.raises(DockerError, match="2.40.2"):
+        ensure_available()
+
+
+# ---- _compose_cmd ------------------------------------------------------------
+
+
+def test_compose_cmd_includes_env_file_and_compose_path(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    rt = DockerRuntime(workspace)
+    rt.up("api")
+
+    args = fake.calls[0]["args"]
+    assert args[0:2] == ["docker", "compose"]
+    assert "--env-file" in args
+    env_idx = args.index("--env-file")
+    assert args[env_idx + 1].endswith("docker" + "\\" + ".env") or args[env_idx + 1].endswith(
+        "docker/.env"
+    )
+    assert "-f" in args
+    f_idx = args.index("-f")
+    assert args[f_idx + 1].endswith("compose.yaml")
+    assert "up" in args
+    assert "-d" in args  # 默认后台
+
+
+def test_compose_cmd_skips_env_file_when_missing(workspace, monkeypatch) -> None:
+    """compose.yaml 存在但 .env 不存在时，不传 --env-file。"""
+    workspace.ensure_app_dirs("api")
+    workspace.app_compose_path("api").write_text("name: lwa-api\n")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    DockerRuntime(workspace).up("api")
+    assert "--env-file" not in fake.calls[0]["args"]
+
+
+# ---- build（WBS-14.02/.13/.14）---------------------------------------------
+
+
+def test_build_success_finishes_build_and_writes_log(workspace, registry, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(args=[], returncode=0, stdout="built\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    build_id = registry.add_build("api", status="running", log_path="x")
+    rt = DockerRuntime(workspace, registry)
+    result = rt.build("api", build_id=build_id)
+
+    assert result.ok
+    # builds 表标记 success
+    builds = registry.list_builds("api")
+    assert builds[0]["status"] == "success"
+    # 日志写入 build.log
+    assert (workspace.app_logs("api") / "build.log").is_file()
+    # 成功不写 error 事件
+    events = registry.list_events("api")
+    assert not any(e["event_type"] == "error" for e in events)
+
+
+def test_build_failure_raises_and_marks_failed(workspace, registry, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(args=[], returncode=1, stderr="npm error: ENOTFOUND\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    build_id = registry.add_build("api", status="running")
+    rt = DockerRuntime(workspace, registry)
+    with pytest.raises(DockerError, match="build 失败"):
+        rt.build("api", build_id=build_id)
+
+    builds = registry.list_builds("api")
+    assert builds[0]["status"] == "failed"
+    assert builds[0]["error_summary"]  # 含 stderr 摘要
+    events = registry.list_events("api")
+    assert any(e["event_type"] == "error" for e in events)
+
+
+def test_build_without_registry_does_not_crash(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", _FakeExecute())
+    rt = DockerRuntime(workspace)  # 无 registry
+    result = rt.build("api", build_id=123)
+    assert result.ok
+
+
+def test_build_command_uses_compose_build(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    DockerRuntime(workspace).build("api")
+    assert "build" in fake.calls[0]["args"]
+
+
+# ---- up / stop / start / restart / down（WBS-14.03~07）---------------------
+
+
+@pytest.mark.parametrize(
+    "method,subcmd,extra",
+    [
+        ("up", "up", ["-d"]),
+        ("stop", "stop", []),
+        ("start", "start", []),
+        ("restart", "restart", []),
+    ],
+)
+def test_lifecycle_commands_dispatch_correct_subcommand(
+    workspace, registry, monkeypatch, method, subcmd, extra
+) -> None:
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    rt = DockerRuntime(workspace, registry)
+    result = getattr(rt, method)("api")
+    assert result.ok
+    args = fake.calls[0]["args"]
+    assert subcmd in args
+    for token in extra:
+        assert token in args
+    # 每个生命周期命令都应写一条事件
+    assert len(registry.list_events("api")) >= 1
+
+
+def test_stop_does_not_pass_down(workspace, monkeypatch) -> None:
+    """验收#2：stop 用 compose stop，不删容器（不应出现 down）。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    DockerRuntime(workspace).stop("api")
+    args = fake.calls[0]["args"]
+    assert "stop" in args
+    assert "down" not in args
+    assert "-v" not in args
+
+
+def test_down_passes_down_and_optional_volumes(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    DockerRuntime(workspace).down("api", remove_volumes=True)
+    args = fake.calls[0]["args"]
+    assert "down" in args
+    assert "-v" in args
+
+
+def test_up_failure_raises_docker_error(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["up"] = ComposeResult(args=[], returncode=1, stderr="port already allocated")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    with pytest.raises(DockerError, match="up 失败"):
+        DockerRuntime(workspace).up("api")
+
+
+def test_up_not_detached_when_requested(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    DockerRuntime(workspace).up("api", detached=False)
+    assert "-d" not in fake.calls[0]["args"]
+
+
+def test_lifecycle_writes_to_run_log(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    DockerRuntime(workspace).stop("api")
+    assert (workspace.app_logs("api") / "run.log").is_file()
+
+
+# ---- logs（WBS-14.08）-------------------------------------------------------
+
+
+def test_logs_returns_stdout(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["logs"] = ComposeResult(args=[], returncode=0, stdout="line1\nline2\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    text = DockerRuntime(workspace).logs("api", tail=50)
+    assert "line1" in text
+    args = fake.calls[0]["args"]
+    assert "--tail" in args
+    assert "50" in args
+
+
+def test_logs_since_argument(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    DockerRuntime(workspace).logs("api", since="10m")
+    assert "--since" in fake.calls[0]["args"]
+    assert "10m" in fake.calls[0]["args"]
+
+
+def test_logs_failure_raises(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["logs"] = ComposeResult(args=[], returncode=1, stderr="no container")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    with pytest.raises(DockerError, match="获取日志失败"):
+        DockerRuntime(workspace).logs("api")
+
+
+# ---- container_id / image_id / status（WBS-14.09~11）----------------------
+
+
+def test_container_id_returns_first_line(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="abc123def\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).container_id("api") == "abc123def"
+
+
+def test_container_id_none_when_empty(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).container_id("api") is None
+
+
+def test_image_id_via_inspect(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    # ps -q 返回容器 id，inspect 返回镜像 sha
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="abc123\n")
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout="sha256:deadbeef\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).image_id("api") == "sha256:deadbeef"
+
+
+def test_image_id_fallback_to_compose_config_images(workspace, monkeypatch) -> None:
+    """无容器时回退 compose config --images + docker image inspect（BUG-425）。
+
+    ``docker compose images`` 只列出已创建容器使用的镜像，容器不存在时通常
+    返回空；必须先经 ``config --images`` 取镜像引用，再 inspect 解析 ID。
+    """
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")  # 无容器
+    fake.by_subcmd["config"] = ComposeResult(args=[], returncode=0, stdout="lwa-api-app:latest\n")
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout="sha256:img999\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).image_id("api") == "sha256:img999"
+    config_call = [c for c in fake.calls if "config" in c["args"]][0]
+    assert config_call["args"][:2] == ["docker", "compose"]
+    assert "--images" in config_call["args"]
+    inspect_call = [c for c in fake.calls if "inspect" in c["args"]][0]
+    assert inspect_call["args"][:3] == ["docker", "image", "inspect"]
+    assert "lwa-api-app:latest" in inspect_call["args"]
+
+
+def test_image_id_fallback_custom_project_uses_compose(workspace, monkeypatch) -> None:
+    """自定义 project/image 时经 config --images 取引用，不猜 legacy 镜像名。"""
+    workspace.ensure_app_dirs("api")
+    workspace.app_compose_path("api").write_text(
+        "name: custom-proj\nservices:\n  app:\n    image: my-custom-image:latest\n"
+    )
+    workspace.app_env_path("api").write_text("HOST_PORT=18000\n")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    fake.by_subcmd["config"] = ComposeResult(
+        args=[], returncode=0, stdout="my-custom-image:latest\n"
+    )
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout="sha256:customimg\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).image_id("api") == "sha256:customimg"
+    config_call = [c for c in fake.calls if "config" in c["args"]][0]
+    assert config_call["args"][:2] == ["docker", "compose"]
+    assert "--images" in config_call["args"]
+    inspect_call = [c for c in fake.calls if "inspect" in c["args"]][0]
+    assert "my-custom-image:latest" in inspect_call["args"]
+    assert "lwa-api-app" not in inspect_call["args"]
+
+
+def test_image_id_fallback_returns_none_when_image_missing(workspace, monkeypatch) -> None:
+    """config --images 无输出或 image inspect 失败（镜像已删）→ None（BUG-425）。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    fake.by_subcmd["config"] = ComposeResult(args=[], returncode=0, stdout="")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).image_id("api") is None
+
+    fake2 = _FakeExecute()
+    fake2.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    fake2.by_subcmd["config"] = ComposeResult(args=[], returncode=0, stdout="gone-image:latest\n")
+    fake2.by_subcmd["inspect"] = ComposeResult(args=[], returncode=1, stderr="No such image")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake2)
+    assert DockerRuntime(workspace).image_id("api") is None
+
+
+def test_status_parses_json_lines(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    payload = {
+        "Service": "app",
+        "Name": "lwa-api",
+        "Image": "lwa-api-app",
+        "State": "running",
+        "Status": "Up 2 minutes",
+        "Health": "healthy",
+        "Publishers": [{"URL": "0.0.0.0:18000", "PublishedPort": 18000, "TargetPort": 8000}],
+    }
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout=json.dumps(payload) + "\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    st = DockerRuntime(workspace).status("api")
+    assert isinstance(st, ContainerStatus)
+    assert st.is_running
+    assert st.service == "app"
+    assert st.health == "healthy"
+    assert any("18000" in p for p in st.ports)
+
+
+def test_status_none_when_no_container(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    assert DockerRuntime(workspace).status("api") is None
+
+
+def test_is_running_reflects_state(workspace, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    payload_running = {"Service": "app", "State": "running"}
+    payload_exited = {"Service": "app", "State": "exited"}
+
+    def ps_handler(args, *, cwd, log_path=None, timeout=60, **kw):
+        if "--all" in args:
+            return ComposeResult(args=args, returncode=0, stdout=json.dumps(current[0]) + "\n")
+        return ComposeResult(args=args, returncode=0, stdout="")
+
+    current = [payload_running]
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", ps_handler)
+    rt = DockerRuntime(workspace)
+    assert rt.is_running("api") is True
+    current[0] = payload_exited
+    assert rt.is_running("api") is False
+
+
+# ---- _execute 真实路径（WBS-14.12/.13）------------------------------------
+
+
+def test_execute_writes_log_file(tmp_path: Path) -> None:
+    log = tmp_path / "out.log"
+    if sys.platform == "win32":
+        args = ["cmd", "/c", "echo hello"]
+    else:
+        args = ["echo", "hello"]
+    r = _execute(args, cwd=tmp_path, log_path=log)
+    assert r.ok
+    assert log.is_file()
+    content = log.read_text(encoding="utf-8")
+    assert "hello" in content
+    assert "$" in content  # 命令头
+
+
+def test_execute_streams_log_while_command_running(tmp_path: Path) -> None:
+    """BUG-229：有 log_path 时须在命令结束前把命令头与输出落到日志。
+
+    旧实现 ``subprocess.run(capture_output=True)`` 等进程结束后才写 build.log，
+    长耗时 ``docker compose build`` 期间日志一直为空，易误判为调度卡死。
+    """
+    log = tmp_path / "build.log"
+    marker = "STREAM_MARKER_VISIBLE"
+    code = f"import sys, time; print({marker!r}, flush=True); time.sleep(3)"
+    args = [sys.executable, "-c", code]
+    seen = threading.Event()
+
+    def _watch() -> None:
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            if log.is_file():
+                text = log.read_text(encoding="utf-8", errors="replace")
+                if marker in text and "$" in text:
+                    seen.set()
+                    return
+            time.sleep(0.05)
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    r = _execute(args, cwd=tmp_path, log_path=log, timeout=10)
+    watcher.join(timeout=5)
+    assert r.ok
+    assert seen.is_set(), "命令仍在运行时 build.log 就应含命令头与输出"
+
+
+def test_execute_rotates_log_before_append(tmp_path: Path, monkeypatch) -> None:
+    """BUG-186：docker _execute 写日志须经 open_append（先滚动再追加）。"""
+    from local_webpage_access import logs as logs_mod
+
+    calls: list[Path] = []
+    real = logs_mod.open_append
+
+    def spy(path, **kwargs):
+        calls.append(Path(path))
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(logs_mod, "open_append", spy)
+    log = tmp_path / "run.log"
+    log.write_text("old", encoding="utf-8")
+    if sys.platform == "win32":
+        args = ["cmd", "/c", "echo hello"]
+    else:
+        args = ["echo", "hello"]
+    _execute(args, cwd=tmp_path, log_path=log)
+    assert any(c == log or c.resolve() == log.resolve() for c in calls)
+
+
+def test_execute_nonzero_returncode_recorded(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        args = ["cmd", "/c", "exit 3"]
+    else:
+        args = ["false"]
+    r = _execute(args, cwd=tmp_path)
+    assert r.returncode != 0
+    assert not r.ok
+
+
+def test_execute_timeout_raises_docker_error(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        args = ["cmd", "/c", "ping -n 10 127.0.0.1"]
+    else:
+        args = ["sleep", "10"]
+    with pytest.raises(DockerError, match="超时"):
+        _execute(args, cwd=tmp_path, timeout=1)
+
+
+def test_execute_streaming_timeout_writes_cmd_header(tmp_path: Path) -> None:
+    """BUG-229：流式路径超时仍须先落盘命令头，并抛出超时错误。"""
+    log = tmp_path / "build.log"
+    args = [sys.executable, "-c", "import time; time.sleep(10)"]
+    with pytest.raises(DockerError, match="超时"):
+        _execute(args, cwd=tmp_path, log_path=log, timeout=1)
+    content = log.read_text(encoding="utf-8")
+    assert "$" in content
+    assert "time.sleep" in content
+
+
+def test_execute_streaming_closes_stdout_pipe(tmp_path: Path, monkeypatch) -> None:
+    """审查 L4：reader 结束须关闭 stdout，避免 kill 失败时 fd/线程泄漏。"""
+    import subprocess
+
+    from local_webpage_access import docker_runtime as dr
+
+    closed: list[bool] = []
+    real_popen = subprocess.Popen
+
+    class _TrackingStdout:
+        def __init__(self, real: object) -> None:
+            self._real = real
+
+        def readline(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return self._real.readline(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def close(self) -> None:
+            closed.append(True)
+            return self._real.close()  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str):
+            return getattr(self._real, name)
+
+    def fake_popen(*args, **kwargs):  # noqa: ANN002, ANN003
+        proc = real_popen(*args, **kwargs)
+        if proc.stdout is not None:
+            proc.stdout = _TrackingStdout(proc.stdout)  # type: ignore[assignment]
+        return proc
+
+    monkeypatch.setattr(dr.subprocess, "Popen", fake_popen)
+    log = tmp_path / "build.log"
+    r = _execute(
+        [sys.executable, "-c", "print('close-me', flush=True)"],
+        cwd=tmp_path,
+        log_path=log,
+        timeout=10,
+    )
+    assert r.ok
+    assert closed, "流式 reader 结束必须 close(stdout)"
+
+
+def test_execute_missing_binary_raises_docker_error(tmp_path: Path) -> None:
+    with pytest.raises(DockerError, match="未找到"):
+        _execute(["this-binary-does-not-exist-xyz"], cwd=tmp_path)
+
+
+# ---- 解析辅助 ----------------------------------------------------------------
+
+
+def test_iter_ps_json_array_format() -> None:
+    """Compose 输出 JSON 数组的情况。"""
+    stdout = json.dumps([{"Service": "a", "State": "running"}])
+    items = list(_iter_ps_json(stdout))
+    assert len(items) == 1
+    assert items[0]["Service"] == "a"
+
+
+def test_iter_ps_json_line_format() -> None:
+    stdout = '{"Service": "a"}\n{"Service": "b"}\n'
+    items = list(_iter_ps_json(stdout))
+    assert [i["Service"] for i in items] == ["a", "b"]
+
+
+def test_iter_ps_json_empty() -> None:
+    assert list(_iter_ps_json("")) == []
+    assert list(_iter_ps_json("   ")) == []
+
+
+def test_extract_ports_from_publishers() -> None:
+    data = {"Publishers": [{"URL": "0.0.0.0:18000", "PublishedPort": 18000, "TargetPort": 8000}]}
+    ports = _extract_ports(data)
+    assert len(ports) == 1
+    assert "18000" in ports[0]
+
+
+def test_extract_ports_legacy_string() -> None:
+    data = {"Ports": "0.0.0.0:18000->8000/tcp"}
+    assert _extract_ports(data) == ["0.0.0.0:18000->8000/tcp"]
+
+
+def test_extract_ports_empty() -> None:
+    assert _extract_ports({}) == []
+
+
+# ---- BUG-205：重建前从容器救出数据 ------------------------------------------
+
+
+class _RescueCopyFake(_FakeExecute):
+    """模拟 docker cp：命中目标候选路径时把数据文件写入宿主目录。"""
+
+    def __init__(self, *, cid: str = "deadbeef", ps_stdout: str | None = None) -> None:
+        super().__init__()
+        self._cid = cid
+        self._ps_stdout = ps_stdout if ps_stdout is not None else f"{cid}\n"
+        self.cp_targets: list[str] = []
+        self.ps_args: list[str] = []
+
+    def __call__(self, args, *, cwd, log_path=None, timeout=60, **kw):
+        # container_id 查询（docker compose ps -q）返回容器 id
+        if "ps" in args:
+            self.ps_args = list(args)
+            return ComposeResult(args=list(args), returncode=0, stdout=self._ps_stdout, stderr="")
+        # docker cp：<cid>:<src>/. <host>/ —— 模拟写入数据文件
+        if tuple(args[:2]) == ("docker", "cp"):
+            target = args[-1].rstrip("/")
+            self.cp_targets.append(target)
+            Path(target).mkdir(parents=True, exist_ok=True)
+            (Path(target) / "app.sqlite").write_bytes(b"sqlite-data")
+            return ComposeResult(args=list(args), returncode=0, stdout="", stderr="")
+        return super().__call__(args, cwd=cwd, log_path=log_path, timeout=timeout, **kw)
+
+
+def test_rescue_container_data_copies_when_host_empty(workspace, registry, monkeypatch) -> None:
+    """BUG-205：宿主 data/ 为空、容器存在 → down 前从容器救出数据文件。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+
+    fake = _RescueCopyFake()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    rt = DockerRuntime(workspace, registry)
+    rescued = rt.rescue_container_data("api", host_data, ["/app/data", "/app/runtime/data"])
+    # 救出 app.sqlite 一个文件
+    assert rescued == 1
+    assert (host_data / "app.sqlite").is_file()
+    # 第一个候选路径命中即止：docker cp 只调用一次
+    assert len(fake.cp_targets) == 1
+    # 记录 migrate 事件
+    events = registry.list_events("api")
+    assert any(e["event_type"] == "migrate" for e in events)
+
+
+def test_rescue_container_data_skips_when_host_has_content(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-205：宿主 data/ 已有内容（挂载已持久化）→ 跳过迁移、不调 docker。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+    (host_data / "app.sqlite").write_bytes(b"already-here")
+
+    fake = _RescueCopyFake()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    rt = DockerRuntime(workspace, registry)
+    assert rt.rescue_container_data("api", host_data, ["/app/data"]) == 0
+    # 挂载已持久化：一次 docker 调用都没有
+    assert fake.calls == []
+    assert fake.cp_targets == []
+
+
+def test_rescue_container_data_no_container_returns_zero(workspace, registry, monkeypatch) -> None:
+    """BUG-205：容器不存在（ps 无输出）→ 返回 0、不抛错、不 cp。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+
+    fake = _RescueCopyFake(ps_stdout="")  # 无容器
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    rt = DockerRuntime(workspace, registry)
+    assert rt.rescue_container_data("api", host_data, ["/app/data", "/app/runtime/data"]) == 0
+    assert fake.cp_targets == []
+
+
+def test_rescue_container_data_finds_stopped_container(workspace, registry, monkeypatch) -> None:
+    """BUG-318：数据救援查询必须包含已停止但尚未删除的容器。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_data = workspace.app_data("api")
+    host_data.mkdir(parents=True, exist_ok=True)
+    fake = _RescueCopyFake()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    assert (
+        DockerRuntime(workspace, registry).rescue_container_data("api", host_data, ["/app/data"])
+        == 1
+    )
+    assert "--all" in fake.ps_args
+
+
+def test_container_id_all_containers_param(workspace, monkeypatch) -> None:
+    """BUG-318：container_id(all_containers=True) 使用 ps --all -q。"""
+    _seed_compose_files(workspace, "api")
+    seen: list[list[str]] = []
+
+    def fake(args, *, cwd, log_path=None, timeout=60, **kw):
+        seen.append(list(args))
+        return ComposeResult(args=list(args), returncode=0, stdout="cid1\n")
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    rt = DockerRuntime(workspace)
+    assert rt.container_id("api", all_containers=True) == "cid1"
+    assert "--all" in seen[-1]
+    assert rt.container_id("api") == "cid1"
+    assert "--all" not in seen[-1]
+
+
+# ---- bind_mounts（BUG-421）-------------------------------------------------
+
+
+def test_bind_mounts_parses_inspect_json(workspace, monkeypatch) -> None:
+    """BUG-421：解析 inspect Mounts JSON，仅保留 Type=bind。"""
+    _seed_compose_files(workspace, "api")
+    mounts = [
+        {
+            "Type": "bind",
+            "Source": "/old/workspace/apps/api/data",
+            "Destination": "/app/data",
+            "Mode": "rw",
+            "RW": True,
+        },
+        {
+            "Type": "volume",
+            "Name": "anon",
+            "Source": "/var/lib/docker/volumes/anon/_data",
+            "Destination": "/var/lib",
+        },
+        {
+            "Type": "bind",
+            "Source": "/old/workspace/apps/api/current",
+            "Destination": "/app",
+        },
+    ]
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="cid-abc\n")
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=0, stdout=json.dumps(mounts) + "\n"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    result = DockerRuntime(workspace).bind_mounts("api", all_containers=True)
+
+    assert len(result) == 2
+    assert result[0].type == "bind"
+    assert result[0].source == "/old/workspace/apps/api/data"
+    assert result[0].destination == "/app/data"
+    assert result[1].source == "/old/workspace/apps/api/current"
+    assert result[1].destination == "/app"
+    # 使用 all_containers 查容器 + inspect Mounts
+    assert any("--all" in c["args"] for c in fake.calls if "ps" in c["args"])
+    inspect_call = [c for c in fake.calls if "inspect" in c["args"]][0]
+    assert "cid-abc" in inspect_call["args"]
+    assert "{{json .Mounts}}" in inspect_call["args"]
+
+
+def test_bind_mounts_empty_when_no_container(workspace, monkeypatch) -> None:
+    """BUG-421：无容器时返回空 list，不调用 inspect。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    assert DockerRuntime(workspace).bind_mounts("api") == []
+    assert not any("inspect" in c["args"] for c in fake.calls)
+
+
+def test_bind_mounts_inspect_failure_raises(workspace, monkeypatch) -> None:
+    """BUG-421：inspect 失败抛 DockerError（调用方 fail-safe，禁止破坏性操作）。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="cid-abc\n")
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr="permission denied"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    with pytest.raises(DockerError, match="挂载|Mounts|inspect"):
+        DockerRuntime(workspace).bind_mounts("api")
+
+
+def test_container_id_strict_raises_on_ps_failure(workspace, monkeypatch) -> None:
+    """BUG-429：ps 查询失败——strict 版抛 DockerError；宽松版仍折叠为 None。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr="daemon unreachable"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    runtime = DockerRuntime(workspace)
+    with pytest.raises(DockerError, match="查询容器失败|compose ps"):
+        runtime.container_id_strict("api", all_containers=True)
+    assert runtime.container_id("api", all_containers=True) is None
+
+
+def test_bind_mounts_raises_on_ps_failure(workspace, monkeypatch) -> None:
+    """BUG-429：ps 查询失败不得误报"无挂载"——bind_mounts 抛 DockerError。"""
+    _seed_compose_files(workspace, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr="daemon unreachable"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    with pytest.raises(DockerError, match="查询容器失败|compose ps"):
+        DockerRuntime(workspace).bind_mounts("api")
+    assert not any("inspect" in c["args"] for c in fake.calls)
+
+
+def test_bind_mounts_ignores_volume_mounts(workspace, monkeypatch) -> None:
+    """BUG-421：仅返回 bind，忽略 volume / tmpfs。"""
+    _seed_compose_files(workspace, "api")
+    mounts = [
+        {"Type": "volume", "Source": "/var/lib/docker/volumes/x/_data", "Destination": "/data"},
+        {"Type": "tmpfs", "Destination": "/tmp"},
+    ]
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="cid1\n")
+    fake.by_subcmd["inspect"] = ComposeResult(args=[], returncode=0, stdout=json.dumps(mounts))
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    assert DockerRuntime(workspace).bind_mounts("api") == []
+
+
+# ---- issue #14：Docker Hub 不可达错误分类与指引 -------------------------------
+
+_HUB_TIMEOUT_STDERR = (
+    "#3 [internal] load metadata for docker.io/library/python:3.13-slim\n"
+    '#3 ERROR: failed to do request: Head '
+    '"https://registry-1.docker.io/v2/library/python/manifests/3.13-slim": '
+    'dial tcp 199.96.61.1:443: i/o timeout\n'
+    "failed to solve: DeadlineExceeded: python:3.13-slim: "
+    "failed to resolve source metadata for docker.io/library/python:3.13-slim\n"
+)
+
+
+def test_is_registry_timeout_error_positive_and_negative() -> None:
+    """双信号匹配：buildkit 真实超时文案命中；pip/npm 超时与普通失败不误判。"""
+    from local_webpage_access.docker_runtime import is_registry_timeout_error
+
+    assert is_registry_timeout_error(_HUB_TIMEOUT_STDERR)
+    # 普通构建失败：无网络特征
+    assert not is_registry_timeout_error("npm error: ENOTFOUND\nexit 1")
+    # PyPI 超时：有网络特征、无 registry 特征
+    assert not is_registry_timeout_error(
+        "WARNING: Retrying after error ReadTimeoutError on https://pypi.org/simple/"
+    )
+    # registry 特征但非网络故障（manifest 不存在）
+    assert not is_registry_timeout_error(
+        "docker.io/library/python:3.13-slim: manifest unknown"
+    )
+    # CHK-261：通用 "failed to resolve source metadata" 不能当 Docker Hub 信号，
+    # 否则 ghcr.io / quay.io 超时会被误报成 Hub 不可达并建议配 Hub mirror。
+    assert not is_registry_timeout_error(
+        "#3 [internal] load metadata for ghcr.io/astral-sh/uv:latest\n"
+        "#3 ERROR: failed to resolve source metadata for ghcr.io/astral-sh/uv:latest: "
+        "dial tcp: lookup ghcr.io: no such host\n"
+        "failed to solve: DeadlineExceeded: ghcr.io/astral-sh/uv:latest: "
+        "failed to resolve source metadata for ghcr.io/astral-sh/uv:latest\n"
+    )
+    assert not is_registry_timeout_error(
+        "failed to resolve source metadata for quay.io/prometheus/busybox:latest: "
+        "context deadline exceeded\n"
+    )
+
+
+def test_extract_failed_registry_image() -> None:
+    from local_webpage_access.docker_runtime import extract_failed_registry_image
+
+    assert extract_failed_registry_image(_HUB_TIMEOUT_STDERR) == "python:3.13-slim"
+    assert (
+        extract_failed_registry_image("#3 load metadata for docker.io/library/node:24-alpine")
+        == "node:24-alpine"
+    )
+    assert extract_failed_registry_image("no image reference here") is None
+
+
+def test_build_hub_timeout_error_carries_hint(workspace, registry, monkeypatch) -> None:
+    """issue #14 路径一（buildkit 非零退出）：CLI 异常与 error_summary 均含指引。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr=_HUB_TIMEOUT_STDERR
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    build_id = registry.add_build("api", status="running")
+    rt = DockerRuntime(workspace, registry)
+    with pytest.raises(DockerError, match="registry-mirrors"):
+        rt.build("api", build_id=build_id)
+
+    builds = registry.list_builds("api")
+    summary = builds[0]["error_summary"]
+    assert "registry-mirrors" in summary
+    assert "python:3.13-slim" in summary  # 分类器提取的失败镜像
+    assert "build.log" in summary
+    assert len(summary) <= 1200
+
+
+def test_build_normal_failure_has_no_hub_hint(workspace, registry, monkeypatch) -> None:
+    """普通构建失败不带 Hub 指引，保持原始摘要。"""
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(args=[], returncode=1, stderr="npm error: ENOTFOUND\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    build_id = registry.add_build("api", status="running")
+    rt = DockerRuntime(workspace, registry)
+    with pytest.raises(DockerError, match="build 失败"):
+        rt.build("api", build_id=build_id)
+
+    summary = registry.list_builds("api")[0]["error_summary"]
+    assert "registry-mirrors" not in summary
+    assert "npm error" in summary
+
+
+def test_build_apt_fetch_failure_classified(workspace, registry, monkeypatch) -> None:
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    fake = _FakeExecute()
+    fake.by_subcmd["build"] = ComposeResult(
+        args=[],
+        returncode=1,
+        stderr="E: Unable to fetch some archives, maybe run apt-get update\n",
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    build_id = registry.add_build("api", status="running")
+    rt = DockerRuntime(workspace, registry)
+    with pytest.raises(DockerError, match="镜像源不可达"):
+        rt.build("api", build_id=build_id)
+    summary = registry.list_builds("api")[0]["error_summary"]
+    assert "aptFallbacks" in summary
+
+
+def test_execute_streaming_timeout_classifies_hub_unreachable(tmp_path: Path) -> None:
+    """issue #14 路径二（LWA 总超时）：已捕获的部分输出进分类器，异常带指引。"""
+    log = tmp_path / "build.log"
+    script = f"print({_HUB_TIMEOUT_STDERR!r}, flush=True); import time; time.sleep(30)"
+    with pytest.raises(DockerError, match="命令超时") as excinfo:
+        _execute(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+            log_path=log,
+            timeout=3,
+        )
+    message = str(excinfo.value)
+    assert "python:3.13-slim" in message
+    assert "registry-mirrors" in message
+    # build.log 保留 BuildKit 原文（不被摘要覆盖）
+    content = log.read_text(encoding="utf-8")
+    assert "registry-1.docker.io" in content
+
+
+def test_inspect_state_reads_restart_count_from_top_level(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-665：RestartCount 在 inspect 顶层，不在 .State。"""
+    payload = {
+        "RestartCount": 4,
+        "State": {"ExitCode": 137, "OOMKilled": True, "Status": "exited", "Error": ""},
+    }
+    fake = _FakeExecute()
+    fake.by_subcmd["inspect"] = ComposeResult(
+        args=[], returncode=0, stdout=json.dumps(payload) + "\n"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    monkeypatch.setattr(
+        DockerRuntime,
+        "status",
+        lambda self, iid: ContainerStatus(container_id="abc123", state="exited"),
+    )
+    rt = DockerRuntime(workspace, registry)
+    ins = rt.inspect_state("api")
+    assert ins["restart_count"] == 4
+    assert ins["exit_code"] == 137
+    assert ins["oom_killed"] is True
+    assert "inspect" in fake.calls[-1]["args"]
+    assert "{{json .}}" in fake.calls[-1]["args"]
+    assert "{{json .State}}" not in fake.calls[-1]["args"]

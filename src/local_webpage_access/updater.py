@@ -1325,6 +1325,22 @@ def _run_runtime_phase(
         except Exception as exc:  # noqa: BLE001
             report.steps.append(StepResult("restartDaemon", "failed", str(exc)))
 
+    # ---- 7.9 S1-01：重写存量别名片段（旧 redir 首参被 Caddy 当匹配器，N1）----
+    try:
+        from local_webpage_access.gateway_switch import rewrite_alias_fragments
+
+        rewritten = rewrite_alias_fragments(workspace, registry, config)
+        report.steps.append(
+            StepResult(
+                "rewriteAliasFragments",
+                "ok" if rewritten else "skipped",
+                f"重写 {len(rewritten)} 个别名片段" if rewritten else "别名片段已是最新",
+                extra={"instances": rewritten},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        report.steps.append(StepResult("rewriteAliasFragments", "failed", str(exc)))
+
     # ---- 8. 重启 Gateway ----
     if options.restart_gateway:
         try:

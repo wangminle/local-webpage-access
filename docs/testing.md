@@ -8,6 +8,9 @@
 # 安装开发依赖
 pip install -e ".[dev]"
 
+# 统一检查入口：Ruff + pytest + Git 差异检查
+bash tests/gate.sh
+
 # 运行全部非 Docker 测试
 python3 -m pytest
 
@@ -15,9 +18,13 @@ python3 -m pytest
 python3 -m pytest -ra -v
 
 # 运行单个模块
-python3 -m pytest tests/test_security.py
-python3 -m pytest tests/test_doctor.py
+python3 -m pytest tests/scripts/test_security.py
+python3 -m pytest tests/scripts/test_doctor.py
 ```
+
+`tests/gate.sh` 自动定位仓库根目录，依次运行 `ruff check src tests`、pytest、工作区与暂存区的 `git diff --check`，汇总结果；任一步失败则返回非零退出码。pytest 参数可以直接透传，例如 `bash tests/gate.sh -k alias -x`。Caddy 语义测试在缺少 Caddy 时跳过，真实 Docker 测试仍按下述条件启用。
+
+`tests/scripts/` 保存自动化测试，`tests/evals/` 保存真实应用部署评测的本地源码；后者按 pytest 配置排除自动收集。
 
 ## 测试分层
 
@@ -30,7 +37,7 @@ python3 -m pytest tests/test_doctor.py
 
 ## Docker 测试跳过条件（WBS-28.15）
 
-`tests/test_docker_integration.py` 使用双重守卫，默认跳过：
+`tests/scripts/test_docker_integration.py` 使用双重守卫，默认跳过：
 
 1. `requires_docker` —— PATH 中存在 `docker` 命令（`shutil.which`）。
 2. `LWA_RUN_DOCKER_TESTS=1` —— 显式环境变量，避免在仅安装 docker
@@ -41,7 +48,7 @@ python3 -m pytest tests/test_doctor.py
 ```bash
 # 正式支持平台：Linux / macOS / WSL2（不要在 Windows 原生跑）
 export LWA_RUN_DOCKER_TESTS=1
-python3 -m pytest tests/test_docker_integration.py
+python3 -m pytest tests/scripts/test_docker_integration.py
 ```
 
 绝大多数 `docker_runtime` / `lifecycle` 测试通过 monkeypatch 模拟

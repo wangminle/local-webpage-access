@@ -80,10 +80,21 @@ class SubprocessRunner(Protocol):
     def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess: ...
 
 
+# S1-06 / #55：外部命令默认时限，避免 systemctl/launchctl 挂起时整条命令无限等待。
+_RUNNER_DEFAULT_TIMEOUT = 30
+
+
 def _default_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
-    """真实子进程执行（默认）。``capture`` 时捕获 stdout/stderr。"""
+    """真实子进程执行（默认）。``capture`` 时捕获 stdout/stderr；默认 30s 超时。"""
     kwargs.setdefault("text", True)
-    return subprocess.run(cmd, **kwargs)  # noqa: S603
+    kwargs.setdefault("timeout", _RUNNER_DEFAULT_TIMEOUT)
+    try:
+        return subprocess.run(cmd, **kwargs)  # noqa: S603
+    except subprocess.TimeoutExpired as exc:
+        raise AutostartError(
+            f"自启命令超时（{kwargs['timeout']}s）：{' '.join(cmd)}。"
+            "排查：systemctl --user status <unit>（Linux）或 launchctl print <target>（macOS）"
+        ) from exc
 
 
 # ---- 服务选择 --------------------------------------------------------------

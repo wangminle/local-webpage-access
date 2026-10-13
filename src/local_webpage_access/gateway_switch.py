@@ -27,6 +27,7 @@ from local_webpage_access.file_lock import (
 from local_webpage_access.gateway_service import start_gateway, stop_gateway
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest, RouteMode, Runtime
+from local_webpage_access.path_alias import _current_alias, _resolve_host_port
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 from local_webpage_access.static_gateway import StaticGateway
@@ -209,6 +210,34 @@ def _iter_static_instances(
         if manifest.static is None:
             continue
         out.append((iid, manifest))
+    return out
+
+
+def _iter_alias_route_instances(
+    workspace: Workspace, registry: Registry
+) -> list[tuple[str, InstanceManifest, str, int]]:
+    """遍历带路径别名路由的已登记实例（静态与容器共用，BUG-762 / F01）。
+
+    容器别名挂在 ``manifest.container`` 上，仅筛 ``manifest.static`` 会漏掉。
+    返回 ``(实例 id, manifest, alias, hostPort)``；alias/hostPort 解析不到
+    （非 name 模式或端口缺失）的实例不进重写循环。
+    """
+    out: list[tuple[str, InstanceManifest, str, int]] = []
+    for row in registry.list_instances():
+        iid = row["id"]
+        path = workspace.app_manifest_path(iid)
+        if not path.is_file():
+            continue
+        try:
+            manifest = InstanceManifest.load(path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("跳过无法加载的 manifest %s：%s", iid, exc)
+            continue
+        alias = _current_alias(manifest)
+        host_port, _ = _resolve_host_port(manifest)
+        if not alias or host_port is None:
+            continue
+        out.append((iid, manifest, alias, int(host_port)))
     return out
 
 
@@ -450,6 +479,39 @@ def _rebuild_caddy_aliases(
                 except Exception as exc:  # noqa: BLE001 — 不阻断网关切换
                     log.warning("网关切换后实例 %s 别名守卫失败：%s", iid, exc)
     return rebuilt
+
+
+def rewrite_alias_fragments(
+    workspace: Workspace,
+    registry: Registry,
+    config: Config,
+    *,
+    reload_if_running: bool = True,
+) -> list[str]:
+    """把存量别名片段重写为当前模板（S1-01 / N1）。
+
+    只处理磁盘上已存在、且内容与当前模板不一致的片段；缺失的片段由启停与切换流程生成，
+    这里不补建，避免为已停止的实例复活片段。网关在线且确有改动时统一 reload 一次；
+    网关离线时只写盘，由随后的启动加载。
+    """
+    gateway = StaticGateway(workspace, config)
+    rewritten: list[str] = []
+    for iid, manifest, alias, host_port in _iter_alias_route_instances(workspace, registry):
+        if not workspace.app_alias_config(iid).is_file():
+            continue
+        runtime = (
+            manifest.runtime.value if hasattr(manifest.runtime, "value") else str(manifest.runtime)
+        )
+        desired = gateway.render_alias_fragment(iid, alias, host_port, runtime=runtime)
+        if workspace.app_alias_config(iid).read_text(encoding="utf-8") == desired:
+            continue
+        gateway.generate_alias_config(iid, alias, host_port, runtime=runtime)
+        rewritten.append(iid)
+    if rewritten:
+        log.info("已重写存量别名片段：%s", ", ".join(rewritten))
+        if reload_if_running and gateway._admin_alive():
+            gateway.reload_all()
+    return rewritten
 
 
 def _static_row_to_upsert_dict(row: dict[str, Any]) -> dict[str, Any]:

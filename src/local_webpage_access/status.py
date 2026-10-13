@@ -96,7 +96,7 @@ class InstanceStatus:
     last_observed_at: str | None = None
     runtime_access: str | None = None
     # IMP-047：来源类型与关联路径
-    source_kind: str = "zip"
+    source_kind: str | None = "zip"
     source_dir_path: str | None = None
     # IMP-065：git 源身份（url / 真实 ref / ref 类型 / 完整 OID / 打包子目录）
     source_git_url: str | None = None
@@ -111,6 +111,8 @@ class InstanceStatus:
     # 非空时的最高等级与条数；无 findings 时为 None/0（列表输出保持紧凑）。
     compatibility_severity: str | None = None
     compatibility_count: int = 0
+    # S1-07 / #56-3：manifest 存在但读取失败时的错误摘要（此时 source_kind 为 None，不显示假默认值）
+    manifest_error: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -177,6 +179,7 @@ class InstanceStatus:
             # IMP-047：来源类型与关联路径
             "sourceKind": self.source_kind,
             "sourceDirPath": self.source_dir_path,
+            "manifestError": self.manifest_error,
             # IMP-065：git 源身份（refKind 供前端区分 分支/tag 展示）
             "sourceGitUrl": self.source_git_url,
             "sourceGitRef": self.source_git_ref,
@@ -227,7 +230,7 @@ def instance_status(
     resources = registry.get_resources(instance_id) or {}
 
     # IMP-047：从 manifest 读取来源类型与关联路径
-    source_kind = "zip"
+    source_kind: str | None = "zip"
     source_dir_path: str | None = None
     # IMP-065：git 源身份
     source_git_url: str | None = None
@@ -241,6 +244,7 @@ def instance_status(
     compatibility_severity: str | None = None
     compatibility_count = 0
     circuit_note: str | None = None
+    manifest_error: str | None = None
     manifest_path = workspace.app_manifest_path(instance_id)
     if manifest_path.is_file():
         try:
@@ -264,8 +268,19 @@ def instance_status(
             from local_webpage_access.reconcile_circuit import status_note
 
             circuit_note = status_note(manifest)
-        except Exception:  # noqa: BLE001 - manifest 读取失败不阻断状态
-            pass
+        except Exception as exc:  # noqa: BLE001 - manifest 读取失败不阻断状态，但必须可见
+            manifest_error = _manifest_error_summary(instance_id, exc)
+            source_kind = None
+    elif manifest_path.exists():
+        manifest_error = _manifest_error_summary(
+            instance_id, IsADirectoryError(f"manifest 路径不是普通文件：{manifest_path}")
+        )
+        source_kind = None
+    else:
+        manifest_error = _manifest_error_summary(
+            instance_id, FileNotFoundError(f"manifest 文件缺失：{manifest_path}")
+        )
+        source_kind = None
 
     return InstanceStatus(
         id=row["id"],
@@ -312,8 +327,22 @@ def instance_status(
         verification_overall=verification_overall,
         compatibility_severity=compatibility_severity,
         compatibility_count=compatibility_count,
+        manifest_error=manifest_error,
         extra={"reconcileCircuit": circuit_note} if circuit_note else {},
     )
+
+
+_MANIFEST_ERROR_LOGGED: set[tuple[str, str]] = set()
+
+
+def _manifest_error_summary(instance_id: str, exc: Exception) -> str:
+    """manifest 读取失败的摘要；同一实例的同一错误只告警一次（S1-07 限流）。"""
+    summary = f"{type(exc).__name__}: {str(exc)[:200]}".strip()
+    key = (instance_id, summary)
+    if key not in _MANIFEST_ERROR_LOGGED:
+        _MANIFEST_ERROR_LOGGED.add(key)
+        log.warning("实例 %s 的 manifest 读取失败（同一错误仅记录一次）：%s", instance_id, summary)
+    return summary
 
 
 def all_statuses(workspace: Workspace, config: Config, registry: Registry) -> list[InstanceStatus]:
