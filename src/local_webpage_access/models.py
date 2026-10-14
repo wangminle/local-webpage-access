@@ -15,7 +15,7 @@ import json
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -162,6 +162,9 @@ class ContainerConfig(BaseModel):
     # issue#1：额外 bind mount（``宿主路径:绝对容器路径[:ro|rw]`` 列表），渲染 compose 时
     # 合并进 volumes--手工改 compose.yaml 会在重生成时被抹掉，业务定制走这里。
     extraVolumes: list[str] = Field(default_factory=list)
+    # S2-03 / D5：重建策略。build-first（默认）= 旧容器服务期间构建、失败不断服；
+    # stop-first = 旧顺序（先停后建），供内存紧张的小主机使用。
+    rebuildStrategy: Literal["build-first", "stop-first"] | None = None
     # issue #20：容器是否以非 root 身份运行（宿主 data/ 目录 UID/GID 对齐方案）。
     # - ``True``：新导入实例的默认值；Dockerfile 末尾生成 ``USER <uid>:<gid>``、
     #   Compose 增加 ``user:`` 防御层，UID/GID 统一取实例 ``data/`` 目录宿主属主。
@@ -351,6 +354,9 @@ class ProbeSpec(BaseModel):
     isMandatory: bool = False  # True = 可作成功门槛；False = 仅诊断
     source: str = "guessed"  # "declared" / "discovered" / "guessed"
     description: str = ""  # 人类可读说明
+    # S2-06（#50 后半）：源码扫描合成路径的置信度；"low" = 挂载前缀未完全
+    # 解析（入探针仍为路由原文，验证时在 probeNotes 留痕，不构成失败）。
+    confidence: str = "high"
 
 
 class ProbeOverride(BaseModel):
@@ -673,6 +679,11 @@ class InstanceManifest(BaseModel):
     lastStartedAt: str | None = None
     lastHealthCheckAt: str | None = None
     lastError: str | None = None
+    # S2-02 / BUG-750 / #57-2（D4）：操作态与实例态分离。实例 status 只由观测
+    # 决定；构建、排队、验证等操作的结果记录在这里：
+    # {kind, status, buildId, startedAt, finishedAt, error, source}。
+    # status 词汇：queued/building/succeeded/failed/cancelled。
+    lastOperation: dict | None = None
 
     # ---- Gate-B 新字段（IMP-058）----
     deploymentCandidates: list[dict] = Field(default_factory=list)
@@ -707,8 +718,15 @@ class InstanceManifest(BaseModel):
     aliasLiveVerifiedFor: str | None = None
     # issue #38：别名内容守卫（IMP-055）最近一次检查。passed/failed/skipped，
     # 探不到入口 HTML 时记 skipped，不得与活验证通过印章混用。
+    # S2-05：结果值带括号原因，如 passed(api-only) / failed(content) /
+    # failed(transient) / skipped(非 Caddy 后端) / skipped(显式跳过) /
+    # skipped(实例未运行)。
     aliasGuardCheckedAt: str | None = None
     aliasGuardResult: str | None = None
+    # S2-05：别名守卫最近一次失败原因（人话摘要），passed/skipped 时清空。
+    aliasGuardError: str | None = None
+    # S2-05 / #58：别名活验证采样覆盖 {checked, found, truncated, skippedExternal}。
+    aliasProbeCoverage: dict | None = None
 
     @field_validator("kind", "runtime", "servingMode", "resourceProfile", "desiredState", "status")
     @classmethod

@@ -85,6 +85,12 @@ def import_cmd(
         help="issue #45：folder 源更换关联目录，保留 instance id / 端口 / 路径别名 / data/。"
         "非交互终端必须显式加上；交互终端也可在确认提示中继续。",
     ),
+    ignore_alias_guard: bool = typer.Option(
+        False,
+        "--ignore-alias-guard",
+        help="S2-05：更新前别名守卫（实例已有别名时检测新内容）失败时不拒绝、"
+        "重建/重启后不跑别名活验证；均记审计事件。用于已知风险场景。",
+    ),
 ) -> None:
     """导入一个 zip 包、本机文件夹源或 GitHub 仓库：解压、识别、登记实例。
 
@@ -176,6 +182,7 @@ def import_cmd(
                         yes=yes,
                         dry_run=dry_run,
                         force_kind_change=force_kind_change,
+                        ignore_alias_guard=ignore_alias_guard,
                     )
                 else:
                     result = importer.import_from_git(
@@ -204,6 +211,7 @@ def import_cmd(
                         dry_run=dry_run,
                         force_kind_change=force_kind_change,
                         allow_source_change=allow_source_change,
+                        ignore_alias_guard=ignore_alias_guard,
                     )
                 else:
                     result = importer.import_from_dir(
@@ -227,6 +235,7 @@ def import_cmd(
                     yes=yes,
                     dry_run=dry_run,
                     force_kind_change=force_kind_change,
+                    ignore_alias_guard=ignore_alias_guard,
                 )
             else:
                 # IMP-009：CLI 路径下 slug 冲突不再 silent 建 -2，提示 --update
@@ -243,6 +252,27 @@ def import_cmd(
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _finish_update_alias_summary(ws, instance_id: str) -> None:
+    """S2-05：更新（含随后的 rebuild/restart）完成后输出别名守卫收口摘要。
+
+    content 级验证失败时以退出码 4 结束（D2：部分成功——内容已更新、
+    别名验证失败）。实例无别名时不输出。
+    """
+    from local_webpage_access.cli.lifecycle import _print_alias_guard_summary
+    from local_webpage_access.models import InstanceManifest
+
+    manifest_path = ws.app_manifest_path(instance_id)
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = InstanceManifest.load(manifest_path)
+    except Exception:  # noqa: BLE001 — 摘要是收尾装饰，manifest 损坏不阻断更新结果
+        return
+    code = _print_alias_guard_summary(manifest)
+    if code:
+        raise typer.Exit(code=code)
 
 
 def _print_import_result(result, config) -> None:
@@ -405,6 +435,7 @@ def _do_update_from_git(
     yes: bool,
     dry_run: bool,
     force_kind_change: bool,
+    ignore_alias_guard: bool = False,
 ) -> None:
     """IMP-065：``lwa import --from-git <url> --update <id>`` 的编排。
 
@@ -451,6 +482,7 @@ def _do_update_from_git(
         yes=yes,
         dry_run=dry_run,
         force_kind_change=force_kind_change,
+        ignore_alias_guard=ignore_alias_guard,
     )
 
     prev_oid = (prev_commit or "")[:12] or "∅"
@@ -503,14 +535,17 @@ def _do_update_from_git(
             "  正在 rebuild（容器源码已更新，须重建镜像）…",
             fg=typer.colors.CYAN,
         )
-        rebuild_instance(ws, config, reg, instance_id)
+        rebuild_instance(
+            ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+        )
         typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
     elif result.needs_restart:
         from local_webpage_access.lifecycle import restart_instance
 
         typer.secho("  正在 restart…", fg=typer.colors.CYAN)
-        restart_instance(ws, config, reg, instance_id)
+        restart_instance(ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard)
         typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
+    _finish_update_alias_summary(ws, instance_id)
 
 
 def _source_dir_brief(path: Path) -> str:
@@ -557,6 +592,7 @@ def _do_update_from_dir(
     dry_run: bool,
     force_kind_change: bool,
     allow_source_change: bool = False,
+    ignore_alias_guard: bool = False,
 ) -> None:
     """IMP-047：``lwa import --from-dir --update <id>`` 的编排。
 
@@ -601,6 +637,7 @@ def _do_update_from_dir(
         dry_run=dry_run,
         force_kind_change=force_kind_change,
         allow_source_dir_change=allow_source_change,
+        ignore_alias_guard=ignore_alias_guard,
     )
 
     prev_short = result.prev_hash[:12] if result.prev_hash else "∅"
@@ -654,14 +691,17 @@ def _do_update_from_dir(
             "  正在 rebuild（容器源码已更新，须重建镜像）…",
             fg=typer.colors.CYAN,
         )
-        rebuild_instance(ws, config, reg, instance_id)
+        rebuild_instance(
+            ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+        )
         typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
     elif result.needs_restart:
         from local_webpage_access.lifecycle import restart_instance
 
         typer.secho("  正在 restart…", fg=typer.colors.CYAN)
-        restart_instance(ws, config, reg, instance_id)
+        restart_instance(ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard)
         typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
+    _finish_update_alias_summary(ws, instance_id)
 
 
 def _do_update(
@@ -677,6 +717,7 @@ def _do_update(
     yes: bool,
     dry_run: bool,
     force_kind_change: bool,
+    ignore_alias_guard: bool = False,
 ) -> None:
     """IMP-009：``lwa import --update <id>`` 的编排（数据层 + 可选 restart）。"""
     result = importer.update_zip(
@@ -687,6 +728,7 @@ def _do_update(
         yes=yes,
         dry_run=dry_run,
         force_kind_change=force_kind_change,
+        ignore_alias_guard=ignore_alias_guard,
     )
 
     prev_short = result.prev_hash[:12] if result.prev_hash else "∅"
@@ -751,13 +793,15 @@ def _do_update(
             "  正在 rebuild（容器源码已更新，须重建镜像）…",
             fg=typer.colors.CYAN,
         )
-        rebuild_instance(ws, config, reg, instance_id)
+        rebuild_instance(
+            ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+        )
         typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
     elif result.needs_restart:
         from local_webpage_access.lifecycle import restart_instance
 
         typer.secho("  正在 restart…", fg=typer.colors.CYAN)
-        restart_instance(ws, config, reg, instance_id)
+        restart_instance(ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard)
         typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
     elif not result.skipped and result.manifest.runtime.value == "docker-compose" and not restart:
         typer.secho(
@@ -766,6 +810,7 @@ def _do_update(
             f" lwa rebuild {instance_id}",
             fg=typer.colors.YELLOW,
         )
+    _finish_update_alias_summary(ws, instance_id)
 
 
 def scan(

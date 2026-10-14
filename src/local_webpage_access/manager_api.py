@@ -327,6 +327,8 @@ _ERROR_STATUS: dict[str, int] = {
     "not_found": status.HTTP_404_NOT_FOUND,
     "bad_request": status.HTTP_400_BAD_REQUEST,
     "conflict": status.HTTP_409_CONFLICT,
+    # S2-09 / BUG-751：乐观并发——实例 revision 与期望不符
+    "revision_conflict": status.HTTP_409_CONFLICT,
     "data_nonempty": status.HTTP_409_CONFLICT,  # IMP-035：purge 非空 data/
     "unauthorized": status.HTTP_401_UNAUTHORIZED,
     "loopback_required": status.HTTP_403_FORBIDDEN,  # IMP-051
@@ -439,6 +441,45 @@ def _body_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
             }
         },
     )
+
+
+def _body_optional_int(payload: dict[str, Any], key: str) -> int | None:
+    """S2-09 / BUG-751：可选整数字段（如 ``expectedRevision``）。
+
+    键缺失或显式 ``null`` 返回 None（保持兼容）；键存在但类型不是 int
+    （含 bool——bool 是 int 子类，必须排除）直接 400。
+    """
+    if key not in payload or payload[key] is None:
+        return None
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "code": "bad_request",
+                    "message": f"{key} 必须是整数，实际为 {type(value).__name__}",
+                }
+            },
+        )
+    return value
+
+
+def _post_update_revision_kwargs(
+    registry: Registry, instance_id: str, expected_revision: int | None
+) -> dict[str, int]:
+    """S2-09 / BUG-751：更新流程后续 rebuild/restart 的 revision 基线。
+
+    调用方提供 ``expectedRevision`` 时，update 已按该值校验并 CAS 递增——
+    后续 rebuild/restart 必须以**更新后的新 revision** 为基线，否则会对本
+    操作自己产生的递增误报 ``revision_conflict``；同时仍保留「更新落地后到
+    rebuild 持锁之间又被其它通道变更 → 409」的保护。未提供则返回空 dict，
+    调用完全保持旧签名（兼容既有 monkeypatch 桩与旧前端）。
+    """
+    if expected_revision is None:
+        return {}
+    revision = registry.get_revision(instance_id)
+    return {"expected_revision": 1 if revision is None else revision}
 
 
 def _hostname_from_host_header(host: str) -> str:
@@ -1141,6 +1182,8 @@ def _register_routes(app: FastAPI) -> None:
         op: Callable[..., Any],
         *,
         label: str,
+        expected_revision: int | None = None,
+        op_accepts_revision: bool = True,
         **kwargs: Any,
     ) -> dict[str, Any]:
         ctx = _Ctx(app)
@@ -1157,6 +1200,25 @@ def _register_routes(app: FastAPI) -> None:
                     }
                 },
             )
+        # S2-09 / BUG-751：乐观并发预检——锁外早败，给出友好 409；权威复核在
+        # 各 op 持实例锁内完成（_ensure_revision_locked）。不传保持兼容。
+        if expected_revision is not None:
+            current = ctx.registry.get_revision(instance_id)
+            if current is None or int(current) != int(expected_revision):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "error": {
+                            "code": "revision_conflict",
+                            "message": (
+                                f"实例已被其他操作更新（期望 revision="
+                                f"{int(expected_revision)}，当前 {current}），请刷新后重试"
+                            ),
+                            "expected": int(expected_revision),
+                            "actual": current,
+                        }
+                    },
+                )
         blocked = _docker_ops_blocked_reason(ctx, instance_id)
         if blocked is not None:
             raise HTTPException(
@@ -1168,6 +1230,10 @@ def _register_routes(app: FastAPI) -> None:
                     }
                 },
             )
+        # 仅在调用方提供 expected_revision 时透传：底层 op 缺省 None 行为不变，
+        # 也不破坏既有 monkeypatch 桩（未声明该关键字参数）
+        if expected_revision is not None and op_accepts_revision:
+            kwargs["expected_revision"] = expected_revision
         op(ctx.workspace, ctx.config, ctx.registry, instance_id, **kwargs)
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
         snap = instance_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
@@ -1179,6 +1245,11 @@ def _register_routes(app: FastAPI) -> None:
         fallback_policy: str = Query(
             "confirm",
             description="降级策略：confirm（默认）/ auto-equivalent / disabled",
+        ),
+        expected_revision: int | None = Query(
+            None,
+            alias="expectedRevision",
+            description="S2-09 乐观并发：列表快照里的 revision，不符返回 409 revision_conflict",
         ),
     ) -> dict[str, Any]:
         """启动实例。
@@ -1217,6 +1288,7 @@ def _register_routes(app: FastAPI) -> None:
                 start_instance,
                 label="start",
                 fallback_policy=fallback_policy,
+                expected_revision=expected_revision,
             )
         except FallbackConfirmationRequired as fcr:
             # C.R03：返回结构化待确认响应（非错误，而是需要用户决策）
@@ -1234,7 +1306,14 @@ def _register_routes(app: FastAPI) -> None:
         dependencies=[api],
         tags=["instances"],
     )
-    def confirm_fallback_op(instance_id: str) -> dict[str, Any]:
+    def confirm_fallback_op(
+        instance_id: str,
+        expected_revision: int | None = Query(
+            None,
+            alias="expectedRevision",
+            description="S2-09 乐观并发：列表快照里的 revision，不符返回 409 revision_conflict",
+        ),
+    ) -> dict[str, Any]:
         """C.R03：确认降级到等价 fallback 候选。
 
         用户在管理页确认后调用此端点，以 ``auto-equivalent`` 策略重试启动。
@@ -1247,36 +1326,66 @@ def _register_routes(app: FastAPI) -> None:
             start_instance,
             label="start",
             fallback_policy="auto-equivalent",
+            expected_revision=expected_revision,
         )
 
     @app.post("/api/instances/{instance_id}/stop", dependencies=[api], tags=["instances"])
-    def stop_op(instance_id: str) -> dict[str, Any]:
+    def stop_op(
+        instance_id: str,
+        expected_revision: int | None = Query(
+            None,
+            alias="expectedRevision",
+            description="S2-09 乐观并发：列表快照里的 revision，不符返回 409 revision_conflict",
+        ),
+    ) -> dict[str, Any]:
         from local_webpage_access.lifecycle import stop_instance_op
 
-        return _lifecycle_op(instance_id, stop_instance_op, label="stop")
+        return _lifecycle_op(
+            instance_id, stop_instance_op, label="stop", expected_revision=expected_revision
+        )
 
     @app.post(
         "/api/instances/{instance_id}/restart",
         dependencies=[api],
         tags=["instances"],
     )
-    def restart_op(instance_id: str) -> dict[str, Any]:
+    def restart_op(
+        instance_id: str,
+        expected_revision: int | None = Query(
+            None,
+            alias="expectedRevision",
+            description="S2-09 乐观并发：列表快照里的 revision，不符返回 409 revision_conflict",
+        ),
+    ) -> dict[str, Any]:
         from local_webpage_access.lifecycle import restart_instance
 
-        return _lifecycle_op(instance_id, restart_instance, label="restart")
+        return _lifecycle_op(
+            instance_id, restart_instance, label="restart", expected_revision=expected_revision
+        )
 
     @app.post(
         "/api/instances/{instance_id}/rebuild",
         dependencies=[api],
         tags=["instances"],
     )
-    def rebuild_op(instance_id: str) -> dict[str, Any]:
+    def rebuild_op(
+        instance_id: str,
+        expected_revision: int | None = Query(
+            None,
+            alias="expectedRevision",
+            description="S2-09 乐观并发：列表快照里的 revision，不符返回 409 revision_conflict",
+        ),
+    ) -> dict[str, Any]:
         from local_webpage_access.lifecycle import rebuild_instance
 
         # issue #8：把 rebuild 前的源码陈旧警告透出到响应（不阻断重建）
         stale_warnings: list[str] = []
         result = _lifecycle_op(
-            instance_id, rebuild_instance, label="rebuild", out=stale_warnings
+            instance_id,
+            rebuild_instance,
+            label="rebuild",
+            out=stale_warnings,
+            expected_revision=expected_revision,
         )
         if stale_warnings:
             result["sourceStaleWarnings"] = stale_warnings
@@ -1327,14 +1436,29 @@ def _register_routes(app: FastAPI) -> None:
         dependencies=[api],
         tags=["instances"],
     )
-    def recover_op(instance_id: str) -> dict[str, Any]:
+    def recover_op(
+        instance_id: str,
+        expected_revision: int | None = Query(
+            None,
+            alias="expectedRevision",
+            description="S2-09 乐观并发：列表快照里的 revision，不符返回 409 revision_conflict",
+        ),
+    ) -> dict[str, Any]:
         """DEV-043：恢复 gateway_down / config_invalid / 掉线实例（一键 recover）。
 
         静态实例先尝试拉起 Caddy master，再 restart 重新托管；容器实例等价 restart。
         """
         from local_webpage_access.lifecycle import recover_instance
 
-        return _lifecycle_op(instance_id, recover_instance, label="recover")
+        # recover_instance 暂不接受 expected_revision（lifecycle 属并行工作包
+        # S2-03 的改动范围）：此处仅做锁外预检，权威保护依赖内部 restart 的锁。
+        return _lifecycle_op(
+            instance_id,
+            recover_instance,
+            label="recover",
+            expected_revision=expected_revision,
+            op_accepts_revision=False,
+        )
 
     @app.post(
         "/api/instances/{instance_id}/remove",
@@ -1468,6 +1592,8 @@ def _register_routes(app: FastAPI) -> None:
         restart = _body_bool(payload, "restart", True)
         keep_data = _body_bool(payload, "keepData", True)
         force_kind_change = _body_bool(payload, "forceKindChange", False)
+        # S2-09 / BUG-751：可选乐观并发 revision（zip 更新在 importer 锁内复核）
+        expected_revision = _body_optional_int(payload, "expectedRevision")
 
         importer = Importer(ctx.workspace, ctx.config, ctx.registry)
         result = importer.update_zip(
@@ -1478,19 +1604,25 @@ def _register_routes(app: FastAPI) -> None:
             yes=True,  # API 路径非交互
             dry_run=False,
             force_kind_change=force_kind_change,
+            expected_revision=expected_revision,
         )
 
         restarted = False
         rebuilt_runtime = False
+        rev_kwargs = _post_update_revision_kwargs(ctx.registry, instance_id, expected_revision)
         if result.needs_rebuild:
             from local_webpage_access.lifecycle import rebuild_instance
 
-            rebuild_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            rebuild_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+            )
             rebuilt_runtime = True
         elif result.needs_restart:
             from local_webpage_access.lifecycle import restart_instance
 
-            restart_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            restart_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+            )
             restarted = True
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
@@ -1541,6 +1673,8 @@ def _register_routes(app: FastAPI) -> None:
         restart = _body_bool(payload, "restart", True)
         keep_data = _body_bool(payload, "keepData", True)
         force_kind_change = _body_bool(payload, "forceKindChange", False)
+        # S2-09 / BUG-751：可选乐观并发 revision（importer 锁内复核）
+        expected_revision = _body_optional_int(payload, "expectedRevision")
 
         importer = Importer(ctx.workspace, ctx.config, ctx.registry)
         result = importer.update_from_dir(
@@ -1550,19 +1684,25 @@ def _register_routes(app: FastAPI) -> None:
             yes=True,
             dry_run=False,
             force_kind_change=force_kind_change,
+            expected_revision=expected_revision,
         )
 
         restarted = False
         rebuilt_runtime = False
+        rev_kwargs = _post_update_revision_kwargs(ctx.registry, instance_id, expected_revision)
         if result.needs_rebuild:
             from local_webpage_access.lifecycle import rebuild_instance
 
-            rebuild_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            rebuild_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+            )
             rebuilt_runtime = True
         elif result.needs_restart:
             from local_webpage_access.lifecycle import restart_instance
 
-            restart_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            restart_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+            )
             restarted = True
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
@@ -1752,6 +1892,8 @@ def _register_routes(app: FastAPI) -> None:
         restart = _body_bool(payload, "restart", True)
         keep_data = _body_bool(payload, "keepData", True)
         force_kind_change = _body_bool(payload, "forceKindChange", False)
+        # S2-09 / BUG-751：可选乐观并发 revision（importer 锁内复核）
+        expected_revision = _body_optional_int(payload, "expectedRevision")
 
         importer = Importer(ctx.workspace, ctx.config, ctx.registry)
         result = importer.update_from_git(
@@ -1762,19 +1904,25 @@ def _register_routes(app: FastAPI) -> None:
             yes=True,
             dry_run=False,
             force_kind_change=force_kind_change,
+            expected_revision=expected_revision,
         )
 
         restarted = False
         rebuilt_runtime = False
+        rev_kwargs = _post_update_revision_kwargs(ctx.registry, instance_id, expected_revision)
         if result.needs_rebuild:
             from local_webpage_access.lifecycle import rebuild_instance
 
-            rebuild_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            rebuild_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+            )
             rebuilt_runtime = True
         elif result.needs_restart:
             from local_webpage_access.lifecycle import restart_instance
 
-            restart_instance(ctx.workspace, ctx.config, ctx.registry, instance_id)
+            restart_instance(
+                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+            )
             restarted = True
 
         sync_status(ctx.workspace, ctx.config, ctx.registry, instance_id)
@@ -2234,6 +2382,11 @@ def _lwa_error_code(exc: LwaError) -> str:
     """
     if isinstance(exc, DataNonemptyError) or getattr(exc, "code", None) == "data_nonempty":
         return "data_nonempty"
+    # S2-09 / BUG-751：revision 乐观锁冲突——LifecycleError/ZipImportError 等携带
+    # code="revision_conflict"（与 Agent 通道同契约），优先于按类映射（否则会被
+    # LifecycleError→internal / ZipImportError→bad_request 吞掉）
+    if getattr(exc, "code", None) == "revision_conflict":
+        return "revision_conflict"
     for cls, code in _LWA_ERROR_CODE_BY_CLASS.items():
         if isinstance(exc, cls):
             return code

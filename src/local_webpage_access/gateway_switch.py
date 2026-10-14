@@ -426,7 +426,7 @@ def _enable_running_builtin(
         if alias:
             try:
                 fresh = InstanceManifest.load(workspace.app_manifest_path(iid))
-                _persist_alias_guard(workspace, iid, fresh, "skipped")
+                _persist_alias_guard(workspace, iid, fresh, "skipped(非 Caddy 后端)")
             except Exception as exc:  # noqa: BLE001 — 守卫记录不阻断网关切换
                 log.warning("切 builtin 后实例 %s 记录守卫 skipped 失败：%s", iid, exc)
     return enabled

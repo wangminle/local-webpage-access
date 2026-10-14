@@ -307,6 +307,58 @@ def test_maybe_restore_noop_when_alias_already_matches(
     assert pa.maybe_restore_desired_alias_after_start(ws, cfg, reg, iid, manifest) is False
 
 
+def test_maybe_restore_failure_stamps_guard_result(
+    ws, cfg, reg, container_instance, monkeypatch
+) -> None:
+    """BUG-785：补登记失败须盖章 failed(...) 落盘，摘要行可见而非仅 WARN。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    manifest.container.routeMode = "port"
+    manifest.container.routeHost = None
+    manifest.desiredAlias = "prd-review"
+    manifest.save(mpath)
+
+    def boom(*a, **k):
+        raise pa.RecognitionError("live verify failed", kind="content")
+
+    monkeypatch.setattr(pa, "set_instance_path_alias", boom)
+    assert pa.maybe_restore_desired_alias_after_start(ws, cfg, reg, iid, manifest) is False
+    reloaded = InstanceManifest.load(mpath)
+    assert reloaded.aliasGuardResult == "failed(content)"
+    assert reloaded.aliasGuardCheckedAt
+    assert "live verify failed" in (reloaded.aliasGuardError or "")
+    assert reloaded.desiredAlias == "prd-review"
+    # 摘要行对「未登记」的期望别名可见，且 content 级给退出码 4
+    assert pa.alias_guard_summary_line(reloaded) == "别名 /prd-review/:failed(content)（未登记）"
+    assert pa.alias_guard_exit_code(reloaded) == 4
+
+
+def test_maybe_restore_infra_failure_stamps_register_kind(
+    ws, cfg, reg, container_instance, monkeypatch
+) -> None:
+    """BUG-785：非内容级失败（无 kind）记 failed(register)，不给退出码 4。"""
+    from local_webpage_access import path_alias as pa
+
+    iid, mpath = container_instance
+    manifest = InstanceManifest.load(mpath)
+    manifest.container.routeMode = "port"
+    manifest.container.routeHost = None
+    manifest.desiredAlias = "prd-review"
+    manifest.save(mpath)
+
+    def boom(*a, **k):
+        raise RuntimeError("gateway reload 失败")
+
+    monkeypatch.setattr(pa, "set_instance_path_alias", boom)
+    assert pa.maybe_restore_desired_alias_after_start(ws, cfg, reg, iid, manifest) is False
+    reloaded = InstanceManifest.load(mpath)
+    assert reloaded.aliasGuardResult == "failed(register)"
+    assert pa.alias_guard_summary_line(reloaded) == "别名 /prd-review/:failed(register)（未登记）"
+    assert pa.alias_guard_exit_code(reloaded) == 0
+
+
 def test_alias_clear_stops_auto_restore(ws, cfg, reg, container_instance, monkeypatch) -> None:
     """CHK-326：用户 alias clear 后不得凭历史期望别名自动挂回。"""
     from local_webpage_access import path_alias as pa

@@ -113,9 +113,24 @@ class GitSourceError(LwaError):
 
 
 class RecognitionError(LwaError):
-    """项目扫描/识别过程中的错误。"""
+    """项目扫描/识别过程中的错误。
+
+    ``kind`` 为别名活验证等场景的故障分类（S2-05 / D2）：
+
+    - ``content``：内容级失败（不带前缀的加载型绝对资源、JS/CSS 返回 HTML、
+      MIME 错误、入口未返回 HTML）——更新已生效但别名不可用，命令退出码 4；
+    - ``transient``：瞬态失败（连接拒绝、5xx、超时）——维持 issue #21 的
+      保留策略，只告警不影响退出码。
+
+    未设置 ``kind`` 时按 ``content`` 处理（保守：宁可将未知故障视为需要用户
+    处置的内容级问题，也不放过白屏）。
+    """
 
     code = "RECOGNITION_ERROR"
+
+    def __init__(self, message: str = "", *, kind: str | None = None, **context: Any) -> None:
+        super().__init__(message, **context)
+        self.kind = kind
 
 
 # ---- 静态网关 --------------------------------------------------------------

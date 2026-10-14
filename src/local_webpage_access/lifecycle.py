@@ -363,6 +363,7 @@ def start_instance(
     fallback_policy: str = _FALLBACK_CONFIRM,
     from_reconcile: bool = False,
     expected_revision: int | None = None,
+    ignore_alias_guard: bool = False,
 ) -> InstanceManifest:
     """启动实例（WBS-17.01）。
 
@@ -399,9 +400,10 @@ def start_instance(
                 manifest.save(workspace.app_manifest_path(instance_id))
         if _is_deployed_container(manifest):
             # C.R06 / CHK-252：指纹变化 → full rebuild / runtime recreate / 轻量 start
-            current_fps = _compute_deployment_fingerprints(workspace, manifest)
-            stored_fps = getattr(manifest, "deploymentFingerprints", None)
-            action, changed_fields = _fingerprint_change_action(stored_fps, current_fps)
+            # S2-04：决策前先按 manifest 收敛生成物（start/restart/recover 共用）
+            action, changed_fields = _deployed_action(
+                workspace, config, registry, instance_id, manifest
+            )
             if action == "full_rebuild":
                 log.info(
                     "实例 %s 指纹变化（%s），禁止轻量 start，强制重建",
@@ -466,6 +468,7 @@ def start_instance(
             registry,
             instance_id,
             manifest,
+            skip_compat_check=ignore_alias_guard,
             alias_fragment_preexisting=alias_fragment_preexisting,
         )
         clear_circuit(manifest)
@@ -1033,6 +1036,50 @@ def _compute_deployment_fingerprints(
         "runtimeConfigHash": runtime_hash,
         "imageId": image_id,
     }
+
+
+def _deployed_action(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+) -> tuple[str, list[str]]:
+    """S2-04：已部署容器的启动决策（start / restart / recover 共用）。
+
+    顺序：快照盘上生成物 → 按 manifest 重渲染（含审计，覆盖手改）→ 指纹决策。
+    决策为 full_rebuild 时先把盘上恢复为快照（旧状态），由 host_container 重新渲染并
+    快照这份旧状态，使先建后换失败后的补偿能精确回到旧版本；决策为 runtime_recreate
+    时保留新渲染，补偿时由 recreate 使用快照恢复。
+    """
+    from local_webpage_access import rebuild_txn
+    from local_webpage_access.generated_convergence import converge_generated_artifacts
+
+    rebuild_txn.snapshot_generated(workspace, instance_id)
+    artifacts_missing = not (
+        workspace.app_compose_path(instance_id).is_file()
+        and workspace.app_dockerfile_path(instance_id).is_file()
+    )
+    if artifacts_missing:
+        # BUG-382：生成物缺失说明部署状态已不完整（镜像也未必存在），保持完整重建语义，
+        # 不因重渲染而退化为仅 up。
+        return "full_rebuild", ["generatedArtifacts"]
+    result = converge_generated_artifacts(workspace, config, manifest)
+    if result.manual_overwritten:
+        with contextlib.suppress(Exception):
+            registry.add_event(
+                instance_id,
+                "lifecycle_stage",
+                "生成物被手工修改，已按 manifest 覆盖（持久化修改请使用 manifest 字段）",
+            )
+    if not result.rendered:
+        return "full_rebuild", ["hostPort"]
+    current_fps = _compute_deployment_fingerprints(workspace, manifest)
+    stored_fps = getattr(manifest, "deploymentFingerprints", None)
+    action, changed_fields = _fingerprint_change_action(stored_fps, current_fps)
+    if action == "full_rebuild":
+        rebuild_txn.restore_generated(workspace, instance_id)
+    return action, changed_fields
 
 
 def _fingerprint_change_action(
@@ -1885,6 +1932,7 @@ def restart_instance(
     instance_id: str,
     *,
     expected_revision: int | None = None,
+    ignore_alias_guard: bool = False,
 ) -> InstanceManifest:
     """重启实例（WBS-17.03）：先 stop 再 start。
 
@@ -1893,7 +1941,9 @@ def restart_instance(
     """
     with instance_lock(workspace, instance_id):
         _ensure_revision_locked(registry, instance_id, expected_revision)
-        return _restart_instance_locked(workspace, config, registry, instance_id)
+        return _restart_instance_locked(
+            workspace, config, registry, instance_id, ignore_alias_guard=ignore_alias_guard
+        )
 
 
 def _restart_instance_locked(
@@ -1901,8 +1951,11 @@ def _restart_instance_locked(
     config: Config,
     registry: Registry,
     instance_id: str,
+    *,
+    ignore_alias_guard: bool = False,
 ) -> InstanceManifest:
     """``restart_instance`` 的已持锁实现（供 recover 等复用，避免文件锁重入）。"""
+    from local_webpage_access.docker_runtime import DockerRuntime
     from local_webpage_access.hosting import (
         host_instance,
         start_container,
@@ -1915,15 +1968,43 @@ def _restart_instance_locked(
     with contextlib.suppress(Exception):
         manifest.save(workspace.app_manifest_path(instance_id))
     deployed_container = _is_deployed_container(manifest)
-    # 先停：容忍"本来就没在跑"的噪声（含 Docker/网关不可用等 stop 失败）
-    try:
-        stop_instance(workspace, config, registry, instance_id)
-    except LwaError as exc:
-        log.warning("restart 前停止失败（忽略并继续启动）：%s", exc)
-
+    action = "none"
     if deployed_container:
-        manifest = start_container(workspace, config, registry, instance_id)
+        # S2-04 / #48 #57-1：restart 与 start 使用同一套收敛与指纹决策。
+        # extraVolumes 等运行时变化 → recreate；镜像相关变化 → full rebuild（build-first）。
+        action, changed = _deployed_action(workspace, config, registry, instance_id, manifest)
+        if action != "none":
+            log.info("实例 %s restart 决策：%s（%s）", instance_id, action, ", ".join(changed))
+
+    if deployed_container and action == "full_rebuild":
+        manifest = host_instance(workspace, config, registry, instance_id)
+    elif deployed_container and action == "runtime_recreate":
+        from local_webpage_access.hosting import recreate_container_runtime
+
+        manifest = recreate_container_runtime(workspace, config, registry, instance_id)
     else:
+        if deployed_container:
+            # S2-01/N3：停机失败直接报错中止，不再吞异常后对仍在跑的容器
+            # 误报「已重启」。「本来就没在跑」视为成功（stop_or_abort 内置）。
+            from local_webpage_access.hosting import stop_or_abort
+
+            stop_or_abort(
+                DockerRuntime(workspace, registry),
+                instance_id,
+                purpose="重启",
+                down=False,
+            )
+        else:
+            # 未部署容器 / 静态实例：没有可停的旧容器，停止噪声（含 Docker/网关
+            # 不可用）保持容忍，restart 随后会走完整托管恢复。
+            try:
+                stop_instance(workspace, config, registry, instance_id)
+            except LwaError as exc:
+                log.warning("restart 前停止失败（忽略并继续启动）：%s", exc)
+
+    if deployed_container and action == "none":
+        manifest = start_container(workspace, config, registry, instance_id)
+    elif not deployed_container:
         manifest = host_instance(workspace, config, registry, instance_id)
     # IMP-021：容器别名入口 reverse_proxy 到 hostPort，端口漂移时同步别名片段。
     _sync_alias_port(workspace, config, instance_id, manifest)
@@ -1936,6 +2017,7 @@ def _restart_instance_locked(
         registry,
         instance_id,
         manifest,
+        skip_compat_check=ignore_alias_guard,
         alias_fragment_preexisting=True,
     )
     return manifest
@@ -2068,6 +2150,7 @@ def rebuild_instance(
     *,
     out: list[str] | None = None,
     expected_revision: int | None = None,
+    ignore_alias_guard: bool = False,
 ) -> InstanceManifest:
     """重建实例（WBS-17.04）：强制重新构建。
 
@@ -2129,6 +2212,7 @@ def rebuild_instance(
             registry,
             instance_id,
             manifest,
+            skip_compat_check=ignore_alias_guard,
             alias_fragment_preexisting=alias_fragment_preexisting,
         )
         clear_circuit(manifest)

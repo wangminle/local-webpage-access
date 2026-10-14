@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -288,24 +289,28 @@ def test_stop_gateway_internal_waits_for_start_lock(
 # ---- 4. update 收尾单 master 断言 -------------------------------------------------
 
 
-def _step_by_pids(monkeypatch: pytest.MonkeyPatch, pids: list[str]):
+def _step_by_pids(monkeypatch: pytest.MonkeyPatch, pids: list[str], tmp_path=None):
     import local_webpage_access.updater as up
 
     monkeypatch.setattr(up, "_admin_master_pids", lambda port=2019: list(pids))
     cfg = Config(staticGateway="caddy", staticGatewayPort=8080)
-    return up._check_single_caddy_master(cfg)
+    # BUG-783：按工作区分配端口计数；未分配的工作区回退 legacy :2019
+    from local_webpage_access.paths import Workspace
+
+    ws = Workspace(tmp_path or Path("/tmp/lwa-race-check-ws"))
+    return up._check_single_caddy_master(ws, cfg)
 
 
-def test_caddy_master_check_ok_single(monkeypatch: pytest.MonkeyPatch) -> None:
-    step = _step_by_pids(monkeypatch, ["70558"])
+def test_caddy_master_check_ok_single(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    step = _step_by_pids(monkeypatch, ["70558"], tmp_path)
     assert step.name == "caddyMasterCheck"
     assert step.status == "ok"
     assert "70558" in step.message
 
 
-def test_caddy_master_check_failed_duplicate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_caddy_master_check_failed_duplicate(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """CHK-280 现场：70556/70558 双 master 必须当场报 failed（而非延迟显形）。"""
-    step = _step_by_pids(monkeypatch, ["70556", "70558"])
+    step = _step_by_pids(monkeypatch, ["70556", "70558"], tmp_path)
     assert step.status == "failed"
     assert step.extra.get("masterPids") == ["70556", "70558"]
     assert "CHK-280" in step.message
@@ -313,19 +318,23 @@ def test_caddy_master_check_failed_duplicate(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_caddy_master_check_skipped_without_lsof(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
-    step = _step_by_pids(monkeypatch, [])
+    step = _step_by_pids(monkeypatch, [], tmp_path)
     assert step.status == "skipped"
 
 
 def test_caddy_master_check_skipped_non_caddy_backend(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     import local_webpage_access.updater as up
 
     monkeypatch.setattr(up, "_admin_master_pids", lambda port=2019: ["1"])
     cfg = Config(staticGateway="builtin", staticGatewayPort=8080)
-    step = up._check_single_caddy_master(cfg)
+    from local_webpage_access.paths import Workspace
+
+    step = up._check_single_caddy_master(Workspace(tmp_path), cfg)
     assert step.status == "skipped"
 
 
@@ -365,6 +374,8 @@ def test_caddy_start_routes_stderr_to_runtime_log(
     monkeypatch.setattr(sg, "_refuse_caddy_admin_in_pytest", lambda action: None)
     monkeypatch.setattr(gw, "_admin_alive", lambda **kw: True)
     monkeypatch.setattr(gw, "_workspace_caddy_pid_alive", lambda: True)
+    # BUG-783：隔离 legacy :2019 迁移探测（本用例只验证 stderr 落盘，不走迁移）
+    monkeypatch.setattr(gw, "_legacy_admin_alive", lambda **kw: False)
     # 主配置已存在且非空 → 不走 bootstrap 分支
     main = gw.main_config_path()
     main.parent.mkdir(parents=True, exist_ok=True)

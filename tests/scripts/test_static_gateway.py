@@ -28,6 +28,11 @@ pytestmark = pytest.mark.usefixtures("_allow_caddy_admin_for_unit_tests")
 @pytest.fixture()
 def _allow_caddy_admin_for_unit_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LWA_ALLOW_CADDY_ADMIN", "1")
+    # BUG-783：隔离宿主机真实 :2019——caddy_start/caddy_stop 现会对 legacy admin
+    # 做迁移探测（只读 GET + lsof），不得因真实网关在线而走入迁移分支。
+    monkeypatch.setattr(
+        StaticGateway, "_legacy_admin_alive", lambda self, **_k: False
+    )
 
 
 @pytest.fixture()
@@ -543,7 +548,12 @@ def test_start_builtin_rotates_gateway_log_before_open(
 def test_assemble_main_config_has_no_admin_off(
     gateway: StaticGateway, workspace: Workspace
 ) -> None:
-    """BUG-014：主 Caddyfile 不得包含 ``admin off``，否则后续 reload 失败。"""
+    """BUG-014：主 Caddyfile 不得包含 ``admin off``，否则后续 reload 失败。
+
+    BUG-783：分配了独立 admin 端口的工作区允许（且必须）出现
+    ``admin 127.0.0.1:<port>`` 指令；未分配的工作区（本用例）不得出现任何
+    admin 配置——保持 legacy 默认行为。
+    """
     root = workspace.app_public("demo")
     root.mkdir(parents=True)
     gateway.generate_site_config("demo", 18001, root)
@@ -551,6 +561,24 @@ def test_assemble_main_config_has_no_admin_off(
     content = gateway._assemble_main_config()
     assert "admin off" not in content
     assert "admin" not in content.lower().split()
+
+
+def test_assemble_main_config_renders_assigned_admin_port(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-783：已分配独立 admin 端口的工作区，全局选项块必须渲染 admin 指令。"""
+    from local_webpage_access.admin_port import ensure_admin_port
+
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+    assigned = ensure_admin_port(workspace)
+
+    content = gateway._assemble_main_config()
+    assert f"admin 127.0.0.1:{assigned}" in content
+    assert "admin off" not in content
+    # 全局选项块必须只有一个（首块）
+    assert content.count("\n{\n") + content.startswith("{\n") <= 1
 
 
 def test_assemble_main_config_quotes_import_paths(

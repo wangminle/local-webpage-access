@@ -121,32 +121,36 @@ def _admin_master_pids(admin_port: int = 2019) -> list[str]:
     return sorted(pids)
 
 
-def _check_single_caddy_master(config: Config) -> StepResult:
+def _check_single_caddy_master(workspace: Workspace, config: Config) -> StepResult:
     """CHK-280 纵深：update 重启后断言 admin 端口上只有一个 Caddy master。
 
     现场复盘：双 master 存活期间监督器探活 / waitReady / doctor 全部通过
     （两个 master 都健康分摊流量），故障延迟 11.5 分钟才显形——update 自检
     对重复 master 存在结构性盲区，本步骤补上。
+
+    BUG-783：按本工作区分配端口计数（未分配回退 legacy :2019）——双 master
+    竞态现在只会发生在同一工作区自己的端口上。
     """
     if config.staticGateway != "caddy":
         return StepResult(
             "caddyMasterCheck", "skipped", f"staticGateway={config.staticGateway}，跳过"
         )
-    from local_webpage_access.gateway_service import ADMIN_PORT
+    from local_webpage_access.admin_port import LEGACY_ADMIN_PORT, read_admin_port
 
-    pids = _admin_master_pids(ADMIN_PORT)
+    admin_port = read_admin_port(workspace) or LEGACY_ADMIN_PORT
+    pids = _admin_master_pids(admin_port)
     if not pids:
         return StepResult(
-            "caddyMasterCheck", "skipped", f":{ADMIN_PORT} 无监听者或 lsof 不可用，无法判定"
+            "caddyMasterCheck", "skipped", f":{admin_port} 无监听者或 lsof 不可用，无法判定"
         )
     if len(pids) == 1:
         return StepResult(
-            "caddyMasterCheck", "ok", f":{ADMIN_PORT} 单 master（pid={pids[0]}）"
+            "caddyMasterCheck", "ok", f":{admin_port} 单 master（pid={pids[0]}）"
         )
     return StepResult(
         "caddyMasterCheck",
         "failed",
-        f":{ADMIN_PORT} 存在 {len(pids)} 个 Caddy master（pid={', '.join(pids)}）——"
+        f":{admin_port} 存在 {len(pids)} 个 Caddy master（pid={', '.join(pids)}）——"
         "双 master 竞态残留（SO_REUSEPORT 双绑、共享 pidfile，CHK-280）；"
         "保留 run/caddy.pid 所指 master，kill 其余后重跑 lwa doctor",
         extra={"masterPids": pids},
@@ -1395,11 +1399,11 @@ def _run_runtime_phase(
                 )
             )
 
-    # ---- 9.25 CHK-280 纵深：网关重启后断言 :2019 单 master ----
+    # ---- 9.25 CHK-280 纵深：网关重启后断言 admin 端口单 master ----
     # 双 master 存活期间探活/waitReady/doctor 都通过（两 master 都健康），故障
     # 延迟 11.5 分钟才显形——update 自检必须显式数一遍监听 PID 才能当场发现。
     if options.restart_gateway:
-        report.steps.append(_check_single_caddy_master(config))
+        report.steps.append(_check_single_caddy_master(workspace, config))
 
     # ---- 9.5 IMP-038：后台重启后再 refresh；review 单独走防抖（DEV-114）----
     from local_webpage_access.access_workflow import review_access_with_debounce, run_access_pass

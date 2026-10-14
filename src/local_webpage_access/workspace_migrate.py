@@ -764,9 +764,18 @@ def _quiesce_step(result: QuiesceResult, label: str, fn: Callable[[], Any]) -> N
 
 def _compose_down(workspace: Workspace, registry: Registry, iid: str) -> None:
     from local_webpage_access.docker_runtime import DockerRuntime
+    from local_webpage_access.hosting import stop_or_abort
 
     DockerRuntime.ensure_available()
-    DockerRuntime(workspace, registry).down(iid)
+    # S2-01/#54：停机失败抛出 HostingError（经 _quiesce_step 记入 errors），
+    # 且 S1-05 后置校验（container_id_strict）会把仍在运行/无法确认的对象计入
+    # failures 阻断迁移——两处语义互补，不重复校验。
+    stop_or_abort(
+        DockerRuntime(workspace, registry),
+        iid,
+        purpose="迁移",
+        only_if_running=False,
+    )
 
 
 def _service_pid_snapshot(workspace: Workspace) -> dict[str, int | None]:

@@ -19,7 +19,7 @@ from local_webpage_access.logging import get_logger
 
 log = get_logger("registry")
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 # ---- DDL --------------------------------------------------------------------
 
@@ -209,6 +209,13 @@ _SCHEMAS: dict[int, list[str]] = {
     5: [
         "ALTER TABLE agent_operations ADD COLUMN payload_json TEXT",
         "CREATE INDEX IF NOT EXISTS idx_agent_operations_status ON agent_operations(status)",
+    ],
+    # S2-02 / BUG-750 / #57-2（D4）：操作态 lastOperation 持久化。
+    # 实例 status 只由观测决定；构建/排队/验证结果写该 JSON 列（形状同
+    # manifest.lastOperation：{kind, status, buildId, startedAt, finishedAt,
+    # error, source}），与 stack_json 同为单列 JSON 先例。
+    6: [
+        "ALTER TABLE instances ADD COLUMN last_operation_json TEXT",
     ],
 }
 

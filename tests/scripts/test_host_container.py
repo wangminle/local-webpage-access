@@ -937,14 +937,14 @@ def test_mount_drift_inspect_failure_raises_without_destructive_ops(
 def test_mount_drift_down_failure_aborts_before_up(
     workspace, registry, config, fake_runtime
 ) -> None:
-    """BUG-423：漂移修复 down 失败 → HostingError 中止，禁止继续 up 复用旧挂载。"""
+    """BUG-423/S2-01：漂移修复停机失败 → HostingError 中止，禁止继续 up 复用旧挂载。"""
     _seed_deployed_sqlite(workspace, registry, "api")
     fake_runtime._running_state = True
     fake_runtime._bind_mounts = [_drifted_data_mount()]
     fake_runtime._rescue_result = 2
     fake_runtime._down_error = DockerError("compose down failed", instance_id="api", action="down")
 
-    with pytest.raises(HostingError, match="down 失败.*已中止"):
+    with pytest.raises(HostingError, match="漂移修复 已中止"):
         start_container(workspace, config, registry, "api")
 
     assert "rescue" in fake_runtime.calls

@@ -1672,6 +1672,9 @@ def test_attach_daemon_log_handler_preserves_requested_level(
 
 def test_main_runtime_oserror_returns_failure(workspace: Workspace, monkeypatch) -> None:
     """BUG-296：拿锁后的运行期 OSError 必须非零退出。"""
+    # S2-08：_main 会 set_op_source("daemon") 直写 os.environ；delenv 快照
+    # 使 teardown 时清掉该污染，避免影响后续依赖默认 cli 来源的用例。
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
     monkeypatch.setattr(
         daemon_mod.sys,
         "argv",
@@ -1696,6 +1699,9 @@ def test_main_lock_busy_still_exits_zero(workspace: Workspace, monkeypatch) -> N
     """BUG-296：仅锁争用仍视为正常退出（exit 0），避免监督器误重启。"""
     import contextlib
 
+    # S2-08：_main 直写 os.environ["LWA_OP_SOURCE"]，delenv 快照防跨用例污染。
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
+
     @contextlib.contextmanager
     def busy_lock(_workspace):
         raise daemon_mod._DaemonLockBusy("daemon 锁被占用")
@@ -1718,6 +1724,9 @@ def test_main_lock_busy_still_exits_zero(workspace: Workspace, monkeypatch) -> N
 def test_main_probes_capability_only_after_daemon_lock(workspace: Workspace, monkeypatch) -> None:
     """BUG-298：子进程应先抢运行锁，再做可能耗时的 capability 探测。"""
     import contextlib
+
+    # S2-08：_main 直写 os.environ["LWA_OP_SOURCE"]，delenv 快照防跨用例污染。
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
 
     inside_lock = {"value": False}
 

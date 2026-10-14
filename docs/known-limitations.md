@@ -20,7 +20,7 @@
   Full Profile（`profile: full`）还会验收 manager/daemon/gateway 真实 Docker 权限与 Caddy owner；未闭环不假绿（见 FAQ「Full Profile」）。
   Linux 上 LWA 以 `serviceUser` 访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，或对 system unit 使用 `SupplementaryGroups=docker`（`lwa autostart` 默认 user unit 仍依赖会话组）。
   观测失败写 `unknown` / `runtimeAccess`，不把运行中容器误标 stopped；管理页与 API 在能力降级时阻断容器操作。
-* **Caddy 所有权（Full）**：禁止静默复用系统 `caddy.service`；`:2019` 必须属于本工作区 LWA Caddy。Default 档在无 Caddy 时可降级 builtin；Full 不得假绿。
+* **Caddy 所有权（Full）**：禁止静默复用系统 `caddy.service`；admin 端口（V0.10.0 起按工作区独立分配并登记 `run/admin-port`，未分配为 legacy `:2019`）必须属于本工作区 LWA Caddy。Default 档在无 Caddy 时可降级 builtin；Full 不得假绿。
 * **架构**：基线镜像 `node:24-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
   其他架构需用户自备镜像或调整模板。
 
@@ -63,7 +63,7 @@ swap=4GB
 
 * LWA 面向**局域网 HTTP**：统一入口默认 `:8080`（`staticGatewayPort`），管理页默认 `:17800`（`managerPort`），实例另占端口池（常见 `18000–19999`）。
 * **端口最小化**：防火墙只放行**实际在用**的业务口（例如当前实例 `18000`），不要把 `portPool` 整段 `18000–19999` 默认全开；管理页 `17800` 仅在确需 LAN 管理时开放，并依赖 manager token。
-* **不要**把 Caddy **admin `:2019`** 暴露到 LAN 或公网——仅供本机 `127.0.0.1` 管理 reload。
+* **不要**把 Caddy **admin 端口**（`:2019` 或 `run/admin-port` 登记的分配端口）暴露到 LAN 或公网——仅供本机 `127.0.0.1` 管理 reload。
 * **Windows / WSL2 Mirrored（Windows 11 22H2+、WSL ≥2.0.9）**：入站由 **Hyper-V firewall** 管理，不是普通「Windows 防火墙」规则 alone。应在 **PowerShell（管理员）** 按 WSL `VMCreatorId` 逐端口放行，例如：
 
   ```powershell

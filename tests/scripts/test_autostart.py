@@ -15,6 +15,7 @@ from subprocess import CompletedProcess
 import pytest
 
 from local_webpage_access import autostart as asm
+from local_webpage_access.ownership import Ownership
 
 
 # ---- 平台识别 --------------------------------------------------------------
@@ -1248,7 +1249,7 @@ def test_port_2019_rejects_alive_but_wrong_identity(tmp_path, monkeypatch) -> No
             pass
 
     monkeypatch.setattr("socket.socket", lambda *a, **k: _FakeSock())
-    assert asm._port_2019_foreign(ws, config) is True
+    assert asm._port_2019_foreign(ws, config) is Ownership.FOREIGN
     item = asm._check_caddy(ws, config)
     assert item.status == "fail"
     assert "2019" in item.message
@@ -1705,7 +1706,7 @@ def test_port_2019_uses_live_pidfile_when_json_stale(tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(dm, "is_pid_alive", _alive)
     monkeypatch.setattr(dm, "pid_cmdline_contains", _cmdline)
-    assert asm._port_2019_foreign(ws, config) is False
+    assert asm._port_2019_foreign(ws, config) is Ownership.OURS
     item = asm._check_caddy(ws, config)
     assert item.status == "ok"
 

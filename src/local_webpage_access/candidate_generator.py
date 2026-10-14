@@ -29,6 +29,7 @@ from pathlib import Path
 
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import frontend_artifact_dest
+from local_webpage_access import route_prefix
 from local_webpage_access.models import (
     CapabilityContract,
     CommandSpec,
@@ -787,6 +788,12 @@ def _discover_health_probes(
     与返回语义（如受保护的 /health 返回 401），不得作为失败门槛。
 
     带路径参数的声明（含 ``{``/``<``）无法静态探测，跳过。
+
+    S2-06（#50 后半）：路由前缀合成见 :mod:`route_prefix`——FastAPI
+    ``APIRouter(prefix)`` + ``include_router(prefix)`` 两层、Node
+    ``app.use(prefix, router)`` 两层（纯静态正则、尽力而为）；无法确定
+    完整路径的探针以路由原文入探针并标 ``confidence="low"``，
+    S1-04 的内容校验兜底（拼错只会变成「返回 HTML」提示，不会假绿）。
     """
     scan_root = Path(evidence.root)
     if backend.sourceSubdir:
@@ -806,11 +813,11 @@ def _discover_health_probes(
         return []
 
     extensions = (".py",) if backend.kind == "python" else (".js", ".ts", ".mjs", ".cjs")
-    found: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    texts: dict[Path, str] = {}
     files_read = 0
     routes_total = 0
     truncated = False
+    route_re = _PY_ROUTE_DECORATOR_RE if backend.kind == "python" else _NODE_ROUTE_RE
     for file_path in _walk_source_files(scan_root, extensions, max_depth=_DISCOVERY_MAX_DEPTH):
         if files_read >= _DISCOVERY_MAX_FILES:
             truncated = True
@@ -820,22 +827,26 @@ def _discover_health_probes(
         except OSError:
             continue
         files_read += 1
-        if backend.kind == "python":
-            matches = _PY_ROUTE_DECORATOR_RE.findall(text)
-        else:
-            matches = _NODE_ROUTE_RE.findall(text)
-        routes_total += len(matches)
-        for method, route in matches:
-            route = route.strip()
-            if not route.startswith("/") or "{" in route or "<" in route:
-                continue
-            if not _HEALTH_PATH_RE.search(route):
-                continue
-            key = (method.upper(), route)
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append(key)
+        routes_total += len(route_re.findall(text))
+        texts[file_path] = text
+
+    if backend.kind == "python":
+        composed = route_prefix.compose_python_routes(scan_root, texts)
+    else:
+        composed = route_prefix.compose_node_routes(scan_root, texts)
+
+    found: list[route_prefix.ComposedRoute] = []
+    seen: set[tuple[str, str]] = set()
+    for item in composed:
+        # 健康命名判定用路由原文（避免前缀里的 health 片段造成误命中）
+        if not _HEALTH_PATH_RE.search(item.route):
+            continue
+        key = (item.method, item.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(item)
+    found.sort(key=lambda c: (c.path, c.method))
 
     # S1-04：零读取或零路由声明通常意味着扫描根/深度不对，留痕便于定位（不改变探针结果）
     if truncated:
@@ -856,17 +867,19 @@ def _discover_health_probes(
 
     return [
         ProbeSpec(
-            path=route,
-            method=method,
+            path=item.path,
+            method=item.method,
             expectedStatus=200,
             isMandatory=False,
             source="discovered",
+            confidence=item.confidence,
             description=(
-                f"源码发现的健康端点（HTTP {method} {route}，可选证据；"
-                "静态扫描无法判断鉴权/返回语义，不作为门槛）"
+                f"源码发现的健康端点（HTTP {item.method} {item.path}，可选证据；"
+                "静态扫描无法判断鉴权/返回语义，不作为门槛"
+                f"{f'；{item.note}' if item.note else ''}）"
             ),
         )
-        for method, route in sorted(found)
+        for item in found
     ]
 
 

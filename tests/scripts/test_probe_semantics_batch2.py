@@ -115,7 +115,8 @@ class TestReachability:
 
 
 class TestGuessedProbeSemantics:
-    """guessed 探针：404 中性 / 401-403 受保护不降级 / 5xx 告警。"""
+    """guessed 探针仅诊断（BUG-499/BUG-781）：404 中性 / 401-403 受保护 /
+    5xx 记 probe_notes，均不告警、不降级。"""
 
     def test_guessed_404_is_neutral(self) -> None:
         m = _manifest(
@@ -134,13 +135,15 @@ class TestGuessedProbeSemantics:
         assert not result["optional_warnings"]
         assert any("受保护" in note for note in result["probe_notes"])
 
-    def test_guessed_500_warns_degraded(self) -> None:
+    def test_guessed_500_is_diagnostic_note_not_degraded(self) -> None:
+        """BUG-781：guessed 探针仅诊断，5xx 失败记 probe_notes，不降级。"""
         m = _manifest(
             probes=[{"path": "/health", "isMandatory": False, "source": "guessed"}]
         )
         result = _evaluate(m, probe_results={"/health": (False, 500)})
-        assert result["overall_status"] == "degraded"
-        assert any("/health" in w for w in result["optional_warnings"])
+        assert result["overall_status"] == "passed"
+        assert not result["optional_warnings"]
+        assert any("/health" in note for note in result["probe_notes"])
 
 
 class TestDiscoveredProbeOptional:

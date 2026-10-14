@@ -979,12 +979,12 @@ def test_host_container_releases_port_on_build_failure(
     assert registry.allocated_ports() == []
 
 
-# ---- 回归测试：BUG-603（issue #16）----------------------------------------
+# ---- 回归测试：BUG-603（issue #16）、S2-08（issue #59）-------------------------
 #
 # BUG-603：daemon 进程触发的重建（reconcile 自动恢复 / inbox 处理）阶段
-#          日志只落 daemon.log，lwa.log 看起来"构建卡死"。修复后 daemon
-#          进程标记（LWA_DAEMON_PROCESS=1）存在时，lifecycle_stage 镜像进
-#          lwa.log；CLI / manager 进程行为不变。
+#          日志只落 daemon.log，lwa.log 看起来"构建卡死"。修复后非 CLI
+#          来源把 lifecycle_stage 镜像进 lwa.log，行首带 source=<来源>；
+#          CLI 进程本就把阶段写进 lwa.log，不重复镜像。
 
 
 class _OkRuntime:
@@ -1026,7 +1026,7 @@ def _seed_ok_container(workspace: Workspace, registry: Registry) -> None:
 def test_host_container_stages_mirrored_to_lwa_log_in_daemon_process(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:
-    """BUG-603：daemon 进程内 lifecycle_stage 全量镜像到 lwa.log。"""
+    """BUG-603 / S2-08：非 CLI 来源 lifecycle_stage 全量镜像到 lwa.log，带 source=。"""
     from local_webpage_access.hosting import host_container
 
     _seed_ok_container(workspace, registry)
@@ -1036,6 +1036,7 @@ def test_host_container_stages_mirrored_to_lwa_log_in_daemon_process(
         lambda *a, **k: {"overall_status": "passed"},
     )
     monkeypatch.setenv("LWA_DAEMON_PROCESS", "1")
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
 
     host_container(workspace, config, registry, "api")
 
@@ -1049,13 +1050,13 @@ def test_host_container_stages_mirrored_to_lwa_log_in_daemon_process(
         "compose_up_start",
         "compose_up_done",
     ):
-        assert f"lifecycle_stage instance=api stage={stage}" in text
+        assert f"source=daemon lifecycle_stage instance=api stage={stage}" in text
 
 
 def test_host_container_stages_not_mirrored_outside_daemon_process(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:
-    """BUG-603：无 daemon 标记（CLI/manager 进程）时不镜像，行为不变。"""
+    """S2-08：CLI 来源（默认）不重复镜像，lwa.log 不出现 source= 阶段行。"""
     from local_webpage_access.hosting import host_container
 
     _seed_ok_container(workspace, registry)
@@ -1065,6 +1066,7 @@ def test_host_container_stages_not_mirrored_outside_daemon_process(
         lambda *a, **k: {"overall_status": "passed"},
     )
     monkeypatch.delenv("LWA_DAEMON_PROCESS", raising=False)
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
 
     host_container(workspace, config, registry, "api")
 

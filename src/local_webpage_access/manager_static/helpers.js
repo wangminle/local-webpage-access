@@ -140,6 +140,42 @@
     );
   };
 
+  // S2-02 / BUG-750 / #57-2（D4）：操作态与实例态分离。构建/排队失败不再
+  // 把仍在服务的实例标成 failed——实例徽标仍是观测状态（如「运行中」），
+  // 操作结果以本徽标叠加展示（如「运行中 · 最近一次重建失败」）。
+  var OP_KIND_LABELS = { build: "构建", rebuild: "重建", deploy: "部署" };
+  var OP_STATUS_LABELS = {
+    queued: "排队中",
+    building: "进行中",
+    succeeded: "成功",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+
+  LWA.operationSummaryText = function (op) {
+    if (!op || typeof op !== "object") return "";
+    var kind = OP_KIND_LABELS[op.kind] || op.kind || "操作";
+    var st = OP_STATUS_LABELS[op.status] || op.status || "";
+    var text = "最近一次" + kind + (st ? " · " + st : "");
+    if (op.finishedAt) text += "（" + String(op.finishedAt) + "）";
+    if (op.error) text += "：" + String(op.error);
+    return text;
+  };
+
+  LWA.operationChipHtml = function (instance) {
+    var op = instance && instance.lastOperation;
+    if (!op || (op.status !== "failed" && op.status !== "cancelled")) {
+      return "";
+    }
+    var kind = OP_KIND_LABELS[op.kind] || op.kind || "操作";
+    var label =
+      op.status === "cancelled" ? "最近一次" + kind + "已取消" : "最近一次" + kind + "失败";
+    var title = LWA.operationSummaryText(op);
+    var cls = op.status === "cancelled" ? "badge-op-cancel" : "badge-op-fail";
+    return ' <span class="badge ' + cls + '" title="' + LWA.esc(title) + '">' +
+      LWA.esc(label) + "</span>";
+  };
+
   // ---- 表格单元格 ----
 
   // 标签统一包进 .stack-tags 容器（DEV-133）：配合 style.css 的 3 列网格实现
@@ -185,12 +221,31 @@
     }
     var aliasHtml = "";
     if (i.routeUrl) {
+      // S2-05：别名守卫状态徽标（passed/failed/skipped + 原因），失败原因悬浮可见。
+      var guardBadge = "";
+      if (i.aliasGuardResult) {
+        var g = String(i.aliasGuardResult);
+        var gCls = g.indexOf("failed") === 0
+          ? "alias-guard-badge alias-guard-failed"
+          : g.indexOf("passed") === 0
+            ? "alias-guard-badge alias-guard-passed"
+            : "alias-guard-badge alias-guard-skipped";
+        var gTitle = "别名守卫：" + g +
+          (i.aliasGuardError ? " — " + i.aliasGuardError : "") +
+          (i.aliasProbeCoverage
+            ? "（采样 " + (i.aliasProbeCoverage.checked || 0) + "/" +
+              (i.aliasProbeCoverage.found || 0) + "）"
+            : "");
+        guardBadge = ' <em class="' + gCls + '" title="' + LWA.esc(gTitle) + '">' +
+          LWA.esc(g) + "</em>";
+      }
       aliasHtml =
         '<a href="' +
         LWA.esc(i.routeUrl) +
         '" target="_blank" rel="noopener" title="路径别名入口">/' +
         LWA.esc(i.routeHost || "") +
-        "/</a>";
+        "/</a>" +
+        guardBadge;
     }
     if (!primary.length && !aliasHtml) return '<span class="cell-muted">—</span>';
     var html = "";
@@ -435,7 +490,7 @@
     return (
       '<tr class="' + rowClass + '">' +
       nameCell +
-      "<td>" + LWA.badgeHtml(i.status) + LWA.verificationChipHtml(i) + "</td>" +
+      "<td>" + LWA.badgeHtml(i.status) + LWA.verificationChipHtml(i) + LWA.operationChipHtml(i) + "</td>" +
       '<td class="cell-muted">' + LWA.esc(i.desiredState || "—") + "</td>" +
       '<td class="cell-muted">' + LWA.esc(i.servingMode || "—") + "</td>" +
       "<td>" + LWA.esc(i.kind || "—") + "</td>" +
@@ -615,6 +670,8 @@
         LWA.describeGitImportOutcome;
       window.__LWA_TEST_HOOKS__.describeGitError = LWA.describeGitError;
       window.__LWA_TEST_HOOKS__.friendlyApiMessage = LWA.friendlyApiMessage;
+      window.__LWA_TEST_HOOKS__.operationChipHtml = LWA.operationChipHtml;
+      window.__LWA_TEST_HOOKS__.operationSummaryText = LWA.operationSummaryText;
     }
   }
   if (typeof module !== "undefined" && module.exports) {

@@ -198,6 +198,12 @@ class Registry:
             "last_started_at": data.get("lastStartedAt"),
             "last_health_check_at": data.get("lastHealthCheckAt"),
             "last_error": data.get("lastError"),
+            # S2-02 / D4：操作态与 manifest 同步（权威读取走 registry 列）
+            "last_operation_json": (
+                json.dumps(data["lastOperation"], ensure_ascii=False)
+                if data.get("lastOperation")
+                else None
+            ),
         }
         # BUG-333：主表、当前 runtime 子表及另一侧清理必须同一事务提交。
         with self.txn() as tx:
@@ -334,6 +340,35 @@ class Registry:
             tx.execute(
                 "UPDATE instances SET updated_at = ? WHERE id = ?",
                 (now_iso(), instance_id),
+            )
+
+    def update_last_operation(
+        self,
+        instance_id: str,
+        operation: dict[str, Any] | None,
+    ) -> None:
+        """写操作态 ``lastOperation``（S2-02 / D4）；不动实例 ``status``。
+
+        ``operation`` 形状：``{kind, status, buildId, startedAt, finishedAt,
+        error, source}``；传 None 清空。操作结果（排队超时、构建失败等）只写
+        这里与 ``last_error``，实例状态由观测链回写。
+        """
+        with self.txn() as tx:
+            tx.execute(
+                "UPDATE instances SET last_operation_json = ?, updated_at = ? WHERE id = ?",
+                (
+                    json.dumps(operation, ensure_ascii=False) if operation else None,
+                    now_iso(),
+                    instance_id,
+                ),
+            )
+
+    def update_last_error(self, instance_id: str, error: str | None) -> None:
+        """仅更新 ``last_error``（S2-02：操作失败不改实例 status 时的错误落点）。"""
+        with self.txn() as tx:
+            tx.execute(
+                "UPDATE instances SET last_error = ?, updated_at = ? WHERE id = ?",
+                (error, now_iso(), instance_id),
             )
 
     def update_name(self, instance_id: str, name: str) -> None:

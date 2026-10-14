@@ -1,7 +1,7 @@
 """BUG-763~765 / BUG-776~777：迁移停机安全门回归（复审 F02/F03/F04 与 CHK-380）。
 
-故障注入手法与 design/5-reviews/2026-10-13-S00-S01-review/repro-migration.py、
-design/5-reviews/2026-10-13-BUG762-774-recheck/migration-repro.py 相同：
+故障注入手法与 design/5-checkpoints/2026-10-13-S00-S01-review/repro-migration.py、
+design/5-checkpoints/2026-10-13-BUG762-774-recheck/migration-repro.py 相同：
 ``_terminate_pid=False`` 模拟 daemon 终止失败且 PID 仍存活；``_execute`` 返回
 rc=1 模拟 Docker 查询失败；回滚侧注入 ``quiesce_workspace`` 失败结果；真实休眠
 子进程 + ``read_pid_cmdline=None`` 模拟命令行不可读（归属无法确认）。
@@ -37,6 +37,26 @@ def ws_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "old-ws"
     init_workspace(root, static_gateway="builtin")
     return root
+
+
+@pytest.fixture(autouse=True)
+def _guard_real_autostart_units(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BUG-781 安全围栏：本文件任何测试不得改写宿主机真实自启动单元。
+
+    快照经 ``autostart.installed_services`` 读到真实已装服务时，走完迁移的
+    用例会在 regenerate 阶段对 pytest 临时目录执行真实 ``autostart.repair``，
+    把 ``~/Library/LaunchAgents`` 里生产单元的 ``--workspace`` 重绑到临时路径
+    （2026-10-13 曾致 runtime 工作区服务错绑中断 8.8 小时）。CI/未装服务的
+    机器上此缺陷不可见，故按文件级围栏兜底；测试内的显式 patch 可覆盖本围栏。
+    """
+
+    def _forbid(*args: object, **kwargs: object) -> None:
+        raise AssertionError("测试不得触碰真实自启动单元（BUG-781 围栏）")
+
+    monkeypatch.setattr("local_webpage_access.autostart.installed_services", lambda *a, **k: [])
+    monkeypatch.setattr("local_webpage_access.autostart.repair", _forbid)
+    monkeypatch.setattr("local_webpage_access.autostart.enable", _forbid)
+    monkeypatch.setattr("local_webpage_access.autostart.install", _forbid)
 
 
 def _patch_services_stopped(monkeypatch: pytest.MonkeyPatch) -> None:

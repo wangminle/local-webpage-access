@@ -338,8 +338,12 @@ def _audit_volume(
     # 宿主敏感目录
     # CHK-225 高危5：先做 normpath 归一化，否则 /home//<user>、/home/./<user>、
     # /Users/<user>/../<user> 等等价于整家目录的挂载会绕过下方判定被静默放行。
+    # BUG-791：normpath 会保留恰好两个前导斜杠（POSIX 实现定义），//etc 归一化后
+    # 仍是 //etc——折叠前导多斜杠，否则 //、//etc、//home/<u>/.ssh 整体绕过审计
+    # （Linux 上 //etc 与 /etc 是同一目录）。
     src_abs = posixpath.normpath(src_norm) if src.startswith("/") else None
     if src_abs:
+        src_abs = "/" + src_abs.lstrip("/")
         # issue#1：家目录整体挂载 critical（/home、/Users、以及某用户的整个
         # 家目录 /home/<user>——后者含 .ssh/.aws 等全部凭据，等价于 /home）；
         # 家目录下的普通业务子目录（container.extraVolumes 的典型场景，如
@@ -378,6 +382,19 @@ def _audit_volume(
                 )
             return
         for sens in _HOST_SENSITIVE_DIRS:
+            # BUG-784：裸 "/" 只精确匹配「挂载宿主根目录」本身——
+            # 前缀展开后 startswith("/") 会判死一切非家目录绝对路径。
+            if sens == "/":
+                if src_abs == "/":
+                    out.append(
+                        SecurityFinding(
+                            LEVEL_CRITICAL,
+                            "host_sensitive_mount",
+                            f"服务 {svc} 挂载了宿主根目录：{src}",
+                        )
+                    )
+                    return
+                continue
             if src_abs == sens or src_abs.startswith(sens.rstrip("/") + "/"):
                 out.append(
                     SecurityFinding(

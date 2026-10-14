@@ -101,7 +101,7 @@ def test_maybe_verify_after_start_runs_guard_and_does_not_stamp(
         )
     reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
     assert reloaded.aliasLiveVerifiedAt is None
-    assert reloaded.aliasGuardResult == "failed"
+    assert reloaded.aliasGuardResult == "failed(content)"
 
 
 def test_set_alias_records_skipped_guard_when_html_missing(
@@ -128,6 +128,6 @@ def test_set_alias_records_skipped_guard_when_html_missing(
     )
     assert result.live_verified is False
     reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
-    assert reloaded.aliasGuardResult == "skipped"
+    assert reloaded.aliasGuardResult == "skipped(显式跳过)"
     assert reloaded.aliasGuardCheckedAt
     assert reloaded.aliasLiveVerifiedAt is None

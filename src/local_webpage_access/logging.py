@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,6 +125,60 @@ def append_global_log(
         return
 
 
+# ---- 操作来源（S2-08 / issue #59）--------------------------------------------
+#
+# ``LWA_OP_SOURCE`` 标记当前进程/线程里生命周期操作的触发方：
+# cli（命令行，默认）/ manager（管理页）/ daemon（自愈 watcher）/ agent
+# （Agent 通道，含 MCP stdio 转发的操作）。非 CLI 来源的阶段日志不落
+# ``lwa.log``（各长驻进程有自己的日志文件），由 hosting 的镜像函数按
+# 来源补一行 ``source=<来源> lifecycle_stage …``，避免运维盯主日志时把
+# manager/daemon 触发的重建误判为「构建卡死」。
+
+_OP_SOURCE_ENV = "LWA_OP_SOURCE"
+# issue #16 / BUG-603 时代的 daemon 入口只设这个标记；作为来源回退兼容。
+_DAEMON_MARKER_ENV = "LWA_DAEMON_PROCESS"
+_OP_SOURCE_VALUES = ("cli", "manager", "daemon", "agent")
+_OP_SOURCE_DEFAULT = "cli"
+# AgentWorker 与 manager 同进程（线程级来源），env 无法区分，用 contextvar。
+_op_source_context: ContextVar[str | None] = ContextVar("lwa_op_source", default=None)
+
+
+def set_op_source(source: str) -> None:
+    """入口设置本进程的操作来源（仅接受 cli/manager/daemon/agent）。
+
+    服务子进程（manager/daemon）必须**强制**赋值：它们由 CLI fork/spawn，
+    继承来的 env 里可能已是 ``cli``，setdefault 会失聪。
+    """
+    if source not in _OP_SOURCE_VALUES:
+        raise ValueError(f"LWA_OP_SOURCE 只能是 {_OP_SOURCE_VALUES}，得到 {source!r}")
+    os.environ[_OP_SOURCE_ENV] = source
+
+
+def set_op_source_context(source: str):
+    """线程/协程级来源覆盖（Agent 通道），返回 contextvar token 供还原。"""
+    if source not in _OP_SOURCE_VALUES:
+        raise ValueError(f"LWA_OP_SOURCE 只能是 {_OP_SOURCE_VALUES}，得到 {source!r}")
+    return _op_source_context.set(source)
+
+
+def reset_op_source_context(token) -> None:
+    """还原 :func:`set_op_source_context` 的线程级来源覆盖。"""
+    _op_source_context.reset(token)
+
+
+def current_op_source() -> str:
+    """当前操作来源：线程级覆盖 → 环境变量 → daemon 旧标记回退 → cli。"""
+    context_source = _op_source_context.get()
+    if context_source:
+        return context_source
+    env_source = os.environ.get(_OP_SOURCE_ENV)
+    if env_source in _OP_SOURCE_VALUES:
+        return env_source
+    if os.environ.get(_DAEMON_MARKER_ENV) == "1":
+        return "daemon"
+    return _OP_SOURCE_DEFAULT
+
+
 def get_logger(name: str) -> logging.Logger:
     """获取子模块 logger，自动归入 ``local_webpage_access`` 命名空间。"""
     if name.startswith("local_webpage_access"):
@@ -188,6 +244,10 @@ __all__ = [
     "setup_logging",
     "get_logger",
     "append_global_log",
+    "set_op_source",
+    "set_op_source_context",
+    "reset_op_source_context",
+    "current_op_source",
     "secure_chmod",
     "instance_log_dir",
     "write_instance_log",

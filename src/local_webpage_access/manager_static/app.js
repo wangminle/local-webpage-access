@@ -144,6 +144,46 @@
       return "加载失败：" + detail + "（请检查管理服务是否在运行）";
     }
 
+    // ---- S2-09 / BUG-751：乐观并发 ----
+
+    // 生命周期操作 URL 携带列表快照里的 revision（expectedRevision 查询参数）。
+    // revision 缺失/非有限数时不携带，保持对旧后端的兼容。
+    function opUrlWithRevision(id, op, revision) {
+      var base = "/api/instances/" + encodeURIComponent(id) + "/" + op;
+      if (typeof revision === "number" && isFinite(revision)) {
+        return base + "?expectedRevision=" + revision;
+      }
+      return base;
+    }
+
+    // update 类操作把 revision 放进 JSON body（键存在才携带，null/undefined 不带）。
+    function bodyWithRevision(body, revision) {
+      var out = {};
+      if (body) {
+        for (var k in body) out[k] = body[k];
+      }
+      if (typeof revision === "number" && isFinite(revision)) {
+        out.expectedRevision = revision;
+      }
+      return out;
+    }
+
+    // 409 revision_conflict：实例在列表快照之后已被其它通道更新
+    function isRevisionConflict(e) {
+      return !!(e && e.code === "revision_conflict");
+    }
+
+    // 操作类请求的统一错误出口：revision 冲突给固定提示并刷新列表，
+    // 其余错误透传人话消息。prefix 形如「正在」+opLabel(op)。
+    function opErrorToast(self, prefix, e) {
+      if (isRevisionConflict(e)) {
+        self.toast("实例已被其他操作更新，请刷新后重试", "error");
+        self.refresh();
+        return;
+      }
+      self.toast(prefix + "失败：" + e.message, "error");
+    }
+
     // ---- 详情/弹窗渲染辅助（HTML 字符串，经 v-html 注入）----
 
     function section(title, content) {
@@ -235,7 +275,13 @@
           ["observedState", "观测状态"], ["runtimeAccess", "运行时访问"],
           ["observationError", "观测错误"], ["lastTrustedState", "最后可信状态"],
           ["lastHealthCheckAt", "最近健康检查"], ["updatedAt", "更新时间"],
-        ]) + sourceInfoHtml(inst)
+        ]) +
+          (inst.lastOperation
+            ? '<div class="detail-kv"><dt>最近操作</dt><dd>' +
+              LWA.esc(LWA.operationSummaryText(inst.lastOperation)) +
+              "</dd></div>"
+            : "") +
+          sourceInfoHtml(inst)
       );
       if (manifest && !manifest._error) {
         html += section(
@@ -281,6 +327,26 @@
             '<p class="detail-hint">可在列表操作区点击「路径别名」设置，或导入时在 CLI 指定：<code>lwa import inbox/foo.zip --path-alias my-slug</code></p>'
         );
       } else if (inst.routeHost) {
+        var guardLine = "";
+        if (inst.aliasGuardResult) {
+          guardLine =
+            '<p class="detail-hint">别名守卫：<code>' +
+            LWA.esc(inst.aliasGuardResult) + "</code>" +
+            (inst.aliasGuardCheckedAt
+              ? "（检查于 " + LWA.esc(LWA.formatLocalDateTime(inst.aliasGuardCheckedAt)) + "）"
+              : "") +
+            (inst.aliasGuardError
+              ? '<br><span class="cell-muted">' + LWA.esc(inst.aliasGuardError) + "</span>"
+              : "") +
+            (inst.aliasProbeCoverage
+              ? '<br><span class="cell-muted">采样覆盖：' +
+                (inst.aliasProbeCoverage.checked || 0) + "/" +
+                (inst.aliasProbeCoverage.found || 0) +
+                (inst.aliasProbeCoverage.truncated ? "（有截断）" : "") +
+                "，外部引用跳过 " + (inst.aliasProbeCoverage.skippedExternal || 0) + " 条</span>"
+              : "") +
+            "</p>";
+        }
         html += section(
           "路径别名",
           '<p class="detail-hint">已启用 <code>/' +
@@ -291,6 +357,7 @@
                 '" target="_blank" rel="noopener">打开路径入口</a>'
               : "") +
             "</p>" +
+            guardLine +
             '<p class="detail-hint cell-muted">可在操作区「路径别名」在线修改；原地更新 zip 会保留当前别名。</p>'
         );
       }
@@ -770,7 +837,13 @@
             }
           }
           this.toast("正在" + opLabel(op) + "…");
-          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/" + op, { method: "POST" })
+          // S2-09 / BUG-751：携带列表快照里的 revision（cancel-build 无该参数）
+          var revInst = (this.instances || []).find(function (x) { return x.id === id; });
+          var opUrl = "/api/instances/" + encodeURIComponent(id) + "/" + op;
+          if (op !== "cancel-build") {
+            opUrl = opUrlWithRevision(id, op, revInst && revInst.revision);
+          }
+          apiFetch(this, opUrl, { method: "POST" })
             .then(function (data) {
               // C.R03：start 可能返回 pendingConfirmation（top-1 失败，需用户确认降级）
               if (op === "start" && data && data.pendingConfirmation) {
@@ -802,7 +875,7 @@
               }
               self.refresh();
             })
-            .catch(function (e) { self.toast(opLabel(op) + "失败：" + e.message, "error"); });
+            .catch(function (e) { opErrorToast(self, opLabel(op), e); });
         },
 
         // C.R03：确认降级到等价 fallback 候选
@@ -811,9 +884,11 @@
           var id = this.fallbackDialog.instanceId;
           if (!id) return;
           this.fallbackDialog.submitting = true;
+          // S2-09 / BUG-751：降级重试同样携带列表快照里的 revision
+          var fbInst = (this.instances || []).find(function (x) { return x.id === id; });
           apiFetch(
             this,
-            "/api/instances/" + encodeURIComponent(id) + "/confirm-fallback",
+            opUrlWithRevision(id, "confirm-fallback", fbInst && fbInst.revision),
             { method: "POST" }
           )
             .then(function (data) {
@@ -832,7 +907,7 @@
             })
             .catch(function (e) {
               self.fallbackDialog.submitting = false;
-              self.toast("降级失败：" + e.message, "error");
+              opErrorToast(self, "降级", e);
             });
         },
 
@@ -848,9 +923,13 @@
         doUpdateFromDir: function (id) {
           var self = this;
           this.toast("正在从文件夹源更新…");
+          // S2-09 / BUG-751：携带列表快照里的 revision（JSON body）
+          var dirInst = (this.instances || []).find(function (x) { return x.id === id; });
           apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/update-from-dir", {
             method: "POST",
-            body: JSON.stringify({ restart: true, keepData: true }),
+            body: JSON.stringify(
+              bodyWithRevision({ restart: true, keepData: true }, dirInst && dirInst.revision)
+            ),
           })
             .then(function (data) {
               if (data.skipped) {
@@ -860,7 +939,7 @@
               }
               self.refresh();
             })
-            .catch(function (e) { self.toast("从文件夹源更新失败：" + e.message, "error"); });
+            .catch(function (e) { opErrorToast(self, "从文件夹源更新", e); });
         },
 
         // IMP-065：从 GitHub 远端更新 git 源实例（先 ls-remote 探测，
@@ -868,9 +947,13 @@
         doUpdateFromGit: function (id) {
           var self = this;
           this.toast("正在探测 GitHub 远端…");
+          // S2-09 / BUG-751：携带列表快照里的 revision（JSON body）
+          var gitInst = (this.instances || []).find(function (x) { return x.id === id; });
           apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/update-from-git", {
             method: "POST",
-            body: JSON.stringify({ restart: true, keepData: true }),
+            body: JSON.stringify(
+              bodyWithRevision({ restart: true, keepData: true }, gitInst && gitInst.revision)
+            ),
           })
             .then(function (data) {
               if (data.skipped) {
@@ -881,6 +964,11 @@
               self.refresh();
             })
             .catch(function (e) {
+              if (isRevisionConflict(e)) {
+                self.toast("实例已被其他操作更新，请刷新后重试", "error");
+                self.refresh();
+                return;
+              }
               self.toast("从 GitHub 更新失败：" + LWA.describeGitError(e), "error");
             });
         },
@@ -1509,6 +1597,10 @@
     if (typeof window !== "undefined" && window.__LWA_TEST_HOOKS__) {
       window.__LWA_TEST_HOOKS__.renderPageviewHtml = renderPageviewHtml;
       window.__LWA_TEST_HOOKS__.closeIpListsOnOutsideClick = closeIpListsOnOutsideClick;
+      // S2-09 / BUG-751：乐观并发纯函数
+      window.__LWA_TEST_HOOKS__.opUrlWithRevision = opUrlWithRevision;
+      window.__LWA_TEST_HOOKS__.bodyWithRevision = bodyWithRevision;
+      window.__LWA_TEST_HOOKS__.isRevisionConflict = isRevisionConflict;
     }
 
     var app = vue.createApp(root);

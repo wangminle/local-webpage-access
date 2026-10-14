@@ -558,6 +558,12 @@ class AgentWorker:
 
     def _execute(self, record: dict[str, Any]) -> None:
         op_id = str(record["operation_id"])
+        # S2-08 / issue #59：Agent 通道触发的操作与 manager 页面线程同进程，
+        # env 无法区分来源——用 contextvar 在线程级标记 source=agent，使阶段
+        # 日志镜像到 lwa.log 时带正确来源。
+        from local_webpage_access.logging import set_op_source_context
+
+        source_token = set_op_source_context("agent")
         with _INFLIGHT_LOCK:
             _INFLIGHT_OPS.add(op_id)
         heartbeat = _LeaseHeartbeat(self, op_id)
@@ -597,6 +603,9 @@ class AgentWorker:
             heartbeat.stop()
             with _INFLIGHT_LOCK:
                 _INFLIGHT_OPS.discard(op_id)
+            from local_webpage_access.logging import reset_op_source_context
+
+            reset_op_source_context(source_token)
 
     def _run_deploy(self, record: dict[str, Any]) -> None:
         from local_webpage_access.importer import Importer

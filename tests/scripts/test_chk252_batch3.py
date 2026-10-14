@@ -525,7 +525,8 @@ def test_recreate_container_runtime_up_failure_rolls_back(
     with pytest.raises(DockerError, match="compose up 爆炸"):
         hosting.recreate_container_runtime(workspace, config, registry, "recreate-up-fail")
 
-    assert fake.down_calls == 1
+    # S2-04：先尝试恢复快照旧 compose（down 一次），无快照回退 failed 收敛（再 down 一次）
+    assert fake.down_calls == 2
     reloaded = InstanceManifest.load(workspace.app_manifest_path("recreate-up-fail"))
     assert reloaded.status == Status.FAILED
     assert reloaded.lastError and "compose up 爆炸" in reloaded.lastError
@@ -584,7 +585,8 @@ def test_recreate_container_runtime_probe_failure_rolls_back(
     with pytest.raises(HostingError, match="必选探针未通过"):
         hosting.recreate_container_runtime(workspace, config, registry, "recreate-probe-fail")
 
-    assert fake.down_calls == 1
+    # S2-04：先尝试恢复快照旧 compose（down 一次），无快照回退 failed 收敛（再 down 一次）
+    assert fake.down_calls == 2
     reloaded = InstanceManifest.load(workspace.app_manifest_path("recreate-probe-fail"))
     assert reloaded.status == Status.FAILED
     assert reloaded.lastError and "必选探针未通过" in reloaded.lastError

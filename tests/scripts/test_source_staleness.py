@@ -323,7 +323,7 @@ def _patched_cli_env(monkeypatch, workspace, config, registry):
     )
     monkeypatch.setattr(
         "local_webpage_access.lifecycle.rebuild_instance",
-        lambda ws, cfg, reg, iid, *, out=None: _make_manifest(iid),
+        lambda ws, cfg, reg, iid, *, out=None, ignore_alias_guard=False: _make_manifest(iid),
     )
     # rebuild 的 finally 会 reg.close()；测试后还要断言，挡住 close
     monkeypatch.setattr(registry, "close", lambda: None)
@@ -418,7 +418,7 @@ def test_cli_rebuild_default_prints_staleness_warning(
     (src / "main.py").write_text("v2")
     _patched_cli_env(monkeypatch, workspace, config, registry)
 
-    def _fake_rebuild(ws, cfg, reg, iid, *, out=None):
+    def _fake_rebuild(ws, cfg, reg, iid, *, out=None, ignore_alias_guard=False):
         if out is not None:
             out.append("源码目录与 current/ 不一致（上次同步后源码已变更）")
         return _make_manifest(iid)

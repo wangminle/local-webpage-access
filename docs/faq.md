@@ -68,7 +68,7 @@ lwa setup --full --resume     # 组权限刷新后继续；exit 2=session_refres
 | 2 | `sessionRefreshRequired`：已加 docker 组但当前会话未继承 | 重登或 `newgrp docker` 后 `--resume`，并重启 manager/daemon |
 | 1 | 其余 unready | 按输出提示修复后 `--resume` |
 
-Full 下系统 `caddy.service` / 外部占用 `:2019` 会 fail-closed；须由 LWA gateway 以 `serviceUser` 托管。
+Full 下系统 `caddy.service` / 外部占用 admin 端口（V0.10.0 起按工作区分配，未分配为 `:2019`）会 fail-closed；须由 LWA gateway 以 `serviceUser` 托管。
 
 ### 后台 capability 缓存 `overall=unready`，但 `lwa doctor --profile full` 已是 ready？
 
@@ -404,6 +404,22 @@ lwa rebuild <id>
 首次启动前无片段）在首次活验证失败时才按 BUG-586 收敛清除。另：统一入口对未
 命中任何别名路由的请求返回 **404**（此前是 200 空体，入口静默失效难定位）。
 
+### 别名验证失败时命令的退出码是什么？（V0.10.0 / issue #52，决策 D2）
+
+`lwa start` / `restart` / `rebuild` / `import --update` 收尾统一输出一行别名摘要
+`别名 /<alias>/:passed | failed(<原因>) | skipped(<原因>)`。失败按性质分类：
+
+* **content 级**（不带前缀的加载型绝对资源、JS/CSS 返回 HTML、MIME 错误）：内容已
+  更新/实例已启动，但别名不可用——命令以**退出码 4**（部分成功）结束，脚本可据此
+  与「没更新成」（退出码 1）区分；修复后重新执行同一命令即可。
+* **transient 级**（连接拒绝、5xx、超时）：维持 issue #21 的保留策略，只告警，
+  退出码 0。
+* **skipped**（非 Caddy 后端 / 显式跳过 / 实例未运行）：退出码 0。
+
+`--ignore-alias-guard` 可显式跳过守卫（记审计事件）。`import --update` 时若实例
+已有别名，新内容会在**换入前**过同一道守卫，未通过即拒绝且 `current/` 零副作用
+（决策 D3），拒绝文案给出补救命令；`--ignore-alias-guard` 可越过。
+
 ### 实例识别为 pending
 
 ```
@@ -564,9 +580,45 @@ lifecycle 锁在同一实例的操作间互斥（build/探针/回滚全程持锁
 * **持有者进程已退出**：文件锁已随进程退出释放，稍候重试即可接管。
 
 另外 daemon 对**刚失败**的实例会先退避一个周期（默认 60s）再自动重建，避免
-与手工 `lwa restart` 相撞。daemon 自动恢复的起止与 `lifecycle_stage` 阶段
-会镜像一份到 `logs/lwa.log`（完整日志在 `logs/daemon.log`，issue #16），
-构建失败后无需手动重试，盯 `lwa.log` 即可看到自动恢复进度。
+与手工 `lwa restart` 相撞。daemon / manager / Agent 通道触发的操作，其
+起止与 `lifecycle_stage` 阶段会镜像一份到 `logs/lwa.log`，行首带
+`source=`（`source=daemon` 完整日志在 `logs/daemon.log`，issue #16；
+`source=manager` 在 `manager.log`；`source=agent` 为 Agent 通道操作，
+issue #59 / S2-08），构建失败后无需手动重试，盯 `lwa.log` 即可看到自动恢复进度。
+
+### rebuild / restart 报「实例仍在运行，<操作> 已中止」？（issue #54 / N3）
+
+`lwa rebuild`、`lwa restart`、runtime recreate（配置指纹变化触发的 force-recreate）
+与工作区迁移在动手前都必须先停掉旧容器。**停机失败（`docker compose down/stop`
+报错，或容器运行状态无法确认）时操作立即中止**并报「实例仍在运行，<操作> 已中止」：
+
+* 旧容器仍在服务，**manifest 的 `containerId`/`imageId` 不会被清空**——修好
+  Docker 后重试即可，不会出现「身份丢了、旧容器又删不掉」的半成品现场；
+* 实例**不会被标为 failed**，registry 状态保持操作前的观测值；
+* 容器本来就没在跑时停机视为成功，操作照常继续。
+
+迁移路径的停机失败还会被 S1-05 停机安全门兜底：后置校验确认仍有容器存活时
+MOVE 不会执行，`--force-quiesce` 可显式越过。
+
+### rebuild 失败了，我的旧服务还在吗？（issue #51 / N7，先建后换）
+
+**在跑的容器实例**重建默认走「先建后换」：
+
+* **构建失败**（依赖装不上、buildHook 非零等）：旧容器从未被停，全程在服务；
+  命令报「构建失败，旧版本仍在服务」并非零退出，`docker/` 下的生成物已自动
+  恢复为重建前快照，重试前修 Dockerfile/依赖即可。
+* **新版本 up 或验证失败**（旧容器已停）：自动补偿——down 新容器、恢复快照、
+  把保留的 `:prev` 镜像打回 `:latest`、拉起旧版本并验证。补偿成功则服务无缝
+  回到旧版本，命令报「重建失败，已回滚到旧版本并恢复服务」；补偿也失败时实例
+  标 failed，`lastOperation.rollbackNotes` 列出残留项，需人工处理。
+* 以上两类失败都记录在 `lastOperation`（`lwa status` 与管理页显示
+  「最近一次重建失败（时间、原因）」），**实例不会被误标 failed、旧服务不受影响**。
+* 构建期间旧实例照常服务，构建进度见 `apps/<id>/logs/build.log` 与
+  `lastOperation=building`。
+
+**例外**：manifest `container` 段设了 `"rebuildStrategy": "stop-first"` 的实例
+（低内存小主机的逃生口）恢复旧的先停后建顺序——此时构建失败没有旧版本可回退；
+首次部署（无旧容器）也谈不上回滚。
 
 ### 构建失败（OOM）
 
@@ -722,6 +774,8 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
   * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
   * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
 * **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME）+ 绝对 API 路径对照（IMP-055），直接指出哪些实例需要 rebuild 或 API 改造；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。瞬时连接失败（TIMEOUT / REFUSED）**不**算 IMP-023，避免误触发 `--rebuild-if-needed`。
+* **采样边界（V0.10.0，issue #58）**：别名活验证采样覆盖入口 HTML **直接引用**的加载型资源——`script src`、stylesheet / modulepreload / preload 等 `link`、`img` 等媒体标签与 `srcset`（相对路径拼别名前缀参与探测；外部 / 协议相对引用跳过不占名额），上限 20 条；manifest 记录 `aliasProbeCoverage={checked, found, truncated, skippedExternal}`，通过/失败消息会说明边界。JS bundle 内部动态加载的资源不在采样范围。
+* **纯 API 服务（V0.10.0，N5）**：契约 `servesUi=false` 的实例没有 HTML 入口——别名入口返回任意非 5xx 即视为别名可用，记 `passed(api-only)`，跳过 HTML 与资源探针；之前这类实例设别名后验证必然失败。
 
 ### 应用开发约定：客户端 IP 与转发头（issue #9）
 

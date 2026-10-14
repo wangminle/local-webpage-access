@@ -75,7 +75,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
 ### `logs/`
 
 - **用途**：工作区级日志（IMP-034）：
-  - `lwa.log` — CLI / 通用操作；daemon 自动恢复的起止与 `lifecycle_stage` 阶段也会镜像一份到此（V0.8.8 / issue #16，完整 daemon 日志仍在 `daemon.log`）
+  - `lwa.log` — CLI / 通用操作；非 CLI 来源（daemon / manager / Agent 通道）的操作阶段（`lifecycle_stage`）也会按来源镜像一份到此，行首带 `source=`（issue #16、issue #59 / S2-08；完整 daemon 日志仍在 `daemon.log`）
   - `manager.log` / `daemon.log` / `gateway.log` — 各后台进程
   - `static-access.log` — Caddy JSON access log（别名入口 + 无别名静态直连端口；浏览量 IMP-024/028）
 - 排障对照见 [FAQ · 症状→日志](faq.md#症状--日志文件--命令imp-034)。

@@ -182,8 +182,12 @@ detached 进程抢锁"产生重复 watcher/manager；单元未在管时退回 st
 ## Caddy 所有权
 
 Caddy 由 **LWA 托管**（`lwa-gateway` 单元跑 `gateway_service` 前台，持有 master +
-admin :2019）。**切勿同时启用发行版 `caddy.service`**——会争用 `:2019`，`check` 会判
-fail。若你已用系统 `caddy.service`，请停用它再 `lwa autostart install --with-caddy`。
+admin 端口）。admin 端口 V0.10.0 起按工作区独立分配（20201–20500，登记
+`run/admin-port`，主 Caddyfile 渲染 `admin 127.0.0.1:<port>`），未分配的工作区
+仍为 legacy `:2019`。**切勿同时启用发行版 `caddy.service`**——在旧版本或未分配
+工作区会争用 `:2019`，`check` 会判 fail。若你已用系统 `caddy.service`，请停用它再
+`lwa autostart install --with-caddy`。独立 admin 端口在结构上阻断其他工作区（含已
+删除工作区）的孤儿进程向共享 :2019 推配置清空本网关（BUG-783）。
 
 ## 完备性检查 `lwa autostart check`
 
@@ -195,7 +199,7 @@ fail。若你已用系统 `caddy.service`，请停用它再 `lwa autostart insta
 - 单元形态为**前台入口**（旧 `… on` 启动器 → fail，可 `repair`）
 - 单元已加载/启用，且前台进程真正存活（单元 active 但 MainPID 已死 / **身份不符本工作区前台模块** / 服务进程探测不到 → fail，杜绝假绿）
 - 单元 PATH 已固化且**可用**（目录真实存在、含解释器或基础系统目录；gateway 须能按该 PATH 解析 caddy）
-- Caddy 二进制可执行；**无系统 `caddy.service` 与外部 `:2019` 占用冲突**（`staticGateway=caddy` 时）
+- Caddy 二进制可执行；**无系统 `caddy.service` 与外部 admin 端口占用冲突**（`staticGateway=caddy` 时；admin 端口按工作区分配，未分配为 legacy `:2019`）
 - linger（Linux/WSL：未 linger → warn）
 - WSL 发行版 / `/mnt/×` 工作区 / 网络变化提示
 - Docker 引擎可达（有容器实例时，warn）；**权限不足时提示 newgrp + 重启 manager/daemon**，并建议 `lwa doctor --profile full` / `lwa capabilities`
@@ -222,8 +226,10 @@ LWA 的 manager / daemon 继承**启动时**的用户组。刚执行 `usermod -a
 重复 enable 保持幂等、零中断窗口。macOS 下 `launchctl bootstrap` 偶发 error 5（bootout 竞态）
 会自动短重试（共 3 次，间隔 1s）；仍失败且 gateway 意图为 enabled 时 **fail-safe 直接拉起**
 gateway 进程（`start_gateway`），拉不起则给出 `lwa gateway on` 恢复指引--enable 失败不再
-留下"单元未加载 + 进程下线"的空窗。另外 `check` 的 `:2019` 占用检查会先核对 live
-`run/caddy.pid` 与 admin owner，自家 caddy 不再误报 `caddy_conflict_2019`（issue #4）。
+留下"单元未加载 + 进程下线"的空窗。另外 `check` 的 admin 端口占用检查会先核对 live
+`run/caddy.pid` 与 admin owner，自家 caddy 不再误报 `caddy_conflict_2019`（issue #4）；
+端口归属探测手段缺失/异常时改为「无法确认归属」并列出探测异常（仍阻断，S2-07），
+不再笼统说「被外部占用」。
 
 ## 旧配置迁移
 

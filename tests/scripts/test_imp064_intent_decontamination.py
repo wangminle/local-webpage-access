@@ -295,6 +295,9 @@ def test_manager_subprocess_exit_keeps_intent(ws: Workspace, cfg: Config, monkey
     """验收（064.03b）：run_service_main 的 finally 只清 pid，不写 enabled=False。"""
     import local_webpage_access.manager_service as ms
 
+    # S2-08：run_service_main 会 set_op_source("manager") 直写 os.environ；
+    # delenv 快照使 teardown 清掉该污染，避免影响后续依赖默认 cli 来源的用例。
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
     # 构造最小可运行现场
     from local_webpage_access.config import example_config_text
 

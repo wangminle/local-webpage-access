@@ -13,6 +13,40 @@ from local_webpage_access.cli._common import log, open_workspace_registry
 from local_webpage_access.errors import LwaError
 
 
+def _print_alias_guard_summary(manifest: Any) -> int:
+    """S2-05 收口摘要：输出「别名 /<alias>/:passed | failed(<原因>) | skipped(<原因>)」。
+
+    返回命令退出码增量——content 级失败返回 4（D2：部分成功，内容已更新、
+    别名验证失败）；其余 0。实例无别名时不输出、返回 0。
+    """
+    from local_webpage_access.path_alias import (
+        alias_guard_exit_code,
+        alias_guard_summary_line,
+    )
+
+    line = alias_guard_summary_line(manifest)
+    if line is None:
+        return 0
+    result = (getattr(manifest, "aliasGuardResult", None) or "").strip()
+    if result.startswith("failed"):
+        fg = typer.colors.RED
+    elif result.startswith("skipped"):
+        fg = typer.colors.YELLOW
+    else:
+        fg = typer.colors.GREEN
+    typer.secho(f"  {line}", fg=fg)
+    code = alias_guard_exit_code(manifest)
+    if code == 4:
+        detail = getattr(manifest, "aliasGuardError", None) or ""
+        suffix = f"（{detail}）" if detail else ""
+        typer.secho(
+            f"  别名验证失败（内容级）{suffix}：内容已更新，但别名入口不可用。"
+            "修复后重新执行本命令，或加 --ignore-alias-guard 豁免（记审计事件）。",
+            fg=typer.colors.YELLOW,
+        )
+    return code
+
+
 def start(
     instance_id: str = typer.Argument(..., help="要启动的实例 ID"),
     auto_fallback: bool = typer.Option(
@@ -24,6 +58,11 @@ def start(
         False,
         "--no-fallback",
         help="top-1 候选失败时不降级（直接失败）",
+    ),
+    ignore_alias_guard: bool = typer.Option(
+        False,
+        "--ignore-alias-guard",
+        help="S2-05：跳过启动后的别名活验证守卫（记审计事件；用于已知风险场景）",
     ),
     yes: bool = typer.Option(
         False,
@@ -62,6 +101,7 @@ def start(
                     reg,
                     instance_id,
                     fallback_policy=fallback_policy,
+                    ignore_alias_guard=ignore_alias_guard,
                 )
             except FallbackConfirmationRequired as fcr:
                 # C.R03：交互式确认--展示等价计划并等待用户选择
@@ -71,6 +111,7 @@ def start(
                     reg,
                     instance_id,
                     fcr,
+                    ignore_alias_guard=ignore_alias_guard,
                 )
         finally:
             reg.close()
@@ -95,6 +136,9 @@ def start(
                 fg=typer.colors.YELLOW,
             )
         typer.echo(f"  健康：{manifest.network.healthUrl}")
+        guard_code = _print_alias_guard_summary(manifest)
+        if guard_code:
+            raise typer.Exit(code=guard_code)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -107,6 +151,8 @@ def _handle_fallback_confirmation(
     reg: Any,
     instance_id: str,
     fcr: Any,
+    *,
+    ignore_alias_guard: bool = False,
 ) -> Any:
     """C.R03：处理 FallbackConfirmationRequired--展示等价计划并等待用户确认。
 
@@ -163,6 +209,7 @@ def _handle_fallback_confirmation(
         reg,
         instance_id,
         fallback_policy="auto-equivalent",
+        ignore_alias_guard=ignore_alias_guard,
     )
 
 
@@ -183,17 +230,29 @@ def stop(instance_id: str = typer.Argument(..., help="要停止的实例 ID")) -
         raise typer.Exit(code=1)
 
 
-def restart(instance_id: str = typer.Argument(..., help="要重启的实例 ID")) -> None:
+def restart(
+    instance_id: str = typer.Argument(..., help="要重启的实例 ID"),
+    ignore_alias_guard: bool = typer.Option(
+        False,
+        "--ignore-alias-guard",
+        help="S2-05：跳过重启后的别名活验证守卫（记审计事件；用于已知风险场景）",
+    ),
+) -> None:
     """重启实例（先停再启，容器走轻量 compose start）。"""
     from local_webpage_access.lifecycle import restart_instance
 
     try:
         ws, config, reg = open_workspace_registry()
         try:
-            restart_instance(ws, config, reg, instance_id)
+            manifest = restart_instance(
+                ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+            )
         finally:
             reg.close()
         typer.secho(f"已重启实例：{instance_id}", fg=typer.colors.GREEN)
+        guard_code = _print_alias_guard_summary(manifest)
+        if guard_code:
+            raise typer.Exit(code=guard_code)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -224,6 +283,11 @@ def rebuild(
         "--sync",
         help="issue #8：重建前先同步上游源码（folder 源走 --from-dir 更新管线，git 源走 --from-git 更新管线）",
     ),
+    ignore_alias_guard: bool = typer.Option(
+        False,
+        "--ignore-alias-guard",
+        help="S2-05：跳过重建后的别名活验证守卫（记审计事件；用于已知风险场景）",
+    ),
 ) -> None:
     """重建实例（强制重新构建镜像 / 产物，经构建队列限流）。
 
@@ -234,16 +298,23 @@ def rebuild(
 
     try:
         ws, config, reg = open_workspace_registry()
+        manifest = None
         try:
             if sync:
                 _sync_source_before_rebuild(ws, config, reg, instance_id)
             stale_warnings: list[str] = []
-            rebuild_instance(ws, config, reg, instance_id, out=stale_warnings)
+            manifest = rebuild_instance(
+                ws, config, reg, instance_id, out=stale_warnings, ignore_alias_guard=ignore_alias_guard
+            )
         finally:
             reg.close()
         for warning in stale_warnings:
             typer.secho(f"⚠ 源码陈旧：{warning}", fg=typer.colors.YELLOW)
         typer.secho(f"已重建实例：{instance_id}", fg=typer.colors.GREEN)
+        if manifest is not None:
+            guard_code = _print_alias_guard_summary(manifest)
+            if guard_code:
+                raise typer.Exit(code=guard_code)
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

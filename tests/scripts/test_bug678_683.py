@@ -76,7 +76,7 @@ def test_restart_records_alias_guard_result(
     config.staticGatewayPort = 8080
     restarted = lifecycle.restart_instance(workspace, config, registry, iid)
     reloaded = InstanceManifest.load(workspace.app_manifest_path(restarted.id))
-    assert reloaded.aliasGuardResult == "failed"
+    assert reloaded.aliasGuardResult == "failed(content)"
     assert reloaded.static is not None
     assert reloaded.static.routeHost == iid
 
@@ -107,7 +107,7 @@ def test_rebuild_caddy_aliases_records_guard(
     rebuilt = gateway_switch._rebuild_caddy_aliases(workspace, registry, gw)
     assert iid in rebuilt
     reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
-    assert reloaded.aliasGuardResult == "failed"
+    assert reloaded.aliasGuardResult == "failed(content)"
 
 
 def test_build_env_rejects_managed_host_port(workspace, registry) -> None:
@@ -454,7 +454,7 @@ def test_enable_running_builtin_records_skipped_guard(
     assert iid in enabled
     assert gw.enabled and gw.enabled[0][2] == iid
     reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
-    assert reloaded.aliasGuardResult == "skipped"
+    assert reloaded.aliasGuardResult == "skipped(非 Caddy 后端)"
     assert reloaded.aliasGuardCheckedAt not in (None, old_checked)
 
 

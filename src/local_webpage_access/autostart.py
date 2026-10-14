@@ -35,6 +35,7 @@ from typing import Any, Callable, Protocol
 
 from local_webpage_access.config import Config
 from local_webpage_access.doctor import STATUS_FAIL, STATUS_OK, STATUS_WARN
+from local_webpage_access.ownership import Ownership
 from local_webpage_access.paths import Workspace
 from local_webpage_access.platform_detect import (
     PLATFORM_LINUX,
@@ -2155,20 +2156,22 @@ def run_check(
     return report
 
 
-def _port_2019_foreign(ws: Workspace, config: Config) -> bool:
-    """:2019 是否被**非本工作区 gateway**的外部进程占用。
+def _port_2019_probe(ws: Workspace, config: Config) -> tuple[Ownership, list[str]]:
+    """admin 端口（本工作区分配端口，未分配回退 legacy :2019）归属三态探测（S2-07）。
 
-    本工作区 gateway 持有存活且命令行身份匹配的 pid（含 ``caddy`` + 工作区路径）
-    则 :2019 是我们的；仅 PID 存活不够——复用/非 Caddy 进程会假绿（BUG-157）。
-    否则若 :2019 仍可连，即为外部 Caddy/测试孤儿占用。
+    返回 ``(判定, 各探测异常列表)``。判定规则：
 
-    issue #4：``run/gateway.json`` 的 pid 可能是监督器接管前的陈旧裸进程记录
-    （监督器拉起的 caddy 不经 ``start_gateway`` 全路径回写）；必须兼看 live 证据--
-    ``run/caddy.pid``（caddy start --pidfile 所写）与 admin owner 探测--否则会把
-    自家在跑的 caddy 误判成外部占用，诱导用户杀掉自家网关。
+    * 任一正向证据（服务态 pid / live pidfile / admin owner）证实本工作区持有 → OURS；
+    * admin 在线但非本工作区，或端口可连且无本工作区证据 → FOREIGN；
+    * 端口连通性不确定（非拒绝类的连接失败）且无正向证据 → UNKNOWN，
+      调用方须阻断并列出探测异常（不能去启停可能属于其他工作区的网关）。
     """
     import socket
 
+    from local_webpage_access.admin_port import LEGACY_ADMIN_PORT, read_admin_port
+
+    port = read_admin_port(ws) or LEGACY_ADMIN_PORT
+    errors: list[str] = []
     try:
         from local_webpage_access.daemon import is_pid_alive, pid_cmdline_contains
         from local_webpage_access.gateway_service import read_state
@@ -2176,10 +2179,10 @@ def _port_2019_foreign(ws: Workspace, config: Config) -> bool:
         st = read_state(ws)
         if st and st.pid and is_pid_alive(st.pid):
             if pid_cmdline_contains(st.pid, "caddy", str(ws.root)):
-                return False  # :2019 由本工作区存活 master 持有
+                return Ownership.OURS, errors  # 由本工作区存活 master 持有
             # PID 存活但身份不匹配 → 继续探端口，可能是陈旧复用
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"服务态 pid 探测异常：{exc}")
     # live pidfile：caddy start --pidfile 写入的当前 master pid（issue #4）。
     try:
         from local_webpage_access.daemon import is_pid_alive, pid_cmdline_contains
@@ -2190,27 +2193,45 @@ def _port_2019_foreign(ws: Workspace, config: Config) -> bool:
             live_pid = None
         if live_pid is not None and is_pid_alive(live_pid):
             if pid_cmdline_contains(live_pid, "caddy", str(ws.root)):
-                return False  # 当前 master 由本工作区持有（json 记录陈旧）
-    except Exception:  # noqa: BLE001
-        pass
-    # admin owner：admin :2019 响应时直接问当前 master 的归属（issue #4）。
+                return Ownership.OURS, errors  # 当前 master 由本工作区持有（json 记录陈旧）
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"live pidfile 探测异常：{exc}")
+    # admin owner：admin 响应时直接问当前 master 的归属（issue #4）。
     try:
         from local_webpage_access.static_gateway import StaticGateway
 
         owner = StaticGateway(ws, config).inspect_caddy_owner()
         if owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"):
-            return False  # admin 上的 master 属于本工作区
-    except Exception:  # noqa: BLE001
-        pass
+            return Ownership.OURS, errors  # admin 上的 master 属于本工作区
+        if owner.get("admin_alive"):
+            # admin 在线但归不出本工作区 → 确证外部占用。
+            return Ownership.FOREIGN, errors
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"admin owner 探测异常：{exc}")
+    # 端口连通性：能连上即确有监听者且非经验证的本工作区 gateway；
+    # 明确拒绝说明端口空闲；其余失败（超时等）归属不可判定。
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(0.5)
     try:
-        sock.connect(("127.0.0.1", 2019))
-        return True  # 有进程在听 :2019，且不是经验证的本工作区 gateway
-    except OSError:
-        return False
+        sock.connect(("127.0.0.1", port))
+        return Ownership.FOREIGN, errors
+    except ConnectionRefusedError:
+        return Ownership.OURS, errors  # 端口空闲，不属于外部
+    except OSError as exc:
+        errors.append(f"端口 :{port} 连通性探测异常：{exc}")
+        return Ownership.UNKNOWN, errors
     finally:
         sock.close()
+
+
+def _port_2019_foreign(ws: Workspace, config: Config) -> Ownership:
+    """:2019（本工作区分配 admin 端口，未分配回退 legacy :2019）是否被**非本工作区 gateway** 的外部进程占用。
+
+    返回归属三态（S2-07/BUG-748）：UNKNOWN 表示探测手段缺失或异常、无法确认归属。
+    详细探测异常经 :func:`_port_2019_probe` 一并返回，供阻断文案列出。
+    """
+    ownership, _ = _port_2019_probe(ws, config)
+    return ownership
 
 
 def _check_caddy(ws: Workspace, config: Config) -> CheckItem:
@@ -2243,14 +2264,32 @@ def _check_caddy(ws: Workspace, config: Config) -> CheckItem:
                 )
         except Exception:  # noqa: BLE001
             pass
-    # 外部 Caddy/进程占用 :2019（本工作区 gateway 未持存活 pid 却探测到端口在线）
-    if _port_2019_foreign(ws, config):
+    # 外部 Caddy/进程占用 admin 端口（本工作区 gateway 未持存活 pid 却探测到端口在线）。
+    # S2-07 三态：UNKNOWN 时仍阻断（不能去启停可能属于其他工作区的网关），
+    # 但文案改为「无法确认归属」并列出各探测异常，不再说「被外部占用」。
+    from local_webpage_access.admin_port import LEGACY_ADMIN_PORT, read_admin_port
+
+    admin_port = read_admin_port(ws) or LEGACY_ADMIN_PORT
+    ownership, probe_errors = _port_2019_probe(ws, config)
+    if ownership is Ownership.UNKNOWN:
+        detail = "；".join(probe_errors) if probe_errors else "（无明细）"
         return CheckItem(
             "caddy",
             "caddy_conflict_2019",
             STATUS_FAIL,
-            "127.0.0.1:2019 已被外部 Caddy/进程占用，LWA gateway 无法监听",
-            fix="停止占用 :2019 的进程（如 caddy stop / 关测试孤儿），或改其 admin 端口",
+            f"无法确认 :{admin_port} 归属"
+            f"（不能去启停可能属于其他工作区的网关）；探测异常：{detail}",
+            fix="按上述探测异常逐项排查后重试 lwa autostart doctor；"
+            "仍无法确认时请用 lsof -iTCP:<端口> -sTCP:LISTEN 人工核对监听进程",
+        )
+    if ownership is Ownership.FOREIGN:
+        return CheckItem(
+            "caddy",
+            "caddy_conflict_2019",
+            STATUS_FAIL,
+            f"127.0.0.1:{admin_port} 已被外部 Caddy/进程占用，"
+            "LWA gateway 无法监听",
+            fix="停止占用该端口的进程（如 caddy stop / 关测试孤儿），或改其 admin 端口",
         )
     return CheckItem("caddy", "caddy_binary", STATUS_OK, f"caddy: {caddy}，无系统服务/端口冲突")
 

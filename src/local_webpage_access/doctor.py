@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -55,8 +56,13 @@ STATUS_WARN = "warn"
 STATUS_FAIL = "fail"
 STATUS_SKIP = "skip"
 
-# Caddy admin API 端口（与 gateway_service.ADMIN_PORT 一致，本地常量避免循环导入）。
-ADMIN_DOCTOR_PORT = 2019
+# S2-05 / #52：doctor 别名活验证的总时间预算（秒）。去掉「只查前 5 个别名」的
+# 数量上限后，用总预算控制探测成本；预算耗尽时报告剩余未查别名（WARN）。
+_ALIAS_CHECK_TIME_BUDGET = 10.0
+
+# Caddy admin API legacy 端口（与 gateway_service.ADMIN_PORT 一致，本地常量避免循环导入）。
+# BUG-783：探测改经 admin_port.read_admin_port() 取本工作区分配端口，本常量仅作未分配时的回退。
+LEGACY_ADMIN_DOCTOR_PORT = 2019
 
 _ORDER = {STATUS_OK: 0, STATUS_SKIP: 1, STATUS_WARN: 2, STATUS_FAIL: 3}
 
@@ -810,9 +816,13 @@ def check_caddy_health(
     gateway = StaticGateway(ws, config)
 
     findings: list[str] = []
+    # BUG-783：admin 端口按工作区分配（未分配回退 legacy :2019），文案跟实际端口。
+    from local_webpage_access.admin_port import LEGACY_ADMIN_PORT, read_admin_port
+
+    admin_port = read_admin_port(ws) or LEGACY_ADMIN_PORT
     admin_ok = gateway._admin_alive()
     if not admin_ok:
-        findings.append("admin :2019 不可达（master 未运行）")
+        findings.append(f"admin :{admin_port} 不可达（master 未运行）")
 
     validate_ok = True
     main = gateway.main_config_path()
@@ -845,33 +855,55 @@ def check_caddy_health(
             aliases = registry.list_route_hosts()
         except Exception:  # noqa: BLE001 — registry 不可用则跳过入口/站点探测
             aliases = {}
-        # BUG-720：TLS 模式下明文 :8080 站点块不再生成——入口端口与 scheme
-        # 必须跟随 lan_entry_port/entry_scheme，且 https 探活走证书验证，
-        # 否则 doctor 恒报"别名入口不可达"误 WARN。
-        from local_webpage_access.ports import entry_scheme, lan_entry_port
-        from local_webpage_access.static_gateway import make_https_ssl_context
+        # BUG-720：TLS 模式下明文 :8080 站点块不再生成——入口端口必须跟随
+        # lan_entry_port（verify_alias_live 内部自行处理 scheme / TLS 上下文）。
+        from local_webpage_access.ports import lan_entry_port
 
         entry_port = lan_entry_port(config)
-        entry_scheme_now = entry_scheme(config)
-        entry_ctx = (
-            make_https_ssl_context(ws) if entry_scheme_now == "https" else None
-        )
         if aliases and entry_port is not None:
-            # BUG-080：入口根路径 / 无路由（仅 /<alias>/ 有），必须探别名子路径，
-            # 否则恒 404 误报 WARN。
-            # 评审-组5：原只探首别名，部分别名 404（reload 未生效/片段缺失）会漏报；
-            # 改为全量探测（别名多于 5 个时截断，防探测成本失控）。
-            for probe_alias in list(aliases)[:5]:
-                if not gateway.health_check(
-                    int(entry_port),
-                    path=f"/{probe_alias}/",
-                    scheme=entry_scheme_now,
-                    ssl_context=entry_ctx,
-                ):
+            # S2-05 / #52：别名检查改为复用 verify_alias_live（抓取别名入口 HTML
+            # 并探测其中引用的资源，而不仅是「/alias/ 可达」）；去掉「只查前 5 个」
+            # 的数量上限，改为总时间预算控制——预算耗尽时剩余别名明确报告。
+            from local_webpage_access.errors import RecognitionError
+            from local_webpage_access.models import InstanceManifest
+            from local_webpage_access.path_alias import verify_alias_live
+
+            deadline = time.monotonic() + _ALIAS_CHECK_TIME_BUDGET
+            alias_items = list(aliases.items())
+            for idx, (probe_alias, owner_id) in enumerate(alias_items):
+                if time.monotonic() >= deadline:
+                    findings.append(
+                        f"别名活验证时间预算（{_ALIAS_CHECK_TIME_BUDGET:.0f}s）耗尽，"
+                        f"剩余 {len(alias_items) - idx} 个别名未检查："
+                        + ", ".join(a for a, _ in alias_items[idx : idx + 3])
+                        + ("…" if len(alias_items) - idx > 3 else "")
+                    )
+                    break
+                serves_ui = True
+                with contextlib.suppress(Exception):
+                    owner = InstanceManifest.load(ws.app_manifest_path(str(owner_id)))
+                    contract = getattr(owner, "capabilityContract", None) or {}
+                    serves_ui = bool(contract.get("servesUi", True))
+                try:
+                    verify_alias_live(
+                        config,
+                        probe_alias,
+                        entry_html=None,
+                        instance_id=str(owner_id or probe_alias),
+                        workspace=ws,
+                        serves_ui=serves_ui,
+                    )
+                except RecognitionError as exc:
+                    entry_unreachable = True
+                    detail = (getattr(exc, "message", None) or str(exc))[:160]
+                    kind = getattr(exc, "kind", None) or "content"
+                    findings.append(
+                        f"别名 /{probe_alias}/ 活验证失败（{kind}）：{detail}"
+                    )
+                except Exception as exc:  # noqa: BLE001 — 单个别名探测异常不中断整体
                     entry_unreachable = True
                     findings.append(
-                        f"别名入口 :{entry_port}/{probe_alias}/ 不可达"
-                        f"（入口未就绪或该别名 reload 未生效）"
+                        f"别名 /{probe_alias}/ 活验证异常：{str(exc)[:160]}"
                     )
         # 各 enabled 静态站点 hostPort
         try:
@@ -927,7 +959,7 @@ def check_caddy_health(
     return CheckResult(
         "caddy_health",
         STATUS_OK,
-        "Caddy master 在线（admin :2019），主配置 validate 通过",
+        f"Caddy master 在线（admin :{admin_port}），主配置 validate 通过",
     )
 
 
@@ -1632,7 +1664,7 @@ def check_port_contention(
     占 ``:2019``（现场 pid 75224，见复盘 §2.7）。本检查断言关键端口上的监听者
     符合当前后端与工作区预期：
 
-    * ``:2019``（admin）：若有监听者但**非** ``run/caddy.pid`` 所记 master，判 FAIL（孤儿）；
+    * admin 端口（BUG-783：本工作区分配端口，未分配回退 :2019）：若有监听者但**非** ``run/caddy.pid`` 所记 master，判 FAIL（孤儿）；
     * ``:staticGatewayPort``（别名入口）：caddy 后端下应仅 caddy 监听。
 
     无 lsof 时 SKIP（无法判定监听者身份）。
@@ -1653,8 +1685,11 @@ def check_port_contention(
     findings: list[str] = []
     probed = 0
     gateway = StaticGateway(ws, config)
-    # :2019 admin
-    admin_listeners = _list_listeners(ADMIN_DOCTOR_PORT)
+    # BUG-783：admin 探测本工作区分配端口（未分配回退 legacy :2019）
+    from local_webpage_access.admin_port import LEGACY_ADMIN_PORT, read_admin_port
+
+    admin_port = read_admin_port(ws) or LEGACY_ADMIN_PORT
+    admin_listeners = _list_listeners(admin_port)
     caddy_pid = None
     pid_path = gateway.caddy_pid_path()
     if pid_path.is_file():
@@ -1670,14 +1705,14 @@ def check_port_contention(
             if caddy_pid is None or pid != str(caddy_pid)
         ]
         if non_self and not gateway._admin_alive():
-            # :2019 被占但非本工作区 caddy master（admin 不可达说明不是健康 master）
+            # admin 端口被占但非本工作区 caddy master（admin 不可达说明不是健康 master）
             findings.append(
-                f":2019 被 {len(non_self)} 个非预期进程占用"
+                f":{admin_port} 被 {len(non_self)} 个非预期进程占用"
                 f"（{', '.join(sorted({n for n, _ in non_self}))}）——疑似测试/外部孤儿"
             )
         elif non_self:
             findings.append(
-                f":2019 存在非本工作区 caddy.pid 记录的监听者"
+                f":{admin_port} 存在非本工作区 caddy.pid 记录的监听者"
                 f"（{', '.join(sorted({n for n, _ in non_self}))}）"
             )
     # 别名入口（TLS 模式为 gatewayTlsPort + 可选 gatewayPlainPort；明文模式
@@ -1704,10 +1739,19 @@ def check_port_contention(
                     f":{entry_port}（别名入口）存在非 caddy 监听者（{', '.join(non_caddy)}）"
                 )
     if probed == 0:
+        if shutil.which("lsof") is None:
+            # S2-07：归属探测手段缺失时显式可见（WARN），而不是静默 SKIP——
+            # 用户需要知道「关键端口监听者身份不可校验」这一不确定性。
+            return CheckResult(
+                "port_contention",
+                STATUS_WARN,
+                "归属未确认（缺少 lsof）：无法校验关键端口监听者身份",
+                suggestion="安装 lsof 后重跑 lwa doctor（Linux 常用包名 lsof）",
+            )
         return CheckResult(
             "port_contention",
             STATUS_SKIP,
-            "关键端口无监听者或 lsof 不可用，跳过",
+            "关键端口无监听者，跳过",
         )
     if findings:
         return CheckResult(
@@ -1720,7 +1764,7 @@ def check_port_contention(
     return CheckResult(
         "port_contention",
         STATUS_OK,
-        f"关键端口（:2019{f'/:{entry_port}' if entry_port else ''}）监听者符合预期",
+        f"关键端口（:{admin_port}{f'/:{entry_port}' if entry_port else ''}）监听者符合预期",
     )
 
 

@@ -37,8 +37,7 @@ from local_webpage_access.build_process import (
 )
 from local_webpage_access.config import Config
 from local_webpage_access.errors import BuildCancelled, LifecycleError
-from local_webpage_access.logging import get_logger
-from local_webpage_access.models import Status
+from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.registry import Registry
 
 log = get_logger("build_queue")
@@ -573,6 +572,32 @@ class CrossProcessBuildGate:
                     self._conn = None
 
 
+def _operation_record(
+    task: BuildTask,
+    *,
+    status: str,
+    error: str | None = None,
+    kind: str = "build",
+    source: str = "build_queue",
+) -> dict[str, Any]:
+    """把构建任务收尾为一条 ``lastOperation`` 操作态记录（S2-02 / D4）。"""
+    record: dict[str, Any] = {
+        "kind": kind,
+        "status": status,
+        "buildId": task.build_token,
+        "source": source,
+    }
+    started = task.started_at or task.queued_at
+    if started:
+        from datetime import datetime
+
+        record["startedAt"] = datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds")
+    record["finishedAt"] = now_iso()
+    if error:
+        record["error"] = error[:500]
+    return record
+
+
 class BuildQueue:
     """构建并发限流器（WBS-20.02~07 / DEV-047 / IMP-039）。"""
 
@@ -767,11 +792,12 @@ class BuildQueue:
                     self.registry.add_event(instance_id, "build_cancel", "排队任务已取消")
                     log.info("实例 %s 排队构建已取消", instance_id)
                     try:
-                        self.registry.update_status(
+                        # S2-02 / D4：取消是操作态，不改写实例观测状态。
+                        self.registry.update_last_operation(
                             instance_id,
-                            Status.CANCELLED.value,
-                            last_error="构建已取消",
+                            _operation_record(task, status="cancelled", error="构建已取消"),
                         )
+                        self.registry.update_last_error(instance_id, "构建已取消")
                     except Exception:  # noqa: BLE001
                         log.exception("更新 cancelled 状态失败")
                     return CancelResult(
@@ -788,10 +814,8 @@ class BuildQueue:
                         status="cancelling",
                         cancel_requested_at=task.cancel_requested_at,
                     )
-                    try:
-                        self.registry.update_status(instance_id, Status.CANCELLING.value)
-                    except Exception:  # noqa: BLE001
-                        log.exception("更新 cancelling 状态失败")
+                    # S2-02 / D4：cancelling 是任务行中间态，不落实例 status
+                    # （实例状态只由观测决定）；终态 cancelled 由收尾路径写操作态。
                     self.registry.add_event(instance_id, "build_cancel", "正在取消进行中的构建")
                 finish_ev = self._finish_events.get(instance_id)
             else:
@@ -912,11 +936,13 @@ class BuildQueue:
             )
         self.registry.add_event(instance_id, "build_cancel", "取消失败：等待构建退出超时")
         try:
-            self.registry.update_status(
-                instance_id,
-                Status.FAILED.value,
-                last_error="构建取消失败（超时）",
-            )
+            # S2-02 / D4：取消失败是操作态，不标实例 FAILED。
+            if final is not None:
+                self.registry.update_last_operation(
+                    instance_id,
+                    _operation_record(final, status="failed", error="构建取消失败（超时）"),
+                )
+            self.registry.update_last_error(instance_id, "构建取消失败（超时）")
         except Exception:  # noqa: BLE001
             log.exception("更新 cancel_failed 状态失败")
         return CancelResult(
@@ -1018,11 +1044,18 @@ class BuildQueue:
 
     def _update_instance_cancelled(self, instance_id: str, message: str) -> None:
         try:
-            self.registry.update_status(
+            # S2-02 / D4：取消收尾只记操作态与 last_error，不改写实例观测状态。
+            self.registry.update_last_operation(
                 instance_id,
-                Status.CANCELLED.value,
-                last_error=message[:500],
+                {
+                    "kind": "build",
+                    "status": "cancelled",
+                    "finishedAt": now_iso(),
+                    "error": message[:500],
+                    "source": "build_queue",
+                },
             )
+            self.registry.update_last_error(instance_id, message[:500])
             # 收尾仍为 running 的 builds 行
             latest = self.registry.list_builds(instance_id, limit=1)
             if latest and latest[0].get("status") == "running":
@@ -1105,7 +1138,12 @@ class BuildQueue:
             task.status = "queued"
         self._persist_task(task, status="queued")
         try:
-            self.registry.update_status(instance_id, Status.QUEUED.value)
+            # S2-02 / BUG-750 / #57-2（D4）：排队是操作态，不改写实例观测状态——
+            # 仍在服务的实例不得被标成 queued。结果只记 lastOperation 与事件。
+            self.registry.update_last_operation(
+                instance_id,
+                _operation_record(task, status="queued"),
+            )
             self.registry.add_event(instance_id, "build_queue", "构建排队等待槽位")
         except Exception:  # noqa: BLE001
             log.exception("标记 queued 失败")
@@ -1113,13 +1151,16 @@ class BuildQueue:
     def _mark_timeout(self, instance_id: str, task: BuildTask, timeout: float | None) -> None:
         task.status = "failed"
         task.error = f"构建排队超时（{timeout}s）"
+        task.finished_at = time.time()
         self._persist_task(task, status="failed")
         try:
-            self.registry.update_status(
+            # S2-02 / BUG-759 / N6（D4）：排队超时不标 FAILED——旧容器仍在服务，
+            # 实例状态只由观测决定；操作失败写 lastOperation 与 last_error。
+            self.registry.update_last_operation(
                 instance_id,
-                Status.FAILED.value,
-                last_error=task.error,
+                _operation_record(task, status="failed", error=task.error),
             )
+            self.registry.update_last_error(instance_id, task.error)
             self.registry.add_event(instance_id, "build_queue", task.error)
         except Exception:  # noqa: BLE001
             log.exception("记录排队超时事件失败")

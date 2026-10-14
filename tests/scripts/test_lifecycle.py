@@ -142,6 +142,11 @@ def _seed_container(
     current = workspace.app_current(iid)
     (current / "main.py").write_text("app=None")
     (current / "requirements.txt").write_text("fastapi")
+    if deployed:
+        # 已部署实例的盘上生成物必然存在（S2-04：start 的决策依赖它们）
+        workspace.app_docker(iid).mkdir(parents=True, exist_ok=True)
+        workspace.app_compose_path(iid).write_text("services: {}\n", encoding="utf-8")
+        workspace.app_dockerfile_path(iid).write_text("FROM scratch\n", encoding="utf-8")
     manifest = InstanceManifest(
         id=iid,
         name=iid,
@@ -358,6 +363,7 @@ def test_start_falls_back_to_full_rebuild_when_compose_missing(
 ) -> None:
     """BUG-382：容器与生成文件均缺失时，回退完整 build+up。"""
     _seed_container(workspace, registry, "api", deployed=True)
+    workspace.app_compose_path("api").unlink()  # 生成物缺失（S2-04：视为需完整重建）
     fake_runtime._has_container = False
     fake_runtime._running = False
     fake_runtime.calls.clear()
@@ -380,6 +386,11 @@ def test_start_recovers_via_full_rebuild_after_rebuild_failure(
     from local_webpage_access.hosting import host_container
 
     _seed_container(workspace, registry, "api", deployed=True)
+    # S2-03：BUG-300 的身份清空发生在「停旧容器之后」，属于 stop-first 语义；
+    # build-first 下 build 失败时旧容器仍在服务，身份必须保留（见 test_s2_03）。
+    seeded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    seeded.container.rebuildStrategy = "stop-first"
+    seeded.save(workspace.app_manifest_path("api"))
     fake_runtime._running = True
 
     def fail_build(self, iid, *, build_id=None, **kw):

@@ -289,3 +289,17 @@ def _cleanup_orphan_test_processes(tmp_path_factory) -> None:
     # 结束：只清理本会话自己拉起的进程，绝不触碰并发会话
     for pid in sorted(_list_lwa_service_pids_on_pytest_workspaces(only_under=session_basetemp)):
         _kill_pid(pid)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker_tag(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """S2-03：单元测试不触发真实 ``docker tag``（先建后换会为旧镜像打 :prev 标签）。
+
+    真实 Docker 集成测试（LWA_RUN_DOCKER_TESTS=1）保持真实行为；
+    需要验证标签逻辑的用例自行 monkeypatch ``rebuild_txn.tag_image``。
+    """
+    if os.environ.get("LWA_RUN_DOCKER_TESTS") == "1":
+        return
+    from local_webpage_access import rebuild_txn
+
+    monkeypatch.setattr(rebuild_txn, "tag_image", lambda source_ref, target_ref: None)

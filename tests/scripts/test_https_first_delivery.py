@@ -501,23 +501,26 @@ def test_gateway_plain_port_full_conflict_validation() -> None:
 
 
 def test_doctor_caddy_health_probes_tls_entry(workspace: Workspace, registry, monkeypatch) -> None:
-    """修复2：TLS 模式下 caddy_health 探测 https 入口（端口/scheme/证书上下文）。"""
+    """修复2：TLS 模式下 caddy_health 探测 https 入口（端口/scheme/证书上下文）。
+
+    S2-05 后入口探测改走 path_alias.verify_alias_live——打桩其底层
+    _http_probe_alias_resource 观察实际请求的 URL 与证书上下文。
+    """
     import shutil as shutil_mod
 
     import local_webpage_access.doctor as doctor_mod
+    from local_webpage_access import path_alias
     from local_webpage_access.static_gateway import StaticGateway
 
     config = _tls_config()
     captured: dict[str, object] = {}
 
-    def fake_health_check(self, host_port, *, timeout=5.0, path="/", scheme="http", ssl_context=None):
-        captured["port"] = host_port
-        captured["scheme"] = scheme
-        captured["path"] = path
+    def fake_probe(url, *, timeout=3.0, ssl_context=None):
+        captured["url"] = url
         captured["ctx"] = ssl_context
-        return True
+        return True, 200, "text/html", b"<!doctype html><html><body>ok</body></html>"
 
-    monkeypatch.setattr(StaticGateway, "health_check", fake_health_check)
+    monkeypatch.setattr(path_alias, "_http_probe_alias_resource", fake_probe)
     monkeypatch.setattr(StaticGateway, "_admin_alive", lambda self: True)
     monkeypatch.setattr(
         shutil_mod, "which", lambda name: "/usr/bin/caddy" if name == "caddy" else None
@@ -526,9 +529,10 @@ def test_doctor_caddy_health_probes_tls_entry(workspace: Workspace, registry, mo
     monkeypatch.setattr(registry, "list_instances", lambda: [])
 
     result = doctor_mod.check_caddy_health(workspace, config, registry=registry)
-    assert captured["port"] == 8443, "TLS 模式入口端口应为 gatewayTlsPort"
-    assert captured["scheme"] == "https"
-    assert captured["path"] == "/demo/"
+    url = str(captured["url"])
+    assert url.startswith("https://127.0.0.1:8443/demo/"), (
+        f"TLS 模式入口应为 https + gatewayTlsPort，实际 {url}"
+    )
     assert captured["ctx"] is not None, "https 探活必须带证书验证上下文"
     assert result.status in ("ok", "warn", "fail"), result.message
 

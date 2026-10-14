@@ -196,6 +196,59 @@ def test_audit_compose_detects_host_sensitive_nested() -> None:
     assert "host_sensitive_mount" in _critical_codes(findings)
 
 
+def test_audit_compose_non_home_absolute_mount_allowed() -> None:
+    """BUG-784：非家目录的普通绝对路径（/tmp、/mnt、/data 等）不得被判 critical。"""
+    for src in (
+        "/tmp/lwa-drill-vol:/mnt/drill:ro",
+        "/mnt/usb-photos:/photos:ro",
+        "/data/shared:/shared",
+    ):
+        text = _CLEAN_COMPOSE.replace(
+            "      - ../data:/app/data",
+            f"      - ../data:/app/data\n      - {src}",
+        )
+        findings = audit_compose(text)
+        assert "host_sensitive_mount" not in _critical_codes(findings), src
+
+
+def test_audit_compose_host_root_mount_is_critical() -> None:
+    """BUG-784：挂载宿主根目录本身仍 critical。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - /:/host-root:ro",
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" in _critical_codes(findings)
+
+
+def test_audit_compose_double_slash_prefix_cannot_bypass() -> None:
+    """BUG-791：normpath 保留恰好两个前导斜杠，//etc 等不得绕过敏感目录审计。"""
+    for src in (
+        "//:/host-root:ro",
+        "//etc:/host-etc:ro",
+        "//root:/host-root2:ro",
+        "//var/lib/docker:/host-docker:ro",
+        "//proc:/host-proc:ro",
+        "//home/alice/.ssh:/ssh:ro",
+    ):
+        text = _CLEAN_COMPOSE.replace(
+            "      - ../data:/app/data",
+            f"      - ../data:/app/data\n      - {src}",
+        )
+        findings = audit_compose(text)
+        assert "host_sensitive_mount" in _critical_codes(findings), src
+
+
+def test_audit_compose_double_slash_business_path_allowed() -> None:
+    """BUG-791：折叠前导斜杠后，//mnt/data 这类业务路径保持放行。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../data:/app/data\n      - //mnt/data:/data:ro",
+    )
+    findings = audit_compose(text)
+    assert "host_sensitive_mount" not in _critical_codes(findings)
+
+
 def test_audit_compose_normalizes_relative_host_mount_traversal() -> None:
     """BUG-304：相对 bind source 规范化后落入敏感目录必须 critical。"""
     text = _CLEAN_COMPOSE.replace(

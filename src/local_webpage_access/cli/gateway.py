@@ -78,7 +78,7 @@ def gateway_on(
         help="交接收尾后对检出 IMP-023 空 200 的实例自动 rebuild（默认仅检查并提示）",
     ),
 ) -> None:
-    """启动 Caddy 网关（master + admin :2019，别名入口随配置就绪）。
+    """启动 Caddy 网关（master + admin（BUG-783 起按工作区分配端口，未分配为 :2019），别名入口随配置就绪）。
 
     建议项 A/B/F/I（gateway-switch-access-review）：启动同时执行切换事务收尾——
     停掉残留 builtin 静态进程、用当前 LAN IP 刷新各实例访问地址、记审计事件；
@@ -101,7 +101,13 @@ def gateway_on(
             pid = start_gateway(ws, config, registry=reg)
             lan_ip = resolve_lan_ip(config) or "127.0.0.1"
             typer.secho(f"网关已启动（pid={pid}）", fg=typer.colors.GREEN)
-            typer.echo("  admin：http://127.0.0.1:2019/")
+            # BUG-783：admin 端口按工作区分配（未分配回退 legacy :2019）
+            from local_webpage_access.admin_port import (
+                LEGACY_ADMIN_PORT,
+                read_admin_port,
+            )
+
+            typer.echo(f"  admin：http://127.0.0.1:{read_admin_port(ws) or LEGACY_ADMIN_PORT}/")
             # BUG-721：TLS 模式下明文 :8080 已关闭——入口提示跟随实际 scheme/端口
             from local_webpage_access.ports import (
                 entry_scheme,

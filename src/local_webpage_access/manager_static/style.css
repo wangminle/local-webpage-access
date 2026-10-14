@@ -382,6 +382,9 @@ table.instances td:first-child { padding-left: 16px; }
 }
 .badge-cancelling { background: var(--amber-bg); color: var(--amber); }
 .badge-cancelled { background: var(--muted-bg, #eee); color: var(--muted, #666); }
+/* S2-02 / D4：操作态徽标（如「最近一次重建失败」），与实例观测状态徽标并列 */
+.badge-op-fail { background: var(--red-bg, #fdecea); color: var(--red, #c0392b); }
+.badge-op-cancel { background: var(--muted-bg, #eee); color: var(--muted, #666); }
 .badge-queued   { background: var(--amber-bg); color: var(--amber); }
 /* DEV-043：网关不可达（橙，需 action）/ 配置无效（红，错误） */
 .badge-gateway-down    { background: var(--amber-bg); color: var(--amber); }
@@ -954,6 +957,12 @@ table.instances td:first-child { padding-left: 16px; }
   color: var(--green); background: var(--green-bg); padding: 0 5px; border-radius: 999px;
   margin-left: 4px; }
 .ip-local .ip-addr { color: var(--green); }
+/* S2-05：实例卡片路径别名旁的别名守卫状态徽标 */
+.alias-guard-badge { font-style: normal; font-weight: 600; font-size: 0.75em;
+  padding: 0 5px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
+.alias-guard-passed { color: var(--green); background: var(--green-bg); }
+.alias-guard-failed { color: var(--red); background: var(--red-bg); }
+.alias-guard-skipped { color: var(--amber); background: var(--amber-bg); }
 /* 窄屏：面板降级为文档流，避免被抽屉裁切 */
 @media (max-width: 560px) {
   .ip-list { display: block; }

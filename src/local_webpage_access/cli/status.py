@@ -27,6 +27,32 @@ def git_source_label(status: object) -> str:
     return "GitHub " + " ".join(b for b in bits if b)
 
 
+def operation_note(status: object) -> str | None:
+    """S2-02 / D4：操作态一行文案（如「最近一次重建失败（…）原因」）；无则 None。"""
+    op = getattr(status, "last_operation", None) or {}
+    if not isinstance(op, dict):
+        return None
+    op_status = op.get("status")
+    if op_status not in ("failed", "cancelled"):
+        return None
+    kind_label = {
+        "build": "构建",
+        "rebuild": "重建",
+        "deploy": "部署",
+    }.get(str(op.get("kind") or ""), "操作")
+    if op_status == "cancelled":
+        text = f"最近一次{kind_label}已取消"
+    else:
+        text = f"最近一次{kind_label}失败"
+    finished = op.get("finishedAt")
+    if finished:
+        text += f"（{finished}）"
+    error = op.get("error")
+    if error:
+        text += f"：{error}"
+    return text
+
+
 def _echo_source_lines(status: object) -> None:
     """端口映射 + 来源行（folder / git）。"""
     mapping = getattr(status, "port_mapping_label", None)
@@ -98,6 +124,10 @@ def status(
                 typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
             if s.last_error:
                 typer.secho(f"  ↳ lastError: {s.last_error}", fg=typer.colors.RED)
+            # S2-02 / D4：实例 status 为观测态，操作失败另以操作态一行展示
+            note = operation_note(s)
+            if note:
+                typer.secho(f"  ↳ {note}", fg=typer.colors.RED)
             circuit = (s.extra or {}).get("reconcileCircuit")
             if circuit:
                 typer.secho(f"  ↳ {circuit}", fg=typer.colors.YELLOW)

@@ -34,7 +34,7 @@ Full 不仅「装上二进制」，还要求：
 
 1. **统一身份**：固化 `serviceUser`（真实登录用户，而非临时 sudo 的 root）。
 2. **多上下文 Docker**：CLI / manager / daemon 各自探测并写入 `run/capability-{manager,daemon,gateway}.json`；父 CLI **不得冒充**后台写缓存。后台三角色均会周期刷新；daemon/gateway 写缓存时合并存活 peer（BUG-406/407）。角色快照 `overall` 按本角色职责计算（ADJ-035）；以 `lwa doctor --profile full`（CLI 实时）为准排查假红，见 [FAQ](faq.md)。
-3. **Caddy 严格托管**：禁用冲突的系统 `caddy.service`；`:2019` 须为本工作区 LWA Caddy（owner / euid / pid）；工作区配置与日志路径可读写。`caddy start` 在 pingback 等待期并行探 admin/pidfile（ADJ-036），就绪即成功。
+3. **Caddy 严格托管**：禁用冲突的系统 `caddy.service`；admin 端口（V0.10.0 起按工作区分配，登记 `run/admin-port`，未分配为 legacy `:2019`）须为本工作区 LWA Caddy（owner / euid / pid）；工作区配置与日志路径可读写。`caddy start` 在 pingback 等待期并行探 admin/pidfile（ADJ-036），就绪即成功。
 4. **退出码**：`ready`→0；`session_refresh_required`（组权限未生效）→2；`unready`→1。
 
 Linux 上 `usermod -aG docker` 后若当前进程仍无 docker 组：按提示重登或 `newgrp docker`，再 `--resume`。  
@@ -63,7 +63,7 @@ Windows **原生进程不受支持**，无内置安装脚本。请在 **WSL2**�
 | WSL 内存 | Windows 侧查 `%UserProfile%\.wslconfig` | 建议 ≥6GB（小主机按表调整）；改后 `wsl --shutdown` |
 | systemd | `/etc/wsl.conf` 含 `[boot] systemd=true` | 否则 `lwa autostart` 不可用 |
 | 自启 + 唤醒 | `lwa autostart install --with-caddy` + Windows 登录任务 | 见 [autostart](autostart.md) |
-| 防火墙 | 放行实际在用的 `:8080` / 管理页 / 实例口；**不**放行 `:2019`；**不**默认全开 portPool | Mirrored：Hyper-V firewall 逐端口；另见 ufw。详见 [LAN 与防火墙](known-limitations.md#lan-访问与防火墙) |
+| 防火墙 | 放行实际在用的 `:8080` / 管理页 / 实例口；**不**放行 Caddy admin 端口（:2019 或 `run/admin-port` 分配端口）；**不**默认全开 portPool | Mirrored：Hyper-V firewall 逐端口；另见 ufw。详见 [LAN 与防火墙](known-limitations.md#lan-访问与防火墙) |
 | 能力闭环 | `lwa doctor --profile full`；`test -f run/capability-gateway.json` | Full 红条多为能力缓存/监管，未必是 Docker 坏了 |
 | 日志空间 | 见下一节 | 避免 journal + 应用日志双份撑满磁盘 |
 
@@ -113,7 +113,7 @@ lwa 的静态站点 / 路径别名由"静态网关"承载，两种后端二选�
 | --- | --- | --- |
 | 统一入口 / 路径别名 | ✅ `:<staticGatewayPort>` 站点块 + import 别名片段 | ❌ 多端口模式，**无统一入口**；`lwa alias set` 会被拦截（IMP-022） |
 | 单点监听 | 1 个端口（默认 8080）聚合所有别名 | 每个静态实例各占 1 个 hostPort |
-| master 生命周期 | `lwa gateway on/off/status` 管理（admin :2019 探活） | 无；每实例 `python -m http.server` 子进程 |
+| master 生命周期 | `lwa gateway on/off/status` 管理（admin 分配端口探活，未分配为 :2019） | 无；每实例 `python -m http.server` 子进程 |
 | 自愈 | reload 失败自愈、stale pid 清理（BUG-069/070） | daemon reconcile 重 spawn 死掉的静态进程 |
 | 安装前提 | 需安装 Caddy ≥ `MIN_CADDY_VERSION` 并在 PATH | 无外部依赖，纯 Python |
 
@@ -259,6 +259,53 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 - `lwa doctor` 的 `source_freshness` 检查（WARN 级，纯离线）批量列出源码
   漂移 / 源目录丢失的 folder 源实例；git 源不触网，仅 SKIP 提示。
 
+### 停机失败语义（issue #54 / N3，统一停机语义）
+
+rebuild、挂载漂移修复、restart、runtime recreate、工作区迁移五条路径共用同一
+停机语义（`hosting.stop_or_abort`）：
+
+- **停机失败即中止**：`compose down/stop` 报错或容器运行状态无法确认时，抛出
+  「实例仍在运行，<操作> 已中止」。先停成功后才会清空 manifest 的
+  `containerId`/`imageId`——停机失败时身份保持完整，旧容器继续服务；
+- **本来就没在跑视为成功**（漂移修复/迁移除外：这两类需要移除「已停止但仍
+  存在」的旧容器，因此无论是否在跑都执行 down）；
+- 停机中止不算构建失败：实例不被标 FAILED，registry 状态回到操作前观测值，
+  本轮 build 行如实收尾为 failed；
+- restart 停机失败直接报错，**不再**吞异常后误报「已重启」；
+- 迁移路径与 S1-05 停机安全门互补：停机失败的 HostingError 记入 quiesce
+  errors，后置严格校验（`container_id_strict`）发现容器仍存活时计入
+  failures 阻断 MOVE（D6），`--force-quiesce` 可显式越过。
+
+### 重建事务化：先建后换 + 失败补偿（issue #51 / N7，S2-03）
+
+对**已在跑的容器实例**执行 `lwa rebuild`（以及触发完整重建的 `--update`）
+时，编排顺序为**先建后换**（首次部署、实例未在跑时没有旧容器可保，仍走原流程）：
+
+1. 非 root 身份预检（issue #20）先于任何改动；
+2. 当前 `docker/` 下的 compose.yaml / Dockerfile / .env 复制到 `docker/.prev/`，
+   旧镜像打上 `<project>-<service>:prev` 标签——这两份快照是补偿的锚点；
+3. 渲染新生成物并 `docker compose build`。**旧容器全程继续服务**（期间实例
+   status 保持观测值，构建进度只记 `lastOperation=building`）；
+4. build 失败：恢复 `.prev` 生成物，`lastOperation=failed`，命令非零退出并提示
+   「构建失败，旧版本仍在服务」——实例状态、端口登记、manifest 身份一律不动；
+5. build 成功后才轮到旧容器：数据救援（BUG-205，`docker cp` 把容器内 SQLite
+   救出到宿主 `data/`）→ `stop_or_abort` 停机（失败即中止、身份保持完整）→
+   停机成功后才清空 `containerId`/`imageId` 并落盘（BUG-300）；
+6. `up` 新版本并做健康/探针验证。
+
+第 6 步失败（或停机后任何一步失败）时自动**补偿回旧版本**：
+down 新容器 → 恢复 `.prev` 生成物 → `:prev` 重新打回 `:latest` → up 旧版本
+→ 验证 HTTP。补偿成功：实例回到 RUNNING，操作仍记 `lastOperation=failed`
+（带 `rollback: restored`），CLI 报「重建失败，已回滚到旧版本并恢复服务」；
+补偿也失败：实例标 FAILED，`rollbackNotes` 列出残留项（未清掉的容器、缺失的
+快照等），需人工介入。runtime recreate（配置指纹变化触发的 force-recreate）
+同样先快照生成物，失败时恢复旧 compose 并拉起旧容器（镜像未变，无需 build）。
+
+**逃生口**：低内存小主机若担心「新旧镜像并存」的磁盘/内存压力，可在实例
+manifest 的 `container` 段设置 `"rebuildStrategy": "stop-first"`，恢复旧的
+先停后建顺序（此时构建失败即没有旧版本可回退）。默认未设置为 `build-first`。
+`docker/.prev/` 与 `:prev` 标签由下一轮重建自动覆盖，平时无需手动清理。
+
 ### 构建慢 / pip 下载失败（issue #18，V0.8.9）
 
 生成的 Dockerfile pip 层按源链执行：**主源 → `pipFallbacks` 逐段 `||`**（china
@@ -318,20 +365,30 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 
 ## 四、Caddy master 排障
 
+> **admin 端口（V0.10.0 / BUG-783 起）**：每个工作区的 Caddy admin API 使用独立分配端口
+> （20201–20500，登记在 `run/admin-port`，主 Caddyfile 全局选项块渲染
+> `admin 127.0.0.1:<port>`），不再默认共享 `:2019`。旧版本工作区在未分配前仍用
+> `:2019`；升级后首次 `lwa gateway on` / reload 会把仍在线的本工作区 `:2019` 旧
+> master 优雅停掉并迁移到分配端口（不归本工作区的 `:2019` 进程不会被触碰）。
+> 该改动在结构上阻断「其他工作区（含已删除工作区）的孤儿 daemon 向共享 :2019
+> 推配置清空本网关」的事故模式。
+
 | 现象 | 排查 | 处置 |
 | --- | --- | --- |
-| `lwa gateway status` 显示未运行 | admin :2019 不可达 | `lwa gateway on`（自动 validate→start→探活） |
+| `lwa gateway status` 显示未运行 | admin 端口不可达（`lwa gateway status` 输出 `adminPort`） | `lwa gateway on`（自动 validate→start→探活） |
 | 别名 502 / 站点不通 | 实例 hostPort 未监听 / 容器未起 | `lwa status <id>` 看状态；`lwa start <id>`；实例 `gateway_down` 用 `lwa recover <id>`（或管理页「恢复」/ `POST /api/instances/{id}/recover`） |
 | `caddy validate` 报悬空 import | BUG-069 类残留（已根治，偶发于历史脏配置） | `lwa gateway off` 再 `on`，会基于实际存在的 conf 重组主 Caddyfile |
 | 切 builtin 后 Caddy 还在跑 | stale pid / 旧 master | `lwa gateway off`（不校验版本，强制 `caddy stop` + 清 `run/gateway.json`） |
 | `lwa doctor` 报 Caddy 健康 FAIL | admin/validate/站点端口探测 | 按 doctor 提示处置；常见为 master 未起（`lwa gateway on`） |
-| `run/caddy.pid` 丢失但 :2019 仍在监听 | 孤儿 master（进程在、pidfile 无） | `lwa gateway on` 会在四重安全闸通过后自动认领并补写 pidfile；不要先 `kill` |
+| `run/caddy.pid` 丢失但 admin 端口仍在监听 | 孤儿 master（进程在、pidfile 无） | `lwa gateway on` 会在四重安全闸通过后自动认领并补写 pidfile；不要先 `kill` |
+| 其他工作区的 daemon 疑似向 :2019 推配置（真实工作区网关配置被清空、8080/8443 全断） | BUG-783 事故模式：旧版本（V0.10.0 前）多工作区共享 admin :2019，孤儿进程 POST /load 可达本网关 | 本工作区升级到 V0.10.0+（admin 独立分配端口，:2019 与真实工作区解绑）；kill 孤儿进程后 `lwa gateway on` 恢复 |
 
-健康探针（IMP-020）：`lwa doctor` 在 caddy 模式会探 admin :2019 + 主 Caddyfile `caddy validate` + 别名入口 / 各 enabled 站点 hostPort 可达性 + stale pid 提示。
+健康探针（IMP-020）：`lwa doctor` 在 caddy 模式会探 admin（分配端口，未分配为 :2019）+ 主 Caddyfile `caddy validate` + 别名入口 / 各 enabled 站点 hostPort 可达性 + stale pid 提示；端口监听者身份因缺少 lsof 无法校验时，`port_contention` 给 WARN「归属未确认（缺少 lsof）」而非静默跳过。
 
 ### Caddy 配置位置
 
-- 主配置：`static-gateway/Caddyfile`（由 `_assemble_main_config` 基于实际存在的片段组装，**永不 import 不存在文件**）。
+- admin 端口登记：`run/admin-port`（首次 reload/start 分配，勿手改）。
+- 主配置：`static-gateway/Caddyfile`（由 `_assemble_main_config` 基于实际存在的片段组装，**永不 import 不存在文件**；含全局选项块 `admin 127.0.0.1:<分配端口>`）。
 - 站点片段：`static-gateway/sites/<id>.conf`。
 - 别名片段：`static-gateway/aliases/<id>.conf`（`reverse_proxy 127.0.0.1:<hostPort>`）。
 
@@ -356,7 +413,7 @@ lwa autostart status [--json]           # 单元 + 进程 + 运行模式（syste
 
 - **停服**：先 `lwa autostart disable`，再 `lwa daemon/manager/gateway off`（`off` 已内置 `coordinated_disable`）。
 - **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长（V0.8.2 起按 live 证据估算：存活 pidfile / systemd `InactiveEnterTimestamp`，陈旧 `run/*.json` 不采信、不确定不虚报）；enabled=false 跳过。均不与 KeepAlive 抢锁。重启后先**等待服务就绪**（`waitReady`，最多约 30s）再进入 access/doctor 收尾，超时降级 warning 并提示稍后 `lwa doctor` 复核（V0.8.2 / issue #5）。
-- **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。V0.8.8（issue #16）起自愈起止与 `lifecycle_stage` 阶段会镜像一份到 `logs/lwa.log`（完整日志仍在 `logs/daemon.log`）——构建失败后盯主日志即可看到"自动恢复开始 / 已自动重试并恢复"，不再表现为静默恢复。
+- **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。V0.8.8（issue #16）起自愈起止与 `lifecycle_stage` 阶段会镜像一份到 `logs/lwa.log`（完整日志仍在 `logs/daemon.log`）；V0.10.0（issue #59 / S2-08）起镜像按操作来源区分，行首带 `source=`（`source=daemon` / `source=manager` / `source=agent`）——manager 与 Agent 通道触发的部署阶段同样落主日志，CLI 触发的本就在 `lwa.log` 不重复镜像——构建失败后盯主日志即可看到"自动恢复开始 / 已自动重试并恢复"，不再表现为静默恢复。
 - **Linux**：systemd user + 建议 `enable-linger`；**WSL** 另需 Windows 登录任务唤醒发行版；**Windows 原生不支持**自启（见 [autostart.md](autostart.md)）。
 
 ---
@@ -454,7 +511,7 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 
 - `lan_url_stale`——实例 lanUrl 是否指向失效（漂移）LAN IP（WARN，提示 `lwa access refresh`）。
 - `backend_handoff`——enabled 静态 hostPort 上是否 builtin + caddy 双开（FAIL，提示 `lwa gateway off` 再 `on`）。
-- `port_contention`——`:2019` / 别名入口上是否有非预期监听者（测试/外部孤儿，§2.7 现场即 pytest 泄漏的 Caddy 占 :2019）；仅 caddy 后端检查。
+- `port_contention`——admin 分配端口（未分配为 :2019，§2.7 现场即 pytest 泄漏的 Caddy 占 :2019）/ 别名入口上是否有非预期监听者（测试/外部孤儿）；仅 caddy 后端检查；缺少 lsof 无法校验监听者身份时给 WARN「归属未确认（缺少 lsof）」（S2-07），不再静默 SKIP。
 - `port_pool`（建议 H）——排除 lwa 自用端口（managerPort、staticGatewayPort、registry 已分配 hostPort），不再把这些合法自用端口误报为冲突。
 - `workspace_path_consistency`（V0.6.12 / DEV-094；**V0.6.13** 加固）——活跃 manifest/registry 派生路径是否等于当前工作区规范值；Caddy 主配置/sites/aliases 引用是否落在当前工作区且存在；Docker 可用时 SQLite data bind mount Source 是否指向 `apps/<id>/data`。外部 `sourceZipPath`、历史 builds/events 不告警。Docker 不可用、挂载观测失败或 **registry 不可用/读取失败** 时对应子项 SKIP（整体不报假绿 OK）。容器查询失败会中止启动（禁止当作「无容器」绕过挂载 fail-safe）。提示优先 `lwa workspace relocate --verify`，已裸 mv 场景按 `rebuild` / `recover` / `gateway on` 修复。
 - `base_image_readiness`（V0.8.7 / issue #14）——未缓存基础镜像是否可拉取；镜像来自第三方 registry（ghcr/quay 等）或 Docker Hub 不可达时按 registry 归类提示（配代理 / 离线预置，而非一律建议 Hub mirror）。
@@ -462,7 +519,7 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 
 ### 7.6 管理页兜底链接（建议 D）
 
-实例列表除 LAN「端口」链接外，额外提供「本机」(`http://127.0.0.1:<hostPort>/`) 链接——LAN IP 漂移失效时仍可本机访问。`caddy start --pingback` 超时假失败（BUG-102）已修复：回退 admin :2019 探活，admin 在线即视为启动成功。
+实例列表除 LAN「端口」链接外，额外提供「本机」(`http://127.0.0.1:<hostPort>/`) 链接——LAN IP 漂移失效时仍可本机访问。`caddy start --pingback` 超时假失败（BUG-102）已修复：回退 admin 探活，admin 在线即视为启动成功。
 
 ---
 

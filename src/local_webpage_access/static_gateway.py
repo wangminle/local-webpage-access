@@ -32,6 +32,13 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
 
+from local_webpage_access.admin_port import (
+    LEGACY_ADMIN_PORT,
+    admin_address,
+    admin_base,
+    ensure_admin_port,
+    read_admin_port,
+)
 from local_webpage_access.config import Config, tls_enabled
 from local_webpage_access.daemon import pid_cmdline_contains
 from local_webpage_access.errors import GatewayError
@@ -133,19 +140,30 @@ def _atomic_write_text(path: Path, content: str) -> None:
 # ---- Caddy master 生命周期（IMP-010 / BUG-069 / BUG-070）-------------------
 # admin API 固定走 IPv4 loopback（macOS 上 localhost 常解析为 ::1，而 Caddy admin
 # 仅监听 IPv4，见 BUG-068）。reload/start/stop 全部显式使用 127.0.0.1。
-_ADMIN_BASE = "http://127.0.0.1:2019"
-_ADMIN_CONFIG_URL = f"{_ADMIN_BASE}/config/"
-_ADMIN_STOP_URL = f"{_ADMIN_BASE}/stop"
+# BUG-783：admin 端口按工作区分配（admin_port.py，登记在 run/admin-port），
+# 未分配的工作区回退 legacy :2019（模块常量仅作 legacy 默认值，调用方一律经
+# StaticGateway 的实例方法取本工作区实际端口）。
 _ADMIN_PROBE_TIMEOUT = 1.0
 _ADMIN_STARTUP_WAIT = 5.0
 # BUG-121：pytest 默认禁止触碰全局 admin :2019；Caddy 单测可设此环境变量放行。
 _ENV_ALLOW_CADDY_ADMIN = "LWA_ALLOW_CADDY_ADMIN"
 _CADDY_OP_TIMEOUT = 15
 _CADDY_START_TIMEOUT = 20
-# 仅保证 Caddy admin 在线的最小 bootstrap 配置（无任何站点；真实站点由 reload_all 注入）。
-# 不含 ``admin off``（BUG-014：首次加载后关闭 admin 会让后续 reload 全部失败）；
-# Caddy 默认即在 :2019 暴露 admin。仅注释行 → 等价空配置。
-_MIN_CADDYFILE = "# lwa bootstrap：仅保证 Caddy admin 在线，真实站点由 reload_all 注入\n"
+
+
+def _bootstrap_config_text(admin_port: int | None = None) -> str:
+    """仅保证 Caddy admin 在线的最小 bootstrap 配置（无任何站点；真实站点由 reload_all 注入）。
+
+    不含 ``admin off``（BUG-014：首次加载后关闭 admin 会让后续 reload 全部失败）。
+    BUG-783：分配了独立 admin 端口的工作区把 ``admin 127.0.0.1:<port>`` 写进全局
+    选项块，保证冷启动 master 绑对端口；未分配时沿用 Caddy 默认 :2019。
+    """
+    lines = ["# lwa bootstrap：仅保证 Caddy admin 在线，真实站点由 reload_all 注入"]
+    if admin_port is not None and admin_port != LEGACY_ADMIN_PORT:
+        lines.append("{")
+        lines.append(f"\tadmin 127.0.0.1:{admin_port}")
+        lines.append("}")
+    return "\n".join(lines) + "\n"
 
 
 # ---- HTTPS 首版交付（2026-09-18 WBS W02/W08）--------------------------------
@@ -884,6 +902,11 @@ class StaticGateway:
         if self.detect_backend() != "caddy":
             return
 
+        # BUG-783：reload 前先确保本工作区已分配独立 admin 端口——后续 _admin_alive /
+        # caddy reload --address / 主 Caddyfile 的 admin 指令都以分配端口为准，
+        # 从根上避免把配置推进共享 :2019 上"谁在听"的 master。
+        ensure_admin_port(self.ws)
+
         access = self.verify_workspace_caddy_access()
         if access:
             raise GatewayError(
@@ -948,8 +971,9 @@ class StaticGateway:
             "--adapter",
             "caddyfile",
             # macOS 上 localhost 常解析为 ::1，而 Caddy admin 仅监听 IPv4 loopback（BUG-068）
+            # BUG-783：reload 目标为本工作区分配的 admin 端口（POST /load 归属保护）
             "--address",
-            "127.0.0.1:2019",
+            admin_address(self.ws),
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=_CADDY_OP_TIMEOUT)
@@ -1027,17 +1051,26 @@ class StaticGateway:
         的歧义。无别名或端口关闭时不追加该块，保持端口不被占用。
         """
         lines: list[str] = []
-        # BUG-710：TLS 模式必须先声明全局选项块（Caddyfile 首块）——
+        # 全局选项块（Caddyfile 首块，唯一）：
+        # BUG-783：已分配独立 admin 端口的工作区必须渲染 ``admin 127.0.0.1:<port>``
+        #   ——否则 master 会绑回 Caddy 默认 :2019，reload 目标与归属校验全部错位；
+        # BUG-710（TLS 模式）——
         # skip_install_trust：禁止 Caddy 自动 sudo 安装根证书到系统信任库
         #   （无 tty 挂起约 90s / 交互终端弹密码；根证书只经 `lwa ca export`
         #   手动分发 + 客户端显式信任）；
         # auto_https disable_redirects：关掉 HTTP→HTTPS 重定向服务器——它
         #   会额外监听明文 :80，非 root 的 Linux 上 permission denied 导致
         #   整份配置加载失败。
-        if tls_enabled(self.config):
+        admin_port = read_admin_port(self.ws)
+        if tls_enabled(self.config) or (
+            admin_port is not None and admin_port != LEGACY_ADMIN_PORT
+        ):
             lines.append("{")
-            lines.append("\tauto_https disable_redirects")
-            lines.append("\tskip_install_trust")
+            if admin_port is not None and admin_port != LEGACY_ADMIN_PORT:
+                lines.append(f"\tadmin 127.0.0.1:{admin_port}")
+            if tls_enabled(self.config):
+                lines.append("\tauto_https disable_redirects")
+                lines.append("\tskip_install_trust")
             lines.append("}")
             lines.append("")
         sites = sorted(self.ws.static_sites.glob("*.conf"))
@@ -1179,10 +1212,20 @@ class StaticGateway:
         """Caddy master 的 pid 文件路径（``run/caddy.pid``）。"""
         return self.ws.run / "caddy.pid"
 
+    def _admin_base_url(self) -> str:
+        """本工作区 Caddy admin API base URL（BUG-783：按工作区分配，未分配回退 :2019）。"""
+        return admin_base(self.ws)
+
+    def _admin_config_url(self) -> str:
+        return f"{self._admin_base_url()}/config/"
+
+    def _admin_stop_url(self) -> str:
+        return f"{self._admin_base_url()}/stop"
+
     def _admin_alive(self, *, timeout: float = _ADMIN_PROBE_TIMEOUT) -> bool:
-        """探测 Caddy admin API（127.0.0.1:2019）是否在线。"""
+        """探测本工作区 Caddy admin API 是否在线。"""
         try:
-            urlopen_direct(_ADMIN_CONFIG_URL, timeout=timeout)
+            urlopen_direct(self._admin_config_url(), timeout=timeout)
             return True
         except Exception:  # noqa: BLE001 — 探测失败即视为不在线
             return False
@@ -1214,14 +1257,38 @@ class StaticGateway:
         start 的 pingback 噪音无诊断价值）。
         """
         _refuse_caddy_admin_in_pytest("start")
+        # BUG-783：分配本工作区独立 admin 端口（幂等；未分配过则登记落盘）。
+        assigned = ensure_admin_port(self.ws)
+        # 迁移（平滑升级）：旧 master 仍监听 legacy :2019 且确属本工作区时，
+        # 先优雅停掉它，再拉起绑定新 admin 端口的 master；不归本工作区则告警
+        # 但不停（fail-closed 边界与 BUG-176 一致：不替用户停外部 Caddy）。
+        if assigned != LEGACY_ADMIN_PORT:
+            # 迁移是尽力而为：探测/关停失败不得阻断新 master 拉起（legacy master
+            # 残留时它继续服务旧配置，由后续 reconcile/gateway on 再迁移）。
+            try:
+                self._stop_legacy_master_for_migration()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("legacy admin 迁移探测失败（不阻断启动）：%s", exc)
         main = self.main_config_path()
         if main.is_file() and main.read_text(encoding="utf-8").strip():
             config_path = main
         else:
             boot = self._bootstrap_config_path()
             boot.parent.mkdir(parents=True, exist_ok=True)
-            boot.write_text(_MIN_CADDYFILE, encoding="utf-8")
+            boot.write_text(_bootstrap_config_text(assigned), encoding="utf-8")
             config_path = boot
+        # 升级残留：盘上主/引导配置是旧版本渲染的（无 admin 指令），直接加载会让
+        # 新 master 绑回 Caddy 默认 :2019——按当前工作区重新渲染，保证 admin 指令
+        # 与分配端口一致（主配置由 _assemble_main_config 统一生成，见 BUG-783）。
+        try:
+            loaded_text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            loaded_text = ""
+        if assigned != LEGACY_ADMIN_PORT and f"admin 127.0.0.1:{assigned}" not in loaded_text:
+            if config_path == main:
+                _atomic_write_text(main, self._assemble_main_config())
+            else:
+                _atomic_write_text(config_path, _bootstrap_config_text(assigned))
         cmd = [
             "caddy",
             "start",
@@ -1321,7 +1388,8 @@ class StaticGateway:
             if pingback_failed:
                 log.warning(
                     "caddy start 的 --pingback 未确认成功，但本工作区 Caddy "
-                    "admin :2019 与 pidfile 均就绪——视为启动成功（BUG-102/ADJ-036）"
+                    "admin :%s 与 pidfile 均就绪——视为启动成功（BUG-102/ADJ-036）",
+                    read_admin_port(self.ws) or LEGACY_ADMIN_PORT,
                 )
             return True
 
@@ -1356,13 +1424,15 @@ class StaticGateway:
                 if self._workspace_caddy_pid_alive():
                     log.warning(
                         "caddy start 的 --pingback 未确认成功，但本工作区 Caddy "
-                        "admin :2019 与 pidfile 均就绪——视为启动成功（BUG-102）"
+                        "admin :%s 与 pidfile 均就绪——视为启动成功（BUG-102）",
+                        read_admin_port(self.ws) or LEGACY_ADMIN_PORT,
                     )
                     return True
                 # admin 在线但 pidfile 非本工作区存活进程 → 疑似孤儿，勿认领
                 log.warning(
-                    "caddy start 失败后 admin :2019 在线，但本工作区 caddy.pid "
-                    "未指向存活进程——疑似外部/测试孤儿，不视为本网关启动成功"
+                    "caddy start 失败后 admin :%s 在线，但本工作区 caddy.pid "
+                    "未指向存活进程——疑似外部/测试孤儿，不视为本网关启动成功",
+                    read_admin_port(self.ws) or LEGACY_ADMIN_PORT,
                 )
                 return False
             time.sleep(0.2)
@@ -1388,46 +1458,161 @@ class StaticGateway:
     def caddy_stop(self) -> bool:
         """停止 Caddy master（IMP-010）。通过 admin API ``POST /stop`` 优雅关闭。
 
-        显式走 IPv4（``127.0.0.1:2019``），规避 macOS 上 ``caddy stop`` 默认连
-        ``localhost``→``::1`` 的 IPv6 问题（与 BUG-068 同源）。
+        显式走 IPv4 loopback，规避 macOS 上 ``caddy stop`` 默认连
+        ``localhost``→``::1`` 的 IPv6 问题（与 BUG-068 同源）。admin 地址取本
+        工作区分配端口（BUG-783），未分配回退 legacy :2019。
 
-        BUG-176：POST /stop 前校验 :2019 归属本工作区。admin 在线但
+        BUG-176：POST /stop 前校验 admin 归属本工作区。admin 在线但
         ``run/caddy.pid`` 不指向存活进程时，视为外部/其他工作区 Caddy，**不**
         执行 POST /stop（仅清本工作区陈旧 pid），避免关停用户自建或其他工作区
         的 master。start 侧已有归属校验（BUG-102），此处补齐 stop 侧对称防护。
+
+        BUG-783 迁移收尾：已分配独立 admin 端口的工作区，legacy :2019 上若仍
+        在线且确属本工作区（升级前拉起的旧 master），一并 POST /stop 停掉。
         """
         if not self._admin_alive():
             self._clear_stale_caddy_pid()
-            return True
-        if not self._workspace_caddy_pid_alive():
-            # issue #43（BUG-729）：pidfile 被 CHK-280 共享删除时，自己的
-            # master 会落在该分支——先按四重安全闸尝试认领，认领成功即可
-            # 正常 POST /stop（gateway off 不再卡死）；认领失败维持 BUG-176
-            # 的 fail-closed（不关停外部/其他工作区 Caddy）。
-            if self.adopt_orphan_master() is None:
-                log.warning(
-                    "admin :2019 在线但非本工作区 Caddy（caddy.pid 不指向存活进程），"
-                    "跳过 POST /stop 以免关停外部/其他工作区 Caddy（BUG-176）"
+            stopped = True
+        else:
+            stopped = False
+            if not self._workspace_caddy_pid_alive():
+                # issue #43（BUG-729）：pidfile 被 CHK-280 共享删除时，自己的
+                # master 会落在该分支——先按四重安全闸尝试认领，认领成功即可
+                # 正常 POST /stop（gateway off 不再卡死）；认领失败维持 BUG-176
+                # 的 fail-closed（不关停外部/其他工作区 Caddy）。
+                if self.adopt_orphan_master() is None:
+                    log.warning(
+                        "admin 在线但非本工作区 Caddy（caddy.pid 不指向存活进程），"
+                        "跳过 POST /stop 以免关停外部/其他工作区 Caddy（BUG-176）"
+                    )
+                    self._clear_stale_caddy_pid()
+                    stopped = True
+                else:
+                    log.info("pidfile 丢失但已认领本工作区 master，继续执行 POST /stop")
+            if not stopped:
+                stopped = self._post_admin_stop(
+                    self._admin_stop_url(), self._admin_config_url()
                 )
-                self._clear_stale_caddy_pid()
-                return True
-            log.info("pidfile 丢失但已认领本工作区 master，继续执行 POST /stop")
+                if stopped:
+                    self._clear_stale_caddy_pid()
+                else:
+                    log.warning("Caddy master 未在预期时间内退出")
+        assigned = read_admin_port(self.ws)
+        if (
+            assigned is not None
+            and assigned != LEGACY_ADMIN_PORT
+            and self._legacy_admin_alive()
+        ):
+            # 迁移收尾同样是尽力而为：失败不得把「已停」翻成「停止失败」。
+            try:
+                if self._legacy_master_is_ours():
+                    log.info(
+                        "迁移（BUG-783）：停止仍监听 legacy :%d 的本工作区旧 master",
+                        LEGACY_ADMIN_PORT,
+                    )
+                    if self._post_admin_stop(
+                        f"http://127.0.0.1:{LEGACY_ADMIN_PORT}/stop",
+                        f"http://127.0.0.1:{LEGACY_ADMIN_PORT}/config/",
+                    ):
+                        self._clear_stale_caddy_pid()
+                else:
+                    log.warning(
+                        "legacy :%d 在线但非本工作区 Caddy，跳过 POST /stop（BUG-176）",
+                        LEGACY_ADMIN_PORT,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("legacy admin 迁移收尾失败（不影响本次停止结论）：%s", exc)
+        return stopped
+
+    @staticmethod
+    def _url_reachable(url: str, *, timeout: float) -> bool:
+        """HTTP GET 探测是否可达（仅用于 admin 停等判定）。"""
         try:
-            req = urllib.request.Request(_ADMIN_STOP_URL, method="POST")
+            urlopen_direct(url, timeout=timeout)
+            return True
+        except Exception:  # noqa: BLE001 — 探测失败即视为不可达
+            return False
+
+    def _post_admin_stop(self, stop_url: str, config_url: str) -> bool:
+        """对已确认归属的 admin 执行 POST /stop 并等待退出，返回是否已停。"""
+        try:
+            req = urllib.request.Request(stop_url, method="POST")
             urlopen_direct(req, timeout=_CADDY_OP_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — POST /stop 响应后常立即断连，属正常
             log.debug("POST /stop 返回异常（通常正常）：%s", exc)
         deadline = time.monotonic() + _ADMIN_STARTUP_WAIT
         while time.monotonic() < deadline:
-            if not self._admin_alive(timeout=0.5):
+            if not self._url_reachable(config_url, timeout=0.5):
                 break
             time.sleep(0.2)
-        stopped = not self._admin_alive()
-        if stopped:
+        return not self._url_reachable(config_url, timeout=0.5)
+
+    def _legacy_admin_alive(self, *, timeout: float = _ADMIN_PROBE_TIMEOUT) -> bool:
+        """legacy :2019 admin 是否在线（BUG-783 迁移判定用）。"""
+        return self._url_reachable(
+            f"http://127.0.0.1:{LEGACY_ADMIN_PORT}/config/", timeout=timeout
+        )
+
+    def _legacy_master_is_ours(self) -> bool:
+        """legacy :2019 上的 master 是否确属本工作区（BUG-176 校验 + 命令行路径实证）。
+
+        与 :meth:`adopt_orphan_master` 的四重安全闸同款思路：仅 pid 存活不够，
+        必须能从命令行实证本工作区路径（--config/--pidfile 实参）。
+        """
+        pid = None
+        path = self.caddy_pid_path()
+        if path.is_file():
+            try:
+                pid = int(path.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                pid = None
+        if pid is not None and self._pid_alive(pid):
+            if pid_cmdline_contains(pid, "caddy", str(self.ws.root)):
+                return True
+        holder = self._admin_holder_pid(LEGACY_ADMIN_PORT)
+        if holder is None or not self._pid_alive(holder):
+            return False
+        cmdline = self._pid_cmdline(holder)
+        if not cmdline:
+            return False  # 拿不到命令行就无法证明归属，fail-closed
+        candidates: list[str] = []
+        for target in (
+            self.main_config_path(),
+            self._bootstrap_config_path(),
+            self.caddy_pid_path(),
+        ):
+            candidates.append(str(target))
+            with contextlib.suppress(OSError):
+                candidates.append(str(target.resolve()))
+        return any(c in cmdline for c in candidates if c)
+
+    def _stop_legacy_master_for_migration(self) -> None:
+        """迁移（BUG-783）：拉起新 master 前，停掉仍监听 legacy :2019 的本工作区旧 master。
+
+        legacy :2019 不归本工作区时告警但不停（fail-closed 边界与 BUG-176 一致：
+        不替用户停外部 Caddy）；此时新 master 仍绑定独立 admin 端口正常启动，
+        legacy 端口保留给原属进程。
+        """
+        if not self._legacy_admin_alive():
+            return
+        if not self._legacy_master_is_ours():
+            log.warning(
+                "legacy :%d admin 在线但非本工作区 Caddy，无法自动迁移；本工作区 "
+                "master 将绑定独立 admin 端口，legacy 端口保留给原属进程",
+                LEGACY_ADMIN_PORT,
+            )
+            return
+        log.info(
+            "迁移（BUG-783）：停止仍监听 legacy :%d 的本工作区旧 master",
+            LEGACY_ADMIN_PORT,
+        )
+        if self._post_admin_stop(
+            f"http://127.0.0.1:{LEGACY_ADMIN_PORT}/stop",
+            f"http://127.0.0.1:{LEGACY_ADMIN_PORT}/config/",
+        ):
             self._clear_stale_caddy_pid()
         else:
-            log.warning("Caddy master 未在预期时间内退出")
-        return stopped
+            log.warning("legacy :%d 旧 master 未在预期时间内退出", LEGACY_ADMIN_PORT)
 
     def _caddy_owner_ok(self) -> bool:
         """admin 在线前提下的归属校验：本工作区 master 返回 True（否则 WARN + False）。"""
@@ -1435,7 +1620,8 @@ class StaticGateway:
         if owner.get("owner") == "lwa_service_user" and owner.get("workspace_match"):
             return True
         log.warning(
-            "Caddy admin :2019 在线但所有权不匹配：owner=%s euid=%s pid=%s",
+            "Caddy admin :%s 在线但所有权不匹配：owner=%s euid=%s pid=%s",
+            read_admin_port(self.ws) or LEGACY_ADMIN_PORT,
             owner.get("owner"),
             owner.get("process_user"),
             owner.get("pid"),
@@ -1567,11 +1753,17 @@ class StaticGateway:
             return "write_denied"
         return None
 
-    def _admin_holder_pid(self) -> int | None:
-        """issue #43：探测 :2019 监听进程 PID（best-effort，lsof → ss）。"""
+    def _admin_holder_pid(self, port: int | None = None) -> int | None:
+        """issue #43：探测 admin 端口监听进程 PID（best-effort，lsof → ss）。
+
+        BUG-783：默认探测本工作区分配端口；显式传 ``port``（如迁移时传 legacy
+        :2019）则探测指定端口。
+        """
+        if port is None:
+            port = read_admin_port(self.ws) or LEGACY_ADMIN_PORT
         try:
             out = subprocess.run(
-                ["lsof", "-tiTCP:2019", "-sTCP:LISTEN"],
+                ["lsof", "-tiTCP:" + str(port), "-sTCP:LISTEN"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -1589,7 +1781,7 @@ class StaticGateway:
                     ["ss", "-tlnp"], capture_output=True, text=True, timeout=5, check=False
                 )
                 for line in (out.stdout or "").splitlines():
-                    if ":2019 " in line:
+                    if f":{port} " in line:
                         m = re.search(r"pid=(\d+)", line)
                         if m:
                             return int(m.group(1))

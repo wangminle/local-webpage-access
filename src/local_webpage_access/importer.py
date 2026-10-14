@@ -38,6 +38,7 @@ from local_webpage_access.models import (
     InstanceManifest,
     Kind,
     ResourceProfile,
+    RouteMode,
     Runtime,
     ServingMode,
     StaticConfig,
@@ -103,9 +104,18 @@ class UpdateResult:
     （``compose build``），**禁止**轻量 ``restart``（那不会重建镜像，
     会造成「源码已新、镜像仍旧」假绿）。
 
-    update_zip 本身不启动 / 重启 / 重建进程（保持纯数据层、便于测试）；
-    但对容器会清空 ``containerId``/``imageId``，使后续 ``lwa start``
-    也不会误走轻量 start。端口复用由 hosting 在 rebuild/start 时完成。
+    update_zip 本身不启动 / 重启 / 重建进程（保持纯数据层、便于测试）。
+
+    BUG-787：容器身份（``containerId``/``imageId``）、hostPort 端口登记与
+    ``deploymentFingerprints``/``lastOperation`` 等运维态随 manifest 一并保留，
+    只有扫描派生字段（entry/capabilityContract/deploymentPlans 等）被刷新。
+    设计取舍：S2-03 先建后换依赖 ``manifest.container.containerId`` 非空判定
+    ``operation_kind="rebuild"``；更新时清空身份会让随后 rebuild 退化为
+    「首次部署」路径（旧容器被 compose down、无 ``docker/.prev`` 快照与
+    ``:prev`` 标签可回退，构建失败无任何补偿 → 在用服务中断）。「源码已换、
+    镜像仍旧」的假绿改由 S2-04 指纹决策兜底：保留的旧指纹基线对比按新
+    manifest 重渲染的生成物，sourceHash/planHash 必然变化 → full_rebuild。
+    端口复用由 hosting 在 rebuild/start 时完成。
     """
 
     instance_id: str
@@ -674,6 +684,7 @@ class Importer:
         dry_run: bool = False,
         force_kind_change: bool = False,
         expected_revision: int | None = None,
+        ignore_alias_guard: bool = False,
     ) -> UpdateResult:
         """用新 zip 原地更新已存在的实例（IMP-009）。
 
@@ -683,7 +694,9 @@ class Importer:
 
         流程：
         1. 校验 zip 与目标实例存在；
-        2. 计算新 hash 与 ``sourceZipHash`` 比较 —— 相同则跳过（``skipped=True``）；
+        2. 计算新 hash 与 ``sourceZipHash`` 比较 —— 相同则跳过（``skipped=True``；
+           BUG-787 例外：status=pending 的实例不跳过——内容虽未变，重扫可能因
+           扫描器/计划生成器升级而识别成功，可借 update 重获扫描结果）；
         3. ``dry_run`` 时仅解压到系统临时目录、扫描、报告差异，不触碰工作区；
         4. 持 :func:`~local_webpage_access.lifecycle.instance_lock` 期间：
            - BUG-704：调用方锁定的 ``expected_revision``（如 Agent 计划）在锁内
@@ -704,6 +717,11 @@ class Importer:
         本方法不启动 / 重启 / 重建进程；``needs_rebuild=True`` 时由调用方执行
         :func:`lifecycle.rebuild_instance`，``needs_restart=True`` 时执行
         :func:`lifecycle.restart_instance`。hostPort 由 hosting 在重启时复用。
+
+        S2-05 / D3（BUG-744）：实例已有路径别名而更新未显式传 ``--path-alias``
+        时（更新路径恒不传），换入前对**新内容**执行同一道别名守卫，未通过即
+        拒绝（current/ 零副作用）；``ignore_alias_guard=True``（CLI
+        ``--ignore-alias-guard``）可越过并记审计事件。
 
         Raises:
             ZipImportError: zip 非法 / 实例不存在 / 形态变化被拒绝 / 解压失败 /
@@ -733,6 +751,7 @@ class Importer:
                 dry_run=dry_run,
                 force_kind_change=force_kind_change,
                 expected_revision=expected_revision,
+                ignore_alias_guard=ignore_alias_guard,
             )
 
     def _update_zip_locked(
@@ -746,6 +765,7 @@ class Importer:
         dry_run: bool = False,
         force_kind_change: bool = False,
         expected_revision: int | None = None,
+        ignore_alias_guard: bool = False,
     ) -> UpdateResult:
         src = Path(zip_path).resolve()
         validate_zip(src)
@@ -787,8 +807,10 @@ class Importer:
         # 缺省沿用既有语义——以进入时读到的当前 revision 为基准。
         cas_base = expected_revision if expected_revision is not None else observed_revision
 
-        # 2. hash 未变化 → 跳过（dry-run 零写入：连事件也不记，CHK-239）
-        if new_hash == old_hash:
+        # 2. hash 未变化 → 跳过（dry-run 零写入：连事件也不记，CHK-239）。
+        # BUG-787：pending（上次扫描未识别/无部署计划）实例不短路——内容虽未变，
+        # 重扫可能因扫描器/计划生成器升级而识别成功（借 update 重获扫描结果）。
+        if new_hash == old_hash and old_manifest.status != Status.PENDING:
             log.info("实例 %s 的 zip 未变化（sha256=%s），跳过更新", instance_id, new_hash[:12])
             if not dry_run:
                 self.registry.add_event(
@@ -907,6 +929,53 @@ class Importer:
                         instance_id=instance_id,
                     )
 
+                # S2-05 / D3（BUG-744）：--update 未显式传 --path-alias（更新路径
+                # 恒不传）、但实例已有别名时，对**新源码**在换入前跑同一道
+                # IMP-023 / IMP-055 别名守卫——避免更新后别名白屏才发现。
+                # 探不到入口 HTML 时不拦截（无法证明会白屏，与导入期一致）。
+                existing_alias = None
+                if (
+                    old_manifest.static is not None
+                    and old_manifest.static.routeMode == RouteMode.NAME.value
+                ):
+                    existing_alias = old_manifest.static.routeHost
+                elif (
+                    old_manifest.container is not None
+                    and old_manifest.container.routeMode == RouteMode.NAME.value
+                ):
+                    existing_alias = old_manifest.container.routeHost
+                if existing_alias:
+                    if ignore_alias_guard:
+                        log.warning(
+                            "实例 %s 更新前的别名守卫被 --ignore-alias-guard 越过"
+                            "（别名 /%s/，新内容未做绝对资源检测）",
+                            instance_id,
+                            existing_alias,
+                        )
+                        self.registry.add_event(
+                            instance_id,
+                            "path-alias",
+                            f"更新前别名守卫被 --ignore-alias-guard 越过"
+                            f"（别名 /{existing_alias}/）",
+                        )
+                    else:
+                        try:
+                            self._assert_alias_no_absolute_spa_assets(
+                                staging, alias=existing_alias, instance_id=instance_id
+                            )
+                        except RecognitionError as exc:
+                            raise ZipImportError(
+                                f"实例 {instance_id} 已设置路径别名 /{existing_alias}/，"
+                                f"新内容未通过别名守卫（换入前拒绝，current/ 未被修改）：\n"
+                                f"{exc.message}\n"
+                                f"补救（任选其一）：\n"
+                                f"  1. 按上述方案改造产物（构建 --base=/{existing_alias}/）"
+                                f"后重新执行更新；\n"
+                                f"  2. 确认风险后加 --ignore-alias-guard 越过本守卫"
+                                f"（会记录审计事件）。",
+                                instance_id=instance_id,
+                            ) from exc
+
                 # issue #19：manifest 重建必须在原子换入**前**、staging 仍在原位时
                 # 完成。build_manifest_from_detection → generate_plans 会沿
                 # detection.evidence.root 扫描后端源码发现健康探针（BUG-504），
@@ -915,6 +984,25 @@ class Importer:
                 # 提前还有 fail-fast 收益：计划生成的问题在旧 current/ 被替换
                 # 前暴露，current/ 原封未动、finally 只需清暂存区。
                 prepared_manifest = apply_detection_to_manifest(old_manifest, detection, self.ws)
+
+                # BUG-787：容器已部署（containerId 非空）但缺 S2-04 指纹基线
+                # （指纹机制启用前部署的旧实例）时，趁 current/ 尚未换入、docker/
+                # 仍是上次部署产物，从 old_manifest 补记上次成功部署的真实基线。
+                # 否则身份保留后 restart/start 的指纹决策拿到空基线会误判「未变」，
+                # 对旧镜像走轻量 compose start（源码已换、镜像仍旧的假绿——
+                # 正是 DEV-067/BUG-112 当初用清空 containerId 防的场景）。
+                if (
+                    prepared_manifest.container is not None
+                    and prepared_manifest.container.containerId
+                    and not getattr(prepared_manifest, "deploymentFingerprints", None)
+                ):
+                    from local_webpage_access.lifecycle import (
+                        _compute_deployment_fingerprints,
+                    )
+
+                    prepared_manifest.deploymentFingerprints = _compute_deployment_fingerprints(
+                        self.ws, old_manifest
+                    )
 
                 # BUG-124：跨形态 upsert 会删除旧 static_sites/containers 子表，
                 # 必须在换表前按旧 manifest 停掉 runtime。即使 desired=stopped 也尝试，
@@ -1010,11 +1098,9 @@ class Importer:
                         manifest.static.hostPort = old_host_port
                     elif manifest.container is not None:
                         manifest.container.hostPort = old_host_port
-                # DEV-067 / BUG-112：容器源码已换 → 作废旧部署标记，避免
-                # restart/start 走轻量 compose start 继续跑旧镜像。
-                if manifest.runtime.value == "docker-compose" and manifest.container is not None:
-                    manifest.container.containerId = None
-                    manifest.container.imageId = None
+                # BUG-787：不再作废旧部署标记。containerId/imageId 由
+                # apply_detection_to_manifest 保留（见 UpdateResult docstring 的
+                # 设计取舍）；S2-04 指纹决策负责识别「源码已换、镜像仍旧」。
                 manifest.touch()
                 manifest.save(manifest_path)
 
@@ -1221,6 +1307,8 @@ class Importer:
         dry_run: bool = False,
         force_kind_change: bool = False,
         allow_source_dir_change: bool = False,
+        expected_revision: int | None = None,
+        ignore_alias_guard: bool = False,
     ) -> UpdateResult:
         """从关联文件夹源更新实例（IMP-047）。
 
@@ -1235,14 +1323,34 @@ class Importer:
         2. 校验源目录仍存在/可读；缺失 -> 明确错误（禁止挂载回退）。
         3. 计算当前源目录指纹，与 ``sourceSyncHash`` 比较：
            - 相同 -> ``skipped=True``（无需更新），不 rebuild / 不重启。
+             BUG-787 例外：status=pending 的实例不短路（与 ``update_zip`` 的
+             zip 级跳过例外同语义，借 update 重获扫描结果）。
            - 不同 -> 打包为临时 zip，调用 :meth:`update_zip`。
            - 换目录时不走指纹短路（旧指纹属于旧目录）。
         4. 更新成功后写回新的 ``sourceSyncHash``。
 
+        ``expected_revision``（S2-09 / BUG-751）：可选乐观并发 revision。锁外
+        预检（含指纹未变的 skipped 路径，同 CHK-353 约定），实际换入在
+        ``_update_zip_locked`` 锁内复核并以该值为收尾 CAS 基准；不符抛
+        ``ZipImportError(code="revision_conflict")``。
+
         Raises:
             ZipImportError: 实例不存在、非 folder 源且未传 ``source_dir``、
-                源目录缺失、未允许的换目录、更新失败。
+                源目录缺失、未允许的换目录、更新失败、revision 冲突。
         """
+        # S2-09 / BUG-751：锁外预检（与 update_zip 的 CHK-353 预检同语义）
+        if expected_revision is not None:
+            pre_revision = self.registry.get_revision(instance_id)
+            if pre_revision is not None and int(pre_revision) != int(expected_revision):
+                raise ZipImportError(
+                    f"实例 {instance_id} revision 与期望不符"
+                    f"（期望 {expected_revision}，当前 {pre_revision}），"
+                    "更新被拒绝；请重新读取实例状态后再更新",
+                    code="revision_conflict",
+                    instance_id=instance_id,
+                    expected=int(expected_revision),
+                    actual=pre_revision,
+                )
         with import_activity_lock(self.ws):
             return self._update_from_dir_locked(
                 instance_id,
@@ -1253,6 +1361,8 @@ class Importer:
                 dry_run=dry_run,
                 force_kind_change=force_kind_change,
                 allow_source_dir_change=allow_source_dir_change,
+                expected_revision=expected_revision,
+                ignore_alias_guard=ignore_alias_guard,
             )
 
     def _update_from_dir_locked(
@@ -1266,6 +1376,8 @@ class Importer:
         dry_run: bool = False,
         force_kind_change: bool = False,
         allow_source_dir_change: bool = False,
+        expected_revision: int | None = None,
+        ignore_alias_guard: bool = False,
     ) -> UpdateResult:
         from local_webpage_access.folder_source import (
             compute_source_hash,
@@ -1371,8 +1483,15 @@ class Importer:
         new_sync_hash = compute_source_hash(source_dir)
         old_sync_hash = getattr(old_manifest, "sourceSyncHash", None)
 
-        # 无变更短路（切源场景恒走全量更新：旧指纹属于另一源类型，不可比）
-        if new_sync_hash == old_sync_hash and not switching_to_folder and not changing_source_dir:
+        # 无变更短路（切源场景恒走全量更新：旧指纹属于另一源类型，不可比；
+        # BUG-787：pending 实例不短路——与 update_zip 的 zip 级跳过例外同语义，
+        # 借 update 重扫可能因扫描器/计划生成器升级而识别成功）。
+        if (
+            new_sync_hash == old_sync_hash
+            and not switching_to_folder
+            and not changing_source_dir
+            and old_manifest.status != Status.PENDING
+        ):
             log.info(
                 "实例 %s 的文件夹源内容未变化（指纹 %s），跳过更新",
                 instance_id,
@@ -1416,6 +1535,8 @@ class Importer:
                 yes=yes,
                 dry_run=dry_run,
                 force_kind_change=force_kind_change,
+                expected_revision=expected_revision,
+                ignore_alias_guard=ignore_alias_guard,
             )
         finally:
             with contextlib.suppress(OSError):
@@ -1612,6 +1733,8 @@ class Importer:
         dry_run: bool = False,
         force_kind_change: bool = False,
         clone_url: str | None = None,
+        expected_revision: int | None = None,
+        ignore_alias_guard: bool = False,
     ) -> UpdateResult:
         """从 GitHub 远端更新 git 源实例（IMP-065 §17.2.3 / 065.15–18）。
 
@@ -1630,10 +1753,29 @@ class Importer:
 
         ``clone_url`` 仅供零外网测试注入（同 :meth:`import_from_git`）。
 
+        ``expected_revision``（S2-09 / BUG-751）：可选乐观并发 revision。锁外
+        预检（含 OID 未变的 skipped 路径），实际换入在 ``_update_zip_locked``
+        锁内复核并以该值为收尾 CAS 基准；不符抛
+        ``ZipImportError(code="revision_conflict")``。
+
         Raises:
-            ZipImportError: 实例不存在 / 非 git 源 / 子目录缺失 / 升级失败。
+            ZipImportError: 实例不存在 / 非 git 源 / 子目录缺失 / 升级失败 /
+                revision 冲突。
             GitSourceError: ``source_mismatch`` 及 URL / git / 网络类 errorKind。
         """
+        # S2-09 / BUG-751：锁外预检（与 update_zip 的 CHK-353 预检同语义）
+        if expected_revision is not None:
+            pre_revision = self.registry.get_revision(instance_id)
+            if pre_revision is not None and int(pre_revision) != int(expected_revision):
+                raise ZipImportError(
+                    f"实例 {instance_id} revision 与期望不符"
+                    f"（期望 {expected_revision}，当前 {pre_revision}），"
+                    "更新被拒绝；请重新读取实例状态后再更新",
+                    code="revision_conflict",
+                    instance_id=instance_id,
+                    expected=int(expected_revision),
+                    actual=pre_revision,
+                )
         with import_activity_lock(self.ws):
             return self._update_from_git_locked(
                 instance_id,
@@ -1644,6 +1786,8 @@ class Importer:
                 dry_run=dry_run,
                 force_kind_change=force_kind_change,
                 clone_url=clone_url,
+                expected_revision=expected_revision,
+                ignore_alias_guard=ignore_alias_guard,
             )
 
     def _update_from_git_locked(
@@ -1657,6 +1801,8 @@ class Importer:
         dry_run: bool = False,
         force_kind_change: bool = False,
         clone_url: str | None = None,
+        expected_revision: int | None = None,
+        ignore_alias_guard: bool = False,
     ) -> UpdateResult:
         from local_webpage_access import git_source
         from local_webpage_access.folder_source import pack_source_dir
@@ -1787,6 +1933,8 @@ class Importer:
                     yes=yes,
                     dry_run=dry_run,
                     force_kind_change=force_kind_change,
+                    expected_revision=expected_revision,
+                    ignore_alias_guard=ignore_alias_guard,
                 )
                 new_ref, new_kind, new_commit = clone.ref, clone.ref_kind, clone.commit
         finally:
@@ -2365,6 +2513,13 @@ def apply_detection_to_manifest(
     DEV-132：亦保留 ``buildEnv``（实例级构建环境变量，如
     ``{"VITE_BASE": "/<alias>/"}``）；重建默认 None，不透传会与 entry.build
     烤入值同途被静默清空（别名实例 --update 后白屏的根因之一）。
+    BUG-787：亦保留容器运维态（``containerId``/``imageId``/``image``/
+    ``hostPort``/``projectName``/``serviceName``/``extraVolumes``/
+    ``rebuildStrategy``）与 ``lastOperation`` / ``deploymentFingerprints``。
+    设计取舍：重建只刷新扫描派生字段；身份被清空会让随后 rebuild 在
+    hosting.host_container 退化为首次部署路径（S2-03 先建后换失效，构建失败
+    无补偿），而 deploymentFingerprints 正是 S2-04 收敛决策判定「源码已换」
+    的基线，两者都必须活过 scan / import --update 重建。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -2435,6 +2590,37 @@ def apply_detection_to_manifest(
     # 无 container 子表，fresh 维持新导入默认 True。
     if manifest.container is not None and fresh.container is not None:
         fresh.container.runAsNonRoot = manifest.container.runAsNonRoot
+    # BUG-787：容器身份（containerId/imageId/image）、hostPort 与
+    # projectName/serviceName/extraVolumes/rebuildStrategy 是运维态/用户显式
+    # 配置，不从扫描推导；重建只应刷新扫描派生字段（entry/internalPort/
+    # capabilityContract/deploymentPlans 等）。containerId/imageId 被清空会让
+    # 随后 rebuild 在 hosting.host_container 退化为 operation_kind="deploy"
+    # （首次部署：先 compose down 旧容器、无 .prev 快照与 :prev 标签可回退，
+    # 构建失败无补偿 → 在用服务中断，S2-03 先建后换被整体绕过）。
+    # extraVolumes / rebuildStrategy 与 buildHooks 同族（用户显式配置），
+    # 不透传会在 update 后静默清空。list() 拷贝避免共享可变列表。
+    if manifest.container is not None and fresh.container is not None:
+        fresh.container.containerId = manifest.container.containerId
+        fresh.container.imageId = manifest.container.imageId
+        fresh.container.image = manifest.container.image
+        fresh.container.hostPort = manifest.container.hostPort
+        fresh.container.projectName = manifest.container.projectName
+        fresh.container.serviceName = manifest.container.serviceName
+        fresh.container.extraVolumes = list(manifest.container.extraVolumes)
+        fresh.container.rebuildStrategy = manifest.container.rebuildStrategy
+        # BUG-788：扫描只观测到 process.env.PORT（无字面回退）时 internalPort
+        # 是兜底推断——保留既有端口，不要让猜测值覆盖运维确认的端口。
+        if getattr(detection, "internalPortGuessed", False) and manifest.container.internalPort:
+            fresh.container.internalPort = manifest.container.internalPort
+    # BUG-787：lastOperation / deploymentFingerprints 是运维态。指纹基线是
+    # S2-04 收敛决策的「上次成功部署」参照——透传后 update 的 restart/start
+    # 以旧基线对比新渲染生成物（sourceHash/planHash 必变 → full_rebuild），
+    # 身份保留才不会把「源码已换、镜像仍旧」误判为「未变」而走轻量 start。
+    # 深拷贝避免与旧 manifest 共享可变结构。
+    fresh.lastOperation = copy.deepcopy(getattr(manifest, "lastOperation", None))
+    fresh.deploymentFingerprints = copy.deepcopy(
+        getattr(manifest, "deploymentFingerprints", None)
+    )
     # issue #23：buildHooks / preStart 是用户在 manifest 的显式配置，不从
     # zip 推导；build_manifest_from_detection 默认 [] / None，不透传会让
     # scan / import --update / rebuild --sync / update_from_git（汇入
@@ -2447,6 +2633,8 @@ def apply_detection_to_manifest(
     fresh.aliasLiveVerifiedFor = getattr(manifest, "aliasLiveVerifiedFor", None)
     fresh.aliasGuardCheckedAt = getattr(manifest, "aliasGuardCheckedAt", None)
     fresh.aliasGuardResult = getattr(manifest, "aliasGuardResult", None)
+    fresh.aliasGuardError = getattr(manifest, "aliasGuardError", None)
+    fresh.aliasProbeCoverage = getattr(manifest, "aliasProbeCoverage", None)
     fresh.consecutiveReconcileFailures = int(
         getattr(manifest, "consecutiveReconcileFailures", 0) or 0
     )

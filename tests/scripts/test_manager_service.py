@@ -1013,6 +1013,9 @@ def test_run_service_main_passes_log_dir(
     """BUG-116：子进程入口 setup_logging 必须传入 workspace.logs。"""
     from local_webpage_access import manager_service
 
+    # S2-08：run_service_main 会 set_op_source("manager") 直写 os.environ；
+    # delenv 快照使 teardown 清掉该污染，避免影响后续依赖默认 cli 来源的用例。
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
     workspace.ensure_workspace_dirs()
     (workspace.root / "local-web.yml").write_text(
         "portPool:\n  start: 21000\n  end: 21050\nmanagerEnabled: true\n",

@@ -107,12 +107,25 @@ class InstanceStatus:
     # 第二批 CHK-252：验证结论（passed/degraded）与进程状态分离，
     # 从 manifest.verificationSummary 透传给列表 API / UI 叠加展示。
     verification_overall: str | None = None
+    # S2-05：别名守卫三态 / 最近失败原因 / 采样覆盖（manifest.aliasGuard*，
+    # BUG-744/752/758；管理页徽标与详情透出）。
+    alias_guard_result: str | None = None
+    alias_guard_checked_at: str | None = None
+    alias_guard_error: str | None = None
+    alias_live_verified_at: str | None = None
+    alias_probe_coverage: dict | None = None
     # C.01（IMP-056 后置包）：兼容性预检摘要——manifest.compatibilityFindings
     # 非空时的最高等级与条数；无 findings 时为 None/0（列表输出保持紧凑）。
     compatibility_severity: str | None = None
     compatibility_count: int = 0
     # S1-07 / #56-3：manifest 存在但读取失败时的错误摘要（此时 source_kind 为 None，不显示假默认值）
     manifest_error: str | None = None
+    # S2-02 / D4：操作态（{kind, status, buildId, startedAt, finishedAt, error, source}），
+    # 与实例 status（观测态）分离；权威来源为 registry last_operation_json
+    last_operation: dict[str, Any] | None = None
+    # S2-09 / BUG-751：实例内容/配置修订号（registry instances.revision，乐观并发用）。
+    # 由更新/重建/部署等变更流程 CAS 递增；start/stop/restart 与状态观测不改 revision
+    revision: int = 1
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -188,9 +201,19 @@ class InstanceStatus:
             "sourceGitSubdir": self.source_git_subdir,
             # 第二批 CHK-252：验证结论（passed/degraded/failed）独立于进程状态。
             "verificationOverall": self.verification_overall,
+            # S2-05：别名守卫三态 / 最近失败原因 / 采样覆盖（管理页徽标）。
+            "aliasGuardResult": self.alias_guard_result,
+            "aliasGuardCheckedAt": self.alias_guard_checked_at,
+            "aliasGuardError": self.alias_guard_error,
+            "aliasLiveVerifiedAt": self.alias_live_verified_at,
+            "aliasProbeCoverage": self.alias_probe_coverage,
             # C.01：JSON 稳定字段（非拼接文案）；无 findings 时为 null/0
             "compatibilitySeverity": self.compatibility_severity,
             "compatibilityCount": self.compatibility_count,
+            # S2-02 / D4：操作态；status 为观测态，二者分离展示
+            "lastOperation": self.last_operation,
+            # S2-09 / BUG-751：乐观并发 revision（registry 权威）
+            "revision": self.revision,
             **self.extra,
         }
 
@@ -240,6 +263,12 @@ def instance_status(
     source_git_subdir: str | None = None
     # 第二批 CHK-252：从 manifest.verificationSummary 读取最近一次验证结论。
     verification_overall: str | None = None
+    # S2-05：别名守卫三态与采样覆盖（manifest.aliasGuard*，BUG-744/752/758）。
+    alias_guard_result: str | None = None
+    alias_guard_checked_at: str | None = None
+    alias_guard_error: str | None = None
+    alias_live_verified_at: str | None = None
+    alias_probe_coverage: dict | None = None
     # C.01：兼容性预检摘要（最高等级 + 条数；不读 DB，直接读 manifest）
     compatibility_severity: str | None = None
     compatibility_count = 0
@@ -261,6 +290,12 @@ def instance_status(
             summary = getattr(manifest, "verificationSummary", None)
             if isinstance(summary, dict):
                 verification_overall = summary.get("overallStatus")
+            # S2-05：别名守卫结果随列表/详情 API 透出（管理页徽标与失败原因）。
+            alias_guard_result = getattr(manifest, "aliasGuardResult", None)
+            alias_guard_checked_at = getattr(manifest, "aliasGuardCheckedAt", None)
+            alias_guard_error = getattr(manifest, "aliasGuardError", None)
+            alias_live_verified_at = getattr(manifest, "aliasLiveVerifiedAt", None)
+            alias_probe_coverage = getattr(manifest, "aliasProbeCoverage", None)
             findings = getattr(manifest, "compatibilityFindings", None) or []
             if findings:
                 compatibility_severity = _highest_compatibility_severity(findings)
@@ -325,9 +360,16 @@ def instance_status(
         source_git_commit=source_git_commit,
         source_git_subdir=source_git_subdir,
         verification_overall=verification_overall,
+        alias_guard_result=alias_guard_result,
+        alias_guard_checked_at=alias_guard_checked_at,
+        alias_guard_error=alias_guard_error,
+        alias_live_verified_at=alias_live_verified_at,
+        alias_probe_coverage=alias_probe_coverage,
         compatibility_severity=compatibility_severity,
         compatibility_count=compatibility_count,
         manifest_error=manifest_error,
+        last_operation=_parse_last_operation(row.get("last_operation_json")),
+        revision=_as_int(row.get("revision")) or 1,
         extra={"reconcileCircuit": circuit_note} if circuit_note else {},
     )
 
@@ -755,6 +797,19 @@ def _parse_stack(raw: Any) -> list[str]:
     if not isinstance(data, list):
         return []
     return [str(item) for item in data]
+
+
+def _parse_last_operation(raw: Any) -> dict[str, Any] | None:
+    """S2-02 / D4：解析 registry ``last_operation_json``；损坏时按 None 处理。"""
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 __all__ = [

@@ -1085,6 +1085,12 @@ def run_service_main() -> int:
     require_supported_platform()
 
     workspace = Workspace(Path(args.workspace).resolve())
+    # S2-08 / issue #59：manager 进程日志落 manager.log（IMP-034），阶段须按
+    # 来源镜像回 lwa.log 才能被运维看到；强制赋值——本进程由 CLI spawn，
+    # 继承的 LWA_OP_SOURCE 可能是 cli。
+    from local_webpage_access.logging import set_op_source
+
+    set_op_source("manager")
     # BUG-116：写入 logs/lwa.log；uvicorn 等 stdout 由父进程重定向到 manager.log。
     setup_logging(
         level=args.log_level.upper(),

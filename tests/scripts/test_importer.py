@@ -1438,7 +1438,12 @@ def test_update_needs_restart_when_running(
 def test_update_container_needs_rebuild_not_restart(
     importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path
 ) -> None:
-    """DEV-067：容器 running 更新 → needs_rebuild=True，且作废 containerId。"""
+    """DEV-067 / BUG-787：容器 running 更新 → needs_rebuild=True，且保留 containerId。
+
+    身份必须保留：S2-03 先建后换依赖 containerId 非空判定 operation_kind=
+    "rebuild"；清空身份会让随后 rebuild 退化为首次部署路径（旧容器被
+    compose down、无 .prev 快照与 :prev 标签可回退）。
+    """
     from local_webpage_access.models import InstanceManifest
 
     v1 = _make_zip(
@@ -1447,7 +1452,7 @@ def test_update_container_needs_rebuild_not_restart(
     )
     r1 = importer.import_zip(v1)
     iid = r1.instance_id
-    # 模拟已部署：落库 containerId，使旧逻辑会走轻量 start
+    # 模拟已部署：落库 containerId
     mpath = workspace.app_manifest_path(iid)
     m = InstanceManifest.load(mpath)
     assert m.container is not None
@@ -1466,29 +1471,24 @@ def test_update_container_needs_rebuild_not_restart(
     assert result.needs_rebuild is True
     assert result.needs_restart is False
     assert result.manifest.container is not None
-    assert result.manifest.container.containerId is None
-    assert result.manifest.container.imageId is None
-    # registry 同步后也不应再有旧 container_id（避免 start 误判已部署）
+    assert result.manifest.container.containerId == "old-container-id"
+    assert result.manifest.container.imageId == "old-image-id"
+    # registry 同步后身份登记仍在（S2-03 rebuild 判定 + 端口复用都依赖它）
     row = registry.get_container(iid)
     assert row is not None
-    assert row.get("container_id") in (None, "")
+    assert row.get("container_id") == "old-container-id"
+    assert row.get("image_id") == "old-image-id"
 
-    # --no-restart：仍作废部署标记，但不要求立即 rebuild
+    # --no-restart：身份同样保留，但不要求立即 rebuild
     v3 = _make_zip(
         tmp_path / "api-v3.zip",
         {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "app=3\n"},
     )
-    # 再假装部署过
-    m = InstanceManifest.load(mpath)
-    assert m.container is not None
-    m.container.containerId = "again"
-    m.save(mpath)
-    registry.upsert_from_manifest(m)
     result2 = importer.update_zip(v3, iid, restart=False)
     assert result2.needs_rebuild is False
     assert result2.needs_restart is False
     assert result2.manifest.container is not None
-    assert result2.manifest.container.containerId is None
+    assert result2.manifest.container.containerId == "old-container-id"
 
 
 def test_update_dry_run_container_reports_needs_rebuild(

@@ -63,6 +63,11 @@ def main_callback(
 ) -> None:
     f"""{PRODUCT_NAME} 命令行工具。"""
     bootstrap("DEBUG" if verbose else "INFO")
+    # S2-08 / issue #59：CLI 入口标记操作来源（默认即 cli；manager/daemon
+    # 子进程入口会强制覆盖，spawn 继承的 cli 值不会失聪）。
+    from local_webpage_access.logging import set_op_source
+
+    set_op_source("cli")
     # IMP-036：除 help / version / 只读 doctor 外，统一平台门禁（写工作区前 fail-fast）
     sub = ctx.invoked_subcommand
     if sub in (None, "version", "doctor"):
@@ -76,7 +81,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.9.2-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.9.3-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())

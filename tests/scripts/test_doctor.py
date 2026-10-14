@@ -871,28 +871,56 @@ def test_check_caddy_health_warns_on_unreachable_alias_entry(env, monkeypatch) -
 
 
 def test_check_caddy_health_entry_probe_uses_alias_path(env, monkeypatch) -> None:
-    """BUG-080：入口探测应打 /<alias>/ 而非 /（根路径无路由会 404 误报 WARN）。"""
+    """BUG-080 / S2-05：入口探测打 /<alias>/（根路径无路由会 404 误报）。
+
+    S2-05 起别名检查复用 verify_alias_live（抓取入口 HTML 并探测引用资源），
+    不再用 health_check 只探「/alias/ 可达」；此处 mock verify_alias_live。
+    """
+    from local_webpage_access import path_alias
+
     ws, config, reg = env
     config.staticGateway = "caddy"
     _seed_static_for_doctor(ws, reg, "demo", host_port=21100, alias="myapp")
     seen: list[str] = []
 
-    def _health(port, path="/"):
-        seen.append(path)
-        # 站点 hostPort(21100) 正常服务；入口端口仅 /myapp/ 可达（模拟别名路由），
-        # 根 / 返回 404——BUG-080 正是要求入口探测打 /myapp/ 而非 /
-        if port == 21100:
-            return True
-        return path == "/myapp/"
+    def _verify(config_, alias, **kwargs):
+        seen.append(alias)
+        return path_alias.AliasLiveVerifyResult()
 
-    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True, health=_health)
+    monkeypatch.setattr(path_alias, "verify_alias_live", _verify)
+    # 站点 hostPort 探测与 admin 存活仍走 StaticGateway 替身（与别名检查无关）。
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True)
     main = ws.static_gateway / "Caddyfile"
     main.parent.mkdir(parents=True, exist_ok=True)
     main.write_text(":8080 {}\n")
     runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
     r = check_caddy_health(ws, config, runner=runner, registry=reg)
     assert r.status == STATUS_OK  # 不因根路径 404 误报
-    assert "/myapp/" in seen
+    assert "myapp" in seen
+
+
+def test_check_caddy_health_alias_live_verify_failure_warns(env, monkeypatch) -> None:
+    """S2-05 / #52：verify_alias_live 失败（content 级）→ WARN，文案含失败原因。"""
+    from local_webpage_access import path_alias
+    from local_webpage_access.errors import RecognitionError
+
+    ws, config, reg = env
+    config.staticGateway = "caddy"
+    _seed_static_for_doctor(ws, reg, "demo", host_port=21100, alias="myapp")
+
+    def _fail(config_, alias, **kwargs):
+        raise RecognitionError("别名资源 /myapp/a.js 返回了 HTML", kind="content")
+
+    monkeypatch.setattr(path_alias, "verify_alias_live", _fail)
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=True)
+    main = ws.static_gateway / "Caddyfile"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(":8080 {}\n")
+    runner = _runner_from_map({("caddy", "validate"): _proc(0, stdout="valid")})
+    r = check_caddy_health(ws, config, runner=runner, registry=reg)
+    assert r.status == STATUS_WARN
+    assert "myapp" in r.message
+    assert "content" in r.message
 
 
 def test_check_caddy_health_ok_when_all_sites_reachable(env, monkeypatch) -> None:

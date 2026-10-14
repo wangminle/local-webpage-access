@@ -21,7 +21,11 @@ from local_webpage_access.models import (
     Status,
 )
 from local_webpage_access.registry import Registry
-from local_webpage_access.registry.connection import get_schema_version, migrate
+from local_webpage_access.registry.connection import (
+    CURRENT_SCHEMA_VERSION,
+    get_schema_version,
+    migrate,
+)
 
 
 @pytest.fixture()
@@ -107,7 +111,7 @@ def test_migrate_runs_on_fresh_db(workspace_root: Path) -> None:
     workspace_root.mkdir(parents=True, exist_ok=True)
     reg = Registry(db_path)
     reg.open()
-    assert get_schema_version(reg.conn) == 5
+    assert get_schema_version(reg.conn) == CURRENT_SCHEMA_VERSION
     reg.close()
 
 
@@ -153,7 +157,7 @@ def test_concurrent_migrate_serializes_schema_version_check(tmp_path: Path, monk
     assert errors == []
     verify = connection_mod.connect(db_path)
     try:
-        assert original_get(verify) == 5
+        assert original_get(verify) == connection_mod.CURRENT_SCHEMA_VERSION
     finally:
         verify.close()
 

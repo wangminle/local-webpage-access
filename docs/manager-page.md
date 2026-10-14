@@ -78,15 +78,15 @@ lwa manager off         # 停止
 | GET | `/api/instances/{id}` | 实例详情：状态快照 + manifest + 构建/事件/资源记录 |
 | GET | `/api/instances/{id}/logs?category=&tail=` | 日志内容（build/run/gateway/import/scan） |
 | GET | `/api/instances/{id}/resources` | 实例级资源占用 |
-| POST | `/api/instances/{id}/start` | 启动实例（`?fallback_policy=confirm\|auto-equivalent\|disabled`，非法值 400，C.R03；top-1 失败且有等价候选时默认返回 `pendingConfirmation` 结构，前端弹窗确认降级后调用 confirm-fallback）；容器在 Docker 能力降级时返回 `409 capability_denied`（BUG-237） |
-| POST | `/api/instances/{id}/confirm-fallback` | Gate-C 降级确认（C.R03）：降级弹窗确认后调用，以 `auto-equivalent` 策略重试启动；幂等--实例已在 fallback 后运行则直接返回当前状态 |
-| POST | `/api/instances/{id}/stop` | 停止实例（同上） |
-| POST | `/api/instances/{id}/restart` | 重启实例（同上） |
-| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上）。V0.8.5 起响应带 `sourceStaleWarnings`（关联 folder/git 源已漂移的提示，前端暂未展示） |
+| POST | `/api/instances/{id}/start` | 启动实例（`?fallback_policy=confirm\|auto-equivalent\|disabled`，非法值 400，C.R03；top-1 失败且有等价候选时默认返回 `pendingConfirmation` 结构，前端弹窗确认降级后调用 confirm-fallback）；容器在 Docker 能力降级时返回 `409 capability_denied`（BUG-237）。**V0.10.0（S2-09）**：可选 `?expectedRevision=<int>` 乐观并发，过期返回 **409 `revision_conflict`** |
+| POST | `/api/instances/{id}/confirm-fallback` | Gate-C 降级确认（C.R03）：降级弹窗确认后调用，以 `auto-equivalent` 策略重试启动；幂等--实例已在 fallback 后运行则直接返回当前状态；同样支持 `?expectedRevision=`（S2-09） |
+| POST | `/api/instances/{id}/stop` | 停止实例（同上，含 `?expectedRevision=`，S2-09） |
+| POST | `/api/instances/{id}/restart` | 重启实例（同上，含 `?expectedRevision=`，S2-09） |
+| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上，含 `?expectedRevision=`，S2-09）。V0.8.5 起响应带 `sourceStaleWarnings`（关联 folder/git 源已漂移的提示，前端暂未展示） |
 | POST | `/api/instances/{id}/cancel-build` | 取消排队中或进行中的构建（IMP-039）；返回 `outcome`：`cancelled` / `cancel_failed` / `noop` / `already_done`；`cancel_failed` 为 **409**；不删缓存/镜像/用户数据；`cancelling` 期间其它生命周期操作返回 409 |
-| POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁；CLI：`lwa recover <id>` |
-| POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009） |
-| POST | `/api/instances/{id}/update-from-dir` | 从关联文件夹源同步更新实例（IMP-047；仅 sourceKind=folder） |
+| POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁；CLI：`lwa recover <id>`；支持 `?expectedRevision=`（S2-09，仅锁外预检） |
+| POST | `/api/instances/{id}/update` | 用 inbox 内新 zip 原地更新实例（IMP-009）；body 可选 `expectedRevision`（S2-09，非整数 400，过期 **409 `revision_conflict`**） |
+| POST | `/api/instances/{id}/update-from-dir` | 从关联文件夹源同步更新实例（IMP-047；仅 sourceKind=folder；支持 body `expectedRevision`，S2-09） |
 | POST | `/api/import-from-dir` | 从本机文件夹导入新实例（IMP-047） |
 | POST | `/api/import-from-git` | 从 GitHub 仓库一键导入新实例（IMP-065；不限 loopback，LAN + token 可用；body：`url`/`ref`/`subdir`/`name`/`pathAlias`） |
 | POST | `/api/instances/{id}/update-from-git` | 从 GitHub 远端更新 git 源实例（IMP-065；`ls-remote` 无变更探测，OID 未变返回 `skipped=true`；仅 sourceKind=git） |
@@ -158,6 +158,7 @@ Content-Type: application/json
   - **静态 / 前端**：`restarted=true`。
   - `restart=false`（对应 CLI `--no-restart`）：只换源码；容器需稍后 `lwa rebuild` / `POST .../rebuild`。
 * 与 CLI `lwa import inbox/foo.zip --update <id>` 共用 `importer.update_zip` 代码路径。
+* **乐观并发（S2-09 / issue #57-3，V0.10.0）**：body 可带 `expectedRevision`（列表/详情快照里的 `revision`，整数；类型非法 400）。实例在该快照之后被其它通道（CLI / daemon / Agent / 另一个管理页标签）更新过 → **409 `revision_conflict`**，错误体含 `expected` / `actual`。管理页前端每次更新都自动携带；update-from-dir / update-from-git 同样支持。更新成功后由更新流程自身 CAS 递增 `revision`。
 
 ### 文件夹源导入与更新（IMP-047）
 
@@ -295,6 +296,13 @@ Content-Type: application/json
 | `redundant` | 是否为同 zip 指纹分组中的冗余实例（非最早者，IMP-019） |
 | `configLossReasons` | 冗余实例携带的「删除即丢失」独立配置清单（路径别名 / buildEnv，issue #31；非冗余实例为空数组） |
 | `reconcileCircuit` | 构建熔断提示（issue #35）：连续构建失败进入小时级退避、达人工阈值后停止自动重试；`lwa start` / `lwa rebuild` 清熔断。仅熔断激活时返回，详情面板显示为「构建熔断」 |
+| `lastOperation` | 操作态（S2-02 / issue #57-2，V0.10.0）：最近一次生命周期操作的结果 `{kind, status, buildId, startedAt, finishedAt, error, source}`，`status` 取 `queued` / `building` / `succeeded` / `failed` / `cancelled`。实例 `status` 只反映观测（运行中/已停止/未在服务），构建排队超时、构建失败等不再把仍在服务的实例标成「失败」——改为状态徽标旁叠加「最近一次重建失败」徽标（含时间与原因），详情面板「最近操作」一行展示完整记录；`lwa status` 同步输出该行 |
+| `revision` | 实例内容/配置修订号（S2-09 / issue #57-3，V0.10.0）：registry 权威计数，更新（zip/文件夹/git）与 rebuild 成功 CAS 递增；start/stop/restart/recover 与状态观测不改。生命周期操作可带 `expectedRevision` 做乐观并发，过期返回 **409 `revision_conflict`**；管理页每次操作自动携带列表快照的 revision，遇 409 提示「实例已被其他操作更新，请刷新后重试」并自动刷新列表 |
+| `aliasGuardResult` | 别名守卫三态（V0.10.0，issue #52）：`passed` / `passed(api-only)`（纯 API 契约，N5）/ `failed(content)` / `failed(transient)` / `skipped(非 Caddy 后端|显式跳过|实例未运行)`；实例卡片路径别名旁显示状态徽标，悬浮可见失败原因 |
+| `aliasGuardCheckedAt` | 最近一次别名守卫检查时间 |
+| `aliasGuardError` | 最近一次守卫失败原因（passed/skipped 时为 null） |
+| `aliasLiveVerifiedAt` | 最近一次别名活验证通过时间（issue #21） |
+| `aliasProbeCoverage` | 采样覆盖（issue #58）：`{checked, found, truncated, skippedExternal}`，上限 20 条 |
 
 详情中的 `manifest.nameSource` 为 `user` / `html_title` / `slug`（或旧数据 `null`），用于判断是否允许 title 回填。
 
@@ -410,7 +418,7 @@ Authorization: Bearer <token>
 * **从文件夹导入（IMP-047 / IMP-051）**：顶栏「导入文件夹」打开对话框；请选**项目根或 dist/**（含 `index.html` / `package.json`），不要只选 `src/`。源路径右侧「选择文件夹」仅在 **loopback** 可用（宿主机原生选目录）；局域网访问时按钮禁用，请粘贴 LWA 机器绝对路径。导入仍复制进工作区，非就地运行。API 错误文案不含 `[ZIP_IMPORT_ERROR]` 等前缀。
 * **浏览量**：列表列展示累计访问；点击打开按天分布、最近命中与独立 IP 列表（IMP-024/026；page 级过滤 IMP-025）。
 
-> **状态说明（DEV-043 / BUG-071 / IMP-033 / IMP-058）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。Docker 观测失败时显示 unknown / 权限提示，不误写 stopped。**V0.7.7** 起容器实例新增 `verifying`（Gate-C 存活探针等待中）、`degraded`（必选探针通过但可选探针失败）状态，参见 [FAQ](faq.md#实例状态为-verifying--degraded--failedimp-058-gate-c)。**V0.7.9**：无源码声明/发现的健康端点时，API 能力无法实证会显示降级而非失败。**V0.8.6（第二批 CHK-252）**：`degraded` 不再写入进程状态——验证有警告时实例保持「运行中」，状态徽标旁叠加琥珀色「验证有警告」徽标，明细见实例 `verificationSummary`；就绪门槛探针可用 `lwa probe set` 显式声明。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例（容器路径仍受能力门禁）。
+> **状态说明（DEV-043 / BUG-071 / IMP-033 / IMP-058）**：Caddy 模式下，enabled 静态实例在 master（admin :2019）不可达时显示 `网关不可达`，在 master 在线但站点端口不通时显示 `配置无效`——二者均不再被误标为普通「已停止」。Docker 观测失败时显示 unknown / 权限提示，不误写 stopped。**V0.7.7** 起容器实例新增 `verifying`（Gate-C 存活探针等待中）、`degraded`（必选探针通过但可选探针失败）状态，参见 [FAQ](faq.md#实例状态为-verifying--degraded--failedimp-058-gate-c)。**V0.7.9**：无源码声明/发现的健康端点时，API 能力无法实证会显示降级而非失败。**V0.8.6（第二批 CHK-252）**：`degraded` 不再写入进程状态——验证有警告时实例保持「运行中」，状态徽标旁叠加琥珀色「验证有警告」徽标，明细见实例 `verificationSummary`；就绪门槛探针可用 `lwa probe set` 显式声明。**V0.10.0（S2-02 / issue #57-2）**：`queued` / `cancelled` 不再作为实例状态出现——实例 `status` 只由观测决定；排队、取消、构建失败写入操作态 `lastOperation`（列表字段表与详情「最近操作」），运行中实例的构建失败以「最近一次重建失败（时间、原因）」徽标叠加展示，不再整体标红。点击「恢复」会先尝试拉起 Caddy master 再 restart 实例（容器路径仍受能力门禁）。
 * **实例详情**：manifest、构建记录、事件流、资源占用、分类日志查看器；含路径别名说明与 CLI 等价命令提示。
 * **待处理区**：pending 实例（可重扫 `lwa scan`）与 failed 实例（显示 `lastError`）。
 

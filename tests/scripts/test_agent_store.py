@@ -1,7 +1,7 @@
 """Agent 存储层测试（AGC-W05，M1）。
 
 验收场景（设计 §9.2 W05）：
-1. 旧库升级：v2 数据库打开后自动迁到 v3，存量数据不丢；
+1. 旧库升级：v2 数据库打开后自动迁到最新 schema，存量数据不丢；
 2. 重复迁移：幂等，无报错；
 3. 事务回滚：DAO 异常不落任何行；
 4. 并发同键只一行：两个连接（模拟两进程）同 (principal, workspace, idempotencyKey)
@@ -55,10 +55,10 @@ def _op_record(**over) -> dict:
 # ---- 1/2. 旧库升级与重复迁移 ------------------------------------------------------
 
 
-def test_fresh_db_at_schema_v5(workspace_root: Path) -> None:
+def test_fresh_db_at_schema_v6(workspace_root: Path) -> None:
     reg = Registry(workspace_root / "registry.db")
     reg.open()
-    assert get_schema_version(reg.conn) == 5
+    assert get_schema_version(reg.conn) == 6
     tables = {
         r[0] for r in reg.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -88,7 +88,7 @@ def test_v2_db_upgrades_with_data_intact(workspace_root: Path) -> None:
 
     reg = Registry(db_path)
     reg.open()
-    assert get_schema_version(reg.conn) == 5
+    assert get_schema_version(reg.conn) == 6
     tables = {
         r[0] for r in reg.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -98,12 +98,12 @@ def test_v2_db_upgrades_with_data_intact(workspace_root: Path) -> None:
     reg.close()
 
 
-def test_migrate_idempotent_at_v4(workspace_root: Path) -> None:
+def test_migrate_idempotent_at_v6(workspace_root: Path) -> None:
     reg = Registry(workspace_root / "registry.db")
     reg.open()
     before = get_schema_version(reg.conn)
     migrate(reg.conn)
-    assert get_schema_version(reg.conn) == before == 5
+    assert get_schema_version(reg.conn) == before == 6
     reg.close()
 
 

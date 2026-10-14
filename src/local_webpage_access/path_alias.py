@@ -10,7 +10,8 @@ import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin
 
@@ -40,6 +41,43 @@ log = get_logger("path_alias")
 # BUG-167：工作区级别名锁，串行化「查唯一性 → 写 manifest/子表/Caddy」全流程。
 _ALIAS_LOCK_TIMEOUT = 30.0
 _alias_thread_lock = threading.RLock()
+
+# S2-05 / #58：别名活验证采样上限（原 6 条放宽到 20 条）。
+_ALIAS_PROBE_LIMIT = 20
+
+
+@dataclass(frozen=True)
+class AliasProbeCoverage:
+    """#58：别名活验证采样覆盖。
+
+    * ``found``：入口 HTML 中发现的站内加载型资源引用总数（去重）；
+    * ``checked``：实际参与探测的条数（≤ 上限）；
+    * ``truncated``：found > checked（有引用因上限未探测）；
+    * ``skippedExternal``：外部 / 内联 / 非法引用条数（不占样本名额，#49）。
+    """
+
+    checked: int = 0
+    found: int = 0
+    truncated: bool = False
+    skippedExternal: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "checked": self.checked,
+            "found": self.found,
+            "truncated": self.truncated,
+            "skippedExternal": self.skippedExternal,
+        }
+
+
+@dataclass(frozen=True)
+class AliasLiveVerifyResult:
+    """verify_alias_live 成功后的返回值（此前为 None，调用方忽略返回值）。"""
+
+    coverage: AliasProbeCoverage = field(default_factory=AliasProbeCoverage)
+    # S2-05 / D7：纯 API 契约（servesUi=false）——入口非 5xx 即通过，
+    # 跳过 HTML 与资源探针，记 passed(api-only)。
+    api_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +191,7 @@ def reject_alias_if_absolute_spa_assets(
         f"请继续用 hostPort 端口直达。\n"
         f"注意：base: './' 可消除绝对资源路径但不推荐作为最终方案"
         f"（Router/API 仍需跟 BASE_URL）。",
+        kind="content",
         instance_id=instance_id,
     )
 
@@ -196,42 +235,114 @@ def _looks_like_html_body(body: bytes) -> bool:
     return head.startswith(b"<!doctype") or head.startswith(b"<html")
 
 
-def _collect_alias_live_probe_paths(html: str, alias: str, *, limit: int = 6) -> list[str]:
-    """收集别名入口下应可达的资源路径（/{alias}/...）。"""
-    from local_webpage_access.access import (
-        _alias_exempt,
-        _extract_js_bundle_paths,
-        classify_resource_ref,
-        scan_absolute_spa_resources,
-    )
+class _AliasLiveProbeCollector(HTMLParser):
+    """按文档顺序收集入口 HTML 的加载型资源引用（S2-05 / #58）。
+
+    覆盖 ``script src``、stylesheet / modulepreload / preload 等加载型 ``link``、
+    ``img`` 等媒体标签与 ``srcset``——相对路径资源同样参与别名活验证
+    （浏览器在 /{alias}/ 下会按相对路径解析）。提示型引用（canonical /
+    favicon / 导航）与 ``<base>`` 不收集：别名下 404 不致命。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.refs: list[str] = []
+        self._seen: set[str] = set()
+
+    def _record(self, value: str | None) -> None:
+        if not value:
+            return
+        value = value.strip()
+        if not value or value in self._seen:
+            return
+        self._seen.add(value)
+        self.refs.append(value)
+
+    def _record_srcset(self, value: str | None) -> None:
+        if not value:
+            return
+        for candidate in value.split(","):
+            piece = candidate.strip()
+            if piece:
+                self._record(piece.split(" ")[0])
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        from local_webpage_access.access import _LOAD_LINK_RELS, _LOAD_SRC_TAGS
+
+        attr = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "script":
+            self._record(attr.get("src"))
+            return
+        if tag == "link":
+            rels = {r.lower() for r in attr.get("rel", "").split()}
+            if rels & _LOAD_LINK_RELS:
+                self._record(attr.get("href"))
+            return
+        if tag in _LOAD_SRC_TAGS:
+            self._record(attr.get("src"))
+            self._record_srcset(attr.get("srcset"))
+
+
+def _collect_alias_live_probe_paths_with_coverage(
+    html: str, alias: str, *, limit: int = _ALIAS_PROBE_LIMIT
+) -> tuple[list[str], AliasProbeCoverage]:
+    """收集别名入口下应可达的资源路径（/{alias}/...）并返回采样覆盖（#58）。
+
+    统一走 S1-03 的 ``classify_resource_ref`` 分类：external / inline / invalid
+    引用不占样本名额，计入 ``skippedExternal``；相对路径拼上别名前缀参与探测；
+    绝对路径仅别名豁免（``/{alias}/...``）的参与探测。采样上限 20 条
+    （``truncated`` 标记是否有引用因上限被跳过）。
+    """
+    from local_webpage_access.access import _alias_exempt, classify_resource_ref
+
+    collector = _AliasLiveProbeCollector()
+    try:
+        collector.feed(html)
+        collector.close()
+    except Exception:  # noqa: BLE001 -- 病态 HTML 不应让活验证崩溃
+        log.warning("别名活验证：入口 HTML 解析失败，跳过资源采样（%s）", alias)
+        return [], AliasProbeCoverage()
 
     paths: list[str] = []
-    seen: set[str] = set()
-
-    def add(path: str) -> None:
-        bare = path.split("?", 1)[0].split("#", 1)[0]
-        if not bare or bare in seen:
-            return
-        seen.add(bare)
-        paths.append(bare)
-
-    scan = scan_absolute_spa_resources(html, alias=None)
-    for p in scan.load_paths:
-        if _alias_exempt(p, alias):
-            add(p)
-
-    for src in _extract_js_bundle_paths(html, limit=limit):
-        # BUG-590：先记录是否相对路径，再解析——相对资源需拼上别名前缀参与活验证。
-        # #49：外部 CDN 与内联引用已由 classify_resource_ref 排除，不得当站内路径探测。
+    seen_paths: set[str] = set()
+    found = 0
+    skipped_external = 0
+    for src in collector.refs:
         kind, path = classify_resource_ref(src, base_url="/")
         if kind != "same_origin" or path is None:
+            skipped_external += 1
             continue
+        bare = path.split("?", 1)[0].split("#", 1)[0]
+        if not bare or bare in seen_paths:
+            continue
+        if src.strip().startswith("/") and not _alias_exempt(bare, alias):
+            # 不带前缀的绝对加载型资源：守卫（reject_alias_if_absolute_spa_assets）
+            # 已先行拦截，这里不探测、也不计入 found。
+            continue
+        found += 1
+        if len(paths) >= limit:
+            continue
+        seen_paths.add(bare)
         if not src.strip().startswith("/"):
-            add(f"/{alias}{path}")
-        elif _alias_exempt(path, alias):
-            add(path)
+            # 相对引用：浏览器在 /{alias}/ 下按相对路径解析，拼前缀探测。
+            paths.append(f"/{alias}{bare}")
+        else:
+            paths.append(bare)
+    coverage = AliasProbeCoverage(
+        checked=len(paths),
+        found=found,
+        truncated=found > len(paths),
+        skippedExternal=skipped_external,
+    )
+    return paths, coverage
 
-    return paths[:limit]
+
+def _collect_alias_live_probe_paths(
+    html: str, alias: str, *, limit: int = _ALIAS_PROBE_LIMIT
+) -> list[str]:
+    """收集别名入口下应可达的资源路径（/{alias}/...）。上限 20 条（#58）。"""
+    paths, _coverage = _collect_alias_live_probe_paths_with_coverage(html, alias, limit=limit)
+    return paths
 
 
 def _http_probe_alias_resource(
@@ -260,6 +371,31 @@ def _http_probe_alias_resource(
         return False, None, None, b""
 
 
+def _classify_probe_failure(code: int | None) -> str:
+    """S2-05 / D2：探测失败的故障分类。
+
+    连接错误（code=None）、5xx、超时为 ``transient``（应用慢启动 / 临时故障，
+    维持 issue #21 保留策略只告警）；其余（4xx 等）为 ``content``。
+    """
+    if code is None or code >= 500:
+        return "transient"
+    return "content"
+
+
+def _raise_verify(
+    message: str,
+    *,
+    kind: str,
+    instance_id: str,
+    coverage: AliasProbeCoverage | None = None,
+) -> None:
+    """构造并抛出带故障分类（与可选采样覆盖）的 RecognitionError。"""
+    err = RecognitionError(message, kind=kind, instance_id=instance_id)
+    if coverage is not None:
+        err.alias_probe_coverage = coverage  # type: ignore[attr-defined]
+    raise err
+
+
 def verify_alias_live(
     config: Config,
     alias: str,
@@ -267,11 +403,18 @@ def verify_alias_live(
     entry_html: str | None,
     instance_id: str,
     workspace: Workspace | None = None,
-) -> None:
+    serves_ui: bool = True,
+) -> AliasLiveVerifyResult:
     """别名入口与关键静态资源的活验证（CHK-252 第三批）。
 
     设置别名并 reload 后，通过统一网关端口请求 ``/{alias}/`` 及 HTML 中引用的
     JS/CSS；若资源返回 SPA HTML 兜底或不可达则失败。
+
+    S2-05：失败按 :func:`_classify_probe_failure` 分类（content/transient），
+    经 ``RecognitionError.kind`` 传出；成功返回 :class:`AliasLiveVerifyResult`
+    （含采样覆盖）。``serves_ui=False``（契约 servesUi=false 的纯 API 服务，
+    D7 / BUG-758）时入口返回任意非 5xx 即通过，跳过 HTML 与资源探针，
+    结果记 ``passed(api-only)``。
     """
     from local_webpage_access.ports import entry_scheme, lan_entry_port
 
@@ -292,14 +435,25 @@ def verify_alias_live(
     base = f"{scheme}://127.0.0.1:{port}"
     entry_url = f"{base}/{alias}/"
     ok, code, ctype, body = _http_probe_alias_resource(entry_url, ssl_context=ssl_ctx)
-    if not ok or not body:
-        raise RecognitionError(
+    if not ok:
+        _raise_verify(
             f"别名入口 {entry_url} 活验证失败（HTTP {code}）",
+            kind=_classify_probe_failure(code),
+            instance_id=instance_id,
+        )
+    if not serves_ui:
+        # D7 / BUG-758：纯 API 服务没有 HTML 入口——非 5xx 即视为别名可用。
+        return AliasLiveVerifyResult(coverage=AliasProbeCoverage(), api_only=True)
+    if not body:
+        _raise_verify(
+            f"别名入口 {entry_url} 返回空响应（HTTP {code}）",
+            kind="content",
             instance_id=instance_id,
         )
     if "html" not in (ctype or "").lower() and not _looks_like_html_body(body):
-        raise RecognitionError(
+        _raise_verify(
             f"别名入口 {entry_url} 未返回 HTML（Content-Type={ctype!r}）",
+            kind="content",
             instance_id=instance_id,
         )
     live_html = body.decode("utf-8", "replace")
@@ -313,26 +467,34 @@ def verify_alias_live(
             html=entry_html, alias=alias, instance_id=instance_id
         )
     html = live_html
-    for path in _collect_alias_live_probe_paths(html, alias):
+    paths, coverage = _collect_alias_live_probe_paths_with_coverage(html, alias)
+    for path in paths:
         url = urljoin(base + "/", path.lstrip("/"))
         rok, rcode, rctype, rbody = _http_probe_alias_resource(url, ssl_context=ssl_ctx)
         if not rok:
-            raise RecognitionError(
+            _raise_verify(
                 f"别名资源 {path} 活验证失败（HTTP {rcode}，URL {url}）",
+                kind=_classify_probe_failure(rcode),
                 instance_id=instance_id,
+                coverage=coverage,
             )
         lower_path = path.lower()
         if lower_path.endswith((".js", ".mjs", ".css")) and _looks_like_html_body(rbody):
-            raise RecognitionError(
+            _raise_verify(
                 f"别名资源 {path} 返回了 HTML 而非静态文件（疑似 SPA 兜底），"
                 f"页面在 /{alias}/ 下仍会白屏",
+                kind="content",
                 instance_id=instance_id,
+                coverage=coverage,
             )
         if lower_path.endswith((".js", ".mjs")) and rctype and "html" in rctype.lower():
-            raise RecognitionError(
+            _raise_verify(
                 f"别名资源 {path} Content-Type 为 {rctype!r}（期望 script）",
+                kind="content",
                 instance_id=instance_id,
+                coverage=coverage,
             )
+    return AliasLiveVerifyResult(coverage=coverage)
 
 
 def _alias_previously_verified(manifest: InstanceManifest, alias: str) -> bool:
@@ -344,9 +506,15 @@ def _alias_previously_verified(manifest: InstanceManifest, alias: str) -> bool:
 
 
 def _stamp_alias_guard(manifest: InstanceManifest, result: str) -> None:
-    """记录别名内容守卫结果（passed / failed / skipped），不单独落盘。"""
+    """记录别名内容守卫结果（passed / failed(...) / skipped(...)），不单独落盘。
+
+    S2-05：同时清空最近失败原因与采样覆盖——新结果生效后旧失败信息不得残留
+    （failed 路径在盖章后由调用方另行写入 error/coverage）。
+    """
     manifest.aliasGuardCheckedAt = now_iso()
     manifest.aliasGuardResult = result
+    manifest.aliasGuardError = None
+    manifest.aliasProbeCoverage = None
 
 
 def _persist_alias_guard(
@@ -382,24 +550,45 @@ def maybe_verify_alias_after_start(
     if not alias:
         return False
     if skip_compat_check:
-        _persist_alias_guard(workspace, instance_id, manifest, "skipped")
+        # S2-05：显式跳过（--ignore-alias-guard / --skip-compat-check）记审计事件。
+        _persist_alias_guard(workspace, instance_id, manifest, "skipped(显式跳过)")
+        registry.add_event(
+            instance_id,
+            "path-alias",
+            f"别名 /{alias}/ 守卫已跳过（--ignore-alias-guard / --skip-compat-check）",
+        )
         return False
     gateway = StaticGateway(workspace, config)
     if gateway.detect_backend() != "caddy":
         # BUG-679：本次未跑活验证，不得沿用旧 passed。
-        _persist_alias_guard(workspace, instance_id, manifest, "skipped")
+        _persist_alias_guard(workspace, instance_id, manifest, "skipped(非 Caddy 后端)")
         return False
     host_port, _ = _resolve_host_port(manifest)
     html = _fetch_entrypoint_html_for_alias_guard(
         workspace=workspace, manifest=manifest, host_port=host_port
     )
+    contract = getattr(manifest, "capabilityContract", None) or {}
+    serves_ui = bool(contract.get("servesUi", True))
     try:
-        verify_alias_live(
-            config, alias, entry_html=html, instance_id=instance_id, workspace=workspace
+        outcome = verify_alias_live(
+            config,
+            alias,
+            entry_html=html,
+            instance_id=instance_id,
+            workspace=workspace,
+            serves_ui=serves_ui,
         )
     except RecognitionError as exc:
         hinted = _append_lwa_build_hint(exc, manifest, alias)
-        _stamp_alias_guard(manifest, "failed")
+        # S2-05 / D2：故障分类。content 级 → failed(content)（命令退出码 4，
+        # 由 CLI 据 aliasGuardResult 判定）；transient 维持 issue #21 保留策略。
+        content_level = getattr(exc, "kind", None) != "transient"
+        result_value = "failed(content)" if content_level else "failed(transient)"
+        _stamp_alias_guard(manifest, result_value)
+        manifest.aliasGuardError = (exc.message or str(exc))[:300]
+        coverage = getattr(exc, "alias_probe_coverage", None)
+        if coverage is not None:
+            manifest.aliasProbeCoverage = coverage.to_dict()
         if _alias_previously_verified(manifest, alias) or alias_fragment_preexisting:
             log.warning(
                 "实例 %s 别名 /%s/ 启动后活验证失败（%s）；"
@@ -434,19 +623,30 @@ def maybe_verify_alias_after_start(
                 "path-alias",
                 f"别名 /{alias}/ 启动后活验证异常（已保留别名配置）：{str(exc)[:200]}",
             )
-            _persist_alias_guard(workspace, instance_id, manifest, "failed")
+            _stamp_alias_guard(manifest, "failed(transient)")
+            manifest.aliasGuardError = str(exc)[:300]
+            with contextlib.suppress(OSError):
+                manifest.save(workspace.app_manifest_path(instance_id))
             return False
         _rollback_deferred_alias_after_failed_live_verify(
             workspace, config, registry, instance_id, manifest, host_port=host_port
         )
         raise RecognitionError(
             f"别名 /{alias}/ 启动后活验证异常：{exc}",
+            kind="transient",
             instance_id=instance_id,
         ) from exc
     # issue #21：验证通过即落标记，后续启动的活验证失败走「保留」分支。
     manifest.aliasLiveVerifiedAt = now_iso()
     manifest.aliasLiveVerifiedFor = alias
-    _stamp_alias_guard(manifest, "passed")
+    # S2-05 / D7：纯 API 契约记 passed(api-only)；同时落采样覆盖与清空旧失败原因。
+    # getattr 防御：单测可能 mock verify_alias_live 返回 None（旧签名无返回值）。
+    api_only = bool(getattr(outcome, "api_only", False))
+    _stamp_alias_guard(manifest, "passed(api-only)" if api_only else "passed")
+    coverage = getattr(outcome, "coverage", None)
+    if coverage is not None:
+        manifest.aliasProbeCoverage = coverage.to_dict()
+    manifest.aliasGuardError = None
     with contextlib.suppress(OSError):
         manifest.save(workspace.app_manifest_path(instance_id))
     registry.add_event(instance_id, "path-alias", f"别名 /{alias}/ 启动后活验证通过")
@@ -482,6 +682,8 @@ def _apply_manifest_alias(
         manifest.aliasLiveVerifiedFor = None
         manifest.aliasGuardCheckedAt = None
         manifest.aliasGuardResult = None
+        manifest.aliasGuardError = None
+        manifest.aliasProbeCoverage = None
     if manifest.runtime == Runtime.DOCKER_COMPOSE:
         # IMP-014：容器别名写入 container.routeMode/routeHost，registry 容器表据此联动。
         if manifest.container is not None:
@@ -947,6 +1149,7 @@ def _set_instance_path_alias_locked(
 
     live_verified = False
     compat_skipped = False
+    verify_outcome: AliasLiveVerifyResult | None = None
     if alias is not None and gateway_reloaded:
         if skip_compat_check:
             compat_skipped = True
@@ -957,12 +1160,14 @@ def _set_instance_path_alias_locked(
             )
         else:
             try:
-                verify_alias_live(
+                contract = getattr(manifest, "capabilityContract", None) or {}
+                verify_outcome = verify_alias_live(
                     config,
                     alias,
                     entry_html=html if html_verified else None,
                     instance_id=instance_id,
                     workspace=workspace,
+                    serves_ui=bool(contract.get("servesUi", True)),
                 )
                 live_verified = True
             except RecognitionError:
@@ -995,9 +1200,17 @@ def _set_instance_path_alias_locked(
         manifest.aliasLiveVerifiedFor = alias
     if alias is not None:
         if live_verified:
-            _stamp_alias_guard(manifest, "passed")
+            _stamp_alias_guard(
+                manifest, "passed(api-only)" if (verify_outcome and verify_outcome.api_only) else "passed"
+            )
+            if verify_outcome is not None:
+                manifest.aliasProbeCoverage = verify_outcome.coverage.to_dict()
+        elif compat_skipped:
+            # 显式跳过（--ignore-alias-guard / --skip-compat-check）与非 Caddy 的
+            # skipped 区分原因，收口摘要据此输出。
+            _stamp_alias_guard(manifest, "skipped(显式跳过)")
         elif html is None:
-            _stamp_alias_guard(manifest, "skipped")
+            _stamp_alias_guard(manifest, "skipped(实例未运行)")
         elif html_verified:
             _stamp_alias_guard(manifest, "passed")
     manifest.save(mpath)
@@ -1146,14 +1359,65 @@ def maybe_restore_desired_alias_after_start(
         manifest.aliasLiveVerifiedFor = refreshed.aliasLiveVerifiedFor
         manifest.aliasGuardCheckedAt = refreshed.aliasGuardCheckedAt
         manifest.aliasGuardResult = refreshed.aliasGuardResult
+        manifest.aliasGuardError = refreshed.aliasGuardError
+        manifest.aliasProbeCoverage = refreshed.aliasProbeCoverage
         return True
     except Exception as exc:  # noqa: BLE001
+        # BUG-785：补登记失败不能只 WARN 退出 0——盖章 failed(...) 落盘并回写
+        # 调用方 manifest，收口摘要行与退出码（content 级 → 4）才可见。
+        kind = getattr(exc, "kind", None) or "register"
+        _stamp_alias_guard(latest, f"failed({kind})")
+        latest.aliasGuardError = str(exc)[:300]
+        latest.touch()
+        with contextlib.suppress(OSError):
+            latest.save(workspace.app_manifest_path(instance_id))
+        with contextlib.suppress(Exception):  # noqa: BLE001 — 登记失败不阻断返回
+            registry.upsert_from_manifest(latest)
+        manifest.aliasGuardCheckedAt = latest.aliasGuardCheckedAt
+        manifest.aliasGuardResult = latest.aliasGuardResult
+        manifest.aliasGuardError = latest.aliasGuardError
+        manifest.aliasProbeCoverage = latest.aliasProbeCoverage
         log.warning("实例 %s 自动补登记别名 /%s/ 失败：%s", instance_id, desired, exc)
         return False
 
 
+def alias_guard_summary_line(manifest: InstanceManifest) -> str | None:
+    """S2-05 收口摘要行：``别名 /<alias>/:passed | failed(<原因>) | skipped(<原因>)``。
+
+    实例无别名时返回 ``None``（调用方不输出）。结果值中的括号原因在盖章处
+    写入（如 ``failed(content)`` / ``skipped(非 Caddy 后端)``）。
+    """
+    alias = _current_alias(manifest)
+    if not alias:
+        # BUG-785：期望别名补登记失败（routeMode 仍 port）也要给出摘要行，
+        # 否则用户无从感知 desiredAlias 未生效。
+        desired = (getattr(manifest, "desiredAlias", None) or "").strip()
+        result = (getattr(manifest, "aliasGuardResult", None) or "").strip()
+        if desired and result.startswith("failed"):
+            return f"别名 /{desired}/:{result}（未登记）"
+        return None
+    result = (getattr(manifest, "aliasGuardResult", None) or "unchecked").strip()
+    return f"别名 /{alias}/:{result}"
+
+
+def alias_guard_exit_code(manifest: InstanceManifest) -> int:
+    """S2-05 / D2：content 级别名验证失败 → 退出码 4。
+
+    含义「部分成功：内容已更新、别名验证失败」——与「没更新成」（1）区分，
+    供脚本按退出码决策。transient 级与 skipped/passed 均保持 0。
+    """
+    result = (getattr(manifest, "aliasGuardResult", None) or "").strip()
+    if result.startswith("failed(content"):
+        return 4
+    return 0
+
+
 __all__ = [
+    "AliasLiveVerifyResult",
+    "AliasProbeCoverage",
     "PathAliasResult",
+    "alias_guard_exit_code",
+    "alias_guard_summary_line",
     "maybe_restore_desired_alias_after_start",
     "maybe_verify_alias_after_start",
     "path_alias_lock",

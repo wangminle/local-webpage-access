@@ -14,7 +14,8 @@
 :func:`maybe_start_gateway` 在 ``lwa init`` / ``lwa manager on`` 联动调用，
 失败只记日志不阻断（可降级 builtin 静态服务）。
 
-"运行中" 的判定以 Caddy admin API（``127.0.0.1:2019``）是否在线为准——这是
+"运行中" 的判定以 Caddy admin API（``127.0.0.1:<admin-port>``，按工作区分配，
+未分配回退 legacy :2019）是否在线为准——这是
 master 真实存活的可信信号；``run/caddy.pid`` 仅作 pid 记录，可能因崩溃残留
 （由 :meth:`StaticGateway._clear_stale_caddy_pid` 清理，BUG-070）。
 """
@@ -62,9 +63,18 @@ GATEWAY_START_LOCK_TIMEOUT = 5.0
 # holder pid 已死即回收，避免网关从此无法启动只能人工删文件（对齐 manager_start_lock）。
 # 评审-组4：GATEWAY_START_LOCK_STALE_SECONDS 从未使用（flock 随进程死亡由内核释放），已删
 
-# Caddy admin API 固定监听 IPv4 loopback（reload/stop 走它，BUG-068 显式 127.0.0.1）。
+# Caddy admin API legacy 端口（reload/stop 走 IPv4 loopback，BUG-068 显式 127.0.0.1）。
+# BUG-783：各工作区 admin 端口按 admin_port.py 运行时分配（登记 run/admin-port），
+# 本常量仅作未分配工作区的回退，与 LEGACY_ADMIN_PORT 同值。
 ADMIN_PORT = 2019
 ENTRY_PORT_DEFAULT = 8080
+
+
+def _admin_port(workspace: Workspace) -> int:
+    """本工作区 Caddy admin 实际端口（未分配回退 legacy :2019）。"""
+    from local_webpage_access.admin_port import read_admin_port
+
+    return read_admin_port(workspace) or ADMIN_PORT
 
 
 @dataclass
@@ -171,7 +181,7 @@ def _require_caddy_backend(gateway: StaticGateway) -> None:
 
 
 def is_gateway_running(workspace: Workspace, config: Config) -> bool:
-    """Caddy master 是否在线（admin :2019 可达）。
+    """Caddy master 是否在线（本工作区 admin API 可达；BUG-783 按工作区分配端口）。
 
     以 admin 探测为准而非 pid 文件：master 崩溃后 pid 文件会残留并指向已死
     进程，单看 pid 会误判（BUG-070）。backend 非 caddy 时恒为 False。
@@ -427,17 +437,17 @@ def start_gateway(
                 fail_state = read_state(workspace) or GatewayState(
                     enabled=True,
                     port=lan_entry_port(config),
-                    admin_port=ADMIN_PORT,
+                    admin_port=_admin_port(workspace),
                 )
                 fail_state.enabled = True
                 record_start_failure(
                     fail_state,
-                    f"Caddy admin :{ADMIN_PORT} 被非本工作区进程占用，启动被拒绝",
+                    f"Caddy admin :{_admin_port(workspace)} 被非本工作区进程占用，启动被拒绝",
                     source=source,
                 )
                 write_state(workspace, fail_state)
                 raise LifecycleError(
-                    "Caddy admin :2019 已被非本工作区进程占用，拒绝停止 builtin "
+                    f"Caddy admin :{_admin_port(workspace)} 已被非本工作区进程占用，拒绝停止 builtin "
                     f"或认领外部网关（owner={owner.get('owner')}, pid={owner.get('pid')}）；"
                     "注意 run/caddy.pid 缺失也会触发本判定（CHK-280：重复 master 退出时 "
                     "Caddy 会删除共享 pidfile）——若 master 实为本工作区所有，"
@@ -465,7 +475,7 @@ def start_gateway(
                         pid=pid,
                         started_at=now_iso(),
                         port=lan_entry_port(config),
-                        admin_port=ADMIN_PORT,
+                        admin_port=_admin_port(workspace),
                     ),
                 )
                 log.info("网关在线但服务态缺失，补写恢复态（pid=%s）", pid if pid else "?")
@@ -523,7 +533,7 @@ def start_gateway(
                     pid=pid,
                     started_at=now_iso(),
                     port=lan_entry_port(config),
-                    admin_port=ADMIN_PORT,
+                    admin_port=_admin_port(workspace),
                 )
                 record_start_failure(fail_state, tls_error, source=source)
                 write_state(workspace, fail_state)
@@ -576,7 +586,7 @@ def start_gateway(
             pid=state.pid if state else None,
             started_at=state.started_at if state else None,
             port=lan_entry_port(config),
-            admin_port=ADMIN_PORT,
+            admin_port=_admin_port(workspace),
             last_start_error=state.last_start_error if state else None,
             consecutive_start_failures=(
                 state.consecutive_start_failures if state else 0
@@ -592,13 +602,13 @@ def start_gateway(
             intent_state.pid = None
             record_start_failure(
                 intent_state,
-                "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）",
+                f"Caddy master 启动失败（admin :{_admin_port(workspace)} 不可达或非本工作区进程）",
                 source=source,
             )
             write_state(workspace, intent_state)
             raise LifecycleError(
-                "Caddy master 启动失败（admin :2019 不可达或非本工作区进程）；"
-                "请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :2019；"
+                f"Caddy master 启动失败（admin :{_admin_port(workspace)} 不可达或非本工作区进程）；"
+                f"请检查 Caddyfile、PATH 中的 caddy，以及是否有测试孤儿占用 :{_admin_port(workspace)}；"
                 "Caddy 自身输出见 logs/caddy-runtime.log（CHK-280）",
             )
         if stopped_builtin:
@@ -613,7 +623,7 @@ def start_gateway(
             pid=pid,
             started_at=now_iso(),
             port=lan_entry_port(config),
-            admin_port=ADMIN_PORT,
+            admin_port=_admin_port(workspace),
             bind_version=_gateway_bind_version(),
             bind_revision=_gateway_bind_revision(),
         )
@@ -633,7 +643,7 @@ def start_gateway(
         log.info(
             "网关已启动（pid=%s，admin=127.0.0.1:%d，entry=%s）",
             pid if pid else "?",
-            ADMIN_PORT,
+            _admin_port(workspace),
             config.staticGatewayPort,
         )
         _post_switch_finalize(
@@ -718,8 +728,9 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
             log.info("staticGateway=%s 且无 Caddy master 在线，已清理服务态", backend)
             return True
         log.info(
-            "staticGateway=%s 但检测到 Caddy master 仍在运行（admin :2019），尝试停止",
+            "staticGateway=%s 但检测到 Caddy master 仍在运行（admin :%s），尝试停止",
             backend,
+            _admin_port(workspace),
         )
         stopped = gateway.caddy_stop()
         if stopped:
@@ -730,7 +741,7 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
             except Exception:  # noqa: BLE001
                 pass
         else:
-            log.warning("Caddy master 停止失败（admin :2019 仍可能在线）")
+            log.warning("Caddy master 停止失败（admin :%s 仍可能在线）", _admin_port(workspace))
         return stopped
 
     stopped = gateway.caddy_stop()
@@ -750,7 +761,7 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
             pass
         log.info("网关已停止")
     else:
-        log.warning("网关停止失败，Caddy master 可能仍在运行（admin :2019）")
+        log.warning("网关停止失败，Caddy master 可能仍在运行（admin :%s）", _admin_port(workspace))
     return stopped
 
 
@@ -783,15 +794,15 @@ def stop_gateway_internal(workspace: Workspace, config: Config) -> bool:
             pass
         log.info("网关已内部停止（意图保持 enabled=%s）", state.enabled if state else "?")
     else:
-        log.warning("网关内部停止失败，Caddy master 可能仍在运行（admin :2019）")
+        log.warning("网关内部停止失败，Caddy master 可能仍在运行（admin :%s）", _admin_port(workspace))
     return stopped
 
 
 def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
     """``lwa gateway status``：返回状态摘要。
 
-    BUG-108：``running`` 以 admin :2019 是否在线为准，**不**要求
-    ``staticGateway=caddy``。配置已切 builtin 但旧 master 仍占 :2019 时，
+    BUG-108：``running`` 以 Caddy admin API 是否在线为准，**不**要求
+    ``staticGateway=caddy``。配置已切 builtin 但旧 master 仍占 admin 端口时，
     必须报 ``running=True`` 并标 ``orphanMaster``，与 :func:`stop_gateway`
     （BUG-077）一致，避免 CLI 显示「未运行」掩盖端口占用。
     """
@@ -826,7 +837,7 @@ def gateway_status(workspace: Workspace, config: Config) -> dict[str, Any]:
         "pid": pid,
         "startedAt": state.started_at if state else None,
         "port": (state.port if state and state.port is not None else configured_port),
-        "adminPort": ADMIN_PORT,
+        "adminPort": _admin_port(workspace),
         "orphanMaster": orphan_master,
         "foreignMaster": foreign_master,
         # IMP-064.05：透出失败观测
@@ -918,7 +929,7 @@ def run_gateway_foreground(
 
     log.info(
         "gateway 前台监管就绪（admin=127.0.0.1:%d），每 %ss 探活一次",
-        ADMIN_PORT,
+        _admin_port(workspace),
         poll_interval,
     )
     # 进程常驻期间周期刷新能力快照（默认约 5 分钟），覆盖权限/网络等静默变化。

@@ -89,9 +89,8 @@ STATE_FILENAME = "daemon.json"
 LOCK_FILENAME = "daemon.lock"
 START_LOCK_FILENAME = "daemon-start.lock"
 LOG_FILENAME = "daemon.log"
-# issue #16 / BUG-603：daemon 进程标记（_main 启动时置 1）。hosting._stage
-# 检测到该标记时把 lifecycle_stage 镜像进 lwa.log，使 daemon 自动恢复路径
-# 的阶段对只看主日志的运维可见；CLI/manager 进程不受影响。
+# issue #16 / BUG-603：daemon 旧进程标记（_main 启动时置 1）。S2-08 起来源
+# 以 LWA_OP_SOURCE=daemon 为准，本标记仅作 current_op_source 的回退兼容。
 _DAEMON_PROCESS_MARKER = "LWA_DAEMON_PROCESS"
 # BUG-298：须覆盖子进程抢锁后的 Docker capability 探测（可达 10s+），
 # 避免父进程把仍在探测的健康子进程误杀。
@@ -812,9 +811,13 @@ def _mirror_recovery_to_lwa_log(
     ``lwa.log``，运维继续盯 ``lwa.log`` 时看不到 daemon 的恢复进度（现场：
     23:22 后零日志、实际 23:35 已恢复）。镜像只写起止两三条面包屑，完整
     阶段仍在 ``daemon.log`` / registry events。失败静默，不影响自愈主流程。
+    S2-08 / issue #59：非 CLI 来源的行首补 ``source=<来源>``，与阶段镜像格式一致。
     """
-    from local_webpage_access.logging import append_global_log
+    from local_webpage_access.logging import append_global_log, current_op_source
 
+    source = current_op_source()
+    if source != "cli":
+        message = f"source={source} {message}"
     append_global_log(workspace.logs, message, level=level)
 
 
@@ -1710,9 +1713,13 @@ def _main() -> int:
 
     workspace.ensure_workspace_dirs()
     attach_daemon_log_handler(workspace, level=args.log_level.upper())
-    # issue #16 / BUG-603：标记本进程为 daemon——hosting._stage 据此把
-    # lifecycle_stage 镜像到 lwa.log，运维盯主日志也能看到恢复路径的阶段。
+    # issue #16 / BUG-603、S2-08 / issue #59：标记本进程为 daemon——阶段记录
+    # 按来源把 lifecycle_stage 镜像到 lwa.log，运维盯主日志也能看到恢复路径
+    # 的阶段。LWA_OP_SOURCE 强制赋值（本进程由 CLI spawn，env 可能继承 cli）。
     os.environ.setdefault(_DAEMON_PROCESS_MARKER, "1")
+    from local_webpage_access.logging import set_op_source
+
+    set_op_source("daemon")
     from local_webpage_access.config import load_config
 
     config = load_config(workspace)

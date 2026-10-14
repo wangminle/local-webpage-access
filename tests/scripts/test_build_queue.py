@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -209,7 +210,7 @@ def test_run_writes_build_events(registry, config) -> None:
 
 
 def test_run_marks_queued_when_waiting(registry, config) -> None:
-    """并发=1：第二个任务在等待期间实例状态应为 queued。"""
+    """并发=1：第二个任务等待期间只记操作态 queued，实例观测状态不被改写（S2-02 / D4）。"""
     _seed_instance(registry, "api")
     _seed_instance(registry, "api2")
     q = BuildQueue(config, registry, concurrency=1)
@@ -224,8 +225,12 @@ def test_run_marks_queued_when_waiting(registry, config) -> None:
         return iid
 
     def quick_builder(iid):
-        # 第二个：此时第一个还在跑，应该处于 queued
-        queued_seen["v"] = registry.get_instance(iid)["status"] == Status.QUEUED.value
+        # 第二个：此时第一个还在跑，lastOperation 应为 queued，status 保持 pending
+        row = registry.get_instance(iid)
+        op = json.loads(row["last_operation_json"]) if row.get("last_operation_json") else {}
+        queued_seen["v"] = (
+            row["status"] == "pending" and op.get("status") == "queued"
+        )
         second_checked.set()
         return iid
 
@@ -295,14 +300,16 @@ def test_in_flight_counts_active_build_not_semaphore_private_attr(registry, conf
 # ---- 超时 -------------------------------------------------------------------
 
 
-# ---- 回归测试：BUG-023 ----------------------------------------------------
+# ---- 回归测试：BUG-023 / BUG-759（S2-02 / D4） -------------------------------
 #
 # BUG-023：排队超时后 ``_mark_timeout`` 只记事件不改状态，实例永远卡在
-#          ``queued``。修复后超时置 ``failed`` + ``last_error``，绝不残留 queued。
+#          ``queued``。修复后超时写操作态 failed + last_error，绝不残留 queued。
+# BUG-759 / S2-02：排队超时不再把实例标 FAILED——status 只由观测决定，
+#          操作失败只写 lastOperation 与 last_error。
 
 
 def test_queue_timeout_does_not_leave_status_queued(registry, config) -> None:
-    """超时后状态必须离开 queued：先观测到 queued，再断言最终 failed + last_error。"""
+    """超时后：status 保持观测值（pending），操作态 failed + last_error。"""
     _seed_instance(registry, "api")
     _seed_instance(registry, "api2")
     q = BuildQueue(config, registry, concurrency=1)
@@ -311,9 +318,13 @@ def test_queue_timeout_does_not_leave_status_queued(registry, config) -> None:
     queued_seen = {"v": False}
 
     def blocking_builder(iid):
-        # 期间 api2 应被标记为 queued
+        # 期间 api2 的操作态应为 queued（实例 status 仍 pending）
         time.sleep(0.15)
-        queued_seen["v"] = registry.get_instance("api2")["status"] == Status.QUEUED.value
+        row = registry.get_instance("api2")
+        op = json.loads(row["last_operation_json"]) if row.get("last_operation_json") else {}
+        queued_seen["v"] = (
+            row["status"] == "pending" and op.get("status") == "queued"
+        )
         release.wait(2.0)
         return iid
 
@@ -330,13 +341,17 @@ def test_queue_timeout_does_not_leave_status_queued(registry, config) -> None:
     release.set()
     t1.join()
 
-    # 排队期间确实进入过 queued
+    # 排队期间确实记过操作态 queued
     assert queued_seen["v"] is True
-    # 超时后已离开 queued，置 failed 并带 last_error
+    # 超时后：实例 status 不被改写（S2-02 / D4），操作态 failed 且带 last_error
     row = registry.get_instance("api2")
-    assert row["status"] == Status.FAILED.value
+    assert row["status"] == "pending"
     assert row["status"] != Status.QUEUED.value
     assert row["last_error"] and "排队超时" in row["last_error"]
+    op = json.loads(row["last_operation_json"])
+    assert op["status"] == "failed"
+    assert op["kind"] == "build"
+    assert "排队超时" in op["error"]
 
 
 # ---- cancel / 状态查询 -----------------------------------------------------

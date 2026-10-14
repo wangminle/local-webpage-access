@@ -1087,8 +1087,9 @@ class TestContainerRuntimeEvidence:
         assert "api" not in result["observed_capabilities"]
         assert any("无法实证" in w for w in result["optional_warnings"])
 
-    def test_hosting_optional_probe_failure_is_degraded(self, workspace) -> None:
-        """CHK-252：guessed 探针 404 为中性；5xx 才产生告警并 degraded。"""
+    def test_hosting_guessed_probe_failure_is_diagnostic(self, workspace) -> None:
+        """CHK-252 / BUG-781：guessed 探针仅诊断——404 中性；5xx 记 probe_notes，
+        不告警、不降级。"""
         from local_webpage_access.hosting import _evaluate_container_verification
 
         manifest = self._sqlite_manifest()
@@ -1123,8 +1124,9 @@ class TestContainerRuntimeEvidence:
                 MagicMock(),
                 "api",
             )
-        assert result5xx["overall_status"] == "degraded"
-        assert result5xx["optional_warnings"]
+        assert result5xx["overall_status"] == "passed"
+        assert result5xx["optional_warnings"] == []
+        assert any("/health" in note for note in result5xx["probe_notes"])
 
 
 class TestNodeSubdirCandidate:

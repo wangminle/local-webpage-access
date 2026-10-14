@@ -85,7 +85,7 @@ _review_reports/
 
 # ---- design 本地目录（issues/reviews 不同步到 GitHub）------------------------
 design/4-issues/
-design/5-reviews/
+design/5-checkpoints/
 
 # ---- 真实应用 Eval 本地源码（版本与配置见 tests/evals/evals-readme.md）---------
 # 通配排除全部评测应用目录（新增应用自动覆盖），仅反向包含 readme

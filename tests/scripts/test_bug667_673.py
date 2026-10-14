@@ -274,6 +274,15 @@ def test_restart_clears_reconcile_circuit(
     monkeypatch.setattr(
         "local_webpage_access.hosting.stop_instance", lambda *a, **k: None
     )
+    # S2-01：deployed 路径改走 stop_or_abort，直接打桩跳过真实 Docker 停止。
+    monkeypatch.setattr(
+        "local_webpage_access.hosting.stop_or_abort", lambda *a, **k: None
+    )
+    # S2-04：restart 先做收敛指纹决策，打桩为「无变化」走 stop+start 路径。
+    monkeypatch.setattr(
+        "local_webpage_access.lifecycle._deployed_action",
+        lambda *a, **k: ("none", []),
+    )
     monkeypatch.setattr(
         "local_webpage_access.hosting.start_container",
         lambda ws, cfg, reg, instance_id: InstanceManifest.load(
