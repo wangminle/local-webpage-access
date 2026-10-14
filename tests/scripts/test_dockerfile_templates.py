@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
+import time
+from pathlib import Path
+
 import pytest
 
 from local_webpage_access.dockerfile_templates import generate_dockerfile
@@ -1169,3 +1173,144 @@ def test_second_apt_layer_restores_official_sources(workspace: Workspace) -> Non
     assert "cp /tmp/lwa-official-debian.sources /etc/apt/sources.list.d/debian.sources" in content
     # 可变备份路径不得每层无条件覆盖官方快照
     assert "cp /etc/apt/sources.list.d/debian.sources /tmp/lwa-debian.sources" not in content
+
+
+# ---------------------------------------------------------------------------
+# DEV-146（S3-07）：apt 每个源候选的总时间预算 aptBudget
+# ---------------------------------------------------------------------------
+
+
+def _budget_mirrors(budget: int, **kw):
+    from local_webpage_access.config import BuildMirrors
+
+    return BuildMirrors(
+        enabled=True, preset="china", aptBudget=budget, **kw
+    ).resolved()
+
+
+def test_apt_budget_default_keeps_legacy_render() -> None:
+    """未配置预算（默认 0）时渲染与旧版逐字一致：不引入 timeout / download-only。"""
+    from local_webpage_access.dockerfile_templates import _render_apt_deps_block
+
+    out = _render_apt_deps_block(["ffmpeg"], _budget_mirrors(0))
+    assert "timeout -k" not in out
+    assert "--download-only" not in out
+    assert (
+        "apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 update && "
+        "apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 "
+        "install -y --no-install-recommends --fix-missing ffmpeg"
+    ) in out
+
+
+def test_apt_budget_wraps_network_phase_per_source_candidate() -> None:
+    """设置预算后：每个源候选各自 timeout 包住 update + download-only，dpkg 安装离线随后执行。"""
+    from local_webpage_access.dockerfile_templates import _apt_hosts, _render_apt_deps_block
+
+    mirrors = _budget_mirrors(120)
+    out = _render_apt_deps_block(["ffmpeg"], mirrors)
+    hosts = _apt_hosts(mirrors)
+    assert len(hosts) >= 2
+    assert out.count("timeout -k 10 120 sh -c") == len(hosts)
+    assert out.count("--download-only --fix-missing ffmpeg") == len(hosts)
+    # 离线安装在 timeout 之外（不被预算打断，避免 dpkg 半安装）
+    offline = "&& apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 install -y --no-install-recommends --fix-missing ffmpeg"
+    assert out.count(offline) == len(hosts)
+    assert "aptBudget" in out
+
+
+def test_apt_budget_applies_to_node_toolchain_layer(workspace: Workspace) -> None:
+    """Python + 辅助 Node 项目的 Node 工具链 apt 层同样受预算约束。"""
+    from local_webpage_access.config import default_config
+
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "package.json").write_text("{}", encoding="utf-8")
+    cfg = default_config()
+    cfg.buildMirrors = _budget_mirrors(90)
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uvicorn main:app")
+    content = generate_dockerfile(m, workspace, config=cfg).read_text(encoding="utf-8")
+    assert "timeout -k 10 90 sh -c" in content
+    assert "--download-only ca-certificates curl xz-utils" in content
+
+
+def test_apt_budget_validation_bounds() -> None:
+    from pydantic import ValidationError
+
+    from local_webpage_access.config import BuildMirrors
+
+    assert BuildMirrors().aptBudget == 0
+    assert BuildMirrors(aptBudget=3600).aptBudget == 3600
+    for bad in (-1, 3601):
+        with pytest.raises(ValidationError):
+            BuildMirrors(aptBudget=bad)
+
+
+def test_apt_budget_survives_resolved_even_when_mirrors_disabled() -> None:
+    from local_webpage_access.config import BuildMirrors
+
+    assert BuildMirrors(enabled=False, preset="none", aptBudget=45).resolved().aptBudget == 45
+    assert BuildMirrors(enabled=True, aptBudget=45).resolved().aptBudget == 45
+
+
+def _run_apt_body(tmp_path: Path, apt_script: str, budget: int):
+    """用假 apt-get 在真实 sh 中执行 ``_apt_body``，验证超时/退出码语义。"""
+    import subprocess
+
+    from local_webpage_access.dockerfile_templates import _apt_body
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "calls.log"
+    fake = bindir / "apt-get"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {log}\n'
+        + apt_script,
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    body = _apt_body("--fix-missing demo", _budget_mirrors(budget))
+    proc = subprocess.run(
+        ["sh", "-ec", body],
+        env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return proc, calls
+
+
+needs_timeout_bin = pytest.mark.skipif(
+    shutil.which("timeout") is None, reason="需要 coreutils timeout"
+)
+
+
+@needs_timeout_bin
+def test_apt_budget_kills_hanging_fetch_and_reports(tmp_path: Path) -> None:
+    """update 挂住 -> 到点被终止，退出码非 0，输出预算提示，且不进入离线安装。"""
+    # 预算取 3s 而非 1s：macOS 首次执行新建脚本有安全扫描延迟，过紧会让假 apt-get 来不及记录。
+    started = time.monotonic()
+    proc, calls = _run_apt_body(tmp_path, "sleep 30\n", budget=3)
+    elapsed = time.monotonic() - started
+    assert proc.returncode != 0
+    assert "总时间预算" in proc.stderr
+    assert elapsed < 20, f"应在预算附近终止，实际 {elapsed:.1f}s"
+    assert not any("install" in call for call in calls)
+
+
+@needs_timeout_bin
+def test_apt_budget_does_not_misreport_ordinary_failure(tmp_path: Path) -> None:
+    """源 503 等普通失败原样透传退出码，不误报“预算超时”。"""
+    proc, _calls = _run_apt_body(tmp_path, "exit 100\n", budget=30)
+    assert proc.returncode == 100
+    assert "总时间预算" not in proc.stderr
+
+
+@needs_timeout_bin
+def test_apt_budget_success_downloads_then_installs_offline(tmp_path: Path) -> None:
+    proc, calls = _run_apt_body(tmp_path, "exit 0\n", budget=30)
+    assert proc.returncode == 0
+    assert len(calls) == 3  # update、download-only、离线 install
+    assert "--download-only" in calls[1]
+    assert "--download-only" not in calls[2]

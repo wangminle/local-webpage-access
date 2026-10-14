@@ -361,6 +361,63 @@
             '<p class="detail-hint cell-muted">可在操作区「路径别名」在线修改；原地更新 zip 会保留当前别名。</p>'
         );
       }
+      if (data.versions) {
+        // S3-01：版本留档面板（容器实例）；回滚按钮经 onDrawerClick 事件委托处理
+        var vrows = data.versions.versions || [];
+        var vhtml;
+        if (!vrows.length) {
+          vhtml =
+            '<p class="detail-hint">暂无留档版本——成功部署容器实例后自动产生' +
+            "（保留最近 " + LWA.esc(String(data.versions.retention)) + " 个）。</p>";
+        } else {
+          vhtml =
+            '<table class="pv-recent"><thead><tr><th>构建</th><th>时间</th>' +
+            "<th>源码哈希</th><th>镜像</th><th>结果</th><th></th></tr></thead><tbody>" +
+            vrows.map(function (v) {
+              var when = LWA.formatLocalDateTime(v.finishedAt || v.startedAt);
+              var present = v.imagePresent ? "在" : "已清理";
+              var canRollback = v.imagePresent && v.status === "success" && !v.inUse;
+              var action = v.inUse
+                ? '<span class="cell-muted">在用</span>'
+                : canRollback
+                  ? '<button class="btn btn-sm" type="button" data-rollback-build="' +
+                    v.id + '">回滚</button>'
+                  : '<span class="cell-muted">—</span>';
+              return (
+                "<tr><td>#" + v.id + "</td><td>" + LWA.esc(when) +
+                '</td><td><code>' + LWA.esc((v.sourceHash || "-").slice(0, 12)) +
+                "</code></td><td>" + present + "</td><td>" + LWA.esc(v.status || "?") +
+                "</td><td>" + action + "</td></tr>"
+              );
+            }).join("") + "</tbody></table>";
+          vhtml +=
+            '<p class="detail-hint cell-muted">保留最近 ' +
+            LWA.esc(String(data.versions.retention)) + " 个版本，合计占用 " +
+            LWA.fmtBytes(data.versions.diskUsageBytes) + "。" +
+            LWA.esc(data.versions.scopeNote || "") + "</p>";
+        }
+        html += section("版本", vhtml);
+      }
+      if (data.timeline && data.timeline.items && data.timeline.items.length) {
+        // S3-04：最近操作（事件 / 构建 / 最近操作态合并，标注发起方来源）
+        html += section(
+          "最近操作",
+          '<ul class="detail-events">' +
+            data.timeline.items.slice(0, 12).map(function (t) {
+              var st = t.status ? " · " + LWA.esc(t.status) : "";
+              var dur = t.durationSeconds != null ? " · 耗时 " + t.durationSeconds + "s" : "";
+              return (
+                "<li><time>" + LWA.esc(LWA.formatLocalDateTime(t.at)) + "</time> " +
+                '<span class="cell-muted">[' + LWA.esc(t.source || "unknown") + "]</span> " +
+                LWA.esc(t.type || "") + st + dur +
+                (t.message ? " — " + LWA.esc(t.message) : "") +
+                "</li>"
+              );
+            }).join("") +
+            "</ul>" +
+            '<p class="detail-hint cell-muted">完整时间线：<code>lwa logs &lt;id&gt; --timeline</code></p>'
+        );
+      }
       if (data.builds && data.builds.length) {
         html += section(
           "构建记录",
@@ -512,6 +569,16 @@
           tokenVisible: false,
           drawer: { open: false, title: "", body: "" },
           currentDetailId: null,
+          // S3-01：版本回滚二次确认弹窗（D8 范围说明）
+          rollbackDialog: {
+            open: false,
+            instanceId: null,
+            buildId: null,
+            requiresConfirm: false,
+            submitting: false,
+            acknowledged: false,
+            error: "",
+          },
           logs: { open: false, title: "", category: "run", content: "", instanceId: null },
           pathAlias: { open: false, title: "", value: "", skipCompatCheck: false, error: "", instanceId: null },
           verification: {
@@ -1195,6 +1262,7 @@
             .then(function (data) {
               if (self._detailReq !== myReq) return; // 已有更新的请求，丢弃旧响应
               var inst = data.instance || {};
+              self._detailData = data; // S3-01：版本面板回滚按钮需要 requiresConfirm
               self.drawer.title = inst.name || inst.id || "实例详情";
               self.drawer.body = renderDetailHtml(data);
               self.drawer.open = true;
@@ -1206,7 +1274,79 @@
         },
         closeDetail: function () {
           this.currentDetailId = null;
+          this._detailData = null;
           this.drawer.open = false;
+        },
+
+        // S3-01：详情抽屉里的「回滚」按钮（v-html 注入，走事件委托）
+        onDrawerClick: function (e) {
+          var btn = e.target.closest ? e.target.closest("[data-rollback-build]") : null;
+          if (!btn) return;
+          e.preventDefault();
+          this.openRollbackDialog(parseInt(btn.getAttribute("data-rollback-build"), 10));
+        },
+        openRollbackDialog: function (buildId) {
+          var info = (this._detailData && this._detailData.versions) || {};
+          var versions = info.versions || [];
+          var selected = null;
+          for (var i = 0; i < versions.length; i++) {
+            if (Number(versions[i].id) === Number(buildId)) {
+              selected = versions[i];
+              break;
+            }
+          }
+          this.rollbackDialog.open = true;
+          this.rollbackDialog.instanceId = this.currentDetailId;
+          this.rollbackDialog.buildId = buildId;
+          // 与服务端 rollback 相同：当前配置或该目标版本留档命令含迁移才要求确认。
+          this.rollbackDialog.requiresConfirm = selected && typeof selected.requiresConfirm === "boolean"
+            ? !!selected.requiresConfirm
+            : !!info.requiresConfirm;
+          this.rollbackDialog.submitting = false;
+          this.rollbackDialog.acknowledged = false;
+          this.rollbackDialog.error = "";
+        },
+        closeRollbackDialog: function () {
+          this.rollbackDialog.open = false;
+          this.rollbackDialog.submitting = false;
+        },
+        submitRollbackDialog: function () {
+          var self = this;
+          var id = this.rollbackDialog.instanceId;
+          if (!id) return;
+          if (this.rollbackDialog.requiresConfirm && !this.rollbackDialog.acknowledged) {
+            this.rollbackDialog.error = "请先勾选「我已了解风险」";
+            return;
+          }
+          this.rollbackDialog.submitting = true;
+          this.rollbackDialog.error = "";
+          // S2-09：携带列表快照里的 revision（JSON body）
+          var revInst = (this.instances || []).find(function (x) { return x.id === id; });
+          var body = bodyWithRevision(
+            { toBuildId: this.rollbackDialog.buildId, confirm: true },
+            revInst && revInst.revision
+          );
+          apiFetch(this, "/api/instances/" + encodeURIComponent(id) + "/rollback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          })
+            .then(function () {
+              self.rollbackDialog.open = false;
+              self.rollbackDialog.submitting = false;
+              self.toast("回滚完成", "success");
+              self.refresh();
+            })
+            .catch(function (e) {
+              self.rollbackDialog.submitting = false;
+              if (e && e.code === "rollback_needs_yes") {
+                // D8：preStart 含迁移命令——要求勾选风险确认后重试
+                self.rollbackDialog.requiresConfirm = true;
+                self.rollbackDialog.error = e.message || "";
+                return;
+              }
+              opErrorToast(self, "回滚", e);
+            });
         },
 
         // ---- 日志 ----
@@ -1697,7 +1837,7 @@
     '<aside class="drawer" :hidden="!drawer.open" :aria-hidden="String(!drawer.open)">',
     '  <div class="drawer-head"><h2>{{ drawer.title || "实例详情" }}</h2>',
     '    <button class="btn btn-ghost" title="关闭" aria-label="关闭详情" @click="closeDetail">✕</button></div>',
-    '  <div class="drawer-body" v-html="drawer.body"></div>',
+    '  <div class="drawer-body" v-html="drawer.body" @click="onDrawerClick"></div>',
     "</aside>",
     '<div class="drawer-mask" :hidden="!drawer.open" @click="closeDetail"></div>',
     // 日志
@@ -1934,6 +2074,28 @@
     '      <button class="btn btn-ghost" type="button" @click="cancelFallback" :disabled="fallbackDialog.submitting">取消</button>',
     '      <button class="btn btn-primary" type="button" @click="confirmFallback" :disabled="fallbackDialog.submitting">',
     '        {{ fallbackDialog.submitting ? "降级中…" : "确认降级" }}',
+    '      </button>',
+    '    </div>',
+    '  </div>',
+    '</div>',
+    // S3-01：版本回滚二次确认（D8 范围说明）
+    '<div class="modal" :hidden="!rollbackDialog.open" role="dialog" aria-modal="true" aria-labelledby="rollback-dialog-title">',
+    '  <div class="modal-card">',
+    '    <div class="modal-header"><h2 id="rollback-dialog-title">回滚确认</h2>',
+    '    <button class="btn btn-ghost" type="button" title="关闭" aria-label="关闭回滚确认" @click="closeRollbackDialog" :disabled="rollbackDialog.submitting">✕</button></div>',
+    '    <div class="modal-body">',
+    '      <p>即将把实例 <code>{{ rollbackDialog.instanceId }}</code> 回滚到构建 <strong>#{{ rollbackDialog.buildId }}</strong>。</p>',
+    '      <p class="remove-dialog-warn" role="alert">回滚范围（D8）：只还原镜像与生成配置（compose / Dockerfile / .env），<strong>不回滚 data/ 数据库</strong>。回滚后会执行实证验证，失败时自动恢复原版本。</p>',
+    '      <p v-if="rollbackDialog.requiresConfirm" class="remove-dialog-warn" role="alert">当前配置或目标版本留档的启动命令含数据库迁移命令：启动旧镜像可能执行迁移，<strong>data/ 不会回滚，数据库修改也无法随镜像补偿撤销</strong>。旧版本代码可能无法兼容当前数据库结构。</p>',
+    '      <label v-if="rollbackDialog.requiresConfirm" class="remove-option">',
+    '        <input type="checkbox" v-model="rollbackDialog.acknowledged" :disabled="rollbackDialog.submitting" />',
+    '        <span>我已了解风险：回滚不回滚 data/，数据库结构可能不兼容</span></label>',
+    '      <p class="remove-dialog-error" :hidden="!rollbackDialog.error">{{ rollbackDialog.error }}</p>',
+    '    </div>',
+    '    <div class="modal-footer" style="display:flex; justify-content:flex-end; gap:0.5rem;">',
+    '      <button class="btn btn-ghost" type="button" @click="closeRollbackDialog" :disabled="rollbackDialog.submitting">取消</button>',
+    '      <button class="btn btn-danger" type="button" @click="submitRollbackDialog" :disabled="rollbackDialog.submitting">',
+    '        {{ rollbackDialog.submitting ? "回滚中…" : "确认回滚" }}',
     '      </button>',
     '    </div>',
     '  </div>',

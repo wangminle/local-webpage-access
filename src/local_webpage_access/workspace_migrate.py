@@ -327,7 +327,7 @@ def _list_path_holders(workspace: Workspace) -> list[str]:
                     ("instances", ("app_path", "source_zip_path")),
                     ("containers", ("compose_path", "dockerfile_path")),
                     ("static_sites", ("gateway_config_path",)),
-                    ("builds", ("log_path",)),
+                    ("builds", ("log_path", "config_snapshot")),
                 ):
                     for col in cols:
                         try:
@@ -626,7 +626,7 @@ def rewrite_registry_paths(db_path: Path, old: str, new: str) -> None:
             ("instances", ("app_path", "source_zip_path")),
             ("containers", ("compose_path", "dockerfile_path")),
             ("static_sites", ("gateway_config_path",)),
-            ("builds", ("log_path",)),
+            ("builds", ("log_path", "config_snapshot")),
         )
         for table, cols in updates:
             for col in cols:

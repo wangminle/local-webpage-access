@@ -15,7 +15,7 @@ from typing import Any, Iterator
 from urllib.parse import quote
 
 from local_webpage_access.errors import RegistryError
-from local_webpage_access.logging import get_logger, now_iso
+from local_webpage_access.logging import current_op_source, get_logger, now_iso
 from local_webpage_access.models import InstanceManifest
 from local_webpage_access.registry.connection import (
     init_db,
@@ -602,12 +602,21 @@ class Registry:
 
     # ---- 事件（WBS-05.13）-------------------------------------------------
 
-    def add_event(self, instance_id: str | None, event_type: str, message: str) -> int:
+    def add_event(
+        self,
+        instance_id: str | None,
+        event_type: str,
+        message: str,
+        *,
+        source: str | None = None,
+    ) -> int:
+        # S3-04：来源缺省取当前操作来源（cli/manager/daemon/agent），调用方无需逐处传参
+        event_source = source or current_op_source()
         with self.txn() as tx:
             cur = tx.execute(
-                "INSERT INTO events(instance_id, event_type, message, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (instance_id, event_type, message, now_iso()),
+                "INSERT INTO events(instance_id, event_type, message, created_at, source) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (instance_id, event_type, message, now_iso(), event_source),
             )
             row_id = cur.lastrowid
             if row_id is None:
@@ -672,6 +681,42 @@ class Registry:
             tx.execute(
                 "UPDATE builds SET status = ?, finished_at = ?, error_summary = ? WHERE id = ?",
                 (status, now_iso(), error_summary, build_id),
+            )
+
+    def record_build_artifacts(
+        self,
+        build_id: int,
+        *,
+        image_ref: str | None = None,
+        image_id: str | None = None,
+        source_hash: str | None = None,
+        config_snapshot: str | None = None,
+    ) -> None:
+        """S3-01：成功构建留档——镜像标签引用、镜像 ID、源码哈希、生成物快照路径。"""
+        fields = {
+            "image_ref": image_ref,
+            "image_id": image_id,
+            "source_hash": source_hash,
+            "config_snapshot": config_snapshot,
+        }
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self.txn() as tx:
+            tx.execute(
+                f"UPDATE builds SET {sets} WHERE id = ?",
+                (*fields.values(), build_id),
+            )
+
+    def clear_build_artifacts(self, build_id: int) -> None:
+        """S3-01 GC（BUG-802）：镜像与快照已清理后置空产物列。
+
+        置空后的行不再参与 GC 重试、版本列表与占用统计（构建史本身仍保留在
+        builds 行，供构建记录与时间线展示）。
+        """
+        with self.txn() as tx:
+            tx.execute(
+                "UPDATE builds SET image_ref = NULL, image_id = NULL, config_snapshot = NULL "
+                "WHERE id = ?",
+                (build_id,),
             )
 
     def list_builds(

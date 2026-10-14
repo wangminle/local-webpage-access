@@ -134,6 +134,10 @@ class BuildMirrors(BaseModel):
     aptFallbacks: list[str] | None = None
     aptRetries: int = Field(default=2, ge=0, le=20)
     aptTimeout: int = Field(default=30, ge=1, le=600)
+    # DEV-146（S3-07）：每个源候选从 update 到下载完成的总时间预算（秒）。
+    # aptTimeout 只是连接/无数据超时，Retries 叠加多 IP 解析仍可拖到数分钟；
+    # 预算到点即放弃当前源并 || 切下一个。0 = 不限（默认，渲染结果与旧版一致）。
+    aptBudget: int = Field(default=0, ge=0, le=3600)
 
     @field_validator("preset")
     @classmethod
@@ -161,6 +165,7 @@ class BuildMirrors(BaseModel):
                 aptFallbacks=[],
                 aptRetries=self.aptRetries,
                 aptTimeout=self.aptTimeout,
+                aptBudget=self.aptBudget,
             )
         fallbacks = (
             [u.rstrip("/") for u in self.pipFallbacks]
@@ -186,6 +191,7 @@ class BuildMirrors(BaseModel):
             aptFallbacks=apt_fallbacks,
             aptRetries=self.aptRetries,
             aptTimeout=self.aptTimeout,
+            aptBudget=self.aptBudget,
         )
 
 
@@ -229,6 +235,13 @@ class Config(BaseModel):
     # 不被占用。``None`` 表示彻底关闭别名入口（即便实例配置了 alias 也只走端口）。
     staticGatewayPort: int | None = Field(default=STATIC_GATEWAY_PORT_DEFAULT, ge=1, le=65535)
     buildConcurrency: int = Field(default=1, ge=1, le=8)
+    # S3-01 / DEV-157：镜像版本留档——每个实例保留最近 N 个成功构建的镜像
+    # 标签（lwa-<id>-app:b<build_id>）与生成物快照；超出的由部署成功后 GC 清理。
+    # 正在使用的镜像与上一个可用版本永远不被 GC 删除。
+    imageRetention: int = Field(default=3, ge=1, le=50)
+    # S3-01：daemon 自愈策略——「最近一次操作失败且容器缺失」时优先拉回
+    # 上一个可用镜像版本，而不是按当前源码重建；设为 false 回退原有重建式自愈。
+    selfHealPreferLastGood: bool = True
     defaultResourceLimits: ResourceLimits = Field(default_factory=ResourceLimits)
     staticRateLimit: StaticRateLimit = Field(default_factory=StaticRateLimit)
     buildMirrors: BuildMirrors = Field(default_factory=BuildMirrors)
@@ -542,6 +555,15 @@ instanceBindHost: 0.0.0.0
 # 构建并发数（小主机建议保持 1）
 buildConcurrency: 1
 
+# 镜像版本留档（S3-01）：每个实例保留最近 N 个成功构建的镜像与生成物快照，
+# 供 `lwa versions` / `lwa rollback` 使用；部署成功后自动 GC 超出版本
+# （正在使用的镜像与上一个可用版本永不删除）
+imageRetention: 3
+
+# daemon 自愈（S3-01）：最近一次操作失败且容器缺失时，优先拉回上一可用镜像
+# 版本（false 则按当前源码重建）
+selfHealPreferLastGood: true
+
 # 容器默认资源限制
 defaultResourceLimits:
   memory: 512m
@@ -573,6 +595,7 @@ buildMirrors:
   #   - deb.debian.org
   # aptRetries: 2
   # aptTimeout: 30
+  # aptBudget: 0   # 每个 apt 源候选的总时间预算（秒），超时即切下一个源；0 = 不限
 
 # 局域网 IP 获取策略：auto（自动探测）| manual（手动指定）
 lanIpStrategy: auto

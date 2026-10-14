@@ -358,6 +358,50 @@ def test_rewrite_registry_paths(ws_root: Path) -> None:
     assert cid is None
 
 
+def test_rewrite_registry_paths_rebinds_config_snapshot(ws_root: Path) -> None:
+    """builds.config_snapshot 是绝对路径，迁移后必须改写，否则 GC 会删旧根快照。"""
+    ws = Workspace(ws_root)
+    old = str(ws_root.resolve())
+    new = str((ws_root.parent / "new-ws").resolve())
+    conn = sqlite3.connect(ws.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO instances (id, name, version, kind, runtime, serving_mode, "
+            "status, desired_state, app_path, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "x", "x", "1", "static", "docker", "container",
+                "stopped", "stopped", f"{old}/apps/x/current", "t", "t",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO builds (instance_id, status, started_at, log_path, config_snapshot) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "x",
+                "success",
+                "t",
+                f"{old}/apps/x/logs/build.log",
+                f"{old}/apps/x/docker/builds/3",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    wm.rewrite_registry_paths(ws.db_path, old, new)
+    conn = sqlite3.connect(ws.db_path)
+    try:
+        log_path, snap = conn.execute(
+            "SELECT log_path, config_snapshot FROM builds"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert log_path.startswith(new)
+    assert snap == f"{new}/apps/x/docker/builds/3"
+    assert old not in snap
+
+
 def test_rewrite_registry_paths_boundary_and_idempotent(ws_root: Path) -> None:
     """BUG-518：兄弟目录不被误改；new 为 old 前缀时重跑不二次损坏。"""
     ws = Workspace(ws_root)

@@ -3208,6 +3208,17 @@ def test_body_bool_strict_rejects_non_bool() -> None:
         assert exc_info.value.status_code == 400
 
 
+def test_post_rollback_rejects_string_false_confirm(manager_env: EnvBundle) -> None:
+    """``bool("false")`` 为 True：字符串 false 不得被当成确认回滚。"""
+    resp = manager_env.client.post(
+        f"/api/instances/{manager_env.instance_id}/rollback",
+        headers=manager_env.auth_headers(),
+        json={"confirm": "false"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "bad_request"
+
+
 def test_post_gateway_switch_rejects_non_bool_body_values(manager_env: EnvBundle) -> None:
     """评审-P1：/api/gateway/switch 收到字符串布尔时返回 400 而非回落默认。"""
     resp = manager_env.client.post(

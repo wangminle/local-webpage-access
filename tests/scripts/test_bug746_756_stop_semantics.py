@@ -1,9 +1,9 @@
 """BUG-746 / BUG-756（issue #54 / N3，WBS S2-01）：统一停机语义 stop_or_abort。
 
 复现翻转来源（design/5-checkpoints/ 原脚本保持不动，断言缺陷存在）：
-- 2026-10-11-issues47-60-independent-repro.py::test_n3
+- 2026-10-11/issues47-60-independent-repro.py::test_n3
   原断言「restart 停机失败后仍误报已重启」；此处翻转：停机失败直接报错中止。
-- 2026-10-11-issues47-60-repro.py::test_51_54[down_fails]
+- 2026-10-11/issues47-60-repro.py::test_51_54[down_fails]
   原断言「重建 down 失败后仍继续 build 且 manifest 身份被清空」；此处翻转：
   down 失败即中止，build 不再执行，身份保持完整。
 """

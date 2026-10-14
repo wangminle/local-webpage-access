@@ -20,7 +20,7 @@
   Full Profile（`profile: full`）还会验收 manager/daemon/gateway 真实 Docker 权限与 Caddy owner；未闭环不假绿（见 FAQ「Full Profile」）。
   Linux 上 LWA 以 `serviceUser` 访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，或对 system unit 使用 `SupplementaryGroups=docker`（`lwa autostart` 默认 user unit 仍依赖会话组）。
   观测失败写 `unknown` / `runtimeAccess`，不把运行中容器误标 stopped；管理页与 API 在能力降级时阻断容器操作。
-* **Caddy 所有权（Full）**：禁止静默复用系统 `caddy.service`；admin 端口（V0.10.0 起按工作区独立分配并登记 `run/admin-port`，未分配为 legacy `:2019`）必须属于本工作区 LWA Caddy。Default 档在无 Caddy 时可降级 builtin；Full 不得假绿。
+* **Caddy 所有权（Full）**：禁止静默复用系统 `caddy.service`；admin 端口（V0.9.3 起按工作区独立分配并登记 `run/admin-port`，未分配为 legacy `:2019`）必须属于本工作区 LWA Caddy。Default 档在无 Caddy 时可降级 builtin；Full 不得假绿。
 * **架构**：基线镜像 `node:24-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
   其他架构需用户自备镜像或调整模板。
 
@@ -246,8 +246,11 @@ swap=4GB
 
 ## apt 构建源链（issue #34 / #35）
 
-* **`||` 切源同样只覆盖硬故障**：主源慢但能通时不会切走；`aptRetries` / `aptTimeout`
+* **`||` 切源默认只覆盖硬故障**：主源慢但能通时不会切走；`aptRetries` / `aptTimeout`
   只缩短假死窗口。阿里云个别大包（如 `libllvm19`）connection failed 时依赖 fallback。
+* **`aptBudget`（可选，默认关闭）**：给每个源候选一个 update + 下载的总时间预算，到点终止该源并
+  切下一个。预算过小会把「慢但正常」的下载也判死，所有源都超时则构建失败；它不限制随后离线执行的
+  dpkg 安装。需要容器内有 coreutils `timeout`（Debian 系 Python 镜像自带）。
 * **Docker Desktop VM 内存**：长 apt 下载 + 解包会把构建容器顶到 OOM；这不是宿主
   `lwa doctor` 内存检查能单独覆盖的，需在 Desktop 设置里加内存，并保持 `buildConcurrency: 1`。
 * **`buildHooks` 含 apt-get**：钩子原样写入 Dockerfile，**不会**自动注入 apt 镜像。

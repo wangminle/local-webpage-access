@@ -47,6 +47,7 @@ from local_webpage_access.capability import (
     docker_state_pending,
 )
 from local_webpage_access.config import Config
+from local_webpage_access.consistency import run_consistency_patrol as _run_consistency_patrol
 from local_webpage_access.errors import LifecycleError, ZipImportError
 from local_webpage_access.file_lock import (
     ensure_lockable,
@@ -82,6 +83,8 @@ DEFAULT_SUPERVISE_INTERVAL = 60.0
 # capability_initial_delay 一次，吸收三 unit 同启竞态。
 DEFAULT_CAPABILITY_REFRESH_INTERVAL = 300.0
 DEFAULT_CAPABILITY_INITIAL_DELAY = 15.0
+# S3-02 / DEV-158：副本一致性周期巡检（只读，漂移写 consistency_drift 事件）
+DEFAULT_CONSISTENCY_INTERVAL = 1800.0
 # issue #29 短退避常量从 capability 再导出，供测试与 __all__ 兼容。
 RECONCILE_BACKOFF_BASE_SECONDS = 60.0
 RECONCILE_BACKOFF_MAX_SECONDS = 3600.0
@@ -902,6 +905,68 @@ def _reconcile_circuit_clear(workspace: Workspace, instance_id: str) -> None:
     persist_circuit(workspace, instance_id, manifest)
 
 
+def _try_last_good_rollback(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+) -> bool:
+    """S3-01 / DEV-157：自愈优先拉回上一可用镜像版本（D8：只回滚镜像与生成配置）。
+
+    触发条件：最近一次操作失败（lastOperation.status=failed），且严格查询
+    （含已退出容器）成功并确认没有任何容器。查询失败或容器只是退出时不回滚。
+    返回 True 表示已恢复；任何不满足/失败返回 False，调用方回退常规 start_instance。
+    """
+    from local_webpage_access import rollback as rollback_mod
+
+    try:
+        row = registry.get_instance(instance_id) or {}
+        raw = row.get("last_operation_json")
+        op = json.loads(raw) if raw else None
+        if not op or op.get("status") != "failed":
+            return False
+        # 容器缺失判定：必须是「查询成功且包含已退出容器在内确实没有容器」。
+        # container_id() 默认只看运行中，并在内部吞掉 DockerError，无法区分
+        # 容器缺失与无法观测；那会把仍在的退出容器或查询故障当成自愈回滚。
+        try:
+            from local_webpage_access.docker_runtime import DockerRuntime
+
+            runtime = DockerRuntime(workspace, registry)
+            if runtime.container_id_strict(instance_id, all_containers=True):
+                return False
+        except Exception:  # noqa: BLE001 — 无法观测时保守回退常规恢复，不回滚
+            log.debug("daemon 自愈：容器状态无法确认，回退常规恢复", exc_info=True)
+            return False
+        target = rollback_mod.select_rollback_target(
+            workspace,
+            registry,
+            instance_id,
+            exclude_build_id=op.get("buildId"),
+        )
+        if target is None:
+            return False
+        rollback_mod.rollback_instance(
+            workspace,
+            config,
+            registry,
+            instance_id,
+            to_build_id=int(target["id"]),
+            yes=True,
+            source="daemon-self-heal",
+            run_alias_guard=False,
+        )
+        registry.add_event(
+            instance_id,
+            "rollback_self_heal",
+            f"daemon 自愈：最近一次操作失败且容器缺失，已拉回上一可用版本"
+            f"（构建 #{target['id']}，镜像 {target['image_ref']}）",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — 回退常规恢复
+        log.warning("daemon 自愈拉回上一可用版本失败（回退常规恢复）：%s", exc)
+        return False
+
+
 def reconcile(
     workspace: Workspace,
     config: Config,
@@ -1092,6 +1157,26 @@ def reconcile(
             # 自动重试恢复又只写 daemon.log（IMP-034 按进程分文件），运维盯
             # lwa.log 会误判"构建卡死"。恢复的起止在此镜像一条到 lwa.log，
             # 完整 lifecycle_stage 由 hosting._stage 镜像（见 hosting.py）。
+            # S3-01 / DEV-157：最近一次操作失败且容器缺失时，优先拉回上一可用
+            # 镜像版本（selfHealPreferLastGood，默认开），而不是按当前源码重建。
+            if (
+                runtime == "docker-compose"
+                and getattr(config, "selfHealPreferLastGood", True)
+                and _try_last_good_rollback(workspace, config, registry, iid)
+            ):
+                _reconcile_failures.pop(failure_key, None)
+                _reconcile_circuit_clear(workspace, iid)
+                restarted.append(iid)
+                log.info(
+                    "daemon reconcile: 实例 %s 已拉回上一可用镜像版本（selfHealPreferLastGood）",
+                    iid,
+                )
+                _mirror_recovery_to_lwa_log(
+                    workspace,
+                    f"daemon 自愈：实例 {iid} 已拉回上一可用镜像版本（最近一次操作失败"
+                    "且容器缺失，selfHealPreferLastGood=true；data/ 未回滚）",
+                )
+                continue
             _mirror_recovery_to_lwa_log(
                 workspace,
                 f"daemon 自动恢复开始：实例 {iid} 状态偏离（{actual_status}，"
@@ -1160,6 +1245,8 @@ def run_watcher(
     heartbeat_interval: float | None = None,
     capability_refresh_interval: float = DEFAULT_CAPABILITY_REFRESH_INTERVAL,
     capability_initial_delay: float = DEFAULT_CAPABILITY_INITIAL_DELAY,
+    consistency_check: Callable[[Workspace, Config, Registry], Any] | None = None,
+    consistency_interval: float = DEFAULT_CONSISTENCY_INTERVAL,
 ) -> None:
     """watcher 主循环（可注入 stop_event/process_fn/heartbeat/supervise，便于单测）。
 
@@ -1197,6 +1284,7 @@ def run_watcher(
 
     log.info("daemon watcher 启动（poll=%.1fs）", poll_interval)
     last_supervise = clock()
+    last_consistency = clock()
     # _main 启动时已探过一次；此处先等 initial_delay 再探，之后走 refresh 周期。
     next_capability_at = clock() + max(0.0, float(capability_initial_delay))
     capability_period = max(1.0, float(capability_refresh_interval))
@@ -1232,6 +1320,14 @@ def run_watcher(
                     supervise(workspace, config, registry)
                 except Exception:  # noqa: BLE001 — 自愈失败不中断 watcher
                     log.exception("daemon supervise（reconcile）失败")
+
+            # S3-02：副本一致性周期巡检（只读；失败不中断 watcher）
+            if consistency_check is not None and (clock() - last_consistency) >= consistency_interval:
+                last_consistency = clock()
+                try:
+                    consistency_check(workspace, config, registry)
+                except Exception:  # noqa: BLE001 — 巡检失败不中断 watcher
+                    log.exception("daemon 副本一致性巡检失败")
 
             # BUG-407：周期刷新能力缓存（启动后 initial_delay，再按 refresh 周期）
             now_ts = clock()
@@ -1766,6 +1862,7 @@ def _main() -> int:
                         poll_interval=args.poll,
                         heartbeat=lambda: touch_lock_heartbeat(workspace),
                         supervise=reconcile,
+                        consistency_check=_run_consistency_patrol,
                     )
             finally:
                 reg.close()

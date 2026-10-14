@@ -1,6 +1,6 @@
 """S2-08 操作观测回归（BUG-753 / issue #59）。
 
-翻转 design/5-checkpoints/2026-10-11-issues47-60-repro.py::test_59_manager_stage_not_mirrored：
+翻转 design/5-checkpoints/2026-10-11/issues47-60-repro.py::test_59_manager_stage_not_mirrored：
 阶段日志按操作来源镜像到 lwa.log（``source=<来源> lifecycle_stage …``），
 非 CLI 进程（manager/daemon/agent）不再丢失阶段；CLI 来源不重复镜像。
 静态站与前端构建部署路径补齐 host_start / sync_done / gateway_reload_done 等阶段记录。

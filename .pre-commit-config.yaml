@@ -1,0 +1,7 @@
+# S3-03/DEV-159：pre-commit 只跑 ruff，与门禁口径一致（ruff check src tests）。
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.0
+    hooks:
+      - id: ruff
+        args: [--fix]

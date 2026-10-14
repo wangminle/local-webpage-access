@@ -1055,6 +1055,17 @@ def _deployed_action(
     from local_webpage_access import rebuild_txn
     from local_webpage_access.generated_convergence import converge_generated_artifacts
 
+    stored_pin = getattr(manifest, "deploymentFingerprints", None) or {}
+    if stored_pin.get("rollbackBuildId"):
+        # 回滚钉住留档镜像与快照生成物，直到显式 rebuild（host_container 会重算指纹并清钉）。
+        # 否则 start/restart 会按当前源码重渲染，等于把刚回滚掉的版本再部署回来。
+        log.info(
+            "实例 %s 处于回滚钉住状态（build #%s），start/restart 不按当前源码重渲染",
+            instance_id,
+            stored_pin.get("rollbackBuildId"),
+        )
+        return "none", []
+
     rebuild_txn.snapshot_generated(workspace, instance_id)
     artifacts_missing = not (
         workspace.app_compose_path(instance_id).is_file()
@@ -1092,6 +1103,8 @@ def _fingerprint_change_action(
         ``(action, changed_fields)`` — action 为 ``none`` / ``runtime_recreate`` / ``full_rebuild``
     """
     if not stored:
+        return "none", []
+    if stored.get("rollbackBuildId"):
         return "none", []
     # BUG-583：新格式指纹（含 build/runtime 拆分）决策只用拆分后的 hash 字段。
     # 真实 .env/Compose 变化会同时改写 runtimeConfigHash 与聚合 configHash，
@@ -2377,11 +2390,20 @@ def remove_instance(
                         force=force,
                         detail=str(exc),
                     )
-                if purge and manifest.container is not None:
-                    image_ref = manifest.container.imageId or manifest.container.image
-                    if image_ref:
+                if purge:
+                    runtime = DockerRuntime(workspace, registry)
+                    from local_webpage_access import versions as versions_mod
+
+                    for ref in versions_mod.iter_instance_image_refs(
+                        registry, instance_id, manifest
+                    ):
                         with contextlib.suppress(Exception):
-                            DockerRuntime(workspace, registry).remove_image(image_ref)
+                            runtime.remove_image(ref)
+                    if manifest is not None and manifest.container is not None:
+                        image_ref = manifest.container.imageId or manifest.container.image
+                        if image_ref:
+                            with contextlib.suppress(Exception):
+                                runtime.remove_image(image_ref)
             else:
                 _log_remove_stage(
                     registry,
@@ -2418,6 +2440,15 @@ def remove_instance(
                         force=force,
                         detail=f"registry fallback: {exc}",
                     )
+                if purge:
+                    from local_webpage_access import versions as versions_mod
+
+                    runtime = DockerRuntime(workspace, registry)
+                    for ref in versions_mod.iter_instance_image_refs(
+                        registry, instance_id, None
+                    ):
+                        with contextlib.suppress(Exception):
+                            runtime.remove_image(ref)
                 _log_remove_stage(
                     registry,
                     instance_id,

@@ -1,7 +1,7 @@
 """S2-05 别名守卫收口（BUG-744 issue#52 / BUG-752 issue#58 / BUG-758 N5；D2/D3/D7）。
 
-翻转自 design/5-checkpoints/2026-10-11-issues47-60-repro.py 的 test_52_* / test_58_* 与
-2026-10-11-issues47-60-independent-repro.py 的 test_n5（原断言缺陷存在），
+翻转自 design/5-checkpoints/2026-10-11/issues47-60-repro.py 的 test_52_* / test_58_* 与
+2026-10-11/issues47-60-independent-repro.py 的 test_n5（原断言缺陷存在），
 并新增：退出码 4、--ignore-alias-guard 审计事件、--update 更新前拒绝（D3）。
 """
 

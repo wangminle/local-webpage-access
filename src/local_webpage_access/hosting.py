@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -595,6 +596,125 @@ def _build_first_applies(
         return False
 
 
+def _finalize_build_artifacts(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    build_id: int,
+) -> None:
+    """S3-01：成功构建留档——新镜像打 ``b<build_id>`` 标签、生成物快照、builds 行补记产物。
+
+    留档失败（无法解析镜像 / 打标签失败）只告警不阻断部署——回滚只是缺失一个
+    候选版本，不影响本次服务。
+    """
+    from local_webpage_access import versions as versions_mod
+
+    repo = rebuild_txn.image_repo(manifest)
+    image_id = versions_mod.resolve_repo_image_id(repo)
+    if not image_id:
+        log.warning(
+            "实例 %s 构建 #%s：无法解析 %s:latest 的镜像 ID，跳过版本留档",
+            instance_id, build_id, repo,
+        )
+        return
+    ref = versions_mod.build_image_ref(repo, build_id)
+    try:
+        versions_mod.tag_build_image(image_id, ref)
+    except DockerError as exc:
+        log.warning("实例 %s 构建 #%s：镜像打标签 %s 失败（%s），跳过版本留档",
+                    instance_id, build_id, ref, exc)
+        return
+    try:
+        snapshot = versions_mod.snapshot_config(workspace, instance_id, build_id)
+        from local_webpage_access.rollback import archive_version_migration
+
+        archive_version_migration(workspace, instance_id, build_id, manifest)
+        source_hash = None
+        try:
+            from local_webpage_access.lifecycle import _compute_source_fingerprint
+
+            source_hash = _compute_source_fingerprint(str(workspace.app_current(instance_id)))
+        except Exception:  # noqa: BLE001 — 指纹失败不阻塞留档
+            log.debug("实例 %s 构建 #%s：源码哈希计算失败", instance_id, build_id)
+        registry.record_build_artifacts(
+            build_id,
+            image_ref=ref,
+            image_id=image_id,
+            source_hash=source_hash or None,
+            config_snapshot=str(snapshot),
+        )
+    except Exception as exc:  # noqa: BLE001 — 留档失败只告警，不阻断已成功的构建
+        log.warning(
+            "实例 %s 构建 #%s：版本留档失败（%s），撤回未登记标签（本次部署不中断）",
+            instance_id, build_id, exc,
+        )
+        with contextlib.suppress(Exception):
+            versions_mod._image_rm(ref)
+        shutil.rmtree(
+            versions_mod.build_snapshot_dir(workspace, instance_id, build_id),
+            ignore_errors=True,
+        )
+
+
+def _gc_after_deploy(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    in_use_image_id: str | None,
+) -> None:
+    """S3-01：部署成功后 GC 超保留期的历史版本镜像与快照；失败仅告警。"""
+    from local_webpage_access import versions as versions_mod
+
+    try:
+        versions_mod.gc_build_artifacts(
+            workspace, config, registry, instance_id, in_use_image_id=in_use_image_id
+        )
+    except Exception:  # noqa: BLE001 — GC 不得阻断已成功部署
+        log.warning("实例 %s 部署后版本 GC 失败（不阻断部署）", instance_id, exc_info=True)
+
+
+def _revoke_unverified_build_archive(
+    workspace: Workspace,
+    registry: Registry,
+    instance_id: str,
+    build_id: int,
+) -> None:
+    """部署未通过验证时撤销该构建的可回滚留档。
+
+    镜像构建成功会把 builds 行标成 success；若此时已经打了版本标签并写入
+    产物列，失败版本仍会被选版和 GC 当成可用版本。这里删标签、清快照、置空
+    产物列，使 ``is_rollback_candidate`` 不再成立。
+    """
+    from local_webpage_access import versions as versions_mod
+
+    try:
+        rows = registry.list_builds(instance_id, limit=200)
+    except Exception:  # noqa: BLE001 — 撤销失败不得掩盖原始部署错误
+        log.warning("实例 %s 构建 #%s：读取留档以便撤销失败", instance_id, build_id, exc_info=True)
+        return
+    row = next((item for item in rows if int(item["id"]) == int(build_id)), None)
+    if row is None or not row.get("image_ref"):
+        return
+    ref = str(row["image_ref"])
+    try:
+        versions_mod._image_rm(ref)
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "实例 %s 构建 #%s：撤销留档时删除镜像 %s 失败",
+            instance_id, build_id, ref, exc_info=True,
+        )
+    snap_paths = {versions_mod.build_snapshot_dir(workspace, instance_id, int(build_id))}
+    stored = row.get("config_snapshot")
+    if stored:
+        snap_paths.add(Path(stored))
+    for snap in snap_paths:
+        shutil.rmtree(snap, ignore_errors=True)
+    with contextlib.suppress(Exception):
+        registry.clear_build_artifacts(int(build_id))
+
+
 def _clear_container_identity(workspace: Workspace, manifest: InstanceManifest) -> None:
     """BUG-300：旧容器已停后立即清空身份并落盘。
 
@@ -706,6 +826,36 @@ def _compensate_build_first(
     raise residual from reason
 
 
+@dataclass
+class _ContainerDeploy:
+    """``host_container`` 一次部署/重建的共享状态（S3-06）。
+
+    原先是 ``host_container`` 内的一组局部标志；拆成阶段函数后经本对象传递，
+    各阶段与异常收尾读写同一份，语义与拆分前逐行一致。
+    """
+
+    workspace: Workspace
+    config: Config
+    registry: Registry
+    instance_id: str
+    manifest: InstanceManifest
+    runtime: DockerRuntime
+    build_id: int
+    op_started_at: str
+    # S2-02 / D4：操作态记录——有旧容器为「重建」，否则为「首次部署」
+    operation_kind: str
+    # S2-03：已在跑的实例重建走先建后换
+    txn: bool
+    host_port: int = 0
+    fresh_port: bool = False
+    # 旧容器已停、身份已清空：此后失败须补偿回旧版本
+    old_stopped: bool = False
+    # S2-01/#54：停机失败中止时不做 failed 标记（旧容器仍在服务）
+    stop_aborted: bool = False
+    # 评审-组2：up 后写失败须回滚停容器
+    up_completed: bool = False
+
+
 def host_container(
     workspace: Workspace,
     config: Config,
@@ -730,6 +880,14 @@ def host_container(
     → 数据救援 → 停机 → 清身份 → up → 验证；停机后失败按
     :func:`_compensate_build_first` 补偿回旧版本。build 失败时旧容器从未被
     动，恢复快照即可。失败时标记 failed 并写诊断上下文（WBS-15.10 / 16.15）。
+
+    S3-06：主流程按阶段拆为 ``_begin_container_deploy`` →
+    ``_prepare_previous_container`` → ``_render_container_artifacts`` →
+    ``_build_container_image`` → ``_swap_in_new_container``（失败走
+    ``_handle_container_deploy_cancelled`` / ``_handle_container_deploy_failed``）→
+    ``_observe_new_container`` → ``_commit_verifying_state`` →
+    ``_verify_container_deployment`` → ``_finalize_container_deploy``；
+    共享状态见 :class:`_ContainerDeploy`，行为与拆分前一致。
     """
     manifest = _load_manifest(workspace, instance_id)
     if manifest.runtime.value != "docker-compose" or manifest.container is None:
@@ -743,18 +901,51 @@ def host_container(
     DockerRuntime.ensure_available()
     runtime = DockerRuntime(workspace, registry)
 
+    ctx = _begin_container_deploy(workspace, config, registry, instance_id, manifest, runtime)
+
+    try:
+        _record_stage(workspace, registry, instance_id, "host_start")
+        # issue #20：非 root 身份预检必须先于任何状态改变（数据救出、down、
+        # 生成器覆写）——runAsNonRoot=True 而 data/ 属主为 root 时直接拒绝，
+        # 提示先修正属主；否则停机后才发现，留下无法恢复的已停现场。
+        from local_webpage_access.container_identity import ensure_non_root_identity_ready
+
+        ensure_non_root_identity_ready(manifest, workspace)
+
+        _prepare_previous_container(ctx)
+        _render_container_artifacts(ctx)
+        _build_container_image(ctx)
+        _swap_in_new_container(ctx)
+    except BuildCancelled as exc:
+        _handle_container_deploy_cancelled(ctx, exc)
+        raise
+    except Exception as exc:
+        _handle_container_deploy_failed(ctx, exc)
+        raise
+
+    _observe_new_container(ctx)
+    _commit_verifying_state(ctx)
+    verification = _verify_container_deployment(ctx)
+    return _finalize_container_deploy(ctx, verification)
+
+
+def _begin_container_deploy(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    instance_id: str,
+    manifest: InstanceManifest,
+    runtime: DockerRuntime,
+) -> _ContainerDeploy:
+    """登记 build 行与操作态，返回各阶段共享的 :class:`_ContainerDeploy`。"""
+    assert manifest.container is not None  # host_container 入口已校验
     build_log = workspace.app_logs(instance_id) / "build.log"
     build_id = registry.add_build(instance_id, status="running", log_path=str(build_log))
-    _up_completed = False  # 评审-组2
-    fresh_port = False
-    stop_aborted = False  # S2-01/#54：停机失败中止时不做 failed 标记（旧容器仍在服务）
-    # S2-02 / D4：操作态记录——有旧容器为「重建」，否则为「首次部署」
     op_started_at = now_iso()
     operation_kind = "rebuild" if manifest.container.containerId is not None else "deploy"
     # S2-03：已在跑的实例重建走先建后换，旧容器服务期间构建；实例 status 不改为 BUILDING，
     # 构建进度只记 lastOperation（D4：实例状态反映实际服务，操作另记）。
     txn = _build_first_applies(runtime, manifest, operation_kind)
-    old_stopped = False  # 旧容器已停、身份已清空：此后失败须补偿回旧版本
     if txn:
         registry.update_last_operation(
             instance_id,
@@ -768,183 +959,223 @@ def host_container(
         )
     else:
         registry.update_status(instance_id, Status.BUILDING.value)
+    return _ContainerDeploy(
+        workspace=workspace,
+        config=config,
+        registry=registry,
+        instance_id=instance_id,
+        manifest=manifest,
+        runtime=runtime,
+        build_id=build_id,
+        op_started_at=op_started_at,
+        operation_kind=operation_kind,
+        txn=txn,
+    )
 
+
+def _prepare_previous_container(ctx: _ContainerDeploy) -> None:
+    """处理旧容器：先建后换只做快照与留档；旧顺序则救数据 → 停机 → 清身份。"""
+    if ctx.txn:
+        # S2-03：先建后换——旧镜像保留为 :prev、生成物快照在前，失败即中止，
+        # 旧容器全程不动。
+        rebuild_txn.prepare_build_first(ctx.workspace, ctx.runtime, ctx.manifest)
+        return
+    # BUG-205：重建 down 前先把容器内数据救出到宿主 data/，避免旧库随容器删除丢失
+    _rescue_container_data_before_rebuild(
+        ctx.workspace, ctx.manifest, ctx.instance_id, ctx.runtime
+    )
+
+    # S2-01/#54：先停机、成功后才动身份——停机失败立即中止且 manifest 身份
+    # 保持完整，旧容器继续服务；「本来就没在跑」视为成功。
     try:
-        _record_stage(workspace, registry, instance_id, "host_start")
-        # issue #20：非 root 身份预检必须先于任何状态改变（数据救出、down、
-        # 生成器覆写）——runAsNonRoot=True 而 data/ 属主为 root 时直接拒绝，
-        # 提示先修正属主；否则停机后才发现，留下无法恢复的已停现场。
-        from local_webpage_access.container_identity import ensure_non_root_identity_ready
+        stop_or_abort(ctx.runtime, ctx.instance_id, purpose="重建")
+    except HostingError:
+        ctx.stop_aborted = True
+        raise
+    _clear_container_identity(ctx.workspace, ctx.manifest)
 
-        ensure_non_root_identity_ready(manifest, workspace)
 
-        if txn:
-            # S2-03：先建后换——旧镜像保留为 :prev、生成物快照在前，失败即中止，
-            # 旧容器全程不动。
-            rebuild_txn.prepare_build_first(workspace, runtime, manifest)
-        else:
-            # BUG-205：重建 down 前先把容器内数据救出到宿主 data/，避免旧库随容器删除丢失
-            _rescue_container_data_before_rebuild(workspace, manifest, instance_id, runtime)
+def _render_container_artifacts(ctx: _ContainerDeploy) -> None:
+    """生成 Dockerfile、分配/复用端口、生成 Compose 与 .env。"""
+    # 3. 生成 Dockerfile（BUG-200：注入 config.buildMirrors，避免手改被覆盖）
+    generate_dockerfile(ctx.manifest, ctx.workspace, config=ctx.config)
+    _record_stage(ctx.workspace, ctx.registry, ctx.instance_id, "dockerfile_ready")
 
-            # S2-01/#54：先停机、成功后才动身份——停机失败立即中止且 manifest 身份
-            # 保持完整，旧容器继续服务；「本来就没在跑」视为成功。
-            try:
-                stop_or_abort(runtime, instance_id, purpose="重建")
-            except HostingError:
-                stop_aborted = True
-                raise
-            _clear_container_identity(workspace, manifest)
+    # 4. 分配/复用端口（先建后换下旧容器仍占用旧端口，须按登记复用以保持
+    # lanUrl 稳定，BUG-790）
+    ctx.host_port, ctx.fresh_port = _ensure_container_port(
+        ctx.config, ctx.registry, ctx.instance_id, allow_listening_reuse=ctx.txn
+    )
 
-        # 3. 生成 Dockerfile（BUG-200：注入 config.buildMirrors，避免手改被覆盖）
-        generate_dockerfile(manifest, workspace, config=config)
-        _record_stage(workspace, registry, instance_id, "dockerfile_ready")
+    # 5. 生成 Compose + .env（含 SQLite DATABASE_URL / RUNTIME_ROOT 与 data/ 挂载）
+    generate_compose(ctx.manifest, ctx.workspace, host_port=ctx.host_port, config=ctx.config)
+    generate_env(ctx.manifest, ctx.workspace, host_port=ctx.host_port)
+    _record_stage(ctx.workspace, ctx.registry, ctx.instance_id, "compose_ready")
 
-        # 4. 分配/复用端口（先建后换下旧容器仍占用旧端口，须按登记复用以保持
-        # lanUrl 稳定，BUG-790）
-        host_port, fresh_port = _ensure_container_port(
-            config, registry, instance_id, allow_listening_reuse=txn
+
+def _build_container_image(ctx: _ContainerDeploy) -> None:
+    """build 镜像（先建后换时旧容器仍在服务）并为成功构建留档。"""
+    _record_stage(ctx.workspace, ctx.registry, ctx.instance_id, "compose_build_start")
+    try:
+        ctx.runtime.build(ctx.instance_id, build_id=ctx.build_id)
+    except DockerError as exc:
+        if ctx.txn:
+            # S2-03：先建后换下 build 失败——旧容器全程未动，文案明确
+            # 「构建失败，旧版本仍在服务」，避免用户误以为服务已被破坏
+            raise DockerError(
+                f"构建失败，旧版本仍在服务：{exc}",
+                instance_id=ctx.instance_id,
+            ) from exc
+        raise
+    _record_stage(ctx.workspace, ctx.registry, ctx.instance_id, "compose_build_done")
+    # 可回滚资格延后到部署验证通过（_finalize_container_deploy）。此处只表示
+    # 镜像构建成功；启动或必选探针失败的版本不得进入选版与 GC。
+
+
+def _swap_in_new_container(ctx: _ContainerDeploy) -> None:
+    """（先建后换）停旧容器并清身份，然后 ``up`` 新容器。"""
+    if ctx.txn:
+        # 新镜像已就绪，才动旧容器：救数据（需旧容器在跑）→ 停机 → 清身份
+        _rescue_container_data_before_rebuild(
+            ctx.workspace, ctx.manifest, ctx.instance_id, ctx.runtime
         )
-
-        # 5. 生成 Compose + .env（含 SQLite DATABASE_URL / RUNTIME_ROOT 与 data/ 挂载）
-        generate_compose(manifest, workspace, host_port=host_port, config=config)
-        generate_env(manifest, workspace, host_port=host_port)
-        _record_stage(workspace, registry, instance_id, "compose_ready")
-
-        # 6. build（先建后换时旧容器仍在服务）+ 停旧容器 + up
-        _record_stage(workspace, registry, instance_id, "compose_build_start")
         try:
-            runtime.build(instance_id, build_id=build_id)
-        except DockerError as exc:
-            if txn:
-                # S2-03：先建后换下 build 失败——旧容器全程未动，文案明确
-                # 「构建失败，旧版本仍在服务」，避免用户误以为服务已被破坏
-                raise DockerError(
-                    f"构建失败，旧版本仍在服务：{exc}",
-                    instance_id=instance_id,
-                ) from exc
+            stop_or_abort(ctx.runtime, ctx.instance_id, purpose="重建")
+        except HostingError:
+            ctx.stop_aborted = True
             raise
-        _record_stage(workspace, registry, instance_id, "compose_build_done")
-        if txn:
-            # 新镜像已就绪，才动旧容器：救数据（需旧容器在跑）→ 停机 → 清身份
-            _rescue_container_data_before_rebuild(workspace, manifest, instance_id, runtime)
-            try:
-                stop_or_abort(runtime, instance_id, purpose="重建")
-            except HostingError:
-                stop_aborted = True
-                raise
-            _clear_container_identity(workspace, manifest)
-            old_stopped = True
-        _record_stage(workspace, registry, instance_id, "compose_up_start")
-        runtime.up(instance_id)
-        _up_completed = True  # 评审-组2：up 后写失败须回滚停容器
-        _record_stage(workspace, registry, instance_id, "compose_up_done")
-    except BuildCancelled as exc:
-        if txn and not old_stopped:
+        # S2 审计 P1-1（S2-03）：停机成功即记录事务阶段——随后的身份清空/写盘
+        # 失败同样属于「旧容器已停」，必须走补偿，不能按「旧版本仍在服务」收尾
+        # （否则 registry 回 running 而服务实际已下线，且无 up 恢复）。
+        ctx.old_stopped = True
+        _clear_container_identity(ctx.workspace, ctx.manifest)
+    _record_stage(ctx.workspace, ctx.registry, ctx.instance_id, "compose_up_start")
+    ctx.runtime.up(ctx.instance_id)
+    ctx.up_completed = True  # 评审-组2：up 后写失败须回滚停容器
+    _record_stage(ctx.workspace, ctx.registry, ctx.instance_id, "compose_up_done")
+
+
+def _handle_container_deploy_cancelled(ctx: _ContainerDeploy, exc: BuildCancelled) -> None:
+    """构建被取消的收尾（调用方随后 ``raise``）。"""
+    workspace, registry, instance_id = ctx.workspace, ctx.registry, ctx.instance_id
+    manifest = ctx.manifest
+    _revoke_unverified_build_archive(workspace, registry, instance_id, ctx.build_id)
+    if ctx.txn and not ctx.old_stopped:
+        _restore_generated_for_txn(workspace, instance_id)
+    if ctx.fresh_port:
+        try:
+            PortAllocator(ctx.config, registry).release_instance(instance_id)
+        except Exception:  # noqa: BLE001
+            log.warning("取消回滚释放实例 %s 端口失败", instance_id)
+    try:
+        latest = registry.list_builds(instance_id, limit=1)
+        if latest and latest[0]["id"] == ctx.build_id and latest[0]["status"] == "running":
+            registry.finish_build(ctx.build_id, status="cancelled", error_summary=str(exc)[:500])
+    except Exception:  # noqa: BLE001
+        log.exception("取消 finish build 失败")
+    # S2-02 / D4：取消是操作态——不改写实例 status（保留操作前观测值），
+    # 结果记 lastOperation 与 lastError。
+    registry.update_last_operation(
+        instance_id,
+        {
+            "kind": ctx.operation_kind,
+            "status": "cancelled",
+            "buildId": ctx.build_id,
+            "startedAt": ctx.op_started_at,
+            "finishedAt": now_iso(),
+            "error": str(exc)[:500],
+            "source": "host_container",
+        },
+    )
+    registry.update_last_error(instance_id, str(exc)[:500])
+    manifest.lastError = str(exc)[:500]
+    manifest.touch()
+    with contextlib.suppress(Exception):
+        manifest.save(workspace.app_manifest_path(instance_id))
+
+
+def _handle_container_deploy_failed(ctx: _ContainerDeploy, exc: Exception) -> None:
+    """build/up 阶段失败的收尾（调用方随后 ``raise``；补偿路径自身会抛出）。"""
+    workspace, registry, instance_id = ctx.workspace, ctx.registry, ctx.instance_id
+    manifest, runtime = ctx.manifest, ctx.runtime
+    _revoke_unverified_build_archive(workspace, registry, instance_id, ctx.build_id)
+    if ctx.txn and ctx.old_stopped:
+        # S2-03：旧容器已停，新版本失败——补偿回到旧版本（总会抛出）
+        _compensate_build_first(
+            workspace, registry, runtime, manifest, ctx.host_port, ctx.build_id, exc
+        )
+    # S2-01/#54：停机失败即中止——旧容器仍在服务，不得标 FAILED、不得
+    # 释放端口；registry 回到本次操作前的观测状态，manifest 不落盘任何变更。
+    # S2-03：先建后换下 build 失败同样属于「旧版本仍在服务」，走同一收尾。
+    if ctx.stop_aborted or (ctx.txn and not ctx.old_stopped):
+        if ctx.txn:
             _restore_generated_for_txn(workspace, instance_id)
-        if fresh_port:
-            try:
-                PortAllocator(config, registry).release_instance(instance_id)
-            except Exception:  # noqa: BLE001
-                log.warning("取消回滚释放实例 %s 端口失败", instance_id)
+        # 停机失败即中止：旧容器仍在服务，不得标 FAILED、不得释放端口；
+        # build 行如实收尾，registry 状态回到本次操作前的观测值。
         try:
             latest = registry.list_builds(instance_id, limit=1)
-            if latest and latest[0]["id"] == build_id and latest[0]["status"] == "running":
-                registry.finish_build(build_id, status="cancelled", error_summary=str(exc)[:500])
+            if latest and latest[0]["id"] == ctx.build_id and latest[0]["status"] == "running":
+                registry.finish_build(ctx.build_id, status="failed", error_summary=str(exc)[:500])
         except Exception:  # noqa: BLE001
-            log.exception("取消 finish build 失败")
-        # S2-02 / D4：取消是操作态——不改写实例 status（保留操作前观测值），
-        # 结果记 lastOperation 与 lastError。
-        registry.update_last_operation(
-            instance_id,
-            {
-                "kind": operation_kind,
-                "status": "cancelled",
-                "buildId": build_id,
-                "startedAt": op_started_at,
-                "finishedAt": now_iso(),
-                "error": str(exc)[:500],
-                "source": "host_container",
-            },
-        )
-        registry.update_last_error(instance_id, str(exc)[:500])
-        manifest.lastError = str(exc)[:500]
-        manifest.touch()
+            log.exception("停机中止收尾 build 行失败")
+        registry.update_status(instance_id, manifest.status.value)
+        # S2-02 / D4：操作失败补记操作态（registry-only；manifest 不落盘，
+        # 与上面「manifest 不落盘任何变更」的 S2-01 约束一致）。
         with contextlib.suppress(Exception):
-            manifest.save(workspace.app_manifest_path(instance_id))
-        raise
-    except Exception as exc:
-        if txn and old_stopped:
-            # S2-03：旧容器已停，新版本失败——补偿回到旧版本（总会抛出）
-            _compensate_build_first(
-                workspace, registry, runtime, manifest, host_port, build_id, exc
+            registry.update_last_operation(
+                instance_id,
+                {
+                    "kind": ctx.operation_kind,
+                    "status": "failed",
+                    "buildId": ctx.build_id,
+                    "startedAt": ctx.op_started_at,
+                    "finishedAt": now_iso(),
+                    "error": str(exc)[:500],
+                    "source": "host_container",
+                },
             )
-        # S2-01/#54：停机失败即中止——旧容器仍在服务，不得标 FAILED、不得
-        # 释放端口；registry 回到本次操作前的观测状态，manifest 不落盘任何变更。
-        # S2-03：先建后换下 build 失败同样属于「旧版本仍在服务」，走同一收尾。
-        if stop_aborted or (txn and not old_stopped):
-            if txn:
-                _restore_generated_for_txn(workspace, instance_id)
-            # 停机失败即中止：旧容器仍在服务，不得标 FAILED、不得释放端口；
-            # build 行如实收尾，registry 状态回到本次操作前的观测值。
-            try:
-                latest = registry.list_builds(instance_id, limit=1)
-                if latest and latest[0]["id"] == build_id and latest[0]["status"] == "running":
-                    registry.finish_build(build_id, status="failed", error_summary=str(exc)[:500])
-            except Exception:  # noqa: BLE001
-                log.exception("停机中止收尾 build 行失败")
-            registry.update_status(instance_id, manifest.status.value)
-            # S2-02 / D4：操作失败补记操作态（registry-only；manifest 不落盘，
-            # 与上面「manifest 不落盘任何变更」的 S2-01 约束一致）。
-            with contextlib.suppress(Exception):
-                registry.update_last_operation(
-                    instance_id,
-                    {
-                        "kind": operation_kind,
-                        "status": "failed",
-                        "buildId": build_id,
-                        "startedAt": op_started_at,
-                        "finishedAt": now_iso(),
-                        "error": str(exc)[:500],
-                        "source": "host_container",
-                    },
-                )
-                registry.update_last_error(instance_id, str(exc)[:500])
-            raise
-        # 端口回滚：仅释放本轮新分配的端口（与 _enable_static / BUG-182 对称）。
-        # 复用旧端口是上一轮成功部署的登记，失败时清掉会破坏 lanUrl 稳定性。
-        if fresh_port:
-            try:
-                PortAllocator(config, registry).release_instance(instance_id)
-            except Exception:  # noqa: BLE001
-                log.warning("失败回滚释放实例 %s 端口失败", instance_id)
-        # DockerRuntime.build 成功/失败都会 finish 该 build 行；
-        # 这里只兜底"build 尚未执行就被打断"的情况（如生成文件/分配端口失败），
-        # 此时 build 行仍为 running，需要标记 failed。避免与 build() 双重 finish。
+            registry.update_last_error(instance_id, str(exc)[:500])
+        return
+    # 端口回滚：仅释放本轮新分配的端口（与 _enable_static / BUG-182 对称）。
+    # 复用旧端口是上一轮成功部署的登记，失败时清掉会破坏 lanUrl 稳定性。
+    if ctx.fresh_port:
         try:
-            latest = registry.list_builds(instance_id, limit=1)
-            if latest and latest[0]["id"] == build_id and latest[0]["status"] == "running":
-                registry.finish_build(build_id, status="failed", error_summary=str(exc)[:500])
+            PortAllocator(ctx.config, registry).release_instance(instance_id)
         except Exception:  # noqa: BLE001
-            log.exception("兜底 finish build 失败")
-        # 评审-组2：up 成功后的写盘/DB 失败会留孤儿运行容器（实例标 FAILED 但
-        # 容器在跑）；best-effort down，与 _liveness_failed_rollback 对称。
-        if _up_completed:
-            with contextlib.suppress(Exception):
-                runtime.down(instance_id)
-                log.info("实例 %s 部署后置写失败，已回滚停掉容器", instance_id)
-        _mark_failed(
-            workspace,
-            registry,
-            instance_id,
-            manifest,
-            exc,
-            operation_kind=operation_kind,
-            operation_source="host_container",
-            build_id=build_id,
-        )
-        raise
+            log.warning("失败回滚释放实例 %s 端口失败", instance_id)
+    # DockerRuntime.build 成功/失败都会 finish 该 build 行；
+    # 这里只兜底"build 尚未执行就被打断"的情况（如生成文件/分配端口失败），
+    # 此时 build 行仍为 running，需要标记 failed。避免与 build() 双重 finish。
+    try:
+        latest = registry.list_builds(instance_id, limit=1)
+        if latest and latest[0]["id"] == ctx.build_id and latest[0]["status"] == "running":
+            registry.finish_build(ctx.build_id, status="failed", error_summary=str(exc)[:500])
+    except Exception:  # noqa: BLE001
+        log.exception("兜底 finish build 失败")
+    # 评审-组2：up 成功后的写盘/DB 失败会留孤儿运行容器（实例标 FAILED 但
+    # 容器在跑）；best-effort down，与 _liveness_failed_rollback 对称。
+    if ctx.up_completed:
+        with contextlib.suppress(Exception):
+            runtime.down(instance_id)
+            log.info("实例 %s 部署后置写失败，已回滚停掉容器", instance_id)
+    _mark_failed(
+        workspace,
+        registry,
+        instance_id,
+        manifest,
+        exc,
+        operation_kind=ctx.operation_kind,
+        operation_source="host_container",
+        build_id=ctx.build_id,
+    )
 
-    # 7. 观测 containerId / imageId（失败不阻塞，仅记录 None）
+
+def _observe_new_container(ctx: _ContainerDeploy) -> None:
+    """7. 观测 containerId / imageId 并写回 manifest（观测不到则补偿/失败）。"""
+    workspace, registry, instance_id = ctx.workspace, ctx.registry, ctx.instance_id
+    manifest, runtime = ctx.manifest, ctx.runtime
+    assert manifest.container is not None  # host_container 入口已校验
+    # 失败不阻塞，仅记录 None
     container_id = _safe(lambda: runtime.container_id(instance_id))
     image_id = _safe(lambda: runtime.image_id(instance_id))
     if container_id is None:
@@ -955,37 +1186,50 @@ def host_container(
             f"实例 {instance_id} 启动后未能观测到新 containerId",
             instance_id=instance_id,
         )
-        if txn:
+        _revoke_unverified_build_archive(workspace, registry, instance_id, ctx.build_id)
+        if ctx.txn:
             # S2-03：旧容器已停，无法确认新版本身份——补偿回到旧版本（总会抛出）
             _compensate_build_first(
-                workspace, registry, runtime, manifest, host_port, build_id, observation_error
+                workspace,
+                registry,
+                runtime,
+                manifest,
+                ctx.host_port,
+                ctx.build_id,
+                observation_error,
             )
         with contextlib.suppress(Exception):
             runtime.down(instance_id)
-        if fresh_port:
+        if ctx.fresh_port:
             with contextlib.suppress(Exception):
-                PortAllocator(config, registry).release_instance(instance_id)
+                PortAllocator(ctx.config, registry).release_instance(instance_id)
         _mark_failed(
             workspace,
             registry,
             instance_id,
             manifest,
             observation_error,
-            operation_kind=operation_kind,
+            operation_kind=ctx.operation_kind,
             operation_source="host_container",
-            build_id=build_id,
+            build_id=ctx.build_id,
         )
         raise observation_error
     manifest.container.containerId = container_id
     manifest.container.imageId = image_id
-    manifest.container.hostPort = host_port
+    manifest.container.hostPort = ctx.host_port
 
-    # 8. 更新 manifest + registry（先 upsert，再 record_health_check，
-    #    否则 upsert_from_manifest 会用 manifest 的 lastHealthCheckAt=None 覆盖 DB 时间戳）
+
+def _commit_verifying_state(ctx: _ContainerDeploy) -> None:
+    """8. 更新 manifest + registry 到 VERIFYING（验证结论由下一阶段决定）。"""
+    workspace, registry, instance_id = ctx.workspace, ctx.registry, ctx.instance_id
+    manifest = ctx.manifest
+    assert manifest.container is not None  # host_container 入口已校验
+    # 先 upsert，再 record_health_check，
+    # 否则 upsert_from_manifest 会用 manifest 的 lastHealthCheckAt=None 覆盖 DB 时间戳
     # BUG-084：写回 network 时保留容器已配置的路径别名，否则别名入口对状态/API 不可见。
     entry = build_network_entry(
-        config,
-        host_port,
+        ctx.config,
+        ctx.host_port,
         internal_port=manifest.container.internalPort,
         path_alias=_container_path_alias(manifest),
     )
@@ -999,10 +1243,10 @@ def host_container(
     # S2-02 / D4：build+up 成功——操作态记 succeeded（验证结论另由
     # verificationSummary 承载，不混进实例 status）。
     manifest.lastOperation = {
-        "kind": operation_kind,
+        "kind": ctx.operation_kind,
         "status": "succeeded",
-        "buildId": build_id,
-        "startedAt": op_started_at,
+        "buildId": ctx.build_id,
+        "startedAt": ctx.op_started_at,
         "finishedAt": now_iso(),
         "source": "host_container",
     }
@@ -1017,10 +1261,16 @@ def host_container(
         desired_state=DesiredState.RUNNING.value,
     )
 
-    # 9. Gate-C C.04/C.05：实证校验——评估成功谓词。
-    #    必选探针失败 → FAILED（不写 RUNNING）。
-    #    可选探针失败 → DEGRADED。
-    #    首页 200 不代替 API/DB 验证（§6.5）。
+
+def _verify_container_deployment(ctx: _ContainerDeploy) -> dict[str, Any]:
+    """9. Gate-C C.04/C.05：实证校验——评估成功谓词。
+
+    必选探针失败 → FAILED（不写 RUNNING；先建后换则补偿回旧版本）；
+    可选探针失败 → DEGRADED。首页 200 不代替 API/DB 验证（§6.5）。
+    返回含副作用记录的 verification 结论。
+    """
+    workspace, registry, instance_id = ctx.workspace, ctx.registry, ctx.instance_id
+    manifest, host_port = ctx.manifest, ctx.host_port
     verification = _evaluate_container_verification(
         host_port,
         manifest,
@@ -1038,31 +1288,32 @@ def host_container(
     verification["side_effect_records"] = side_effects
     verification["side_effects_auto_recoverable"] = _side_effects_auto_recoverable(side_effects)
 
-    if txn and verification["overall_status"] == "failed":
-        # S2-03：新版本必选探针未通过——旧容器已停，补偿回到旧版本（总会抛出）
-        _compensate_build_first(
-            workspace,
-            registry,
-            runtime,
-            manifest,
-            host_port,
-            build_id,
-            HostingError(
-                f"实例 {instance_id} 必选探针未通过（host_port={host_port}）："
-                f"{verification.get('error', 'liveness timeout')}",
-                instance_id=instance_id,
-            ),
-        )
     if verification["overall_status"] == "failed":
+        _revoke_unverified_build_archive(workspace, registry, instance_id, ctx.build_id)
+        if ctx.txn:
+            # S2-03：新版本必选探针未通过——旧容器已停，补偿回到旧版本（总会抛出）
+            _compensate_build_first(
+                workspace,
+                registry,
+                ctx.runtime,
+                manifest,
+                host_port,
+                ctx.build_id,
+                HostingError(
+                    f"实例 {instance_id} 必选探针未通过（host_port={host_port}）："
+                    f"{verification.get('error', 'liveness timeout')}",
+                    instance_id=instance_id,
+                ),
+            )
         # 必选探针失败 → 回滚到 FAILED
         _liveness_failed_rollback(
             workspace,
-            config,
+            ctx.config,
             registry,
             instance_id,
             manifest,
             host_port,
-            fresh_port,
+            ctx.fresh_port,
             verification.get("error", "必选探针未通过"),
         )
         # C.R05：将副作用记录附加到异常 context，供 lifecycle 回滚判断使用
@@ -1078,7 +1329,15 @@ def host_container(
             instance_id=instance_id,
             **se_context,
         )
+    return verification
 
+
+def _finalize_container_deploy(
+    ctx: _ContainerDeploy, verification: dict[str, Any]
+) -> InstanceManifest:
+    """验证通过后的落盘：最终状态、verificationSummary、指纹、事件与 GC。"""
+    workspace, registry, instance_id = ctx.workspace, ctx.registry, ctx.instance_id
+    manifest, host_port = ctx.manifest, ctx.host_port
     # 第二批 CHK-252：验证结论（degraded）不再写入进程状态——Status 只表达
     # 进程/部署态；验证警告经 verificationSummary 由 UI 叠加展示
     # （「运行中 · 验证有警告」）。
@@ -1137,6 +1396,17 @@ def host_container(
         "start",
         f"容器实例已启动（{status_detail}，host_port={host_port}）",
     )
+    # 验证通过后才赋予可回滚资格，再按保留数 GC。失败版本没有产物列，
+    # 不会被当成上一可用版本保护。
+    try:
+        _finalize_build_artifacts(workspace, registry, instance_id, manifest, ctx.build_id)
+    except Exception:  # noqa: BLE001 — 可选留档不得阻断已通过验证的部署
+        log.warning(
+            "实例 %s 构建 #%s：版本留档阶段异常（本次部署不中断）",
+            instance_id, ctx.build_id, exc_info=True,
+        )
+    image_id = manifest.container.imageId if manifest.container else None
+    _gc_after_deploy(workspace, ctx.config, registry, instance_id, image_id)
     log.info("容器实例 %s 已启动（%s），端口 %d", instance_id, status_detail, host_port)
     return manifest
 

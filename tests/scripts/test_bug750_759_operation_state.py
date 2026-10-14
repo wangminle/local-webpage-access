@@ -1,6 +1,6 @@
 """S2-02 操作态与实例态分离回归（BUG-750 / issue #57-2、BUG-759 / N6，决策 D4）。
 
-翻转 design/5-checkpoints/2026-10-11-issues47-60-repro.py::test_57_queue_status_only_updates_registry：
+翻转 design/5-checkpoints/2026-10-11/issues47-60-repro.py::test_57_queue_status_only_updates_registry：
 排队/超时/构建失败只写操作态 lastOperation 与 lastError，实例 status 仅由观测决定。
 """
 

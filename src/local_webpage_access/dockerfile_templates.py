@@ -433,7 +433,7 @@ _APT_RETRIES = 2
 _APT_TIMEOUT = 30
 _APT_FAIL_HINT = (
     "lwa: apt 安装失败。可能是镜像源不可达或过慢——可在 local-web.yml 的 "
-    "buildMirrors 中调整 aptMirror / aptFallbacks / aptRetries / aptTimeout，"
+    "buildMirrors 中调整 aptMirror / aptFallbacks / aptRetries / aptTimeout / aptBudget，"
     "或把系统包装入 systemDeps 后重试"
 )
 _APT_CACHE_MOUNTS = (
@@ -449,6 +449,44 @@ def _apt_retry_opts(mirrors: BuildMirrors | None) -> str:
         retries = mirrors.aptRetries
         timeout = mirrors.aptTimeout
     return f"-o Acquire::Retries={retries} -o Acquire::http::Timeout={timeout}"
+
+
+def _apt_budget(mirrors: BuildMirrors | None) -> int:
+    """DEV-146：每个源候选的总时间预算（秒）；0 / 未配置 = 不限。"""
+    return int(getattr(mirrors, "aptBudget", 0) or 0)
+
+
+def _apt_budget_hint(budget: int) -> str:
+    return (
+        f"lwa: apt 在 {budget}s 总时间预算内未完成下载，放弃当前源并尝试下一个"
+        "（可调 buildMirrors.aptBudget）"
+    )
+
+
+def _apt_body(install_args: str, mirrors: BuildMirrors | None) -> str:
+    """单个源候选内执行的 ``apt-get update`` + ``install``。
+
+    设置 ``aptBudget`` 后，网络阶段（update + ``--download-only``）整体放进
+    ``timeout``，到点连同子进程一并终止并让 ``||`` 切下一个源；真正的 dpkg
+    安装在下载完成后离线执行、不受预算约束——因此预算只会打断下载，
+    不会把 dpkg 留在半安装状态。
+    """
+    opts = _apt_retry_opts(mirrors)
+    budget = _apt_budget(mirrors)
+    base = f"apt-get {opts} install -y --no-install-recommends"
+    update = f"apt-get {opts} update"
+    if budget <= 0:
+        return f"{update} && {base} {install_args}"
+    fetch = f"{update} && {base} --download-only {install_args}"
+    hint = _apt_budget_hint(budget)
+    # 124 = timeout 到点终止；137 = 宽限 10s 后被 KILL。其他失败码（源 503、
+    # 解析失败等）原样透传，不误报“预算超时”。
+    return (
+        f"( timeout -k 10 {budget} sh -c {shlex.quote(fetch)} "
+        f"|| ( rc=$?; if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then "
+        f"echo '{hint}' >&2; fi; exit $rc ) ) && "
+        f"{base} {install_args}"
+    )
 
 
 def _apt_hosts(mirrors: BuildMirrors | None) -> list[str]:
@@ -511,12 +549,8 @@ def _render_apt_deps_block(apt_deps: list[str], mirrors: BuildMirrors | None) ->
     """
     if not apt_deps:
         return ""
-    opts = _apt_retry_opts(mirrors)
     pkgs = " ".join(apt_deps)
-    body = (
-        f"apt-get {opts} update && "
-        f"apt-get {opts} install -y --no-install-recommends --fix-missing {pkgs}"
-    )
+    body = _apt_body(f"--fix-missing {pkgs}", mirrors)
     return _render_apt_run(body, mirrors)
 
 
@@ -817,11 +851,7 @@ def _render_python(
     if source_dir is not None and (
         (source_dir / "package.json").is_file() or frontend_pkg
     ):
-        opts = _apt_retry_opts(mirrors)
-        node_apt = (
-            f"apt-get {opts} update && "
-            f"apt-get {opts} install -y --no-install-recommends ca-certificates curl xz-utils"
-        )
+        node_apt = _apt_body("ca-certificates curl xz-utils", mirrors)
         node_toolchain = _render_apt_run(node_apt, mirrors) + _render_node_tarball_run(mirrors)
         if (source_dir / "package.json").is_file():
             npm_install = _with_npm_registry(

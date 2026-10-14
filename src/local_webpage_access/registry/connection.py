@@ -19,7 +19,7 @@ from local_webpage_access.logging import get_logger
 
 log = get_logger("registry")
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 
 # ---- DDL --------------------------------------------------------------------
 
@@ -216,6 +216,21 @@ _SCHEMAS: dict[int, list[str]] = {
     # error, source}），与 stack_json 同为单列 JSON 先例。
     6: [
         "ALTER TABLE instances ADD COLUMN last_operation_json TEXT",
+    ],
+    # S3-01 / DEV-157 / issue #51 远期（D8）：镜像版本留档。成功构建打
+    # ``lwa-<id>-app:b<build_id>`` 标签后，把镜像引用、镜像 ID、源码哈希与
+    # 生成物快照路径（apps/<id>/docker/builds/<build_id>/）回写到对应行，
+    # 供 ``lwa versions`` / 有限回滚 / GC 使用。全部为可空列，存量行不受影响。
+    7: [
+        "ALTER TABLE builds ADD COLUMN image_ref TEXT",
+        "ALTER TABLE builds ADD COLUMN image_id TEXT",
+        "ALTER TABLE builds ADD COLUMN source_hash TEXT",
+        "ALTER TABLE builds ADD COLUMN config_snapshot TEXT",
+    ],
+    # S3-04 / DEV-160 / issue #59：事件记录发起方（cli/manager/daemon/agent），
+    # 操作时间线据此标注来源。存量事件为 NULL，时间线显示为「未知来源」。
+    8: [
+        "ALTER TABLE events ADD COLUMN source TEXT",
     ],
 }
 

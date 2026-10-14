@@ -1026,10 +1026,36 @@ class StaticGateway:
         经 :meth:`write_main_config` **无条件写回**（不回滚到可能含悬空 import
         的旧版本），保证主 Caddyfile 永不 import 已删文件。
         reload 失败仅记 WARN：配置已正确落盘，下次 ``caddy start``/reload 会加载它。
+
+        BUG-783（S2 审计 P1-3）：本路径与 :meth:`reload_all` 同受独立端口分配与
+        归属保护——先 ``ensure_admin_port``（组装结果随之渲染 ``admin`` 指令、
+        reload 目标改为本工作区端口），admin 在线但不归本工作区时跳过 reload 只
+        记 WARN（磁盘配置已正确，由下次归属可证的 start/reload 加载），未分配到
+        独立端口同样只写盘不 reload——绝不把重组结果推给共享 :2019 上"谁在听"。
         """
         if self.detect_backend() != "caddy":
             return
+        try:
+            ensure_admin_port(self.ws)
+        except Exception as exc:  # noqa: BLE001 — 清理路径不得被分配失败阻断：写盘照常，仅跳过 reload
+            self.write_main_config()
+            log.warning(
+                "无法分配独立 admin 端口，已写盘但跳过 reload（不触碰共享 :%d）：%s",
+                LEGACY_ADMIN_PORT,
+                exc,
+            )
+            return
         self.write_main_config()
+        if self._admin_alive():
+            owner = self.inspect_caddy_owner()
+            if owner.get("owner") != "lwa_service_user" or not owner.get("workspace_match"):
+                log.warning(
+                    "Caddy master 所有权不匹配，跳过本次 reload（主 Caddyfile 已落盘，"
+                    "下次归属可证的 start/reload 会加载）：owner=%s pid=%s",
+                    owner.get("owner"),
+                    owner.get("pid"),
+                )
+                return
         ok, stderr = self._reload_with_self_heal()
         if not ok:
             log.warning(
@@ -1517,7 +1543,8 @@ class StaticGateway:
                         self._clear_stale_caddy_pid()
                 else:
                     log.warning(
-                        "legacy :%d 在线但非本工作区 Caddy，跳过 POST /stop（BUG-176）",
+                        "legacy :%d 归属未确证（非本工作区，或监听者无法核实），"
+                        "跳过 POST /stop（BUG-176 fail-closed）",
                         LEGACY_ADMIN_PORT,
                     )
             except Exception as exc:  # noqa: BLE001
@@ -1558,6 +1585,10 @@ class StaticGateway:
 
         与 :meth:`adopt_orphan_master` 的四重安全闸同款思路：仅 pid 存活不够，
         必须能从命令行实证本工作区路径（--config/--pidfile 实参）。
+        S2 审计 P1-2（S2-07/BUG-783）：pidfile PID 存活且命令行含本工作区路径仍
+        不足以免检——该 PID 还必须**就是 :2019 的监听者**。迁移窗口内本工作区
+        master 可能已绑独立端口（或正在优雅退出），:2019 实际由别的 master 持有，
+        凭 pidfile 即 return True 会向别人的 :2019 发 POST /stop。
         """
         pid = None
         path = self.caddy_pid_path()
@@ -1566,10 +1597,14 @@ class StaticGateway:
                 pid = int(path.read_text(encoding="utf-8").strip())
             except (ValueError, OSError):
                 pid = None
-        if pid is not None and self._pid_alive(pid):
-            if pid_cmdline_contains(pid, "caddy", str(self.ws.root)):
-                return True
         holder = self._admin_holder_pid(LEGACY_ADMIN_PORT)
+        if (
+            pid is not None
+            and holder == pid
+            and self._pid_alive(pid)
+            and pid_cmdline_contains(pid, "caddy", str(self.ws.root))
+        ):
+            return True
         if holder is None or not self._pid_alive(holder):
             return False
         cmdline = self._pid_cmdline(holder)
@@ -1597,8 +1632,8 @@ class StaticGateway:
             return
         if not self._legacy_master_is_ours():
             log.warning(
-                "legacy :%d admin 在线但非本工作区 Caddy，无法自动迁移；本工作区 "
-                "master 将绑定独立 admin 端口，legacy 端口保留给原属进程",
+                "legacy :%d 归属未确证（非本工作区，或监听者无法核实），无法自动迁移；"
+                "本工作区 master 将绑定独立 admin 端口，legacy 端口保留给原属进程",
                 LEGACY_ADMIN_PORT,
             )
             return

@@ -17,7 +17,7 @@ import pytest
 
 from local_webpage_access import hosting, rebuild_txn
 from local_webpage_access.errors import DockerError, HostingError
-from local_webpage_access.models import Status
+from local_webpage_access.models import InstanceManifest, Status
 from tests.scripts._helpers import make_container_manifest
 
 OLD_COMPOSE = "services:\n  app:\n    image: old\n"
@@ -72,6 +72,11 @@ def env(workspace, registry, config, deployed, monkeypatch):
     monkeypatch.setattr(
         "local_webpage_access.container_identity.ensure_non_root_identity_ready",
         lambda *a: None,
+    )
+    # S3-01：本机若恰好存在同名 <repo>:latest 镜像，留档会多打 b<id> 标签——
+    # 本套件只验证 S2-03 事务语义，固定关闭留档解析保持确定性。
+    monkeypatch.setattr(
+        "local_webpage_access.versions.resolve_repo_image_id", lambda repo: None
     )
     monkeypatch.setattr(
         hosting,
@@ -236,6 +241,40 @@ def test_prepare_failure_aborts_before_touching_anything(
 
     assert order == []
     assert workspace.app_compose_path("demo").read_text(encoding="utf-8") == OLD_COMPOSE
+
+
+def test_identity_save_failure_after_stop_compensates(
+    workspace, registry, config, deployed, env, monkeypatch
+) -> None:
+    """S2 审计 P1-1：停机成功 → 清身份写盘失败 → 必须补偿回旧版本并恢复服务。
+
+    旧代码 ``old_stopped`` 在 ``_clear_container_identity`` 之后才置位：身份写盘
+    抛 OSError 时异常分支误判「旧版本仍在服务」，不补偿、registry 谎报 running，
+    服务实际已下线（审计复现 docker 调用序止于 build → rescue → down）。
+    """
+    order, _rt, _tags = env
+    original_save = InstanceManifest.save
+
+    def _fail_when_identity_cleared(self, *args, **kwargs):
+        # _clear_container_identity 落盘时机：containerId 已置 None
+        if self.container is not None and self.container.containerId is None:
+            raise OSError("模拟身份清空写盘失败")
+        return original_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(InstanceManifest, "save", _fail_when_identity_cleared)
+
+    with pytest.raises(HostingError, match="已回滚到旧版本并恢复服务"):
+        hosting.host_container(workspace, config, registry, "demo")
+
+    # 旧容器确实停过（down）；补偿必须把旧版本重新拉起——最后一个 docker 动作是 up
+    assert order[-1] == "up"
+    assert order.count("down") >= 1
+    assert workspace.app_compose_path("demo").read_text(encoding="utf-8") == OLD_COMPOSE
+    saved = hosting._load_manifest(workspace, "demo")
+    assert saved.status == Status.RUNNING
+    assert saved.lastOperation["rollback"] == "restored"
+    # registry 状态与实际服务一致（旧版本已被 up 恢复），不是无补偿的谎报
+    assert registry.get_instance("demo")["status"] == Status.RUNNING.value
 
 
 def test_rebuild_strategy_defaults_to_build_first(deployed) -> None:

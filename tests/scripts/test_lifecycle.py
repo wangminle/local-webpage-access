@@ -549,6 +549,66 @@ def test_remove_purge_best_effort_removes_image(workspace, registry, config, fak
     assert registry.get_instance("api") is None
 
 
+def test_remove_purge_removes_version_tags(workspace, registry, config, fake_runtime) -> None:
+    """purge 须先摘掉 b<build_id>/latest 标签，否则按 imageId 删除会因多引用失败。"""
+    m = _seed_container(workspace, registry, "api", deployed=True)
+    b1 = registry.add_build("api", status="running")
+    registry.finish_build(b1, status="success")
+    registry.record_build_artifacts(
+        b1,
+        image_ref=f"lwa-api-app:b{b1}",
+        image_id="sha256:deadbeef",
+        source_hash="h1",
+        config_snapshot=None,
+    )
+    b2 = registry.add_build("api", status="running")
+    registry.finish_build(b2, status="success")
+    registry.record_build_artifacts(
+        b2,
+        image_ref=f"lwa-api-app:b{b2}",
+        image_id="sha256:deadbeef",
+        source_hash="h2",
+        config_snapshot=None,
+    )
+    m.container.imageId = "sha256:deadbeef"
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+
+    remove_instance(workspace, config, registry, "api", purge=True, force=True)
+
+    assert f"rmi:lwa-api-app:b{b1}" in fake_runtime.calls
+    assert f"rmi:lwa-api-app:b{b2}" in fake_runtime.calls
+    assert "rmi:lwa-api-app:latest" in fake_runtime.calls
+    assert "rmi:lwa-api-app:prev" in fake_runtime.calls
+    assert registry.get_instance("api") is None
+
+
+def test_remove_purge_without_manifest_still_removes_prev_tag(
+    workspace, registry, config, fake_runtime
+) -> None:
+    """manifest 损坏时仍须从 builds 引用推导并摘掉 prev/latest。"""
+    m = _seed_container(workspace, registry, "api", deployed=True)
+    b1 = registry.add_build("api", status="running")
+    registry.finish_build(b1, status="success")
+    registry.record_build_artifacts(
+        b1,
+        image_ref=f"lwa-api-app:b{b1}",
+        image_id="sha256:deadbeef",
+        source_hash="h1",
+        config_snapshot=None,
+    )
+    m.container.imageId = "sha256:deadbeef"
+    m.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(m)
+    workspace.app_manifest_path("api").write_text("{not-json", encoding="utf-8")
+
+    remove_instance(workspace, config, registry, "api", purge=True, force=True)
+
+    assert f"rmi:lwa-api-app:b{b1}" in fake_runtime.calls
+    assert "rmi:lwa-api-app:latest" in fake_runtime.calls
+    assert "rmi:lwa-api-app:prev" in fake_runtime.calls
+
+
 def test_remove_tolerates_corrupt_manifest(workspace, registry, config, fake_runtime) -> None:
     """BUG-347：local-web.json 损坏时 remove 仍按 registry 降级清理，不得整段崩溃。"""
     _seed_container(workspace, registry, "api", deployed=True)

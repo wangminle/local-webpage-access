@@ -1,7 +1,7 @@
 """BUG-763~765 / BUG-776~777：迁移停机安全门回归（复审 F02/F03/F04 与 CHK-380）。
 
-故障注入手法与 design/5-checkpoints/2026-10-13-S00-S01-review/repro-migration.py、
-design/5-checkpoints/2026-10-13-BUG762-774-recheck/migration-repro.py 相同：
+故障注入手法与 design/5-checkpoints/2026-10-13/S00-S01-review/repro-migration.py、
+design/5-checkpoints/2026-10-13/BUG762-774-recheck/migration-repro.py 相同：
 ``_terminate_pid=False`` 模拟 daemon 终止失败且 PID 仍存活；``_execute`` 返回
 rc=1 模拟 Docker 查询失败；回滚侧注入 ``quiesce_workspace`` 失败结果；真实休眠
 子进程 + ``read_pid_cmdline=None`` 模拟命令行不可读（归属无法确认）。

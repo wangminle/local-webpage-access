@@ -41,8 +41,16 @@ def configure(
     clear_build_hooks: bool = typer.Option(
         False, "--clear-build-hooks", help="清空 buildHooks"
     ),
+    extra_volume: list[str] | None = typer.Option(
+        None,
+        "--extra-volume",
+        help="替换额外 bind 挂载（可重复）SRC:DST[:ro]；整组替换，改后 lwa restart 生效",
+    ),
+    clear_extra_volumes: bool = typer.Option(
+        False, "--clear-extra-volumes", help="清空额外 bind 挂载"
+    ),
 ) -> None:
-    """配置实例；不带选项时显示当前配置，修改后需 rebuild 生效。"""
+    """配置实例；不带选项时显示当前配置。构建参数改后需 rebuild，挂载改后 restart 即可。"""
     try:
         changes: dict[str, Any] = {}
         if build_env and clear_build_env:
@@ -73,30 +81,43 @@ def configure(
             changes["buildHooks"] = build_hook
         if clear_build_hooks:
             changes["buildHooks"] = []
+        if extra_volume and clear_extra_volumes:
+            raise ValueError("--extra-volume 与 --clear-extra-volumes 互斥")
+        if extra_volume:
+            changes["extraVolumes"] = list(extra_volume)
+        if clear_extra_volumes:
+            changes["extraVolumes"] = []
         ws, _, reg = open_workspace_registry()
         try:
             if changes:
                 manifest = update_instance_settings(ws, reg, instance_id, changes)
             else:
                 manifest = InstanceManifest.load(ws.app_manifest_path(instance_id))
+            extra_volumes = manifest.container.extraVolumes if manifest.container else None
             typer.echo(
                 json.dumps(
                     {
-                        k: getattr(manifest, k)
-                        for k in (
-                            "buildEnv",
-                            "buildBaseFromAlias",
-                            "redundancyAcknowledged",
-                            "systemDeps",
-                            "buildHooks",
-                        )
+                        **{
+                            k: getattr(manifest, k)
+                            for k in (
+                                "buildEnv",
+                                "buildBaseFromAlias",
+                                "redundancyAcknowledged",
+                                "systemDeps",
+                                "buildHooks",
+                            )
+                        },
+                        "extraVolumes": extra_volumes,
                     },
                     ensure_ascii=False,
                     indent=2,
                 )
             )
             if changes:
-                typer.echo("配置已保存；构建参数在下次 rebuild 时生效。")
+                if set(changes) - {"extraVolumes"}:
+                    typer.echo("配置已保存；构建参数在下次 rebuild 时生效。")
+                if "extraVolumes" in changes:
+                    typer.echo("挂载配置已保存；执行 lwa restart 生效（无需 rebuild）。")
         finally:
             reg.close()
     except (ValueError, OSError, LwaError) as exc:

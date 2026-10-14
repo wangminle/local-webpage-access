@@ -128,10 +128,11 @@ Use `lwa <command> --help` for flags. Global `-v` turns on DEBUG logs.
 | `lwa rebuild [--sync] <ID>` | Force-rebuild through the build queue; `--sync` refreshes folder/git sources first (stale sources are detected and warned) |
 | `lwa cancel-build <ID>` | Cancel a queued or running build (keeps caches / images / data) |
 | `lwa probe show` / `set` / `reset` / `auto` `<ID>` | Readiness-probe overrides (`verificationOverrides`, CHK-252): `show` prints inherited + overrides + effective, `set <ID> <PATH> [--expected-status N]` adds a mandatory probe, `auto <ID> on\|off` toggles contract probes, `reset` clears overrides; kept across rescan / rebuild (same as `GET`/`PATCH /api/instances/{id}/verification`) |
-| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks]` | Show or change per-instance settings: `buildEnv`, alias-base follow, intentional duplicate, container `systemDeps` (apt fallback chain before `COPY current/`), and `buildHooks` (each list flag is a whole-map replace, repeatable); apply with `lwa rebuild` |
+| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks] [--extra-volume SRC:DST[:ro]] [--clear-extra-volumes]` | Show or change per-instance settings: `buildEnv`, alias-base follow, intentional duplicate, container `systemDeps` (apt fallback chain before `COPY current/`), and `buildHooks` (each list flag is a whole-map replace, repeatable); `--extra-volume` sets container bind mounts (whole-list replace, security-audited, apply with `lwa restart`); other settings apply with `lwa rebuild` |
 | `lwa remove <ID> [--purge] [--force]` | Remove instance; `--purge` deletes disk (non-empty `data/` needs `--force`) |
 | `lwa remove --redundant [--purge] [--allow-config-loss]` | Drop duplicate zips, keep the earliest; skips curated (alias / `buildEnv`) and running instances — `--allow-config-loss` opts in for curated ones |
-| `lwa logs <ID> [-c CATEGORY] [-n TAIL]` | Logs: build / run / gateway / import / scan |
+| `lwa logs <ID> [-c CATEGORY] [-n TAIL] [--timeline]` | Logs: build / run / gateway / import / scan; `--timeline` shows the operation timeline (events, builds, last operation, each tagged with its source) |
+| `lwa versions <ID>` / `lwa rollback <ID> [--to BUILD_ID] [--yes]` | List retained image versions (`imageRetention`, default 3); roll a container instance back to the previous good version (or `--to`). Only images and generated config are restored, `data/` is not touched; a `preStart`/`buildHooks` migration requires `--yes` |
 | `lwa status [ID]` / `lwa list` | Status of one or all; list ids and ports |
 | `lwa stats [ID]` | Host + instance disk / image / container usage |
 | `lwa pageviews [ID] [-n LIMIT]` | Pageview summary (same data as the manager) |
@@ -203,6 +204,7 @@ buildMirrors:
   # aptFallbacks: []        # empty list → primary only
   # aptRetries: 2
   # aptTimeout: 30
+  # aptBudget: 0              # per-source total time budget in seconds; 0 = unlimited
 lanIpStrategy: auto         # auto | manual
 manualLanIp: null
 logLevel: INFO
@@ -387,10 +389,11 @@ lwa status
 | `lwa rebuild [--sync] <ID>` | 经构建队列强制重建；`--sync` 先同步 folder/git 源码（漂移时自动警告） |
 | `lwa cancel-build <ID>` | 取消排队/进行中的构建（不删缓存/镜像/数据） |
 | `lwa probe show` / `set` / `reset` / `auto` `<ID>` | 实例就绪探针覆盖层（`verificationOverrides`，CHK-252）：`show` 显示继承探针 + 用户覆盖 + 合并后的有效探针，`set <ID> <路径> [--expected-status N]` 添加 mandatory 探针，`auto <ID> on\|off` 开关契约自动探针，`reset` 清空覆盖；重扫/rebuild 不覆盖（同 `GET`/`PATCH /api/instances/{id}/verification`） |
-| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks]` | 查看/修改实例配置：`buildEnv`、别名 base 跟随、有意保留重复实例、容器 `systemDeps`（COPY 前走 apt 切源链）与 `buildHooks`（列表选项均为整组替换、可重复）；`lwa rebuild` 生效 |
+| `lwa configure <ID> [--build-env KEY=VALUE] [--clear-build-env] [--follow-alias-base] [--acknowledge-redundancy] [--system-deps PKG] [--clear-system-deps] [--build-hook CMD] [--clear-build-hooks] [--extra-volume SRC:DST[:ro]] [--clear-extra-volumes]` | 查看/修改实例配置：`buildEnv`、别名 base 跟随、有意保留重复实例、容器 `systemDeps`（COPY 前走 apt 切源链）与 `buildHooks`（列表选项均为整组替换、可重复）；`lwa rebuild` 生效。`--extra-volume` 设置容器额外挂载（整组替换、经安全审计，`lwa restart` 生效）|
 | `lwa remove <ID> [--purge] [--force]` | 移除实例；`--purge` 删磁盘（非空 `data/` 需 `--force`） |
 | `lwa remove --redundant [--purge] [--allow-config-loss]` | 按 zip 指纹去重，保留最早者；带独立配置（别名 / `buildEnv`）或运行中的实例默认跳过，`--allow-config-loss` 显式覆盖 |
-| `lwa logs <ID> [-c CATEGORY] [-n TAIL]` | 日志：build / run / gateway / import / scan |
+| `lwa logs <ID> [-c CATEGORY] [-n TAIL] [--timeline]` | 日志：build / run / gateway / import / scan；`--timeline` 查看操作时间线（事件、构建、最近操作，均标注发起方） |
+| `lwa versions <ID>` / `lwa rollback <ID> [--to BUILD_ID] [--yes]` | 列出留档镜像版本（`imageRetention`，默认 3）；容器实例回滚到上一可用版本（或 `--to`）。只还原镜像与生成配置，不动 `data/`；preStart/buildHooks 含迁移命令时需 `--yes` |
 | `lwa status [ID]` / `lwa list` | 状态；列出 id 与端口 |
 | `lwa stats [ID]` | 整机 + 实例磁盘/镜像/容器占用 |
 | `lwa pageviews [ID] [-n LIMIT]` | 浏览量（与管理页同一数据） |
@@ -462,6 +465,7 @@ buildMirrors:
   # aptFallbacks: []        # empty list → primary only
   # aptRetries: 2
   # aptTimeout: 30
+  # aptBudget: 0              # per-source total time budget in seconds; 0 = unlimited
 lanIpStrategy: auto         # auto | manual
 manualLanIp: null
 logLevel: INFO

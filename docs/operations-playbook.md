@@ -34,7 +34,7 @@ Full 不仅「装上二进制」，还要求：
 
 1. **统一身份**：固化 `serviceUser`（真实登录用户，而非临时 sudo 的 root）。
 2. **多上下文 Docker**：CLI / manager / daemon 各自探测并写入 `run/capability-{manager,daemon,gateway}.json`；父 CLI **不得冒充**后台写缓存。后台三角色均会周期刷新；daemon/gateway 写缓存时合并存活 peer（BUG-406/407）。角色快照 `overall` 按本角色职责计算（ADJ-035）；以 `lwa doctor --profile full`（CLI 实时）为准排查假红，见 [FAQ](faq.md)。
-3. **Caddy 严格托管**：禁用冲突的系统 `caddy.service`；admin 端口（V0.10.0 起按工作区分配，登记 `run/admin-port`，未分配为 legacy `:2019`）须为本工作区 LWA Caddy（owner / euid / pid）；工作区配置与日志路径可读写。`caddy start` 在 pingback 等待期并行探 admin/pidfile（ADJ-036），就绪即成功。
+3. **Caddy 严格托管**：禁用冲突的系统 `caddy.service`；admin 端口（V0.9.3 起按工作区分配，登记 `run/admin-port`，未分配为 legacy `:2019`）须为本工作区 LWA Caddy（owner / euid / pid）；工作区配置与日志路径可读写。`caddy start` 在 pingback 等待期并行探 admin/pidfile（ADJ-036），就绪即成功。
 4. **退出码**：`ready`→0；`session_refresh_required`（组权限未生效）→2；`unready`→1。
 
 Linux 上 `usermod -aG docker` 后若当前进程仍无 docker 组：按提示重登或 `newgrp docker`，再 `--resume`。  
@@ -306,6 +306,45 @@ manifest 的 `container` 段设置 `"rebuildStrategy": "stop-first"`，恢复旧
 先停后建顺序（此时构建失败即没有旧版本可回退）。默认未设置为 `build-first`。
 `docker/.prev/` 与 `:prev` 标签由下一轮重建自动覆盖，平时无需手动清理。
 
+### 镜像版本留档与有限回滚（issue #51 远期，S3-01 / DEV-157，V0.9.4）
+
+容器实例**每次成功构建**自动留档：新镜像打 `<project>-<service>:b<build_id>`
+标签，三件生成物（compose.yaml / Dockerfile / .env）快照到
+`apps/<id>/docker/builds/<build_id>/`，镜像引用 / 镜像 ID / 源码哈希回写到
+registry 的 builds 行。`latest` 始终只是指针。
+
+```bash
+lwa versions <id>    # 列出构建号 / 时间 / 源码哈希 / 镜像是否仍在 / 构建结果 / 占用
+lwa status <id>      # 单实例视图追加「保留版本：N 个 · 占用 X」一行
+lwa rollback <id> [--to <build-id>] [--yes]
+```
+
+要点：
+
+* **范围（D8）**：只回滚镜像与生成配置，**不回滚 `data/`**。回滚用快照生成物 +
+  对应 `b<build_id>` 镜像执行 up，随后跑实证验证与别名守卫（退出码语义同
+  rebuild：内容级别名失败为 4）。回滚后验证失败时自动补偿——恢复原生成物、
+  原镜像打回 `:latest`、重新 up，并对恢复结果做实证验证（基础存活 + 必选探针）：
+  通过才报「已恢复原版本」；未通过则如实报「未能恢复原版本」、实例标 failed，
+  不谎报 running。
+* **迁移命令守门**：`preStart` / `buildHooks` 含迁移命令（alembic / migrate /
+  prisma）时，回滚必须显式 `--yes`，CLI 会醒目提示「旧版本代码可能无法兼容
+  当前数据库结构」。管理页对应勾选「我已了解风险」。
+* **保留与 GC**：全局配置 `imageRetention`（默认 3）控制每个实例保留的最近
+  成功版本数；**部署成功后** GC 超出部分。正在使用的镜像与上一个可用版本
+  **永不删除**（GC 只删 `b<build_id>` 标签，共享层不受影响；快照目录一并清理）。
+  留档占磁盘属预期，`lwa status <id>` 可见占用；需要更多历史就调大
+  `imageRetention`。
+* **revision**：回滚是生命周期操作，管理页/API 携带 `expectedRevision` 乐观
+  并发（过期 409 `revision_conflict`），成功后 revision +1。成功落盘在实例锁内完成。
+* **回滚钉住**：成功回滚后 start/restart **不会**按 `current/` 里的新源码重渲染生成物
+  （否则等于把刚退掉的版本再部署回来）。要回到当前源码请显式 `lwa rebuild`。
+  钉住期间 `lwa configure --extra-volume` 也要等 rebuild 才生效。
+* **daemon 自愈**：全局配置 `selfHealPreferLastGood`（默认 true）——daemon 发现
+  「最近一次操作失败且容器缺失」时，优先拉回上一可用镜像版本（事件
+  `rollback_self_heal`），而不是按当前源码重建；拉回失败自动回退常规恢复。
+  容器仍在（如旧版本持续服务）时不触发。
+
 ### 构建慢 / pip 下载失败（issue #18，V0.8.9）
 
 生成的 Dockerfile pip 层按源链执行：**主源 → `pipFallbacks` 逐段 `||`**（china
@@ -330,7 +369,8 @@ manifest 的 `container` 段设置 `"rebuildStrategy": "stop-first"`，恢复旧
 阿里云 → 清华 → `deb.debian.org`，每源快速失败后 `||` 切源。排障口径：
 
 - **镜像源不可达**（`Failed to fetch` / `Connection failed`）→ 调 `aptFallbacks` /
-  `aptRetries` / `aptTimeout`，或把包装入 `systemDeps` 后 rebuild。
+  `aptRetries` / `aptTimeout`，或把包装入 `systemDeps` 后 rebuild。构建长时间卡在 apt 而不报错时，
+  设 `aptBudget`（每个源的总时间预算，秒）让慢源到点切换。
 - **cannot allocate memory / OOMKilled** → 提高 Docker Desktop 内存，避免并发构建。
 - **仅出现 Killed** → 原因未确认，结合 ExitCode / OOMKilled 与日志，不要直接当成 VM 内存不足。
 - **No space left on device** → `docker builder prune`。
@@ -365,7 +405,7 @@ manifest 的 `container` 段设置 `"rebuildStrategy": "stop-first"`，恢复旧
 
 ## 四、Caddy master 排障
 
-> **admin 端口（V0.10.0 / BUG-783 起）**：每个工作区的 Caddy admin API 使用独立分配端口
+> **admin 端口（V0.9.3 / BUG-783 起）**：每个工作区的 Caddy admin API 使用独立分配端口
 > （20201–20500，登记在 `run/admin-port`，主 Caddyfile 全局选项块渲染
 > `admin 127.0.0.1:<port>`），不再默认共享 `:2019`。旧版本工作区在未分配前仍用
 > `:2019`；升级后首次 `lwa gateway on` / reload 会把仍在线的本工作区 `:2019` 旧
@@ -381,7 +421,7 @@ manifest 的 `container` 段设置 `"rebuildStrategy": "stop-first"`，恢复旧
 | 切 builtin 后 Caddy 还在跑 | stale pid / 旧 master | `lwa gateway off`（不校验版本，强制 `caddy stop` + 清 `run/gateway.json`） |
 | `lwa doctor` 报 Caddy 健康 FAIL | admin/validate/站点端口探测 | 按 doctor 提示处置；常见为 master 未起（`lwa gateway on`） |
 | `run/caddy.pid` 丢失但 admin 端口仍在监听 | 孤儿 master（进程在、pidfile 无） | `lwa gateway on` 会在四重安全闸通过后自动认领并补写 pidfile；不要先 `kill` |
-| 其他工作区的 daemon 疑似向 :2019 推配置（真实工作区网关配置被清空、8080/8443 全断） | BUG-783 事故模式：旧版本（V0.10.0 前）多工作区共享 admin :2019，孤儿进程 POST /load 可达本网关 | 本工作区升级到 V0.10.0+（admin 独立分配端口，:2019 与真实工作区解绑）；kill 孤儿进程后 `lwa gateway on` 恢复 |
+| 其他工作区的 daemon 疑似向 :2019 推配置（真实工作区网关配置被清空、8080/8443 全断） | BUG-783 事故模式：旧版本（V0.9.3 前）多工作区共享 admin :2019，孤儿进程 POST /load 可达本网关 | 本工作区升级到 V0.9.3+（admin 独立分配端口，:2019 与真实工作区解绑）；kill 孤儿进程后 `lwa gateway on` 恢复 |
 
 健康探针（IMP-020）：`lwa doctor` 在 caddy 模式会探 admin（分配端口，未分配为 :2019）+ 主 Caddyfile `caddy validate` + 别名入口 / 各 enabled 站点 hostPort 可达性 + stale pid 提示；端口监听者身份因缺少 lsof 无法校验时，`port_contention` 给 WARN「归属未确认（缺少 lsof）」而非静默跳过。
 
@@ -413,7 +453,7 @@ lwa autostart status [--json]           # 单元 + 进程 + 运行模式（syste
 
 - **停服**：先 `lwa autostart disable`，再 `lwa daemon/manager/gateway off`（`off` 已内置 `coordinated_disable`）。
 - **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长（V0.8.2 起按 live 证据估算：存活 pidfile / systemd `InactiveEnterTimestamp`，陈旧 `run/*.json` 不采信、不确定不虚报）；enabled=false 跳过。均不与 KeepAlive 抢锁。重启后先**等待服务就绪**（`waitReady`，最多约 30s）再进入 access/doctor 收尾，超时降级 warning 并提示稍后 `lwa doctor` 复核（V0.8.2 / issue #5）。
-- **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。V0.8.8（issue #16）起自愈起止与 `lifecycle_stage` 阶段会镜像一份到 `logs/lwa.log`（完整日志仍在 `logs/daemon.log`）；V0.10.0（issue #59 / S2-08）起镜像按操作来源区分，行首带 `source=`（`source=daemon` / `source=manager` / `source=agent`）——manager 与 Agent 通道触发的部署阶段同样落主日志，CLI 触发的本就在 `lwa.log` 不重复镜像——构建失败后盯主日志即可看到"自动恢复开始 / 已自动重试并恢复"，不再表现为静默恢复。
+- **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。V0.8.8（issue #16）起自愈起止与 `lifecycle_stage` 阶段会镜像一份到 `logs/lwa.log`（完整日志仍在 `logs/daemon.log`）；V0.9.3（issue #59 / S2-08）起镜像按操作来源区分，行首带 `source=`（`source=daemon` / `source=manager` / `source=agent`）——manager 与 Agent 通道触发的部署阶段同样落主日志，CLI 触发的本就在 `lwa.log` 不重复镜像——构建失败后盯主日志即可看到"自动恢复开始 / 已自动重试并恢复"，不再表现为静默恢复。
 - **Linux**：systemd user + 建议 `enable-linger`；**WSL** 另需 Windows 登录任务唤醒发行版；**Windows 原生不支持**自启（见 [autostart.md](autostart.md)）。
 
 ---
@@ -447,6 +487,19 @@ lwa list                 # 实例清单
 ```
 
 异常态识别（DEV-043）：`gateway_down`（master 不可达）/ `config_invalid`（站点路由异常）会单独标注，管理页标"需恢复"并提供一键 recover；CLI 对齐为 `lwa recover <id>`。
+
+### 6.1 操作时间线与副本一致性（V0.9.4 / S3-04、S3-02）
+
+- **操作时间线**：`lwa logs <id> --timeline`（`--tail` 控制条数）按时间倒序列出生命周期事件、构建记录与最近一次操作态，每行标注发起方 `[cli]` / `[manager]` / `[daemon]` / `[agent]`，构建行附耗时。历史事件没有来源记录，显示 `[unknown]`。管理页实例详情的「最近操作」区块展示同一数据。排查"谁触发了这次重建、失败在哪一步"时优先看它，再看 `lwa logs <id> --category build`。
+- **副本一致性**：`lwa doctor` 的 `state_consistency` 检查只读地核对 manifest 与 registry（状态、desiredState、runtime、hostPort）、生成物是否被手改、运行容器是否挂上了 `extraVolumes`、别名片段与 manifest 是否一致、孤儿片段、主 Caddyfile 的 import 是否有效。别名片段与主 Caddyfile 的检查以**实际网关后端**为准（配置 caddy 但二进制缺失被降级 builtin 时不做片段级判定）；未在服务实例的片段按停止语义判定（容器停止有意保留片段、不算残留，静态实例仅明确 stopped 后的残片段才报告）。发现漂移时 WARN 并给出修复建议，**不会自动修复**。daemon 每 30 分钟巡检一次，漂移集合变化时写入 `consistency_drift` 事件（同一组漂移只记一次），可用 `lwa logs <id> --timeline` 查看。
+- 无主锁文件属于设计上的正常状态（锁文件按设计保留、不删除），不纳入漂移判定。
+
+### 6.2 调整容器额外挂载（V0.9.4 / S3-05）
+
+- 设置：`lwa configure <id> --extra-volume /宿主路径:/容器路径[:ro]`（可重复；每次都是整组替换）。
+- 清空：`lwa configure <id> --clear-extra-volumes`。
+- 保存前会做结构校验并执行与生成 compose 相同的安全审计；敏感路径（如 `/etc`、家目录凭据目录）直接拒绝，manifest 不变。
+- 挂载变化在 `lwa restart <id>` 时生效（无需 rebuild）。之后可用 `lwa doctor <id>` 或 `lwa doctor` 的 `state_consistency` 检查确认运行容器已挂上目标路径。
 
 ---
 

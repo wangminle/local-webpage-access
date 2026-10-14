@@ -94,7 +94,7 @@ def classify_build_failure(text: str | None) -> FailureHint | None:
             kind="apt",
             summary=(
                 "镜像源不可达：apt 拉取失败（Failed to fetch / Connection failed）。"
-                "可在 local-web.yml 配置 buildMirrors.aptFallbacks / aptRetries / aptTimeout，"
+                "可在 local-web.yml 配置 buildMirrors.aptFallbacks / aptRetries / aptTimeout / aptBudget，"
                 "或把系统包装入 manifest.systemDeps 走内置切源链后重试构建。"
             ),
             confidence="likely",

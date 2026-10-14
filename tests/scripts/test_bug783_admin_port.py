@@ -1,6 +1,6 @@
 """BUG-783 回归：Caddy admin 按工作区独立分配端口（POST /load 归属保护）。
 
-证据：design/5-checkpoints/2026-10-13-S1-exit-acceptance/README.md 新发现 1——
+证据：design/5-checkpoints/2026-10-13/S1-exit-acceptance/README.md 新发现 1——
 多工作区共享 Caddy admin :2019，孤儿 daemon 向共享 admin 推空配置，
 清空真实工作区网关运行配置；BUG-176 只保护了 POST /stop。
 

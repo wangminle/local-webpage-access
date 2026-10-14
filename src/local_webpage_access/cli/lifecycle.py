@@ -521,14 +521,42 @@ def logs(
     category: str = typer.Option(
         "run", "--category", "-c", help="日志分类：build/run/gateway/import/scan"
     ),
-    tail: int = typer.Option(200, "--tail", "-n", help="显示最近 N 行"),
+    tail: int = typer.Option(200, "--tail", "-n", help="显示最近 N 行（时间线模式为条数）"),
+    timeline: bool = typer.Option(
+        False,
+        "--timeline",
+        help="显示操作时间线（事件/构建/最近操作，标注发起方）而非日志文件",
+    ),
 ) -> None:
-    """查看实例日志（默认 run，可选 build/gateway 等）。"""
+    """查看实例日志（默认 run，可选 build/gateway 等）；``--timeline`` 查看操作时间线。"""
     from local_webpage_access.logs import list_logs, read_log
 
     try:
         ws, _config, reg = open_workspace_registry()
         try:
+            if timeline:
+                from local_webpage_access.models import InstanceManifest
+                from local_webpage_access.timeline import build_timeline, format_timeline_lines
+
+                if reg.get_instance(instance_id) is None:
+                    raise LwaError(f"实例 {instance_id} 不存在", instance_id=instance_id)
+                manifest_path = ws.app_manifest_path(instance_id)
+                last_operation = None
+                if manifest_path.is_file():
+                    try:
+                        last_operation = InstanceManifest.load(manifest_path).lastOperation
+                    except Exception as exc:  # noqa: BLE001 — 损坏 manifest 不阻断时间线
+                        typer.secho(
+                            f"manifest 读取失败，时间线不含最近操作：{exc}",
+                            fg=typer.colors.YELLOW,
+                            err=True,
+                        )
+                items = build_timeline(reg, instance_id, last_operation=last_operation, limit=tail)
+                if not items:
+                    typer.secho("暂无操作记录", fg=typer.colors.YELLOW)
+                for line in format_timeline_lines(items):
+                    typer.echo(line)
+                return
             text = read_log(ws, instance_id, category, tail=tail)
             if not text:
                 available = [i.category for i in list_logs(ws, instance_id)]

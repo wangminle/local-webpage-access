@@ -2553,6 +2553,41 @@ def check_restart_resilience(ws: Workspace, config: Config) -> CheckResult:
     )
 
 
+# ---- S3-02 / DEV-158：副本一致性巡检 ---------------------------------------
+
+
+def check_state_consistency(
+    ws: Workspace,
+    config: Config,
+    registry: Registry,
+    runner: SubprocessRunner = _default_runner,
+) -> CheckResult:
+    """manifest / registry / 生成物 / 容器挂载 / 别名片段 / 主 Caddyfile 的只读一致性巡检。
+
+    WARN 级：只报告漂移与修复建议，不自动修复（修复动作由 restart / gateway on 等命令执行）。
+    """
+    from local_webpage_access.consistency import collect_drifts
+
+    try:
+        drifts = collect_drifts(ws, config, registry, runner=runner)
+    except Exception as exc:  # noqa: BLE001 — 巡检自身失败不应中断整体诊断
+        return CheckResult("state_consistency", STATUS_WARN, f"副本一致性巡检异常：{exc}")
+    if not drifts:
+        return CheckResult(
+            "state_consistency",
+            STATUS_OK,
+            "副本一致（manifest / registry / 生成物 / 挂载 / 别名片段 / 主 Caddyfile 互相吻合）",
+        )
+    suggestions = list(dict.fromkeys(d.suggestion for d in drifts if d.suggestion))
+    return CheckResult(
+        "state_consistency",
+        STATUS_WARN,
+        f"发现 {len(drifts)} 项副本漂移（巡检只读，未自动修复）",
+        detail="\n".join(d.to_line() for d in drifts),
+        suggestion="；".join(suggestions) or None,
+    )
+
+
 # ---- 聚合入口（WBS-26.01/11）-----------------------------------------------
 
 
@@ -2616,6 +2651,12 @@ def run_doctor(
             if caddy_probe_registry is not None
             else CheckResult("lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"),
             check_workspace_path_consistency(ws, config, registry=caddy_probe_registry),
+            # S3-02 / DEV-158：副本一致性巡检（WARN 级，只读）
+            check_state_consistency(ws, config, caddy_probe_registry, runner=runner)
+            if caddy_probe_registry is not None
+            else CheckResult(
+                "state_consistency", STATUS_SKIP, "registry 不可用，跳过副本一致性巡检"
+            ),
             # issue #8：源码新鲜度（WARN 级，纯离线；git 源不触网）
             check_source_freshness(ws),
             # issue #15：SQLite DATABASE_URL 指向错位（WARN 级，纯离线）

@@ -1,0 +1,93 @@
+# S3-03/DEV-159：CI 复现本地门禁（tests/gate.sh）。
+#
+# 结构：
+#   - gate：ubuntu-latest + uv + Python 3.13 + 固定版本 caddy，全量跑 tests/gate.sh。
+#   - report：gate 之后的报告型步骤（mypy 四模块、覆盖率基线），均不阻断。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同分支新提交取消旧运行，避免排队浪费。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 固定 caddy 版本（不追 latest，保证 CI 可重复）。升级时同步改这里。
+  CADDY_VERSION: "2.11.7"
+  # gate.sh 的 Caddyfile 语义测试需要找到 caddy 可执行文件。
+  LWA_TEST_CADDY: /usr/local/bin/caddy
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.x"
+          enable-cache: true
+
+      - name: 安装 Python 3.13
+        run: uv python install 3.13
+
+      # 官方 release 二进制固定版本安装，比 apt 仓库更可控（无外部源可用性问题）。
+      - name: 安装 caddy（固定版本）
+        run: |
+          curl -fsSLo /tmp/caddy.tar.gz \
+            "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+          sudo install -m 0755 /tmp/caddy /usr/local/bin/caddy
+          caddy version
+
+      # 依赖按 uv.lock 全量锁定；dev extra 已含 pytest/ruff/pytest-cov/mypy。
+      - name: 安装依赖
+        run: uv sync --extra dev
+
+      # gate.sh 的解释器选择：uv sync 已创建 .venv，gate.sh 会自动选中
+      # .venv/bin/python（等价 uv 管理的解释器）；不设置 LWA_GATE_PYTHON，
+      # 因为它只接受单个可执行路径、不能带「uv run ...」这类参数。
+      - name: 门禁（ruff + pytest + diff-check）
+        run: bash tests/gate.sh
+
+  report:
+    # 报告型 job：mypy 与覆盖率基线，结果仅供台账记录，不阻断合并。
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.x"
+          enable-cache: true
+
+      - name: 安装 Python 3.13
+        run: uv python install 3.13
+
+      - name: 安装依赖
+        run: uv sync --extra dev
+
+      # S3-03：先只对生命周期相关四模块出报告；已知 hosting.py 有 7 条
+      # ContainerConfig|None 告警（DEV-154 口径为全仓库零告警，此处按现状记录、不修复）。
+      - name: mypy 四模块报告（不阻断）
+        run: >-
+          uv run --extra dev python -m mypy
+          src/local_webpage_access/lifecycle.py
+          src/local_webpage_access/hosting.py
+          src/local_webpage_access/path_alias.py
+          src/local_webpage_access/workspace_migrate.py
+        continue-on-error: true
+
+      # 覆盖率基线：首版只记录、不设门槛（无 fail-under）。
+      # 与门禁一致使用 LC_ALL=C LANG=C，避免排序/本地化差异。
+      - name: 覆盖率基线（不阻断）
+        run: >-
+          env LC_ALL=C LANG=C uv run --extra dev python -m pytest
+          --cov=src/local_webpage_access --cov-report=term
+        continue-on-error: true

@@ -33,6 +33,27 @@ def effective_build_env(manifest: InstanceManifest) -> dict[str, str]:
     return result
 
 
+def validate_extra_volumes(instance_id: str, entries: list[str]) -> list[str]:
+    """S3-05：校验 extraVolumes 结构，并对整组挂载预跑 compose 安全审计。
+
+    结构复用 compose 渲染时的 ``_validate_extra_volume``；审计与生成 compose 时同口径，
+    出现 critical 即拒绝保存，避免把不会被渲染通过的配置写入 manifest。
+    """
+    import yaml
+
+    from local_webpage_access.compose import _validate_extra_volume
+    from local_webpage_access.security import LEVEL_CRITICAL, audit_compose
+
+    normalized = [_validate_extra_volume(entry, instance_id=instance_id) for entry in entries]
+    if normalized:
+        probe = yaml.safe_dump({"services": {"app": {"volumes": normalized}}})
+        critical = [f for f in audit_compose(probe) if f.level == LEVEL_CRITICAL]
+        if critical:
+            detail = "；".join(f.message for f in critical)
+            raise ValueError(f"extraVolumes 未通过安全审计：{detail}")
+    return normalized
+
+
 def update_instance_settings(
     workspace: Workspace, registry: Registry, instance_id: str, changes: dict[str, Any]
 ) -> InstanceManifest:
@@ -42,11 +63,12 @@ def update_instance_settings(
         "redundancyAcknowledged",
         "systemDeps",
         "buildHooks",
+        "extraVolumes",
     }
     if not changes or set(changes) - allowed:
         raise ValueError(
             "仅允许设置 buildEnv、buildBaseFromAlias、redundancyAcknowledged、"
-            "systemDeps、buildHooks"
+            "systemDeps、buildHooks、extraVolumes"
         )
     for key in ("buildBaseFromAlias", "redundancyAcknowledged"):
         if key in changes and not isinstance(changes[key], bool):
@@ -57,7 +79,17 @@ def update_instance_settings(
             raise LwaError(f"实例 {instance_id} 不存在", instance_id=instance_id)
         old = InstanceManifest.load(path)
         # model_copy(update=...) 不执行校验，须完整 validate 后才允许落盘。
-        updated = InstanceManifest.model_validate({**old.model_dump(), **changes})
+        data = {**old.model_dump(), **{k: v for k, v in changes.items() if k != "extraVolumes"}}
+        if "extraVolumes" in changes:
+            if old.container is None:
+                raise ValueError("extraVolumes 仅支持容器实例")
+            entries = changes["extraVolumes"]
+            if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+                raise ValueError("extraVolumes 必须是字符串列表（SRC:DST[:ro]）")
+            container = dict(data["container"] or {})
+            container["extraVolumes"] = validate_extra_volumes(instance_id, entries)
+            data["container"] = container
+        updated = InstanceManifest.model_validate(data)
         if set(changes) & {"buildEnv", "buildBaseFromAlias"}:
             if (
                 updated.buildEnv or updated.buildBaseFromAlias

@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.9.3 当前实际可用的接入方式。**
+> **状态：本文描述 V0.9.4 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -69,7 +69,9 @@ token 由 LWA 工作区管理员提供，存放于服务器工作区 `run/manage
 | `/api/health` | 存活与版本（免鉴权，见 §2） |
 | `/api/capability` | 依赖能力就绪状态（Docker/Caddy 等） |
 | `/api/instances` | 实例列表与摘要 |
-| `/api/instances/{id}` | 单实例详情 |
+| `/api/instances/{id}` | 单实例详情（**V0.9.4 / S3-01**：响应只增不改，新增 `versions` 版本留档负载字段，非容器实例为 `null`） |
+| `/api/instances/{id}/versions` | 版本留档列表（S3-01 / V0.9.4；同详情的 `versions` 负载；非容器 409 `not_container`） |
+| `/api/instances/{id}/timeline` | 操作时间线（S3-04 / V0.9.4，只读；合并事件、构建与 lastOperation，每条含 `source` 发起方与 `kind`，query `limit` 1–200） |
 | `/api/instances/{id}/logs` | 构建与运行日志（分页） |
 | `/api/instances/{id}/resources` | 资源档位信息 |
 | `/api/stats` / `/api/pageviews*` | 统计与浏览量 |
@@ -82,7 +84,8 @@ token 由 LWA 工作区管理员提供，存放于服务器工作区 `run/manage
 | `/api/import-from-dir` / `/api/import-from-git` | 新建导入（输入限制见 §5） |
 | `/api/instances/{id}/update` / `update-from-dir` / `update-from-git` | 更新既有实例 |
 | `/api/instances/{id}/start` / `stop` / `restart` / `rebuild` / `cancel-build` | 生命周期操作 |
-| `/api/instances/{id}/settings` | 实例配置（buildEnv、followAliasBase 等） |
+| `/api/instances/{id}/rollback` | 有限回滚到留档版本（S3-01 / V0.9.4；body `toBuildId`/`expectedRevision`/`confirm`，D8：不回滚 `data/`，preStart 含迁移须 `confirm=true` 否则 409 `rollback_needs_yes`） |
+| `/api/instances/{id}/settings` | 实例配置（buildEnv、buildBaseFromAlias、systemDeps、buildHooks、extraVolumes 等；extraVolumes 仅容器实例，改后 restart 生效） |
 | `/api/instances/{id}/path-alias` | 路径别名 |
 | `/api/instances/{id}/remove` | 移除实例（破坏性，先向用户确认） |
 | `/api/access/refresh` / `/api/gateway/switch` | 访问地址刷新 / 网关切换 |
@@ -117,7 +120,7 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 
 构建失败、容器启动失败、技术栈识别不准等"判断类"环节，配套 **20 个 LLM skill**（`skills/README.md`）提供修复流程指引；Agent 处理 pending/失败实例时应先查对应 skill，最多执行两轮受控修复，之后升级给用户。**红线**：skill 与本指南都不授权任意 shell 执行、修改工作区外的文件或绕过鉴权直接操作 registry 数据库。
 
-**实例状态语义（V0.10.0 / S2-02）**：`lwa status` 与各 API 的实例 `status` 只反映观测结果（`running` / `stopped` / `failed` 等，failed 表示「未在服务」）。构建排队超时、取消、构建失败不改写 `status`——仍在服务的旧容器保持 `running`。这类操作结果写在 `lastOperation`（`{kind, status, buildId, startedAt, finishedAt, error, source}`），CLI 以「最近一次重建失败（时间）原因」行展示。Agent 判断实例是否健康应看 `status` + `lastOperation`，不要见到 `lastError` 就断定实例已挂。
+**实例状态语义（V0.9.3 / S2-02）**：`lwa status` 与各 API 的实例 `status` 只反映观测结果（`running` / `stopped` / `failed` 等，failed 表示「未在服务」）。构建排队超时、取消、构建失败不改写 `status`——仍在服务的旧容器保持 `running`。这类操作结果写在 `lastOperation`（`{kind, status, buildId, startedAt, finishedAt, error, source}`），CLI 以「最近一次重建失败（时间）原因」行展示。Agent 判断实例是否健康应看 `status` + `lastOperation`，不要见到 `lastError` 就断定实例已挂。
 
 ## 7. 部署结果与访问 URL
 
@@ -169,7 +172,7 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 **语义要点：**
 
 - **幂等**：所有写操作要求 `idempotencyKey`。同键同内容重试返回**同一** `operationId`；同键不同内容 → `409 idempotency_conflict`。
-- **revision 乐观锁**：update 类计划与生命周期操作带 `expectedRevision`；不符 → `409 revision_conflict`（先 `lwa_get_instance` 取最新 revision 再决定）。rebuild/部署成功 +1；start/stop/restart 与状态观测不改 revision。**同一 revision 语义也适用于管理页 API**（S2-09 / issue #57-3，V0.10.0）：`/api/instances` 快照输出 `revision`，管理页生命周期路由（start/stop/restart/rebuild/recover/confirm-fallback）接受可选 `?expectedRevision=`、更新路由（update/update-from-dir/update-from-git）接受可选 body `expectedRevision`，冲突同样返回 `409 revision_conflict`；不传保持兼容。管理页前端每次操作自动携带列表快照的 revision，遇 409 提示「实例已被其他操作更新，请刷新后重试」。
+- **revision 乐观锁**：update 类计划与生命周期操作带 `expectedRevision`；不符 → `409 revision_conflict`（先 `lwa_get_instance` 取最新 revision 再决定）。rebuild/部署成功 +1；start/stop/restart 与状态观测不改 revision。**同一 revision 语义也适用于管理页 API**（S2-09 / issue #57-3，V0.9.3）：`/api/instances` 快照输出 `revision`，管理页生命周期路由（start/stop/restart/rebuild/recover/confirm-fallback）接受可选 `?expectedRevision=`、更新路由（update/update-from-dir/update-from-git）接受可选 body `expectedRevision`，冲突同样返回 `409 revision_conflict`；不传保持兼容。管理页前端每次操作自动携带列表快照的 revision，遇 409 提示「实例已被其他操作更新，请刷新后重试」。
 - **异步执行**：部署与生命周期返回 202 + operation；轮询 `lwa_get_operation` 至 `succeeded`/`failed`/`needs_input` 等终态。manager 重启后未完成任务标记 `interrupted`，核对后可重新提交（同幂等键安全）。
 - **部署源限制**：`server_directory` 仅限 `agent.allowedSourceRoots` 之内；`git` 仅 HTTPS github.com；`artifact` 上传属 M2，当前一律 `source_not_allowed`。git 源**实例**（`sourceKind=git`）的 update 在计划期即被拒绝（`needs_input`，指引走 `lwa import --from-git --update` / 管理页 update-from-git）；folder/git 源部署（create 与 update）完成后源身份写回 manifest（folder 带 `sourceSyncHash`、git 带 `sourceGitUrl`/`sourceGitRef`/`sourceGitRefKind`/`sourceGitCommit`/`sourceGitSubdir` 五个字段），CLI/管理页按原源更新可对上（V0.8.18 BUG-690）。
 - **队列上限**：待执行 operation 超限 → `429 busy`（带 `retryAfterMs`，有界退避重试）。

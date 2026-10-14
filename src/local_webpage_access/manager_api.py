@@ -873,6 +873,13 @@ def create_app(
 
 def _register_routes(app: FastAPI) -> None:
     """注册所有 ``/api/*`` 路由。"""
+    # S3-06：历史类路由（时间线/版本/回滚）在子模块中；子模块反向依赖本模块的
+    # 请求上下文与辅助函数，故在函数内惰性导入以避免循环导入。
+    from local_webpage_access.manager_history_routes import (
+        register_history_routes,
+        timeline_payload,
+        versions_payload,
+    )
     from local_webpage_access.models import Status
     from local_webpage_access.status import (
         all_statuses,
@@ -1032,8 +1039,13 @@ def _register_routes(app: FastAPI) -> None:
             manifest = update_instance_settings(ctx.workspace, ctx.registry, instance_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"ok": True, "id": manifest.id,
-                "redundancyAcknowledged": manifest.redundancyAcknowledged}
+        return {
+            "ok": True,
+            "id": manifest.id,
+            "redundancyAcknowledged": manifest.redundancyAcknowledged,
+            # S3-05：挂载配置（非容器实例为 None）；改后 restart 生效
+            "extraVolumes": manifest.container.extraVolumes if manifest.container else None,
+        }
 
     # ---- IMP-040：显式刷新访问地址（薄封装 refresh_network_entries）----
     @app.post("/api/access/refresh", dependencies=[api], tags=["access"])
@@ -1102,6 +1114,10 @@ def _register_routes(app: FastAPI) -> None:
             "builds": [_camelize_keys(row) for row in builds],
             "events": [_camelize_keys(row) for row in events],
             "resources": _camelize_keys(resources) if resources else None,
+            # S3-01：版本留档面板（非容器实例为 None）
+            "versions": versions_payload(ctx.workspace, ctx.config, ctx.registry, instance_id),
+            # S3-04：最近操作抽屉（合并事件、构建与 lastOperation）
+            "timeline": timeline_payload(ctx, instance_id, manifest, limit=20),
         }
 
     # ---- 日志（WBS-22.07）----
@@ -1459,6 +1475,13 @@ def _register_routes(app: FastAPI) -> None:
             expected_revision=expected_revision,
             op_accepts_revision=False,
         )
+
+    # ---- S3-01 / S3-04：操作时间线、版本留档与有限回滚（S3-06 拆到子模块）----
+    register_history_routes(
+        app,
+        api=api,
+        docker_ops_blocked_reason=_docker_ops_blocked_reason,
+    )
 
     @app.post(
         "/api/instances/{instance_id}/remove",

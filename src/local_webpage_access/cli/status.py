@@ -7,6 +7,8 @@ DEV-044（WBS-20260708 阶段5.1）：从原 ``cli.py`` 按功能域拆出。
 
 from __future__ import annotations
 
+import contextlib
+
 import typer
 
 from local_webpage_access.cli._common import fmt_bytes, log, open_workspace_registry
@@ -94,10 +96,20 @@ def status(
 
     try:
         ws, config, reg = open_workspace_registry()
+        retained_usage: tuple[int, int] | None = None
         try:
             sync_status(ws, config, reg, instance_id)
             if instance_id:
                 statuses = [instance_status(ws, config, reg, instance_id)]
+                # S3-01：单实例视图顺带显示保留版本镜像占用（无留档行时不显示）
+                row = reg.get_instance(instance_id) or {}
+                if row.get("runtime") == "docker-compose":
+                    with contextlib.suppress(Exception):
+                        from local_webpage_access import versions as versions_mod
+
+                        count, usage = versions_mod.retained_disk_usage_bytes(reg, instance_id)
+                        if count:
+                            retained_usage = (count, usage)
             else:
                 statuses = all_statuses(ws, config, reg)
         finally:
@@ -128,6 +140,12 @@ def status(
             note = operation_note(s)
             if note:
                 typer.secho(f"  ↳ {note}", fg=typer.colors.RED)
+            if retained_usage is not None:
+                count, usage = retained_usage
+                typer.echo(
+                    f"  ↳ 保留版本：{count} 个 · 占用 {fmt_bytes(usage)}"
+                    f"（lwa versions {s.id}）"
+                )
             circuit = (s.extra or {}).get("reconcileCircuit")
             if circuit:
                 typer.secho(f"  ↳ {circuit}", fg=typer.colors.YELLOW)

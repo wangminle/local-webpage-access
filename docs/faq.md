@@ -68,7 +68,7 @@ lwa setup --full --resume     # 组权限刷新后继续；exit 2=session_refres
 | 2 | `sessionRefreshRequired`：已加 docker 组但当前会话未继承 | 重登或 `newgrp docker` 后 `--resume`，并重启 manager/daemon |
 | 1 | 其余 unready | 按输出提示修复后 `--resume` |
 
-Full 下系统 `caddy.service` / 外部占用 admin 端口（V0.10.0 起按工作区分配，未分配为 `:2019`）会 fail-closed；须由 LWA gateway 以 `serviceUser` 托管。
+Full 下系统 `caddy.service` / 外部占用 admin 端口（V0.9.3 起按工作区分配，未分配为 `:2019`）会 fail-closed；须由 LWA gateway 以 `serviceUser` 托管。
 
 ### 后台 capability 缓存 `overall=unready`，但 `lwa doctor --profile full` 已是 ready？
 
@@ -379,6 +379,11 @@ lwa rebuild <id>
 
 * 可在 `buildMirrors` 调整 `aptMirror` / `aptFallbacks`（`[]` 只走主源）/
   `aptRetries` / `aptTimeout`。
+* apt 下载「卡很久不报错」（`aptTimeout` 只管连接/无数据超时，重试叠加多 IP 仍可能拖数分钟）：
+  设 `buildMirrors.aptBudget`（秒，默认 0 = 不限）给**每个源**一个总时间预算，到点放弃该源并
+  切下一个 `aptFallbacks`；日志会出现“apt 在 Ns 总时间预算内未完成下载”。预算只约束
+  update 与下载阶段，dpkg 安装在下载完成后离线执行，不会被打断；预算宜大于该源正常下载所需
+  时间（大包多时建议 ≥ 300）。
 * 长 apt 下载会抬高 Docker Desktop VM 内存；并发构建更容易 OOM。提高 Desktop 内存上限，
   或把 `buildConcurrency` 保持为 1。
 * 连续失败约 3 次后 daemon 自愈进入小时级熔断，约 5 次后停止自动重试；`lwa status`
@@ -404,7 +409,7 @@ lwa rebuild <id>
 首次启动前无片段）在首次活验证失败时才按 BUG-586 收敛清除。另：统一入口对未
 命中任何别名路由的请求返回 **404**（此前是 200 空体，入口静默失效难定位）。
 
-### 别名验证失败时命令的退出码是什么？（V0.10.0 / issue #52，决策 D2）
+### 别名验证失败时命令的退出码是什么？（V0.9.3 / issue #52，决策 D2）
 
 `lwa start` / `restart` / `rebuild` / `import --update` 收尾统一输出一行别名摘要
 `别名 /<alias>/:passed | failed(<原因>) | skipped(<原因>)`。失败按性质分类：
@@ -419,6 +424,34 @@ lwa rebuild <id>
 `--ignore-alias-guard` 可显式跳过守卫（记审计事件）。`import --update` 时若实例
 已有别名，新内容会在**换入前**过同一道守卫，未通过即拒绝且 `current/` 零副作用
 （决策 D3），拒绝文案给出补救命令；`--ignore-alias-guard` 可越过。
+
+### 回滚会把数据（data/）也退回旧版本吗？（V0.9.4 / S3-01，决策 D8）
+
+**不会。** 有限回滚只还原镜像与生成配置（compose.yaml / Dockerfile / .env 的
+快照），`data/` 目录原样保留。这是有意为之：数据回滚涉及应用语义（表结构、
+迁移方向），LWA 无法保证正确性。注意副作用——`preStart` / `buildHooks` 含
+迁移命令的实例，回滚后的旧代码可能**无法兼容当前数据库结构**，因此这类实例
+回滚必须显式 `--yes`（管理页勾选「我已了解风险」），命令会醒目提示风险。
+
+回滚成功后，`lwa start` / `lwa restart` 会继续用留档镜像和快照生成物，**不会**
+按 `apps/<id>/current/` 里已经更新过的源码重新构建。这是有意的：否则一次 start
+就会把刚回滚掉的版本再部署回来。要回到当前源码请显式 `lwa rebuild`。
+
+### 镜像版本留档占磁盘吗？可以调吗？（V0.9.4 / S3-01）
+
+占，但有边界：每个容器实例默认只保留最近 **3** 个成功构建的镜像标签
+（`lwa-<id>-app:b<build_id>`）与生成物快照，由 `local-web.yml` 的
+`imageRetention` 控制（调大需更久历史时改它）。**部署成功后**自动 GC 超出的
+版本；正在使用的镜像与上一个可用版本**永不删除**，GC 只摘标签、不动共享层。
+`lwa status <id>` 显示保留版本数与合计占用，`lwa versions <id>` 列出仍留档的
+版本（已被 GC 清理的版本不再显示；构建史仍可在构建记录与时间线中看到）。
+
+### daemon 自愈会把失败的重建再跑一遍吗？（V0.9.4 / S3-01）
+
+默认不会先重建。`selfHealPreferLastGood`（默认 true）下，daemon 发现「最近一次
+操作失败且容器缺失」时，优先**拉回上一可用镜像版本**（事件 `rollback_self_heal`，
+同样不回滚 data/）；只有没有可回滚版本或拉回失败，才回退到按当前源码重建的
+常规自愈。容器仍在服务（如先建后换补偿成功、旧版本还在跑）时不触发回滚。
 
 ### 实例识别为 pending
 
@@ -513,13 +546,22 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
 }
 ```
 
-改完后执行 `lwa rebuild <id>` 才会生效：`docker/compose.yaml` 只在重建时重新生成，
-`lwa restart` 仍沿用旧的 compose，不会带上新挂载。安全边界仍在：家目录整体（`/home`、
-`/Users`）、`/etc`、`docker.sock`、`.ssh`/`.aws` 等凭据目录挂载会被 compose 安全审计拒绝。
+命令行设置（整组替换，可重复）：
 
-> 不要手工编辑 `docker/compose.yaml` 追加挂载。当前版本中，手改的 compose 会在容器
-> recreate 时直接生效，且**不经过安全审计**，这是已知缺陷（PLN-052 S2-04 计划改为重生成时
-> 覆盖手改内容）。请只使用上面的 `extraVolumes`。
+```bash
+lwa configure <id> --extra-volume /home/user/data:/workspace/data:ro
+lwa configure <id> --clear-extra-volumes   # 清空
+```
+
+改完执行 `lwa restart <id>` 即可生效，**无需 rebuild**：start / restart 会先按 manifest
+重新渲染 compose，挂载变化会触发容器 recreate。安全边界仍在：家目录整体（`/home`、
+`/Users`）、`/etc`、`docker.sock`、`.ssh`/`.aws` 等凭据目录挂载会被 compose 安全审计拒绝，
+`configure` 保存前即拒绝（与渲染时同一套校验）。
+
+> 不要手工编辑 `docker/compose.yaml` 追加挂载。start / restart 会按 manifest 重新渲染并**覆盖**
+> 手改内容，覆盖时会在日志中告警；手改的内容不会持久保留。请只使用 `extraVolumes`。
+> 若运行中的容器与配置不一致（例如改了配置但未 restart），`lwa doctor` 的副本一致性检查
+> （`state_consistency`）会报告 `容器挂载` 漂移。
 
 ### 应用需要构建钩子 / 启动前迁移怎么办？（buildHooks / preStart，issue#7）
 
@@ -774,8 +816,8 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
   * 自查：访问日志 `logs/static-access.log` 中出现 `GET /assets/<旧hash>.js`、`size=0` 且 referer 为别名页，即为缓存旧 HTML。
   * 修复：浏览器**硬刷新**（macOS `Cmd+Shift+R` / Windows `Ctrl+F5`），或无痕窗口 / 清该源缓存。
 * **统一排查**：`lwa access review` 对每个别名实例做入口 + 绝对路径子资源对照（空 200 / 404 / 错误 MIME）+ 绝对 API 路径对照（IMP-055），直接指出哪些实例需要 rebuild 或 API 改造；`lwa gateway on` / `lwa gateway switch` 也会在交接后默认跑一次。瞬时连接失败（TIMEOUT / REFUSED）**不**算 IMP-023，避免误触发 `--rebuild-if-needed`。
-* **采样边界（V0.10.0，issue #58）**：别名活验证采样覆盖入口 HTML **直接引用**的加载型资源——`script src`、stylesheet / modulepreload / preload 等 `link`、`img` 等媒体标签与 `srcset`（相对路径拼别名前缀参与探测；外部 / 协议相对引用跳过不占名额），上限 20 条；manifest 记录 `aliasProbeCoverage={checked, found, truncated, skippedExternal}`，通过/失败消息会说明边界。JS bundle 内部动态加载的资源不在采样范围。
-* **纯 API 服务（V0.10.0，N5）**：契约 `servesUi=false` 的实例没有 HTML 入口——别名入口返回任意非 5xx 即视为别名可用，记 `passed(api-only)`，跳过 HTML 与资源探针；之前这类实例设别名后验证必然失败。
+* **采样边界（V0.9.3，issue #58）**：别名活验证采样覆盖入口 HTML **直接引用**的加载型资源——`script src`、stylesheet / modulepreload / preload 等 `link`、`img` 等媒体标签与 `srcset`（相对路径拼别名前缀参与探测；外部 / 协议相对引用跳过不占名额），上限 20 条；manifest 记录 `aliasProbeCoverage={checked, found, truncated, skippedExternal}`，通过/失败消息会说明边界。JS bundle 内部动态加载的资源不在采样范围。
+* **纯 API 服务（V0.9.3，N5）**：契约 `servesUi=false` 的实例没有 HTML 入口——别名入口返回任意非 5xx 即视为别名可用，记 `passed(api-only)`，跳过 HTML 与资源探针；之前这类实例设别名后验证必然失败。
 
 ### 应用开发约定：客户端 IP 与转发头（issue #9）
 

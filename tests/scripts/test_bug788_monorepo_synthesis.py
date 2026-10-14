@@ -6,7 +6,7 @@
 1. ``entry.install`` 合成为 ``npm ci``，丢了 ``--ignore-scripts``——root
    package.json 的 ``preinstall``（ensure-electron-mirror.mjs）依赖宿主机
    环境，容器内 ``npm ci`` 执行必败（exit 1，见
-   design/5-checkpoints/2026-10-14-S2-11-drills/08-patent-update2.log）。
+   design/5-checkpoints/2026-10-14/S2-11-drills/08-patent-update2.log）。
 2. ``entry.start`` 误选 ``packages/webpage/dist/watch``——dev 脚本是
    ``tsx watch src/server.ts``，旧正则把 ``watch`` 标志当成入口文件；
    应为 ``packages/webpage/dist/server.js``。

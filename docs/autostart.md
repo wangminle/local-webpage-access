@@ -182,7 +182,7 @@ detached 进程抢锁"产生重复 watcher/manager；单元未在管时退回 st
 ## Caddy 所有权
 
 Caddy 由 **LWA 托管**（`lwa-gateway` 单元跑 `gateway_service` 前台，持有 master +
-admin 端口）。admin 端口 V0.10.0 起按工作区独立分配（20201–20500，登记
+admin 端口）。admin 端口 V0.9.3 起按工作区独立分配（20201–20500，登记
 `run/admin-port`，主 Caddyfile 渲染 `admin 127.0.0.1:<port>`），未分配的工作区
 仍为 legacy `:2019`。**切勿同时启用发行版 `caddy.service`**——在旧版本或未分配
 工作区会争用 `:2019`，`check` 会判 fail。若你已用系统 `caddy.service`，请停用它再

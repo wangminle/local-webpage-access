@@ -9,7 +9,7 @@
   拼错只会变成「返回 HTML」提示，不构成失败（不造成假绿）。
 
 test_50_router_prefix_composed_and_deep_route_walked 为
-design/5-checkpoints/2026-10-11-issues47-60-repro.py::test_50 的前缀合成
+design/5-checkpoints/2026-10-11/issues47-60-repro.py::test_50 的前缀合成
 翻转迁移（S1-04 已翻转深度/命名部分）。
 """
 

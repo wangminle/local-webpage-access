@@ -334,7 +334,7 @@ M1 本机 owner 可以使用现有管理 token，但新路由始终验证凭据�
 
 | WBS | 阶段/主责 | 交付物与具体改动 | 前置 | 人日 | 验收证据 |
 | --- | --- | --- | --- | --- | --- |
-| AGC-W01 | M0/协议 | 锁定客户端/SDK矩阵；输出 `design/5-checkpoints/agent-protocol-compatibility.md`；检查 `pyproject.toml` 依赖可解性 | 无 | 1 | 至少一款 stdio 客户端、一款 LAN 客户端与官方 SDK 实际版本记录；确定目标/兼容 profile |
+| AGC-W01 | M0/协议 | 锁定客户端/SDK矩阵；输出 `design/5-checkpoints/2026-09-15/agent-protocol-compatibility.md`；检查 `pyproject.toml` 依赖可解性 | 无 | 1 | 至少一款 stdio 客户端、一款 LAN 客户端与官方 SDK 实际版本记录；确定目标/兼容 profile |
 | AGC-W02 | M0/文档 | 新建 `docs/agent-guide.md`；更新 README 与包内 skills README；明确旧 API 本机鉴权、Git 限制、路径语义 | 无 | 0.5 | 从指南能定位现有命令和权限获取方式；未实现命令不混入现有操作步骤 |
 | AGC-W03 | M0/后端 | `agent/discovery.py`、包内 `agent/guides/`；manager 暴露 llms.txt、agent-info.json、指南路径 | W02 | 1 | `tests/test_agent_discovery.py`：返回正确媒体类型，秘密零暴露，SPA 不吞路由 |
 | AGC-W04 | M1/契约 | `agent/contracts.py`、OpenAPI/tool 共源 schema；冻结工具与错误表 | W01 | 1 | `tests/test_agent_contracts.py`：strict bool/enum/unknown fields；错误与分页快照 |
@@ -348,7 +348,7 @@ M1 本机 owner 可以使用现有管理 token，但新路由始终验证凭据�
 | AGC-W12 | M1/接口 | `agent/http_api.py` 严格新路由、错误映射；`manager_api.py`挂载；本机网络门禁 | W07,W10 | 1 | `tests/test_agent_api.py`：202/401/403/409、路径参数和旧API隔离 |
 | AGC-W13 | M1/协议 | `mcp/server.py`、`mcp/client_bridge.py`、`cli/mcp.py`；CLI注册与可选依赖 | W01,W12 | 1.5 | `tests/test_mcp_stdio.py`：真实子进程工具列举/调用、stdout无日志、manager离线明确失败 |
 | AGC-W14 | M1/引导 | `cli/agent.py` connection-info/配置检查；指南更新及版本一致性检查 | W03,W13 | 0.5 | `tests/test_agent_connection.py`：两个workspace正确匹配、无token输出、无隐式init |
-| AGC-W15 | M1/验证 | 本机完整部署与双客户端重试；记录 `design/5-checkpoints/agent-m1-acceptance.md` | W11,W14 | 1 | 静态/容器/pending三类fixture；CLI/daemon混合并发；旧回归通过 |
+| AGC-W15 | M1/验证 | 本机完整部署与双客户端重试；记录 `design/5-checkpoints/2026-09-16/agent-m1-acceptance.md` | W11,W14 | 1 | 静态/容器/pending三类fixture；CLI/daemon混合并发；旧回归通过 |
 | AGC-W16 | M2/授权 | 扩展 `agent/auth.py`、ACL DAO与配置；接一个现有OAuth/OIDC服务；资源元数据/challenge | W01,W06 | 2 | `tests/test_agent_remote_auth.py`：issuer/audience/scope/expired/revoked/跨项目拒绝 |
 | AGC-W17 | M2/网络 | manager/mcp远程挂载、TLS反代模板、Host/Origin/代理信任与开关 | W13,W16 | 1.5 | `tests/test_mcp_http.py`：目标版本协议、坏Origin、无凭据回环反代、禁用时不可访问 |
 | AGC-W18 | M2/制品 | `agent/artifacts.py`及API/DAO：分块、摘要、所有权、原子complete、TTL | W05,W16 | 1.5 | `tests/test_agent_artifacts.py`：续传、同块重试、摘要错、越权、未完成禁止部署 |
