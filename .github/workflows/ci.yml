@@ -73,6 +73,15 @@ jobs:
       - name: 安装 Python 3.13
         run: uv python install 3.13
 
+      # 与 gate 相同：路径别名用例会探测 PATH 上的 caddy，缺二进制会落到 builtin。
+      - name: 安装 caddy（固定版本）
+        run: |
+          curl -fsSLo /tmp/caddy.tar.gz \
+            "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+          sudo install -m 0755 /tmp/caddy /usr/local/bin/caddy
+          caddy version
+
       - name: 安装依赖
         run: |
           uv sync --extra dev --extra mcp
