@@ -106,10 +106,15 @@ def update_instance_settings(
                 )
         if "systemDeps" in changes and old.runtime != Runtime.DOCKER_COMPOSE:
             raise ValueError("systemDeps 仅支持容器实例")
-        if "systemDeps" in changes and (changes.get("systemDeps") or []) and old.kind != Kind.PYTHON:
+        # Python 走 apt 切源链；Node(alpine) 在 npm 安装前 apk add。
+        # 空列表仍允许，用来清空。buildHooks 在依赖安装之后，不能替代这一层。
+        if (
+            "systemDeps" in changes
+            and (changes.get("systemDeps") or [])
+            and old.kind not in (Kind.PYTHON, Kind.NODE)
+        ):
             raise ValueError(
-                "systemDeps 使用 apt，仅支持 Debian 系 Python 容器；"
-                "Node 镜像为 Alpine，请改用 buildHooks"
+                "systemDeps 仅支持 Python（Debian/apt）与 Node（Alpine/apk）容器"
             )
         updated.touch()
         updated.save(path)

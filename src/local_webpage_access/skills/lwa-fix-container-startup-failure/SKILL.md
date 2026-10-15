@@ -6,7 +6,9 @@ description: >-
 
 # lwa-fix-container-startup-failure
 
-> 诊断容器启动后立即退出/OOM/崩溃的原因，修正启动配置。
+> 诊断容器启动后立即退出/OOM/崩溃的原因，修正 manifest 里的启动配置。
+>
+> **生成物不是真相。** `docker/Dockerfile` 与 `docker/compose.yaml` 会在 `lwa start` / `lwa rebuild` 时按 manifest **重新渲染**。改 CMD、`command` 或往镜像里加 `USER`/`RUN` 都不会留下来。启动命令写 `entry.start`，启动前步骤写 `preStart`，端口写 `container.internalPort`。
 
 ## 何时触发
 
@@ -22,15 +24,13 @@ description: >-
 
 ## 输出
 
-- 修正后的 `Dockerfile` CMD / `compose.yaml` command / `entry.start`。
-- 资源限制调整建议（若 OOM）。
+- 修正后的 `entry.start` / `preStart` / `container.internalPort` / `resourceProfile`。
 - 诊断说明（事件日志）。
 
 ## 可修改文件
 
-- `apps/<id>/docker/Dockerfile`。
-- `apps/<id>/docker/compose.yaml`。
 - `apps/<id>/local-web.json`。
+- 不要修改 `apps/<id>/docker/Dockerfile` 或 `docker/compose.yaml`。
 
 ## 禁止事项
 
@@ -47,17 +47,16 @@ description: >-
    - **OOM**：内存限制过低，或进程本身泄漏。
    - **权限**：非 root 用户写不了 `/app/data`、绑定 <1024 端口。
 2. 针对性修复：
-   - 缺环境变量 → 在 compose `environment` / `.env` 补齐（默认值 + 提示修改）。
-   - CMD 错误 → 修正为实际入口（如 `python -m uvicorn app:app`）。
-   - OOM → 在 `local-web.json` 调整资源档位（small → medium），不超主机上限。
-   - 权限 → `chown` 在构建期完成，或调整挂载点属主。
-3. 写回修改 + 诊断，提示 `lwa restart <id>`。
+   - 缺环境变量 → 写 `docker/.env` 里应用需要的键（该文件会保留），或在诊断里说明用户要补的变量。不要改生成的 compose `environment` 块。
+   - 命令错误 → 改 `entry.start`（如 `python -m uvicorn app:app --host 0.0.0.0 --port 8000`）。迁移类步骤用 `preStart`。
+   - OOM → 在 `local-web.json` 调整 `resourceProfile`（small → medium），不超主机上限。
+   - 权限 → 新实例默认 `container.runAsNonRoot: true`，数据目录由生成流程处理。不要在 Dockerfile 里手写 `USER`。
+3. 写回 manifest，提示 `lwa restart <id>` 或 `lwa rebuild <id>`。重启会重新渲染 Dockerfile 与 compose。
 
 ## 示例
 
-`run.log` 含 `permission denied: /app/data/app.db` → 非 root 用户无写权限：
+`run.log` 含 `python: can't open file '/app/main.py'`，实际入口是 `server.py`：
 
-```dockerfile
-RUN mkdir -p /app/data && chown -R appuser /app/data
-USER appuser
+```json
+{ "entry": { "start": "python server.py" } }
 ```

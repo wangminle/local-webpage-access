@@ -27,13 +27,13 @@
 | [`lwa-detect-stack`](lwa-detect-stack/SKILL.md) | 识别项目技术栈 | 修改 `local-web.json` 的 `stack`/`kind` |
 | [`lwa-detect-internal-port`](lwa-detect-internal-port/SKILL.md) | 找不到应用监听端口 | 修改 `local-web.json` 的 `internalPort` |
 | [`lwa-build-frontend-static`](lwa-build-frontend-static/SKILL.md) | 前端 SPA 需构建为静态产物 | 修改 `local-web.json` + 构建脚本 |
-| [`lwa-dockerize-node-app`](lwa-dockerize-node-app/SKILL.md) | Node 后端容器化 | 生成 `Dockerfile` |
-| [`lwa-dockerize-python-app`](lwa-dockerize-python-app/SKILL.md) | Python 后端容器化 | 生成 `Dockerfile` |
-| [`lwa-dockerize-fullstack-sqlite`](lwa-dockerize-fullstack-sqlite/SKILL.md) | 全栈 + SQLite 容器化 | 生成 `docker/Dockerfile` + `docker/compose.yaml` |
+| [`lwa-dockerize-node-app`](lwa-dockerize-node-app/SKILL.md) | Node 后端容器化 | 核对 manifest，由 `lwa` 重新渲染 Dockerfile |
+| [`lwa-dockerize-python-app`](lwa-dockerize-python-app/SKILL.md) | Python 后端容器化 | 核对 manifest，由 `lwa` 重新渲染 Dockerfile |
+| [`lwa-dockerize-fullstack-sqlite`](lwa-dockerize-fullstack-sqlite/SKILL.md) | 全栈 + SQLite 容器化 | 核对 manifest，由 `lwa` 重新渲染 Dockerfile 与 compose |
 | [`lwa-generate-static-gateway-config`](lwa-generate-static-gateway-config/SKILL.md) | 静态实例需网关 | 核对/触发生成 `sites/<id>.conf`（主 Caddyfile 由 lwa 组装） |
-| [`lwa-generate-compose`](lwa-generate-compose/SKILL.md) | 多服务需编排 | 生成/扩展 `docker/compose.yaml`（V1 默认同服务） |
-| [`lwa-fix-docker-build-failure`](lwa-fix-docker-build-failure/SKILL.md) | 构建失败 | 诊断 + 修复 `Dockerfile`/依赖 |
-| [`lwa-fix-container-startup-failure`](lwa-fix-container-startup-failure/SKILL.md) | 容器启动失败 | 诊断 + 修复启动配置 |
+| [`lwa-generate-compose`](lwa-generate-compose/SKILL.md) | 单服务 compose 与 manifest 不一致 | 改 manifest；不往生成的 compose 追加 Redis/Postgres |
+| [`lwa-fix-docker-build-failure`](lwa-fix-docker-build-failure/SKILL.md) | 构建失败 | 诊断 + 改 `systemDeps` / `buildHooks` / 依赖声明 |
+| [`lwa-fix-container-startup-failure`](lwa-fix-container-startup-failure/SKILL.md) | 容器启动失败 | 诊断 + 改 `entry.start` / 资源档位 |
 | [`lwa-fix-port-binding`](lwa-fix-port-binding/SKILL.md) | 端口冲突 | 修改端口映射 |
 | [`lwa-diagnose-health-check`](lwa-diagnose-health-check/SKILL.md) | 健康检查失败 | 诊断说明 + 修复建议 |
 | [`lwa-setup-host-environment`](lwa-setup-host-environment/SKILL.md) | 新机器首次部署 / 环境缺失 / Full Profile | 宿主机工具安装 + `--default`/`--full`/`--resume` + `doctor --profile full` / `capabilities` |
@@ -51,13 +51,11 @@
 
 ## 输出约定
 
-skill 的输出**只**落到以下位置（设计 §18）：
+skill 的持久输出落在 manifest 与诊断说明。`docker/Dockerfile` 与 `docker/compose.yaml` 由 `lwa start` / `lwa rebuild` 按 manifest **重新渲染**，不是 skill 的可编辑产物。
 
-1. 修改后的 `local-web.json`。
-2. `apps/<id>/docker/Dockerfile`（容器实例）。
-3. `apps/<id>/docker/compose.yaml`（容器编排；V1 默认同服务模板）。
-4. 静态网关配置（`static-gateway/` 下）。
-5. 诊断说明（写入事件日志或返回给 `lwa`）。
+1. 修改后的 `local-web.json`（`kind` / `runtime` / `servingMode` / `entry.*` / `container.internalPort` / `systemDeps` / `buildHooks` / `preStart` / `buildEnv` / `extraVolumes`）。
+2. 诊断说明（写入事件日志或返回给 `lwa`）。
+3. 静态网关仍由 `lwa gateway` 生成；不要手改主 Caddyfile。
 
 ## 通用禁止事项
 
@@ -65,8 +63,9 @@ skill 的输出**只**落到以下位置（设计 §18）：
 
 - **先复用已有工作区，勿另开第二套 Runtime（IMP-053）**：操作前先
   `curl -s http://127.0.0.1:17800/api/health`（或本机 `managerPort`）。若
-  `ok` 且带 `workspaceRoot`，**cd 到该目录**再 `lwa import` / `start` /
-  `update`；**禁止**再 `mkdir ~/lwa-workspace && lwa init`（默认抢同一
+  `ok` 且带 `workspaceRoot`，用 `lwa --workspace <workspaceRoot> import` /
+  `start` / `update`，或先 `lwa workspace use <workspaceRoot>` 记住默认值。
+  **禁止**再 `mkdir ~/lwa-workspace && lwa init`（默认抢同一
   17800/8080，管理页只看见一半实例）。确需第二工作区时须改
   `managerPort` / `staticGatewayPort` / `portPool`。
 - **不直接运行长期服务**（`docker run -d`、`npm start` 守护进程等由 `lwa` 决定）。

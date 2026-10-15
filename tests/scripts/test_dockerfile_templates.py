@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from local_webpage_access.dockerfile_templates import generate_dockerfile
+from tests.scripts._helpers import make_container_manifest
 from local_webpage_access.models import (
     ContainerConfig,
     DatabaseConfig,
@@ -1314,3 +1315,121 @@ def test_apt_budget_success_downloads_then_installs_offline(tmp_path: Path) -> N
     assert len(calls) == 3  # update、download-only、离线 install
     assert "--download-only" in calls[1]
     assert "--download-only" not in calls[2]
+
+
+# ---- DOC-201（V0.9.7）：Node(alpine) 消费 systemDeps --------------------------
+
+
+def _node_manifest(mid: str = "nodedemo") -> InstanceManifest:
+    manifest = make_container_manifest(mid, kind=Kind.NODE)
+    manifest.entry = EntryConfig(
+        install="npm ci", build="npm run build", start="node dist/index.js"
+    )
+    return manifest
+
+
+def test_node_system_deps_rendered_before_install(workspace) -> None:
+    """systemDeps 以 apk 安装，且必须位于 npm 依赖安装层之前（node-gyp 场景）。"""
+    manifest = _node_manifest()
+    manifest.systemDeps = ["python3", "make", "g++"]
+    out = generate_dockerfile(manifest, workspace)
+    text = out.read_text(encoding="utf-8")
+    assert "RUN apk add --no-cache python3 make g++" in text
+    assert text.index("apk add") < text.index("RUN npm ci")
+
+
+def test_node_without_system_deps_rendering_unchanged(workspace) -> None:
+    """systemDeps 为空时不产生 apk 层（默认渲染保持逐字不变）。"""
+    manifest = _node_manifest()
+    out = generate_dockerfile(manifest, workspace)
+    assert "apk add" not in out.read_text(encoding="utf-8")
+
+
+# ---- BUG-850（V0.9.7）：安装脚本引用的项目文件随依赖层先行复制 ---------------
+
+
+def _bug850_project(current, *, preinstall="sh probe.sh", with_scripts_dir=False):
+    import json as _json
+
+    (current / "package.json").write_text(
+        _json.dumps(
+            {
+                "name": "native-probe",
+                "scripts": {
+                    "preinstall": preinstall,
+                    "build": "node build.js",
+                    "start": "node server.js",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (current / "probe.sh").write_text("#!/bin/sh\necho probe\n", encoding="utf-8")
+    (current / "build.js").write_text("console.log('build')\n", encoding="utf-8")
+    (current / "server.js").write_text(
+        "require('http').createServer((q,s)=>{s.end('{\"ok\":true}')}).listen(3000)\n",
+        encoding="utf-8",
+    )
+    if with_scripts_dir:
+        (current / "scripts").mkdir(exist_ok=True)
+        (current / "scripts/ensure-mirror.mjs").write_text(
+            "export const mirror = 1\n", encoding="utf-8"
+        )
+
+
+def test_install_script_referenced_root_file_copied_before_npm_ci(workspace) -> None:
+    """BUG-850：`preinstall: sh probe.sh` —— probe.sh 必须先于 RUN npm ci 复制。"""
+    manifest = _node_manifest("bug850a")
+    current = workspace.app_current("bug850a")
+    current.mkdir(parents=True, exist_ok=True)
+    _bug850_project(current)
+
+    out = generate_dockerfile(manifest, workspace)
+    text = out.read_text(encoding="utf-8")
+    assert "COPY current/probe.sh probe.sh" in text
+    assert text.index("COPY current/probe.sh") < text.index("RUN npm ci")
+
+
+def test_install_script_referenced_dir_copied_whole(workspace) -> None:
+    """引用 scripts/ 内文件 → 整目录拷贝（兄弟 import 也可用）。"""
+    manifest = _node_manifest("bug850b")
+    current = workspace.app_current("bug850b")
+    current.mkdir(parents=True, exist_ok=True)
+    _bug850_project(
+        current,
+        preinstall="node scripts/ensure-mirror.mjs",
+        with_scripts_dir=True,
+    )
+
+    out = generate_dockerfile(manifest, workspace)
+    text = out.read_text(encoding="utf-8")
+    assert "COPY current/scripts/ scripts/" in text
+    assert text.index("COPY current/scripts/") < text.index("RUN npm ci")
+
+
+def test_install_script_referencing_missing_file_keeps_rendering(workspace) -> None:
+    """引用不存在的路径不追加 COPY（渲染保持不变，不破坏层缓存）。"""
+    manifest = _node_manifest("bug850c")
+    current = workspace.app_current("bug850c")
+    current.mkdir(parents=True, exist_ok=True)
+    _bug850_project(current, preinstall="sh does-not-exist.sh")
+    (current / "probe.sh").unlink()
+
+    out = generate_dockerfile(manifest, workspace)
+    text = out.read_text(encoding="utf-8")
+    assert "COPY current/probe.sh" not in text
+    assert "COPY current/package*.json ./" in text
+
+
+def test_no_lifecycle_scripts_rendering_unchanged(workspace) -> None:
+    """无生命周期脚本 → 依赖层仍只有 package*.json（逐字不变）。"""
+    manifest = _node_manifest("bug850d")
+    current = workspace.app_current("bug850d")
+    current.mkdir(parents=True, exist_ok=True)
+    _bug850_project(current, preinstall="")
+    (current / "probe.sh").unlink()
+
+    out = generate_dockerfile(manifest, workspace)
+    text = out.read_text(encoding="utf-8")
+    assert "COPY current/probe.sh" not in text
+    assert "COPY current/scripts/" not in text

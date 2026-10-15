@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 CONFIG_FILENAME = "local-web.yml"
@@ -345,7 +347,8 @@ class Workspace:
 def find_workspace_root(start: Path | None = None) -> Path | None:
     """从 ``start``（默认当前目录）向上查找包含 ``local-web.yml`` 的目录。
 
-    返回工作区根目录；找不到时返回 ``None``。
+    返回工作区根目录；找不到时返回 ``None``。不读取 ``--workspace``、
+    ``LWA_WORKSPACE`` 或已保存的默认工作区。
     """
     current = (Path(start) if start else Path.cwd()).resolve()
     for candidate in [current, *current.parents]:
@@ -354,16 +357,142 @@ def find_workspace_root(start: Path | None = None) -> Path | None:
     return None
 
 
+# CLI 入口在执行子命令前设置。库代码与测试默认关闭，避免误用用户家目录里的默认工作区。
+_explicit_workspace: ContextVar[Path | None] = ContextVar("lwa_explicit_workspace", default=None)
+_use_saved_default: ContextVar[bool] = ContextVar("lwa_use_saved_default", default=False)
+ENV_WORKSPACE = "LWA_WORKSPACE"
+
+
+def push_cli_workspace(explicit: str | None) -> tuple[Token[Path | None], Token[bool]]:
+    """记录本次 CLI 调用的显式工作区，并允许回退到已保存的默认值。"""
+    path = None
+    if explicit is not None and explicit.strip():
+        path = Path(explicit).expanduser().resolve()
+    return _explicit_workspace.set(path), _use_saved_default.set(True)
+
+
+def pop_cli_workspace(tokens: tuple[Token[Path | None], Token[bool]]) -> None:
+    """子命令结束后恢复工作区选择，避免污染同一进程里的后续调用。"""
+    explicit_token, default_token = tokens
+    _explicit_workspace.reset(explicit_token)
+    _use_saved_default.reset(default_token)
+
+
+def default_workspace_config_path() -> Path:
+    """用户级默认工作区文件（不放在某个 runtime 里面）。"""
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(raw).expanduser() if raw else Path.home() / ".config"
+    return base / "lwa" / "default-workspace"
+
+
+def read_saved_default_workspace() -> tuple[Path | None, str]:
+    """返回 ``(路径, 来源)``。``LWA_WORKSPACE`` 优先于配置文件。"""
+    env = os.environ.get(ENV_WORKSPACE, "").strip()
+    if env:
+        return Path(env).expanduser().resolve(), ENV_WORKSPACE
+    path = default_workspace_config_path()
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None, ""
+    if not text:
+        return None, ""
+    return Path(text).expanduser().resolve(), str(path)
+
+
+def write_default_workspace(root: Path) -> Path:
+    """把默认工作区写成绝对路径。调用方须先确认该目录已初始化。"""
+    dest = default_workspace_config_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(str(root.expanduser().resolve()) + "\n", encoding="utf-8")
+    dest.chmod(0o600)
+    return dest
+
+
+def rebind_saved_default_workspace(old: Path, new: Path) -> bool:
+    """迁移/回滚时只同步文件中恰好指向旧根的默认值，不受环境变量覆盖影响。"""
+    path = default_workspace_config_path()
+    try:
+        saved = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    if not saved or Path(saved).expanduser().resolve() != old.expanduser().resolve():
+        return False
+    write_default_workspace(new)
+    return True
+
+
+def clear_default_workspace() -> bool:
+    """删除已保存的默认工作区文件。不存在时返回 False。"""
+    path = default_workspace_config_path()
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def locate_workspace_root(start: Path | None = None) -> Path | None:
+    """定位工作区：显式路径、当前目录向上、再是 CLI 默认值。
+
+    ``start`` 非空时只从该路径向上查找（``lwa update --workspace`` 的既有语义）。
+    """
+    if start is None:
+        explicit = _explicit_workspace.get()
+        if explicit is not None:
+            return explicit if (explicit / CONFIG_FILENAME).is_file() else None
+    found = find_workspace_root(start)
+    if found is not None:
+        return found
+    if start is None and _use_saved_default.get():
+        saved, _source = read_saved_default_workspace()
+        if saved is not None and (saved / CONFIG_FILENAME).is_file():
+            return saved
+    return None
+
+
+def _cli_missing_workspace_message() -> str:
+    return (
+        "未找到工作区：当前目录及其上级没有 local-web.yml，也没有可用的默认工作区。\n"
+        "已有工作区请执行：lwa --workspace <工作区绝对路径> <命令>\n"
+        "或先记住它：lwa workspace use <工作区绝对路径>\n"
+        f"也可以设置环境变量 {ENV_WORKSPACE}。\n"
+        "不要在项目目录里执行 lwa init，那会新建另一套工作区。"
+    )
+
+
 def require_workspace(start: Path | None = None) -> Workspace:
     """查找工作区根，找不到时抛 :class:`PathError`。"""
     from local_webpage_access.errors import PathError
 
-    root = find_workspace_root(start)
-    if root is None:
+    if start is None:
+        explicit = _explicit_workspace.get()
+        if explicit is not None:
+            if not (explicit / CONFIG_FILENAME).is_file():
+                raise PathError(
+                    f"--workspace 指向的目录不是已初始化工作区（缺少 {CONFIG_FILENAME}）："
+                    f"{explicit}。\n"
+                    "请改成已有工作区的绝对路径。不要对这个路径执行 lwa init，除非确实要新建一套。"
+                )
+            return Workspace(explicit)
+    found = find_workspace_root(start)
+    if found is not None:
+        return Workspace(found)
+    if start is not None:
         raise PathError(
-            "未找到工作区（缺少 local-web.yml）。请先在目标目录执行 `lwa init`。",
+            f"从 {Path(start).expanduser().resolve()} 向上未找到 {CONFIG_FILENAME}。"
         )
-    return Workspace(root)
+    if _use_saved_default.get():
+        saved, source = read_saved_default_workspace()
+        if saved is not None:
+            if (saved / CONFIG_FILENAME).is_file():
+                return Workspace(saved)
+            raise PathError(
+                f"{source} 不可用（缺少 {CONFIG_FILENAME}）：{saved}。"
+                "请重新执行 lwa workspace use <工作区绝对路径>。"
+            )
+        raise PathError(_cli_missing_workspace_message())
+    raise PathError(f"未找到工作区（缺少 {CONFIG_FILENAME}）。")
 
 
 __all__ = [
@@ -375,5 +504,13 @@ __all__ = [
     "validate_source_subdir",
     "resolve_source_workdir",
     "find_workspace_root",
+    "locate_workspace_root",
     "require_workspace",
+    "push_cli_workspace",
+    "pop_cli_workspace",
+    "read_saved_default_workspace",
+    "write_default_workspace",
+    "clear_default_workspace",
+    "default_workspace_config_path",
+    "ENV_WORKSPACE",
 ]

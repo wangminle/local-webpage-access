@@ -283,14 +283,89 @@ def test_configure_cli_system_deps_for_container(workspace, registry, config, mo
     assert saved.buildHooks == ["echo ok"]
 
 
-def test_node_container_rejects_system_deps(workspace, registry) -> None:
-    """BUG-664：Node/Alpine 不得保存 systemDeps。"""
+def _node_container(workspace, registry):
+    from local_webpage_access.models import ContainerConfig, EntryConfig, ServingMode
+
+    workspace.ensure_app_dirs("demo")
+    m = manifest()
+    m.kind = Kind.NODE
+    m.runtime = Runtime.DOCKER_COMPOSE
+    m.servingMode = ServingMode.CONTAINER
+    m.entry = EntryConfig(install="npm ci", start="node server.js")
+    m.container = ContainerConfig(
+        projectName="demo",
+        internalPort=8000,
+        composePath="docker/compose.yml",
+        dockerfilePath="docker/Dockerfile",
+    )
+    m.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(m)
+    return m
+
+
+def test_node_container_saves_system_deps_before_npm(workspace, registry) -> None:
+    """DOC-201：Node 可保存 systemDeps，apk 在 npm 安装之前，buildHooks 仍在其后。"""
+    from local_webpage_access.dockerfile_templates import generate_dockerfile
+    from local_webpage_access.instance_settings import update_instance_settings
+
+    _node_container(workspace, registry)
+    updated = update_instance_settings(
+        workspace,
+        registry,
+        "demo",
+        {"systemDeps": ["python3", "make", "g++"], "buildHooks": ["echo after-install"]},
+    )
+    assert updated.systemDeps == ["python3", "make", "g++"]
+    text = generate_dockerfile(updated, workspace).read_text(encoding="utf-8")
+    apk_at = text.index("RUN apk add --no-cache python3 make g++")
+    npm_at = text.index("RUN npm ci")
+    hook_at = text.index("RUN echo after-install")
+    assert apk_at < npm_at < hook_at
+
+
+def test_configure_cli_node_system_deps_match_skill_example(
+    workspace, registry, config, monkeypatch
+):
+    """DOC-200/201：技能示例的 --system-deps 能写入 Node 实例，而不是解析失败或被拒绝。"""
+    from local_webpage_access.dockerfile_templates import generate_dockerfile
+    from local_webpage_access.models import InstanceManifest
+    from local_webpage_access.registry import Registry
+
+    _node_container(workspace, registry)
+
+    def open_env():
+        reg = Registry(workspace.db_path)
+        reg.open()
+        return workspace, config, reg
+
+    monkeypatch.setattr("local_webpage_access.cli.configure.open_workspace_registry", open_env)
+    result = CliRunner().invoke(
+        app,
+        [
+            "configure",
+            "demo",
+            "--system-deps",
+            "python3",
+            "--system-deps",
+            "make",
+            "--system-deps",
+            "g++",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    saved = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    assert saved.systemDeps == ["python3", "make", "g++"]
+    text = generate_dockerfile(saved, workspace).read_text(encoding="utf-8")
+    assert text.index("RUN apk add --no-cache python3 make g++") < text.index("RUN npm ci")
+
+
+def test_non_node_python_container_still_rejects_system_deps(workspace, registry) -> None:
+    """没有 apt/apk 安装步骤的类型仍拒绝 systemDeps，避免写入后不生效。"""
     from local_webpage_access.instance_settings import update_instance_settings
     from local_webpage_access.models import ContainerConfig, ServingMode
 
     workspace.ensure_app_dirs("demo")
     m = manifest()
-    m.kind = Kind.NODE
     m.runtime = Runtime.DOCKER_COMPOSE
     m.servingMode = ServingMode.CONTAINER
     m.container = ContainerConfig(
@@ -301,5 +376,5 @@ def test_node_container_rejects_system_deps(workspace, registry) -> None:
     )
     m.save(workspace.app_manifest_path("demo"))
     registry.upsert_from_manifest(m)
-    with pytest.raises(ValueError, match="Alpine"):
+    with pytest.raises(ValueError, match="Python"):
         update_instance_settings(workspace, registry, "demo", {"systemDeps": ["ffmpeg"]})

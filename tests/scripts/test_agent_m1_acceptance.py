@@ -22,7 +22,7 @@ from local_webpage_access.manager_api import create_app, ensure_token
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 from tests.scripts._helpers import make_container_manifest
-from tests.scripts.conftest import requires_docker, stop_workspace_test_builtins
+from tests.scripts.conftest import requires_docker_opt_in, stop_workspace_test_builtins
 
 BASE = "/api/agent/v1"
 TERMINAL = {"succeeded", "failed", "cancelled", "cancel_failed", "needs_input", "interrupted"}
@@ -216,11 +216,12 @@ def test_concurrent_update_loser_gets_revision_conflict(acc_env) -> None:
 # ---- 场景 4：容器实例 operation 不悬挂（无 Docker 跳过并记录） -----------------------
 
 
-@requires_docker
+@requires_docker_opt_in
 def test_container_operation_reaches_terminal_state(acc_env) -> None:
     """容器实例 rebuild 操作必须到达终态（无 daemon 时允许 failed，不得悬挂）。
 
-    无 docker 命令的环境整条跳过（pytest skip reason 已记录）。
+    真实调用 Docker 约 35s：默认门禁跳过，``LWA_RUN_DOCKER_TESTS=1`` 才执行
+    （DEV-166；发布前按 release-checklist 的 Docker 项执行）。
     """
     ws, _config, reg, app, token = acc_env
     headers = _auth(token)

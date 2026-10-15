@@ -234,6 +234,11 @@ def _render_node(
     cpfx = _copy_prefix(manifest)
     dependency_copy = _node_dependency_copy_block(install, source_dir=source_dir, copy_prefix=cpfx)
     install_run = _with_npm_registry(install, mirrors)
+    # DOC-201（V0.9.7）：Node(alpine) 同样消费 systemDeps——node-gyp 等原生构建
+    # 在 npm install 阶段就需要 python3/make/g++，必须先于依赖安装层；alpine
+    # 用 apk（apt 切源链不适用，不走 mirrors）。为空时渲染保持逐字不变。
+    system_pkgs = [str(p).strip() for p in (manifest.systemDeps or []) if str(p).strip()]
+    apk_block = f"RUN apk add --no-cache {' '.join(system_pkgs)}\n" if system_pkgs else ""
 
     # BUG-122：安装/构建阶段不可设 NODE_ENV=production，否则 npm 会 omit
     # devDependencies，导致 tsc/vite 等构建工具缺失。运行期再切 production。
@@ -242,6 +247,7 @@ def _render_node(
         f"FROM {_NODE_IMAGE}",
         _build_env_arg_block(manifest),
         "WORKDIR /app",
+        apk_block,
         dependency_copy,
         f"RUN {install_run}",
         f"COPY {cpfx} ./",
@@ -1327,7 +1333,84 @@ def _node_dependency_copy_block(
             except (json.JSONDecodeError, OSError):
                 pass
 
+    # BUG-850：安装生命周期脚本引用的项目内文件（如根级 `preinstall: sh probe.sh`
+    # 或 `node scripts/ensure-mirror.mjs`）必须随依赖层先于 `npm ci` 复制，
+    # 否则 preinstall 在容器内因文件缺失必败。提取脚本命令中的路径 token，
+    # 解析为 source_dir 内真实存在的文件/目录时，按其**顶层路径组件**追加
+    # COPY（目录整目录拷贝，保证脚本 import 同目录兄弟文件也成立）。
+    for copy_line in _node_install_script_prereq_copies(source_dir, copy_prefix):
+        if copy_line not in lines:
+            lines.append(copy_line)
+
     return "\n".join(lines)
+
+
+# npm 安装生命周期（与 scanner._INSTALL_LIFECYCLE_SCRIPT_KEYS 对应）
+_NODE_LIFECYCLE_KEYS = ("preinstall", "install", "postinstall", "prepare")
+_SHELL_OPERATOR_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+# 已由依赖层复制的声明文件，不重复拷贝
+_NODE_DECLARATION_FILES = {"package.json", "package-lock.json"}
+
+
+def _node_install_script_prereq_copies(
+    source_dir: Path | None, copy_prefix: str
+) -> list[str]:
+    """BUG-850：根 package.json 安装生命周期脚本引用的本地文件 → COPY 行。
+
+    只接受可解析为项目内真实存在的文件/目录 token；引用不存在路径时不追加
+    （保持既有渲染逐字不变，不为幻觉路径多拷源码破坏层缓存）。目录按顶层
+    组件整拷；node_modules、package*.json 与隐藏路径不在此机制内。
+    """
+    if source_dir is None:
+        return []
+    root_pkg = source_dir / "package.json"
+    if not root_pkg.is_file():
+        return []
+    try:
+        pkg = json.loads(root_pkg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    scripts = pkg.get("scripts") if isinstance(pkg, dict) else None
+    if not isinstance(scripts, dict):
+        return []
+    commands = [str(scripts.get(key) or "") for key in _NODE_LIFECYCLE_KEYS]
+    if not any(commands):
+        return []
+    copies: list[str] = []
+    seen_top: set[str] = set()
+    for command in commands:
+        for chunk in _SHELL_OPERATOR_SPLIT_RE.split(command):
+            for raw in chunk.split():
+                token = raw.strip("'\"")
+                if token.startswith("./"):
+                    token = token[2:]
+                elif token.startswith(("-", "/", "$", "http://", "https://")):
+                    continue
+                if not token or any(c in token for c in "*?$"):
+                    continue
+                candidate = (source_dir / token)
+                if not candidate.exists():
+                    continue
+                try:
+                    rel = candidate.resolve().relative_to(source_dir.resolve())
+                except ValueError:
+                    continue  # 越出项目根（如绝对路径）不拷
+                if not rel.parts:
+                    continue
+                top = rel.parts[0]
+                if (
+                    top in seen_top
+                    or top in _NODE_DECLARATION_FILES
+                    or top == "node_modules"
+                    or top.startswith(".")
+                ):
+                    continue
+                seen_top.add(top)
+                if (source_dir / top).is_dir():
+                    copies.append(f"COPY {copy_prefix}{top}/ {top}/")
+                else:
+                    copies.append(f"COPY {copy_prefix}{top} {top}")
+    return copies
 
 
 __all__ = ["generate_dockerfile", "generate_dockerignore"]

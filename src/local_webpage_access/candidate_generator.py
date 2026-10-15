@@ -13,6 +13,7 @@
   R-python-root     根目录有 Python Web 框架依赖 -> python/docker-compose, sourceSubdir=None
   R-node-monorepo   根 package.json 有 workspaces（IMP-057 规则集）
   R-node-root       根目录有 package.json + NODE_BACKEND
+  R-stdlib-http     根目录零依赖 Node/Python 内置 HTTP（与 scanner 弱信号同源）
   R-frontend-subdir 子目录有 package.json + NODE_FRONTEND + scripts.build
   R-frontend-root   根目录有 package.json + NODE_FRONTEND + scripts.build
   R-static          根目录或子目录有 index.html
@@ -174,6 +175,10 @@ def generate_candidates(evidence: ProjectEvidence) -> list[DeploymentCandidate]:
         if node_backend and not any(c.kind == "node" for c in candidates):
             candidate = _make_node_root_candidate(evidence, node_backend)
             candidates.append(candidate)
+
+    # R-stdlib-http：Scanner 已能识别零依赖 Node/Python HTTP，计划层必须承接，
+    # 否则 Importer 会因 plans 为空把容器识别退回 pending 静态草稿（BUG-844）。
+    _append_stdlib_http_candidate(evidence, candidates)
 
     # ---- Frontend 候选 ----
     # R-frontend-subdir: 子目录有 NODE_FRONTEND + build script
@@ -478,6 +483,114 @@ def _node_install_command(evidence: ProjectEvidence) -> str:
     if "package-lock.json" in root_files or "bun.lockb" in root_files:
         return "npm ci"
     return "npm install"
+
+
+def _has_primary_backend(candidates: list[DeploymentCandidate]) -> bool:
+    return any(
+        c.kind in ("python", "node")
+        and c.runtime == "docker_compose"
+        and c.confidenceTier == "primary"
+        for c in candidates
+    )
+
+
+def _append_stdlib_http_candidate(
+    evidence: ProjectEvidence, candidates: list[DeploymentCandidate]
+) -> None:
+    """零依赖内置 HTTP：与 scanner 的弱信号使用同一判定，避免计划层漏接。
+
+    路由与 ``Scanner.detect`` 对齐：已有框架后端候选则不重复；根目录静态页
+    优先于无工程文件的 Python 弱信号；带前端依赖或 HTML 的 Node 包不抢判。
+    """
+    if _has_primary_backend(candidates):
+        return
+
+    from local_webpage_access.scanner import (
+        FileSummary,
+        _node_stdlib_http_entry,
+        _stdlib_http_entry,
+    )
+
+    summary = FileSummary(root=Path(evidence.root))
+    has_python_project = any(
+        name in evidence.rootFiles
+        for name in (
+            "requirements.txt",
+            "requirements-prod.txt",
+            "pyproject.toml",
+            "pipfile",
+            "uv.lock",
+        )
+    )
+    has_html = evidence.hasIndexHtml or evidence.hasHtml
+    frontend = bool(set(evidence.nodeDeps) & _NODE_FRONTEND)
+    form = "fullstack-sqlite" if evidence.sqliteFiles else "backend-container"
+
+    if evidence.hasPackageJson:
+        if frontend or has_html:
+            return
+        found = _node_stdlib_http_entry(summary)
+        if found is None:
+            return
+        entry_file, listen_port = found
+        has_build = "build" in evidence.nodeScripts
+        candidates.append(
+            DeploymentCandidate(
+                kind="node",
+                runtime="docker_compose",
+                servingMode="container",
+                form=form,
+                resourceProfile="tiny",
+                entry=EntryConfig(
+                    install=None if not evidence.nodeDeps else _node_install_command(evidence),
+                    build="npm run build" if has_build else None,
+                    start=f"node {entry_file}",
+                ),
+                internalPort=listen_port or 3000,
+                sourceSubdir=None,
+                confidenceTier="primary",
+                reasoning=[
+                    f"根目录 {entry_file} 使用 Node 内置 http（createServer + listen），"
+                    "无框架依赖"
+                ],
+            )
+        )
+        return
+
+    if has_html and not has_python_project:
+        return
+    entry = _stdlib_http_entry(summary)
+    if entry is None:
+        return
+    if has_python_project:
+        if "requirements-prod.txt" in evidence.rootFiles:
+            install = "pip install -r requirements-prod.txt"
+        elif "requirements.txt" in evidence.rootFiles:
+            install = "pip install -r requirements.txt"
+        elif "pyproject.toml" in evidence.rootFiles:
+            install = "pip install ."
+        elif "pipfile" in evidence.rootFiles:
+            install = "pip install pipenv && pipenv install --system --skip-lock"
+        else:
+            install = "uv sync"
+    else:
+        install = None
+    candidates.append(
+        DeploymentCandidate(
+            kind="python",
+            runtime="docker_compose",
+            servingMode="container",
+            form=form,
+            resourceProfile="tiny",
+            entry=EntryConfig(install=install, build=None, start=f"python {entry}"),
+            internalPort=8000,
+            sourceSubdir=None,
+            confidenceTier="primary",
+            reasoning=[
+                f"根目录 {entry} 使用 Python 标准库 http.server/socketserver，无 Web 框架依赖"
+            ],
+        )
+    )
 
 
 # ---- Gate-C C.02：部署拓扑生成 ----------------------------------------------

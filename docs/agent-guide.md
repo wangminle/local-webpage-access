@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.9.6 当前实际可用的接入方式。**
+> **状态：本文描述 V0.9.7 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -104,7 +104,21 @@ token 由 LWA 工作区管理员提供，存放于服务器工作区 `run/manage
 
 ## 6. 本机 Agent：CLI 路径
 
-当 Agent 与 LWA 同机运行（如经用户授权在服务器主机上的 shell），CLI 是功能最全的通道。常用命令（完整参考见 README「命令参考」）：
+当 Agent 与 LWA 同机运行（如经用户授权在服务器主机上的 shell），CLI 是功能最全的通道。没有上一轮会话上下文时，按这个顺序做，不要另建工作区：
+
+1. **定位已有工作区。** 不必先 `cd` 进 runtime。任选一种：
+   - `lwa --workspace <工作区绝对路径> status`（`import`、`start` 等同理，全局选项写在子命令前面）
+   - 记住默认值：`lwa workspace use <工作区绝对路径>`，之后在项目目录里直接 `lwa status`
+   - 或设置环境变量 `LWA_WORKSPACE`
+   当前目录及其上级若已有 `local-web.yml`，仍优先用那一个，避免误操作另一个工作区。找不到工作区时不要执行 `lwa init` 新建第二套；`lwa init --workspace <目录>` 只用于确实要创建新工作区。
+2. **能力预检。** `lwa doctor` 或 `lwa capabilities --json`。容器项目缺 Docker 时停下来报告，不要自行安装。
+3. **导入。** `lwa import <zip>`、`lwa import --from-dir <绝对路径>` 或 `lwa import --from-git <url>`。导入退出码 0 只表示登记成功。看输出里的类型：`pending` 或 `static` 配「部署计划为空」时，还不能 `start`。
+4. **处理 pending。** 用 `lwa-detect-stack` 按 schema 改 `local-web.json`（`kind` 只接受 `static`/`node`/`python`，`servingMode` 只接受 `shared-static`/`container`）。不要手改 `docker/Dockerfile` 或 `docker/compose.yaml`，它们会在启动和重建时按 manifest 重新渲染。
+5. **启动并验证。** `lwa start <id> --yes`。用返回的 URL 做 HTTP 请求，并核对业务探针，不要只看进程在不在。
+6. **记下身份。** 记录实例 id、访问 URL、`lwa versions <id>` 里的版本。更新用 `lwa import ... --update <id>`，保留 id 和 `data/`。
+7. **MCP / API 导入本机目录。** 现网 `agent.allowedSourceRoots` 为空时，`server_directory` 会被拒绝。先让管理员配置允许的源码根，不要自行放宽。MCP 适合要幂等和 revision 的自动化；同机一次性部署用 CLI 即可。
+
+常用命令（完整参考见 README「命令参考」）：
 
 ```bash
 lwa status                        # 实例与各服务状态总览
@@ -206,5 +220,6 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 - [security-boundary.md](security-boundary.md)——安全审计分级与默认保护
 - [known-limitations.md](known-limitations.md)——已知限制
 - [operations-playbook.md](operations-playbook.md)——日常运维手册
+- CLI 操作可在任意目录执行：`lwa --workspace <工作区根> <命令>`（或先 `lwa workspace use <工作区根>` 设默认；优先级为显式 `--workspace` > 当前目录向上发现 > `LWA_WORKSPACE` > 保存的默认值，V0.9.7）。
 - [runtime-workspace.md](runtime-workspace.md)——工作区目录与端口结构
 - README「命令参考」——CLI 全量命令

@@ -354,9 +354,12 @@ privileged / Docker socket 等为 **critical**，
 
 ### 容器构建 apt / 系统包失败或极慢？（issue #34 / #35）
 
-ffmpeg 等**运行时**系统包请写入 `systemDeps`（不要只塞进 `buildHooks`），会渲染到
-`COPY current/` **之前**，并走与 pip 对称的 apt 源链（china 默认阿里云 → 清华 →
+ffmpeg 等**运行时**系统包请写入 `systemDeps`（不要只塞进 `buildHooks`）。Python（Debian）
+会渲染到 `COPY current/` **之前**，并走与 pip 对称的 apt 源链（china 默认阿里云 → 清华 →
 官方 `deb.debian.org`，每源 `Acquire::Retries=2` / 超时 30s，带 BuildKit apt cache mount）。
+Node（`node:24-alpine`）则用 `apk add --no-cache`，并且位于 npm 依赖安装层**之前**
+（node-gyp 缺 `python3` / `make` / `g++` 走这里）；这条路径不走 apt 切源。`buildHooks`
+仍在依赖安装之后，补不了安装期已经失败的原生模块。
 
 ```bash
 lwa configure <id> --system-deps ffmpeg
@@ -452,6 +455,41 @@ lwa rebuild <id>
 操作失败且容器缺失」时，优先**拉回上一可用镜像版本**（事件 `rollback_self_heal`，
 同样不回滚 data/）；只有没有可回滚版本或拉回失败，才回退到按当前源码重建的
 常规自愈。容器仍在服务（如先建后换补偿成功、旧版本还在跑）时不触发回滚。
+
+### Flask/Django 实例用什么服务器跑？怎么改成生产服务器？（V0.9.6 / IMP-066）
+
+未显式指定 `entry.start` 时，LWA 会推断 WSGI 入口并默认生成 **Gunicorn** 生产
+命令（单 worker、小线程数的低配参数）：Flask 认根 `app.py`/`main.py`/`wsgi.py`/
+`app/__init__.py` 中可唯一证明的 `app = Flask(...)` 或 `create_app` 工厂；Django
+认 `manage.py` 根 + 唯一 `*/wsgi.py`。项目没声明 Gunicorn 也没关系——生成 Gunicorn
+命令时 Dockerfile 会分层安装平台选定的版本范围，不回写你的 requirements/pyproject。
+
+入口无法唯一证明（多个候选 / 找不到入口）时保留 `flask run` /
+`manage.py runserver` fallback，不阻断导入，但导入输出、manifest
+`preflightSummary` 与 `lwa doctor`（`dev_server_fallback`）都会警告。要消除警告：
+在项目依赖里声明 Gunicorn（已声明优先），或调整源码布局让入口可唯一推断，或显式
+设置 `entry.start`。显式使用 Uvicorn 等 ASGI 服务器的项目不会被改写。存量实例
+只在 `rebuild`/源码更新后重生成时应用该规则，升级 LWA 不改正在运行容器的 CMD。
+
+### access review 里「不确定，不计错位」是什么意思？（V0.9.6 / BUG-843）
+
+`lwa access review` 的绝对 API 路径对照只用 GET 探测（不会替你发 POST）。当入口根
+与带别名前缀两处都返回 404 时，无法区分「路由不存在」与「该端点只接受 POST/登录
+后才能访问」——证据不足，记为**不确定**并输出一条说明，不计错位、不升 WARN。真正
+的错位（入口根 404/空 200、而带前缀处路由确实存在）仍会照常告警。同理，前端里
+`BASE + '/api/...'` 这类拼接形态不再是绝对路径证据。
+
+### 不 cd 进工作区能执行 lwa 命令吗？多工作区怎么切换？（V0.9.7）
+
+可以。四种指定方式按优先级：`lwa --workspace <目录> <命令>`（一次性显式，也可 `-w`）→ 当前目录向上发现 `local-web.yml` → `LWA_WORKSPACE` 环境变量 → `lwa workspace use <目录>` 保存的默认工作区（`--clear` 清除，保存在 `~/.config/lwa/default-workspace`）。都未命中时命令会失败并提示这四种方式，不会在项目目录里误建第二套工作区。
+
+### 预构建 static/ 产物过期了 LWA 会提醒吗？（V0.9.6 / #61 检查部分）
+
+会分级提醒，但**只告警、不自动构建**：同一份源码里前端目录比 `backend/static/`
+类产物新 → 疑似陈旧（`lwa doctor` 的 `frontend_artifacts_staleness` WARN，`rebuild
+--sync` 后也会提示）；前端源码不在导入树内（跨仓）或时间不可区分 → 无法判断（信息
+性说明）；要「确证」需要构建期源码指纹，随 #61 的预构建机制后续接入。注意这与
+「base 配错导致别名白屏」是两类问题——后者走别名资源检查。
 
 ### 实例识别为 pending
 

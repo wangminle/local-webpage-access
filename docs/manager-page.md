@@ -467,8 +467,10 @@ Authorization: Bearer <token>
 
 `buildEnv` 为整组替换，null 清空；布尔字段必须是真正布尔值。`buildEnv` / 别名 base
 跟随支持宿主前端构建，也支持 docker-compose 容器构建（Dockerfile ARG/ENV + Compose
-`build.args`，issue #39）；`systemDeps` 仅支持 Debian 系 Python 容器
-（走 apt 源链），Node/Alpine 容器保存时拒绝并提示改用 `buildHooks`（issue #35，BUG-664）。
+`build.args`，issue #39）。`systemDeps` 支持两类容器：Python（Debian，apt 切源链，
+渲染在 `COPY current/` 之前）与 Node（Alpine，`apk add --no-cache`，渲染在 npm 依赖安装之前）。
+`buildHooks` 在依赖安装之后执行，补不了 node-gyp 这类安装期失败（DOC-201）。其他类型保存非空
+`systemDeps` 会被拒绝。
 `systemDeps` / `buildHooks` 为整组替换（数组），接口不会自动 rebuild。设置弹窗暂未
 暴露 `systemDeps` / `buildHooks`，推荐用 `lwa configure <id> --system-deps /
 --build-hook`（含 `--clear-*` 清空变体）操作。

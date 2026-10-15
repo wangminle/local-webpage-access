@@ -6,13 +6,14 @@ description: >-
 
 # lwa-generate-compose
 
-> 为多服务实例（后端 + 缓存 + 数据库等）生成或扩展 `apps/<id>/docker/compose.yaml`。
-> **口径**：V1 `compose.generate_compose` 只产出**单服务**模板；多服务需在此基础上人工扩展，并过 `audit_compose`。
+> 核对单服务 Compose 是否与 manifest 一致。`compose.generate_compose` 只产出**一个 app 服务**。
+>
+> **生成物不是真相。** `docker/compose.yaml` 与 `docker/Dockerfile` 会在 `lwa start` / `lwa rebuild` 时按 manifest **重新渲染**。不要往生成文件里人工追加 Redis、Postgres 或其他服务：下一次生成会丢掉这些服务。MySQL / PostgreSQL / Redis 不会由 LWA 自动起容器，见 `docs/known-limitations.md`。需要额外挂载时用 `container.extraVolumes` 或 `lwa configure <id> --extra-volume`。
 
 ## 何时触发
 
-- 实例含多个服务（如后端 + Redis + Postgres），但无可用的 `docker/compose.yaml`。
-- 单容器不够，需要编排。
+- 容器实例缺少可用的单服务 `docker/compose.yaml`，或端口、卷、资源限制与 `local-web.json` 不一致。
+- 有人准备往生成的 compose 里加 Redis / Postgres。这时应停下来说明平台边界，而不是追加服务。
 
 ## 输入
 
@@ -23,16 +24,13 @@ description: >-
 
 ## 输出
 
-- 生成或修正 `apps/<id>/docker/compose.yaml`（V1 默认同服务；多服务人工扩展）。
-- 修改 `local-web.json`：
-  - `container.hostPort` / `internalPort`（主服务）。
-  - `database` 段（若含数据库服务）。
-  - `mounts`（仅各服务自己的 `data/`）。
+- 修改 `local-web.json` 的 `container.internalPort`、`entry.start`、`container.extraVolumes`。
+- 由 `lwa start` / `lwa rebuild` 重新渲染单服务 `docker/compose.yaml`。不要自己维护那份文件。
 
 ## 可修改文件
 
-- `apps/<id>/docker/compose.yaml`。
 - `apps/<id>/local-web.json`。
+- 不要把 `apps/<id>/docker/compose.yaml` 当作可持久化的修改目标。
 
 ## 禁止事项
 
@@ -44,34 +42,15 @@ description: >-
 
 ## 处理流程
 
-1. 优先用 `compose.generate_compose` 生成单服务基线（`build.context: ..`，`dockerfile: docker/Dockerfile`，`../data:/app/data`，ports 来自 `.env`）。
-2. 若确需多服务：在基线上人工追加依赖服务，主服务端口仍用 `${HOST_PORT}:${INTERNAL_PORT}`。
-3. 附加服务的 volumes 仅挂各自数据目录（相对 compose 文件，如 `../data/redis:/data`）。
-4. 定义 `networks`：默认 bridge，服务间用服务名互通。
-5. `restart: unless-stopped`；写回前跑 `audit_compose`。
-6. 写回 `local-web.json`。
+1. 确认实例是 `runtime: docker-compose`、`servingMode: container`，并已有 `container.internalPort` 与 `entry.start`。
+2. 需要额外只读或数据卷时，写入 `container.extraVolumes`（`宿主路径:容器绝对路径[:ro|rw]`），或执行 `lwa configure <id> --extra-volume <规格>`。
+3. 执行 `lwa rebuild <id>` 或 `lwa start <id>`，让平台重新渲染单服务 compose。
+4. 若需求是 Redis / Postgres / MySQL：向用户说明当前生成器不保留这些服务，不要追加到 `docker/compose.yaml`。
 
 ## 示例
 
-后端（对齐 V1 布局）+ Redis（人工扩展）：
+只追加一个只读配置目录，而不是追加 Redis 服务：
 
-```yaml
-services:
-  app:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    ports:
-      - "${HOST_PORT}:${INTERNAL_PORT}"
-    volumes:
-      - ../data:/app/data
-    env_file:
-      - .env
-    depends_on: [redis]
-    restart: unless-stopped
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - ../data/redis:/data
-    restart: unless-stopped
+```bash
+lwa configure <id> --extra-volume /path/on/host:/app/config:ro
 ```

@@ -15,6 +15,10 @@
 # 环境变量：
 #   LWA_GATE_PYTHON   指定 Python 解释器（默认依次尝试 .venv、uv run、python3、python）
 #   LWA_TEST_CADDY    指定 caddy 可执行文件，只用于 Caddyfile 语义测试（tests/scripts/_caddy.py）
+#   LWA_GATE_JOBS     pytest 并行 worker 数（DEV-166）：默认 3（控制资源占用）；1 或 0 强制串行，auto 用全部核
+#                     （调试 -s / --pdb 时用）。需要 pytest-xdist，缺失时自动退回串行。
+#                     分组策略见 tests/scripts/conftest.py 的 _REAL_PORT_FILES：占用固定测试
+#                     端口池的文件固定同组串行，其余每个文件独立成组。
 
 set -uo pipefail
 
@@ -81,8 +85,22 @@ run_step() {
     fi
 }
 
+# ---- pytest 并行参数 -----------------------------------------------------------
+PYTEST_PAR=()
+JOBS="${LWA_GATE_JOBS:-3}"
+if [[ "$JOBS" != "0" && "$JOBS" != "1" ]]; then
+    if "${PY[@]}" -c 'import xdist' >/dev/null 2>&1; then
+        PYTEST_PAR=(-n "$JOBS" --dist loadgroup)
+        echo "gate: pytest 并行 = -n $JOBS --dist loadgroup（LWA_GATE_JOBS=1 可强制串行）"
+    else
+        echo "gate: 未安装 pytest-xdist —— pytest 串行执行（uv sync --extra dev 可启用并行）"
+    fi
+else
+    echo "gate: pytest 串行（LWA_GATE_JOBS=$JOBS）"
+fi
+
 run_step "ruff" "${PY[@]}" -m ruff check src tests
-run_step "pytest" env LC_ALL=C LANG=C "${PY[@]}" -m pytest "$@"
+run_step "pytest" env LC_ALL=C LANG=C "${PY[@]}" -m pytest "${PYTEST_PAR[@]}" "$@"
 run_step "diff-check(工作区)" git diff --check
 run_step "diff-check(暂存区)" git diff --cached --check
 

@@ -18,9 +18,9 @@ def bootstrap(level: str = "INFO") -> None:
     """
     log_dir = None
     try:
-        from local_webpage_access.paths import Workspace, find_workspace_root
+        from local_webpage_access.paths import Workspace, locate_workspace_root
 
-        root = find_workspace_root()
+        root = locate_workspace_root()
         if root is not None:
             log_dir = Workspace(root).logs
     except Exception:  # noqa: BLE001 — 日志初始化不得阻断 CLI

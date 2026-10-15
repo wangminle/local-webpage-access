@@ -1,12 +1,14 @@
 """``lwa workspace`` 子命令组（IMP-042 / DEV-089）：工作区迁移。
 
-唯一执行入口：``lwa workspace relocate``。交互与排障见 Skill
+``lwa workspace relocate`` 迁移工作区。``lwa workspace use`` 记住默认工作区，
+供不在该目录里的命令回退使用。交互与排障见 Skill
 ``lwa-relocate-workspace``；人工逃生舱见 ``docs/workspace-rename.md``。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,7 +17,62 @@ import typer
 from local_webpage_access.cli._common import log
 from local_webpage_access.errors import LwaError, MigrateError
 
-app = typer.Typer(help="工作区级操作（迁移 / relocate）")
+app = typer.Typer(help="工作区级操作（默认工作区 / 迁移）")
+
+
+@app.command("use")
+def workspace_use(
+    path: str | None = typer.Argument(
+        None, help="要记住的已初始化工作区根目录；省略则显示当前默认值"
+    ),
+    clear: bool = typer.Option(False, "--clear", help="清除已保存的默认工作区文件"),
+) -> None:
+    """记住默认工作区，使其他目录里的 lwa 命令不必先 cd。"""
+    from local_webpage_access.paths import (
+        CONFIG_FILENAME,
+        ENV_WORKSPACE,
+        clear_default_workspace,
+        default_workspace_config_path,
+        read_saved_default_workspace,
+        write_default_workspace,
+    )
+
+    if clear and path is not None:
+        typer.secho("不能同时指定路径和 --clear", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    if clear:
+        removed = clear_default_workspace()
+        if removed:
+            typer.echo(f"已清除 {default_workspace_config_path()}")
+        else:
+            typer.echo("没有已保存的默认工作区。")
+        if os.environ.get(ENV_WORKSPACE, "").strip():
+            typer.echo(f"环境变量 {ENV_WORKSPACE} 仍然生效。")
+        return
+    if path is None:
+        saved, source = read_saved_default_workspace()
+        if saved is None:
+            typer.echo(
+                "未设置默认工作区。执行 lwa workspace use <工作区绝对路径>，"
+                f"或设置 {ENV_WORKSPACE}。"
+            )
+            return
+        typer.echo(f"{saved}")
+        typer.echo(f"来源：{source}")
+        return
+
+    root = Path(path).expanduser().resolve()
+    if not (root / CONFIG_FILENAME).is_file():
+        typer.secho(
+            f"该路径不是已初始化工作区（缺少 {CONFIG_FILENAME}）：{root}\n"
+            "请指向已有 runtime。不要为了设置默认值而 lwa init 一个新目录。",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    dest = write_default_workspace(root)
+    typer.echo(f"已将默认工作区设为 {root}")
+    typer.echo(f"保存在 {dest}")
 
 
 @app.command("relocate")
@@ -59,7 +116,7 @@ def workspace_relocate(
         raise typer.Exit(code=2)
 
     try:
-        from local_webpage_access.paths import Workspace, find_workspace_root, require_workspace
+        from local_webpage_access.paths import Workspace, locate_workspace_root, require_workspace
         from local_webpage_access.workspace_migrate import read_journal, run_migrate
 
         def _load_journal(*candidates: Path | None):
@@ -84,7 +141,7 @@ def workspace_relocate(
         if from_path:
             old = Path(from_path).expanduser().resolve()
         elif resume or verify or rollback:
-            found = find_workspace_root()
+            found = locate_workspace_root()
             if found is not None:
                 old = found
             elif new_path:
@@ -96,7 +153,7 @@ def workspace_relocate(
 
         if resume or verify or rollback:
             # BUG-390：即使显式传入 NEW，也必须读 journal 拿权威 old/new
-            found = find_workspace_root()
+            found = locate_workspace_root()
             journal = _load_journal(
                 Path(from_path).expanduser().resolve() if from_path else None,
                 found,

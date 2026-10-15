@@ -59,8 +59,22 @@ app = typer.Typer(
 def main_callback(
     ctx: typer.Context,
     verbose: bool = typer.Option(False, "--verbose", "-v", help="输出 DEBUG 级别日志"),
+    workspace: str | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help=(
+            "已初始化的工作区根目录（含 local-web.yml）。"
+            "省略时从当前目录向上查找，再使用 LWA_WORKSPACE 或 lwa workspace use 记住的默认值。"
+            "新建工作区仍用 lwa init --workspace <目录>"
+        ),
+    ),
 ) -> None:
     f"""{PRODUCT_NAME} 命令行工具。"""
+    from local_webpage_access.paths import pop_cli_workspace, push_cli_workspace
+
+    tokens = push_cli_workspace(workspace)
+    ctx.call_on_close(lambda: pop_cli_workspace(tokens))
     bootstrap("DEBUG" if verbose else "INFO")
     # S2-08 / issue #59：CLI 入口标记操作来源（默认即 cli；manager/daemon
     # 子进程入口会强制覆盖，spawn 继承的 cli 值不会失聪）。
@@ -80,7 +94,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.9.6-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.9.7-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())

@@ -795,9 +795,9 @@ def require_supported_platform(
     root = workspace_root
     if root is None and report is None:
         try:
-            from local_webpage_access.paths import find_workspace_root
+            from local_webpage_access.paths import locate_workspace_root
 
-            root = find_workspace_root()
+            root = locate_workspace_root()
         except Exception:  # noqa: BLE001 — 门禁不得因定位失败崩溃
             root = None
     rep = report or collect_platform_support_report(workspace_root=root)

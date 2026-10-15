@@ -6,7 +6,9 @@ description: >-
 
 # lwa-dockerize-node-app
 
-> 为小型 Node 后端生成最小化 `Dockerfile`，交由 `lwa` 构建运行。
+> 为小型 Node 后端核对 manifest，交由 `lwa` 重新渲染 `Dockerfile` 并构建运行。
+>
+> **生成物不是真相。** `docker/Dockerfile` 会在 `lwa start` / `lwa rebuild` 时按 manifest **重新渲染**。不要手写或手改这份文件。持久字段是 `entry.install`、`entry.start`、`container.internalPort`、`systemDeps`、`buildHooks`。
 
 ## 何时触发
 
@@ -28,9 +30,8 @@ description: >-
 
 ## 可修改文件
 
-- `apps/<id>/docker/Dockerfile`（新建或覆盖）。
-- `apps/<id>/.dockerignore`。
 - `apps/<id>/local-web.json`。
+- 不要手改 `apps/<id>/docker/Dockerfile` 或 `.dockerignore`；它们由 `lwa` 重新生成。
 
 ## 禁止事项
 

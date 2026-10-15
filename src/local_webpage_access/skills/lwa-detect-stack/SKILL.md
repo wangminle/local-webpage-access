@@ -26,16 +26,29 @@ description: >-
 
 ## 输出
 
-修改 `local-web.json` 的以下字段：
+只改 `local-web.json` 里 schema 接受的字段。`form`（`static` / `frontend-static` / `backend-container` / `fullstack-sqlite`）是识别分类用语，**不是**可写入的字段；写进 `servingMode` 会导致校验失败。
 
-- `kind`：`static` / `node` / `python`（其他语言设 `unknown` 并保持 pending）。
+持久化枚举：
+
+- `kind`：`static` / `node` / `python`。Go / Rust 等其他语言保持 `pending`，不要写非法 kind。
 - `runtime`：`shared-static` / `docker-compose`。
-- `servingMode`：`static` / `frontend-static` / `backend-container` / `fullstack-sqlite`。
-- `stack`：数组，如 `["React", "Vite", "FastAPI", "SQLite"]`。
+- `servingMode`：`shared-static` / `container`。
+- `stack`：数组，如 `["React", "Vite"]` 或 `["node-stdlib-http"]`。
 - `resourceProfile`：`tiny` / `small` / `medium` / `heavy`。
-- `database.type`：`none` / `sqlite` / `postgres` / `mysql` / `redis` / `unknown`。
+- `database.type`：有 SQLite 文件时写 `sqlite`。MySQL / PostgreSQL / Redis 只在诊断里说明，不要为此改生成的 compose。
+- `entry.install` / `entry.build` / `entry.start`：命令在 `entry` 对象内，不是顶层字段。
+- `container.internalPort`：容器监听端口，不是顶层 `internalPort`。
 - `buildHooks`（issue#7）：构建钩子命令数组，镜像构建期在依赖安装后逐条执行（如 `["python scripts/build_skills_bundle.py"]`）；仅在有明确构建期脚本证据时填写，值不得含换行。
 - `preStart`（issue#7）：启动前命令，容器启动时先于 `entry.start` 执行（如 `"alembic upgrade head"`）；仅在项目声明了启动前迁移/初始化步骤时填写，值不得含换行。
+
+分类怎么落到枚举：
+
+| 口头分类 | kind | runtime | servingMode |
+| --- | --- | --- | --- |
+| static | `static` | `shared-static` | `shared-static` |
+| frontend-static | `node` | `shared-static` | `shared-static` |
+| backend-container | `node` 或 `python` | `docker-compose` | `container` |
+| fullstack-sqlite | `node` 或 `python`，并设 `hasDatabase: true` | `docker-compose` | `container` |
 
 ## 可修改文件
 
@@ -65,11 +78,31 @@ description: >-
 
 ```json
 {
-  "kind": "static",
+  "kind": "node",
   "runtime": "shared-static",
-  "servingMode": "frontend-static",
+  "servingMode": "shared-static",
   "stack": ["React", "Vite"],
   "resourceProfile": "tiny",
-  "database": { "type": "none" }
+  "entry": { "install": "npm ci", "build": "npm run build", "start": null }
+}
+```
+
+零依赖 Node 内置 `http`（只有 `package.json` + `server.js`，`require('http')` / `createServer` / `listen`）被识别成 pending 静态草稿时，按容器后端补全后再 `lwa start`。不要改 `docker/Dockerfile`：
+
+```json
+{
+  "kind": "node",
+  "runtime": "docker-compose",
+  "servingMode": "container",
+  "stack": ["node-stdlib-http"],
+  "resourceProfile": "tiny",
+  "status": "stopped",
+  "entry": { "install": null, "build": null, "start": "node server.js" },
+  "container": {
+    "projectName": "lwa-demo",
+    "internalPort": 3000,
+    "composePath": "docker/compose.yaml",
+    "dockerfilePath": "docker/Dockerfile"
+  }
 }
 ```

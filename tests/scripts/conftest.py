@@ -34,8 +34,17 @@ requires_docker_daemon = pytest.mark.skipif(
 )
 
 
+# DEV-166：会真实调用 Docker 构建/重建、单例耗时 30s 以上的验收用例不进默认门禁，
+# 与 ``test_docker_*_integration.py`` 一致，设置 ``LWA_RUN_DOCKER_TESTS=1`` 才执行。
+requires_docker_opt_in = pytest.mark.skipif(
+    os.environ.get("LWA_RUN_DOCKER_TESTS") != "1" or not _docker_available(),
+    reason="设置 LWA_RUN_DOCKER_TESTS=1（且需 docker 命令）以启用真实 Docker 耗时用例",
+)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "requires_docker: 需要宿主机 docker 命令")
+    config.addinivalue_line("markers", "xdist_group(name): pytest-xdist 并行分组（DEV-166）")
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:  # noqa: ARG001
@@ -93,13 +102,6 @@ def config(workspace_root: Path):
 #    ``manager_service`` / ``daemon``（工作区在 pytest 临时目录，常占 :17800/:17801），
 #    旧泄漏网扫不到 → 曾存活十余天（OPS-071）。
 # 会话起止清理，保证套件幂等；正式工作区路径不含 pytest 标记，不会被误杀。
-_TEST_PORT_POOL_START = 21000
-_TEST_PORT_POOL_END = 21050
-_TEST_HTTP_PORT_RANGES = (
-    (_TEST_PORT_POOL_START, _TEST_PORT_POOL_END),
-    (22000, 22050),
-    (23000, 23050),
-)
 # pytest 临时工作区路径特征（含跨 session 已删目录仍留在 cmdline 的孤儿）
 _PYTEST_WS_MARK = re.compile(
     r"(?:[/\\]pytest-of-[^/\\ \"']+|/pytest-\d+|\\pytest-\d+)",
@@ -110,6 +112,56 @@ _LWA_SERVICE_WS = re.compile(
     r"--workspace(?:\s+|=)([^\s\"']+)",
     re.IGNORECASE,
 )
+
+
+# DEV-166：pytest-xdist 并行（gate 默认 ``-n 3 --dist loadgroup``）。
+# 多个文件真实占用共享的固定测试端口池（21000/22000/23000 段 http.server、
+# 端口登记复用、doctor 占位探测等），分散到不同 worker 会互相抢端口。
+# 曾试过按 worker 平移端口池，但大量用例断言字面端口（21000/21001…），平移会让
+# 它们整片失败——因此改为：这批文件固定归入同一个 xdist 分组（同一 worker 串行），
+# 其余每个文件独立成组（等价 ``--dist loadfile``，保留文件内顺序语义）。
+_REAL_PORT_FILES = frozenset(
+    {
+        "test_agent_api",
+        "test_agent_m1_acceptance",
+        "test_agent_operations",
+        "test_agent_recovery",
+        "test_access",
+        "test_bug704_chk349_agent_guards",
+        "test_bug706_709_agent_m1_guards",
+        "test_bug753_stage_observability",
+        "test_bug783_admin_port",
+        "test_caddy_semantics",
+        "test_daemon",
+        "test_doctor",
+        "test_e2e_acceptance",
+        "test_host_container",
+        "test_hosting",
+        "test_gateway_service",
+        "test_gateway_start_race",
+        "test_https_first_delivery",
+        "test_issue43_gateway_adopt",
+        "test_lifecycle",
+        "test_manager_service",
+        "test_ports",
+        "test_s2_03_rebuild_txn",
+        "test_s2_07_ownership",
+        "test_s2_audit_p1_fixes",
+        "test_s3_02_consistency",
+        "test_static_gateway",
+    }
+)
+_REAL_PORT_GROUP = "real-ports"
+
+
+def _xdist_group_for(module_stem: str) -> str:
+    """文件 → xdist 分组名：真实占端口的文件共用一组，其余按文件分组。"""
+    return _REAL_PORT_GROUP if module_stem in _REAL_PORT_FILES else module_stem
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:  # noqa: ARG001
+    for item in items:
+        item.add_marker(pytest.mark.xdist_group(_xdist_group_for(item.path.stem)))
 
 
 def _parse_pid_cmdline_lines(out: str) -> list[tuple[int, str]]:
@@ -162,24 +214,60 @@ def _pgrep_lf(pattern: str) -> str:
 def _list_http_server_pids_on_test_ports() -> set[int]:
     """枚举测试泄漏的 ``http.server`` 进程 PID。
 
-    命中任一即纳入（避免误杀正式工作区实例）：
-    1. 命令行 ``http.server <port>`` 且端口落在测试端口池（21000/22000/23000 段）；
-    2. 命令行同时含 ``http.server`` 与 pytest 临时工作区路径标记（operations
-       测试默认 18000 段也走这条，正式 ``/opt/.../apps`` 不命中）。
+    必须同时含 ``http.server`` 与 pytest 临时工作区路径标记。
+    端口池也可能被普通服务使用，不能作为测试归属证据；此约束同时保护
+    跨会话陈旧回收和会话结束差集清理。
     """
     pids: set[int] = set()
-    port_pat = re.compile(r"http\.server\s+(\d+)\b")
     out = _pgrep_lf(r"http\.server" if os.name == "nt" else "http.server")
     for pid, cmdline in _parse_pid_cmdline_lines(out):
-        in_pytest_ws = bool(_PYTEST_WS_MARK.search(cmdline))
-        in_pool = False
-        mport = port_pat.search(cmdline)
-        if mport:
-            port = int(mport.group(1))
-            in_pool = any(lo <= port <= hi for lo, hi in _TEST_HTTP_PORT_RANGES)
-        if in_pool or in_pytest_ws:
+        if re.search(r"\bhttp\.server\b", cmdline) and _PYTEST_WS_MARK.search(cmdline):
             pids.add(pid)
     return pids
+
+
+# DEV-166：被中断（Ctrl-C / kill / 超时）的旧会话没机会跑 teardown，会话级“起止差集”
+# 又把它们算进启动快照，导致孤儿永远不被回收（实测残留 39 个、存活 1 天以上）。
+# 单个测试不会跑几小时，因此“属于测试 + 存活超阈值”的 http.server 一定是陈旧孤儿。
+_STALE_HTTP_SERVER_SECONDS = 3 * 3600
+_ETIME_RE = re.compile(r"^(?:(?:(\d+)-)?(?:(\d+):)?(\d+):)(\d+)$")
+
+
+def _parse_etime(text: str) -> int | None:
+    """解析 ``ps -o etime=``（``[[dd-]hh:]mm:ss``）为秒；无法解析返回 ``None``。"""
+    m = _ETIME_RE.match(text.strip())
+    if not m:
+        return None
+    days, hours, minutes, seconds = (int(g) if g else 0 for g in m.groups())
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+
+
+def _process_age_seconds(pid: int) -> int | None:
+    """进程存活秒数（仅 POSIX；Windows / 查询失败返回 ``None``，调用方保守不杀）。"""
+    if os.name == "nt":
+        return None
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return _parse_etime(proc.stdout or "")
+
+
+def _list_stale_http_server_pids(
+    *, max_age_seconds: int = _STALE_HTTP_SERVER_SECONDS
+) -> set[int]:
+    """测试 ``http.server`` 中存活超过阈值的陈旧孤儿 PID（跨会话残留）。"""
+    stale: set[int] = set()
+    for pid in _list_http_server_pids_on_test_ports():
+        age = _process_age_seconds(pid)
+        if age is not None and age > max_age_seconds:
+            stale.add(pid)
+    return stale
 
 
 def stop_workspace_test_builtins(workspace: Workspace) -> None:
@@ -280,6 +368,9 @@ def _cleanup_orphan_test_processes(tmp_path_factory) -> None:
         - own_pids
     )
     for pid in sorted(own_pids | orphan_pids):
+        _kill_pid(pid)
+    # DEV-166：先回收被中断旧会话遗留的陈旧 http.server，再取启动快照
+    for pid in sorted(_list_stale_http_server_pids()):
         _kill_pid(pid)
     initial_http = _list_http_server_pids_on_test_ports()
     yield

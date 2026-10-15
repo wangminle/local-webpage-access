@@ -6,7 +6,9 @@ description: >-
 
 # lwa-dockerize-python-app
 
-> 为小型 Python 后端（FastAPI/Flask/Django）生成最小化 `Dockerfile`。
+> 为小型 Python 后端（FastAPI/Flask/Django）核对 manifest，交由 `lwa` 重新渲染 `Dockerfile`。
+>
+> **生成物不是真相。** `docker/Dockerfile` 会在 `lwa start` / `lwa rebuild` 时按 manifest **重新渲染**。不要手写或手改这份文件。持久字段是 `entry.install`、`entry.start`、`preStart`、`container.internalPort`、`systemDeps`、`buildHooks`。
 
 ## 何时触发
 
@@ -24,14 +26,12 @@ description: >-
 
 - 生成 `apps/<id>/docker/Dockerfile`（由 `dockerfile_templates.generate_dockerfile` 渲染）。
 - 同步生成 `apps/<id>/.dockerignore`（排除 `node_modules` / `.git` / `__pycache__` / `.env` 等）。
-- 修改 `local-web.json` 的 `container` 字段（`image`、`internalPort`、`entry.start`）。
+- 修改 `local-web.json` 的 `container.internalPort` 与顶层 `entry.start`（`entry` 不在 `container` 里面）。
 
 ## 可修改文件
 
-- `apps/<id>/docker/Dockerfile`。
-- `apps/<id>/.dockerignore`。
 - `apps/<id>/local-web.json`。
-- 必要时手工微调上述生成文件（改模板可惠及全部 Python 实例）。
+- 不要手改 `apps/<id>/docker/Dockerfile` 或 `.dockerignore`；它们由 `lwa` 重新生成。
 
 ## 禁止事项
 

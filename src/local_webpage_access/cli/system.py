@@ -153,9 +153,9 @@ def setup_cmd(
     if profile == "full":
         ws_root = None
         try:
-            from local_webpage_access.paths import find_workspace_root
+            from local_webpage_access.paths import locate_workspace_root
 
-            ws_root = find_workspace_root()
+            ws_root = locate_workspace_root()
         except Exception:  # noqa: BLE001
             ws_root = None
         boot = run_full_bootstrap(yes=yes, resume=resume, workspace_root=ws_root)
@@ -239,9 +239,9 @@ def setup_cmd(
     if profile == "default" and not json_output:
         try:
             from local_webpage_access.config import load_config
-            from local_webpage_access.paths import find_workspace_root
+            from local_webpage_access.paths import locate_workspace_root
 
-            ws_root = find_workspace_root()
+            ws_root = locate_workspace_root()
             if ws_root is not None:
                 from local_webpage_access import autostart as asm
                 from local_webpage_access.paths import Workspace

@@ -5,7 +5,7 @@ managerPort: 17800
 portPool:
   start: 18000
   end: 19999
-staticGateway: caddy          # caddy | nginx | builtin
+staticGateway: caddy          # caddy | builtin（nginx 为历史无效值，加载时自动按 builtin 兼容）
 buildConcurrency: 1
 defaultResourceLimits:
   memory: 512m

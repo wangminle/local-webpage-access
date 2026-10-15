@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import tests.scripts.conftest as cf
 
 
@@ -163,3 +165,64 @@ def test_only_under_prefix_does_not_cross_directory_boundary(monkeypatch, tmp_pa
     own_root = str(tmp_path / "session-A")
     # own_root 不存在；sibling = tmp_path/session-A-extra，不以 own_root + sep 开头
     assert cf._list_lwa_service_pids_on_pytest_workspaces(only_under=own_root) == set()
+
+
+# ---- DEV-166：跨会话残留（被中断的旧 pytest 会话）的陈旧 http.server 清理 ------------
+
+
+def test_parse_etime_handles_all_ps_formats() -> None:
+    assert cf._parse_etime("00:05") == 5
+    assert cf._parse_etime("07:37") == 7 * 60 + 37
+    assert cf._parse_etime("01:02:03") == 3723
+    assert cf._parse_etime("1-04:30:11") == 86400 + 4 * 3600 + 30 * 60 + 11
+    assert cf._parse_etime("garbage") is None
+    assert cf._parse_etime("") is None
+
+
+def test_stale_http_server_only_returns_old_test_processes(monkeypatch) -> None:
+    """陈旧 = 属于 pytest 工作区且存活超过阈值；年轻的（可能是并发会话）不动。"""
+    out = (
+        "111\t/usr/bin/python -m http.server 21001 --directory "
+        "/tmp/pytest-of-u/pytest-1/t_old/ws/apps/a/public\n"
+        "222\t/usr/bin/python -m http.server 21002 --directory "
+        "/tmp/pytest-of-u/pytest-1/t_new/ws/apps/b/public\n"
+        "333\t/usr/bin/python -m http.server 18001 --directory /opt/lwa/apps/prod/current\n"
+    )
+    monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
+    ages = {111: 2 * 86400, 222: 30, 333: 9 * 86400}
+    monkeypatch.setattr(cf, "_process_age_seconds", lambda pid: ages.get(pid))
+    assert cf._list_stale_http_server_pids(max_age_seconds=3600) == {111}
+
+
+def test_stale_http_server_skips_unknown_age(monkeypatch) -> None:
+    """取不到进程年龄（如 Windows / ps 失败）时保守不杀。"""
+    out = (
+        "111\t/usr/bin/python -m http.server 21001 --directory "
+        "/tmp/pytest-of-u/pytest-1/t_old/ws/apps/a/public\n"
+    )
+    monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
+    monkeypatch.setattr(cf, "_process_age_seconds", lambda pid: None)
+    assert cf._list_stale_http_server_pids(max_age_seconds=3600) == set()
+
+
+@pytest.mark.parametrize("port", [21001, 22001, 23001])
+def test_http_cleanup_preserves_unrelated_servers_on_test_ports(monkeypatch, port) -> None:
+    """端口和存活时间都不能证明普通 HTTP 服务属于 pytest。"""
+    out = f"111\t/usr/bin/python -m http.server {port} --directory /srv/my-site\n"
+    monkeypatch.setattr(cf, "_pgrep_lf", lambda pattern: out)
+    monkeypatch.setattr(cf, "_process_age_seconds", lambda pid: 9 * 86400)
+    assert cf._list_stale_http_server_pids() == set()
+    assert cf._list_http_server_pids_on_test_ports() == set()
+
+
+# ---- DEV-166：xdist 分组 -----------------------------------------------------------
+
+
+def test_xdist_group_puts_port_bound_files_together() -> None:
+    assert cf._xdist_group_for("test_hosting") == cf._xdist_group_for("test_agent_api")
+    assert cf._xdist_group_for("test_hosting") == "real-ports"
+
+
+def test_xdist_group_isolates_other_files_per_module() -> None:
+    assert cf._xdist_group_for("test_scanner") == "test_scanner"
+    assert cf._xdist_group_for("test_models") == "test_models"

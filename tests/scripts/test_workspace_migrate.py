@@ -13,7 +13,11 @@ import pytest
 
 from local_webpage_access.errors import MigrateError
 from local_webpage_access.init_workspace import init_workspace
-from local_webpage_access.paths import Workspace
+from local_webpage_access.paths import (
+    Workspace,
+    default_workspace_config_path,
+    write_default_workspace,
+)
 from local_webpage_access.registry import Registry
 from local_webpage_access import workspace_migrate as wm
 
@@ -21,6 +25,7 @@ from local_webpage_access import workspace_migrate as wm
 @pytest.fixture()
 def ws_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """初始化最小工作区；禁止 init 拉起 manager。"""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "user-config"))
     monkeypatch.setattr(
         "local_webpage_access.manager_service.maybe_start_manager",
         lambda *a, **k: None,
@@ -554,6 +559,118 @@ def test_regenerate_clears_capability_only(ws_root: Path, monkeypatch: pytest.Mo
 # ---- Task 8–9: dry-run / full migrate / rollback ---------------------------
 
 
+@pytest.mark.parametrize("with_env_override", [False, True])
+def test_migrate_updates_matching_saved_default(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_env_override: bool
+) -> None:
+    """即使环境变量覆盖选择，也须同步文件中指向 OLD 的默认值。"""
+    _patch_migrate_side_effects(monkeypatch)
+    new = tmp_path / "new-ws"
+    saved = write_default_workspace(ws_root)
+    if with_env_override:
+        monkeypatch.setenv("LWA_WORKSPACE", str(tmp_path / "env-ws"))
+    else:
+        monkeypatch.delenv("LWA_WORKSPACE", raising=False)
+
+    result = wm.run_migrate(ws_root, new, yes=True)
+    assert result.ok, result.error
+    assert saved.read_text().strip() == str(new.resolve())
+
+
+def test_rollback_updates_matching_saved_default(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_migrate_side_effects(monkeypatch)
+    old = ws_root.resolve()
+    new = tmp_path / "new-ws"
+    assert wm.run_migrate(old, new, yes=True).ok
+    saved = write_default_workspace(new)
+
+    result = wm.run_migrate(old, new, rollback=True)
+    assert result.ok, result.error
+    assert saved.read_text().strip() == str(old)
+
+
+@pytest.mark.parametrize("saved_target", [None, "old-ws-other"])
+def test_migrate_and_rollback_preserve_unrelated_default(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_target: str | None
+) -> None:
+    _patch_migrate_side_effects(monkeypatch)
+    saved = default_workspace_config_path()
+    if saved_target is not None:
+        write_default_workspace(tmp_path / saved_target)
+    before = saved.read_bytes() if saved.exists() else None
+    new = tmp_path / "new-ws"
+
+    assert wm.run_migrate(ws_root, new, yes=True).ok
+    assert (saved.read_bytes() if saved.exists() else None) == before
+    assert wm.run_migrate(ws_root, new, rollback=True).ok
+    assert (saved.read_bytes() if saved.exists() else None) == before
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_migrate_preserves_saved_default_without_verified_success(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    _patch_migrate_side_effects(monkeypatch)
+    saved = write_default_workspace(ws_root)
+    before = saved.read_bytes()
+    monkeypatch.setattr(wm, "verify_migrate", lambda *a, **k: (False, ["验收失败"]))
+
+    result = wm.run_migrate(ws_root, tmp_path / "new-ws", dry_run=dry_run, yes=True)
+    assert result.ok is dry_run
+    assert saved.read_bytes() == before
+
+
+def test_cli_saved_default_survives_relocate_and_rollback(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """从项目目录设置默认值后，迁移及回滚的后续命令仍能找到工作区。"""
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+
+    _patch_migrate_side_effects(monkeypatch)
+    monkeypatch.delenv("LWA_WORKSPACE", raising=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    new = tmp_path / "new-ws"
+    runner = CliRunner()
+
+    saved = runner.invoke(app, ["workspace", "use", str(ws_root)])
+    assert saved.exit_code == 0, saved.output
+    moved = runner.invoke(app, ["workspace", "relocate", str(new), "--yes"])
+    assert moved.exit_code == 0, moved.output
+    status = runner.invoke(app, ["status"])
+    assert status.exit_code == 0, status.output
+
+    rolled_back = runner.invoke(app, ["workspace", "relocate", "--rollback", "--yes"])
+    assert rolled_back.exit_code == 0, rolled_back.output
+    assert default_workspace_config_path().read_text().strip() == str(ws_root.resolve())
+    status = runner.invoke(app, ["status"])
+    assert status.exit_code == 0, status.output
+
+
+@pytest.mark.parametrize("verify_ok", [False, True])
+def test_resume_complete_syncs_default_only_after_success(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verify_ok: bool
+) -> None:
+    old = ws_root.resolve()
+    new = tmp_path / "new-ws"
+    saved = write_default_workspace(old)
+    old.rename(new)
+    wm.write_journal(
+        Workspace(new),
+        {"phase": "complete", "old": str(old), "new": str(new), "verify_ok": verify_ok},
+    )
+    monkeypatch.setattr(wm, "verify_migrate", lambda *a, **k: (verify_ok, []))
+
+    result = wm.run_migrate(old, new, resume=True)
+    assert result.ok is verify_ok
+    assert saved.read_text().strip() == str(new.resolve() if verify_ok else old)
+
+
 def test_run_migrate_dry_run_no_move(ws_root: Path, tmp_path: Path) -> None:
     new = tmp_path / "new-ws"
     result = wm.run_migrate(ws_root, new, dry_run=True)
@@ -695,6 +812,15 @@ def test_verify_detects_old_path_in_manifest(ws_root: Path) -> None:
 
 
 def _patch_migrate_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEV-166：restore_instances 会按迁前控制面运行态拉回 detached 进程；
+    # 不替换则测试真实 start_daemon（等 watcher ~30s）并在 pytest 工作区留下孤儿进程。
+    monkeypatch.setattr("local_webpage_access.daemon.start_daemon", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.maybe_start_manager", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.gateway_service.maybe_start_gateway", lambda *a, **k: None
+    )
     monkeypatch.setattr("local_webpage_access.lifecycle.stop_instance_op", lambda *a, **k: None)
     monkeypatch.setattr("local_webpage_access.lifecycle.start_instance", lambda *a, **k: None)
     monkeypatch.setattr(

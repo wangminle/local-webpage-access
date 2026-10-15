@@ -97,7 +97,7 @@ swap=4GB
 ## 项目识别
 
 * **支持识别**：纯静态 HTML、纯前端 SPA（Vite/React/Vue/Svelte 等基于 `package.json` 的项目）、
-  Node 后端（Express/Fastify 等）、Python 后端（FastAPI/Flask/Django 等）、含 SQLite 的全栈项目。
+  Node 后端（Express/Fastify，以及无框架、使用内置 `http` 的 `server.js` 等）、Python 后端（FastAPI/Flask/Django，以及无第三方框架的 `http.server` / `socketserver`）、含 SQLite 的全栈项目。
 * **不自动识别**：Go / Rust / Java / .NET / PHP / Ruby 等其他生态（导入后标记 `pending`，
   需用户手动配置或扩展扫描器）。
 * **数据库**：仅自动识别 SQLite（文件型）。MySQL / PostgreSQL / Redis 等网络数据库
@@ -151,6 +151,7 @@ swap=4GB
 * **浏览量统计**：Caddy 模式下别名入口与无别名静态站点的直连端口均可计入（IMP-028 按 `request.host` 端口归属；探测请求 `__lwa_probe` 排除）；builtin 解析各实例 `gateway.log`；有别名的容器优先走 Caddy 日志（IMP-027），无别名容器仍为 docker logs 尽力解析（近似）。游标为路径无关稳定 key（工作区改名不致重复计入）。**V0.6.13** 起 Caddy `-size.log.gz` 多轮转/旧游标迁移/归档暂时不可读时的补读逻辑已加固（避免双计或永久漏计）。
 * **工作区迁移（IMP-042）**：`lwa workspace relocate` **仅同卷**原子改名（macOS / Linux / WSL Linux 盘）；跨盘 / 跨机不自动，见 [工作区迁移手册](workspace-rename.md)。勿只做 `mv`。**V0.6.12** 起代码侧加固裸 mv 残留（gateway 启动前写主配置、SQLite mount 漂移 fail-safe、派生路径回写、doctor `workspace_path_consistency`），**V0.6.13** 起容器查询失败禁止绕过挂载 fail-safe、registry 不可读时一致性检查 SKIP，但仍不能替代正式 relocate 事务。
 * **一致性巡检的生成物比对边界（S3-02 / CHK-402）**：`doctor state_consistency` 的生成物比对以「部署基线 configHash + mtime」判定，不按 manifest 重渲染（渲染需读 `app_current` 源码，离线重渲染会失真）。「先手改 `docker/compose.yaml` 等生成物、之后又执行过 `lwa configure`」的情形会被 mtime 判为待生效而不报告；该场景由配置收敛在下一次 `start`/`restart` 时按 manifest 覆盖并告警兜底。挂载一致性检查（目标路径、宿主源路径与 ro/rw）只在 `lwa doctor` 执行，daemon 周期巡检不做 Docker 探测；无主锁文件按锁机制设计属正常状态，不判漂移。
+* **Flask/Django WSGI 入口推断边界（V0.9.6 / IMP-066）**：无显式启动命令时按「唯一可证明」推断 WSGI 入口并生成 Gunicorn；多候选入口、`manage.py` 缺失或多个 `wsgi.py` 时不猜测，回退框架开发服务器（不阻断导入；扫描备注 / manifest `preflightSummary` / doctor `dev_server_fallback` 同源警告）。存量实例仅在 `rebuild` / 源码更新后重生成时应用。前端预构建产物的时效性检查同理只分级告警（疑似 / 无法判断），「确证」需构建期源码指纹（#61 预构建规划中）。
 * **文件夹源导入（IMP-047）**：`lwa import --from-dir` 从本机文件夹**复制**进工作区（非就地运行）；关联目录是只读源，LWA 不会监听其变更，需手动执行 `--from-dir --update <id>`、`lwa rebuild --sync <id>`（V0.8.5，先同步源码再重建）或管理页「从源更新」同步；`lwa rebuild` 与 `lwa doctor`（`source_freshness` 检查，WARN 级纯离线）会提示源码已漂移的实例。源目录被删除 / 移动后 update 会报错（不回退到 mount 模式）。folder 源更换关联目录用 `--allow-source-change`（V0.9.1，保留 id / 端口 / 别名 / data/；相对路径先解析，写回绝对路径）。`sourceKind=zip`/`git` 的实例可用 `--from-dir <目录> --update <id>` **原地切换为文件夹源**（issue #28，「换源不换实例」：保留实例 id / hostPort / 路径别名 / data/，仅覆盖 current/ 并登记新源身份）；不带目录的 `--from-dir --update` 仍仅对 folder 源有效（`rebuild --sync` 同样仅支持 folder/git 源）。请选项目根或 `dist/`，不要只选 `src/`。静态实例 rebuild 在本站点仍监听原端口时复用该端口（V0.9.1）。
 * **GitHub 源导入的锁语义（IMP-065 / CHK-239）**：git 导入/更新在
   `import_activity` 全局锁内完成探测（ls-remote ≤30s）与克隆（≤180s）——设计取舍：
@@ -257,6 +258,8 @@ swap=4GB
 * **`buildHooks` 含 apt-get**：钩子原样写入 Dockerfile，**不会**自动注入 apt 镜像。
   系统包请迁到 `systemDeps`（`lwa configure <id> --system-deps ffmpeg`），以便切源、
   重试与层缓存命中。旧 hook 示例：删掉 `apt-get install … ffmpeg`，改配 `systemDeps: [ffmpeg]`。
+* **Node / Alpine 的 `systemDeps`**：以 `apk add --no-cache` 插在依赖安装层之前，
+  没有 apt 切源、重试和 cache mount。`buildHooks` 在 npm 安装之后，不能用来补安装期缺失的编译工具。
 
 * **导入预览（#30）**：`lwa import --dry-run` 仅支持带 `--update <id>` 的原地更新。全新 zip、folder、git 导入传该选项会在打开工作区/下载前以退出码 2 拒绝，不会静默执行真实导入。
 * **构建环境**：`buildEnv` / `buildBaseFromAlias` 用于宿主前端安装/构建命令，容器实例则经 Docker `ARG`/`ENV` 与 Compose `build.args` **字面值**注入（issue #39；不写入 `docker/.env`，也不能用 `HOST_PORT` 等管理键覆盖 LWA 分配的端口）。这不是容器**运行期**环境（运行期仍用 `docker/.env` / `.env.local`）。Vite 项目须主动读取 `VITE_BASE`；Python 模板不执行 `entry.build`，预编译 `backend/static` 需在含 `frontend/` 的源码上走镜像内 `npm run build`（或 `buildHooks`）。别名跟随仅在下次构建生效，不会自动重构建或改写源码。手改 `entry.build --base` 不属于重扫保留清单，请优先使用 `lwa configure` 的持久配置。

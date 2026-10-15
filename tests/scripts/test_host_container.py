@@ -326,6 +326,8 @@ def test_host_container_health_check_failure_does_not_block(
     首次部署的容器，存活探针超时 = 部署失败。
     """
     monkeypatch.setattr("local_webpage_access.hosting._http_ok", lambda port, **kw: False)
+    # DEV-166：存活探针默认轮询 30 次 × 1s，真实 sleep 白等 30s
+    monkeypatch.setattr("local_webpage_access.hosting.time.sleep", lambda s: None)
     _seed_container_instance(workspace, registry, "api")
     with pytest.raises(HostingError, match="必选探针未通过"):
         host_container(workspace, config, registry, "api")

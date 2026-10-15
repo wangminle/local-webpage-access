@@ -557,6 +557,117 @@ def test_import_node_frontend(importer: Importer, tmp_path: Path) -> None:
     assert result.manifest.runtime == Runtime.SHARED_STATIC
 
 
+_NODE_STDLIB_SERVER = """\
+const http = require('http');
+const server = http.createServer((req, res) => {
+  res.end('ok');
+});
+server.listen(process.env.PORT || 3000);
+"""
+
+_PYTHON_STDLIB_SERVER = """\
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'ok')
+
+port = int(os.environ.get('PORT', '8000'))
+HTTPServer(('0.0.0.0', port), Handler).serve_forever()
+"""
+
+
+def test_import_node_stdlib_http_is_container_not_pending_static(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """BUG-844：无框架的 Node 内置 http 必须生成容器计划，不能退回 pending 静态草稿。"""
+    import json
+
+    zip_path = _make_zip(
+        tmp_path / "node-http.zip",
+        {
+            "package.json": json.dumps({"name": "node-http"}),
+            "server.js": _NODE_STDLIB_SERVER,
+        },
+    )
+    manifest = importer.import_zip(zip_path).manifest
+    assert manifest.kind == Kind.NODE
+    assert manifest.runtime == Runtime.DOCKER_COMPOSE
+    assert manifest.servingMode == ServingMode.CONTAINER
+    assert manifest.status == Status.STOPPED
+    assert manifest.container is not None
+    assert manifest.entry is not None
+    assert manifest.entry.start is not None and "server.js" in manifest.entry.start
+    assert manifest.deploymentPlans
+    assert manifest.selectedPlanId
+
+
+def test_import_python_stdlib_http_is_container_not_pending_static(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """BUG-844：仅 server.py + http.server 的零依赖 Python 服务同样必须落成容器。"""
+    zip_path = _make_zip(
+        tmp_path / "py-http.zip",
+        {"server.py": _PYTHON_STDLIB_SERVER},
+    )
+    manifest = importer.import_zip(zip_path).manifest
+    assert manifest.kind == Kind.PYTHON
+    assert manifest.runtime == Runtime.DOCKER_COMPOSE
+    assert manifest.servingMode == ServingMode.CONTAINER
+    assert manifest.status == Status.STOPPED
+    assert manifest.container is not None
+    assert manifest.entry is not None
+    assert manifest.entry.start == "python server.py"
+    assert manifest.deploymentPlans
+
+
+def test_import_html_with_stdlib_helper_stays_static(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """有 index.html、又没有 Python 工程文件时，http.server 辅助脚本不得抢走静态站。"""
+    zip_path = _make_zip(
+        tmp_path / "site.zip",
+        {
+            "index.html": "<html><title>Site</title></html>",
+            "server.py": _PYTHON_STDLIB_SERVER,
+        },
+    )
+    manifest = importer.import_zip(zip_path).manifest
+    assert manifest.kind == Kind.STATIC
+    assert manifest.runtime == Runtime.SHARED_STATIC
+    assert manifest.status == Status.STOPPED
+
+
+def test_cli_import_node_stdlib_http(workspace: Workspace, tmp_path: Path, monkeypatch) -> None:
+    """BUG-844：CLI 导入与 Importer 同一条链，零依赖 Node HTTP 不得登记成静态 pending。"""
+    import json
+
+    from typer.testing import CliRunner
+
+    from local_webpage_access.cli import app
+    from local_webpage_access.init_workspace import init_workspace
+
+    init_workspace(workspace.root)
+    monkeypatch.chdir(workspace.root)
+    zip_path = _make_zip(
+        tmp_path / "cli-node-http.zip",
+        {
+            "package.json": json.dumps({"name": "cli-node-http"}),
+            "server.js": _NODE_STDLIB_SERVER,
+        },
+    )
+    result = CliRunner().invoke(app, ["import", str(zip_path)])
+    assert result.exit_code == 0, result.output
+    saved = next(workspace.apps.glob("*/local-web.json"))
+    manifest = InstanceManifest.load(saved)
+    assert manifest.kind == Kind.NODE
+    assert manifest.runtime == Runtime.DOCKER_COMPOSE
+    assert manifest.status == Status.STOPPED
+
+
 def test_import_python_backend(importer: Importer, tmp_path: Path) -> None:
     zip_path = _make_zip(
         tmp_path / "api.zip",

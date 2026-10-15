@@ -26,7 +26,7 @@ from local_webpage_access.config import Config, load_config
 from local_webpage_access.errors import MigrateError
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.models import DesiredState
-from local_webpage_access.paths import Workspace
+from local_webpage_access.paths import Workspace, rebind_saved_default_workspace
 from local_webpage_access.registry import Registry
 
 log = get_logger("workspace_migrate")
@@ -1333,6 +1333,8 @@ def _run_migrate_locked(
                 resume_verify_ok, resume_verify_notes = verify_migrate(
                     ws, str(old_r), str(new_r), snapshot
                 )
+            if resume_verify_ok:
+                rebind_saved_default_workspace(old_r, new_r)
             _save(
                 MigratePhase.COMPLETE.value,
                 completed_at=now_iso(),
@@ -1457,6 +1459,8 @@ def _run_migrate_locked(
             phase = MigratePhase.COMPLETE.value
 
         # COMPLETE（必须带上 verify_ok，避免 resume 丢失验收结果）
+        if verify_ok:
+            rebind_saved_default_workspace(old_r, new_r)
         _save(
             MigratePhase.COMPLETE.value,
             completed_at=now_iso(),
@@ -1608,6 +1612,14 @@ def _rollback_migrate(old: Path, new: Path, *, force_quiesce: bool = False) -> M
             notes.append(f"恢复实例失败：{exc}")
         finally:
             reg.close()
+
+        try:
+            rebind_saved_default_workspace(j_new, j_old)
+        except OSError as exc:
+            raise MigrateError(
+                f"工作区已回滚到 {j_old}，但默认工作区同步失败：{exc}。"
+                f"请执行 lwa workspace use {j_old} 更新默认值。"
+            ) from exc
 
         with contextlib.suppress(Exception):
             write_journal(

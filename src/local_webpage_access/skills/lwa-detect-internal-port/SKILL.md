@@ -33,7 +33,7 @@ description: >-
 
 ## 禁止事项
 
-- 不修改源码文件（除非是 `lwa` 托管的 `Dockerfile`/`compose`）。
+- 不修改源码文件，也不要手改 `docker/Dockerfile` 或 `docker/compose.yaml`（下次 `lwa start` / `lwa rebuild` 会重新渲染）。端口写在 `container.internalPort`。
 - 不把 `internalPort` 设为特权端口（<1024），除非源码明确要求。
 - 不臆造端口；找不到时保持 pending 并在诊断中说明。
 

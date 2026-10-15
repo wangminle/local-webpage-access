@@ -26,6 +26,20 @@ from local_webpage_access.updater import (
 # ---- fixtures --------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _service_probe_is_ready_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEV-166：run_update 重启分支会调 ``_wait_services_ready``（真实最长 30s 轮询）。
+
+    它经 ``_service_ready`` 探测宿主机真实 daemon / gateway / manager——测试环境里
+    永远不就绪，会白等满 30s，还会碰宿主机真实服务。默认把探测替换为“已就绪”；
+    需要验证未就绪/轮询/超时的用例（如 ``test_wait_services_ready_*``）自行再
+    monkeypatch ``_service_ready``，后设置者生效。
+    """
+    import local_webpage_access.updater as upd
+
+    monkeypatch.setattr(upd, "_service_ready", lambda name, ws, cfg: True)
+
+
 @pytest.fixture()
 def workspace_root(tmp_path: Path) -> Path:
     return tmp_path / "ws"
@@ -1144,6 +1158,8 @@ def test_access_refresh_failure_separate_from_pip(
         "local_webpage_access.access_workflow.review_access",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("should not run")),
     )
+    # DEV-166：review 抛错会走 0.5+1+2+4s 防抖重试，真实 sleep 白等 7.5s
+    monkeypatch.setattr("local_webpage_access.access_workflow.time.sleep", lambda s: None)
 
     report = run_update(
         workspace,

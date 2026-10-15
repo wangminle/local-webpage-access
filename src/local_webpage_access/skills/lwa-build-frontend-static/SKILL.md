@@ -22,11 +22,12 @@ description: >-
 ## 输出
 
 - 修改 `local-web.json`：
+  - `kind` = `node`
   - `runtime` = `shared-static`
-  - `servingMode` = `frontend-static`
-  - `static.root` = 构建产物目录（如 `dist`、`build`、`out`）
+  - `servingMode` = `shared-static`（`frontend-static` 只是口头分类，不能写入该字段）
   - `entry.build` = 构建命令（如 `npm run build`）
   - `entry.install` = 安装命令（如 `npm ci`）
+  - `entry.buildOutputDir` = 构建产物相对目录（如 `dist`）。托管根仍是 `static.root`（默认 `public`），由 `lwa` 在构建后同步，不要把 `dist` 直接写成 `static.root`。
 - 不直接执行构建（由 `lwa rebuild` 在隔离环境执行）。
 
 ## 可修改文件
@@ -48,7 +49,7 @@ description: >-
    - Next 静态导出 `out`
 3. 设定 `entry.install`（优先 `npm ci`，无 `package-lock.json` 时 `npm install`）。
 4. 设定 `entry.build` 为 `package.json` 的 `scripts.build`。
-5. 设定 `static.root` 为输出目录相对路径。
+5. 设定 `entry.buildOutputDir` 为输出目录相对路径。不要改 `static.root`。
 6. 写回 `local-web.json`。
 
 ## 示例
@@ -57,10 +58,15 @@ Vite + React 项目：
 
 ```json
 {
+  "kind": "node",
   "runtime": "shared-static",
-  "servingMode": "frontend-static",
-  "static": { "root": "dist", "gateway": "caddy", "hostPort": null },
-  "entry": { "install": "npm ci", "build": "npm run build" }
+  "servingMode": "shared-static",
+  "entry": {
+    "install": "npm ci",
+    "build": "npm run build",
+    "start": null,
+    "buildOutputDir": "dist"
+  }
 }
 ```
 

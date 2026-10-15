@@ -28,7 +28,7 @@ def configure(
     system_deps: list[str] | None = typer.Option(
         None,
         "--system-deps",
-        help="替换系统依赖包列表（可重复）；仅 Debian 系 Python 容器走 apt 切源链，Node/Alpine 请用 --build-hook",
+        help="替换系统依赖包列表（可重复）。Python(Debian) 走 apt 切源链；Node(Alpine) 以 apk 安装在依赖层之前——原生编译工具（node-gyp 需 python3/make/g++）用这里，勿用 buildHooks（其在依赖安装后执行）",
     ),
     clear_system_deps: bool = typer.Option(
         False, "--clear-system-deps", help="清空 systemDeps"

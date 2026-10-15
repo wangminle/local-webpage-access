@@ -305,6 +305,11 @@ def test_build_first_reuses_listening_registered_port(
     registry.upsert_from_manifest(manifest)
 
     monkeypatch.setattr(hosting, "is_port_listening", lambda port: True)
+    # DEV-166：分配器会真实 bind 探测端口池；并行/残留进程占着 21000 时旧断言会漂到 21001。
+    # 这里模拟“只有旧容器的 21001 被占用、其余端口空闲”，让结果与宿主机状态无关。
+    monkeypatch.setattr(
+        "local_webpage_access.ports.is_port_in_use", lambda port, **kw: port == 21001
+    )
 
     port, fresh = hosting._ensure_container_port(
         config, registry, "demo", allow_listening_reuse=True

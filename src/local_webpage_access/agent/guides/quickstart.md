@@ -16,6 +16,7 @@
 - 服务基址由用户提供（默认端口 `17800`）。
 - `GET /api/health` 免鉴权：`{"ok": true, "version": ...}`。先探活再干活。
 - 一台主机可能有多个工作区（各自独立 manager/token）；部署前向用户确认目标工作区。
+- CLI 操作不必 cd 进工作区：`lwa --workspace <工作区根> <命令>` 显式指定（优先级最高），或 `lwa workspace use` 保存默认；两者都缺时按当前目录向上发现。
 - `GET /api/capability`（需鉴权）确认 Docker 等能力；缺 Docker 时报告能力缺口，不要自行安装。
 
 ## 2. 鉴权

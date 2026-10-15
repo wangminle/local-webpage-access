@@ -6,11 +6,13 @@ description: >-
 
 # lwa-dockerize-fullstack-sqlite
 
-> 为"后端 + SQLite"全栈项目生成 `Dockerfile` 与 `docker-compose.yml`，并正确挂载数据目录。
+> 为「后端 + SQLite」核对 manifest，交由 `lwa` 重新渲染 `Dockerfile` 与单服务 compose，并把数据目录挂到 `data/`。
+>
+> **生成物不是真相。** `docker/Dockerfile` 与 `docker/compose.yaml` 会在 `lwa start` / `lwa rebuild` 时按 manifest **重新渲染**。持久字段是 `entry.start`、`hasDatabase`、`database`、`container.internalPort`。`fullstack-sqlite` 是口头分类，不是 `servingMode` 的合法值；容器实例写 `servingMode: container`。
 
 ## 何时触发
 
-- 识别为 `servingMode: fullstack-sqlite`（后端框架 + SQLite 文件）。
+- 识别为带 SQLite 的容器后端（`kind` 为 `node` 或 `python`，`runtime: docker-compose`，`servingMode: container`，`hasDatabase: true`）。口头分类叫 fullstack-sqlite。
 - 需要持久化 SQLite 数据，且实例走容器形态。
 
 ## 输入
@@ -30,9 +32,8 @@ description: >-
 
 ## 可修改文件
 
-- `apps/<id>/docker/Dockerfile`。
-- `apps/<id>/docker/compose.yaml`。
 - `apps/<id>/local-web.json`。
+- 不要手改 `apps/<id>/docker/Dockerfile` 或 `docker/compose.yaml`。
 
 ## 禁止事项
 

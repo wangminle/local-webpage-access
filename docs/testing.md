@@ -22,7 +22,7 @@ python3 -m pytest tests/scripts/test_security.py
 python3 -m pytest tests/scripts/test_doctor.py
 ```
 
-`tests/gate.sh` 自动定位仓库根目录，依次运行 `ruff check src tests`、pytest、工作区与暂存区的 `git diff --check`，汇总结果；任一步失败则返回非零退出码。pytest 参数可以直接透传，例如 `bash tests/gate.sh -k alias -x`。Caddy 语义测试在缺少 Caddy 时跳过，真实 Docker 测试仍按下述条件启用。
+`tests/gate.sh` 自动定位仓库根目录，依次运行 `ruff check src tests`、pytest、工作区与暂存区的 `git diff --check`，汇总结果；任一步失败则返回非零退出码。pytest 参数可以直接透传，例如 `bash tests/gate.sh -k alias -x`。pytest 默认经 pytest-xdist 并行（默认 3 个 worker：`-n 3 --dist loadgroup`，以控制 CPU/内存占用；`LWA_GATE_JOBS=auto` 可用满全部核；占用固定测试端口池的文件固定同组串行，其余按文件分组；`tests/scripts/conftest.py` 的 `_REAL_PORT_FILES` 是手工清单——新增会真实占用固定测试端口的测试文件时必须把文件名加进去，否则并行时可能出现间歇性端口冲突）；调试 `-s` / `--pdb` 或排查可疑并行问题时用 `LWA_GATE_JOBS=1 bash tests/gate.sh` 强制串行（约 4 分钟），未安装 xdist 时自动退回串行。Caddy 语义测试在缺少 Caddy 时跳过，真实 Docker 测试（含耗时约 35s 的 `test_agent_m1_acceptance.py::test_container_operation_reaches_terminal_state`）默认跳过，设置 `LWA_RUN_DOCKER_TESTS=1` 才启用。
 
 GitHub Actions（`.github/workflows/ci.yml`）在 `ubuntu-latest` 上复现同一道门禁：安装固定版本 Caddy、`uv sync --extra dev --extra mcp`，并在 uv 虚拟环境中安装 `pip`。`mcp` 是门禁会导入的可选依赖；uv 创建的解释器默认没有 `pip` 模块，而 `lwa update` 会在快进前做 pip 预检。`report` job 安装同一套 Caddy 后记录 mypy 与覆盖率，不阻断合并。
 

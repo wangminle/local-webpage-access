@@ -345,6 +345,26 @@ lwa rollback <id> [--to <build-id>] [--yes]
   `rollback_self_heal`），而不是按当前源码重建；拉回失败自动回退常规恢复。
   容器仍在（如旧版本持续服务）时不触发。
 
+### Flask/Django 生产服务器与 WSGI 入口推断（V0.9.6 / IMP-066）
+
+无显式启动命令的 Flask/Django 实例，LWA 在扫描时推断 WSGI 入口并生成
+**Gunicorn** 生产命令（低配参数 `--workers 1 --threads 4`，不按 CPU 放大）：
+
+* **命令优先级**：用户显式 `entry.start` > 项目已声明 Gunicorn > LWA 可证明的
+  WSGI 生成命令 > 开发服务器 fallback。显式使用 Uvicorn 等 ASGI 服务器的项目
+  不改写。
+* **入口推断（只认唯一可证明）**：Flask 认根 `app.py` / `main.py` / `wsgi.py` /
+  `app/__init__.py` 中的 `app = Flask(...)` 或 `create_app` 工厂（多候选不猜）；
+  Django 认 `manage.py` 根 + 唯一 `*/wsgi.py`。
+* **平台依赖分层**：生成 Gunicorn 命令且项目未声明 Gunicorn 时，Dockerfile 内
+  分层安装平台选定的版本范围（`gunicorn>=21,<23`）；不回写用户的
+  requirements/pyproject。uv 项目装进 uv venv。
+* **fallback 警告**：无法唯一推断时保留 `flask run` / `manage.py runserver` 不
+  阻断导入，但扫描备注（`[预检警告]`，入 manifest `preflightSummary`）与
+  doctor `dev_server_fallback` 同源告警。
+* **存量兼容**：仅 `rebuild` / 源码更新后重生成时应用新规则；升级 LWA 不改已
+  运行容器的 CMD。
+
 ### 构建慢 / pip 下载失败（issue #18，V0.8.9）
 
 生成的 Dockerfile pip 层按源链执行：**主源 → `pipFallbacks` 逐段 `||`**（china
@@ -569,6 +589,9 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 - `workspace_path_consistency`（V0.6.12 / DEV-094；**V0.6.13** 加固）——活跃 manifest/registry 派生路径是否等于当前工作区规范值；Caddy 主配置/sites/aliases 引用是否落在当前工作区且存在；Docker 可用时 SQLite data bind mount Source 是否指向 `apps/<id>/data`。外部 `sourceZipPath`、历史 builds/events 不告警。Docker 不可用、挂载观测失败或 **registry 不可用/读取失败** 时对应子项 SKIP（整体不报假绿 OK）。容器查询失败会中止启动（禁止当作「无容器」绕过挂载 fail-safe）。提示优先 `lwa workspace relocate --verify`，已裸 mv 场景按 `rebuild` / `recover` / `gateway on` 修复。
 - `base_image_readiness`（V0.8.7 / issue #14）——未缓存基础镜像是否可拉取；镜像来自第三方 registry（ghcr/quay 等）或 Docker Hub 不可达时按 registry 归类提示（配代理 / 离线预置，而非一律建议 Hub mirror）。
 - `database_url_alignment`（V0.8.8 / issue #15，WARN 级纯离线）——SQLite 实例 `docker/.env` 的 `DATABASE_URL` 指向缺失/空库但同目录存在其他非空库时提示疑似错位（数据仍在 `data/`，只是未被指向）；带引号/query 的 URL 与非 sqlite scheme 不误报。
+- `caddy_health` admin 归属诊断（V0.9.6 / BUG-794）——master 未运行时用 lsof 诊断登记 admin 端口的占用者（name/pid），被外部进程占用时 WARN 并给出针对性处置建议；缺 lsof 时如实标注「归属未确认」。不做自动换端口（admin 端口已渲染进主配置）。
+- `dev_server_fallback`（V0.9.6 / IMP-066，WARN 级）——容器实例仍以框架开发服务器（`flask run` / `manage.py runserver`，含 `./manage.py` 相对路径形态）启动时告警；判定谓词与扫描期 fallback 备注同源。
+- `frontend_artifacts_staleness`（V0.9.6 / #61 检查部分，WARN 级）——预构建 `static/` 产物时效性分级：同仓布局前端源码晚于产物记「疑似」（WARN + 重建建议）；前端源不在导入树内（跨仓）或 mtime 不可区分记「无法判断」（信息性汇总，不升 WARN）；确证需构建期源码指纹（#61 预构建落地后接入）。只告警不自动构建，与别名资源检查（base 配错）相互独立。
 
 ### 7.6 管理页兜底链接（建议 D）
 

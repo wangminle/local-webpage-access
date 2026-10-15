@@ -9,7 +9,7 @@
 ## 快速上手
 
 ```bash
-cd runtime          # 进入工作区（示例路径）
+cd runtime          # 进入工作区（示例路径；也可用下面的 --workspace 免 cd）
 lwa setup           # 可选：检查宿主机工具（default，无需工作区）
 lwa init            # 首次：生成目录与配置（已 init 可跳过）
 # Full：lwa init --full --yes，或先 init 再 lwa setup --full --yes
@@ -19,6 +19,10 @@ lwa import inbox/xxx.zip --name my-app
 lwa start my-app
 lwa list
 ```
+
+### 指定工作区的四种方式（V0.9.7）
+
+按优先级从高到低：`lwa --workspace <dir> <命令>`（或 `-w`，一次性的显式指定）→ 当前目录向上找到 `local-web.yml`（cd 进工作区的传统方式）→ `LWA_WORKSPACE` 环境变量 → `lwa workspace use <dir>` 保存的默认工作区（`~/.config/lwa/default-workspace`，`lwa workspace use --clear` 清除）。都未命中时提示以上四种方式，不会在项目目录里误建第二套工作区。多工作区主机或从任意目录操作时优先用 `--workspace`。
 
 管理页：本机 http://127.0.0.1:17800/（本机读免 token，写需同源或 token）；局域网 http://\<LAN-IP\>:17800/（需 token；`/api/health` 带 token 才返回完整 capabilities）。
 

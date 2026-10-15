@@ -178,9 +178,9 @@ def _echo_service_modes(instance_id: str | None) -> None:
 def _service_failure_note(name: str) -> str | None:
     """读取指定服务的启动失败观测摘要（IMP-064.05）；无失败返回 None。"""
     try:
-        from local_webpage_access.paths import Workspace, find_workspace_root
+        from local_webpage_access.paths import Workspace, locate_workspace_root
 
-        root = find_workspace_root()
+        root = locate_workspace_root()
         if root is None:
             return None
         ws = Workspace(root)
