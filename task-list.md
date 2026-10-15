@@ -844,6 +844,7 @@
 | BUG-829 | 修复 | 新增回滚单测在无 HTTP 服务和无 Docker daemon 时有三项失败：两个停机后恢复用例未模拟验证，静态实例拒绝用例未隔离 Docker | 2026-10-14 20:25 | 2026-10-14 20:51 | 已修复 | 停机后恢复用例补 _evaluate_container_verification 替身，并把补偿观测镜像设为原镜像。静态实例拒绝用例改用 DockerRuntime 替身。定向 tests/scripts/test_s3_01_rollback.py 及相关套件通过。 |
 | BUG-830 | 修复 | 最近操作失败后，容器已退出或 Docker 查询失败时 container_id 返回 None，自愈误走自动回滚 | 2026-10-14 20:25 | 2026-10-14 20:51 | 已修复 | 改为 container_id_strict(instance_id, all_containers=True)。仅查询成功且确实没有容器时才回滚；查询失败回退常规恢复。回归 test_daemon_self_heal_skips_when_only_exited_container_remains、test_daemon_self_heal_skips_when_container_query_fails。 |
 | BUG-831 | 修复 | P1：迁移命令留档遗漏扫描器生成的 entry.start，空或不完整留档遮蔽 Dockerfile，回滚可绕过风险确认 | 2026-10-14 23:27 | 2026-10-14 23:27 | 已修复 | 关联 [[BUG-827]]。migration_commands_blob 同时纳入 entry.start/preStart/buildHooks；target_version_has_migration 合并命令留档与快照 Dockerfile 的 CMD/RUN/ENTRYPOINT，已有空留档亦受保护。新增 test_s3_migration_start_command.py 共11例：真实扫描器启动命令、留档前后检测不变、空/非迁移留档遮蔽、注释排除、CLI和管理接口拒绝未确认回滚且零副作用、版本风险标记及显式确认成功。修复前9例按预期失败、2例控制通过；修复后11例全绿，回滚/版本相关78例全绿。全量门禁正在运行，完成后另记检查条目。；最终全量 bash tests/gate.sh 全绿：3535 passed / 20 skipped；Ruff、工作区与暂存区 diff-check 均通过。 |
+| BUG-832 | 修复 | P2：S3-03 GitHub Actions 全量门禁无法复现本地全绿，V0.9.4-Build4485 当前提交有20项测试失败 | 2026-10-15 07:58 | 2026-10-15 08:40 | 已修复 | 2026-10-15 S4准入检查发现；HEAD c39d3f8。GitHub Actions https://github.com/wangminle/local-webpage-access/actions/runs/38594774658：20 failed / 3515 passed / 20 skipped，gate job失败，report跳过。错误包括未安装mcp extra、当前uv解释器缺少pip导致updater前置检查分支变化、runner Docker server28.0.4低于项目29.0.0最低要求，以及平台判定和manager启动锁测试失败。这些是已观察到的失败形态，后两类具体根因尚未定位。ci.yml 当前只执行 uv sync --extra dev。需补齐CI依赖与环境契约、隔离依赖宿主环境的测试并重跑成功后收口；不能仅凭macOS本地门禁全绿认定S3-03完成远端验收。关联 [[DEV-159]]。；已修复：PR https://github.com/wangminle/local-webpage-access/pull/67 ，HEAD 15c8ef2。根因：① ci 只 uv sync --extra dev，缺 mcp 且 uv venv 无 pip，update 预检提前跳过；② collect_platform_support_report 在已注入发行版身份时仍从宿主 /etc/os-release 填代号，Ubuntu noble 把 Debian 12 / Ubuntu 22.04 判成不匹配；③ restart 完整重建先调真实 DockerRuntime.ensure_available，runner Engine 28.0.4 低于 29.0.0；能力刷新单飞会吃掉 monkeypatch 前的真实探测；④ 启动锁测试用路径 st_ino 比较，ext4 unlink 后复用 inode 号。修复后 Actions https://github.com/wangminle/local-webpage-access/actions/runs/38659836099 ：gate 与 report 均为 success，3536 passed / 20 skipped，ruff 通过。未合并到 main，S4 真机验收与 issue 关闭尚未开始。 |
 
 ## 调整事项
 
@@ -1304,6 +1305,7 @@
 | CHK-396 | 检查 | 立即修复 CHK-395 复核确认的 4 项 P2 遗留（BUG-812/815/821/825），补回归并反向验证 | 2026-10-14 17:55 | 2026-10-14 18:08 | 已完成 | 四项修复：① rollback 补偿 up 后实证验证（存活+必选探针），不过则 FAILED+清 containerId+如实文案；② check_aliases/check_caddy 以 detect_backend 实际后端为准，降级 builtin 不再做片段级巡检；③ 静态残留片段仅 status=stopped 才报告（building 等操作中状态跳过）；④ iter_instance_image_refs 增加 containers 表兜底（仓库名推导 + image_id 末位纳入）。回归 6 例新增 + 5 例存量按新语义调整（caddy 侧钉住 detect_backend 保持密闭、补偿两例改序列 mock）；四项反向验证均失败-恢复通过；consistency/versions/rollback/lifecycle/doctor/gateway_switch 套件全绿，ruff 与 diff-check 通过。 |
 | CHK-397 | 检查 | 复核 CHK-395 列出的 4 项 P2：当前代码与回归均已覆盖，不再是遗留 | 2026-10-14 18:30 | 2026-10-14 18:30 | 已完成 | 对照 rollback.py 补偿验证、consistency.py detect_backend 与 stopped 残留、versions.py containers 兜底。定向 7 项测试通过。台账上 [[BUG-812]] [[BUG-815]] [[BUG-821]] [[BUG-825]] 已是已修复；[[BUG-805]] [[BUG-808]] 状态列仍为待修复，已按同次实现改为已修复。 |
 | CHK-398 | 检查 | 修复并验证 P1：扫描器生成迁移启动命令被命令留档遗漏，回滚风险确认可被绕过 | 2026-10-14 23:33 | 2026-10-14 23:33 | 已完成 | 对应 [[BUG-831]]，关联 [[BUG-827]]。真实扫描器复现 FastAPI/alembic.ini 将迁移写入 entry.start；修复前9项回归失败、2项控制通过，CLI未确认返回成功且管理接口返回200并执行stop/up。修复后11项新回归及回滚/留档相关78项测试通过；未确认时在停容器/改标签前拒绝，manifest与revision不变；已有空或非迁移命令留档不再遮蔽Dockerfile，管理页版本风险标记恢复，显式确认路径仍成功。全量 bash tests/gate.sh：3535 passed / 20 skipped；Ruff、工作区/暂存区 diff-check 全绿。台账校验通过；产品代码和测试保留未提交。 |
+| CHK-399 | 检查 | 核对S4阶段准入：可开始发布文档与验收准备，正式发布前须先修复当前提交CI门禁失败 | 2026-10-15 07:58 | 2026-10-15 07:58 | 已完成 | 对照PLN-052计划：S4是发布与验收，进入条件为各版本代码冻结。当前HEAD c39d3f8（V0.9.4-Build4485-20261015），检查前工作区干净；DEV-157~161已完成，S3-06/07实施清单完成。最近本地全量门禁3535 passed /20 skipped；本次启动命令迁移回归及版本测试20 passed。实际查询当前HEAD GitHub Actions为failure：20 failed /3515 passed /20 skipped，已登记 [[BUG-832]]。未关闭产品BUG仅 [[BUG-793]]/[[BUG-794]] 两项P3观察项（CI问题发现前）。S4-01核对V0.9.4发布清单及最新BUG-826~831文档证据、Build4485实际落点；S4-02执行仍待办的 [[CHK-285]] 更新通道A-F与真实Docker完整回归；S4-03完成runtime工作区13实例升级演练，附实测与修复版本后再关闭issue。此轮只做准入检查与台账同步，未开始S4实施、未发布或关闭issue。 |
 
 ## 测试数据
 
@@ -1891,6 +1893,7 @@
 | OPS-202 | 运维 | 确认 S1 发布提交：HEAD 6a0d806「V0.9.2-Build4389-20261013」已提交并推送 origin/main，工作区干净 | 2026-10-13 20:20 | 2026-10-13 20:20 | 已完成 | 按约定发布提交由维护者手动执行，已于 2026-10-13 19:48 完成并推送（git rev-parse HEAD == origin/main）。原计划便签主题为 V0.9.2-Build4350，实际落为 Build4389，以实际提交为准。提交覆盖 BUG-762~780 共 19 项修复、ADJ-050/051 测试重组、版本号六处落点。S1 退出验收（runtime 9 项实测）与残留修复 BUG-782 在本提交之后，随下次提交落盘。关联 [[OPS-197]] [[PLN-052]]。 |
 | OPS-203 | 运维 | 应用版本号提升至 0.9.3（V0.9.3 发布准备批次），docs 与 skills 版本行同步 | 2026-10-14 10:15 | 2026-10-14 10:15 | 已完成 | 版本落点：pyproject(0.9.3)、version_info fallback 与 4 处 docstring 示例、cli docstring、tests/scripts/test_version_info 断言、lwa-update-runtime SKILL 当前版本行、uv.lock（uv lock 重生成后 --offline --check 通过）。文档版本行：agent-guide「V0.9.3 当前实际可用」、https.md 适用版本、agent guides deploy/troubleshooting 适用版本；quickstart 沿用 {{PRODUCT_VERSION}} 动态替换无需改。release-checklist 新增 V0.9.3 行（S2 收敛批次 BUG-740~792 + BUG-781 隔离加固 + design/5-checkpoints 改名；Build 建议 4389→4430；剩余 BUG-793/794）。门禁：pytest test_version_info 9 passed。注意 lwa version 在 V0.9.3 主题提交前仍显示 V0.9.2（git 主题优先解析）；本机 runtime editable 安装待发布提交后再 pip install -e . 刷新。关联 [[OPS-202]] [[OPS-197]]。 |
 | OPS-204 | 运维 | 应用版本号提升至 0.9.4（V0.9.4 发布准备批次），docs 与 skills 版本行同步 | 2026-10-14 15:30 | 2026-10-14 15:30 | 已完成 | 版本落点：pyproject(0.9.4)、version_info fallback 与 4 处 docstring 示例、cli docstring、tests/scripts/test_version_info 断言、lwa-update-runtime SKILL 当前版本行、uv.lock（uv lock 重生成后 --offline --check 通过，包数 51→56：dev extras 新增 mypy>=1.11.0）。文档版本行：agent-guide「V0.9.4 当前实际可用」、https.md 适用版本、agent guides deploy/troubleshooting 适用版本。release-checklist 新增 V0.9.4 行（S3 功能批次 DEV-157~161：lwa versions/rollback、state_consistency 巡检、CI(ci.yml)+mypy+pre-commit、操作时间线、configure --extra-volume；Build 建议 4430→4470；剩余 BUG-793/794）。门禁：pytest test_version_info 9 passed。注意 lwa version 在 V0.9.4 主题提交前仍显示 V0.9.3；本机 runtime editable 安装待发布提交后再 pip install -e . 刷新。关联 [[OPS-203]]。 |
+| OPS-205 | 运维 | 本机 lwa 部署从 V0.9.2 更新到 V0.9.4：重装 editable 包刷新元数据 + 协调重启三服务 | 2026-10-15 08:19 | 2026-10-15 08:19 | 已完成 | 排查：源码侧版本落点已全部为 0.9.4（pyproject/version_info fallback/uv.lock/cli docstring/lwa-update-runtime SKILL/agent guides），git 有发布提交 c39d3f8 V0.9.4-Build4485-20261015，但 lwa version 报 V0.9.2、三服务 bind_version 均为 V0.9.2。根因两级：①version_info._version_from_git 只读 HEAD 单条 commit 主题（version_info.py:50-67），HEAD=647893e「修复 GitHub Actions 门禁无法复现本地全绿。」无 V 前缀 → 返回 None，不回溯 c39d3f8；②退到包元数据，而 editable dist-info 停留在 0.9.2（10-13 20:02 生成，0.9.3/0.9.4 两次版本提升均未重装），_FALLBACK_VERSION 0.9.4 排最后够不到。处置：以 lwa 命令归属解释器（which lwa → /usr/local/bin/python3 → 软链至 Python.framework 3.13，editable 指回仓库 src/）执行 /usr/local/bin/python3 -m pip install -e .，pip 卸载 0.9.2 装上 0.9.4；随后在 runtime 工作区 lwa services restart 协调重启 manager/daemon/gateway（launchd 单元重启，保留自启意图）。验证：lwa version → V0.9.4；importlib.metadata → 0.9.4；三服务 bind_version 全 V0.9.4；lwa doctor 0 失败 1 警告（gateway_tls 明文旁路警告为既有有意保留）；service_version_drift OK（运行版本与安装版本均 V0.9.4+647893eb7df8）；13 实例全 running；抽查 prd-review 别名 200（HTML 49976 / css 99497）、patent-disclosure 200、3d-demo-family-wakeup 200、prd-review hostPort 直连 200、管理面 9443 200。遗留提醒：发布提交之上再追加无 V 前缀提交会永久遮住 git 版本解析，lwa version 只能靠包元数据兜底——源码改版后必须重装 editable 包，否则版本号陈旧。 |
 
 ## 规划事项
 
@@ -1954,12 +1957,12 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 831 | 829 | 2 | 99.8% |
+| 代码 Bug | 832 | 830 | 2 | 99.8% |
 | 调整事项 | 53 | 53 | 0 | 100% |
-| 检查事项 | 397 | 396 | 1 | 99.7% |
+| 检查事项 | 398 | 397 | 1 | 99.7% |
 | 测试数据 | 9 | 9 | 0 | 100% |
 | 文档维护 | 194 | 194 | 0 | 100% |
 | 功能开发 | 161 | 158 | 3 | 98.1% |
-| 配置运维 | 203 | 203 | 0 | 100% |
+| 配置运维 | 204 | 204 | 0 | 100% |
 | 规划事项 | 53 | 49 | 4 | 92.5% |
-| **总计** | 1901 | 1891 | 10 | 99.5% |
+| **总计** | 1904 | 1894 | 10 | 99.5% |
