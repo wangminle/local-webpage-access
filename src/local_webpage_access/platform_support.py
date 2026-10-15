@@ -546,7 +546,17 @@ def collect_platform_support_report(
     plat = platform_name if platform_name is not None else detect_platform()
     arch = _normalize_arch(architecture)
 
-    os_rel = _read_os_release() if plat in (PLATFORM_LINUX, PLATFORM_WSL) else {}
+    # 发行版身份是一组事实：调用方注入了 ID / 版本 / 代号中的任一项，
+    # 就不再用宿主 /etc/os-release 补其余项。否则 Ubuntu CI 的 noble
+    # 会配上测试注入的 Debian 12，版本与代号不配对，受支持平台被判否。
+    distro_identity_injected = any(
+        value is not None for value in (distro_id, distro_version, distro_codename)
+    )
+    os_rel = (
+        {}
+        if distro_identity_injected or plat not in (PLATFORM_LINUX, PLATFORM_WSL)
+        else _read_os_release()
+    )
     if distro_id is None and os_rel:
         distro_id = (os_rel.get("ID") or "").lower() or None
     if distro_version is None and os_rel:

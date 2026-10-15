@@ -730,7 +730,11 @@ def test_manager_start_lock_watches_empty_record_until_legacy_finishes(
     lock = start_lock_path(workspace)
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_bytes(b"")  # 旧版已建文件、尚未写 PID
-    original_ino = lock.stat().st_ino
+    # 全程持有旧文件的 fd：ext4 在 unlink 后会立刻复用 inode 号，
+    # 只比较路径上前后两次 st_ino 会把「新文件」误判成「仍是旧 inode」。
+    # fd 未关闭时该 inode 不能被复用，号不同才证明换了文件。
+    original_fd = os.open(lock, os.O_RDONLY)
+    original_ino = os.fstat(original_fd).st_ino
     released = threading.Event()
 
     def legacy_creator() -> None:
@@ -747,11 +751,13 @@ def test_manager_start_lock_watches_empty_record_until_legacy_finishes(
     try:
         with manager_start_lock(workspace, timeout=3.0):
             assert released.is_set()  # 进入时旧临界区确已结束
+            assert os.fstat(original_fd).st_nlink == 0  # 旧文件确已被 unlink
             assert lock.stat().st_ino != original_ino  # 持有的是新 inode
             lines = lock.read_text(encoding="utf-8").splitlines()
             assert lines[0].strip() == str(os.getpid())
             assert lines[1].strip() == "flock"
     finally:
+        os.close(original_fd)
         t.join(timeout=2.0)
 
 

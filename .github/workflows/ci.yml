@@ -45,9 +45,12 @@ jobs:
           sudo install -m 0755 /tmp/caddy /usr/local/bin/caddy
           caddy version
 
-      # 依赖按 uv.lock 全量锁定；dev extra 已含 pytest/ruff/pytest-cov/mypy。
+      # dev extra：pytest/ruff/pytest-cov/mypy。mcp extra：门禁会导入 mcp 包。
+      # uv venv 默认没有 pip 模块；lwa update 在快进前会因此预检失败。
       - name: 安装依赖
-        run: uv sync --extra dev
+        run: |
+          uv sync --extra dev --extra mcp
+          uv pip install pip
 
       # gate.sh 的解释器选择：uv sync 已创建 .venv，gate.sh 会自动选中
       # .venv/bin/python（等价 uv 管理的解释器）；不设置 LWA_GATE_PYTHON，
@@ -71,7 +74,9 @@ jobs:
         run: uv python install 3.13
 
       - name: 安装依赖
-        run: uv sync --extra dev
+        run: |
+          uv sync --extra dev --extra mcp
+          uv pip install pip
 
       # S3-03：先只对生命周期相关四模块出报告；已知 hosting.py 有 7 条
       # ContainerConfig|None 告警（DEV-154 口径为全仓库零告警，此处按现状记录、不修复）。
