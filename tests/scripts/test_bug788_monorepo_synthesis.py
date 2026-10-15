@@ -340,3 +340,47 @@ def test_flat_stdlib_env_only_port_marked_guessed(tmp_path: Path) -> None:
     assert result.pending is False
     assert result.internalPort == 3000
     assert result.internalPortGuessed is True
+
+
+# ---- BUG-793：--ignore-scripts 收窄（原生构建反例） --------------------------
+
+
+def test_monorepo_install_keeps_scripts_for_native_build_postinstall(tmp_path: Path) -> None:
+    """BUG-793 反例：postinstall 做原生构建（node-gyp）时不得补
+    --ignore-scripts——忽略脚本会让原生模块未编译即用、装不起来。"""
+    _write_patent_incident_monorepo(
+        tmp_path,
+        root_scripts={"postinstall": "node-gyp rebuild"},
+    )
+
+    result = Scanner().detect(tmp_path)
+
+    assert result.entry.install == "npm ci"
+    assert not any("--ignore-scripts" in n for n in result.notes)
+
+
+def test_monorepo_install_keeps_scripts_for_mixed_mirror_and_native(tmp_path: Path) -> None:
+    """镜像脚本 + 原生构建并存：单一开关无法两全，保守不补，交给用户手改。"""
+    _write_patent_incident_monorepo(
+        tmp_path,
+        root_scripts={
+            "preinstall": "node scripts/ensure-electron-mirror.mjs",
+            "postinstall": "node-gyp rebuild",
+        },
+    )
+
+    result = Scanner().detect(tmp_path)
+
+    assert result.entry.install == "npm ci"
+
+
+def test_monorepo_install_still_ignores_harmless_lifecycle_scripts(tmp_path: Path) -> None:
+    """忽略无害类（husky 等非构建脚本）维持 BUG-788 的补参保护。"""
+    _write_patent_incident_monorepo(
+        tmp_path,
+        root_scripts={"prepare": "husky install"},
+    )
+
+    result = Scanner().detect(tmp_path)
+
+    assert result.entry.install == "npm ci --ignore-scripts"

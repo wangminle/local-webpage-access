@@ -19,7 +19,7 @@ description: >-
 
 1. `local-web.json` 的 `static` 段（`root`、`hostPort`、`gateway`）。
 2. 静态产物目录：通常为 `apps/<id>/public/`（或 manifest 中的 `static.root`）。
-3. 工作区 `local-web.yml` 的 `staticGateway`（`caddy` / `builtin`；nginx 未充分验证）。
+3. 工作区 `local-web.yml` 的 `staticGateway`（`caddy` / `builtin`；旧 nginx 值由 `lwa update` 自动迁移 builtin）。
 
 ## 输出
 
@@ -34,7 +34,7 @@ description: >-
 
 ## 禁止事项
 
-- **不修改**网关主配置文件（`Caddyfile` / `nginx.conf`）—— 由 `lwa` 汇总各片段后 reload；手写易引入悬空 `import`（BUG-069）。
+- **不修改**网关主配置文件（`Caddyfile`）—— 由 `lwa` 汇总各片段后 reload；手写易引入悬空 `import`（BUG-069）。
 - **不手写**统一入口的 JSON access log；`logs/static-access.log` 由 `_assemble_main_config` 自动注入。
 - 不暴露管理端口到公网；不启用 TLS 自动签发（V1 局域网，`http://` 即可）。
 

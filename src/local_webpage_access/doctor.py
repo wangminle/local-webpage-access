@@ -776,6 +776,35 @@ def _pid_alive_local(pid: int) -> bool:
     return True
 
 
+def _port_listener_hint(port: int) -> str | None:
+    """BUG-794：lsof best-effort 查端口监听者（name/pid，去重）。
+
+    lsof 不可用、查询失败或无人监听时返回 ``None``——「无监听者」与
+    「无法确认」都由调用方按各自语义处理。
+    """
+    if shutil.which("lsof") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    hints: list[str] = []
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2:
+            hint = f"{parts[0]}/pid={parts[1]}"
+            if hint not in hints:
+                hints.append(hint)
+    return "、".join(hints) or None
+
+
 def check_caddy_health(
     ws: Workspace,
     config: Config,
@@ -821,8 +850,21 @@ def check_caddy_health(
 
     admin_port = read_admin_port(ws) or LEGACY_ADMIN_PORT
     admin_ok = gateway._admin_alive()
+    admin_occupier: str | None = None
+    admin_attr_unknown = False
     if not admin_ok:
-        findings.append(f"admin :{admin_port} 不可达（master 未运行）")
+        # BUG-794：master 未运行时诊断登记端口的归属——被其它进程长期占用时
+        # 给出占用者线索并换用针对性建议；不自动切换 admin 端口（已渲染进
+        # 主配置），缺 lsof 时如实标注「归属未确认」。
+        occupier = _port_listener_hint(admin_port)
+        if occupier:
+            admin_occupier = occupier
+            findings.append(
+                f"admin :{admin_port} 被其它进程占用（{occupier}），本工作区 master 未运行"
+            )
+        else:
+            admin_attr_unknown = shutil.which("lsof") is None
+            findings.append(f"admin :{admin_port} 不可达（master 未运行）")
 
     validate_ok = True
     main = gateway.main_config_path()
@@ -926,12 +968,27 @@ def check_caddy_health(
             findings.append(f"enabled 站点 hostPort 不可达：{preview}{more}")
 
     if not admin_ok:
+        # BUG-794：占用者明确时给出针对性处置建议（本版不自动切换 admin 端口）。
+        if admin_occupier:
+            suggestion = (
+                f"admin :{admin_port} 被 {admin_occupier} 占用——确认该进程可安全停止后"
+                "释放端口，再执行 `lwa gateway on`；本版不自动切换 admin 端口（已渲染进主配置）"
+            )
+        elif admin_attr_unknown:
+            suggestion = (
+                "执行 `lwa gateway on` 启动 Caddy master；若启动失败，安装 lsof 后重跑"
+                " doctor 以确认 admin 端口归属（当前缺少 lsof，归属未确认）"
+            )
+        else:
+            suggestion = (
+                "执行 `lwa gateway on` 启动 Caddy master；"
+                "若反复失败，检查 static-gateway/sites 与主 Caddyfile 是否含悬空 import（BUG-069）"
+            )
         return CheckResult(
             "caddy_health",
             STATUS_FAIL,
             "；".join(findings),
-            suggestion="执行 `lwa gateway on` 启动 Caddy master；"
-            "若反复失败，检查 static-gateway/sites 与主 Caddyfile 是否含悬空 import（BUG-069）",
+            suggestion=suggestion,
         )
     if not validate_ok:
         return CheckResult(
@@ -2556,6 +2613,110 @@ def check_restart_resilience(ws: Workspace, config: Config) -> CheckResult:
 # ---- S3-02 / DEV-158：副本一致性巡检 ---------------------------------------
 
 
+def check_dev_server_fallback(ws: Workspace, registry: Registry | None) -> CheckResult:
+    """IMP-066（066.f）：容器实例仍以框架开发服务器启动的同源警告（WARN）。
+
+    判定谓词与扫描期 fallback 备注共用 :func:`scanner.dev_server_fallback_warning`
+    ——doctor、扫描/导入输出、manifest ``preflightSummary`` 三处同源展示。
+    """
+    if registry is None:
+        return CheckResult(
+            "dev_server_fallback", STATUS_SKIP, "registry 不可用，跳过开发服务器检查"
+        )
+    from local_webpage_access.models import InstanceManifest
+    from local_webpage_access.scanner import dev_server_fallback_warning
+
+    try:
+        rows = registry.list_instances()
+    except Exception:  # noqa: BLE001
+        return CheckResult("dev_server_fallback", STATUS_SKIP, "实例列表不可读")
+
+    hits: list[str] = []
+    for row in rows:
+        if row.get("runtime") != "docker-compose":
+            continue
+        iid = str(row.get("id") or "")
+        try:
+            manifest = InstanceManifest.load(ws.app_manifest_path(iid))
+        except Exception:  # noqa: BLE001 — manifest 读取失败由 state_consistency 报告
+            continue
+        start = getattr(manifest.entry, "start", None)
+        if dev_server_fallback_warning(start):
+            hits.append(f"{iid}（{start}）")
+    if not hits:
+        return CheckResult(
+            "dev_server_fallback", STATUS_OK, "无实例使用框架开发服务器启动"
+        )
+    preview = "、".join(hits[:5]) + ("…" if len(hits) > 5 else "")
+    return CheckResult(
+        "dev_server_fallback",
+        STATUS_WARN,
+        f"{len(hits)} 个容器实例仍用框架开发服务器启动：{preview}",
+        suggestion=dev_server_fallback_warning("flask --app app run"),
+    )
+
+
+def check_frontend_artifacts_staleness(ws: Workspace, registry: Registry | None) -> CheckResult:
+    """#61（检查部分 / DEV-164）：预构建前端产物时效性分级（只告警，不构建）。
+
+    ``suspected`` 升 WARN（同仓布局源码晚于产物）；``unknown``（跨仓/时间
+    失真）以信息性说明汇总在结论里，不升 WARN。base 配错属别名资源检查，
+    与本检查相互独立。``confirmed`` 需构建期源码指纹（#61 预构建落地后接入）。
+    """
+    if registry is None:
+        return CheckResult(
+            "frontend_artifacts_staleness", STATUS_SKIP, "registry 不可用，跳过产物时效性检查"
+        )
+    from local_webpage_access.frontend_staleness import (
+        LEVEL_SUSPECTED,
+        LEVEL_UNKNOWN,
+        check_frontend_artifacts_staleness as _check,
+    )
+
+    try:
+        rows = registry.list_instances()
+    except Exception:  # noqa: BLE001
+        return CheckResult("frontend_artifacts_staleness", STATUS_SKIP, "实例列表不可读")
+
+    suspected: list[str] = []
+    unknown: list[str] = []
+    for row in rows:
+        iid = str(row.get("id") or "")
+        current = ws.app_current(iid)
+        if not current.is_dir():
+            continue
+        verdict = _check(current)
+        if verdict.level == LEVEL_SUSPECTED:
+            suspected.append(iid)
+        elif verdict.level == LEVEL_UNKNOWN:
+            unknown.append(iid)
+    if suspected:
+        preview = "、".join(suspected[:5]) + ("…" if len(suspected) > 5 else "")
+        return CheckResult(
+            "frontend_artifacts_staleness",
+            STATUS_WARN,
+            f"{len(suspected)} 个实例的前端源码疑似晚于预构建 static/ 产物：{preview}"
+            + (
+                f"；另有 {len(unknown)} 个无法判定（跨仓/时间失真）"
+                if unknown
+                else ""
+            ),
+            suggestion="在前端目录重新构建并覆盖 static/ 产物后执行 "
+            "lwa rebuild --sync <id>（只告警不自动构建，见 issue #61）",
+        )
+    if unknown:
+        preview = "、".join(unknown[:5]) + ("…" if len(unknown) > 5 else "")
+        return CheckResult(
+            "frontend_artifacts_staleness",
+            STATUS_OK,
+            f"预构建产物时效性：{len(unknown)} 个实例无法判定（前端源码不在导入树内"
+            f"或 mtime 不可区分）：{preview}——确证需构建期源码指纹（#61 预构建规划中）",
+        )
+    return CheckResult(
+        "frontend_artifacts_staleness", STATUS_OK, "预构建前端产物时效性无异常"
+    )
+
+
 def check_state_consistency(
     ws: Workspace,
     config: Config,
@@ -2659,6 +2820,10 @@ def run_doctor(
             ),
             # issue #8：源码新鲜度（WARN 级，纯离线；git 源不触网）
             check_source_freshness(ws),
+            # IMP-066（066.f）：开发服务器 fallback 同源警告（WARN 级）
+            check_dev_server_fallback(ws, caddy_probe_registry),
+            # #61（检查部分 / DEV-164）：预构建前端产物时效性（WARN 级，只告警）
+            check_frontend_artifacts_staleness(ws, caddy_probe_registry),
             # issue #15：SQLite DATABASE_URL 指向错位（WARN 级，纯离线）
             check_database_url_alignment(ws),
             check_backend_handoff(ws, config, caddy_probe_registry)

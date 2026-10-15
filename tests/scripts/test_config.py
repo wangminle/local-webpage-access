@@ -91,19 +91,40 @@ def test_manual_lan_requires_ip() -> None:
 
 
 def test_from_file(workspace: Workspace) -> None:
+    """IMP-067：旧 nginx 值在加载层映射 builtin；文件不被加载动作改写。"""
     workspace.config_path.write_text(
         "managerPort: 17800\nportPool:\n  start: 19000\n  end: 19100\nstaticGateway: nginx\n",
         encoding="utf-8",
     )
     cfg = load_config(workspace)
     assert cfg.portPool.start == 19000
-    assert cfg.staticGateway == "nginx"
+    assert cfg.staticGateway == "builtin"
+    assert "staticGateway: nginx" in workspace.config_path.read_text(encoding="utf-8")
 
 
 def test_load_config_missing_file_returns_default(workspace: Workspace) -> None:
     cfg = load_config(workspace)
     assert cfg.managerPort == 17800
     assert cfg.portPool.start == 18000
+
+
+def test_load_config_unreadable_file_raises_config_error(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置文件存在但不可读时，应包装为 ConfigError，而不是裸 OSError。"""
+    from pathlib import Path
+
+    workspace.config_path.write_text("managerPort: 17800\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def deny_config(self: Path, *args: object, **kwargs: object) -> str:
+        if self == workspace.config_path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny_config)
+    with pytest.raises(ConfigError, match="配置文件读取失败"):
+        load_config(workspace)
 
 
 def test_load_config_invalid_yaml(workspace: Workspace) -> None:

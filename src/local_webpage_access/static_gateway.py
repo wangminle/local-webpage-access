@@ -387,7 +387,7 @@ class StaticGateway:
                 )
             log.warning("配置 staticGateway=caddy 但未找到 caddy 可执行文件，降级 builtin")
             return "builtin"
-        # nginx 等尚未实现的网关
+        # 未知/历史值（IMP-067 后 nginx 已在加载层映射 builtin，正常不可达）
         if strict:
             raise GatewayError(
                 f"staticGateway={configured} 尚未实现，Full/严格模式禁止降级 builtin",

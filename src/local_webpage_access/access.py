@@ -113,6 +113,9 @@ class ApiPathFinding:
     absolute: UrlProbe
     prefixed: UrlProbe
     mismatch: bool = False
+    # BUG-843：两侧都 404（GET 无法区分「路由不存在」与「仅接受非 GET」）时
+    # 证据不足——记不确定，不计错位、不升 WARN。
+    uncertain: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -120,6 +123,7 @@ class ApiPathFinding:
             "absolute": self.absolute.to_dict(),
             "prefixed": self.prefixed.to_dict(),
             "mismatch": self.mismatch,
+            "uncertain": self.uncertain,
         }
 
 
@@ -898,6 +902,12 @@ def _extract_api_paths(html: str, *, limit: int = 6) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for match in _API_PATH_RE.finditer(html):
+        # BUG-843：``BASE + '/api/...'`` 拼接形态（含压缩产物 ``af="/alias/"+e``）
+        # 中的字面量不是绝对路径证据——前端实际请求的是折叠后的带前缀路径，
+        # 据裸字面量探测会误报错位。跳过紧邻 ``+`` 的拼接上下文。
+        prefix_ctx = html[: match.start()].rstrip()
+        if prefix_ctx.endswith("+"):
+            continue
         path = match.group(1)
         if path in seen:
             continue
@@ -1134,12 +1144,14 @@ def _check_api_paths(
     仍无命中时用默认 ``/api/`` ``/api/v1/`` 兜底。分别探测无前缀（入口根）
     与带 ``/<alias>/api/...`` 前缀。
 
-    mismatch 判定：
+    mismatch 判定（BUG-843 收紧）：
 
-    * **经典**：根空 200/失败，且带前缀 2xx 有实体。
-    * **疑似（仅 bundle/HTML 明确发现的路径）**：根空 200/失败，且带前缀
-      返回非空 JSON 404——说明绝对请求落到错误网关，带前缀到达应用后端。
-      默认兜底探针**不得**据此告警（无 API 项目会误报）。
+    * **错位**：入口根 404/空 200，且带前缀**路由存在**（非 404 响应——
+      401/405/422/5xx 都说明路由已到达处理器，GET 2xx 有实体亦然）。
+    * **不确定**：入口根与带前缀都 404/空 200——GET 无法区分「路由不存在」
+      与「该端点仅接受非 GET」，证据不足不计错位，仅记一条说明（不发 POST、
+      不升 WARN）。
+    * 根返回任何非 404 响应（401/405/422 等）说明绝对路由存在，不判错位。
     """
     entry_port = lan_entry_port(config)
     if entry_port is None:
@@ -1158,6 +1170,7 @@ def _check_api_paths(
     from_default = not discovered
     api_paths = discovered if discovered else _DEFAULT_API_PATHS[:]
 
+    uncertain_paths: list[str] = []
     for api_path in api_paths[:5]:  # 最多探测 5 条（含具体端点）
         absolute = _http_get(
             f"{_entry_scheme}://127.0.0.1:{entry_port}{api_path}", ssl_context=ssl_context
@@ -1166,54 +1179,40 @@ def _check_api_paths(
             f"{_entry_scheme}://127.0.0.1:{entry_port}/{path_alias}{api_path}",
             ssl_context=ssl_context,
         )
-        # 判定 mismatch：绝对路径空 200 或失败，且带前缀有内容
-        abs_empty_200 = absolute.ok and (absolute.content_length == 0)
-        abs_failed = absolute.status_code is not None and not absolute.ok
-        prefixed_ok = prefixed.ok and (prefixed.content_length or 0) > 0
-        mismatch = prefixed_ok and (abs_empty_200 or abs_failed)
-        probable = False
-        if not mismatch and not from_default:
-            # 高置信疑似：根空/失败 + 前缀非空 JSON 404（BASE="/api/v1" 拼接形态）
-            prefixed_json_404 = (
-                prefixed.status_code == 404
-                and (prefixed.content_length or 0) > 0
-                and _is_json_content_type(prefixed.content_type)
-            )
-            if (abs_empty_200 or abs_failed) and prefixed_json_404:
-                mismatch = True
-                probable = True
+        # BUG-843：GET 的 404 不证明路由不存在（POST-only 端点同样 404）；
+        # 任何非 404 响应都证明路由存在于该位置。
+        abs_missing = absolute.status_code == 404 or (
+            absolute.ok and (absolute.content_length or 0) == 0
+        )
+        prefixed_route_exists = (
+            prefixed.status_code is not None
+            and prefixed.status_code != 404
+            and not (prefixed.ok and (prefixed.content_length or 0) == 0)
+        )
+        prefixed_missing = prefixed.status_code == 404 or (
+            prefixed.ok and (prefixed.content_length or 0) == 0
+        )
+        mismatch = abs_missing and prefixed_route_exists
+        uncertain = (not mismatch) and abs_missing and prefixed_missing
 
         finding = ApiPathFinding(
             path=api_path,
             absolute=absolute,
             prefixed=prefixed,
             mismatch=mismatch,
+            uncertain=uncertain,
         )
         rep.api_findings.append(finding)
         if mismatch:
-            if probable:
-                if abs_empty_200:
-                    abs_desc = "返回 200 但 0 字节"
-                else:
-                    abs_desc = f"返回 {absolute.status_code or absolute.note or '失败'}"
-                detail = (
-                    f"绝对 API 基址 {api_path} 在别名入口根{abs_desc}，"
-                    f"带前缀 /{path_alias}{api_path} 返回非空 JSON 404"
-                    f"（{prefixed.content_length} 字节）——疑似绝对路径错位"
-                )
-            elif abs_empty_200:
-                detail = (
-                    f"绝对 API 路径 {api_path} 在别名入口根返回 200 但 0 字节，"
-                    f"带前缀 /{path_alias}{api_path} 有响应"
-                    f"（{prefixed.content_length} 字节）"
-                )
+            if absolute.status_code == 404:
+                abs_desc = "返回 404"
             else:
-                code = absolute.status_code or absolute.note or "失败"
-                detail = (
-                    f"绝对 API 路径 {api_path} 返回 {code}，"
-                    f"带前缀 /{path_alias}{api_path} 有响应"
-                    f"（{prefixed.content_length} 字节）"
-                )
+                abs_desc = "返回 200 但 0 字节"
+            detail = (
+                f"绝对 API 路径 {api_path} 在别名入口根{abs_desc}，"
+                f"带前缀 /{path_alias}{api_path} 路由存在"
+                f"（返回 {prefixed.status_code}，{prefixed.content_length or 0} 字节）"
+            )
             rep.findings.append(
                 f"IMP-055 API 路径错位：{detail}"
                 "--前端 API 客户端需从 BASE_URL 派生请求路径"
@@ -1221,6 +1220,16 @@ def _check_api_paths(
             )
             if rep.status == "ok":
                 rep.status = "warn"
+        elif uncertain and not from_default:
+            uncertain_paths.append(api_path)
+
+    if uncertain_paths:
+        rep.findings.append(
+            "IMP-055 API 路径仅以 GET 探测无法判定（入口根与带前缀均 404，"
+            "可能为仅接受非 GET 的端点）："
+            + ", ".join(uncertain_paths[:5])
+            + "——不确定，不计错位"
+        )
 
 
 def _detect_backend(gateway) -> str:

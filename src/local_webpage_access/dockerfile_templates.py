@@ -835,6 +835,11 @@ def _render_python(
             f"COPY {cpfx}requirements.txt ./\n" + _pip_run(fallback, mirrors=mirrors) + "\n"
         )
 
+    # IMP-066（066.b）：CMD 使用 LWA 生成的 Gunicorn 生产命令时，平台分层补装
+    # 运行时依赖（项目依赖声明 gunicorn 则尊重项目版本，不重复安装）；
+    # uv 流程装进 uv venv（uv pip）。不回写用户 requirements/pyproject。
+    gunicorn_block = _gunicorn_platform_block(start, source_dir, mirrors, uses_uv=uses_uv)
+
     # IMP-016（WBS-20260708 阶段2.5）：Python 全栈镜像含 Node 运行时。
     # 源码含 package.json（如 Pi Agent 这类 Python + 辅助 Node 项目）时，追加
     # Node.js/npm 与 Node 依赖安装，base 仍为 python:3.13-slim。
@@ -901,6 +906,7 @@ def _render_python(
         apt_deps_block,
         node_toolchain,
         deps_block,
+        gunicorn_block,
         npm_block,
         final_copy,
         project_install,
@@ -914,6 +920,81 @@ def _render_python(
         f"CMD {_cmd_line(manifest, start)}",
     ]
     return "\n".join(line for line in lines if line) + "\n"
+
+
+# PEP 621 引号包名，或 Poetry 等 ``gunicorn = ...`` 表项。描述/注释里的单词不算。
+_PYPROJECT_GUNICORN_RE = re.compile(
+    r"""(?im)(?:^\s*gunicorn\s*=|["']gunicorn(?=$|["'\s,<>=!~\[]))"""
+)
+
+
+def _project_declares_gunicorn(source_dir: Path | None) -> bool:
+    """项目依赖是否已声明 gunicorn（requirements 行锚定 / pyproject 依赖声明）。"""
+    if source_dir is None:
+        return False
+    req_re = re.compile(r"^\s*gunicorn\b", re.IGNORECASE | re.MULTILINE)
+    for name in ("requirements.txt", "requirements-prod.txt"):
+        text = _read_source_text(source_dir / name)
+        if text and req_re.search(text):
+            return True
+    pyproject = _read_source_text(source_dir / "pyproject.toml")
+    return bool(pyproject) and bool(_PYPROJECT_GUNICORN_RE.search(pyproject))
+
+
+def _read_source_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _strip_uv_run(cmd: str) -> str:
+    prefix = "uv run "
+    stripped = cmd.strip()
+    if stripped.startswith(prefix):
+        return stripped[len(prefix) :].strip()
+    return stripped
+
+
+def _gunicorn_launch_command(start: str, *, uses_uv: bool) -> str:
+    """去掉平台加上的 ``uv run`` 与 ``sh -c`` 包裹，得到实际启动命令。
+
+    工厂目标 ``app:create_app()`` 含括号，预检会写成 ``sh -c 'gunicorn ...'``。
+    uv 流程还会在外层再加 ``uv run``。是否补装 Gunicorn 必须看内层命令。
+    """
+    cmd = _strip_uv_run(start) if uses_uv else start.strip()
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return cmd
+    if len(parts) >= 3 and parts[0] == "sh" and parts[1] == "-c":
+        inner = parts[2].strip()
+        return _strip_uv_run(inner) if uses_uv else inner
+    return cmd
+
+
+def _gunicorn_platform_block(
+    start: str, source_dir: Path | None, mirrors: BuildMirrors | None, *, uses_uv: bool
+) -> str:
+    """IMP-066（066.b）：Gunicorn 平台运行时依赖的分层安装块（不需要时为空）。"""
+    cmd = _gunicorn_launch_command(start, uses_uv=uses_uv)
+    if not cmd.startswith("gunicorn"):
+        return ""
+    if _project_declares_gunicorn(source_dir):
+        return ""
+    from local_webpage_access.scanner import GUNICORN_PLATFORM_SPEC
+
+    if uses_uv:
+        # uv venv 由 uv sync 创建；平台依赖装进同一 venv（不带走 --no-cache-dir
+        # 等 pip 专属旗标，避免与 uv CLI 不兼容）。
+        return f'RUN uv pip install "gunicorn{GUNICORN_PLATFORM_SPEC}"\n'
+    return (
+        _pip_run(
+            f'pip install --no-cache-dir "gunicorn{GUNICORN_PLATFORM_SPEC}"',
+            mirrors=mirrors,
+        )
+        + "\n"
+    )
 
 
 def _frontend_package_dir(source_dir: Path | None) -> str | None:

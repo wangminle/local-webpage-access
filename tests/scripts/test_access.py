@@ -1661,10 +1661,11 @@ def test_collect_api_paths_ignores_html_spa_fallback_as_bundle() -> None:
         httpd.server_close()
 
 
-def test_review_detects_probable_api_mismatch_from_base_and_json_404(
+def test_review_probable_json_404_now_uncertain(
     workspace, registry, config, prefixed_script_bundle_server, monkeypatch
 ):
-    """旧版负向：bundle 仅有 BASE=/api/v1；根空 200 + 前缀 JSON 404 → 疑似错位。"""
+    """BUG-843：bundle 仅有 BASE=/api/v1；根空 200 + 前缀 JSON 404 证据不足——
+    记「不确定」，不计错位、不升 WARN（旧「疑似错位」分支已移除）。"""
     port = prefixed_script_bundle_server
     config.staticGatewayPort = port
     _seed_static(
@@ -1680,11 +1681,12 @@ def test_review_detects_probable_api_mismatch_from_base_and_json_404(
 
     report = review_access(workspace, config, registry)
     rep = report.instances[0]
-    assert rep.has_api_mismatch is True
-    mismatched = [f for f in rep.api_findings if f.mismatch]
-    assert any(f.path == "/api/v1" for f in mismatched)
-    assert rep.status == "warn"
-    assert any("IMP-055" in f for f in rep.findings)
+    assert rep.has_api_mismatch is False
+    finding = next(f for f in rep.api_findings if f.path == "/api/v1")
+    assert finding.mismatch is False
+    assert finding.uncertain is True
+    assert not any("路径错位" in f for f in rep.findings)
+    assert any("不确定" in f for f in rep.findings)
 
 
 class _CompatiblePrefixedHandler(http.server.BaseHTTPRequestHandler):

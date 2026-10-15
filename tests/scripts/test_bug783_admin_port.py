@@ -4,7 +4,7 @@
 多工作区共享 Caddy admin :2019，孤儿 daemon 向共享 admin 推空配置，
 清空真实工作区网关运行配置；BUG-176 只保护了 POST /stop。
 
-方案（design/3-plans/2026-10-14-S2-07-三态判定与BUG-783-实施清单.md）：
+方案（design/2-achievement/2026-10-15-S2-实施与交付记录.md#s2-07-显式三态判定与-caddy-admin-归属保护）：
 每工作区运行时分配独立 admin 端口（20201–20500，登记 run/admin-port），
 主 Caddyfile 渲染 ``admin 127.0.0.1:<port>`` 指令；升级后首次 start 把仍在线的
 本工作区 legacy :2019 旧 master 优雅停掉（平滑迁移）。旧代码孤儿再向 :2019 推送

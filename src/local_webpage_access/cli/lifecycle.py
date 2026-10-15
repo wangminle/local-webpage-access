@@ -356,6 +356,19 @@ def _sync_source_before_rebuild(ws: Any, config: Any, reg: Any, instance_id: str
         typer.echo("  源码无变更，直接重建。")
     else:
         typer.secho("  源码已同步，继续重建。", fg=typer.colors.GREEN)
+    # #61（检查部分）：同步后对预构建产物布局给时效性分级提示（只告警，
+    # 疑似才打印；「无法判断」由 lwa doctor 汇总，避免命令输出噪音）。
+    from local_webpage_access.frontend_staleness import (
+        LEVEL_SUSPECTED,
+        check_frontend_artifacts_staleness,
+    )
+
+    current_dir = ws.app_current(instance_id)
+    if current_dir.is_dir():
+        verdict = check_frontend_artifacts_staleness(current_dir)
+        if verdict.level == LEVEL_SUSPECTED:
+            typer.secho(f"  #61 提示：{verdict.message}", fg=typer.colors.YELLOW)
+            typer.secho(f"  建议：{verdict.suggestion}", fg=typer.colors.YELLOW)
 
 
 def cancel_build(

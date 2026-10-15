@@ -113,6 +113,8 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 
 临时工作区的 doctor 总体 FAIL（端口池被现网占用、manager 因 17800 已被占用而未能启动、本工作区没有自己的 Caddy master）。这不是更新通道失败。现网 `lwa update --no-pull` 刷新 13 个实例、漂移 0，`lwa status` 13 行均为 running；`http://127.0.0.1:8080/prd-review/` 与管理页 `/api/health` 均为 200。现网 doctor 0 失败 / 1 警告（`gateway_tls` 明文旁路，原有警告）。access review 0 失败 / 4 警告（prd-review-v035、backend、patent-disclosure-workflow-v1、funasr-workbench），演练未对它们 rebuild，因此 E 的「accessReview 转绿」这一句没有达到。
 
+**E 项口径调整（2026-10-15，CHK-401 收口）**：上述 4 条 WARN 已逐条实测定性——prd-review-v035、funasr-workbench、patent-disclosure-workflow-v1 为 access review 探测口径误报（仅 GET 探测、字面量正则盲区、疑似分支推理缺陷；登记 BUG-843，排 V0.9.6 修复）；backend 为真缺陷，根因在前端源仓以 `VITE_BASE=/` 预构建的绝对路径产物（入口 HTML 引用 `/assets/index-*.js`，别名下白屏），属 issue #61 范围——LWA 生成的 Python 模板 Dockerfile 无前端构建阶段，任何 `lwa rebuild` 只会重新拷贝同一份产物。E 项按「0 失败 + WARN 逐条定性」收口，backend 保持 `aliasGuardResult=failed` 如实记录。
+
 ### 033.13 — Full Profile Ubuntu / systemd 完整链路
 
 | 项 | 手工步骤 | 通过标准 |

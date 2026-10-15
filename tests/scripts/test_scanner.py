@@ -308,8 +308,9 @@ def test_python_multi_framework_port_command_consistent() -> None:
         assert _infer_python_port(None, order) == 5000
         cmd = _python_start_command(order, None)
         assert cmd is not None
-        assert "--port 5000" in cmd
-        assert "flask" in cmd
+        # IMP-066：已声明 gunicorn 时为 gunicorn 绑定形式；端口语义不变
+        assert "0.0.0.0:5000" in cmd
+        assert "gunicorn" in cmd
 
 
 @pytest.mark.parametrize(
@@ -895,12 +896,14 @@ def test_preflight_static_project_no_issues(tmp_path: Path) -> None:
 
 
 def test_preflight_root_flask_no_issues(tmp_path: Path) -> None:
-    """根目录 Flask 项目预检不修正、不警告。"""
+    """根目录 Flask 项目（可证明入口）预检不修正、不警告（IMP-066 生成 Gunicorn）。"""
     (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n")
     result = Scanner().detect(tmp_path)
     assert result.pending is False
     preflight_notes = [n for n in result.notes if n.startswith("[预检")]
     assert len(preflight_notes) == 0
+    assert result.entry.start.startswith("gunicorn")
 
 
 def test_preflight_root_fastapi_no_issues(tmp_path: Path) -> None:

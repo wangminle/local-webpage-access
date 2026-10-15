@@ -5,7 +5,7 @@ Linux/WSL（systemd user unit）上**直接监管前台进程**（修复 BUG-138
 ``lwa daemon/manager on`` 这种"快速返回的 detached 启动器"当作 ``ExecStart``，
 ``Restart=on-failure`` 监管的是秒退的 CLI，而非真实 watcher/uvicorn）。
 
-设计要点（见 ``design/plan/local-webpage-access-新增功能点2607.md`` §10）：
+设计要点（见 ``design/2-achievement/local-webpage-access-新增功能点2607.md`` §10）：
 
 * 监管对象是前台模块入口 ``python -m local_webpage_access.<daemon|manager_service|
   gateway_service> --workspace <abs>``（030.a）；

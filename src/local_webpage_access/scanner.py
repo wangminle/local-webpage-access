@@ -675,6 +675,26 @@ class Scanner:
     """项目类型识别器（确定性规则）。"""
 
     def detect(self, project_dir: Path) -> DetectionResult:
+        result = self._detect_impl(project_dir)
+        # #61（检查部分 / DEV-164）：预构建前端产物时效性——统一收口（所有识别
+        # 分支共用一次检查）；疑似陈旧才入扫描提示（可行动），「无法判断」由
+        # doctor 汇总避免噪音。
+        from local_webpage_access.frontend_staleness import (
+            LEVEL_SUSPECTED,
+            check_frontend_artifacts_staleness,
+        )
+
+        try:
+            staleness = check_frontend_artifacts_staleness(project_dir)
+        except Exception:  # noqa: BLE001 — 时效性检查不得阻断识别
+            return result
+        if staleness.level == LEVEL_SUSPECTED:
+            result.notes.append(
+                f"[预检警告] #61：{staleness.message}——{staleness.suggestion}"
+            )
+        return result
+
+    def _detect_impl(self, project_dir: Path) -> DetectionResult:
         if not project_dir.is_dir():
             return DetectionResult(confidence="low", pending=True, notes=["项目目录不存在"])
 
@@ -1148,7 +1168,7 @@ class Scanner:
             )
             # IMP-018：重运行时依赖（lancedb/pyarrow/torch/openai …）自动升 medium。
             self._detect_heavy_deps(summary, result)
-            start = _python_start_command(matched, summary)
+            start = _python_start_command(matched, summary, notes=result.notes)
             result.entry = EntryConfig(
                 install=_python_install_command(summary),
                 build=None,
@@ -1227,23 +1247,43 @@ def _node_install_command(summary: FileSummary) -> str:
 # install 生命周期脚本（如 ensure-electron-mirror.mjs）常依赖宿主机环境，
 # 容器内 ``npm ci`` 执行必败（exit 1）；检测到这类脚本时给安装命令补
 # ``--ignore-scripts``（构建与启动不依赖它们，scripts 由 entry.build/start 执行）。
+#
+# BUG-793 收窄：postinstall/preinstall 做**原生构建**（node-gyp、prebuild、
+# electron-rebuild 等）时不得补——忽略脚本会让原生模块装不上（未编译即用），
+# 宁可让安装在容器内如实失败，由用户手改 entry.install（BUG-787 保留语义，
+# update 不覆盖）。其余生命周期脚本（镜像配置、husky 等忽略无害类）维持
+# BUG-788 的补参保护。
 _INSTALL_LIFECYCLE_SCRIPT_KEYS = frozenset({"preinstall", "install", "postinstall", "prepare"})
+_NATIVE_BUILD_SCRIPT_RE = re.compile(
+    r"node-gyp|node-pre-gyp|prebuild|electron-rebuild|install-app-deps|cmake", re.IGNORECASE
+)
 
 
 def _has_install_lifecycle_scripts(scripts: dict) -> bool:
     """package.json scripts 是否声明 install 生命周期脚本。"""
-    return any(key in scripts for key in _INSTALL_LIFECYCLE_SCRIPT_KEYS)
+    return any(scripts.get(key) for key in _INSTALL_LIFECYCLE_SCRIPT_KEYS)
+
+
+def _lifecycle_scripts_native_build(scripts: dict) -> bool:
+    """install 生命周期脚本是否包含原生构建命令（忽略即装不起来）。"""
+    return any(
+        _NATIVE_BUILD_SCRIPT_RE.search(str(scripts.get(key) or ""))
+        for key in _INSTALL_LIFECYCLE_SCRIPT_KEYS
+    )
 
 
 def _guard_install_scripts(command: str | None, scripts: dict) -> str | None:
-    """有 install 生命周期脚本时给安装命令补 ``--ignore-scripts``。
+    """有忽略无害的 install 生命周期脚本时给安装命令补 ``--ignore-scripts``。
 
     只对安装命令尾部追加（``corepack enable && pnpm install`` 形式也只影响
-    最后的安装子命令）；已是 ``None`` 或已带该参数时原样返回。
+    最后的安装子命令）；已是 ``None`` 或已带该参数时原样返回；脚本含原生
+    构建时不补（BUG-793）。
     """
     if not command or "--ignore-scripts" in command:
         return command
     if not _has_install_lifecycle_scripts(scripts):
+        return command
+    if _lifecycle_scripts_native_build(scripts):
         return command
     return f"{command} --ignore-scripts"
 
@@ -1488,7 +1528,11 @@ def _python_install_command(summary: FileSummary) -> str:
     return "pip install -r requirements.txt"
 
 
-def _python_start_command(matched: list[str], summary: FileSummary | None) -> str | None:
+def _python_start_command(
+    matched: list[str],
+    summary: FileSummary | None,
+    notes: list[str] | None = None,
+) -> str | None:
     fw = _select_python_framework(matched)
     if fw in ("fastapi", "uvicorn", "starlette"):
         # BUG-455 / IMP-052：按磁盘布局推断 ASGI 模块，勿硬编码 main:app。
@@ -1499,8 +1543,23 @@ def _python_start_command(matched: list[str], summary: FileSummary | None) -> st
             cmd = f'sh -c "alembic upgrade head && exec {cmd}"'
         return cmd
     if fw == "flask":
+        target, reason = _infer_flask_wsgi_target(summary)
+        if target:
+            _note_gunicorn_generated(notes)
+            return _gunicorn_start_command(target, port=5000)
+        if "gunicorn" in matched:
+            # 066.a：已声明生产服务器优先——入口不可证明时沿用既有 app:app 形态。
+            return "gunicorn -b 0.0.0.0:5000 app:app"
+        _note_wsgi_fallback(notes, "Flask", reason)
         return "flask --app app run --host 0.0.0.0 --port 5000"
     if fw == "django":
+        target, reason = _infer_django_wsgi_target(summary)
+        if target:
+            _note_gunicorn_generated(notes)
+            return _gunicorn_start_command(target, port=8000)
+        if "gunicorn" in matched:
+            return "gunicorn -b 0.0.0.0:8000 app:app"
+        _note_wsgi_fallback(notes, "Django", reason)
         return "python manage.py runserver 0.0.0.0:8000"
     if fw == "streamlit":
         return "streamlit run app.py --server.port 8501"
@@ -1513,6 +1572,122 @@ def _python_start_command(matched: list[str], summary: FileSummary | None) -> st
     if fw == "tornado":
         return "python app.py"
     return None
+
+
+# ---- IMP-066：Flask/Django WSGI 入口推断与生产服务器模板（066.b~066.f） ------
+
+# 066.b：平台选定的 Gunicorn 版本范围（分层安装，不回写用户依赖文件）。
+GUNICORN_PLATFORM_SPEC = ">=21,<23"
+_FLASK_APP_ASSIGN_RE = re.compile(r"^\s*app\s*=\s*Flask\(", re.MULTILINE)
+_CREATE_APP_RE = re.compile(r"^\s*(async\s+)?def\s+create_app\s*\(", re.MULTILINE)
+_DJANGO_WSGI_APP_RE = re.compile(r"^\s*application\s*=", re.MULTILINE)
+_WSGI_SKIP_DIRS = frozenset(
+    {"venv", ".venv", "env", "node_modules", "site-packages", "dist", "build"}
+)
+_DEV_SERVER_START_RE = re.compile(
+    r"(^|[\s/])("
+    r"flask\s+--app|flask\s+run|python\s+-m\s+flask"
+    r"|manage\.py\s+runserver"
+    r")"
+)
+
+
+def _read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _infer_flask_wsgi_target(summary: FileSummary | None) -> tuple[str, str | None]:
+    """066.c：唯一可证明的 Flask WSGI 目标 ``module:app`` / 工厂 ``module:create_app()``。
+
+    只接受根 ``app.py`` / ``main.py`` / ``wsgi.py`` / ``app/__init__.py`` 中可证明
+    的入口（``app = Flask(...)`` 或 ``def create_app``）；多候选不猜。
+    返回 ``(target, fallback_reason)``，二者互斥。
+    """
+    if summary is None:
+        return "", "扫描摘要缺失，无法推断 Flask WSGI 入口"
+    root = summary.root
+    candidates: list[str] = []
+    for fname, module in (("app.py", "app"), ("main.py", "main"), ("wsgi.py", "wsgi")):
+        text = _read_text_if_exists(root / fname)
+        if not text:
+            continue
+        if _FLASK_APP_ASSIGN_RE.search(text):
+            candidates.append(f"{module}:app")
+        elif _CREATE_APP_RE.search(text):
+            candidates.append(f"{module}:create_app()")
+    pkg_text = _read_text_if_exists(root / "app" / "__init__.py")
+    if pkg_text:
+        if _FLASK_APP_ASSIGN_RE.search(pkg_text):
+            candidates.append("app:app")
+        elif _CREATE_APP_RE.search(pkg_text):
+            candidates.append("app:create_app()")
+    if len(candidates) == 1:
+        return candidates[0], None
+    if len(candidates) > 1:
+        return "", f"Flask WSGI 入口存在多个候选（{'、'.join(candidates)}），不猜测"
+    return "", "未能从源码证明唯一的 Flask WSGI 入口"
+
+
+def _infer_django_wsgi_target(summary: FileSummary | None) -> tuple[str, str | None]:
+    """066.d：``manage.py`` 根 + 唯一 ``*/wsgi.py`` → ``<project>.wsgi:application``。
+
+    多个 wsgi.py 或缺失时返回 fallback 原因（不猜）。
+    """
+    if summary is None or not (summary.root / "manage.py").is_file():
+        return "", "未找到 manage.py，无法推断 Django WSGI 入口"
+    modules: list[str] = []
+    for path in _walk(summary.root, max_depth=2):
+        if not path.is_file() or path.name != "wsgi.py":
+            continue
+        rel = path.relative_to(summary.root)
+        if any(part in _WSGI_SKIP_DIRS for part in rel.parts[:-1]):
+            continue
+        text = _read_text_if_exists(path)
+        if text and _DJANGO_WSGI_APP_RE.search(text):
+            modules.append(".".join(rel.with_suffix("").parts))
+    if len(modules) == 1:
+        return f"{modules[0]}:application", None
+    if not modules:
+        return "", "未找到含 application 的 wsgi.py"
+    return "", f"Django wsgi.py 存在多个候选（{'、'.join(modules)}），不猜测"
+
+
+def _gunicorn_start_command(target: str, *, port: int) -> str:
+    # 066.e 低配参数：单 worker、小线程数（家庭服务器预算内），不按 CPU 放大。
+    return f"gunicorn --workers 1 --threads 4 -b 0.0.0.0:{port} {target}"
+
+
+def _note_gunicorn_generated(notes: list[str] | None) -> None:
+    if notes is None:
+        return
+    notes.append(
+        "IMP-066：已生成 Gunicorn 生产启动命令（平台运行时依赖，构建时分层安装，"
+        "不回写项目依赖文件）"
+    )
+
+
+def _note_wsgi_fallback(notes: list[str] | None, framework: str, reason: str | None) -> None:
+    if notes is None:
+        return
+    notes.append(
+        f"[预检警告] IMP-066：{reason or '入口不可证明'}，{framework} 使用开发服务器 "
+        "fallback——仅建议内部快速验证；长期运行请在项目依赖声明 Gunicorn，"
+        "或调整源码布局使 WSGI 入口可唯一推断"
+    )
+
+
+def dev_server_fallback_warning(start: str | None) -> str | None:
+    """IMP-066（066.f）：开发服务器 fallback 的同源警告文案（doctor / 扫描共用）。"""
+    if not start or not _DEV_SERVER_START_RE.search(start):
+        return None
+    return (
+        "启动命令使用框架开发服务器（flask run / manage.py runserver）——"
+        "仅建议内部快速验证；长期运行请在项目依赖声明 Gunicorn，"
+        "或调整源码布局使 WSGI 入口可唯一推断（IMP-066）"
+    )
 
 
 def _infer_uvicorn_app_target(summary: FileSummary | None) -> str:
@@ -1556,4 +1731,5 @@ __all__ = [
     "FileSummary",
     "DetectionResult",
     "summarize",
+    "dev_server_fallback_warning",
 ]

@@ -271,9 +271,17 @@ class Config(BaseModel):
     @field_validator("staticGateway")
     @classmethod
     def _validate_gateway(cls, v: str) -> str:
-        allowed = {"caddy", "nginx", "builtin"}
+        # IMP-067（067.a）：新写入契约仅 caddy | builtin——nginx 从未实现，
+        # 不再是合法新值；旧 YAML 的 nginx 由 load_config 预校验层兼容映射。
+        allowed = {"caddy", "builtin"}
         if v not in allowed:
-            raise ValueError(f"staticGateway 必须是 {allowed} 之一，得到 {v!r}")
+            hint = (
+                "（nginx 从未实现；旧配置在加载时自动按 builtin 兼容，"
+                "如需路径别名请改为 caddy）"
+                if v == "nginx"
+                else ""
+            )
+            raise ValueError(f"staticGateway 必须是 {allowed} 之一，得到 {v!r}{hint}")
         return v
 
     @field_validator("profile")
@@ -484,11 +492,53 @@ def default_config() -> Config:
     return Config()
 
 
+# IMP-067（067.d）：旧值兼容提示每进程只发一次。
+_LEGACY_GATEWAY_WARNED = False
+
+
 def load_config(workspace: Workspace) -> Config:
-    """从工作区加载配置；配置文件不存在时返回默认配置。"""
-    if workspace.config_path.is_file():
-        return Config.from_file(workspace.config_path)
-    return default_config()
+    """从工作区加载配置；配置文件不存在时返回默认配置。
+
+    IMP-067（067.b）：旧 ``local-web.yml`` 的 ``staticGateway: nginx`` 是无效
+    存量值（nginx 从未实现）——在严格校验**前**映射为 builtin 继续加载，
+    保证新版 CLI/update 能先启动；单进程只警告一次，且**不在加载阶段改写
+    文件**——持久迁移由 ``lwa update`` 的配置迁移阶段负责（备份后原子写回
+    builtin）。其它非法值仍 fail-closed。
+    """
+    global _LEGACY_GATEWAY_WARNED
+    path = workspace.config_path
+    if not path.is_file():
+        return default_config()
+    import re
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"配置文件读取失败：{path}", path=str(path)) from exc
+    if re.search(r"(?m)^staticGateway:\s*[\"']?nginx[\"']?\s*(#.*)?$", raw_text):
+        patched = re.sub(
+            r"(?m)^(staticGateway:\s*)[\"']?nginx[\"']?",
+            r"\1builtin",
+            raw_text,
+            count=1,
+        )
+        try:
+            parsed = yaml.safe_load(patched) or {}
+        except yaml.YAMLError:
+            parsed = None
+        if isinstance(parsed, dict):
+            cfg = Config.from_dict(parsed)
+            if not _LEGACY_GATEWAY_WARNED:
+                _LEGACY_GATEWAY_WARNED = True
+                import logging
+
+                logging.getLogger("local_webpage_access.config").warning(
+                    "配置 staticGateway=nginx 为历史无效值（nginx 从未实现），"
+                    "本次按 builtin 兼容运行；`lwa update` 会把它持久迁移为 builtin。"
+                    "如需路径别名请改为 caddy。"
+                )
+            return cfg
+    return Config.from_file(path)
 
 
 def example_config_text(*, static_gateway: str | None = None) -> str:
@@ -530,7 +580,7 @@ portPool:
   start: 18000
   end: 19999
 
-# 静态网关实现：caddy | nginx | builtin
+# 静态网关实现：caddy | builtin（nginx 为历史无效值，加载时自动按 builtin 兼容）
 staticGateway: caddy
 
 # 路径别名统一入口端口（IMP-006）。仅当存在已启用的 --path-alias 时，Caddy

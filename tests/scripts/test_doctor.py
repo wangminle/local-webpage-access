@@ -35,6 +35,8 @@ from local_webpage_access.doctor import (
     format_report,
     run_doctor,
 )
+from tests.scripts._helpers import make_container_manifest
+
 from local_webpage_access.init_workspace import init_workspace
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
@@ -1948,3 +1950,110 @@ def test_db_url_alignment_skips_memory_and_foreign_dir(env) -> None:
     assert check_database_url_alignment(ws).status == STATUS_OK
     _write_alignment_env(ws, "sqlite:////var/lib/myapp/custom.db")
     assert check_database_url_alignment(ws).status == STATUS_OK
+
+
+# ---- BUG-794：admin 端口归属诊断（不自动切换） -------------------------------
+
+
+def test_check_caddy_health_reports_foreign_admin_port_occupier(env, monkeypatch) -> None:
+    """master 未运行且登记端口被其它进程占用 → 归属告警 + 针对性处置建议。"""
+    import local_webpage_access.doctor as doctor_mod
+
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=False)
+    monkeypatch.setattr(doctor_mod, "_port_listener_hint", lambda port: "python3/pid=4321")
+    runner = _runner_from_map({("caddy", "validate"): _proc(0)})
+    r = check_caddy_health(ws, config, runner=runner)
+    assert r.status == STATUS_FAIL
+    assert "被其它进程占用" in r.message and "python3/pid=4321" in r.message
+    suggestion = r.suggestion or ""
+    assert "不自动切换" in suggestion and "gateway on" in suggestion
+
+
+def test_check_caddy_health_admin_down_port_free_keeps_plain_hint(env, monkeypatch) -> None:
+    """端口空闲（无人监听）→ 维持原文案；缺 lsof 时建议标注「归属未确认」。"""
+    import local_webpage_access.doctor as doctor_mod
+
+    ws, config, _reg = env
+    config.staticGateway = "caddy"
+    _patch_static_gateway(monkeypatch, ws, backend="caddy", admin_alive=False)
+    monkeypatch.setattr(doctor_mod, "_port_listener_hint", lambda port: None)
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.shutil.which",
+        lambda name: "/usr/bin/caddy" if name == "caddy" else None,
+    )
+    runner = _runner_from_map({("caddy", "validate"): _proc(0)})
+    r = check_caddy_health(ws, config, runner=runner)
+    assert r.status == STATUS_FAIL
+    assert "不可达" in r.message
+    assert "归属未确认" in (r.suggestion or "")
+
+
+def test_port_listener_hint_tolerates_lsof_failure(monkeypatch) -> None:
+    """lsof 不在 PATH / 执行失败 → None（不抛异常，交由调用方按语义处理）。"""
+    import local_webpage_access.doctor as doctor_mod
+
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.shutil.which", lambda name: None
+    )
+    assert doctor_mod._port_listener_hint(20999) is None
+
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.shutil.which",
+        lambda name: "/usr/sbin/lsof" if name == "lsof" else None,
+    )
+    monkeypatch.setattr(
+        doctor_mod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+    )
+    assert doctor_mod._port_listener_hint(20999) is None
+
+
+# ---- IMP-066：开发服务器 fallback 同源警告 -----------------------------------
+
+
+def test_dev_server_fallback_check_warns_for_flask_run(env) -> None:
+    """容器实例 entry.start 为 flask run / manage.py runserver → WARN + 建议。"""
+    from local_webpage_access.doctor import check_dev_server_fallback
+    from local_webpage_access.models import EntryConfig
+
+    ws, _config, reg = env
+    manifest = make_container_manifest("flaskdemo")
+    manifest.entry = EntryConfig(
+        install="pip install -r requirements.txt",
+        build=None,
+        start="flask --app app run --host 0.0.0.0 --port 5000",
+    )
+    manifest.save(ws.app_manifest_path("flaskdemo"))
+    reg.upsert_from_manifest(manifest)
+
+    r = check_dev_server_fallback(ws, reg)
+    assert r.status == STATUS_WARN
+    assert "flaskdemo" in r.message
+    assert "IMP-066" in (r.suggestion or "")
+
+
+def test_dev_server_fallback_check_ok_for_gunicorn(env) -> None:
+    from local_webpage_access.doctor import check_dev_server_fallback
+    from local_webpage_access.models import EntryConfig
+
+    ws, _config, reg = env
+    manifest = make_container_manifest("prod")
+    manifest.entry = EntryConfig(
+        install="pip install -r requirements.txt",
+        build=None,
+        start="gunicorn --workers 1 --threads 4 -b 0.0.0.0:8000 app:app",
+    )
+    manifest.save(ws.app_manifest_path("prod"))
+    reg.upsert_from_manifest(manifest)
+
+    r = check_dev_server_fallback(ws, reg)
+    assert r.status == STATUS_OK
+
+
+def test_dev_server_fallback_check_skips_without_registry(env) -> None:
+    from local_webpage_access.doctor import check_dev_server_fallback
+
+    ws, _config, _reg = env
+    r = check_dev_server_fallback(ws, None)
+    assert r.status == STATUS_SKIP

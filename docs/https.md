@@ -1,6 +1,6 @@
 # HTTPS 传输加密（gatewayTls）
 
-> 适用版本：V0.9.5（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
+> 适用版本：V0.9.6（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
 > 目标：保护 LAN 管理凭据与应用登录的传输安全——明文只存在于回环。
 
 ## 1. 支持矩阵
@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | caddy | ✅ | Caddy 内嵌 CA（internal CA）自动签发，证书 SAN 覆盖 `127.0.0.1` 与当前 LAN IP |
 | builtin | ❌ | `http.server` 无 TLS 能力；配置校验直接拒绝 `builtin + gatewayTls=internal` |
-| nginx | ❌ | 未实现（白名单占位） |
+| nginx | — | 已收敛（IMP-067）：不再是合法新值；旧配置加载时按 builtin 兼容，`lwa update` 自动迁移 |
 
 TLS 失败（证书损坏、端口被占、验证不通过）时 `lwa gateway on` **显式报错，绝不静默回退明文**。
 

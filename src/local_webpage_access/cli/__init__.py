@@ -45,7 +45,6 @@ class StaticGatewayChoice(StrEnum):
     """
 
     caddy = "caddy"
-    nginx = "nginx"
     builtin = "builtin"
 
 app = typer.Typer(
@@ -81,7 +80,7 @@ def main_callback(
 
 @app.command()
 def version() -> None:
-    """显示版本号（与 Git commit 主题 ``V0.9.5-Build...`` 对齐）。"""
+    """显示版本号（与 Git commit 主题 ``V0.9.6-Build...`` 对齐）。"""
     from local_webpage_access.version_info import display_version
 
     typer.echo(display_version())

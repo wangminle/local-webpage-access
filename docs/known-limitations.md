@@ -117,7 +117,7 @@ swap=4GB
   * **含 Python / Node 等后端的全栈** → **仅** `docker-compose`（`host_container`）。**没有**「本机 venv / systemd 直接跑 uvicorn/gunicorn」的本地 Python 运行时；坚持不装 Docker 则无法用 lwa 托管此类后端（见 FAQ「Python 后端是否支持本地直跑」）。
 * **不纳管外部既有站点**：已在机上的 nginx+systemd、独立进程、非本工作区 Caddy 等，**不能** `adopt` / 登记进 lwa 生命周期。`lwa autostart` 只监管 **本工作区** 的 manager/daemon/gateway；要把旧站纳入 lwa，须改为 zip 导入并由 lwa 重新部署（静态走网关，全栈走 Compose）。与 Full Profile「禁止静默复用系统 caddy.service / 外部 `:2019`」一致。
 * **静态网关**：默认 Caddy 优先；Default 档无 Caddy 时可降级内置 `http.server`。
-  Full Profile 要求可用的 LWA 托管 Caddy（见上）。`staticGateway=nginx` 枚举保留但未实现（无 nginx 模板），会降级 builtin（Full/严格模式则拒绝降级）。
+  Full Profile 要求可用的 LWA 托管 Caddy（见上）。`staticGateway=nginx` 为历史无效值（IMP-067 收敛）：新配置仅接受 `caddy | builtin`，旧 YAML 加载时自动按 builtin 兼容（单进程一次警告），`lwa update` 会备份后持久迁移为 builtin。
 * **HTTPS**：V0.9.0 起 Caddy 可用 `gatewayTls: internal` 打开传输加密（内嵌 CA，别名 `:8443`、管理面 `:9443`；详见 [https.md](https.md)）。**builtin 网关无 TLS**；Let's Encrypt / 公网 ACME / 自定义域名证书自动化仍不在范围内。客户端须 `lwa ca export` 后手动信任根证书，禁止点穿告警。
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。

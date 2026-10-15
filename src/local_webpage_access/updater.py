@@ -461,7 +461,17 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
     # Config 模型的全部顶层字段 → 默认值
     defaults = Config().model_dump()
     missing = [k for k in defaults if k not in existing]
-    if not missing:
+    # IMP-067（067.c）：旧 nginx 值的持久迁移——与缺失键补齐共用「备份→写回」
+    # 事务：只改写 staticGateway 值本身（保留行内注释与用户格式），可重跑
+    # 幂等；迁移失败（如备份失败）保留原文件，update 报告显式呈现。
+    import re
+
+    # 必须落到行尾或行内注释，避免 nginx-custom / nginx2 被改成 builtin-custom。
+    _legacy_nginx = re.compile(
+        r"""(?m)^(staticGateway:\s*)["']?nginx["']?(?=\s*(?:#.*)?$)"""
+    )
+    has_legacy_nginx = bool(_legacy_nginx.search(raw))
+    if not missing and not has_legacy_nginx:
         return [], False
 
     # 备份后写回：用 existing + 缺失键的默认值合并，保留用户已有键的值
@@ -474,7 +484,8 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
 
     # BUG-356：只把缺失键追加/嵌入原文，保留注释、键顺序与用户格式。
     # CHK-115：flow-style（portPool: {start: …}）也须补齐嵌套缺省子键。
-    updated_raw = raw
+    # IMP-067：nginx 迁移先行改写值行，后续缺失键操作在改写后的文本上进行。
+    updated_raw = _legacy_nginx.sub(r"\1builtin", raw, count=1) if has_legacy_nginx else raw
     for key, default_value in defaults.items():
         current_value = existing.get(key)
         if not isinstance(default_value, dict) or not isinstance(current_value, dict):
@@ -537,14 +548,22 @@ def migrate_config_defaults(ws: Workspace, config: Config) -> tuple[list[str], b
             fragment = yaml.safe_dump(nested_missing, allow_unicode=True, sort_keys=False)
             lines[end:end] = ["  " + line for line in fragment.splitlines(keepends=True)]
         updated_raw = "".join(lines)
-    addition = yaml.safe_dump(
-        {key: defaults[key] for key in missing},
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
+    addition = (
+        yaml.safe_dump(
+            {key: defaults[key] for key in missing},
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+        if missing
+        else ""
     )
     prefix = updated_raw if updated_raw.endswith("\n") else updated_raw + "\n"
     config_path.write_text(prefix + addition, encoding="utf-8")
+    if has_legacy_nginx:
+        # 返回列表中的标记仅用于 update 报告展示（在写盘与 addition 构造之后追加）
+        missing.append("staticGateway: nginx→builtin（IMP-067 持久迁移）")
+        log.info("配置迁移：旧 staticGateway=nginx 已改写为 builtin（备份 → %s）", backup.name)
     log.info("配置迁移：补齐 %d 个缺失字段（备份 → %s）", len(missing), backup.name)
     return missing, True
 
