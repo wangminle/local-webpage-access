@@ -98,6 +98,21 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 | E | kill 一个 enabled 服务后 `lwa update`（IMP-059 联动） | 报告标注「意外未运行（中断约 X），已恢复」；accessReview 转绿 |
 | F | 两个 `lwa update` 并发 | 后者 fail-fast「更新锁被占用」，不触碰 pip/进程/registry |
 
+#### S4-02 实机记录（2026-10-15）
+
+对照清单 A–F。版本目标是已发布的 V0.9.4，不是计划稿里的 V0.10.0。代理是本机 v2rayN/xray 的 `socks5h://127.0.0.1:10808`（清单写的 mihomo 用同等 SOCKS 代理代替）。验收克隆在 `/tmp/lwa-s4-chk285`，独立 venv，工作区 `/tmp/lwa-s4-ws`，不接管现网 launchd。
+
+| 项 | 结果 |
+| --- | --- |
+| A | 从 `d757384`（V0.9.1-Build4310）一条 `lwa update --remote origin --ref main` 快进到 `c39d3f8`。报告：`sourceUpdate` 已快进 origin/main：V0.9.1 → V0.9.4；日志有 continuation；结束后 `lwa version` 为 V0.9.4。退出码 0。 |
+| B | 再次更新：`sourceUpdate` 已是最新（origin/main @ V0.9.4），pip / syncSkills / accessRefresh / accessReview 照旧。退出码 0。 |
+| C | 仅把 GitHub 的 git 代理指到 `127.0.0.1:9`。`sourceUpdate` 为 warning（fetch 连接失败），工作树仍停在 `c39d3f8`，其余 Runtime 步骤完成。退出码 0。 |
+| D | 在非工作区目录执行 `lwa update --check --repo <克隆>`：SourceCheckReport，关系 equal，ahead 0 / behind 0。退出码 0。检查后克隆工作树无改动。 |
+| E | 现网 runtime 的 manager 被结束后执行 `lwa update --no-pull --skip-pip`。`restartManager`：管理页意外未运行，中断约 65 秒，已恢复（version=V0.9.4）。`/api/health` 200，新 pid 93558。 |
+| F | 两个更新同时启动。后者 `sourceUpdate` failed：更新锁被占用（repo），未进入 pip。 |
+
+临时工作区的 doctor 总体 FAIL（端口池被现网占用、manager 因 17800 已被占用而未能启动、本工作区没有自己的 Caddy master）。这不是更新通道失败。现网 `lwa update --no-pull` 刷新 13 个实例、漂移 0，`lwa status` 13 行均为 running；`http://127.0.0.1:8080/prd-review/` 与管理页 `/api/health` 均为 200。现网 doctor 0 失败 / 1 警告（`gateway_tls` 明文旁路，原有警告）。access review 0 失败 / 4 警告（prd-review-v035、backend、patent-disclosure-workflow-v1、funasr-workbench），演练未对它们 rebuild，因此 E 的「accessReview 转绿」这一句没有达到。
+
 ### 033.13 — Full Profile Ubuntu / systemd 完整链路
 
 | 项 | 手工步骤 | 通过标准 |

@@ -2041,6 +2041,7 @@ def recover_instance(
     config: Config,
     registry: Registry,
     instance_id: str,
+    expected_revision: int | None = None,
 ) -> InstanceManifest:
     """DEV-043 配套：恢复处于 ``gateway_down`` / ``config_invalid`` / 掉线的实例。
 
@@ -2051,10 +2052,13 @@ def recover_instance(
     最终 ``desiredState=running``。
 
     全程在 ``instance_lock`` 内执行，避免与并发 ``remove_instance`` 竞态。
+    BUG-837：受理 ``expected_revision`` 并在锁内复验（原先仅锁外预检，
+    与其他生命周期操作不一致，存在 TOCTOU 窗口）。
     """
     from local_webpage_access.gateway_service import maybe_start_gateway
 
     with instance_lock(workspace, instance_id):
+        _ensure_revision_locked(registry, instance_id, expected_revision)
         manifest = _load(workspace, instance_id)
         if manifest.runtime.value == "shared-static":
             try:

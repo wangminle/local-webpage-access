@@ -20,7 +20,9 @@ LWA 的同一事实在多个副本中各存一份：manifest（local-web.json）
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,7 +55,7 @@ FAMILY_LABELS = {
 CONSISTENCY_EVENT_TYPE = "consistency_drift"
 
 _IMPORT_RE = re.compile(r"^\s*import\s+(?P<target>`[^`]*`|\"(?:[^\"\\]|\\.)*\"|\S+)\s*$")
-_VOLUME_RE = re.compile(r"^(?P<src>.+?):(?P<dst>/[^:]*)(?::(?:ro|rw))?$")
+_VOLUME_RE = re.compile(r"^(?P<src>.+?):(?P<dst>/[^:]*)(?::(?P<mode>ro|rw))?$")
 
 
 @dataclass(frozen=True)
@@ -231,12 +233,69 @@ def check_artifacts(
     return drifts
 
 
+def _normalize_host_mount_source(path: str) -> str:
+    """宿主源路径归一：Docker Desktop（macOS）把宿主路径翻译成 ``/host_mnt/<原路径>``。"""
+    if path.startswith("/host_mnt/"):
+        path = "/" + path[len("/host_mnt/") :]
+    return path.rstrip("/") or "/"
+
+
+def _interpolated_mount_sources(
+    ws: Workspace, manifest: InstanceManifest, runner: Any
+) -> dict[str, str]:
+    """让 Compose 展开变量（含 .env、默认值及 $$），避免自行模拟插值规则。
+
+    输入使用 manifest 的挂载，防止陈旧 compose 掩盖真实配置漂移；项目目录与
+    执行目录分别对齐生成 compose 与 DockerRuntime，保持相同的路径和 .env 语义。
+    config 仅解析配置，不启动容器。
+    """
+    assert manifest.container is not None
+    cmd = ["docker", "compose"]
+    env_file = ws.app_env_path(manifest.id)
+    if env_file.is_file():
+        cmd += ["--env-file", str(env_file)]
+    cmd += [
+        "--project-directory", str(ws.app_compose_path(manifest.id).parent),
+        "-f", "-", "config", "--format", "json",
+    ]
+    try:
+        result = runner(
+            cmd,
+            cwd=str(ws.app_dir(manifest.id)),
+            input=json.dumps({
+                "name": manifest.container.projectName,
+                "services": {"app": {"image": "busybox", "volumes": manifest.container.extraVolumes}},
+            }),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode != 0:
+            return {}
+        volumes = json.loads(result.stdout)["services"]["app"].get("volumes", [])
+        return {
+            item["target"]: item["source"]
+            for item in volumes
+            if isinstance(item, dict) and item.get("type") == "bind" and item.get("source")
+        }
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        log.debug("挂载源插值巡检跳过 %s：%s", manifest.id, exc)
+        return {}
+
+
 def check_mounts(
+    ws: Workspace,
     registry: Registry,
     manifests: dict[str, InstanceManifest],
     runner: Any,
 ) -> list[Drift]:
-    """extraVolumes 的目标路径是否出现在运行容器的 Mounts 中（docker inspect）。"""
+    """extraVolumes 与运行容器 Mounts 的逐项比对（docker inspect）。
+
+    CHK-402 收口：除目标路径存在性外，还比对宿主源路径与读写模式——在 LWA
+    之外改过容器挂载（换源目录、改 ro/rw）时如实报告。源路径归一
+    ``/host_mnt`` 前缀后比较，macOS Docker Desktop 不误报。
+    """
     drifts: list[Drift] = []
     for iid, manifest in manifests.items():
         if manifest.container is None or not manifest.container.extraVolumes:
@@ -259,19 +318,65 @@ def check_mounts(
         except (OSError, ValueError, TypeError) as exc:
             log.debug("挂载巡检跳过 %s：%s", iid, exc)
             continue
-        destinations = {str(item.get("Destination")) for item in mounts if isinstance(item, dict)}
+        by_destination = {
+            str(item.get("Destination")): item
+            for item in mounts
+            if isinstance(item, dict)
+        }
+        interpolated = (
+            _interpolated_mount_sources(ws, manifest, runner)
+            if any("$" in entry for entry in manifest.container.extraVolumes)
+            else {}
+        )
         for entry in manifest.container.extraVolumes:
             match = _VOLUME_RE.match(entry.strip())
             if match is None:
                 continue
             dst = match.group("dst")
-            if dst not in destinations:
+            mount = by_destination.get(dst)
+            if mount is None:
                 drifts.append(
                     Drift(
                         FAMILY_MOUNTS,
                         iid,
                         f"extraVolumes 目标 {dst} 未出现在运行容器中（配置已改但未生效）",
                         f"lwa restart {iid}（挂载变更在 restart 时生效）",
+                    )
+                )
+                continue
+            source = match.group("src")
+            if "$" in source:
+                # 无法展开时不把表达式与绝对路径硬比；目标与读写模式仍可检查。
+                source = interpolated.get(dst, "")
+            if source:
+                source = os.path.expanduser(source)
+                if not os.path.isabs(source):
+                    source = str(ws.app_compose_path(iid).parent / source)
+                source = os.path.abspath(source)
+            expected_src = _normalize_host_mount_source(source)
+            actual_src = _normalize_host_mount_source(str(mount.get("Source") or ""))
+            if source and actual_src != expected_src:
+                drifts.append(
+                    Drift(
+                        FAMILY_MOUNTS,
+                        iid,
+                        f"extraVolumes {dst} 的宿主源路径与配置不一致"
+                        f"（配置 {expected_src}，容器实际 {actual_src}）",
+                        f"lwa restart {iid}（若在 LWA 外改过容器，请以 manifest 为准）",
+                    )
+                )
+                continue
+            configured_ro = match.group("mode") == "ro"
+            actual_rw = bool(mount.get("RW"))
+            if configured_ro == actual_rw:
+                drifts.append(
+                    Drift(
+                        FAMILY_MOUNTS,
+                        iid,
+                        f"extraVolumes {dst} 的读写模式与配置不一致"
+                        f"（配置 {match.group('mode') or 'rw'}，"
+                        f"容器实际 {'rw' if actual_rw else 'ro'}）",
+                        f"lwa restart {iid}（若在 LWA 外改过容器，请以 manifest 为准）",
                     )
                 )
     return drifts
@@ -447,7 +552,7 @@ def collect_drifts(
     drifts = check_manifest_registry(ws, registry, manifests)
     drifts += check_artifacts(ws, manifests)
     if runner is not None:
-        drifts += check_mounts(registry, manifests, runner)
+        drifts += check_mounts(ws, registry, manifests, runner)
     drifts += check_aliases(ws, config, registry)
     drifts += check_fragments(ws, registry)
     drifts += check_caddy(ws, config, registry)

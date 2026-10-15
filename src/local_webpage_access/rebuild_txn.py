@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -47,16 +48,29 @@ def prev_dir(workspace: Workspace, instance_id: str) -> Path:
 
 
 def snapshot_generated(workspace: Workspace, instance_id: str) -> Path:
-    """把当前生成物复制到 ``docker/.prev/``；先清空旧快照，缺失的文件记为不存在。"""
+    """把当前生成物复制到 ``docker/.prev/``；先清空旧快照，缺失的文件记为不存在。
+
+    BUG-835：先写临时目录再整体交换，快照中途失败不会留下半份快照；此时
+    连上一轮的陈旧 ``.prev`` 一并移除——失败恢复时 :func:`restore_generated`
+    返回 False 且不改动现场，杜绝把过期快照盖回 ``docker/``。
+    """
     target = prev_dir(workspace, instance_id)
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True)
-    docker_dir = workspace.app_docker(instance_id)
-    for name in GENERATED_FILES:
-        src = docker_dir / name
-        if src.is_file():
-            shutil.copy2(src, target / name)
+    staging = target.parent / f"{PREV_DIRNAME}.staging-{os.getpid()}"
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        docker_dir = workspace.app_docker(instance_id)
+        for name in GENERATED_FILES:
+            src = docker_dir / name
+            if src.is_file():
+                shutil.copy2(src, staging / name)
+        shutil.rmtree(target, ignore_errors=True)
+        staging.rename(target)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        # 本轮快照未建立：上一轮的陈旧 .prev 不得再被恢复（BUG-835）
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     return target
 
 
@@ -102,10 +116,13 @@ def prepare_build_first(
     runtime,
     manifest: InstanceManifest,
 ) -> None:
-    """build 之前的准备：保留旧镜像为 ``:prev`` 并快照生成物。
+    """build 之前的准备：快照生成物并保留旧镜像为 ``:prev``。
 
-    无法确定旧镜像或无法打上 ``:prev`` 标签时直接抛出 :class:`HostingError`，
-    此时尚未改动任何生成物或容器，旧版本保持服务。
+    BUG-835：快照在前、打标签在后——快照的就是「当前仍在服务的旧生成物」，
+    随后打 ``:prev`` 失败而中止时，失败收尾里的恢复等价于无操作，绝不会再
+    翻出上一轮的陈旧 ``.prev`` 盖掉当前 compose。无法确定旧镜像或无法打上
+    ``:prev`` 标签时抛出 :class:`HostingError`，此时容器未被改动，旧版本
+    保持服务。
     """
     instance_id = manifest.id
     old_image = manifest.container.imageId if manifest.container else None
@@ -120,6 +137,7 @@ def prepare_build_first(
             "如需强制重建请在 manifest 设置 rebuildStrategy: stop-first",
             instance_id=instance_id,
         )
+    snapshot_generated(workspace, instance_id)
     repo = image_repo(manifest)
     try:
         tag_image(old_image, f"{repo}:{PREV_TAG}")
@@ -128,7 +146,6 @@ def prepare_build_first(
             f"实例 {instance_id} 无法保留旧镜像，已中止重建（旧版本仍在服务）：{exc}",
             instance_id=instance_id,
         ) from exc
-    snapshot_generated(workspace, instance_id)
 
 
 def restore_previous_image_tag(manifest: InstanceManifest) -> None:

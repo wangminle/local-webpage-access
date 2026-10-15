@@ -435,15 +435,17 @@ def verify_alias_live(
     base = f"{scheme}://127.0.0.1:{port}"
     entry_url = f"{base}/{alias}/"
     ok, code, ctype, body = _http_probe_alias_resource(entry_url, ssl_context=ssl_ctx)
+    if not serves_ui:
+        # D7 / BUG-758/836：纯 API 服务没有 HTML 入口——任何非 5xx 响应（含
+        # 401/404 等鉴权或路由语义）即视为别名可用；连接失败与 5xx 仍按分类失败。
+        if ok or (code is not None and code < 500):
+            return AliasLiveVerifyResult(coverage=AliasProbeCoverage(), api_only=True)
     if not ok:
         _raise_verify(
             f"别名入口 {entry_url} 活验证失败（HTTP {code}）",
             kind=_classify_probe_failure(code),
             instance_id=instance_id,
         )
-    if not serves_ui:
-        # D7 / BUG-758：纯 API 服务没有 HTML 入口——非 5xx 即视为别名可用。
-        return AliasLiveVerifyResult(coverage=AliasProbeCoverage(), api_only=True)
     if not body:
         _raise_verify(
             f"别名入口 {entry_url} 返回空响应（HTTP {code}）",

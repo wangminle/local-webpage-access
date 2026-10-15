@@ -277,6 +277,18 @@ def build_and_host_frontend(
         except PathError as exc:
             raise BuildError(str(exc), instance_id=instance_id) from exc
 
+    # BUG-833 / S2-02 / D4：重建已运行的纯前端实例时，install/build 失败发生在
+    # 产物同步（sync_dir）之前，public/ 旧产物原样保留、仍在服务——失败分支
+    # 据此保留观测态，不把仍在服务的实例标成 FAILED。
+    prior_row = registry.get_instance(instance_id)
+    was_serving = (
+        prior_row is not None
+        and str(prior_row.get("status") or "") == Status.RUNNING.value
+        and public_dir.is_dir()
+        and any(public_dir.iterdir())
+    )
+    content_sync_started = False
+
     registry.update_status(instance_id, Status.BUILDING.value)
     build_id = registry.add_build(
         instance_id,
@@ -322,6 +334,8 @@ def build_and_host_frontend(
                 f"构建完成但未找到产物目录（dist/build/out）：{current_dir}",
                 instance_id=instance_id,
             )
+        # sync_dir 先清空旧产物；中途复制失败也不能再声明旧版本可用。
+        content_sync_started = True
         sync_dir(dist, public_dir)
         _record_stage(workspace, registry, instance_id, "sync_done")
         registry.finish_build(build_id, status="success")
@@ -387,6 +401,32 @@ def build_and_host_frontend(
             status="failed",
             error_summary=str(exc)[:500],
         )
+        if was_serving and not content_sync_started:
+            # BUG-833 / S2-02 / D4：旧产物未被替换且仍在服务——实例 status 保留
+            # 观测值（running，含把 BUILDING 恢复为运行），失败只进操作态与
+            # lastError；与取消分支同语义。
+            error_summary = str(exc)[:500]
+            failed_operation = {
+                "kind": "deploy",
+                "status": "failed",
+                "buildId": build_id,
+                "startedAt": op_started_at,
+                "finishedAt": now_iso(),
+                "error": error_summary,
+                "source": "host_static",
+            }
+            registry.update_last_operation(instance_id, failed_operation)
+            registry.update_last_error(instance_id, error_summary)
+            manifest.lastError = error_summary
+            manifest.lastOperation = dict(failed_operation)
+            manifest.touch()
+            with contextlib.suppress(Exception):
+                manifest.save(workspace.app_manifest_path(instance_id))
+            registry.update_status(instance_id, Status.RUNNING.value)
+            registry.add_event(
+                instance_id, "error", f"前端重建失败，旧版本仍在服务：{error_summary}"
+            )
+            raise
         _mark_failed(
             workspace,
             registry,
@@ -854,6 +894,9 @@ class _ContainerDeploy:
     stop_aborted: bool = False
     # 评审-组2：up 后写失败须回滚停容器
     up_completed: bool = False
+    # BUG-834：观测/验证的设计内失败路径已自行完成补偿/收尾并抛出——
+    # 外层统一收尾据此跳过，避免二次补偿（down 旧版本、重复恢复快照）。
+    outcome_settled: bool = False
 
 
 def host_container(
@@ -916,17 +959,21 @@ def host_container(
         _render_container_artifacts(ctx)
         _build_container_image(ctx)
         _swap_in_new_container(ctx)
+        # BUG-834 / S2-03：up 之后的观测、VERIFYING 落盘、验证与最终提交同样
+        # 在事务范围内——任何一步失败都进入统一收尾/补偿（先建后换则回旧
+        # 版本），不再让异常裸抛把生成物/容器留在新版本半提交状态。观测与
+        # 验证的设计内失败路径已自行收尾（outcome_settled），跳过二次补偿。
+        _observe_new_container(ctx)
+        _commit_verifying_state(ctx)
+        verification = _verify_container_deployment(ctx)
+        return _finalize_container_deploy(ctx, verification)
     except BuildCancelled as exc:
         _handle_container_deploy_cancelled(ctx, exc)
         raise
     except Exception as exc:
-        _handle_container_deploy_failed(ctx, exc)
+        if not ctx.outcome_settled:
+            _handle_container_deploy_failed(ctx, exc)
         raise
-
-    _observe_new_container(ctx)
-    _commit_verifying_state(ctx)
-    verification = _verify_container_deployment(ctx)
-    return _finalize_container_deploy(ctx, verification)
 
 
 def _begin_container_deploy(
@@ -1182,6 +1229,9 @@ def _observe_new_container(ctx: _ContainerDeploy) -> None:
         # BUG-344 与 BUG-300 联合约束：旧 ID 已因 down 失效，不能恢复；新 ID
         # 又未观测到时也不能假报 running。清理本轮容器并留在 failed，使下次
         # start 走完整重建，而不是对陈旧身份 compose start。
+        # BUG-834：以下收尾（补偿/清容器/释放端口/_mark_failed）在本分支内
+        # 完成——外层统一收尾据 outcome_settled 跳过，避免二次补偿。
+        ctx.outcome_settled = True
         observation_error = HostingError(
             f"实例 {instance_id} 启动后未能观测到新 containerId",
             instance_id=instance_id,
@@ -1289,6 +1339,9 @@ def _verify_container_deployment(ctx: _ContainerDeploy) -> dict[str, Any]:
     verification["side_effects_auto_recoverable"] = _side_effects_auto_recoverable(side_effects)
 
     if verification["overall_status"] == "failed":
+        # BUG-834：本分支内自行完成补偿（先建后换）或存活失败回滚后抛出，
+        # 外层统一收尾据 outcome_settled 跳过，避免二次补偿。
+        ctx.outcome_settled = True
         _revoke_unverified_build_archive(workspace, registry, instance_id, ctx.build_id)
         if ctx.txn:
             # S2-03：新版本必选探针未通过——旧容器已停，补偿回到旧版本（总会抛出）

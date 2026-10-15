@@ -580,14 +580,29 @@ def _synthesize_production_start(
     tsconfig = _read_package_json(pkg_dir / "tsconfig.json")
     compiler_options = tsconfig.get("compilerOptions")
     out_dir = "dist"
-    if isinstance(compiler_options, dict) and isinstance(compiler_options.get("outDir"), str):
-        out_dir = compiler_options["outDir"].strip().strip("./").strip("/") or "dist"
+    root_dir: str | None = None
+    if isinstance(compiler_options, dict):
+        if isinstance(compiler_options.get("outDir"), str):
+            out_dir = compiler_options["outDir"].strip().strip("./").strip("/") or "dist"
+        if isinstance(compiler_options.get("rootDir"), str):
+            root_dir = compiler_options["rootDir"].strip().strip("./").strip("/") or ""
 
     def _to_out_module(src_rel: str) -> str:
-        rel = src_rel.lstrip("./")
-        if rel.startswith("src/"):
-            rel = rel[4:]
-        return re.sub(r"\.(ts|mts|cts)$", ".js", rel)
+        js = re.sub(r"\.(ts|mts|cts)$", ".js", src_rel.lstrip("./"))
+        if root_dir is None:
+            # 未声明 rootDir：tsc 默认公共源根多为 src/，沿用前缀剥离启发。
+            if js.startswith("src/"):
+                js = js[4:]
+            return js
+        # 显式 rootDir（BUG-839）：输出为 outDir 下相对 rootDir 的路径——
+        # rootDir="." 保留 src/ 前缀；入口不在 rootDir 内时退回启发式。
+        if root_dir:
+            prefix = root_dir + "/"
+            if js.startswith(prefix):
+                return js[len(prefix):]
+            if js.startswith("src/"):
+                js = js[4:]
+        return js
 
     module_js = _to_out_module(entry_src)
     if _DEVISH_ENTRY_STEM_RE.search(Path(module_js).stem):

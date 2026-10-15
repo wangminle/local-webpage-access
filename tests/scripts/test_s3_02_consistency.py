@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -192,11 +193,116 @@ def test_mounts_check_passes_when_destination_present(workspace, registry) -> No
         registry,
         _container(extra=["/mnt/lwa-a:/mnt/a:ro"], container_id="cid123"),
     )
-    runner = _docker_runner([{"Destination": "/mnt/a"}])
+    runner = _docker_runner(
+        [{"Destination": "/mnt/a", "Source": "/mnt/lwa-a", "RW": False}]
+    )
     drifts = collect_drifts(
         workspace, Config(staticGateway="builtin"), registry, runner=runner
     )
     assert not [d for d in drifts if d.family == "mounts"]
+
+
+def test_mounts_check_flags_source_path_mismatch(workspace, registry) -> None:
+    """CHK-402：源路径被外部改写（同目标挂了别的宿主目录）要如实报告。"""
+    _seed(
+        workspace,
+        registry,
+        _container(extra=["/mnt/lwa-a:/mnt/a:ro"], container_id="cid123"),
+    )
+    runner = _docker_runner(
+        [{"Destination": "/mnt/a", "Source": "/mnt/other", "RW": False}]
+    )
+    drifts = collect_drifts(
+        workspace, Config(staticGateway="builtin"), registry, runner=runner
+    )
+    mount_drifts = [d for d in drifts if d.family == "mounts"]
+    assert len(mount_drifts) == 1
+    assert "源路径" in mount_drifts[0].message
+
+
+def test_mounts_check_flags_rw_mode_mismatch(workspace, registry) -> None:
+    """CHK-402：配置 ro 但容器实际挂成 rw（或反之）要如实报告。"""
+    _seed(
+        workspace,
+        registry,
+        _container(extra=["/mnt/lwa-a:/mnt/a:ro"], container_id="cid123"),
+    )
+    runner = _docker_runner(
+        [{"Destination": "/mnt/a", "Source": "/mnt/lwa-a", "RW": True}]
+    )
+    drifts = collect_drifts(
+        workspace, Config(staticGateway="builtin"), registry, runner=runner
+    )
+    mount_drifts = [d for d in drifts if d.family == "mounts"]
+    assert len(mount_drifts) == 1
+    assert "读写模式" in mount_drifts[0].message
+
+
+def test_mounts_check_normalizes_host_mnt_prefix(workspace, registry) -> None:
+    """Docker Desktop（macOS）的 /host_mnt 翻译前缀不构成源路径漂移。"""
+    _seed(
+        workspace,
+        registry,
+        _container(extra=["/Users/x/vol:/mnt/a:ro"], container_id="cid123"),
+    )
+    runner = _docker_runner(
+        [{"Destination": "/mnt/a", "Source": "/host_mnt/Users/x/vol", "RW": False}]
+    )
+    drifts = collect_drifts(
+        workspace, Config(staticGateway="builtin"), registry, runner=runner
+    )
+    assert not [d for d in drifts if d.family == "mounts"]
+
+
+@pytest.mark.parametrize("source", ["../data", "./cache/../data", "~/lwa-data"])
+def test_mounts_check_resolves_source_from_compose_directory(
+    workspace, registry, monkeypatch, tmp_path, source
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed(workspace, registry, _container(extra=[f"{source}:/mnt/a:ro"], container_id="cid123"))
+    expected = Path(source).expanduser()
+    if not expected.is_absolute():
+        expected = workspace.app_compose_path("demo").parent / expected
+    runner = _docker_runner([
+        {"Destination": "/mnt/a", "Source": str(expected.resolve()), "RW": False}
+    ])
+    drifts = collect_drifts(workspace, Config(staticGateway="builtin"), registry, runner=runner)
+    assert not [d for d in drifts if d.family == "mounts"]
+
+
+@pytest.mark.parametrize("actual_source", ["data", "other"])
+def test_mounts_check_resolves_interpolation_using_manifest(
+    workspace, registry, tmp_path, actual_source
+) -> None:
+    """Compose 负责环境/.env/默认值展开；仍按 manifest 检查真实源路径漂移。"""
+    source = "${LWA_MOUNT_ROOT:-../data}"
+    _seed(workspace, registry, _container(extra=[f"{source}:/mnt/a:ro"], container_id="cid123"))
+    workspace.app_env_path("demo").write_text("LWA_MOUNT_ROOT=../data\n", encoding="utf-8")
+    resolved = str(tmp_path / "data")
+
+    def runner(cmd, **kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=json.dumps([
+                {"Destination": "/mnt/a", "Source": str(tmp_path / actual_source), "RW": False}
+            ]))
+        assert cmd[:2] == ["docker", "compose"]
+        assert cmd[cmd.index("--env-file") + 1] == str(workspace.app_env_path("demo"))
+        assert cmd[cmd.index("--project-directory") + 1] == str(
+            workspace.app_compose_path("demo").parent
+        )
+        assert kwargs["cwd"] == str(workspace.app_dir("demo"))
+        assert json.loads(kwargs["input"])["services"]["app"]["volumes"] == [
+            f"{source}:/mnt/a:ro"
+        ]
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"services": {"app": {
+            "volumes": [{"type": "bind", "source": resolved, "target": "/mnt/a"}]
+        }}}))
+
+    drifts = collect_drifts(workspace, Config(staticGateway="builtin"), registry, runner=runner)
+    mount_drifts = [d for d in drifts if d.family == "mounts"]
+    assert len(mount_drifts) == (actual_source == "other")
+    if mount_drifts:
+        assert "源路径" in mount_drifts[0].message
 
 
 def test_mounts_check_skipped_without_runner_or_on_docker_error(workspace, registry) -> None:

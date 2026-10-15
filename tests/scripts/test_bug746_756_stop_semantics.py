@@ -161,6 +161,14 @@ def test_restart_stop_failure_aborts_without_start(
 ) -> None:
     """BUG-756/N3：停机失败直接报错中止，start 不再执行。"""
     start = MagicMock(return_value=deployed_container)
+    # 本用例断言停机失败中止，不测 Docker 版本。完整重建会先走
+    # DockerRuntime.ensure_available()；runner 上的 Engine 28 会在停机语义之前
+    # 抛出版本错误。
+    monkeypatch.setattr(
+        hosting.DockerRuntime,
+        "ensure_available",
+        classmethod(lambda cls: None),
+    )
     monkeypatch.setattr(hosting, "stop_or_abort", MagicMock(side_effect=HostingError("停机失败")))
     monkeypatch.setattr(hosting, "start_container", start)
     monkeypatch.setattr(lifecycle, "_sync_alias_port", lambda *a, **k: None)

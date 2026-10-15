@@ -152,6 +152,38 @@ def test_debian_12_supported() -> None:
     assert report.supported is True
 
 
+def test_injected_debian_ignores_host_ubuntu_codename(monkeypatch: pytest.MonkeyPatch) -> None:
+    """注入发行版身份时不得再读取宿主 /etc/os-release 的代号。
+
+    GitHub Actions 的 ubuntu-latest 代号是 noble。旧逻辑在调用方已传入
+    Debian 12 时仍把宿主代号填进去，is_debian_stable 因 12 与 noble 不配对
+    而把本应受支持的报告判成 unsupported。macOS 没有 /etc/os-release，
+    所以这条只在 Linux CI 上暴露。
+    """
+    monkeypatch.setattr(
+        "local_webpage_access.platform_support._read_os_release",
+        lambda: {
+            "ID": "ubuntu",
+            "VERSION_ID": "24.04",
+            "VERSION_CODENAME": "noble",
+        },
+    )
+    report = collect_platform_support_report(
+        platform_name="linux",
+        distro_id="debian",
+        distro_version="12",
+        kernel_version="6.1.0",
+        libc_version="2.36",
+        architecture="aarch64",
+        systemd_available=True,
+        systemd_pid1=True,
+    )
+    assert report.supported is True, report.reasons
+    assert report.distro_id == "debian"
+    assert report.distro_version == "12"
+    assert not any("noble" in reason for reason in report.reasons)
+
+
 def test_debian_11_rejected() -> None:
     report = collect_platform_support_report(
         platform_name="linux",

@@ -41,7 +41,7 @@ def _install_fakes(monkeypatch: pytest.MonkeyPatch, calls: list[str], *, fail_at
     manifest = SimpleNamespace(
         runtime=SimpleNamespace(value="docker-compose"), container=SimpleNamespace()
     )
-    ctx = SimpleNamespace(tag="ctx")
+    ctx = SimpleNamespace(tag="ctx", outcome_settled=False)
     sentinel_result = object()
 
     class _FakeRuntime:
@@ -101,7 +101,7 @@ def test_host_container_runs_stages_in_order_and_returns_finalized_manifest(monk
     assert calls.index("ensure_available") < calls.index("_begin_container_deploy")
 
 
-@pytest.mark.parametrize("fail_stage", _STAGES)
+@pytest.mark.parametrize("fail_stage", (*_STAGES, *_POST_STAGES))
 def test_stage_failure_dispatches_failed_handler_then_reraises(monkeypatch, fail_stage) -> None:
     calls: list[str] = []
     boom = HostingError("boom", instance_id="demo")
@@ -112,8 +112,8 @@ def test_stage_failure_dispatches_failed_handler_then_reraises(monkeypatch, fail
     assert "_handle_container_deploy_failed" in calls
     assert "_handle_container_deploy_cancelled" not in calls
     # 失败后不再进入后续阶段
-    assert not any(c in calls for c in _POST_STAGES)
-    later = _STAGES[_STAGES.index(fail_stage) + 1 :]
+    all_stages = (*_STAGES, *_POST_STAGES)
+    later = all_stages[all_stages.index(fail_stage) + 1 :]
     assert not any(c in calls for c in later)
 
 

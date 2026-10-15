@@ -491,7 +491,7 @@ lwa list                 # 实例清单
 ### 6.1 操作时间线与副本一致性（V0.9.4 / S3-04、S3-02）
 
 - **操作时间线**：`lwa logs <id> --timeline`（`--tail` 控制条数）按时间倒序列出生命周期事件、构建记录与最近一次操作态，每行标注发起方 `[cli]` / `[manager]` / `[daemon]` / `[agent]`，构建行附耗时。历史事件没有来源记录，显示 `[unknown]`。管理页实例详情的「最近操作」区块展示同一数据。排查"谁触发了这次重建、失败在哪一步"时优先看它，再看 `lwa logs <id> --category build`。
-- **副本一致性**：`lwa doctor` 的 `state_consistency` 检查只读地核对 manifest 与 registry（状态、desiredState、runtime、hostPort）、生成物是否被手改、运行容器是否挂上了 `extraVolumes`、别名片段与 manifest 是否一致、孤儿片段、主 Caddyfile 的 import 是否有效。别名片段与主 Caddyfile 的检查以**实际网关后端**为准（配置 caddy 但二进制缺失被降级 builtin 时不做片段级判定）；未在服务实例的片段按停止语义判定（容器停止有意保留片段、不算残留，静态实例仅明确 stopped 后的残片段才报告）。发现漂移时 WARN 并给出修复建议，**不会自动修复**。daemon 每 30 分钟巡检一次，漂移集合变化时写入 `consistency_drift` 事件（同一组漂移只记一次），可用 `lwa logs <id> --timeline` 查看。
+- **副本一致性**：`lwa doctor` 的 `state_consistency` 检查只读地核对 manifest 与 registry（状态、desiredState、runtime、hostPort）、生成物是否被手改、运行容器的 `extraVolumes` 挂载（目标路径、宿主源路径与读写模式逐项比对；Docker Desktop 的 `/host_mnt` 翻译前缀自动归一）、别名片段与 manifest 是否一致、孤儿片段、主 Caddyfile 的 import 是否有效。别名片段与主 Caddyfile 的检查以**实际网关后端**为准（配置 caddy 但二进制缺失被降级 builtin 时不做片段级判定）；未在服务实例的片段按停止语义判定（容器停止有意保留片段、不算残留，静态实例仅明确 stopped 后的残片段才报告）。发现漂移时 WARN 并给出修复建议，**不会自动修复**。daemon 每 30 分钟巡检一次，漂移集合变化时写入 `consistency_drift` 事件（同一组漂移只记一次），可用 `lwa logs <id> --timeline` 查看。已知边界（CHK-402）：生成物比对以部署基线 configHash + mtime 判定，「先手改生成物、之后又执行过 `lwa configure`」会被判为待生效而不报告——该场景由配置收敛在下一次 `start`/`restart` 时覆盖并告警兜底（S2-04）；挂载检查只在 `doctor` 执行，daemon 巡检不做 Docker 探测。
 - 无主锁文件属于设计上的正常状态（锁文件按设计保留、不删除），不纳入漂移判定。
 
 ### 6.2 调整容器额外挂载（V0.9.4 / S3-05）

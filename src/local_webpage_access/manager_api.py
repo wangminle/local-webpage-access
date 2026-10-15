@@ -468,18 +468,19 @@ def _body_optional_int(payload: dict[str, Any], key: str) -> int | None:
 def _post_update_revision_kwargs(
     registry: Registry, instance_id: str, expected_revision: int | None
 ) -> dict[str, int]:
-    """S2-09 / BUG-751：更新流程后续 rebuild/restart 的 revision 基线。
+    """S2-09 / BUG-751/838：更新流程后续 rebuild/restart 的 revision 基线。
 
-    调用方提供 ``expectedRevision`` 时，update 已按该值校验并 CAS 递增——
-    后续 rebuild/restart 必须以**更新后的新 revision** 为基线，否则会对本
-    操作自己产生的递增误报 ``revision_conflict``；同时仍保留「更新落地后到
-    rebuild 持锁之间又被其它通道变更 → 409」的保护。未提供则返回空 dict，
-    调用完全保持旧签名（兼容既有 monkeypatch 桩与旧前端）。
+    调用方提供 ``expectedRevision`` 时，update 已按该值 CAS 递增一次
+    （importer 三类更新共用路径仅此一次）——本次更新产生的新 revision 就是
+    ``expected + 1``。后续 rebuild/restart 以它为基线：对本操作自己的递增
+    不误报，而「更新落地后到 rebuild/restart 持锁之间又被其它通道变更」
+    （revision 已超过 expected+1）会正确 409。BUG-838：不能现读最新
+    revision 作基线——那会接纳插队更新的递增，绕过冲突保护。未提供则返回
+    空 dict，调用完全保持旧签名（兼容既有 monkeypatch 桩与旧前端）。
     """
     if expected_revision is None:
         return {}
-    revision = registry.get_revision(instance_id)
-    return {"expected_revision": 1 if revision is None else revision}
+    return {"expected_revision": int(expected_revision) + 1}
 
 
 def _hostname_from_host_header(host: str) -> str:
@@ -1466,14 +1467,14 @@ def _register_routes(app: FastAPI) -> None:
         """
         from local_webpage_access.lifecycle import recover_instance
 
-        # recover_instance 暂不接受 expected_revision（lifecycle 属并行工作包
-        # S2-03 的改动范围）：此处仅做锁外预检，权威保护依赖内部 restart 的锁。
+        # BUG-837：recover_instance 已支持 expected_revision（锁内复验），
+        # 与其他生命周期操作一致；锁外预检仅用于早败。
         return _lifecycle_op(
             instance_id,
             recover_instance,
             label="recover",
             expected_revision=expected_revision,
-            op_accepts_revision=False,
+            op_accepts_revision=True,
         )
 
     # ---- S3-01 / S3-04：操作时间线、版本留档与有限回滚（S3-06 拆到子模块）----

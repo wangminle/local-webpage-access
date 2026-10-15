@@ -1371,11 +1371,19 @@ def test_capability_refresh_merges_daemon_and_gateway_caches(
         lambda _root: ("ready", "lwa_service_user", "fenix", "ready"),
     )
 
-    resp = manager_env.client.get(
-        "/api/capability",
-        params={"refresh": "true"},
-        headers=manager_env.auth_headers(),
-    )
+    def _refresh():
+        return manager_env.client.get(
+            "/api/capability",
+            params={"refresh": "true"},
+            headers=manager_env.auth_headers(),
+        )
+
+    # 管理页启动时的后台探测可能已在 monkeypatch 之前进入单飞。
+    # 第一次 refresh 可能共享那次真实 Docker 结果（CI 上 Engine 28 为
+    # version_unsupported）；等它结束后再刷新，才断言补丁后的 manager 探测。
+    drained = _refresh()
+    assert drained.status_code == 200, drained.text
+    resp = _refresh()
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["ok"] is True
