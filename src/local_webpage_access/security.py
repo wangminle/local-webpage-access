@@ -14,6 +14,10 @@
 * :func:`sanitize_zip_members` —— 导入前剥离冗余包与缓存目录（IMP-001），
   在 ``audit_zip_members`` 之前运行：被剥离的成员（含其 symlink）不落盘、
   不参与审计，从源头消除 ``node_modules/.bin/*`` 这类良性 symlink 触发的拒绝。
+* :func:`filter_config_auth_lines` —— 包管理器构建配置（``.npmrc`` /
+  ``.yarnrc`` / ``.yarnrc.yml``）的内容级凭据过滤（BUG-870）：这类文件是构建
+  配置（registry / legacy-peer-deps / engines 严格度），不做整文件剥离，
+  仅剥离其中命中认证/令牌形态的行，其余原样保留。
 * :func:`unknown_zip_risk_hint` —— 未知 zip 来源的标准风险提示（WBS-25.09）。
 * :func:`validate_manager_binding` —— 管理页绑定地址安全性（WBS-25.02）。
 
@@ -25,7 +29,7 @@ from __future__ import annotations
 import posixpath
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import yaml
@@ -577,9 +581,14 @@ _STRIPPABLE_SEGMENTS: frozenset[str] = frozenset(
         "build/dependencies",
     }
 )
-# 可剥离的文件名（任意层级，按文件名精确匹配）
+# 可剥离的文件名（任意层级，按文件名精确匹配）。
+# BUG-870：``.npmrc`` 曾在此列，但它是构建配置（registry / legacy-peer-deps /
+# engines 严格度）而非纯冗余，整文件剥离会让 uptime-kuma / excalidraw 等
+# ``npm ci`` 必败；其安全风险（``_authToken`` 等凭据泄漏）改由
+# :func:`filter_config_auth_lines` 做内容级行剥离。``.yarnrc`` / ``.yarnrc.yml``
+# 同理从未列入（yarn 配置同样是构建配置）。
 _STRIPPABLE_FILES: frozenset[str] = frozenset(
-    {".DS_Store", "Thumbs.db", ".npmrc", "yarn-error.log"}
+    {".DS_Store", "Thumbs.db", "yarn-error.log"}
 )
 
 
@@ -589,12 +598,18 @@ class ZipSanitizeResult:
 
     ``keep_indices`` 指向原 ``names`` 列表的下标，调用方据此只解压保留成员。
     ``categories`` 汇总每条剥离规则命中的成员数，供 CLI 输出与事件审计。
+    ``content_filtered`` 汇总内容级过滤（BUG-870）：成员名 → 被剥离的敏感行号，
+    仅 ``.npmrc`` / ``.yarnrc`` / ``.yarnrc.yml`` 且含认证/令牌行时非空。
+    ``content_stripped`` 汇总因无法按 UTF-8 解码而被保守整文件剥离的成员名
+    （评审 P2：解码失败原样保留会让凭据未经检查进入镜像）。
     """
 
     keep_indices: tuple[int, ...]
     stripped_names: tuple[str, ...]
     stripped_symlink_count: int
     categories: dict[str, int]
+    content_filtered: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    content_stripped: tuple[str, ...] = ()
 
 
 def _strip_rule_for(name: str) -> str | None:
@@ -631,6 +646,10 @@ def sanitize_zip_members(names: list[str], *, modes: list[int] | None = None) ->
     * 被 **保留** 的成员继续走 :func:`audit_zip_members` 与路径穿越校验：
       ``src/evil → /etc/passwd`` 这类业务源码目录的恶意 symlink 仍会被拒绝。
 
+    BUG-870：``.npmrc`` / ``.yarnrc`` / ``.yarnrc.yml`` 属构建配置，**不**做
+    整文件剥离（由调用方在解压后按 :func:`filter_config_auth_lines` 做内容级
+    行过滤）。
+
     Args:
         names: zip 成员名列表。
         modes: 可选的 Unix 模式位列表（与 ``names`` 对齐），用于统计被剥离的
@@ -658,6 +677,60 @@ def sanitize_zip_members(names: list[str], *, modes: list[int] | None = None) ->
         stripped_symlink_count=stripped_symlink,
         categories=dict(categories),
     )
+
+
+# ---- 包管理器构建配置的内容级过滤（BUG-870）----------------------------------
+
+# 内容级过滤目标：构建配置文件名（任意层级，按文件名精确匹配）。
+# 这类文件承载 registry / legacy-peer-deps / engines 严格度等构建语义，
+# 整文件剥离会让 ``npm ci`` 等安装步骤丢失关键配置（uptime-kuma / excalidraw
+# 实证），因此保留文件、仅剥离其中的认证/令牌行。
+_CONTENT_FILTERED_FILES: frozenset[str] = frozenset({".npmrc", ".yarnrc", ".yarnrc.yml"})
+
+# 认证/令牌行的判定形态（大小写不敏感）：
+# * ``_auth=`` / ``_authToken=`` / ``//host/:_authToken=``（npm 作用域形态）
+# * ``_password=``、裸 ``token=``
+# * yarnrc.yml 的 ``npmAuthToken:`` / ``npmAuthIdent:``
+# ``legacy-peer-deps=true``、``registry=...``、``engine-strict=false`` 等构建
+# 配置行不命中；``author=...`` 之类普通键也不命中（``_auth`` 前须为非单词字符
+# 或行首，后须紧跟 ``=`` / ``:`` 或行尾）。
+_CONFIG_AUTH_LINE_RE = re.compile(
+    r"(?:^|[^a-z0-9_])_auth(?:token)?(?:\s*[=:]|$)"
+    r"|_password\s*[=:]"
+    r"|(?:^|[^a-z0-9])token\s*="
+    r"|npmauth(?:token|ident)\s*:",
+    re.IGNORECASE,
+)
+
+
+def is_content_filtered_file(name: str) -> bool:
+    """该 zip 成员名是否为内容级过滤目标（按文件名，任意层级）。"""
+    norm = name.replace("\\", "/")
+    return norm.rsplit("/", 1)[-1] in _CONTENT_FILTERED_FILES
+
+
+def filter_config_auth_lines(content: str) -> tuple[str, list[tuple[int, str]]]:
+    """对包管理器构建配置文本做内容级凭据过滤（BUG-870）。
+
+    逐行检查：命中 :data:`_CONFIG_AUTH_LINE_RE` 的认证/令牌行被剥离，其余行
+    （registry、legacy-peer-deps、engines 严格度等构建配置）原样保留。
+
+    Args:
+        content: 配置文件的完整文本。
+
+    Returns:
+        ``(filtered, removed)`` —— 过滤后文本与被剥离行的
+        ``(行号, 原始行)`` 列表（行号从 1 起）。无敏感行时
+        ``filtered == content`` 且 ``removed == []``，调用方据此静默保留。
+    """
+    kept: list[str] = []
+    removed: list[tuple[int, str]] = []
+    for lineno, line in enumerate(content.splitlines(keepends=True), start=1):
+        if _CONFIG_AUTH_LINE_RE.search(line):
+            removed.append((lineno, line.rstrip("\r\n")))
+        else:
+            kept.append(line)
+    return "".join(kept), removed
 
 
 # ---- zip slip 防御纵深（WBS-25.10）------------------------------------------
@@ -813,6 +886,8 @@ __all__ = [
     "audit_zip_members",
     "sanitize_zip_members",
     "ZipSanitizeResult",
+    "is_content_filtered_file",
+    "filter_config_auth_lines",
     "unknown_zip_risk_hint",
     "trusted_zip_hint",
     "validate_manager_binding",

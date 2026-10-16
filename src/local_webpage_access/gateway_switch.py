@@ -415,12 +415,14 @@ def _enable_running_builtin(
             alt = workspace.app_current(iid) / "public"
             public = alt if alt.is_dir() else public
         alias = st.routeHost if st.routeMode == RouteMode.NAME.value and st.routeHost else None
+        # BUG-861：前端 SPA 站点（有 entry.build）重启用时保留 try_files 回退
         gateway.enable(
             iid,
             int(st.hostPort),
             public,
             wait_health=True,
             alias=alias,
+            spa_fallback=bool(manifest.entry.build),
         )
         enabled.append(iid)
         if alias:

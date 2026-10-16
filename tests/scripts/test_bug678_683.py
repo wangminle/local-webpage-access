@@ -446,7 +446,9 @@ def test_enable_running_builtin_records_skipped_guard(
         def __init__(self) -> None:
             self.enabled: list[tuple[str, int, str | None]] = []
 
-        def enable(self, iid_, port, public, *, wait_health=True, alias=None) -> None:
+        def enable(
+            self, iid_, port, public, *, wait_health=True, alias=None, spa_fallback=False
+        ) -> None:
             self.enabled.append((iid_, port, alias))
 
     gw = _FakeBuiltinGW()

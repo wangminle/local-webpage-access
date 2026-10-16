@@ -1334,7 +1334,20 @@ def _run_migrate_locked(
                     ws, str(old_r), str(new_r), snapshot
                 )
             if resume_verify_ok:
-                rebind_saved_default_workspace(old_r, new_r)
+                # BUG-855：默认工作区文件写入失败不得中断 journal 收尾——
+                # 迁移物理上已完成，降级为提示（回滚分支仍保持硬失败语义）。
+                try:
+                    rebind_saved_default_workspace(old_r, new_r)
+                except OSError as exc:
+                    log.warning(
+                        "迁移完成，但默认工作区同步失败：%s；请执行 lwa workspace use %s",
+                        exc,
+                        new_r,
+                    )
+                    resume_verify_notes = [
+                        *resume_verify_notes,
+                        f"默认工作区同步失败：{exc}（请执行 lwa workspace use {new_r}）",
+                    ]
             _save(
                 MigratePhase.COMPLETE.value,
                 completed_at=now_iso(),
@@ -1460,7 +1473,19 @@ def _run_migrate_locked(
 
         # COMPLETE（必须带上 verify_ok，避免 resume 丢失验收结果）
         if verify_ok:
-            rebind_saved_default_workspace(old_r, new_r)
+            # BUG-855：同 resume 分支——同步失败降级为 notes 提示，journal 照常落盘。
+            try:
+                rebind_saved_default_workspace(old_r, new_r)
+            except OSError as exc:
+                log.warning(
+                    "迁移完成，但默认工作区同步失败：%s；请执行 lwa workspace use %s",
+                    exc,
+                    new_r,
+                )
+                verify_notes = [
+                    *verify_notes,
+                    f"默认工作区同步失败：{exc}（请执行 lwa workspace use {new_r}）",
+                ]
         _save(
             MigratePhase.COMPLETE.value,
             completed_at=now_iso(),

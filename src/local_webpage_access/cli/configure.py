@@ -49,6 +49,19 @@ def configure(
     clear_extra_volumes: bool = typer.Option(
         False, "--clear-extra-volumes", help="清空额外 bind 挂载"
     ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="BUG-869：人工确认 pending 实例的 kind（node / python / static），"
+        "须与 --runtime 同用；执行后 manifest 与 registry 同步，"
+        "且不要与其他配置项组合",
+    ),
+    runtime: str | None = typer.Option(
+        None,
+        "--runtime",
+        help="BUG-869：人工确认 pending 实例的 runtime（docker-compose / "
+        "shared-static），须与 --kind 同用",
+    ),
 ) -> None:
     """配置实例；不带选项时显示当前配置。构建参数改后需 rebuild，挂载改后 restart 即可。"""
     try:
@@ -87,9 +100,45 @@ def configure(
             changes["extraVolumes"] = list(extra_volume)
         if clear_extra_volumes:
             changes["extraVolumes"] = []
+        # BUG-869：pending 实例的人工形态确认通道。
+        if (kind is None) != (runtime is None):
+            raise ValueError("--kind 与 --runtime 须同时使用")
+        if kind is not None and changes:
+            raise ValueError("确认形态（--kind/--runtime）请单独使用，勿与其他配置项组合")
+        kind_enum = runtime_enum = None
+        if kind is not None:
+            from local_webpage_access.models import Kind, Runtime
+
+            try:
+                kind_enum = Kind(kind)
+            except ValueError:
+                raise ValueError(f"--kind 取值须为 node / python / static：{kind}") from None
+            try:
+                runtime_enum = Runtime(runtime)
+            except ValueError:
+                raise ValueError(
+                    f"--runtime 取值须为 docker-compose / shared-static：{runtime}"
+                ) from None
         ws, _, reg = open_workspace_registry()
         try:
-            if changes:
+            if kind_enum is not None:
+                assert runtime_enum is not None  # 成对校验已保证
+                from local_webpage_access.instance_settings import confirm_instance_shape
+
+                manifest = confirm_instance_shape(
+                    ws, reg, instance_id, kind=kind_enum, runtime=runtime_enum
+                )
+                typer.secho(
+                    f"已确认实例 {instance_id} 形态：{kind_enum.value}/{runtime_enum.value}"
+                    "（manifest 与 registry 已同步，状态 pending → stopped）",
+                    fg=typer.colors.GREEN,
+                )
+                typer.secho(
+                    "建议下一步：按需 lwa configure <id> --system-deps <包> / 核对 entry 后"
+                    f"执行 lwa start {instance_id}",
+                    fg=typer.colors.CYAN,
+                )
+            elif changes:
                 manifest = update_instance_settings(ws, reg, instance_id, changes)
             else:
                 manifest = InstanceManifest.load(ws.app_manifest_path(instance_id))

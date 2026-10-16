@@ -35,6 +35,7 @@ from local_webpage_access.security import ZipSanitizeResult
 from local_webpage_access.models import (
     ContainerConfig,
     DesiredState,
+    EntryConfig,
     InstanceManifest,
     Kind,
     ResourceProfile,
@@ -131,6 +132,10 @@ class UpdateResult:
     needs_restart: bool = False
     needs_rebuild: bool = False
     kind_changed: bool = False
+    # BUG-876：重扫形态与既有形态不一致，但实例形态此前已确认/部署过
+    # （status != pending）——更新未采纳重扫形态、保留既有形态（仅刷新
+    # stack/entry 检测参考），调用方据此输出「保留既有形态」警告。
+    shape_disagreement: bool = False
     sanitized: ZipSanitizeResult | None = None
     # issue #45：folder → folder 更换了关联目录（含 dry-run 计划）。
     source_dir_changed: bool = False
@@ -838,11 +843,21 @@ class Importer:
             detection = None
             sanitized: ZipSanitizeResult | None = None
             kind_changed = False
+            shape_disagreement = False
             with tempfile.TemporaryDirectory(prefix="lwa-update-dryrun-") as tmp:
                 staging_tmp = Path(tmp)
                 sanitized = safe_extract(src, staging_tmp)
                 detection = self.scanner.detect(staging_tmp)
                 kind_changed = self._kind_changed(old_manifest, detection)
+                shape_disagreement = self._shape_disagreement(old_manifest, detection)
+                if shape_disagreement and self._keep_confirmed_shape(
+                    old_manifest, detection, force_kind_change=force_kind_change
+                ):
+                    # 与落盘路径同判定：已确认形态保留既有形态，不算「将变化」
+                    kind_changed = False
+                else:
+                    # 未保留（采纳重扫形态或 pending 守卫拒绝）时不报「保留既有形态」
+                    shape_disagreement = False
             # 预告实际更新后的动作（与落盘路径一致：容器 rebuild，静态/前端 restart）
             is_container = old_manifest.runtime.value == "docker-compose"
             dry_needs_rebuild = bool(restart and was_running and is_container)
@@ -869,6 +884,7 @@ class Importer:
                 needs_restart=dry_needs_restart,
                 needs_rebuild=dry_needs_rebuild,
                 kind_changed=kind_changed,
+                shape_disagreement=shape_disagreement,
                 sanitized=sanitized,
             )
 
@@ -917,9 +933,21 @@ class Importer:
                 sanitized = safe_extract(src, staging)
                 detection = self.scanner.detect(staging)
                 kind_changed = self._kind_changed(old_manifest, detection)
+                shape_disagreement = self._shape_disagreement(old_manifest, detection)
+                # BUG-876：既有形态已被人工确认/部署（status != pending）时，重扫
+                # 与既有形态不一致视为检测参考噪声而非形态变化：保留既有形态
+                # （人工适配是权威值），更新继续并告警。pending 实例尚无确认
+                # 形态，维持既有拒绝语义；--force-kind-change 且重扫给出确定
+                # 形态时才真正采纳新形态（跨形态停机/换表见下方 BUG-124 分支）。
+                keep_confirmed_shape = shape_disagreement and self._keep_confirmed_shape(
+                    old_manifest, detection, force_kind_change=force_kind_change
+                )
+                # 报告口径：只有「保留既有形态」时才报 shape_disagreement
+                # （采纳重扫形态或 pending 守卫拒绝时该字段为 False）。
+                shape_disagreement = shape_disagreement and keep_confirmed_shape
 
-                # kind/runtime 变化拒绝（首版）
-                if not force_kind_change and kind_changed:
+                # kind/runtime 变化拒绝（仅 pending 实例）
+                if not force_kind_change and kind_changed and not keep_confirmed_shape:
                     raise ZipImportError(
                         f"新 zip 的形态发生变化（"
                         f"{old_manifest.kind.value}/{old_manifest.runtime.value}"
@@ -927,6 +955,15 @@ class Importer:
                         f"首版不支持跨形态原地更新；请改用普通 import 新建实例，"
                         f"或加 --force-kind-change 确认强制迁移",
                         instance_id=instance_id,
+                    )
+                if keep_confirmed_shape:
+                    log.warning(
+                        "实例 %s：重扫形态（%s）与既有形态（%s/%s）不一致；"
+                        "实例形态此前已确认/部署过，保留既有形态及其 entry/stack 等检测派生字段",
+                        instance_id,
+                        detection.form,
+                        old_manifest.kind.value,
+                        old_manifest.runtime.value,
                     )
 
                 # S2-05 / D3（BUG-744）：--update 未显式传 --path-alias（更新路径
@@ -959,22 +996,40 @@ class Importer:
                             f"（别名 /{existing_alias}/）",
                         )
                     else:
-                        try:
-                            self._assert_alias_no_absolute_spa_assets(
-                                staging, alias=existing_alias, instance_id=instance_id
+                        exempt = _alias_guard_build_env_exemption(old_manifest, existing_alias)
+                        if exempt is not None:
+                            # BUG-862：构建型前端已注入 base 构建变量指向别名——守卫
+                            # 扫的是源码 index.html（恒含 /src/main.*），扫它必然误拦。
+                            log.warning(
+                                "实例 %s 更新前别名守卫豁免：buildEnv %s 已指向别名 /%s/"
+                                "（构建型前端，源码 index.html 扫描不适用）",
+                                instance_id,
+                                exempt,
+                                existing_alias,
                             )
-                        except RecognitionError as exc:
-                            raise ZipImportError(
-                                f"实例 {instance_id} 已设置路径别名 /{existing_alias}/，"
-                                f"新内容未通过别名守卫（换入前拒绝，current/ 未被修改）：\n"
-                                f"{exc.message}\n"
-                                f"补救（任选其一）：\n"
-                                f"  1. 按上述方案改造产物（构建 --base=/{existing_alias}/）"
-                                f"后重新执行更新；\n"
-                                f"  2. 确认风险后加 --ignore-alias-guard 越过本守卫"
-                                f"（会记录审计事件）。",
-                                instance_id=instance_id,
-                            ) from exc
+                            self.registry.add_event(
+                                instance_id,
+                                "path-alias",
+                                f"更新前别名守卫豁免（buildEnv {exempt} 指向别名 "
+                                f"/{existing_alias}/，构建型前端）",
+                            )
+                        else:
+                            try:
+                                self._assert_alias_no_absolute_spa_assets(
+                                    staging, alias=existing_alias, instance_id=instance_id
+                                )
+                            except RecognitionError as exc:
+                                raise ZipImportError(
+                                    f"实例 {instance_id} 已设置路径别名 /{existing_alias}/，"
+                                    f"新内容未通过别名守卫（换入前拒绝，current/ 未被修改）：\n"
+                                    f"{exc.message}\n"
+                                    f"补救（任选其一）：\n"
+                                    f"  1. 按上述方案改造产物（构建 --base=/{existing_alias}/）"
+                                    f"后重新执行更新；\n"
+                                    f"  2. 确认风险后加 --ignore-alias-guard 越过本守卫"
+                                    f"（会记录审计事件）。",
+                                    instance_id=instance_id,
+                                ) from exc
 
                 # issue #19：manifest 重建必须在原子换入**前**、staging 仍在原位时
                 # 完成。build_manifest_from_detection → generate_plans 会沿
@@ -983,7 +1038,12 @@ class Importer:
                 # guessed /health（实测 FastAPI 的 /api/health 更新后即丢失）。
                 # 提前还有 fail-fast 收益：计划生成的问题在旧 current/ 被替换
                 # 前暴露，current/ 原封未动、finally 只需清暂存区。
-                prepared_manifest = apply_detection_to_manifest(old_manifest, detection, self.ws)
+                prepared_manifest = apply_detection_to_manifest(
+                    old_manifest,
+                    detection,
+                    self.ws,
+                    keep_confirmed_shape=keep_confirmed_shape,
+                )
 
                 # BUG-787：容器已部署（containerId 非空）但缺 S2-04 指纹基线
                 # （指纹机制启用前部署的旧实例）时，趁 current/ 尚未换入、docker/
@@ -1007,7 +1067,8 @@ class Importer:
                 # BUG-124：跨形态 upsert 会删除旧 static_sites/containers 子表，
                 # 必须在换表前按旧 manifest 停掉 runtime。即使 desired=stopped 也尝试，
                 # 以清理历史遗留的存活进程；业务停止失败只警告，不阻断从未托管实例更新。
-                if force_kind_change and kind_changed:
+                # BUG-876：保留既有形态（keep_confirmed_shape）时形态未变，无需停机。
+                if kind_changed and not keep_confirmed_shape:
                     try:
                         from local_webpage_access.hosting import stop_instance
 
@@ -1212,6 +1273,7 @@ class Importer:
             needs_restart=needs_restart,
             needs_rebuild=needs_rebuild,
             kind_changed=kind_changed,
+            shape_disagreement=shape_disagreement,
             sanitized=sanitized,
         )
 
@@ -1581,6 +1643,14 @@ class Importer:
                 # 返回值与磁盘身份保持一致（skipped 分支的 result.manifest
                 # 仍是旧身份，调用方按其展示会误导）
                 result.manifest = updated_manifest
+
+        # BUG-859：folder 源「有更新」与「无更新跳过」两条路径的消息指纹单位
+        # 必须一致，且以落库值为准。有更新时 _update_zip_locked 返回的是打包
+        # zip 的 sha256，与跳过路径的 sourceSyncHash（compute_source_hash）
+        # 单位不同——同一目录两个值不等，用户无法对照前后更新。这里统一按
+        # 落库口径（sourceSyncHash）回填 UpdateResult 的报告字段。
+        result.prev_hash = old_sync_hash
+        result.zip_hash = new_sync_hash
 
         if changing_source_dir:
             result.source_dir_changed = True
@@ -2003,6 +2073,32 @@ class Importer:
         )
         return detection.kind != old_kind or new_rt != old_rt
 
+    @staticmethod
+    def _shape_disagreement(old: InstanceManifest, detection: DetectionResult) -> bool:
+        """重扫与既有形态不一致、且既有形态已被确认/部署（BUG-876）。
+
+        与 :meth:`_kind_changed` 的口径差异：后者兼容旧语义（pending 检测只在
+        旧实例为容器时算形态变化）；本判定以 :func:`detection_shape_differs`
+        为准——任何不确定（pending）或不一致的重扫，对已确认实例都只作检测
+        参考，不构成形态变化。
+        """
+        return old.status != Status.PENDING and detection_shape_differs(old, detection)
+
+    @staticmethod
+    def _keep_confirmed_shape(
+        old: InstanceManifest, detection: DetectionResult, *, force_kind_change: bool
+    ) -> bool:
+        """BUG-876：已确认/部署过的实例是否保留既有形态（不采纳重扫形态）。
+
+        仅当用户显式 ``--force-kind-change`` 且重扫给出**确定**形态
+        （非 pending）时才采纳新形态（真正的跨形态迁移）；force 撞上 pending
+        检测时无形态可采纳，仍保留既有形态，避免整体覆盖清空 container/
+        network（hostPort 登记）。
+        """
+        if not force_kind_change:
+            return True
+        return bool(detection.pending or detection.kind is None)
+
     def _preserve_hostport(self, manifest: InstanceManifest, instance_id: str) -> None:
         """把 registry 中已登记的 hostPort 回填到 manifest（IMP-009）。
 
@@ -2257,6 +2353,32 @@ class Importer:
 
 # ---- 辅助 -------------------------------------------------------------------
 
+
+def _alias_guard_build_env_exemption(manifest: InstanceManifest, alias: str) -> str | None:
+    """BUG-862：构建型前端已注入指向别名的 base 构建变量时，豁免更新路径别名守卫。
+
+    更新路径守卫扫描的是**源码** index.html——构建型项目源码恒引用
+    ``/src/main.*`` 绝对路径，对已按 ``--base=/{alias}/`` 注入构建变量完成改造
+    的实例必然误拦（每次更新都被拒）。豁免条件：``entry.build`` 非空（构建型
+    前端）且**实际生效的构建环境**存在值恰好为 ``/{alias}`` 或 ``/{alias}/``
+    的变量（BASE_URL / VITE_BASE / PUBLIC_URL 等键名不限，以值为准）。
+    生效环境以 :func:`instance_settings.effective_build_env` 为准——正式配置
+    通道 ``lwa configure --build-env`` 写入顶层 ``manifest.buildEnv``，
+    ``buildBaseFromAlias=True`` 时按当前别名自动派生 ``VITE_BASE=/{alias}/``；
+    不读 ``entry.buildEnv``（扩展字段，构建流程不消费）。
+    返回命中依据（``KEY=value``），不豁免返回 None。
+    """
+    entry = getattr(manifest, "entry", None)
+    if entry is None or not getattr(entry, "build", None):
+        return None
+    from local_webpage_access.instance_settings import effective_build_env
+
+    for key, value in effective_build_env(manifest).items():
+        if value.strip() in {f"/{alias}", f"/{alias}/"}:
+            return f"{key}={value}"
+    return None
+
+
 # issue #15：旧式 start 命令里烤死的 DATABASE_URL（export 形式，值可带引号）。
 _START_EXPORT_DB_URL_RE = re.compile(
     r"export\s+DATABASE_URL\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s&;\"']+))"
@@ -2458,6 +2580,8 @@ def build_manifest_from_detection(
     if path_alias is not None:
         kwargs["desiredAlias"] = path_alias
     manifest = InstanceManifest(**kwargs)
+    # BUG-863 修订：记录本次自动检测 entry 快照，供重扫合并区分人工覆盖。
+    manifest.entry.detected = _entry_detection_snapshot(manifest.entry)
     if zip_hash:
         manifest.sourceZipHash = zip_hash  # type: ignore[attr-defined]
     manifest.network.internalPort = detection.internalPort
@@ -2486,10 +2610,76 @@ def build_manifest_from_detection(
     return manifest
 
 
+def detection_shape_differs(manifest: InstanceManifest, detection: DetectionResult) -> bool:
+    """重扫形态与 manifest 既有 kind/runtime 是否不一致（BUG-876）。
+
+    pending / kind=None 一律视为不一致（重扫未给出确定形态，不得覆盖已确认
+    形态）；runtime=None 但 kind 相同时不算不一致（该形态无 runtime 细分）。
+    """
+    if detection.pending or detection.kind is None:
+        return True
+    if detection.kind != manifest.kind:
+        return True
+    if detection.runtime is not None and detection.runtime != manifest.runtime:
+        return True
+    return False
+
+
+# BUG-863：entry 中可能被用户手工适配的字段（buildEnv/buildHooks/systemDeps
+# 等同族配置已有保留透传；entry 此前是唯一的清零缺口）。
+_ENTRY_USER_FIELDS = ("install", "build", "start", "buildOutputDir")
+
+# issue #15：旧管线把 DATABASE_URL 烤在 entry.start 的 export 里；更新管线
+# 会把该值迁入 docker/.env 并由新检测 start 接管——这类旧式 start 不属于
+# 「用户手工适配」，BUG-863 的保留规则须让位于迁移（否则迁移后仍残留双写）。
+_LEGACY_DB_URL_START_RE = re.compile(r"export\s+DATABASE_URL\s*=")
+
+
+def _entry_detection_snapshot(entry: EntryConfig) -> dict[str, str | None]:
+    """记录本次自动检测产出的 entry 字段快照（BUG-863 修订）。"""
+    return {field: getattr(entry, field, None) for field in _ENTRY_USER_FIELDS}
+
+
+def _preserve_user_entry_fields(
+    old_entry: EntryConfig, new_entry: EntryConfig, *, instance_id: str
+) -> None:
+    """BUG-863（修订）：仅保留有依据的人工覆盖，旧自动生成值随新检测更新。
+
+    判定依据 ``old_entry.detected``（上次自动检测快照）：
+    - 现值非空且 **不同于快照值** → 用户手工改过，保留；
+    - 现值与快照值一致（含快照缺失字段的保守情形除外的纯自动生成值）→
+      不是人工适配，采纳本次新检测值（如源码入口 server.js 改名 app.js 后，
+      旧 ``node server.js`` 必须让位，否则指向已不存在文件导致启动失败）；
+    - 存量 manifest 无快照（``detected is None``）→ 保守保留（现行为），
+      已适配实例不退化；本次合并写入快照后，后续重扫即可区分。
+
+    首次 import 不经本函数（build_manifest_from_detection 直接用检测值）；
+    仅作用于 scan / import --update 等重扫重建路径。被保留字段记 info 日志，
+    CLI 可据更新输出的「保留既有 entry.<field>」提示用户核对。
+    """
+    snapshot = old_entry.detected
+    for field in _ENTRY_USER_FIELDS:
+        old_value = getattr(old_entry, field, None)
+        new_value = getattr(new_entry, field, None)
+        if not old_value or old_value == new_value:
+            continue
+        if field == "start" and _LEGACY_DB_URL_START_RE.search(old_value):
+            # issue #15 迁移优先：旧式 export DATABASE_URL 的 start 会被迁入
+            # docker/.env，值不丢失，交给新检测 start 接管。
+            continue
+        if snapshot is not None and old_value == snapshot.get(field):
+            # 现值 == 上次自动检测值：纯自动生成，随新检测值更新。
+            continue
+        setattr(new_entry, field, old_value)
+        log.info("实例 %s：保留既有 entry.%s（人工覆盖，与检测值不同）", instance_id, field)
+
+
 def apply_detection_to_manifest(
     manifest: InstanceManifest,
     detection: DetectionResult,
     workspace: Workspace,
+    *,
+    keep_confirmed_shape: bool = False,
 ) -> InstanceManifest:
     """把新的扫描结果应用到已存在的 manifest（用于 ``lwa scan`` 重扫）。
 
@@ -2520,6 +2710,19 @@ def apply_detection_to_manifest(
     hosting.host_container 退化为首次部署路径（S2-03 先建后换失效，构建失败
     无补偿），而 deploymentFingerprints 正是 S2-04 收敛决策判定「源码已换」
     的基线，两者都必须活过 scan / import --update 重建。
+    BUG-863（修订）：entry 的 install/build/start/buildOutputDir 按
+    ``entry.detected`` 快照区分——现值与上次自动检测值不同的人工覆盖予以
+    保留；现值等于旧快照的纯自动生成值采纳新检测值（源码入口改名等场景
+    不留守旧命令）；存量无快照 manifest 保守保留（仅 issue #15 的旧式
+    ``export DATABASE_URL`` start 例外，迁移优先）；首次 import 不经此合并。
+    BUG-876：``keep_confirmed_shape=True`` 且实例形态已确认/部署
+    （status != pending）且重扫与既有形态不一致时，kind/runtime/servingMode
+    与 static/container/network 等形态配置整体保留（人工适配是权威值），
+    entry/stack/database 等检测派生字段一并保留（BUG-895：fresh 的这些字段
+    描述的是另一形态或空检测，照搬会冲空已确认配置）——待重扫与既有形态
+    一致时才正常刷新。避免误判 pending / 误检把人工适配的形态整体覆盖清空
+    （container/network/hostPort 登记）。pending 实例不受影响：重扫识别成功
+    即采纳新形态（status 升 stopped）。
     """
     fresh = build_manifest_from_detection(
         instance_id=manifest.id,
@@ -2647,6 +2850,34 @@ def apply_detection_to_manifest(
     fresh.buildEnv = copy.deepcopy(getattr(manifest, "buildEnv", None))
     fresh.buildBaseFromAlias = manifest.buildBaseFromAlias
     fresh.redundancyAcknowledged = manifest.redundancyAcknowledged
+    # BUG-863（修订）：entry 的 install/build/start/buildOutputDir 按
+    # entry.detected 快照区分人工覆盖（保留）与旧自动生成值（随新检测更新）；
+    # 无快照的存量 manifest 保守保留；issue #15 旧式 DATABASE_URL start 例外，
+    # 迁移优先。快照由 build_manifest_from_detection 写入 fresh.entry。
+    _preserve_user_entry_fields(manifest.entry, fresh.entry, instance_id=manifest.id)
+    # BUG-876：已确认/部署过的实例（status != pending），重扫与既有形态不一致时
+    # 形态整体保留——以旧 manifest 为底（kind/runtime/servingMode、static/
+    # container/network、status/desiredState、身份/别名/钩子等天然不动）。
+    # BUG-895：fresh 的 entry/stack/database 等检测派生字段描述的是**另一形态**
+    # （或 pending 的空检测），对本分支保留的形态毫无参考价值——此前照搬会把
+    # 已确认实例的 entry.install/start 冲成 None（detected 快照同为 None）、
+    # stack 冲成空/unknown，下次启动必败。既然形态以旧 manifest 为权威，其
+    # 派生参考字段一并保留；待重扫与既有形态一致时才正常刷新这些字段。
+    if (
+        keep_confirmed_shape
+        and manifest.status != Status.PENDING
+        and detection_shape_differs(manifest, detection)
+    ):
+        kept = manifest.model_copy(deep=True)
+        log.warning(
+            "实例 %s：重扫结果（%s）与既有形态（%s/%s）不一致；形态已确认/部署过，"
+            "保留既有形态及其 entry/stack 等检测派生字段",
+            manifest.id,
+            detection.form,
+            manifest.kind.value,
+            manifest.runtime.value,
+        )
+        return kept
     return fresh
 
 
@@ -2664,4 +2895,5 @@ __all__ = [
     "refresh_display_name_from_homepage",
     "build_manifest_from_detection",
     "apply_detection_to_manifest",
+    "detection_shape_differs",
 ]

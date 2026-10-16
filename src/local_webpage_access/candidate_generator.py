@@ -58,7 +58,17 @@ _PYTHON_WEB = {
     "sanic",
     "tornado",
 }
-_NODE_FRONTEND = {"vite", "react", "react-dom", "vue", "@vitejs/plugin-react", "svelte", "preact"}
+_NODE_FRONTEND = {
+    "vite",
+    "react",
+    "react-dom",
+    "vue",
+    "@vitejs/plugin-react",
+    "svelte",
+    "preact",
+    # BUG-866（#97）：astro 默认 output=static，与 scanner.NODE_FRONTEND 同步
+    "astro",
+}
 _NODE_BACKEND = {
     "express",
     "fastify",
@@ -69,6 +79,8 @@ _NODE_BACKEND = {
     "@hono/node-server",
     "polka",
     "restana",
+    # BUG-866（#97）：astro 的 Node SSR adapter，与 scanner.NODE_BACKEND 同步
+    "@astrojs/node",
 }
 # Python 框架默认端口
 _PYTHON_PORT = {
@@ -480,7 +492,11 @@ def _node_install_command(evidence: ProjectEvidence) -> str:
         return "pnpm install --frozen-lockfile"
     if "yarn.lock" in root_files:
         return "yarn install --frozen-lockfile"
-    if "package-lock.json" in root_files or "bun.lockb" in root_files:
+    # BUG-873（#104）：bun.lock（现行文本锁）与 bun.lockb（旧二进制锁）都走
+    # bun install——此前 bun.lockb 被错映射为 npm ci、bun.lock 完全不识别。
+    if "bun.lock" in root_files or "bun.lockb" in root_files:
+        return "bun install --frozen-lockfile"
+    if "package-lock.json" in root_files:
         return "npm ci"
     return "npm install"
 
@@ -507,8 +523,10 @@ def _append_stdlib_http_candidate(
 
     from local_webpage_access.scanner import (
         FileSummary,
+        UvLockState,
         _node_stdlib_http_entry,
         _stdlib_http_entry,
+        _uv_lock_state,
     )
 
     summary = FileSummary(root=Path(evidence.root))
@@ -563,7 +581,15 @@ def _append_stdlib_http_candidate(
     if entry is None:
         return
     if has_python_project:
-        if "requirements-prod.txt" in evidence.rootFiles:
+        # BUG-854：与 scanner._python_install_command 的权威优先级对齐——可用
+        # uv.lock 最优先，否则 pyproject.toml + uv.lock 的项目会被劫持成
+        # pip install .。空壳 uv.lock 不算可用（issue #13），回退其他依赖文件。
+        uv_lock_ok = "uv.lock" in evidence.rootFiles and _uv_lock_state(
+            Path(evidence.root) / "uv.lock"
+        ) is not UvLockState.VALID_EMPTY
+        if uv_lock_ok:
+            install = "uv sync"
+        elif "requirements-prod.txt" in evidence.rootFiles:
             install = "pip install -r requirements-prod.txt"
         elif "requirements.txt" in evidence.rootFiles:
             install = "pip install -r requirements.txt"
@@ -572,7 +598,7 @@ def _append_stdlib_http_candidate(
         elif "pipfile" in evidence.rootFiles:
             install = "pip install pipenv && pipenv install --system --skip-lock"
         else:
-            install = "uv sync"
+            install = "pip install -r requirements.txt"
     else:
         install = None
     candidates.append(

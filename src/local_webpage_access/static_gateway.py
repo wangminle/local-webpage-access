@@ -268,13 +268,15 @@ def _refuse_caddy_admin_in_pytest(action: str) -> None:
 # builtin 模式回退用的 Caddy 配置模板（也用于 Caddy 模式渲染）
 # {rate_limit_block} 占位符由 _rate_limit_directive 填充（IMP-005）；
 # {bind_directive} 由 instanceBindHost 决定（W06：收敛时空，绑定时 bind <ip>）；
+# {spa_fallback_block} 由 _spa_fallback_block 填充（BUG-861：仅前端 SPA 站点
+# 注入 try_files 回退，纯静态站为空，保持缺失文件 404 语义）；
 # 未启用限流时为空串，留下一行空行（Caddyfile 忽略）。
 _FALLBACK_TEMPLATE = """\
 # Local Webpage Access — Caddy 静态站点配置
 # 由 lwa 自动生成，请勿手动编辑。
 :{host_port} {{
 {bind_directive}\troot * {root}
-\tfile_server
+{spa_fallback_block}\tfile_server
 \tencode gzip
 {rate_limit_block}
 \tlog {{
@@ -286,6 +288,38 @@ _FALLBACK_TEMPLATE = """\
 \t}}
 }}
 """
+
+
+def _spa_fallback_block(spa_fallback: bool) -> str:
+    """BUG-861：SPA history 路由回退指令块（``try_files``）。
+
+    仅前端构建形态（frontend-static）站点注入；纯静态站（folder 导入、无
+    entry.build）返回空串，保持「缺失文件 → 404」语义不变（回退会把 miss
+    变成 index.html 200，可能掩盖断链）。
+
+    采用 ``{path} {path}/ /index.html`` 形态：``{path}/`` 保留目录 index
+    行为（目录存在且含 index 文件时仍按目录服务），仅当路径既非文件、也非
+    含 index 的目录时才回退 ``/index.html``——深链接刷新（如 ``/dashboard``）
+    由前端路由接管，不破坏静态子目录站点。
+    """
+    if not spa_fallback:
+        return ""
+    return "\ttry_files {path} {path}/ /index.html\n"
+
+
+def _inject_spa_fallback(content: str) -> str:
+    """在无 ``{spa_fallback_block}`` 占位符的模板渲染结果里兜底注入回退指令。
+
+    旧工作区 / 用户自定义模板不含该占位符，``str.format`` 会静默忽略多余
+    参数；为保证 SPA 回退一定生效，在首个 ``file_server`` 指令行前注入。
+    """
+    lines = content.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip() == "file_server":
+            indent = line[: len(line) - len(line.lstrip())]
+            lines.insert(i, f"{indent}try_files {{path}} {{path}}/ /index.html\n")
+            return "".join(lines)
+    return content
 
 
 def _caddy_quote(path: str) -> str:
@@ -498,8 +532,20 @@ class StaticGateway:
                     continue
         return _FALLBACK_TEMPLATE
 
-    def generate_site_config(self, instance_id: str, host_port: int, root: Path) -> Path:
-        """渲染并写入 ``static-gateway/sites/<id>.conf``（WBS-09.03）。"""
+    def generate_site_config(
+        self,
+        instance_id: str,
+        host_port: int,
+        root: Path,
+        *,
+        spa_fallback: bool = False,
+    ) -> Path:
+        """渲染并写入 ``static-gateway/sites/<id>.conf``（WBS-09.03）。
+
+        ``spa_fallback=True``（BUG-861，前端 SPA 站点）时注入 ``try_files``
+        history 路由回退；模板无 ``{spa_fallback_block}`` 占位符（旧工作区 /
+        用户自定义模板）时兜底在 ``file_server`` 前注入。
+        """
         template = self._load_template()
         # 评审-组3：用户改过的模板含多余 {} 时 str.format 抛裸异常，
         # 统一转 GatewayError 并带实例上下文
@@ -510,6 +556,7 @@ class StaticGateway:
             root=_caddy_quote(str(root).replace("\\", "/")),
             site_id=instance_id,
             rate_limit_block=self._rate_limit_directive(instance_id),
+            spa_fallback_block=_spa_fallback_block(spa_fallback),
             access_log=_caddy_quote(str(self.ws.logs / "static-access.log").replace("\\", "/")),
         )
         except (KeyError, ValueError, IndexError) as exc:
@@ -517,6 +564,8 @@ class StaticGateway:
                 f"站点模板渲染失败（检查模板占位符）：{exc}",
                 instance_id=instance_id,
             ) from exc
+        if spa_fallback and "try_files" not in content:
+            content = _inject_spa_fallback(content)
         path = self.site_config_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -666,6 +715,7 @@ class StaticGateway:
         *,
         wait_health: bool = True,
         alias: str | None = None,
+        spa_fallback: bool = False,
     ) -> None:
         """启用静态站点（WBS-09.04/05/06/07）。
 
@@ -675,6 +725,9 @@ class StaticGateway:
 
         ``alias`` 非 ``None`` 时（IMP-006）在 Caddy 模式下额外生成路径别名
         路由片段。builtin 模式不支持别名入口，仅记 WARN 提示用户仍只走端口。
+
+        ``spa_fallback=True``（BUG-861）为前端 SPA 站点注入 ``try_files``
+        history 路由回退（深链接刷新不再 404）。
 
         BUG-216：变更前备份已有站点/别名配置；若本轮停掉了存活 builtin，
         失败时按备份端口与 root 重新拉起，避免「既无旧也无新」。
@@ -700,7 +753,7 @@ class StaticGateway:
 
         backend = self.detect_backend()
         try:
-            self.generate_site_config(instance_id, host_port, root)
+            self.generate_site_config(instance_id, host_port, root, spa_fallback=spa_fallback)
             # IMP-006：别名片段仅在 Caddy 模式下生成；builtin 多端口模式无统一入口。
             if alias is not None and backend == "caddy":
                 self.generate_alias_config(instance_id, alias, host_port)

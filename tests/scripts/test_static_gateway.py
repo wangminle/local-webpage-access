@@ -86,6 +86,93 @@ def test_generate_site_config_includes_access_log(
     assert str(workspace.logs / "static-access.log").replace("\\", "/") in content
 
 
+# ---- BUG-861：前端 SPA 站点注入 try_files history 路由回退 --------------------
+
+
+def test_generate_site_config_spa_fallback_injects_try_files(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """SPA 站点（spa_fallback=True）生成 try_files {path} {path}/ /index.html 回退。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root, spa_fallback=True)
+    content = gateway.site_config_path("demo").read_text(encoding="utf-8")
+    assert "try_files {path} {path}/ /index.html" in content
+    # 回退指令必须在 file_server 之前
+    assert content.index("try_files") < content.index("file_server")
+
+
+def test_generate_site_config_pure_static_has_no_try_files(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """纯静态站（默认 spa_fallback=False）保持裸 file_server：缺失文件仍 404。"""
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root)
+    content = gateway.site_config_path("demo").read_text(encoding="utf-8")
+    assert "try_files" not in content
+    assert "file_server" in content
+
+
+def test_generate_site_config_spa_fallback_injected_into_legacy_template(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """旧工作区/自定义模板无 {spa_fallback_block} 占位符时兜底注入 try_files。"""
+    tpl_dir = workspace.templates / "static"
+    tpl_dir.mkdir(parents=True)
+    (tpl_dir / "caddy_site.conf.tpl").write_text(
+        ":{host_port} {{\n\troot * {root}\n\tfile_server\n\tencode gzip\n}}\n",
+        encoding="utf-8",
+    )
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root, spa_fallback=True)
+    content = gateway.site_config_path("demo").read_text(encoding="utf-8")
+    assert "try_files {path} {path}/ /index.html" in content
+    assert content.index("try_files") < content.index("file_server")
+
+
+def test_generate_site_config_repo_template_comments_not_expanded(
+    gateway: StaticGateway, workspace: Workspace
+) -> None:
+    """评审 P1：仓库模板注释里的占位符曾被 str.format 一并替换——spa_fallback
+    多行块撑破注释成为顶层 Caddyfile 内容，caddy adapt 解析失败、站点启用与
+    网关重载均失败。用仓库真实模板渲染后：站点块之前只允许注释/空行，
+    try_files 恰好出现一次且在 file_server 之前。"""
+    import local_webpage_access.static_gateway as sg
+
+    repo_tpl = Path(sg.__file__).parent / "templates" / "static" / "caddy_site.conf.tpl"
+    tpl_dir = workspace.templates / "static"
+    tpl_dir.mkdir(parents=True, exist_ok=True)
+    (tpl_dir / "caddy_site.conf.tpl").write_text(
+        repo_tpl.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.generate_site_config("demo", 18001, root, spa_fallback=True)
+    content = gateway.site_config_path("demo").read_text(encoding="utf-8")
+    lines = content.splitlines()
+    site_start = next(i for i, line in enumerate(lines) if line.startswith(":18001"))
+    for line in lines[:site_start]:
+        assert line.startswith("#") or not line.strip(), f"注释被占位符撑破: {line!r}"
+    assert sum(1 for line in lines if line.strip().startswith("try_files")) == 1
+
+
+def test_enable_passes_spa_fallback_to_site_config(
+    gateway: StaticGateway, workspace: Workspace, monkeypatch
+) -> None:
+    """enable(spa_fallback=True) 落盘的站点配置带 try_files 回退。"""
+    monkeypatch.setattr(StaticGateway, "_start_builtin", lambda self, iid, port, root: None)
+    monkeypatch.setattr(StaticGateway, "_stop_live_builtin_if_any", lambda self, iid: None)
+    monkeypatch.setattr(StaticGateway, "_wait_until_healthy", lambda self, port: True)
+    monkeypatch.setattr(StaticGateway, "_clear_stale_static_pid", lambda self, iid: None)
+    root = workspace.app_public("demo")
+    root.mkdir(parents=True)
+    gateway.enable("demo", 18001, root, wait_health=False, spa_fallback=True)
+    content = gateway.site_config_path("demo").read_text(encoding="utf-8")
+    assert "try_files {path} {path}/ /index.html" in content
+
+
 def test_remove_site_config(gateway: StaticGateway, workspace: Workspace) -> None:
     root = workspace.app_public("demo")
     root.mkdir(parents=True)

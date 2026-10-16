@@ -172,6 +172,72 @@ def test_offer_linux_no_systemd_skips(tmp_path, monkeypatch) -> None:
     assert result.messages == []
 
 
+# ---- BUG-879 多工作区单元归属校验 ---------------------------------------------
+
+
+def test_offer_warns_when_units_point_to_other_workspace(ws_env, monkeypatch) -> None:
+    """BUG-879：单元存在但指向另一工作区——不得报「已安装」，警示并继续引导。"""
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.paths import Workspace
+
+    root, ws, config, runner = ws_env
+    monkeypatch.setattr(asm, "_stdin_is_interactive", lambda: False)
+    asm.install(ws, config, with_caddy=False, enable=False, runner=runner)
+
+    other_root = root.parent / "ws-b"
+    init_workspace(other_root)
+    ws_b = Workspace(other_root)
+    result = asm.maybe_offer_autostart_install(ws_b, config)
+
+    assert result.attempted is False
+    assert not any(m.startswith("自启动单元已安装") for m in result.messages)
+    assert any("指向其他工作区" in m for m in result.messages)
+    assert any("lwa autostart install" in m for m in result.messages)
+
+
+def test_offer_confirm_installs_over_other_workspace_units(ws_env, monkeypatch) -> None:
+    """BUG-879：交互确认后可为当前工作区安装（覆盖别家单元是用户明示选择）。"""
+    from local_webpage_access.init_workspace import init_workspace
+    from local_webpage_access.paths import Workspace
+
+    root, ws, config, runner = ws_env
+    monkeypatch.setattr(asm, "_stdin_is_interactive", lambda: True)
+    asm.install(ws, config, with_caddy=False, enable=False, runner=runner)
+
+    other_root = root.parent / "ws-b"
+    init_workspace(other_root)
+    ws_b = Workspace(other_root)
+    result = asm.maybe_offer_autostart_install(
+        ws_b, config, confirm=lambda prompt: True, runner=runner
+    )
+
+    assert result.attempted is True
+    assert result.ok is True
+    assert any("指向其他工作区" in m for m in result.messages)
+    backend = asm.select_backend(asm.PLATFORM_LINUX)
+    assert asm.unit_points_to_workspace(backend, "daemon", ws_b.root)
+
+
+def test_unit_points_to_workspace_systemd_percent_escape(tmp_path, monkeypatch) -> None:
+    """systemd 单元 % → %% 转义可正确还原比对；别的工作区根不误判。"""
+    monkeypatch.setattr(asm, "detect_platform", lambda: asm.PLATFORM_LINUX)
+    monkeypatch.setattr(asm, "systemd_available", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.select_backend(asm.PLATFORM_LINUX)
+    root = (tmp_path / "ws%20x").resolve()
+    unit = backend.unit_path("daemon")
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        asm.build_systemd_unit("daemon", python_exe="/py", workspace_root=root),
+        encoding="utf-8",
+    )
+    assert asm.unit_points_to_workspace(backend, "daemon", root)
+    assert not asm.unit_points_to_workspace(backend, "daemon", (tmp_path / "other").resolve())
+    # 前缀相近的另一工作区根（/x/ws 是 /x/ws-b 的前缀）不得误判
+    near = (tmp_path / "ws%20x-b").resolve()
+    assert not asm.unit_points_to_workspace(backend, "daemon", near)
+
+
 # ---- 061.03 运行模式标注 -----------------------------------------------------
 
 

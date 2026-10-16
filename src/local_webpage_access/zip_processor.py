@@ -17,6 +17,7 @@ import hashlib
 import shutil
 import tempfile
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 from local_webpage_access.errors import ZipImportError
@@ -24,7 +25,9 @@ from local_webpage_access.logging import get_logger
 from local_webpage_access.security import (
     ZipSanitizeResult,
     audit_zip_members,
+    filter_config_auth_lines,
     has_critical,
+    is_content_filtered_file,
     sanitize_zip_members,
 )
 
@@ -135,6 +138,7 @@ def safe_extract(zip_path: Path, target: Path) -> ZipSanitizeResult:
     3. **路径穿越运行时校验**：每个保留成员 resolve 后必须落在 tmp_path 之内；
     4. **解压后深度防御**：仅解压保留成员；遍历 tmp_path，若出现未在
        external_attr 声明的 symlink（如 Windows 打包器产出的异常 zip），拒绝。
+       随后对 .npmrc/.yarnrc/.yarnrc.yml 做内容级凭据行过滤（BUG-870）。
 
     返回 :class:`~local_webpage_access.security.ZipSanitizeResult` 供调用方
     输出剥离摘要与事件审计。
@@ -206,6 +210,49 @@ def safe_extract(zip_path: Path, target: Path) -> ZipSanitizeResult:
                     f"检测到符号链接（zip slip）：{item.relative_to(tmp_path)}",
                     member=str(item.relative_to(tmp_path)),
                 )
+
+        # 4.5 包管理器配置内容级过滤（BUG-870）：.npmrc/.yarnrc/.yarnrc.yml 是
+        # 构建配置（registry/legacy-peer-deps/engines 严格度），不再整文件剥离；
+        # 但其中可能混入 _authToken 等凭据行——仅剥离敏感行并明确告警
+        # （不记录行内容，防止凭据写入日志），无敏感行时静默保留。
+        # 评审 P2：无法按 UTF-8 解码的目标文件**不得原样保留**（解码失败跳过
+        # 过滤会让凭据未经检查进入镜像）——保守整文件剥离并告警。
+        content_filtered: dict[str, tuple[int, ...]] = {}
+        content_stripped: list[str] = []
+        for item in tmp_path.rglob("*"):
+            if not item.is_file() or not is_content_filtered_file(item.name):
+                continue
+            try:
+                text = item.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                rel = str(item.relative_to(tmp_path))
+                item.unlink()
+                log.warning(
+                    "%s 无法按 UTF-8 解码，已保守整文件剥离"
+                    "（防止未检查的凭据进入镜像；合法配置请转存为 UTF-8）",
+                    rel,
+                )
+                content_stripped.append(rel)
+                continue
+            filtered, removed = filter_config_auth_lines(text)
+            if not removed:
+                continue
+            item.write_text(filtered, encoding="utf-8")
+            rel = str(item.relative_to(tmp_path))
+            lines = "、".join(str(n) for n, _ in removed)
+            log.warning(
+                "已从 %s 剥离 %d 行认证/令牌配置（行 %s），防止凭据进入镜像",
+                rel,
+                len(removed),
+                lines,
+            )
+            content_filtered[rel] = tuple(n for n, _ in removed)
+        if content_filtered or content_stripped:
+            sanitized = replace(
+                sanitized,
+                content_filtered=content_filtered,
+                content_stripped=tuple(content_stripped),
+            )
 
         # 单层根目录拍平：tmp 下只有一个目录且无散落文件时，提升一层
         entries = list(tmp_path.iterdir())

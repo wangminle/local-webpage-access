@@ -30,6 +30,7 @@ from local_webpage_access.doctor import (
     check_python_version,
     check_base_image_readiness,
     _dockerfile_from_images,
+    check_node_toolchain,
     check_registry,
     check_static_gateway,
     format_report,
@@ -275,6 +276,54 @@ def test_check_caddy_version_too_low(env, monkeypatch) -> None:
     runner = _runner_from_map({("caddy", "version"): _proc(0, stdout="v2.9.9\n")})
     r = check_caddy(config, runner=runner)
     assert r.status == STATUS_FAIL
+
+
+# ---- BUG-860 / BUG-877：宿主 Node 前端工具链预检 -----------------------------
+
+
+def test_check_node_toolchain_missing_node_warns(monkeypatch) -> None:
+    monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: None)
+
+    r = check_node_toolchain(runner=_failing_runner)
+
+    assert r.status == STATUS_WARN
+    assert "node" in r.message
+    assert "frontend-static" in (r.detail or "")
+
+
+def test_check_node_toolchain_ok_with_corepack(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in ("node", "corepack", "pnpm") else None,
+    )
+    runner = _runner_from_map(
+        {
+            ("node", "--version"): _proc(0, stdout="v22.11.0\n"),
+            ("pnpm", "--version"): _proc(0, stdout="9.15.0\n"),
+        }
+    )
+
+    r = check_node_toolchain(runner=runner)
+
+    assert r.status == STATUS_OK
+    assert "node v22.11.0" in r.message
+    assert "pnpm 9.15.0" in r.message
+    assert "corepack 可用" in r.message
+
+
+def test_check_node_toolchain_no_corepack_warns_not_fails(monkeypatch) -> None:
+    """corepack 缺失（Ubuntu apt node 常见）：WARN 且如实提示宿主前端构建将失败。"""
+    monkeypatch.setattr(
+        "local_webpage_access.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name == "node" else None,
+    )
+    runner = _runner_from_map({("node", "--version"): _proc(0, stdout="v20.18.0\n")})
+
+    r = check_node_toolchain(runner=runner)
+
+    assert r.status == STATUS_WARN
+    assert "corepack" in r.message
+    assert "宿主前端构建将失败" in r.message
 
 
 def test_check_python_packages_ok() -> None:

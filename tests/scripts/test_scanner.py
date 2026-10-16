@@ -855,8 +855,9 @@ def test_heavy_db_in_devdependencies_does_not_mark_pending(tmp_path: Path) -> No
     assert not any("重型数据库" in n or "redis" in n for n in result.notes)
 
 
-def test_heavy_db_in_dependencies_still_marks_pending(tmp_path: Path) -> None:
-    """BUG-350 对照：dependencies 命中 redis 仍应 pending。"""
+def test_redis_in_dependencies_warning_not_pending(tmp_path: Path) -> None:
+    """BUG-868（#99）：dependencies 仅命中 redis（可选内存缓存）不应 pending——
+    uptime-kuma 声明 redis 但 SQLite 单实例即可运行；应继续识别并带 warning 提示。"""
     (tmp_path / "package.json").write_text(
         json.dumps(
             {
@@ -867,8 +868,19 @@ def test_heavy_db_in_dependencies_still_marks_pending(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     result = Scanner().detect(tmp_path)
+    assert result.pending is False
+    assert result.form == "backend-container"
+    assert any("redis" in n and "可选" in n for n in result.notes)
+    # 仍应是重型数据库拦截口径，不得退化为重型提示文案
+    assert not any("重型数据库" in n for n in result.notes)
+
+
+def test_redis_with_real_heavy_db_still_pending(tmp_path: Path) -> None:
+    """BUG-868（#99）对照：redis 与真正重型依赖（psycopg2）共存时仍随重型依赖 pending。"""
+    (tmp_path / "requirements.txt").write_text("fastapi\npsycopg2\nredis\n")
+    result = Scanner().detect(tmp_path)
     assert result.pending is True
-    assert any("redis" in n for n in result.notes)
+    assert any("重型数据库" in n and "psycopg2" in n for n in result.notes)
 
 
 def test_detect_tornado_infers_port_8888(tmp_path: Path) -> None:

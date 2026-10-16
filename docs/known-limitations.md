@@ -102,13 +102,13 @@ swap=4GB
   需用户手动配置或扩展扫描器）。
 * **数据库**：仅自动识别 SQLite（文件型）。MySQL / PostgreSQL / Redis 等网络数据库
   **不自动起容器**，需用户在项目内自行编排。
-* **monorepo（IMP-057 Gate-1）**：支持 **npm workspaces** 格式的 monorepo 自动识别与主包选择。扫描根 package.json 的 workspaces 字段或 packages/*/package.json 目录结构，对每个子包按 6 值类型（electron_desktop / library / web_server / frontend_build / runtime_data / unknown）分类，并根据优先级规则自动选择主部署包。入口命令使用 -w <pkg-name> 语义（install 在根目录执行）。
+* **monorepo（IMP-057 Gate-1）**：支持根 package.json `workspaces` 字段（npm / yarn / bun 同格式）与 `packages/*/package.json` 目录结构的 monorepo 自动识别与主包选择。对每个子包按 6 值类型（electron_desktop / library / web_server / frontend_build / runtime_data / unknown）分类，并根据优先级规则自动选择主部署包。入口命令使用 -w <pkg-name> 语义（install 在根目录执行）。
   * **已知限制**：
-    * 仅支持 **npm workspaces**；**pnpm workspaces**、**yarn workspaces**、**Nx**、**Turborepo** 等其他 monorepo 工具**不自动识别**，按普通项目处理（可能标记 pending）。
-    * 多 web_server 子包时标记 pending（需用户手动选择）。
+    * yarn / pnpm / bun workspaces 的子包 package.json、`pnpm-workspace.yaml`、`.yarnrc.yml` / `.yarn/`、`.npmrc` 按需拷入镜像依赖层（V0.9.8，BUG-874/885/888）；根 start 脚本经包管理器选项（`yarn --cwd` / `pnpm --dir` / `npm --prefix` / `yarn workspace <name>` / `pnpm --filter` / `npm -w`）指向的子包优先于选主决策表（V0.9.8，BUG-880；`--` 之后的转发参数不参与识别）。
+    * 仅靠 `pnpm-workspace.yaml` / `lerna.json` 等替代配置声明（根无 `workspaces` 字段且无 `packages/` 目录）的仓库**不自动识别**；**Nx**、**Turborepo** 等**不自动识别**，按普通项目处理（可能标记 pending）。
+    * 多 web_server 子包时标记 pending（需用户手动选择；根 start 脚本显式指向时除外）。
     * 无可部署子包（纯 electron_desktop / library / runtime_data）时标记 pending。
     * frontend_build 子包的构建产物路径（packages/<name>/dist）通过 buildOutputDir 传递给托管流程；若构建工具输出到非标准目录（如 .output），需用户手动修正。
-    * 不自动识别 lerna.json / pnpm-workspace.yaml 等替代配置文件。
 
 ## 托管与容器
 

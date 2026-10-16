@@ -267,6 +267,107 @@ def test_run_command_failure(tmp_path: Path) -> None:
         run_command("exit 7", cwd=tmp_path, log_path=log)
 
 
+def test_run_command_failure_message_points_to_build_log(tmp_path: Path) -> None:
+    """BUG-875：BUILD_ERROR 消息须附 build.log 完整路径，便于定位细节日志。"""
+    log = tmp_path / "apps" / "spa" / "logs" / "build.log"
+    with pytest.raises(BuildError, match="详细日志见") as exc_info:
+        run_command("exit 1", cwd=tmp_path, log_path=log)
+    assert str(log) in str(exc_info.value)
+
+
+def test_run_command_timeout_message_points_to_build_log(tmp_path: Path) -> None:
+    """BUG-875：超时分支同样附日志路径。"""
+    log = tmp_path / "build.log"
+    with pytest.raises(BuildError, match="详细日志见"):
+        run_command("exit 0", cwd=tmp_path, log_path=log, timeout=0)
+
+
+# ---- BUG-860 / BUG-877：宿主安装命令工具链解析 -------------------------------
+
+
+def _fake_which(monkeypatch, available: set[str]):
+    """桩 hosting.shutil.which：available 集合内的可执行视为在 PATH。"""
+    monkeypatch.setattr(
+        "local_webpage_access.hosting.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in available else None,
+    )
+
+
+def test_resolve_host_install_command_pm_on_path_drops_corepack_enable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-860：pnpm 已在 PATH → 去掉 corepack enable 前缀直接执行（免 root）。"""
+    from local_webpage_access.hosting import _resolve_host_install_command
+
+    _fake_which(monkeypatch, {"pnpm", "corepack"})
+    cmd = "corepack enable && pnpm install --frozen-lockfile"
+    assert _resolve_host_install_command(cmd, tmp_path) == "pnpm install --frozen-lockfile"
+
+
+def test_resolve_host_install_command_falls_back_to_corepack_exec(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-860：pnpm 不在 PATH 但 corepack 可用 → corepack pnpm（免 enable 形式）。"""
+    from local_webpage_access.hosting import _resolve_host_install_command
+
+    _fake_which(monkeypatch, {"corepack"})
+    cmd = "corepack enable && pnpm install --frozen-lockfile"
+    assert _resolve_host_install_command(cmd, tmp_path) == "corepack pnpm install --frozen-lockfile"
+
+
+def test_resolve_host_install_command_keeps_original_when_nothing_available(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-860：corepack 与 pnpm 均不可用 → 原样执行（如实失败）。"""
+    from local_webpage_access.hosting import _resolve_host_install_command
+
+    _fake_which(monkeypatch, set())
+    cmd = "corepack enable && yarn install --frozen-lockfile"
+    assert _resolve_host_install_command(cmd, tmp_path) == cmd
+
+
+def test_resolve_host_install_command_declared_package_manager_via_corepack(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-877：package.json 声明 pnpm@11.0.1 且 corepack 可用 → corepack 按需取声明版本。"""
+    from local_webpage_access.hosting import _resolve_host_install_command
+
+    _fake_which(monkeypatch, {"pnpm", "corepack"})
+    (tmp_path / "package.json").write_text(
+        '{"packageManager": "pnpm@11.0.1"}', encoding="utf-8"
+    )
+    cmd = "corepack enable && pnpm install --frozen-lockfile"
+    assert (
+        _resolve_host_install_command(cmd, tmp_path)
+        == "corepack pnpm@11.0.1 install --frozen-lockfile"
+    )
+
+
+def test_resolve_host_install_command_declared_without_corepack_warns_and_uses_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-877：声明了版本但 corepack 不可用 → 退回 PATH 版本（告警留痕）。"""
+    from local_webpage_access.hosting import _resolve_host_install_command
+
+    _fake_which(monkeypatch, {"pnpm"})
+    (tmp_path / "package.json").write_text(
+        '{"packageManager": "pnpm@11.0.1"}', encoding="utf-8"
+    )
+    cmd = "corepack enable && pnpm install --frozen-lockfile"
+    assert _resolve_host_install_command(cmd, tmp_path) == "pnpm install --frozen-lockfile"
+
+
+def test_resolve_host_install_command_non_corepack_form_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """非 corepack enable && 形态（npm ci / npm install）原样返回。"""
+    from local_webpage_access.hosting import _resolve_host_install_command
+
+    _fake_which(monkeypatch, {"corepack"})
+    assert _resolve_host_install_command("npm ci", tmp_path) == "npm ci"
+    assert _resolve_host_install_command("npm install", tmp_path) == "npm install"
+
+
 @pytest.mark.skipif(
     __import__("sys").platform == "win32",
     reason="POSIX 进程组语义",
@@ -540,6 +641,67 @@ def test_build_and_host_frontend_success(
     builds = registry.list_builds("spa")
     assert len(builds) == 1
     assert builds[0]["status"] == "success"
+
+    # BUG-861：前端 SPA 站点生成的站点配置带 try_files history 路由回退
+    from local_webpage_access.static_gateway import StaticGateway
+
+    site_conf = StaticGateway(workspace, config).site_config_path("spa")
+    assert "try_files {path} {path}/ /index.html" in site_conf.read_text(encoding="utf-8")
+
+    stop_instance(workspace, config, registry, "spa")
+
+
+def test_host_static_site_config_has_no_spa_fallback(
+    workspace: Workspace, registry: Registry, config: Config
+) -> None:
+    """BUG-861：纯静态站（folder 导入、无 entry.build）保持裸 file_server，不注入回退。"""
+    _seed_static_instance(workspace, registry, "plain")
+
+    host_static(workspace, config, registry, "plain")
+
+    from local_webpage_access.static_gateway import StaticGateway
+
+    site_conf = StaticGateway(workspace, config).site_config_path("plain")
+    assert "try_files" not in site_conf.read_text(encoding="utf-8")
+
+    stop_instance(workspace, config, registry, "plain")
+
+
+def test_build_and_host_frontend_resolves_corepack_install(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """BUG-860/877：宿主执行前安装命令经工具链解析（corepack enable 被改写）。"""
+    from local_webpage_access.models import EntryConfig, InstanceManifest
+
+    _seed_frontend_instance(workspace, registry, "spa")
+    mpath = workspace.app_manifest_path("spa")
+    manifest = InstanceManifest.load(mpath)
+    manifest.entry = EntryConfig(
+        install="corepack enable && pnpm install --frozen-lockfile",
+        build="pnpm run build",
+    )
+    manifest.save(mpath)
+
+    seen: list[str] = []
+
+    def fake_run(cmd, *, cwd, log_path, env=None, **kw):
+        seen.append(cmd)
+        if "build" in cmd:
+            dist = Path(cwd) / "dist"
+            dist.mkdir(exist_ok=True)
+            (dist / "index.html").write_text("<html>built</html>")
+        return _subprocess_completed(0)
+
+    monkeypatch.setattr("local_webpage_access.hosting.run_command", fake_run)
+    # pnpm 在 PATH 且 corepack 可用：安装命令应去掉 corepack enable 前缀
+    monkeypatch.setattr(
+        "local_webpage_access.hosting.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in ("pnpm", "corepack") else None,
+    )
+
+    build_and_host_frontend(workspace, config, registry, "spa")
+
+    assert seen[0] == "pnpm install --frozen-lockfile"
 
     stop_instance(workspace, config, registry, "spa")
 
@@ -1287,3 +1449,159 @@ def test_derived_path_host_static_refreshes_stale_paths(
         assert srow["gateway_config_path"] == expected_gw
     finally:
         stop_instance(workspace, config, registry, "demo")
+
+
+# ---- BUG-887：find_build_output 子包 hint 父目录回退 -------------------------
+
+
+def test_find_build_output_hint_parent_fallback(tmp_path: Path) -> None:
+    """BUG-887：hint 为 <pkg>/dist 而实际产物在 <pkg>/build（vite outDir、
+    CRA/Docusaurus）时，先在子包目录内按常规候选名找，不误报未找到产物。"""
+    pkg = tmp_path / "excalidraw-app"
+    (pkg / "build").mkdir(parents=True)
+    (pkg / "build" / "index.html").write_text("x", encoding="utf-8")
+    assert find_build_output(tmp_path, hint="excalidraw-app/dist") == pkg / "build"
+
+
+def test_find_build_output_hint_parent_priority_over_root(tmp_path: Path) -> None:
+    """BUG-887：子包内的产物候选优先于根级同名目录（更具体的归属）。"""
+    pkg = tmp_path / "web"
+    (pkg / "out").mkdir(parents=True)
+    (pkg / "out" / "index.html").write_text("x", encoding="utf-8")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.html").write_text("x", encoding="utf-8")
+    assert find_build_output(tmp_path, hint="web/dist") == pkg / "out"
+
+
+def test_find_build_output_hint_parent_missing_falls_back_to_root(tmp_path: Path) -> None:
+    """BUG-887：子包目录无任何产物候选时，仍回退根级常规扫描。"""
+    (tmp_path / "web").mkdir()
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.html").write_text("x", encoding="utf-8")
+    assert find_build_output(tmp_path, hint="web/dist") == tmp_path / "dist"
+
+
+def test_find_build_output_hint_parent_outside_not_scanned(tmp_path: Path) -> None:
+    """BUG-887：越界 hint（../shared/dist）的父目录在仓库外，不得扫描其下候选。"""
+    project = tmp_path / "proj"
+    project.mkdir()
+    outside = tmp_path / "shared" / "build"
+    outside.mkdir(parents=True)
+    (outside / "index.html").write_text("x", encoding="utf-8")
+    assert find_build_output(project, hint="../shared/dist") is None
+
+
+# ---- BUG-889：宿主构建命令的 corepack 工具链解析 ------------------------------
+
+
+def test_resolve_host_build_command_declared_version_via_corepack(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-889：build 与 install 同一工具链——声明 yarn@4.5.1 且 corepack 可用
+    时，yarn 开头的 build 也走 corepack 固定版本（不再裸跑 127/版本漂移）。"""
+    from local_webpage_access.hosting import _resolve_host_build_command
+
+    _fake_which(monkeypatch, {"corepack"})
+    (tmp_path / "package.json").write_text(
+        '{"packageManager": "yarn@4.5.1"}', encoding="utf-8"
+    )
+    assert (
+        _resolve_host_build_command("yarn workspace excalidraw-app run build", tmp_path)
+        == "corepack yarn@4.5.1 workspace excalidraw-app run build"
+    )
+
+
+def test_resolve_host_build_command_pm_on_path_runs_as_is(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-889：PATH 已有 pnpm 且未声明版本 → build 原样执行。"""
+    from local_webpage_access.hosting import _resolve_host_build_command
+
+    _fake_which(monkeypatch, {"pnpm", "corepack"})
+    cmd = "pnpm --filter web run build"
+    assert _resolve_host_build_command(cmd, tmp_path) == cmd
+
+
+def test_resolve_host_build_command_corepack_proxy_when_pm_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-889：pnpm 不在 PATH 但 corepack 可用 → corepack pnpm 代理形式。"""
+    from local_webpage_access.hosting import _resolve_host_build_command
+
+    _fake_which(monkeypatch, {"corepack"})
+    assert (
+        _resolve_host_build_command("pnpm run build", tmp_path)
+        == "corepack pnpm run build"
+    )
+
+
+def test_resolve_host_build_command_npm_and_non_pm_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-889：npm run build / 非包管理器命令不经 corepack 改写。"""
+    from local_webpage_access.hosting import _resolve_host_build_command
+
+    _fake_which(monkeypatch, {"corepack"})
+    assert _resolve_host_build_command("npm run build", tmp_path) == "npm run build"
+    assert _resolve_host_build_command("vite build", tmp_path) == "vite build"
+
+
+def test_read_declared_package_manager_strips_sha_suffix(tmp_path: Path) -> None:
+    """BUG-889：packageManager 的 +sha 校验后缀须剥离——corepack CLI 的
+    <pm>@<version> 参数只接受纯版本号。"""
+    from local_webpage_access.hosting import _read_declared_package_manager
+
+    (tmp_path / "package.json").write_text(
+        '{"packageManager": "pnpm@9.12.0+sha512.1234abcd"}', encoding="utf-8"
+    )
+    assert _read_declared_package_manager(tmp_path) == ("pnpm", "9.12.0")
+
+
+def test_resolve_host_build_command_and_chain_segments_all_resolved(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-896：monorepo 拓扑构建是 ``&&`` 多段命令——每段 yarn/pnpm 都须
+    走同一工具链解析，不能只改写第一段（第二段裸跑仍会 127/版本漂移）。"""
+    from local_webpage_access.hosting import _resolve_host_build_command
+
+    _fake_which(monkeypatch, {"corepack"})
+    (tmp_path / "package.json").write_text(
+        '{"packageManager": "yarn@4.5.1"}', encoding="utf-8"
+    )
+    cmd = (
+        "yarn workspace @excalidraw/core run build"
+        " && yarn workspace excalidraw-app run build"
+    )
+    assert _resolve_host_build_command(cmd, tmp_path) == (
+        "corepack yarn@4.5.1 workspace @excalidraw/core run build"
+        " && corepack yarn@4.5.1 workspace excalidraw-app run build"
+    )
+
+
+def test_resolve_host_build_command_mixed_chain_only_pm_segments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-896 对照：非 yarn/pnpm 开头的分段（npm/echo）保持原文不改写。"""
+    from local_webpage_access.hosting import _resolve_host_build_command
+
+    _fake_which(monkeypatch, {"corepack"})
+    cmd = "npm run build && echo done"
+    assert _resolve_host_build_command(cmd, tmp_path) == cmd
+
+
+def test_read_declared_package_manager_rejects_non_version_chars(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-897：packageManager 版本号含白名单外字符（如注入串）时按未声明
+    处理——版本号会被拼进宿主 sh -c 与 Dockerfile RUN，不得原样放行。"""
+    from local_webpage_access.hosting import (
+        _read_declared_package_manager,
+        _resolve_host_build_command,
+    )
+
+    (tmp_path / "package.json").write_text(
+        '{"packageManager": "pnpm@9.12.0; touch /tmp/lwa-pwned"}', encoding="utf-8"
+    )
+    assert _read_declared_package_manager(tmp_path) is None
+    _fake_which(monkeypatch, {"corepack"})
+    assert _resolve_host_build_command("pnpm run build", tmp_path) == "corepack pnpm run build"

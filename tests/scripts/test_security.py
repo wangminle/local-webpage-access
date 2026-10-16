@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import textwrap
 from pathlib import Path
 
@@ -716,6 +718,183 @@ def test_sanitize_nested_strippable_under_source() -> None:
     result = sanitize_zip_members(names)
     kept = [names[i] for i in result.keep_indices]
     assert kept == ["backend/app.py", "frontend/src/App.tsx"]
+
+
+# ---- 包管理器构建配置内容级过滤（BUG-870）-----------------------------------
+
+
+def test_sanitize_preserves_npmrc_and_yarnrc() -> None:
+    """BUG-870：.npmrc/.yarnrc/.yarnrc.yml 是构建配置，不再整文件剥离。"""
+    from local_webpage_access.security import sanitize_zip_members
+
+    names = [
+        ".npmrc",
+        "frontend/.npmrc",
+        ".yarnrc",
+        "frontend/.yarnrc.yml",
+        ".DS_Store",
+        "yarn-error.log",
+    ]
+    result = sanitize_zip_members(names)
+    kept = [names[i] for i in result.keep_indices]
+    # 构建配置（任意层级）保留
+    assert ".npmrc" in kept
+    assert "frontend/.npmrc" in kept
+    assert ".yarnrc" in kept
+    assert "frontend/.yarnrc.yml" in kept
+    # 纯冗余项仍整文件剥离
+    assert ".DS_Store" not in kept
+    assert "yarn-error.log" not in kept
+
+
+def test_filter_config_auth_lines_keeps_build_config() -> None:
+    """legacy-peer-deps / registry / engines 严格度等构建配置行必须原样保留。"""
+    from local_webpage_access.security import filter_config_auth_lines
+
+    content = (
+        "registry=https://registry.npmmirror.com\n"
+        "legacy-peer-deps=true\n"
+        "engine-strict=false\n"
+        "save-exact=true\n"
+    )
+    filtered, removed = filter_config_auth_lines(content)
+    assert filtered == content
+    assert removed == []
+
+
+def test_filter_config_auth_lines_does_not_match_author_key() -> None:
+    """``author=...`` 等普通键不得误伤（BUG-870 回归）。"""
+    from local_webpage_access.security import filter_config_auth_lines
+
+    content = "author=someone\n"
+    filtered, removed = filter_config_auth_lines(content)
+    assert filtered == content
+    assert removed == []
+
+
+def test_filter_config_auth_lines_strips_credential_lines() -> None:
+    """_authToken/_auth/_password/token= 等认证行被剥离并报告行号。"""
+    from local_webpage_access.security import filter_config_auth_lines
+
+    content = (
+        "legacy-peer-deps=true\n"
+        "//registry.npmjs.org/:_authToken=npm_xxxxxxxx\n"
+        "_auth=YWRtaW46czNjcjN0\n"
+        "//registry.example.com/:_password=hunter2\n"
+        "token=abc123\n"
+        "engine-strict=false\n"
+    )
+    filtered, removed = filter_config_auth_lines(content)
+    # 构建配置行原样保留，认证行全部剥离
+    assert filtered == "legacy-peer-deps=true\nengine-strict=false\n"
+    assert [n for n, _ in removed] == [2, 3, 4, 5]
+
+
+def test_filter_config_auth_lines_yarnrc_yml() -> None:
+    """yarnrc.yml 的 npmAuthToken 同样剥离；其余 yarn 配置保留。"""
+    from local_webpage_access.security import filter_config_auth_lines
+
+    content = (
+        'nodeLinker: node-modules\n'
+        'npmRegistryServer: "https://registry.example.com"\n'
+        'npmAuthToken: "secret-token"\n'
+        'npmAuthIdent: "user:pass"\n'
+    )
+    filtered, removed = filter_config_auth_lines(content)
+    assert "nodeLinker" in filtered
+    assert "npmRegistryServer" in filtered
+    assert "npmAuthToken" not in filtered
+    assert "npmAuthIdent" not in filtered
+    assert [n for n, _ in removed] == [3, 4]
+
+
+@contextlib.contextmanager
+def _lwa_logs(caplog: pytest.LogCaptureFixture):
+    """BUG-898：caplog 显式挂到 lwa logger 上再捕获。
+
+    CLI 用例触发 ``setup_logging()`` 后 ``local_webpage_access`` logger 的
+    ``propagate=False``——仅挂 root 的 caplog.handler 在部分 pytest 版本收
+    不到子 logger 记录（本项目 .venv 的 pytest 实测不受影响，属版本相关的
+    顺序脆弱性）。显式挂载后无论是否传播都稳定捕获，退出时摘除不泄漏。
+    """
+    logger = logging.getLogger("local_webpage_access")
+    logger.addHandler(caplog.handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
+def test_safe_extract_filters_npmrc_auth_lines_and_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """BUG-870 集成：导入时 .npmrc 保留构建配置、剥离认证行并告警。"""
+    import zipfile
+
+    from local_webpage_access.zip_processor import safe_extract
+
+    zip_path = tmp_path / "app.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(
+            ".npmrc",
+            "legacy-peer-deps=true\n//registry.npmjs.org/:_authToken=npm_secret\n",
+        )
+        zf.writestr("package.json", "{}")
+    target = tmp_path / "out"
+    with _lwa_logs(caplog), caplog.at_level("WARNING"):
+        result = safe_extract(zip_path, target)
+    extracted = (target / ".npmrc").read_text(encoding="utf-8")
+    assert extracted == "legacy-peer-deps=true\n"
+    assert result.content_filtered == {".npmrc": (2,)}
+    assert any(".npmrc" in r.message and "认证" in r.message for r in caplog.records)
+
+
+def test_safe_extract_keeps_clean_npmrc_silently(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """无敏感行的 .npmrc 静默保留、不告警、不登记 content_filtered。"""
+    import zipfile
+
+    from local_webpage_access.zip_processor import safe_extract
+
+    content = "legacy-peer-deps=true\nregistry=https://registry.npmmirror.com\n"
+    zip_path = tmp_path / "app.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("frontend/.npmrc", content)
+        zf.writestr("frontend/package.json", "{}")
+    target = tmp_path / "out"
+    with _lwa_logs(caplog), caplog.at_level("WARNING"):
+        result = safe_extract(zip_path, target)
+    # 单层根目录拍平：frontend/ 提升一层，.npmrc 落在 target 根
+    assert (target / ".npmrc").read_text(encoding="utf-8") == content
+    assert result.content_filtered == {}
+    assert not any(".npmrc" in r.message for r in caplog.records)
+
+
+def test_safe_extract_strips_undecodable_npmrc_conservatively(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """评审 P2：含非 UTF-8 字节（如 Windows-1252 注释）的 .npmrc 不得原样
+    保留——解码失败即无法确认凭据行是否被过滤，保守整文件剥离并告警，
+    登记 content_stripped；压缩包内其余文件正常解压。"""
+    import zipfile
+
+    from local_webpage_access.zip_processor import safe_extract
+
+    zip_path = tmp_path / "app.zip"
+    # Windows-1252 的「é」(0xE9) 不是合法 UTF-8；同行含 _authToken 凭据
+    payload = b"# caf\xe9 comment\n//registry.npmjs.org/:_authToken=npm_secret\n"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(".npmrc", payload)
+        zf.writestr("package.json", "{}")
+    target = tmp_path / "out"
+    with _lwa_logs(caplog), caplog.at_level("WARNING"):
+        result = safe_extract(zip_path, target)
+    assert not (target / ".npmrc").exists()
+    assert (target / "package.json").is_file()
+    assert result.content_filtered == {}
+    assert result.content_stripped == (".npmrc",)
+    assert any(".npmrc" in r.message and "保守" in r.message for r in caplog.records)
 
 
 # ---- 风险提示（WBS-25.09）-------------------------------------------------

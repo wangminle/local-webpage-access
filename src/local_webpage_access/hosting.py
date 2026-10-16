@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -253,6 +254,130 @@ def host_static(
 # ---- WBS-11 前端构建 -------------------------------------------------------
 
 
+# BUG-897：packageManager 的版本号来自导入的 package.json（外部内容），会被
+# 拼进宿主 ``sh -c`` 命令与 Dockerfile ``RUN``——只接受纯版本字符，含其余
+# 字符（空格/引号/;/$ 等）一律按未声明处理，杜绝命令注入。
+_PM_VERSION_RE = re.compile(r"[0-9A-Za-z._-]+")
+
+
+def _read_declared_package_manager(work_dir: Path) -> tuple[str, str] | None:
+    """读取 ``work_dir/package.json`` 的 ``packageManager`` 字段（BUG-877）。
+
+    返回 ``(包管理器名, 版本)``（形如 ``("pnpm", "11.0.1")``）；未声明、
+    文件缺失或解析失败返回 ``None``。
+    """
+    import json
+
+    pkg_path = work_dir / "package.json"
+    if not pkg_path.is_file():
+        return None
+    try:
+        data = json.loads(pkg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    declared = str(data.get("packageManager") or "").strip()
+    # 形如 "pnpm@11.0.1"（name@version）；两段都非空才生效
+    if "@" not in declared:
+        return None
+    name, _, version = declared.rpartition("@")
+    name = name.strip()
+    # Corepack 规范允许带哈希校验后缀（"pnpm@9.12.0+sha512...."）；CLI 参数
+    # <pm>@<version> 只接受纯版本号，须剥离 "+sha..." 段。
+    version = version.split("+", 1)[0].strip()
+    if not name or not version:
+        return None
+    if not _PM_VERSION_RE.fullmatch(version):
+        return None
+    return name, version
+
+
+def _resolve_host_install_command(install: str, work_dir: Path) -> str:
+    """宿主前端安装命令的工具链解析（BUG-860 / BUG-877）。
+
+    scanner 生成的 ``corepack enable && pnpm install --frozen-lockfile`` 原样在
+    宿主执行有两个高频失败：macOS 上 ``corepack enable`` 写 /usr/local/bin 需
+    root（EACCES）；Ubuntu apt 版 node 未自带 corepack（127）。宿主侧改写优先级：
+
+    1. ``package.json`` 声明了 ``packageManager: <pm>@<version>`` 且 corepack
+       可用 → ``corepack <pm>@<version> install ...``（BUG-877：corepack 按需取
+       声明版本，避免宿主老版本 pnpm 与 lockfile 不匹配）；
+    2. ``<pm>`` 已在 PATH → 去掉 ``corepack enable &&`` 前缀直接执行（免 root）；
+    3. corepack 可用 → ``corepack <pm> install ...``（免 enable 形式）；
+    4. 都不可用 → 原样执行（如实失败，BUILD_ERROR 消息已带 build.log 路径）。
+
+    非 ``corepack enable && ...`` 形态的命令（``npm ci`` / ``npm install``）原样返回。
+    """
+    import re
+
+    m = re.match(
+        r"^\s*corepack\s+enable\s*&&\s*(pnpm|yarn)(\s+.*?)\s*$", install, re.IGNORECASE
+    )
+    if not m:
+        return install
+    pm = m.group(1).lower()
+    rest = m.group(2).strip()
+    declared = _read_declared_package_manager(work_dir)
+    corepack = shutil.which("corepack")
+    if declared and declared[0].lower() == pm and corepack:
+        return f"corepack {pm}@{declared[1]} {rest}"
+    if shutil.which(pm):
+        if declared and declared[0].lower() == pm:
+            # corepack 不可用但声明了版本：PATH 版本未必满足 lockfile，告警留痕
+            log.warning(
+                "工作区声明 packageManager=%s@%s，但 corepack 不可用且 PATH 中 %s "
+                "版本未验证；退回 PATH 版本执行（失败时请安装 corepack）",
+                pm,
+                declared[1],
+                pm,
+            )
+        return f"{pm} {rest}"
+    if corepack:
+        return f"corepack {pm} {rest}"
+    log.warning("corepack 与 %s 均不在 PATH，安装命令按原样执行（大概率失败）：%s", pm, install)
+    return install
+
+
+def _resolve_host_build_command(build: str, work_dir: Path) -> str:
+    """宿主前端构建命令的工具链解析（BUG-889，与 install 侧 BUG-860/877 同策）。
+
+    scanner 生成的 ``entry.build`` 多以 ``yarn ``/``pnpm `` 开头（如 monorepo
+    的 ``yarn workspace <pkg> run build``）。install 已被
+    :func:`_resolve_host_install_command` 改写为 corepack 包装执行，但 build
+    裸跑时宿主可能没有全局 yarn/pnpm（只有 corepack），或 PATH 版本与
+    lockfile 声明版本不一致——同一工程两条命令必须用同一工具链。解析优先级
+    与 install 侧一致：声明版本+corepack 固定版本 → PATH 原样 → corepack
+    代理 → 原样如实失败。非 yarn/pnpm 开头的命令（npm run build 等）原样返回。
+
+    BUG-896：monorepo 拓扑构建是 ``&&`` 连接的多段命令
+    （``yarn workspace a run build && yarn workspace b run build``）——按
+    ``&&`` 逐段解析后原样拼回（未命中 yarn/pnpm 前缀的分段保持原文，引号内
+    含 ``&&`` 的普通命令不会被改写）。
+    """
+    if "&&" not in build:
+        return _resolve_build_segment(build, work_dir)
+    return "&&".join(_resolve_build_segment(part, work_dir) for part in build.split("&&"))
+
+
+def _resolve_build_segment(segment: str, work_dir: Path) -> str:
+    """单个构建分段的工具链解析（BUG-889/896；保留分段前后空白）。"""
+    m = re.match(r"^(\s*)(pnpm|yarn)(\s+.*?)(\s*)$", segment, re.IGNORECASE)
+    if not m:
+        return segment
+    lead = m.group(1)
+    pm = m.group(2).lower()
+    rest = m.group(3).strip()
+    trail = m.group(4)
+    declared = _read_declared_package_manager(work_dir)
+    corepack = shutil.which("corepack")
+    if declared and declared[0].lower() == pm and corepack:
+        return f"{lead}corepack {pm}@{declared[1]} {rest}{trail}"
+    if shutil.which(pm):
+        return segment
+    if corepack:
+        return f"{lead}corepack {pm} {rest}{trail}"
+    return segment
+
+
 def build_and_host_frontend(
     workspace: Workspace,
     config: Config,
@@ -310,16 +435,42 @@ def build_and_host_frontend(
         _record_stage(workspace, registry, instance_id, "host_start")
         # 1-5. 安装 + 构建（WBS-11.01~06）
         if manifest.entry.install:
+            # BUG-860 / BUG-877：宿主工具链解析（corepack enable 免 root 改写 /
+            # packageManager 声明版本优先），失败回退原命令如实报错。
+            install_cmd = _resolve_host_install_command(manifest.entry.install, work_dir)
+            if install_cmd != manifest.entry.install:
+                write_instance_log(
+                    workspace.apps,
+                    instance_id,
+                    "build",
+                    f"安装命令已按宿主工具链改写：{install_cmd}",
+                )
+                if install_cmd.startswith("corepack"):
+                    # corepack 按需下载声明版本时会在交互环境弹下载确认，
+                    # 构建子进程非 TTY，统一关闭提示避免挂起
+                    build_env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
             write_instance_log(
-                workspace.apps, instance_id, "build", f"安装：{manifest.entry.install}"
+                workspace.apps, instance_id, "build", f"安装：{install_cmd}"
             )
-            run_command(manifest.entry.install, cwd=work_dir, log_path=build_log, env=build_env)
+            run_command(install_cmd, cwd=work_dir, log_path=build_log, env=build_env)
             _record_stage(workspace, registry, instance_id, "install_done")
         if manifest.entry.build:
+            # BUG-889：build 与 install 共用同一工具链解析——install 已改写为
+            # corepack 包装时，裸跑 yarn/pnpm build 仍会 127 或版本不匹配。
+            build_cmd = _resolve_host_build_command(manifest.entry.build, work_dir)
+            if build_cmd != manifest.entry.build:
+                write_instance_log(
+                    workspace.apps,
+                    instance_id,
+                    "build",
+                    f"构建命令已按宿主工具链改写：{build_cmd}",
+                )
+                if build_cmd.startswith("corepack"):
+                    build_env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
             write_instance_log(
-                workspace.apps, instance_id, "build", f"构建：{manifest.entry.build}"
+                workspace.apps, instance_id, "build", f"构建：{build_cmd}"
             )
-            run_command(manifest.entry.build, cwd=work_dir, log_path=build_log, env=build_env)
+            run_command(build_cmd, cwd=work_dir, log_path=build_log, env=build_env)
             _record_stage(workspace, registry, instance_id, "build_done")
         else:
             raise BuildError(
@@ -2721,8 +2872,14 @@ def _enable_static(
     # 不在 enable 前 disable：enable 会覆盖站点配置并停掉残留 builtin；
     # 若先 disable 再 enable 失败，会留下「既无旧也无新」的悬空实例。
     backend = gateway.detect_backend()
+    # BUG-861：前端构建形态（有 entry.build，即 SPA）注入 try_files history
+    # 路由回退，深链接刷新不再 404；纯静态站（无 entry.build）不加，保持
+    # 缺失文件 404 语义（回退会把 miss 变成 index.html 200，可能掩盖断链）。
+    spa_fallback = bool(manifest.entry.build)
     try:
-        gateway.enable(instance_id, host_port, public_dir, alias=path_alias)
+        gateway.enable(
+            instance_id, host_port, public_dir, alias=path_alias, spa_fallback=spa_fallback
+        )
     except Exception:
         # 网关启用失败：仅释放本轮新分配的端口，避免连续失败耗尽端口池（BUG-016）。
         # 复用的旧端口是上一轮成功部署的登记，释放会破坏 BUG-045 端口保留语义、
@@ -2816,7 +2973,8 @@ def find_build_output(project_dir: Path, hint: str | None = None) -> Path | None
     """识别构建产物目录（dist/、build/、out/ 等）。
 
     若 *hint* 非空（monorepo 子包的产物相对路径，如 packages/web/dist），
-    优先检查该路径，再回退到常规扫描。
+    优先检查该路径；hint 带子目录且精确路径不存在时，先在子包目录内按
+    常规候选名找（BUG-887），再回退到根级常规扫描。
     """
     if hint:
         candidate = project_dir / hint
@@ -2829,6 +2987,26 @@ def find_build_output(project_dir: Path, hint: str | None = None) -> Path | None
                     return candidate
             except (PermissionError, OSError):
                 pass
+        # BUG-887：hint 带子目录（monorepo 子包，如 excalidraw-app/dist）且该
+        # 精确路径不存在时，先在子包目录内按常规候选名找（如 excalidraw-app/
+        # build）——真实项目会把产物输出到非 dist 目录（vite build.outDir、
+        # CRA/Docusaurus 的 build/），直接回退根级扫描会误报未找到产物。
+        hint_parent = Path(hint).parent
+        if str(hint_parent) not in ("", "."):
+            parent_dir = project_dir / hint_parent
+            try:
+                in_bounds = parent_dir.resolve().is_relative_to(project_dir.resolve())
+            except OSError:
+                in_bounds = False
+            if in_bounds and parent_dir.is_dir():
+                for name in _BUILD_OUTPUT_DIRS:
+                    sub_candidate = parent_dir / name
+                    if sub_candidate.is_dir():
+                        try:
+                            if any(sub_candidate.iterdir()):
+                                return sub_candidate
+                        except (PermissionError, OSError):
+                            continue
     for name in _BUILD_OUTPUT_DIRS:
         candidate = project_dir / name
         if candidate.is_dir():
@@ -3015,7 +3193,7 @@ def run_command(
             )
         if timed_out:
             raise BuildError(
-                f"命令超时（{timeout}s）：{cmd}",
+                f"命令超时（{timeout}s）：{cmd}；详细日志见 {log_path}",
                 command=cmd,
                 timeout=timeout,
             )
@@ -3027,8 +3205,9 @@ def run_command(
                 command=cmd,
                 instance_id=instance_id,
             )
+        # BUG-875：错误消息附上 build.log 完整路径，用户可直接定位细节日志
         raise BuildError(
-            f"命令失败（exit {proc.returncode}）：{cmd}",
+            f"命令失败（exit {proc.returncode}）：{cmd}；详细日志见 {log_path}",
             command=cmd,
             exit_code=proc.returncode,
             log_path=str(log_path),

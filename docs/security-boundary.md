@@ -75,6 +75,15 @@
 导入器在 `safe_extract` 中对每个成员做 `resolve().relative_to(target)` 校验，
 **即便审计层漏过，解压层也会拒绝**。
 
+## 配置文件凭据过滤（V0.9.8 / BUG-870·883）
+
+`.npmrc` / `.yarnrc` / `.yarnrc.yml` 承载构建配置（`legacy-peer-deps`、registry
+等），不因潜在凭据整文件剥离；`safe_extract` 改为**内容级过滤**——
+`_auth` / `_authToken` / `_password` / 裸 token / `yarn npmAuthToken` /
+`npmAuthIdent` 认证行在解压前剥离，命中记入 `content_filtered`（仅行号，
+不含内容）。文件无法按 UTF-8 解码时保守**整文件剥离**并记 `content_stripped`
+——凭据不会未经检查进入镜像或构建上下文。
+
 ## 未识别 zip 风险提示
 
 导入后若实例为 `pending`（未能识别运行形态），导入器会写入一条 `security` 事件：

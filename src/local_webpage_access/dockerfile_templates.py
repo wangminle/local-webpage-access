@@ -207,6 +207,37 @@ def generate_dockerignore(
     return path
 
 
+def _bun_global_install_line(
+    install: str, source_dir: Path | None, copy_prefix: str
+) -> str:
+    """bun 安装命令的容器工具链层（评审 P2 / BUG-873 补齐）。
+
+    node:24-alpine 基础镜像不含 bun——install 推断为 ``bun install
+    --frozen-lockfile`` 时构建必在 RUN 处失败。经 ``npm install -g bun``
+    安装（npm 包按平台自动选择 glibc/musl 与架构二进制），版本取工程根
+    package.json ``packageManager`` 的 ``bun@<ver>``（未声明装最新）。
+    ``+sha...`` 校验后缀会剥掉，与宿主 Corepack 解析一致。
+    非 bun 安装返回空串（渲染逐字不变）。
+    """
+    if "bun install" not in install:
+        return ""
+    spec = "bun"
+    if source_dir is not None:
+        pkg_path = _node_lifecycle_root(source_dir, copy_prefix) / "package.json"
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pkg = {}
+        pm = str(pkg.get("packageManager") or "")
+        # BUG-893：Corepack 允许 "bun@1.2.3+sha512..."；npm install -g bun@<ver> 只接受纯版本号。
+        ver = pm[len("bun@") :].split("+", 1)[0].strip() if pm.startswith("bun@") else ""
+        # BUG-897：版本号来自导入的 package.json，直接拼进 RUN——只接受纯版本
+        # 字符（与 hosting._PM_VERSION_RE 同步），否则按未声明装最新 bun。
+        if ver and re.fullmatch(r"[0-9A-Za-z._-]+", ver):
+            spec = f"bun@{ver}"
+    return f"RUN npm install -g {spec}"
+
+
 # ---- Node -------------------------------------------------------------------
 
 
@@ -239,6 +270,8 @@ def _render_node(
     # 用 apk（apt 切源链不适用，不走 mirrors）。为空时渲染保持逐字不变。
     system_pkgs = [str(p).strip() for p in (manifest.systemDeps or []) if str(p).strip()]
     apk_block = f"RUN apk add --no-cache {' '.join(system_pkgs)}\n" if system_pkgs else ""
+    # 评审 P2：bun 安装命令需先在镜像内补齐 bun 工具链（node:24-alpine 不含 bun）
+    bun_toolchain = _bun_global_install_line(install, source_dir, cpfx)
 
     # BUG-122：安装/构建阶段不可设 NODE_ENV=production，否则 npm 会 omit
     # devDependencies，导致 tsc/vite 等构建工具缺失。运行期再切 production。
@@ -248,6 +281,7 @@ def _render_node(
         _build_env_arg_block(manifest),
         "WORKDIR /app",
         apk_block,
+        bun_toolchain,
         dependency_copy,
         f"RUN {install_run}",
         f"COPY {cpfx} ./",
@@ -386,7 +420,7 @@ def _pip_run(shell_cmd: str, *, mirrors: BuildMirrors | None = None) -> str:
 
 
 def _with_npm_registry(cmd: str, mirrors: BuildMirrors | None) -> str:
-    """给 npm/pnpm/yarn 安装命令追加 registry（BUG-200）。"""
+    """给 npm/pnpm/yarn/bun 安装命令追加 registry（BUG-200）。"""
     if not mirrors or not mirrors.npm:
         return cmd
     registry = mirrors.npm.rstrip("/")
@@ -395,6 +429,8 @@ def _with_npm_registry(cmd: str, mirrors: BuildMirrors | None) -> str:
         seg = segment.strip()
         if "--registry" in seg:
             return seg
+        if "bun install" in seg:
+            return seg.replace("bun install", f"bun install --registry={registry}", 1)
         if "pnpm install" in seg:
             return seg.replace("pnpm install", f"pnpm install --registry={registry}", 1)
         if "yarn install" in seg:
@@ -792,7 +828,7 @@ def _render_python(
             )
             + "\n"
         )
-        run_prefix = "uv run "
+        run_prefix = "uv run --no-sync --no-dev "
         if not start.startswith("uv run"):
             start = run_prefix + start
     elif _is_plain_pip_install_dot(install):
@@ -955,11 +991,15 @@ def _read_source_text(path: Path) -> str:
 
 
 def _strip_uv_run(cmd: str) -> str:
-    prefix = "uv run "
+    """剥掉 ``uv run`` 及平台注入的 ``--no-sync --no-dev --frozen`` 标志。"""
     stripped = cmd.strip()
-    if stripped.startswith(prefix):
-        return stripped[len(prefix) :].strip()
-    return stripped
+    if not stripped.startswith("uv run"):
+        return stripped
+    rest = stripped[len("uv run") :].strip()
+    for flag in ("--no-sync", "--no-dev", "--frozen"):
+        if rest.startswith(flag):
+            rest = rest[len(flag) :].strip()
+    return rest
 
 
 def _gunicorn_launch_command(start: str, *, uses_uv: bool) -> str:
@@ -1292,53 +1332,174 @@ def _database_label(manifest: InstanceManifest) -> str:
     return manifest.database.type
 
 
+def _node_workspace_patterns(root: Path) -> list[str]:
+    """工程根声明的 workspaces glob 列表（package.json ``workspaces``）。"""
+    try:
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    workspaces = pkg.get("workspaces") if isinstance(pkg, dict) else None
+    if not workspaces:
+        return []
+    return list(
+        workspaces if isinstance(workspaces, list) else workspaces.get("packages", [])
+    )
+
+
+def _pnpm_workspace_patterns(root: Path) -> list[str]:
+    """从 pnpm-workspace.yaml 提取 ``packages`` glob（行解析，避免 YAML 依赖）。
+
+    pnpm 只认 pnpm-workspace.yaml 的 workspace 声明（不读 package.json
+    ``workspaces``），monorepo 子包定位必须以此为准。
+    """
+    path = root / "pnpm-workspace.yaml"
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    patterns: list[str] = []
+    in_packages = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_packages:
+            if re.match(r"^packages\s*:", stripped):
+                in_packages = True
+            continue
+        m = re.match(r"^-\s*['\"]?([^'\"]+?)['\"]?\s*$", stripped)
+        if m:
+            patterns.append(m.group(1))
+        elif stripped and not stripped.startswith("#"):
+            break
+    return patterns
+
+
+def _node_workspace_package_copies(
+    root: Path, copy_prefix: str, patterns: list[str]
+) -> list[str]:
+    """workspaces monorepo 子包 package.json 的 COPY 行（npm/pnpm/yarn/bun 共用）。
+
+    ``npm ci --workspace=...`` / ``pnpm install --frozen-lockfile`` /
+    ``yarn install --frozen-lockfile`` / ``bun install --frozen-lockfile``
+    解析 workspaces 时所有子包的 package.json 必须在场，否则 lock 解析失败
+    或子包依赖缺失。glob 逐条展开写出，保证仅复制声明文件而非源码。
+    """
+    lines: list[str] = []
+    for pattern in patterns:
+        for pkg_dir in sorted(root.glob(pattern)):
+            if (pkg_dir / "package.json").is_file():
+                rel = pkg_dir.relative_to(root)
+                lines.append(
+                    f"COPY {copy_prefix}{posixpath.join(str(rel), 'package.json')} {posixpath.join(str(rel), 'package.json')}"
+                )
+    return lines
+
+
 def _node_dependency_copy_block(
     install: str, *, source_dir: Path | None = None, copy_prefix: str = "current/"
 ) -> str:
     """复制与包管理器匹配的依赖声明文件。
 
-    对于 npm workspaces monorepo（root package.json 含 ``"workspaces"``），
-    ``npm ci --workspace=...`` 需要所有子包的 package.json 在场，否则 lock
-    解析失败。检测到 workspaces 时追加 ``COPY current/packages/*/package.json``
-    行（glob 在 Docker COPY 中逐条写出，保证仅复制声明文件而非源码）。
+    对于 workspaces monorepo，各包管理器分支都会追加子包 package.json 的
+    COPY 行（见 :func:`_node_workspace_package_copies`）；pnpm 的 workspace
+    声明取自 pnpm-workspace.yaml，其余取 package.json ``workspaces``。
+
+    BUG-874：yarn/pnpm 分支额外携带工程根实际存在的包管理器配置文件——
+    Yarn Berry 的 .yarnrc.yml 与 .yarn/（releases/patches/plugins）、Yarn 1
+    的 .yarnrc、pnpm 的 pnpm-workspace.yaml；各分支均携带 .npmrc（registry/
+    peer 策略属构建配置）。文件不存在时不追加，渲染保持逐字不变。
+
+    BUG-888：pnpm/yarn/bun 分支不再提前返回而跳过 workspaces 子包拷贝与
+    BUG-850 生命周期脚本前置拷贝（此前这两件事仅 npm 分支生效）；npm
+    workspaces 的 glob/relative_to 统一按 COPY 前缀对应的工程根
+    （:func:`_node_lifecycle_root`）解析，sourceSubdir 工程不再路径错位。
     """
+    if "bun install" in install:
+        # bun.lock（现行文本锁）/ bun.lockb（旧二进制锁）：scanner 仅在锁文件
+        # 存在时才推断 bun install，故 bun.lock* glob 必有所指。
+        lines = [f"COPY {copy_prefix}package.json {copy_prefix}bun.lock* ./"]
+        if source_dir is not None:
+            root = _node_lifecycle_root(source_dir, copy_prefix)
+            lines.extend(
+                _node_workspace_package_copies(root, copy_prefix, _node_workspace_patterns(root))
+            )
+            # bunfig.toml 是 bun 的构建配置（registry/install 行为）
+            if (root / "bunfig.toml").is_file():
+                lines.append(f"COPY {copy_prefix}bunfig.toml ./")
+            if (root / ".npmrc").is_file():
+                lines.append(f"COPY {copy_prefix}.npmrc ./")
+        for copy_line in _node_install_script_prereq_copies(
+            source_dir, copy_prefix, install=install
+        ):
+            if copy_line not in lines:
+                lines.append(copy_line)
+        return "\n".join(lines)
     if "pnpm install" in install:
-        return f"COPY {copy_prefix}package.json current/pnpm-lock.yaml ./"
+        lines = [f"COPY {copy_prefix}package.json {copy_prefix}pnpm-lock.yaml ./"]
+        if source_dir is not None:
+            root = _node_lifecycle_root(source_dir, copy_prefix)
+            # pnpm workspaces 需要 workspace 声明文件在场
+            if (root / "pnpm-workspace.yaml").is_file():
+                lines.append(f"COPY {copy_prefix}pnpm-workspace.yaml ./")
+            # pnpm 只认 pnpm-workspace.yaml 的 packages；缺失时兜底 package.json
+            patterns = _pnpm_workspace_patterns(root) or _node_workspace_patterns(root)
+            lines.extend(_node_workspace_package_copies(root, copy_prefix, patterns))
+            if (root / ".npmrc").is_file():
+                lines.append(f"COPY {copy_prefix}.npmrc ./")
+        for copy_line in _node_install_script_prereq_copies(
+            source_dir, copy_prefix, install=install
+        ):
+            if copy_line not in lines:
+                lines.append(copy_line)
+        return "\n".join(lines)
     if "yarn install" in install:
-        return f"COPY {copy_prefix}package.json current/yarn.lock ./"
+        lines = [f"COPY {copy_prefix}package.json {copy_prefix}yarn.lock ./"]
+        if source_dir is not None:
+            root = _node_lifecycle_root(source_dir, copy_prefix)
+            # BUG-874：Yarn Berry（2+）的 .yarnrc.yml 声明 yarnPath/patches/nodeLinker，
+            # .yarn/ 含 releases/plugins/patches（patch: 协议依赖必需）——缺了 install 必败
+            # （如 hedgedoc 的 passport patch 报 YN0001 ENOENT）。
+            if (root / ".yarnrc.yml").is_file():
+                lines.append(f"COPY {copy_prefix}.yarnrc.yml ./")
+            if (root / ".yarn").is_dir():
+                lines.append(f"COPY {copy_prefix}.yarn/ .yarn/")
+            # Yarn 1 的 .yarnrc（registry/mirror 等配置）
+            if (root / ".yarnrc").is_file():
+                lines.append(f"COPY {copy_prefix}.yarnrc ./")
+            lines.extend(
+                _node_workspace_package_copies(root, copy_prefix, _node_workspace_patterns(root))
+            )
+            if (root / ".npmrc").is_file():
+                lines.append(f"COPY {copy_prefix}.npmrc ./")
+        for copy_line in _node_install_script_prereq_copies(
+            source_dir, copy_prefix, install=install
+        ):
+            if copy_line not in lines:
+                lines.append(copy_line)
+        return "\n".join(lines)
 
     lines = [f"COPY {copy_prefix}package*.json ./"]
 
-    # 检测 npm workspaces monorepo，追加子包 package.json
     if source_dir is not None:
-        root_pkg = source_dir / "package.json"
-        if root_pkg.is_file():
-            try:
-                pkg = json.loads(root_pkg.read_text(encoding="utf-8"))
-                workspaces = pkg.get("workspaces")
-                if workspaces:
-                    patterns = (
-                        workspaces
-                        if isinstance(workspaces, list)
-                        else workspaces.get("packages", [])
-                    )
-                    for pattern in patterns:
-                        # 将 glob（如 "packages/*"）展开为实际目录
-                        for pkg_dir in sorted(source_dir.glob(pattern)):
-                            if (pkg_dir / "package.json").is_file():
-                                rel = pkg_dir.relative_to(source_dir)
-                                lines.append(
-                                    f"COPY current/{posixpath.join(str(rel), 'package.json')} {posixpath.join(str(rel), 'package.json')}"
-                                )
-            except (json.JSONDecodeError, OSError):
-                pass
+        root = _node_lifecycle_root(source_dir, copy_prefix)
+        # 检测 npm workspaces monorepo，追加子包 package.json
+        lines.extend(
+            _node_workspace_package_copies(root, copy_prefix, _node_workspace_patterns(root))
+        )
+
+        # .npmrc 是构建配置（registry/peer 策略），与声明文件同属依赖层
+        if (root / ".npmrc").is_file():
+            lines.append(f"COPY {copy_prefix}.npmrc ./")
 
     # BUG-850：安装生命周期脚本引用的项目内文件（如根级 `preinstall: sh probe.sh`
     # 或 `node scripts/ensure-mirror.mjs`）必须随依赖层先于 `npm ci` 复制，
     # 否则 preinstall 在容器内因文件缺失必败。提取脚本命令中的路径 token，
-    # 解析为 source_dir 内真实存在的文件/目录时，按其**顶层路径组件**追加
-    # COPY（目录整目录拷贝，保证脚本 import 同目录兄弟文件也成立）。
-    for copy_line in _node_install_script_prereq_copies(source_dir, copy_prefix):
+    # 在与 COPY 前缀相同的工程根下解析为真实存在的文件/目录时，按其**顶层路径
+    # 组件**追加 COPY。npm 脚本名和已 --ignore-scripts 的安装不复制。
+    for copy_line in _node_install_script_prereq_copies(
+        source_dir, copy_prefix, install=install
+    ):
         if copy_line not in lines:
             lines.append(copy_line)
 
@@ -1350,20 +1511,34 @@ _NODE_LIFECYCLE_KEYS = ("preinstall", "install", "postinstall", "prepare")
 _SHELL_OPERATOR_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
 # 已由依赖层复制的声明文件，不重复拷贝
 _NODE_DECLARATION_FILES = {"package.json", "package-lock.json"}
+# 包管理器的 ``run <脚本名>`` 参数不是路径；node/npx 的普通参数仍可能是文件。
+_NODE_PACKAGE_BINS = {"npm", "pnpm", "yarn", "bun"}
+
+
+def _node_lifecycle_root(source_dir: Path, copy_prefix: str) -> Path:
+    """COPY 前缀对应的工程根：``current/`` → source_dir，``current/server/`` → source_dir/server。"""
+    rest = copy_prefix[len("current/") :] if copy_prefix.startswith("current/") else copy_prefix
+    rest = rest.strip("/")
+    return source_dir.joinpath(rest) if rest else source_dir
 
 
 def _node_install_script_prereq_copies(
-    source_dir: Path | None, copy_prefix: str
+    source_dir: Path | None, copy_prefix: str, *, install: str = ""
 ) -> list[str]:
-    """BUG-850：根 package.json 安装生命周期脚本引用的本地文件 → COPY 行。
+    """BUG-850：安装生命周期脚本引用的本地文件 → COPY 行。
 
-    只接受可解析为项目内真实存在的文件/目录 token；引用不存在路径时不追加
-    （保持既有渲染逐字不变，不为幻觉路径多拷源码破坏层缓存）。目录按顶层
-    组件整拷；node_modules、package*.json 与隐藏路径不在此机制内。
+    读取和路径存在性检查都用与 COPY 前缀相同的工程根（``sourceSubdir`` 下的
+    package.json，而不是仓库根的辅助 package.json）。只接受可解析为该工程内
+    真实存在的文件/目录 token；引用不存在路径时不追加。目录按顶层组件整拷；
+    node_modules、package*.json 与隐藏路径不在此机制内。
+
+    ``npm run <名称>`` 的名称是脚本，不是文件。安装命令含 ``--ignore-scripts``
+    时这些脚本不会执行，不再为它们复制。
     """
-    if source_dir is None:
+    if source_dir is None or "--ignore-scripts" in install:
         return []
-    root_pkg = source_dir / "package.json"
+    project_root = _node_lifecycle_root(source_dir, copy_prefix)
+    root_pkg = project_root / "package.json"
     if not root_pkg.is_file():
         return []
     try:
@@ -1380,6 +1555,7 @@ def _node_install_script_prereq_copies(
     seen_top: set[str] = set()
     for command in commands:
         for chunk in _SHELL_OPERATOR_SPLIT_RE.split(command):
+            tokens: list[str] = []
             for raw in chunk.split():
                 token = raw.strip("'\"")
                 if token.startswith("./"):
@@ -1388,14 +1564,27 @@ def _node_install_script_prereq_copies(
                     continue
                 if not token or any(c in token for c in "*?$"):
                     continue
-                candidate = (source_dir / token)
+                tokens.append(token)
+            index = 0
+            while index < len(tokens):
+                token = tokens[index]
+                if token in _NODE_PACKAGE_BINS:
+                    if index + 2 < len(tokens) and tokens[index + 1] in ("run", "run-script"):
+                        index += 3
+                        continue
+                    index += 1
+                    continue
+                candidate = project_root / token
                 if not candidate.exists():
+                    index += 1
                     continue
                 try:
-                    rel = candidate.resolve().relative_to(source_dir.resolve())
+                    rel = candidate.resolve().relative_to(project_root.resolve())
                 except ValueError:
-                    continue  # 越出项目根（如绝对路径）不拷
+                    index += 1
+                    continue  # 越出工程根（如绝对路径）不拷
                 if not rel.parts:
+                    index += 1
                     continue
                 top = rel.parts[0]
                 if (
@@ -1404,12 +1593,14 @@ def _node_install_script_prereq_copies(
                     or top == "node_modules"
                     or top.startswith(".")
                 ):
+                    index += 1
                     continue
                 seen_top.add(top)
-                if (source_dir / top).is_dir():
+                if (project_root / top).is_dir():
                     copies.append(f"COPY {copy_prefix}{top}/ {top}/")
                 else:
                     copies.append(f"COPY {copy_prefix}{top} {top}")
+                index += 1
     return copies
 
 

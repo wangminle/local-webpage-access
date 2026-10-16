@@ -467,6 +467,110 @@ def test_restart_container_stop_then_light_start(workspace, registry, config, fa
     assert "build" not in fake_runtime.calls
 
 
+# ---- BUG-864：静态/前端 restart 先建后切，构建失败不拆旧服务 --------------------
+
+
+def _seed_running_frontend(workspace, registry, config, iid="spa"):
+    """构造正在服务的前端实例：status=running、public/ 有旧产物、有路径别名。"""
+    from local_webpage_access.hosting import _load_manifest
+    from local_webpage_access.models import RouteMode, StaticConfig
+    from local_webpage_access.static_gateway import StaticGateway
+    from tests.scripts.test_hosting import _seed_frontend_instance
+
+    _seed_frontend_instance(workspace, registry, iid)
+    manifest = _load_manifest(workspace, iid)
+    manifest.status = Status.RUNNING
+    manifest.desiredState = DesiredState.RUNNING
+    manifest.static = StaticConfig(
+        root="public",
+        gateway="builtin",
+        routeMode=RouteMode.NAME.value,
+        routeHost=iid,
+        hostPort=21100,
+        enabled=True,
+    )
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+    registry.update_status(iid, Status.RUNNING.value, desired_state="running")
+    registry.set_static_enabled(iid, True)
+    public = workspace.app_public(iid)
+    public.mkdir(parents=True, exist_ok=True)
+    (public / "index.html").write_text("<h1>old</h1>", encoding="utf-8")
+    # 预置站点配置与路径别名片段（模拟旧服务仍在网关登记）
+    gateway = StaticGateway(workspace, config)
+    gateway.generate_site_config(iid, 21100, public, spa_fallback=True)
+    alias_path = workspace.app_alias_config(iid)
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    alias_path.write_text("# 旧别名片段\n", encoding="utf-8")
+    return manifest
+
+
+def test_restart_frontend_build_failure_keeps_old_service(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-864：前端 restart 构建失败时，旧产物/站点配置/别名原样保留且
+    status 按 BUG-833 语义保留观测态 running（先建后切，不停旧服务）。"""
+    import json
+
+    from local_webpage_access import hosting
+    from local_webpage_access.errors import BuildError
+
+    _seed_running_frontend(workspace, registry, config, "spa")
+
+    stop_calls: list[str] = []
+    monkeypatch.setattr(
+        hosting,
+        "stop_instance",
+        lambda *a, **k: stop_calls.append("stop_instance"),
+    )
+
+    def fake_run(cmd, *, cwd, log_path, **kw):
+        raise BuildError("yarn build 编译失败", command=cmd, exit_code=1)
+
+    monkeypatch.setattr(hosting, "run_command", fake_run)
+
+    with pytest.raises(BuildError):
+        restart_instance(workspace, config, registry, "spa")
+
+    # 构建失败：不触发先停旧服务
+    assert stop_calls == []
+    # 旧产物原样保留
+    assert (workspace.app_public("spa") / "index.html").read_text(encoding="utf-8") == "<h1>old</h1>"
+    # 站点配置与别名片段未被拆除
+    assert workspace.app_gateway_config("spa").is_file()
+    assert workspace.app_alias_config("spa").is_file()
+    # BUG-833 语义：status 保留观测值 running，失败只进操作态
+    row = registry.get_instance("spa")
+    assert row["status"] == Status.RUNNING.value
+    op = json.loads(row["last_operation_json"])
+    assert op["status"] == "failed" and op["kind"] == "deploy"
+
+
+def test_restart_frontend_success_switches_after_build(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-864：restart 成功路径照常构建并切换为新产物（先建后切）。"""
+    from local_webpage_access import hosting
+    from tests.scripts.test_hosting import _subprocess_completed
+
+    _seed_running_frontend(workspace, registry, config, "spa")
+
+    def fake_run(cmd, *, cwd, log_path, **kw):
+        if "build" in cmd:
+            dist = Path(cwd) / "dist"
+            dist.mkdir(exist_ok=True)
+            (dist / "index.html").write_text("<h1>new</h1>", encoding="utf-8")
+        return _subprocess_completed(0)
+
+    monkeypatch.setattr(hosting, "run_command", fake_run)
+
+    manifest = restart_instance(workspace, config, registry, "spa")
+    assert manifest.status == Status.RUNNING
+    assert (workspace.app_public("spa") / "index.html").read_text(encoding="utf-8") == "<h1>new</h1>"
+
+    hosting.stop_instance(workspace, config, registry, "spa")
+
+
 # ---- rebuild ---------------------------------------------------------------
 
 
@@ -1081,6 +1185,50 @@ def test_observe_health_first_keeps_running_even_if_admin_down(
 
     _seed_enabled_static(workspace, registry, "demo", host_port=21100)
     _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=False, health_ok=True)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.RUNNING
+
+
+# ---- BUG-858：import 后未启动（desiredState=stopped）不误报 config_invalid -------
+
+
+def test_observe_imported_not_started_static_is_stopped_not_config_invalid(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-858：static_sites 行 enabled=1 但 desiredState=stopped（import 未启动），
+    即便 Caddy master 在线也应观测为 stopped，而非 config_invalid。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+    from tests.scripts._helpers import make_static_manifest
+
+    # 模拟 import 后未启动：enabled 已登记但 host_port 为 NULL，期望态 stopped
+    workspace.ensure_app_dirs("demo")
+    m = make_static_manifest("demo")
+    m.static.enabled = True
+    m.static.hostPort = None
+    m.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(m)
+    registry.set_static_enabled("demo", True)
+    assert registry.get_instance("demo")["desired_state"] == "stopped"
+
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=True, health_ok=False)
+    assert _observe_static_status(workspace, config, registry, "demo") == Status.STOPPED
+
+
+def test_observe_desired_stopped_still_reports_running_when_serving(
+    workspace, registry, config, monkeypatch
+) -> None:
+    """BUG-858 健康优先边界：desiredState=stopped 但服务实际可达，仍如实报 running。"""
+    from local_webpage_access.lifecycle import _observe_static_status
+    from tests.scripts._helpers import make_static_manifest
+
+    workspace.ensure_app_dirs("demo")
+    m = make_static_manifest("demo")
+    m.static.enabled = True
+    m.static.hostPort = 21100
+    m.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(m)
+    registry.set_static_enabled("demo", True)
+
+    _patch_gateway_for_observe(monkeypatch, backend="caddy", admin_alive=True, health_ok=True)
     assert _observe_static_status(workspace, config, registry, "demo") == Status.RUNNING
 
 

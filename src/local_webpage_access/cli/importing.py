@@ -513,6 +513,7 @@ def _do_update_from_git(
                 "  ⚠ 形态将变化，需 --force-kind-change 才能实际更新",
                 fg=typer.colors.YELLOW,
             )
+        _print_shape_disagreement_warning(result)
         return
 
     typer.secho(f"已从 GitHub 源更新实例：{instance_id}", fg=typer.colors.GREEN)
@@ -525,6 +526,7 @@ def _do_update_from_git(
     )
     if result.detection is not None:
         typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
+    _print_shape_disagreement_warning(result)
     typer.echo(f"  目录：{result.app_dir}")
 
     # DEV-067 / BUG-112：容器源码已换 -> rebuild 镜像；静态/前端 -> restart。
@@ -546,6 +548,18 @@ def _do_update_from_git(
         restart_instance(ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard)
         typer.secho("  已 restart，端口不变", fg=typer.colors.GREEN)
     _finish_update_alias_summary(ws, instance_id)
+
+
+def _print_shape_disagreement_warning(result) -> None:
+    """BUG-876：重扫与已确认形态不一致、保留既有形态时的统一警告。"""
+    if not result.shape_disagreement:
+        return
+    typer.secho(
+        "  注意：重扫形态与既有形态不一致；实例形态此前已确认/部署过，"
+        "本次更新保留既有形态及其 entry/stack 等检测派生字段。"
+        "如确要切换形态，请加 --force-kind-change",
+        fg=typer.colors.YELLOW,
+    )
 
 
 def _source_dir_brief(path: Path) -> str:
@@ -660,6 +674,7 @@ def _do_update_from_dir(
                 "  ⚠ 形态将变化，需 --force-kind-change 才能实际更新",
                 fg=typer.colors.YELLOW,
             )
+        _print_shape_disagreement_warning(result)
         return
 
     if result.skipped and not result.source_dir_changed:
@@ -681,6 +696,7 @@ def _do_update_from_dir(
         typer.echo(f"  关联目录：{result.prev_source_dir} → {result.new_source_dir}")
     if result.detection is not None:
         typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
+    _print_shape_disagreement_warning(result)
     typer.echo(f"  目录：{result.app_dir}")
 
     # DEV-067 / BUG-112：容器源码已换 -> rebuild 镜像；静态/前端 -> restart。
@@ -753,6 +769,7 @@ def _do_update(
                 "  ⚠ 形态将变化，需 --force-kind-change 才能实际更新",
                 fg=typer.colors.YELLOW,
             )
+        _print_shape_disagreement_warning(result)
         if result.was_running:
             if result.needs_rebuild:
                 action = "rebuild"
@@ -773,6 +790,7 @@ def _do_update(
     typer.echo(f"  sha256：{prev_short} → {new_short}")
     if result.detection is not None:
         typer.echo(f"  形态：{result.detection.form}（置信度 {result.detection.confidence}）")
+    _print_shape_disagreement_warning(result)
     typer.echo(f"  目录：{result.app_dir}")
     if result.sanitized and result.sanitized.stripped_names:
         san = result.sanitized
@@ -817,7 +835,10 @@ def scan(
     instance_id: str = typer.Argument(None, help="要重新扫描的实例 ID（省略则扫所有 pending）"),
 ) -> None:
     """重新扫描实例（或所有 pending 实例），刷新运行形态识别。"""
-    from local_webpage_access.importer import apply_detection_to_manifest
+    from local_webpage_access.importer import (
+        apply_detection_to_manifest,
+        detection_shape_differs,
+    )
     from local_webpage_access.models import InstanceManifest, Status
     from local_webpage_access.scanner import Scanner
 
@@ -853,7 +874,15 @@ def scan(
                         )
                         continue
                     manifest = InstanceManifest.load(manifest_path)
-                    manifest = apply_detection_to_manifest(manifest, detection, ws)
+                    # BUG-876 / BUG-869：已确认/部署过的实例（status != pending），
+                    # 重扫与既有形态不一致时仅作检测参考，不覆盖既有形态
+                    # （人工确认/适配的 kind/runtime 是权威值）。
+                    kept_shape = manifest.status != Status.PENDING and detection_shape_differs(
+                        manifest, detection
+                    )
+                    manifest = apply_detection_to_manifest(
+                        manifest, detection, ws, keep_confirmed_shape=True
+                    )
                     # C.02（IMP-056 后置包）：重扫后用同一 checker 原子刷新
                     # findings——问题代码删除即清除旧 finding；失败保留旧结果
                     # 并标 stale，不写半成品。
@@ -891,6 +920,16 @@ def scan(
                             fg=typer.colors.YELLOW,
                         )
                 status_label = detection.form if not detection.pending else "pending"
+                if kept_shape:
+                    typer.secho(
+                        f"  {iid}：重扫结果（{status_label}）与既有形态 "
+                        f"{manifest.kind.value}/{manifest.runtime.value} 不一致；"
+                        "该实例形态已确认/部署过，保留既有形态及其 entry/stack 等检测派生字段",
+                        fg=typer.colors.YELLOW,
+                    )
+                    status_label = (
+                        f"{manifest.kind.value}/{manifest.runtime.value}（保留既有形态）"
+                    )
                 typer.echo(f"  {iid}：{status_label}（{detection.confidence}）")
         finally:
             reg.close()

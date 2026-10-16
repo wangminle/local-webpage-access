@@ -202,6 +202,10 @@ class EntryConfig(BaseModel):
     buildOutputDir: str | None = (
         None  # 构建产物目录（相对项目根），monorepo 子包为 packages/<name>/dist
     )
+    # BUG-863 修订：上次自动检测产出的 install/build/start/buildOutputDir 快照。
+    # 重扫合并时据此区分「人工覆盖」（现值 != 快照 → 保留）与「旧自动生成值」
+    # （现值 == 快照 → 采纳新检测值）；存量 manifest 无快照（None）时保守保留。
+    detected: dict[str, str | None] | None = None
 
 
 # ---- Monorepo 包分类（IMP-057 Gate-1）---------------------------------------

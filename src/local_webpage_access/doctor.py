@@ -545,6 +545,60 @@ def check_git(runner: SubprocessRunner = _default_runner) -> CheckResult:
     )
 
 
+def check_node_toolchain(runner: SubprocessRunner = _default_runner) -> CheckResult:
+    """BUG-860 / BUG-877：宿主 Node 前端工具链预检（WARN 级，不打红 doctor）。
+
+    纯静态与容器实例不依赖宿主 node，仅宿主前端构建（frontend-static）需要
+    node + pnpm/yarn（经 corepack 或 PATH）。缺 node / corepack 只影响该路径，
+    故按 check_git 同例给 WARN 与修复指引；各项可达性与版本如实列出。
+    """
+    if not shutil.which("node"):
+        return CheckResult(
+            "node_toolchain",
+            STATUS_WARN,
+            "未检测到 node 可执行文件",
+            detail="宿主前端构建（frontend-static 实例）不可用；纯静态 / 容器实例不受影响",
+            suggestion=(
+                "安装 Node.js LTS（推荐经官方包管理器或 nvm；"
+                "Ubuntu apt 版 node 无 corepack，需 npm i -g corepack）"
+            ),
+        )
+    node_result = runner(["node", "--version"])
+    node_version = (node_result.stdout or "").strip() if node_result.returncode == 0 else "未知"
+    details: list[str] = [f"node {node_version}"]
+    missing: list[str] = []
+    if shutil.which("corepack"):
+        details.append("corepack 可用")
+    else:
+        missing.append("corepack 不可用")
+        details.append("无 corepack")
+    for pm in ("pnpm", "yarn"):
+        if shutil.which(pm) is None:
+            details.append(f"{pm} 不在 PATH（corepack 可用时仍可经 corepack {pm} 运行）")
+            continue
+        pm_result = runner([pm, "--version"])
+        pm_version = (
+            (pm_result.stdout or "").strip() if pm_result.returncode == 0 else "版本获取失败"
+        )
+        details.append(f"{pm} {pm_version}")
+    if missing:
+        extra = ""
+        if shutil.which("pnpm") is None and shutil.which("yarn") is None:
+            extra = "；pnpm/yarn 均不在 PATH，宿主前端构建将失败"
+        return CheckResult(
+            "node_toolchain",
+            STATUS_WARN,
+            f"node {node_version} 可用，但{'、'.join(missing)}{extra}",
+            detail="；".join(details),
+            suggestion="安装 corepack（Node.js 自带或 npm i -g corepack）后即可按需使用 pnpm/yarn",
+        )
+    return CheckResult(
+        "node_toolchain",
+        STATUS_OK,
+        "Node 前端工具链可用（" + "；".join(details) + "）",
+    )
+
+
 def check_caddy(config: Config, runner: SubprocessRunner = _default_runner) -> CheckResult:
     """Caddy 版本检查：缺失时与运行时一致，降级 builtin 并告警。"""
     if config.staticGateway != "caddy":
@@ -2798,6 +2852,8 @@ def run_doctor(
             check_caddy(config, runner=runner),
             # IMP-065：git 可执行（缺失仅 WARN，不影响 zip/文件夹导入）
             check_git(runner=runner),
+            # BUG-860 / BUG-877：宿主 Node 前端工具链（缺失仅 WARN）
+            check_node_toolchain(runner=runner),
             check_port_pool(config, port_in_use=port_in_use, allocated_ports=allocated_ports),
             check_registry(ws),
             check_static_gateway(ws),

@@ -1177,7 +1177,9 @@ def test_enable_caddy_stops_live_builtin(workspace, config, monkeypatch):
     monkeypatch.setattr(gateway, "_pid_alive", lambda pid: True)
     # enable 的其余依赖桩掉
     monkeypatch.setattr(gateway, "_clear_stale_static_pid", lambda iid: None)
-    monkeypatch.setattr(gateway, "generate_site_config", lambda iid, hp, root: Path("/tmp/x"))
+    monkeypatch.setattr(
+        gateway, "generate_site_config", lambda iid, hp, root, **kw: Path("/tmp/x")
+    )
     monkeypatch.setattr(gateway, "detect_backend", lambda: "caddy")
     monkeypatch.setattr(gateway, "reload_all", lambda: None)
 

@@ -1947,9 +1947,11 @@ def restart_instance(
     expected_revision: int | None = None,
     ignore_alias_guard: bool = False,
 ) -> InstanceManifest:
-    """重启实例（WBS-17.03）：先 stop 再 start。
+    """重启实例（WBS-17.03）。
 
-    在同一把锁内完成，保证原子性。已部署的容器走轻量 start，不重建镜像。
+    在同一把锁内完成，保证原子性。容器实例按收敛决策走轻量 start（先 stop
+    再 start）/ runtime recreate / full rebuild（build-first）；静态/前端实例
+    与 rebuild 一致走「先建后切」（BUG-864：构建成功前不拆除旧服务）。
     IMP-021：重启后若实例有路径别名且 hostPort 发生漂移，重写别名片段并 reload。
     """
     with instance_lock(workspace, instance_id):
@@ -1972,7 +1974,6 @@ def _restart_instance_locked(
     from local_webpage_access.hosting import (
         host_instance,
         start_container,
-        stop_instance,
     )
     from local_webpage_access.reconcile_circuit import clear_circuit
 
@@ -1995,29 +1996,26 @@ def _restart_instance_locked(
         from local_webpage_access.hosting import recreate_container_runtime
 
         manifest = recreate_container_runtime(workspace, config, registry, instance_id)
-    else:
-        if deployed_container:
-            # S2-01/N3：停机失败直接报错中止，不再吞异常后对仍在跑的容器
-            # 误报「已重启」。「本来就没在跑」视为成功（stop_or_abort 内置）。
-            from local_webpage_access.hosting import stop_or_abort
+    elif deployed_container:
+        # S2-01/N3：停机失败直接报错中止，不再吞异常后对仍在跑的容器
+        # 误报「已重启」。「本来就没在跑」视为成功（stop_or_abort 内置）。
+        from local_webpage_access.hosting import stop_or_abort
 
-            stop_or_abort(
-                DockerRuntime(workspace, registry),
-                instance_id,
-                purpose="重启",
-                down=False,
-            )
-        else:
-            # 未部署容器 / 静态实例：没有可停的旧容器，停止噪声（含 Docker/网关
-            # 不可用）保持容忍，restart 随后会走完整托管恢复。
-            try:
-                stop_instance(workspace, config, registry, instance_id)
-            except LwaError as exc:
-                log.warning("restart 前停止失败（忽略并继续启动）：%s", exc)
-
-    if deployed_container and action == "none":
+        stop_or_abort(
+            DockerRuntime(workspace, registry),
+            instance_id,
+            purpose="重启",
+            down=False,
+        )
         manifest = start_container(workspace, config, registry, instance_id)
-    elif not deployed_container:
+    else:
+        # BUG-864：静态/前端实例 restart 与 rebuild 对齐为「先建后切」——
+        # 构建成功前不拆除旧服务（不再先 stop_instance 禁用站点、删除路径
+        # 别名）。此前「先停后建」在构建失败时旧服务已被拆除，且
+        # build_and_host_frontend 的 BUG-833「旧版本仍在服务」保留语义因
+        # 停机后 was_serving=False 而失效（status=failed，服务全灭）。
+        # host_instance 复用已登记端口并覆盖站点配置/别名片段，成功即完成
+        # 切换；失败则旧 public/ 与旧路由原样保留，继续服务。
         manifest = host_instance(workspace, config, registry, instance_id)
     # IMP-021：容器别名入口 reverse_proxy 到 hostPort，端口漂移时同步别名片段。
     _sync_alias_port(workspace, config, instance_id, manifest)
@@ -3161,7 +3159,11 @@ def _observe_static_status(
     1. 未启用 → ``STOPPED``；
     2. pid 存活 或 hostPort HTTP 可达 → ``RUNNING``（BUG-052 防御：pid 抖动/缺失但
        服务在跑时按 HTTP 兜底）；
-    3. 既未 pid 存活也不可达时，按后端细化（DEV-043）：
+    3. 既未 pid 存活也不可达，且用户期望非 running（BUG-858：如 ``lwa import``
+       后未启动的实例，static_sites 行 enabled=1 但 host_port 为 NULL）→
+       ``STOPPED``（站点本就不该在服务，不看网关健康，避免误报
+       ``CONFIG_INVALID`` 惊扰用户）；
+    4. 既未 pid 存活也不可达且期望 running 时，按后端细化（DEV-043）：
 
        * Caddy 后端 + admin :2019 不可达 → ``GATEWAY_DOWN``（master 挂了，
          enabled 站点实际不可达——BUG-071：不再误标普通 stopped）；
@@ -3169,6 +3171,7 @@ def _observe_static_status(
          （路由/配置问题，BUG-069 类悬空 import 征兆）；
        * builtin 后端 → ``STOPPED``（进程已死，由 daemon reconcile 自愈）。
     """
+    from local_webpage_access.models import DesiredState
     from local_webpage_access.static_gateway import StaticGateway
 
     row = registry.get_static_site(instance_id)
@@ -3193,7 +3196,15 @@ def _observe_static_status(
     if host_port is not None and gateway.health_check(int(host_port)):
         return Status.RUNNING
 
-    # 3) 既无 pid 也不可达：Caddy 模式下区分"网关不可达"与"配置无效"（DEV-043）
+    # 3) BUG-858：enabled 但 desiredState≠running（import 后未启动等）——站点
+    # 本就不该在服务，直接按 STOPPED 观测，不看网关健康（否则 Caddy master
+    # 在线时未启动实例会被误标 CONFIG_INVALID）。
+    inst_row = registry.get_instance(instance_id)
+    desired = str((inst_row or {}).get("desired_state") or "")
+    if desired and desired != DesiredState.RUNNING.value:
+        return Status.STOPPED
+
+    # 4) 既无 pid 也不可达：Caddy 模式下区分"网关不可达"与"配置无效"（DEV-043）
     if gateway.detect_backend() == "caddy":
         if not gateway._admin_alive():
             return Status.GATEWAY_DOWN

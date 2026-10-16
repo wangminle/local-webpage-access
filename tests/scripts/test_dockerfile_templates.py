@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import time
 from pathlib import Path
@@ -265,8 +266,28 @@ def test_python_uv_sync_path(workspace: Workspace) -> None:
     assert "pip install uv" in content
     assert "--mount=type=cache,target=/root/.cache/pip" in content
     assert "--mount=type=cache,target=/root/.cache/uv" in content
-    # 启动命令自动包 uv run
-    assert '"uv", "run", "uvicorn"' in content
+    # 启动命令自动包 uv run --no-sync --no-dev（BUG-865：运行期不再同步 dev 依赖）
+    assert '"uv", "run", "--no-sync", "--no-dev", "uvicorn"' in content
+
+
+def test_python_uv_sync_user_start_not_double_prefixed(workspace: Workspace) -> None:
+    """BUG-865：用户已写 uv run 的 start 不再叠加前缀；gunicorn 预检须剥掉标志位。"""
+    from local_webpage_access.dockerfile_templates import _gunicorn_launch_command
+
+    m = _mk_manifest(
+        kind=Kind.PYTHON,
+        stack=["fastapi"],
+        install="uv sync",
+        start="uv run --no-sync --no-dev sh -c 'exec gunicorn -b 0.0.0.0:8000 main:app'",
+        internal_port=8000,
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert content.count('"uv", "run"') == 1
+    # _strip_uv_run 须剥掉平台注入的标志，gunicorn 探测看到真实内层命令
+    assert (
+        _gunicorn_launch_command(m.entry.start, uses_uv=True)
+        == "exec gunicorn -b 0.0.0.0:8000 main:app"
+    )
 
 
 def test_python_pipfile_install_path(workspace: Workspace) -> None:
@@ -1433,3 +1454,473 @@ def test_no_lifecycle_scripts_rendering_unchanged(workspace) -> None:
     text = out.read_text(encoding="utf-8")
     assert "COPY current/probe.sh" not in text
     assert "COPY current/scripts/" not in text
+
+
+@pytest.mark.parametrize("command", ["npm run build", "npm run-script build"])
+def test_npm_script_name_is_not_copied_as_path(workspace, command) -> None:
+    """prepare: npm run build 且已有 build/ 时，不得把脚本名当成 COPY 源。
+
+    有构建命令时 .dockerignore 会排除 current/build，这条 COPY 会让构建因源不存在失败。
+    """
+    manifest = _node_manifest("bug856a")
+    current = workspace.app_current("bug856a")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "prepare": command,
+                    "build": "node build.js",
+                    "start": "node server.js",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (current / "build").mkdir()
+    (current / "build" / "index.js").write_text("built\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/build/" not in text
+    assert "COPY current/build " not in text
+
+
+def test_ignore_scripts_skips_lifecycle_file_copies(workspace) -> None:
+    """安装命令已带 --ignore-scripts 时，生命周期脚本不会执行，不再为它复制文件。"""
+    manifest = _node_manifest("bug856b")
+    manifest.entry.install = "npm ci --ignore-scripts"
+    current = workspace.app_current("bug856b")
+    current.mkdir(parents=True, exist_ok=True)
+    _bug850_project(current)
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/probe.sh" not in text
+
+
+@pytest.mark.parametrize("command", ["sh probe", "sh ./probe", "node run probe"])
+def test_lifecycle_file_named_like_npm_script_is_still_copied(workspace, command) -> None:
+    """只有 npm run 的脚本名应跳过，同名的真实脚本文件仍须先复制。"""
+    manifest = _node_manifest("script-file")
+    current = workspace.app_current(manifest.id)
+    current.mkdir(parents=True)
+    (current / "package.json").write_text(
+        json.dumps({"scripts": {"preinstall": command, "probe": "echo probe"}}),
+        encoding="utf-8",
+    )
+    (current / "probe").write_text("#!/bin/sh\necho probe\n", encoding="utf-8")
+    (current / "run").write_text("console.log('probe')\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/probe probe" in text
+    assert text.index("COPY current/probe probe") < text.index("RUN npm ci")
+    if command.startswith("node "):
+        assert "COPY current/run run" in text
+
+
+def test_lifecycle_copies_follow_source_subdir_not_repo_root(workspace) -> None:
+    """sourceSubdir=server 时，根级辅助 package.json 的脚本不得生成 current/server/ 下不存在的 COPY。"""
+    manifest = _node_manifest("bug856c")
+    manifest.sourceSubdir = "server"
+    current = workspace.app_current("bug856c")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        json.dumps({"scripts": {"prepare": "node scripts/tools.js"}}),
+        encoding="utf-8",
+    )
+    (current / "scripts").mkdir()
+    (current / "scripts" / "tools.js").write_text("console.log(1)\n", encoding="utf-8")
+    server = current / "server"
+    server.mkdir()
+    (server / "package.json").write_text(
+        json.dumps({"scripts": {"start": "node server.js"}}),
+        encoding="utf-8",
+    )
+    (server / "server.js").write_text("console.log(1)\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/server/scripts/" not in text
+    assert "COPY current/scripts/" not in text
+
+
+def test_lifecycle_file_inside_source_subdir_is_copied(workspace) -> None:
+    """子目录工程自己的生命周期脚本引用的文件，按 current/<subdir>/ 前缀复制。"""
+    manifest = _node_manifest("bug856d")
+    manifest.sourceSubdir = "server"
+    manifest.entry.install = "npm ci"
+    current = workspace.app_current("bug856d")
+    server = current / "server"
+    server.mkdir(parents=True)
+    (server / "package.json").write_text(
+        json.dumps({"scripts": {"preinstall": "sh probe.sh", "start": "node server.js"}}),
+        encoding="utf-8",
+    )
+    (server / "probe.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/server/probe.sh probe.sh" in text
+    assert text.index("COPY current/server/probe.sh") < text.index("RUN npm ci")
+
+
+def test_yarn_berry_project_copies_yarnrc_and_yarn_dir(workspace) -> None:
+    """BUG-874：Yarn Berry 项目依赖层必须带 .yarnrc.yml 与 .yarn/（patches/releases），否则 patch: 依赖 YN0001。"""
+    manifest = _node_manifest("bug874a")
+    manifest.entry.install = "corepack enable && yarn install --frozen-lockfile"
+    current = workspace.app_current("bug874a")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(json.dumps({"name": "hd", "scripts": {"start": "node app.js"}}), encoding="utf-8")
+    (current / "yarn.lock").write_text("__metadata:\n  version: 8\n", encoding="utf-8")
+    (current / ".yarnrc.yml").write_text("nodeLinker: node-modules\nyarnPath: .yarn/releases/yarn-4.13.0.cjs\n", encoding="utf-8")
+    (current / ".yarn" / "patches").mkdir(parents=True)
+    (current / ".yarn" / "patches" / "passport.patch").write_text("diff", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/package.json current/yarn.lock ./" in text
+    assert "COPY current/.yarnrc.yml ./" in text
+    assert "COPY current/.yarn/ .yarn/" in text
+    assert text.index("COPY current/.yarnrc.yml") < text.index("RUN corepack enable && yarn install")
+
+
+def test_yarn1_project_without_berry_files_unchanged(workspace) -> None:
+    """Yarn 1 项目（无 .yarnrc.yml/.yarn/）渲染与 BUG-874 前逐字一致。"""
+    manifest = _node_manifest("bug874b")
+    manifest.entry.install = "corepack enable && yarn install --frozen-lockfile"
+    current = workspace.app_current("bug874b")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(json.dumps({"name": "y1", "scripts": {"start": "node app.js"}}), encoding="utf-8")
+    (current / "yarn.lock").write_text("# yarn lockfile v1\n", encoding="utf-8")
+    (current / ".yarnrc").write_text("registry https://registry.npmmirror.com\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/package.json current/yarn.lock ./" in text
+    assert "COPY current/.yarnrc ./" in text
+    assert ".yarnrc.yml" not in text
+    assert "COPY current/.yarn/" not in text
+
+
+def test_pnpm_workspace_project_copies_workspace_yaml(workspace) -> None:
+    """pnpm monorepo 依赖层须带 pnpm-workspace.yaml；.npmrc 存在时同样携带。"""
+    manifest = _node_manifest("bug874c")
+    manifest.entry.install = "corepack enable && pnpm install --frozen-lockfile"
+    current = workspace.app_current("bug874c")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(json.dumps({"name": "mono", "scripts": {"start": "node app.js"}}), encoding="utf-8")
+    (current / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+    (current / "pnpm-workspace.yaml").write_text("packages:\n  - packages/*\n", encoding="utf-8")
+    (current / ".npmrc").write_text("legacy-peer-deps=true\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/package.json current/pnpm-lock.yaml ./" in text
+    assert "COPY current/pnpm-workspace.yaml ./" in text
+    assert "COPY current/.npmrc ./" in text
+
+
+def test_npm_project_with_npmrc_copies_it_into_deps_layer(workspace) -> None:
+    """npm 项目根级 .npmrc（如 legacy-peer-deps=true）随依赖层先于 npm ci 复制。"""
+    manifest = _node_manifest("bug874d")
+    current = workspace.app_current("bug874d")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(json.dumps({"name": "n", "scripts": {"start": "node app.js"}}), encoding="utf-8")
+    (current / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    (current / ".npmrc").write_text("legacy-peer-deps=true\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/.npmrc ./" in text
+    assert text.index("COPY current/.npmrc ./") < text.index("RUN npm ci")
+
+
+# ---- 评审 P2（BUG-873 补齐）：bun 容器工具链与锁文件复制 --------------------------
+
+
+def _bun_manifest(mid: str = "bundemo") -> InstanceManifest:
+    manifest = make_container_manifest(mid, kind=Kind.NODE)
+    manifest.entry = EntryConfig(
+        install="bun install --frozen-lockfile", start="bun run src/index.ts"
+    )
+    return manifest
+
+
+def _bun_project(
+    current,
+    *,
+    package_manager: str | None = None,
+    lock: str = "bun.lock",
+    workspaces: list[str] | None = None,
+    bunfig: bool = False,
+) -> None:
+    pkg: dict = {"name": "bun-app", "scripts": {"start": "bun run src/index.ts"}}
+    if package_manager:
+        pkg["packageManager"] = package_manager
+    if workspaces:
+        pkg["workspaces"] = workspaces
+    (current / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    (current / lock).write_text("# bun lockfile\n", encoding="utf-8")
+    if bunfig:
+        (current / "bunfig.toml").write_text("[install]\n", encoding="utf-8")
+
+
+def test_bun_install_adds_toolchain_and_lock_copy(workspace) -> None:
+    """评审 P2：bun 项目走 node:24-alpine 必须先补 bun 工具链（版本取
+    packageManager 的 bun@<ver>），且依赖层复制 bun.lock* 而非 package*.json。"""
+    manifest = _bun_manifest("bun873a")
+    current = workspace.app_current("bun873a")
+    current.mkdir(parents=True, exist_ok=True)
+    _bun_project(current, package_manager="bun@1.4.2")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "RUN npm install -g bun@1.4.2" in text
+    bun_install = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("RUN bun install") and "--frozen-lockfile" in line
+    )
+    assert text.index("RUN npm install -g bun@1.4.2") < text.index(bun_install)
+    assert "COPY current/package.json current/bun.lock* ./" in text
+    assert "COPY current/package*.json ./" not in text
+
+
+def test_bun_package_manager_strips_integrity_suffix(workspace) -> None:
+    """packageManager 的 +sha 校验后缀不得传给 npm install -g。
+
+    Corepack 规范允许 ``bun@1.2.3+sha512...``；npm 的 ``bun@<ver>`` 只接受纯版本号。
+    """
+    manifest = _bun_manifest("bun873sha")
+    current = workspace.app_current("bun873sha")
+    current.mkdir(parents=True, exist_ok=True)
+    _bun_project(current, package_manager="bun@1.2.3+sha512.abcdef")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "RUN npm install -g bun@1.2.3\n" in text
+    assert "+sha" not in text
+
+
+def test_bun_package_manager_non_version_chars_falls_back_to_latest(workspace) -> None:
+    """BUG-897：packageManager 版本号含白名单外字符时按未声明处理、装最新
+    bun——版本号直接拼进 RUN，注入串不得进入 Dockerfile。"""
+    manifest = _bun_manifest("bun897")
+    current = workspace.app_current("bun897")
+    current.mkdir(parents=True, exist_ok=True)
+    _bun_project(current, package_manager="bun@1.2.3; curl evil.sh")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "RUN npm install -g bun\n" in text
+    assert "curl evil" not in text
+
+
+def test_bun_without_package_manager_installs_latest(workspace) -> None:
+    """未声明 packageManager 时装最新 bun（不拼 @ 版本号）。"""
+    manifest = _bun_manifest("bun873b")
+    current = workspace.app_current("bun873b")
+    current.mkdir(parents=True, exist_ok=True)
+    _bun_project(current, lock="bun.lockb")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "RUN npm install -g bun\n" in text
+    assert "COPY current/package.json current/bun.lock* ./" in text
+
+
+def test_bun_workspace_monorepo_copies_subpackage_jsons_and_bunfig(workspace) -> None:
+    """bun workspaces monorepo：子包 package.json 与 bunfig.toml 随依赖层复制。"""
+    manifest = _bun_manifest("bun873c")
+    current = workspace.app_current("bun873c")
+    current.mkdir(parents=True, exist_ok=True)
+    _bun_project(current, workspaces=["packages/*"], bunfig=True)
+    sub = current / "packages" / "api"
+    sub.mkdir(parents=True)
+    (sub / "package.json").write_text(json.dumps({"name": "api"}), encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/packages/api/package.json packages/api/package.json" in text
+    assert "COPY current/bunfig.toml ./" in text
+
+
+def test_non_bun_install_has_no_bun_toolchain(workspace) -> None:
+    """npm 项目不产生 bun 工具链层（渲染逐字不变）。"""
+    manifest = _node_manifest("bun873d")
+    current = workspace.app_current("bun873d")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        json.dumps({"name": "n", "scripts": {"start": "node app.js"}}), encoding="utf-8"
+    )
+    (current / "package-lock.json").write_text("{}\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "npm install -g bun" not in text
+
+
+def test_bun_install_gets_registry_flag() -> None:
+    """bun install 与 npm/pnpm/yarn 一样消费 buildMirrors.npm 的 --registry。"""
+    from local_webpage_access.config import BuildMirrors
+    from local_webpage_access.dockerfile_templates import _with_npm_registry
+
+    mirrors = BuildMirrors(npm="https://registry.npmmirror.com")
+    out = _with_npm_registry("bun install --frozen-lockfile", mirrors)
+    assert out == "bun install --registry=https://registry.npmmirror.com --frozen-lockfile"
+
+
+# ---- BUG-888：pnpm/yarn/bun 分支对齐 workspaces 子包拷贝与生命周期前置拷贝 ----
+
+
+def test_pnpm_monorepo_copies_subpackage_jsons(workspace) -> None:
+    """BUG-888：pnpm workspaces 的子包 package.json 必须在依赖层在场（此前
+    pnpm 分支提前 return 跳过），glob 取自 pnpm-workspace.yaml。"""
+    manifest = _node_manifest("bug888a")
+    manifest.entry.install = "corepack enable && pnpm install --frozen-lockfile"
+    current = workspace.app_current("bug888a")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        json.dumps({"name": "mono", "scripts": {"start": "node app.js"}}),
+        encoding="utf-8",
+    )
+    (current / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+    (current / "pnpm-workspace.yaml").write_text(
+        "packages:\n  - packages/*\n", encoding="utf-8"
+    )
+    for sub in ("packages/api", "packages/web"):
+        (current / sub).mkdir(parents=True)
+        (current / sub / "package.json").write_text(
+            json.dumps({"name": sub.split("/")[-1]}), encoding="utf-8"
+        )
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/pnpm-workspace.yaml ./" in text
+    assert "COPY current/packages/api/package.json packages/api/package.json" in text
+    assert "COPY current/packages/web/package.json packages/web/package.json" in text
+    assert text.index("COPY current/packages/api/package.json") < text.index(
+        "RUN corepack enable && pnpm install"
+    )
+
+
+def test_pnpm_lifecycle_prereq_file_is_copied(workspace) -> None:
+    """BUG-888：pnpm 项目的 preinstall 引用文件同样先于 install 复制（此前
+    提前 return 使 BUG-850 前置拷贝对 pnpm 是死代码）。"""
+    manifest = _node_manifest("bug888b")
+    manifest.entry.install = "corepack enable && pnpm install --frozen-lockfile"
+    current = workspace.app_current("bug888b")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        json.dumps(
+            {"name": "p", "scripts": {"preinstall": "sh probe.sh", "start": "node app.js"}}
+        ),
+        encoding="utf-8",
+    )
+    (current / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+    (current / "probe.sh").write_text("echo ok\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/probe.sh probe.sh" in text
+    assert text.index("COPY current/probe.sh") < text.index(
+        "RUN corepack enable && pnpm install"
+    )
+
+
+def test_yarn_workspaces_copies_subpackage_jsons(workspace) -> None:
+    """BUG-888：yarn workspaces（package.json workspaces 字段）子包
+    package.json 随依赖层复制（此前 yarn 分支提前 return 跳过）。"""
+    manifest = _node_manifest("bug888c")
+    manifest.entry.install = "corepack enable && yarn install --frozen-lockfile"
+    current = workspace.app_current("bug888c")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "mono",
+                "workspaces": ["packages/*"],
+                "scripts": {"start": "node app.js"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (current / "yarn.lock").write_text("# yarn lockfile v1\n", encoding="utf-8")
+    (current / "packages/lib").mkdir(parents=True)
+    (current / "packages/lib" / "package.json").write_text(
+        json.dumps({"name": "lib"}), encoding="utf-8"
+    )
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/packages/lib/package.json packages/lib/package.json" in text
+    assert text.index("COPY current/packages/lib/package.json") < text.index(
+        "RUN corepack enable && yarn install"
+    )
+
+
+def test_yarn_lifecycle_prereq_dir_is_copied(workspace) -> None:
+    """BUG-888：yarn 项目 prepare 脚本引用的目录按顶层组件整拷。"""
+    manifest = _node_manifest("bug888d")
+    manifest.entry.install = "corepack enable && yarn install --frozen-lockfile"
+    current = workspace.app_current("bug888d")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "y",
+                "scripts": {"prepare": "node scripts/setup.mjs", "start": "node app.js"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (current / "yarn.lock").write_text("# yarn lockfile v1\n", encoding="utf-8")
+    (current / "scripts").mkdir()
+    (current / "scripts" / "setup.mjs").write_text("console.log(1)\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/scripts/ scripts/" in text
+    assert text.index("COPY current/scripts/") < text.index(
+        "RUN corepack enable && yarn install"
+    )
+
+
+def test_bun_lifecycle_prereq_file_is_copied(workspace) -> None:
+    """BUG-888：bun 项目的 install 生命周期引用文件同样先于 bun install 复制。"""
+    manifest = _bun_manifest("bug888e")
+    current = workspace.app_current("bug888e")
+    current.mkdir(parents=True, exist_ok=True)
+    _bun_project(current)
+    pkg = json.loads((current / "package.json").read_text(encoding="utf-8"))
+    pkg["scripts"]["preinstall"] = "node scripts/ensure.mjs"
+    (current / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+    (current / "scripts").mkdir()
+    (current / "scripts" / "ensure.mjs").write_text("console.log(1)\n", encoding="utf-8")
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "COPY current/scripts/ scripts/" in text
+    assert text.index("COPY current/scripts/") < text.index("RUN bun install")
+
+
+def test_npm_workspaces_follow_source_subdir(workspace) -> None:
+    """BUG-888：npm workspaces 的 glob/relative_to 按 COPY 前缀对应的工程根
+    解析——sourceSubdir=server 时子包 COPY 为 current/server/packages/...，
+    不再用仓库根错位。"""
+    manifest = _node_manifest("bug888f")
+    manifest.sourceSubdir = "server"
+    current = workspace.app_current("bug888f")
+    server = current / "server"
+    server.mkdir(parents=True)
+    (server / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "mono",
+                "workspaces": ["packages/*"],
+                "scripts": {"start": "node server.js"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (server / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    (server / "packages/api").mkdir(parents=True)
+    (server / "packages/api" / "package.json").write_text(
+        json.dumps({"name": "api"}), encoding="utf-8"
+    )
+    # 仓库根的辅助 package.json 不得参与子包解析
+    (current / "package.json").write_text(
+        json.dumps({"workspaces": ["rootonly/*"]}), encoding="utf-8"
+    )
+    (current / "rootonly/x").mkdir(parents=True)
+    (current / "rootonly/x" / "package.json").write_text(
+        json.dumps({"name": "x"}), encoding="utf-8"
+    )
+
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert (
+        "COPY current/server/packages/api/package.json packages/api/package.json" in text
+    )
+    assert "rootonly" not in text

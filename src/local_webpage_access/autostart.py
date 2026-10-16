@@ -35,6 +35,7 @@ from typing import Any, Callable, Protocol
 
 from local_webpage_access.config import Config
 from local_webpage_access.doctor import STATUS_FAIL, STATUS_OK, STATUS_WARN
+from local_webpage_access.logging import get_logger
 from local_webpage_access.ownership import Ownership
 from local_webpage_access.paths import Workspace
 from local_webpage_access.platform_detect import (
@@ -45,6 +46,8 @@ from local_webpage_access.platform_detect import (
     systemd_available,
     wsl_distro,
 )
+
+log = get_logger("autostart")
 
 # ---- 常量 -------------------------------------------------------------------
 
@@ -780,6 +783,39 @@ def installed_services(ws: Workspace, backend: AutostartBackend | None = None) -
     return [s for s in ALL_SERVICES if backend.unit_path(s).is_file()]
 
 
+def unit_points_to_workspace(
+    backend: AutostartBackend, name: str, ws_root: Path
+) -> bool:
+    """磁盘单元是否指向 ``ws_root`` 工作区（BUG-879）。
+
+    单元名是用户级全局的（``lwa-daemon.service`` 等），多工作区共存时磁盘上
+    的单元可能属于另一个工作区；仅凭文件存在性会把别家单元误报为本工作区
+    「已安装」。以单元内容的 ``WorkingDirectory`` 为准（两种后端生成时必写），
+    读不到/解析不出一律返回 False（保守按「指向别处」处理，引导会重新安装）。
+    """
+    path = backend.unit_path(name)
+    # BUG-890：两侧统一 resolve——macOS 下 /var 与 /private/var、软链工作区根
+    # 会让一边 resolve 一边不 resolve 的比较恒为 False（与同文件
+    # _check_unit_identity 的 Path(...).resolve() == Path(...).resolve() 对齐）。
+    ws_resolved = Path(ws_root).resolve()
+    try:
+        if path.suffix == ".plist":
+            import plistlib
+
+            data = plistlib.loads(path.read_bytes())
+            workdir = data.get("WorkingDirectory")
+            return bool(workdir) and Path(str(workdir)).resolve() == ws_resolved
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return False
+    for line in text.splitlines():
+        if line.startswith("WorkingDirectory="):
+            # systemd 转义：% → %%
+            value = line.split("=", 1)[1].strip().replace("%%", "%")
+            return Path(value).resolve() == ws_resolved
+    return False
+
+
 def _install_render_kwargs(
     name: str, python_exe: str, ws_root: Path, caddy_dir: str | None
 ) -> dict[str, Any]:
@@ -1263,6 +1299,15 @@ def coordinated_disable(
         return CoordinatedResult()
     if not backend.unit_path(service_name).is_file():
         return CoordinatedResult()
+    # BUG-890：单元名是用户级全局的，磁盘单元可能属于另一工作区（如生产
+    # 工作区）。归属不明时不得停用该单元——否则会借用系统级 unit 把别家
+    # 工作区的守护进程停掉；按「非本工作区」返回，调用方走自有进程管理。
+    if not unit_points_to_workspace(backend, service_name, ws.root):
+        log.info(
+            "%s 的自启动单元指向其他工作区，coordinated_disable 跳过（仅处理本工作区进程）",
+            service_name,
+        )
+        return CoordinatedResult()
     try:
         loaded = backend.is_loaded(service_name, runner)
     except Exception:  # noqa: BLE001
@@ -1310,6 +1355,15 @@ def coordinated_restart(
     except AutostartError:
         return CoordinatedResult()
     if not backend.unit_path(service_name).is_file():
+        return CoordinatedResult()
+    # BUG-890：磁盘单元可能属于另一工作区——归属不明时不得经监督器重启，
+    # 避免把别家工作区（如生产）的服务重启；按「非本工作区」返回，调用方
+    # 走 stop+start 管理自有进程。
+    if not unit_points_to_workspace(backend, service_name, ws.root):
+        log.info(
+            "%s 的自启动单元指向其他工作区，coordinated_restart 跳过（按 stop+start 处理）",
+            service_name,
+        )
         return CoordinatedResult()
     try:
         loaded = backend.is_loaded(service_name, runner)
@@ -1366,6 +1420,15 @@ def coordinated_start(
     except AutostartError:
         return CoordinatedResult()
     if not backend.unit_path(service_name).is_file():
+        return CoordinatedResult()
+    # BUG-890：磁盘单元可能属于另一工作区——归属不明时不得经监督器拉起/重启，
+    # 避免跨工作区操作别家（如生产）服务；按「非本工作区」返回，调用方走
+    # detached start 管理自有进程。
+    if not unit_points_to_workspace(backend, service_name, ws.root):
+        log.info(
+            "%s 的自启动单元指向其他工作区，coordinated_start 跳过（按 detached 启动处理）",
+            service_name,
+        )
         return CoordinatedResult()
     try:
         loaded = backend.is_loaded(service_name, runner)
@@ -1473,9 +1536,20 @@ def maybe_offer_autostart_install(
         return result
     try:
         backend = select_backend(plat)
-        if installed_services(ws, backend):
+        installed = installed_services(ws, backend)
+        own = [s for s in installed if unit_points_to_workspace(backend, s, ws.root)]
+        if own:
             result.messages.append("自启动单元已安装（可 `lwa autostart check` 复核完备性）")
             return result
+        if installed:
+            # BUG-879：单元存在但指向其他工作区——不算「已安装」，继续引导并明确
+            # 警示覆盖后果（单元名用户级全局，装本工作区会使另一工作区自启失效）。
+            result.messages.append(
+                "警告：已安装的自启动单元（"
+                + "、".join(installed)
+                + "）指向其他工作区，不是当前工作区；为本工作区安装会覆盖同名单元，"
+                "另一工作区的自启动将随之失效"
+            )
     except AutostartError:
         return result
 

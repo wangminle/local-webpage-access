@@ -138,6 +138,106 @@ def _read_pkg_json(path: Path) -> dict:
         return {}
 
 
+# BUG-881：目录/过滤选项按包管理器分别登记——只有命令首 token 是对应包管理器
+# 时，这些选项才表示「定位子包」；普通命令（node server.js --dir app、
+# vite --prefix out 等）的同名参数与包管理器无关，不得据此选主。
+_PM_DIR_FLAGS = {
+    "yarn": ("--cwd",),
+    "pnpm": ("--dir", "-C"),
+    "npm": ("--prefix",),
+}
+# 按包名定位子包的选项（pnpm --filter/-F、npm --workspace/-w；yarn 用
+# ``yarn workspace <name>`` 子命令形式，在扫描循环里单独识别）。
+_PM_NAME_FLAGS = {
+    "pnpm": ("--filter", "-F"),
+    "npm": ("--workspace", "-w"),
+}
+
+
+def _root_start_target_package(
+    root: Path, classifications: list[PackageClassification]
+) -> PackageClassification | None:
+    """根 package.json 的 start 脚本显式指向的可部署子包（BUG-880）。
+
+    真实 monorepo 常在 examples/ 放可部署示例——按 §4.4「唯一 web_server
+    优先」会误选示例，偏离根入口 ``yarn --cwd ./excalidraw-app start`` 声明
+    的主应用。识别形式（首 token 必须是对应包管理器，BUG-881）：
+
+    - ``yarn --cwd <dir>`` / ``pnpm --dir <dir>``（或 ``-C``）/
+      ``npm --prefix <dir>``（``--flag <dir>`` 与 ``--flag=<dir>`` 两种写法）；
+    - ``yarn workspace <name>``；
+    - ``pnpm --filter <name>``（或 ``-F``）/ ``npm --workspace <name>``
+      （或 ``-w``，``--flag=<name>`` 亦可；值也接受子包相对路径）。
+
+    只扫描 ``--`` 参数转发分隔符之前的 token——其后属于目标脚本自身的
+    参数，与包管理器定位无关（BUG-881）。
+
+    仅当目标唯一且可部署（web_server / frontend_build）时返回该包，
+    否则返回 None（回落 §4.4 决策表）。
+    """
+    pkg = _read_pkg_json(root / "package.json")
+    scripts = pkg.get("scripts")
+    start = scripts.get("start") if isinstance(scripts, dict) else None
+    if not isinstance(start, str):
+        return None
+    tokens = start.split()
+    if not tokens or tokens[0] not in _PM_DIR_FLAGS:
+        # BUG-881：非包管理器命令（node server.js --dir app 等）不作选主提示。
+        return None
+    pm = tokens[0]
+    dir_flags = _PM_DIR_FLAGS[pm]
+    name_flags = _PM_NAME_FLAGS.get(pm, ())
+
+    target_dir: str | None = None
+    target_name: str | None = None
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            # BUG-881：`--` 是包管理器的参数转发分隔符，其后 token 原样传给
+            # 目标脚本（``npm run serve -- --prefix app`` 实测应用收到该参数），
+            # 不再是包管理器自己的定位选项，到此停止扫描。
+            break
+        if tok in dir_flags and i + 1 < len(tokens):
+            target_dir = tokens[i + 1]
+            break
+        if any(tok.startswith(f + "=") for f in dir_flags):
+            target_dir = tok.split("=", 1)[1]
+            break
+        if tok in name_flags and i + 1 < len(tokens):
+            target_name = tokens[i + 1]
+            break
+        if any(tok.startswith(f + "=") for f in name_flags):
+            target_name = tok.split("=", 1)[1]
+            break
+        if pm == "yarn" and tok == "workspace" and i + 1 < len(tokens):
+            target_name = tokens[i + 1]
+            break
+        i += 1
+
+    def _norm_dir(value: str) -> str:
+        norm = value.strip().strip("\"'")
+        while norm.startswith("./"):
+            norm = norm[2:]
+        return norm.rstrip("/")
+
+    matches: list[PackageClassification] = []
+    if target_dir is not None:
+        norm = _norm_dir(target_dir)
+        if norm and ".." not in norm.split("/"):
+            matches = [c for c in classifications if c.path == norm]
+    elif target_name is not None:
+        name = target_name.strip().strip("\"'")
+        matches = [c for c in classifications if c.name == name]
+        if not matches:
+            # pnpm --filter / npm -w 也接受相对路径（如 ./excalidraw-app）
+            norm = _norm_dir(name)
+            if norm and ".." not in norm.split("/"):
+                matches = [c for c in classifications if c.path == norm]
+    deployable = [c for c in matches if c.isDeployable]
+    return deployable[0] if len(deployable) == 1 else None
+
+
 def classify_package(
     pkg_json: dict,
     rel_path: str,
@@ -249,13 +349,28 @@ def classify_and_select(root: Path) -> ClassificationResult:
     summary_parts = [f"{c.path}={c.packageType}" for c in classifications]
     notes.append(f"分类：{', '.join(summary_parts)}")
 
+    # BUG-880：根 start 脚本显式指向某可部署子包时优先于 §4.4 决策表——
+    # 真实 monorepo 的 examples/ 常含可部署示例（唯一 web_server），按表
+    # 会误选示例而偏离根入口（yarn --cwd 等）声明的主应用。
+    hinted = _root_start_target_package(root, classifications)
+    if hinted is not None:
+        notes.append(f"primary={hinted.path} ({hinted.name})（根 start 脚本指定，优先于选主表）")
+        return ClassificationResult(
+            classifications=classifications,
+            primary=hinted,
+            is_monorepo=True,
+            notes=notes,
+        )
+
     if len(web_servers) == 1:
         primary = web_servers[0]
         notes.append(f"primary={primary.path} ({primary.name})")
     elif len(web_servers) >= 2:
         candidates = ", ".join(f"{c.path} ({c.name})" for c in web_servers)
         notes.append(
-            f"发现 {len(web_servers)} 个 web_server 子包：{candidates}；标记 pending（后续可用 --package 指定）"
+            f"发现 {len(web_servers)} 个 web_server 子包：{candidates}；"
+            "标记 pending（可拆分导入：git 源用 --from-git <repo> "
+            f"--subdir <子包路径> 单独导入其中一个，如 --subdir {web_servers[0].path}）"
         )
     elif len(frontend_builds) == 1:
         primary = frontend_builds[0]
@@ -263,7 +378,9 @@ def classify_and_select(root: Path) -> ClassificationResult:
     elif len(frontend_builds) >= 2:
         candidates = ", ".join(f"{c.path} ({c.name})" for c in frontend_builds)
         notes.append(
-            f"发现 {len(frontend_builds)} 个 frontend_build 子包：{candidates}；标记 pending（后续可用 --package 指定）"
+            f"发现 {len(frontend_builds)} 个 frontend_build 子包：{candidates}；"
+            "标记 pending（可拆分导入：git 源用 --from-git <repo> "
+            f"--subdir <子包路径> 单独导入其中一个，如 --subdir {frontend_builds[0].path}）"
         )
     else:
         notes.append("monorepo 中未发现 Web 可部署子包")

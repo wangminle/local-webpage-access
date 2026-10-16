@@ -32,6 +32,9 @@ htmlcov/
 .hypothesis/
 tmp-test/
 
+# Node 依赖与包管理器状态（含 Eval 构建时生成的本地元数据）
+node_modules/
+
 # ---- 编辑器与 IDE -----------------------------------------------------------
 # 注意：目录整目录排除（.vscode/）会让下面的 ! 反向包含失效（git 不能重新包含
 # 父目录已被排除的文件），必须用 /* 通配内容再排除 extensions.json
@@ -83,7 +86,8 @@ AGENTS.md
 # 代码审查报告（本地生成）
 _review_reports/
 
-# ---- design 本地目录（issues/reviews 不同步到 GitHub）------------------------
+# ---- design 本地目录（issues/reviews/eval 成果不同步到 GitHub）----------------
+design/2-achievement/lwa-eval/
 design/4-issues/
 design/5-checkpoints/
 

@@ -36,7 +36,21 @@ log = get_logger("scanner")
 
 # ---- 框架特征常量 -----------------------------------------------------------
 
-NODE_FRONTEND = {"vite", "react", "react-dom", "vue", "@vitejs/plugin-react", "svelte", "preact"}
+# BUG-866（#97）：astro 默认 output=static，是纯静态前端框架（astro examples/portfolio
+# 即此类）；有 build 脚本即可按 frontend-static 部署。仅当声明 Node SSR adapter
+# （@astrojs/node，见 NODE_BACKEND）时才应进后端容器形态。
+NODE_FRONTEND = {
+    "vite",
+    "react",
+    "react-dom",
+    "vue",
+    "@vitejs/plugin-react",
+    "svelte",
+    "preact",
+    "astro",
+}
+# next/nuxt 不在 NODE_FRONTEND：二者生产形态是自带 Node 服务器的容器应用，
+# 放入前端名单会把纯前端规则套到后端容器上（误判 frontend-static）。
 NODE_BACKEND = {
     "express",
     "fastify",
@@ -47,6 +61,8 @@ NODE_BACKEND = {
     "@hono/node-server",
     "polka",
     "restana",
+    # BUG-866（#97）：astro 的 Node SSR adapter——声明了它才说明项目是后端形态。
+    "@astrojs/node",
 }
 PYTHON_WEB = {
     "flask": ("flask", 5000),
@@ -75,16 +91,19 @@ _PYTHON_FRAMEWORK_PRIORITY = (
     "sanic",
     "tornado",
 )
+# 真正需要外部服务的数据库客户端：命中即 pending（不自动启动，交人工/skills）。
 HEAVY_DATABASES = {
     "psycopg2",
     "psycopg",
     "asyncpg",
     "pymysql",
     "mysqlclient",
-    "redis",
     "aiomysql",
-    "aioredis",
 }
+# BUG-868（#99）：内存缓存类依赖多为可选组件——uptime-kuma 声明 redis 但
+# SQLite 单实例即可运行。单独出现时不标 pending，仅给 warning 级提示；
+# 与真正重型依赖共存时仍随重型依赖走 pending。
+OPTIONAL_CACHE_DATABASES = {"redis", "aioredis"}
 SQLITE_MARKERS = {"sqlite3", "better-sqlite3", "sqlalchemy", "peewee", "tortoise-orm", "aiosqlite"}
 SQLITE_FILE_EXT = (".sqlite", ".sqlite3", ".db")
 # IMP-018（WBS-20260708 阶段2.3）：命中即把资源档位自动升 medium（已 medium/heavy 不降）。
@@ -485,10 +504,40 @@ def _workspace_build_command(build_order: list[tuple[str, str]], top_files: set[
 # 那是构建脚本，不会走到 start 判定）。
 _DEV_NODE_SCRIPT_PREFIXES = ("tsx ", "ts-node ", "ts-node-dev ", "nodemon ")
 
+# BUG-871（#102）：monorepo 根 start 脚本的包管理器包装——
+# ``yarn --cwd ./excalidraw-app start`` / ``yarn workspace <name> run <script>`` /
+# ``pnpm --dir <dir> ...`` / ``npm --prefix <dir> run ...``。只认归一化前缀会把
+# 间接 vite/tsx dev server 误判为生产启动（excalidraw 实案：纯前端被误判
+# backend-container），必须先解包再按目标脚本判定。
+_PM_DIR_WRAP_RE = re.compile(r"^(?:yarn|pnpm|npm)\s+(?:--cwd|--dir|--prefix)\s+\S+\s+(.+)$")
+_PM_WORKSPACE_WRAP_RE = re.compile(r"^yarn\s+workspace\s+\S+\s+(?:run\s+)?(.+)$")
+
+
+def _unwrap_pm_script(command: str) -> str:
+    """剥掉 yarn/pnpm/npm 的目录/workspace 包装，返回目标脚本命令。
+
+    嵌套包装最多解 3 层（防异常输入死循环）；无法解包时原样返回。
+    解包后残留的 ``run`` 连接词（``npm --prefix ./app run vite``）也一并剥掉。
+    """
+    current = command
+    for _ in range(3):
+        m = _PM_DIR_WRAP_RE.match(current) or _PM_WORKSPACE_WRAP_RE.match(current)
+        if not m:
+            break
+        current = m.group(1).strip()
+    if current.startswith("run "):
+        current = current[4:].strip()
+    return current
+
 
 def _is_dev_node_script(script: str | None) -> bool:
     """start 脚本是否为 dev 模式（tsx/ts-node/nodemon/vite dev server）。"""
     normalized = " ".join((script or "").strip().lower().split())
+    if not normalized:
+        return False
+    # BUG-871（#102）：先解包 yarn --cwd / yarn workspace / pnpm --dir /
+    # npm --prefix 包装，再对目标脚本做 dev 前缀判定。
+    normalized = _unwrap_pm_script(normalized)
     if not normalized:
         return False
     if normalized.startswith(_DEV_NODE_SCRIPT_PREFIXES):
@@ -762,6 +811,14 @@ class Scanner:
                 result.notes.append(f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录")
                 return result
 
+            # BUG-868（#99）：子目录的可选缓存依赖同样只提示不拦（与根目录口径一致）
+            optional_db = self._detect_optional_db_deps(subdir_summary)
+            if optional_db:
+                result.notes.append(
+                    f"[预检警告] 子目录检测到可选缓存/数据库依赖："
+                    f"{', '.join(sorted(optional_db))}——通常为可选组件，运行失败时请人工确认"
+                )
+
             self._detect_sqlite(subdir_summary, result)
             if subdir_candidate.kind == "python":
                 # 检测 Python 项目
@@ -772,6 +829,19 @@ class Scanner:
                 elif subdir_summary.has_requirements_prod and result.entry.install:
                     result.entry.install = "pip install -r requirements-prod.txt"
             elif subdir_candidate.kind == "node":
+                # BUG-878（#109）：Go 主服务 + web/ 前端布局（memos 实案）——
+                # 前端子目录单独部署不是完整服务，判 pending 并明确提示。
+                if (
+                    subdir_candidate.form == "frontend-static"
+                    and _has_go_main_service(project_dir, summary)
+                ):
+                    result.pending = True
+                    result.confidence = "low"
+                    result.notes.append(_go_main_service_note())
+                    result.notes.append(
+                        f"[子目录识别] 源码在 {subdir_candidate.sourceSubdir}/ 子目录"
+                    )
+                    return result
                 # BUG-495/BUG-496：Node 子目录（frontend 或 backend）也走子目录识别。
                 self._detect_node(subdir_summary, result)
                 if subdir_candidate.form == "frontend-static":
@@ -799,6 +869,15 @@ class Scanner:
             # 仍尝试识别语言族，方便 skill 处理
             self._fill_language(summary, result)
             return result
+
+        # 1.5 可选缓存/数据库依赖（BUG-868，#99）：不拦 pending，仅 warning 提示
+        optional_db = self._detect_optional_db_deps(summary)
+        if optional_db:
+            result.notes.append(
+                f"[预检警告] 检测到可选缓存/数据库依赖：{', '.join(sorted(optional_db))}"
+                "——通常为可选组件（未配置外部服务时应用多回退内置 SQLite）；"
+                "运行失败时请人工确认是否需要外部服务"
+            )
 
         # 2. 数据库（SQLite）
         self._detect_sqlite(summary, result)
@@ -834,6 +913,11 @@ class Scanner:
             # 兜底：子目录 index.html，或任意可打开的 .html
             if _has_index_anywhere(project_dir) or _has_html_anywhere(project_dir):
                 self._detect_static(summary, result)
+            elif _has_go_main_service(project_dir, summary):
+                # BUG-878（#109）：Go 主服务超出当前支持范围，明确提示而非笼统 unknown
+                result.pending = True
+                result.confidence = "low"
+                result.notes.append(_go_main_service_note())
             else:
                 result.pending = True
                 result.confidence = "low"
@@ -963,6 +1047,12 @@ class Scanner:
     # ---- 重型数据库 --------------------------------------------------------
 
     def _detect_heavy_db(self, summary: FileSummary) -> set[str]:
+        """真正需要外部服务的重型数据库依赖（命中即 pending）。
+
+        BUG-868（#99）：redis/aioredis 这类可选内存缓存不再计入重型集合——
+        它们单独出现时仅由 :meth:`_detect_optional_db_deps` 给 warning 提示，
+        不再拦 pending（uptime-kuma 声明 redis 但 SQLite 单实例即可运行）。
+        """
         found: set[str] = set()
         all_deps: set[str] = {d.lower() for d in summary.node_runtime_deps} | {
             d.lower() for d in summary.python_deps
@@ -970,6 +1060,18 @@ class Scanner:
         for dep in all_deps:
             base = re.split(r"[<>=!\[ ]", dep, maxsplit=1)[0]
             if base in HEAVY_DATABASES:
+                found.add(base)
+        return found
+
+    def _detect_optional_db_deps(self, summary: FileSummary) -> set[str]:
+        """可选缓存/数据库依赖（BUG-868，#99）：单独出现不拦，仅 warning 提示。"""
+        found: set[str] = set()
+        all_deps: set[str] = {d.lower() for d in summary.node_runtime_deps} | {
+            d.lower() for d in summary.python_deps
+        }
+        for dep in all_deps:
+            base = re.split(r"[<>=!\[ ]", dep, maxsplit=1)[0]
+            if base in OPTIONAL_CACHE_DATABASES:
                 found.add(base)
         return found
 
@@ -1238,6 +1340,11 @@ def _node_install_command(summary: FileSummary) -> str:
         return "corepack enable && pnpm install --frozen-lockfile"
     if "yarn.lock" in files:
         return "corepack enable && yarn install --frozen-lockfile"
+    # BUG-873（#104）：bun.lock 是现行文本锁、bun.lockb 是旧二进制锁——
+    # 两者都应走 bun install（此前 bun.lockb 被错映射为 npm ci，bun.lock
+    # 完全不识别）。宿主 bun 工具链缺失是运行环境问题，不在识别层兜底。
+    if "bun.lock" in files or "bun.lockb" in files:
+        return "bun install --frozen-lockfile"
     if "package-lock.json" in files:
         return "npm ci"
     return "npm install"
@@ -1345,9 +1452,15 @@ def _select_python_framework(matched: list[str]) -> str | None:
     return matched[0].lower() if matched else None
 
 
-def _infer_python_port(summary: FileSummary, matched: list[str]) -> int:
+def _infer_python_port(summary: FileSummary | None, matched: list[str]) -> int:
     fw = _select_python_framework(matched)
     if fw and fw in PYTHON_WEB:
+        # BUG-867（#98）：flask 工厂包形态按 8000 约定，与 _python_start_command
+        # 的 gunicorn 绑定端口保持同一口径（BUG-181：端口与命令必须一致）。
+        if fw == "flask" and summary is not None:
+            target, _reason = _infer_flask_wsgi_target(summary)
+            if target:
+                return _flask_target_port(target)
         return PYTHON_WEB[fw][1]
     return 8000
 
@@ -1546,7 +1659,9 @@ def _python_start_command(
         target, reason = _infer_flask_wsgi_target(summary)
         if target:
             _note_gunicorn_generated(notes)
-            return _gunicorn_start_command(target, port=5000)
+            # BUG-867（#98）：工厂包形态（flaskr:create_app()）按内部端口约定
+            # 8000 绑定；模块文件形态（app:app）沿用 flask 惯例 5000。
+            return _gunicorn_start_command(target, port=_flask_target_port(target))
         if "gunicorn" in matched:
             # 066.a：已声明生产服务器优先——入口不可证明时沿用既有 app:app 形态。
             return "gunicorn -b 0.0.0.0:5000 app:app"
@@ -1599,11 +1714,40 @@ def _read_text_if_exists(path: Path) -> str:
         return ""
 
 
+def _find_flask_factory_candidates(root: Path) -> list[str]:
+    """BUG-867（#98）：在根级 Python 包目录的 ``__init__.py`` 中探测 Flask 工厂。
+
+    覆盖 flask 教程式布局（pyproject 项目、根无 app.py、``flaskr/__init__.py``
+    内 ``def create_app``）。跳过 venv/site-packages/dist 等目录、隐藏目录与
+    tests 目录（测试目录里的工厂不是生产入口）。返回 ``<pkg>:create_app()``
+    候选列表。
+    """
+    candidates: list[str] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return candidates
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if name.startswith(".") or name in _WSGI_SKIP_DIRS or name in ("test", "tests"):
+            continue
+        if not (entry / "__init__.py").is_file():
+            continue
+        text = _read_text_if_exists(entry / "__init__.py")
+        if text and _CREATE_APP_RE.search(text):
+            candidates.append(f"{name}:create_app()")
+    return candidates
+
+
 def _infer_flask_wsgi_target(summary: FileSummary | None) -> tuple[str, str | None]:
     """066.c：唯一可证明的 Flask WSGI 目标 ``module:app`` / 工厂 ``module:create_app()``。
 
     只接受根 ``app.py`` / ``main.py`` / ``wsgi.py`` / ``app/__init__.py`` 中可证明
     的入口（``app = Flask(...)`` 或 ``def create_app``）；多候选不猜。
+    根文件无候选时，回退到根级包目录的工厂探测（BUG-867，#98：flask 教程式
+    ``flaskr/`` 工厂包布局，根无 app.py 时不再硬编码不存在的 ``app`` 模块）。
     返回 ``(target, fallback_reason)``，二者互斥。
     """
     if summary is None:
@@ -1628,7 +1772,19 @@ def _infer_flask_wsgi_target(summary: FileSummary | None) -> tuple[str, str | No
         return candidates[0], None
     if len(candidates) > 1:
         return "", f"Flask WSGI 入口存在多个候选（{'、'.join(candidates)}），不猜测"
+    # BUG-867（#98）：根级包目录工厂（如 flaskr/__init__.py 的 create_app）
+    factories = _find_flask_factory_candidates(root)
+    if len(factories) == 1:
+        return factories[0], None
+    if len(factories) > 1:
+        return "", f"Flask 工厂入口存在多个候选（{'、'.join(factories)}），不猜测"
     return "", "未能从源码证明唯一的 Flask WSGI 入口"
+
+
+def _flask_target_port(target: str) -> int:
+    """Flask 启动命令端口：工厂包形态按内部端口约定 8000（BUG-867，#98），
+    模块文件形态沿用 flask 惯例 5000。与 _infer_python_port 保持同一口径。"""
+    return 8000 if "create_app()" in target else 5000
 
 
 def _infer_django_wsgi_target(summary: FileSummary | None) -> tuple[str, str | None]:
@@ -1716,6 +1872,49 @@ def _has_index_anywhere(root: Path, *, max_depth: int = 2) -> bool:
         if path.is_file() and path.name.lower() == "index.html":
             return True
     return False
+
+
+# BUG-878（#109）：Go 主程序入口的 package main 声明（行首锚定，避免注释误命中）。
+_GO_PACKAGE_MAIN_RE = re.compile(r"^\s*package\s+main\s*$", re.MULTILINE)
+
+
+def _has_go_main_service(root: Path, summary: FileSummary) -> bool:
+    """源码根是否存在 Go 主服务（BUG-878，#109）。
+
+    memos 类项目（根 go.mod + main.go/cmd 入口 + web/ React 前端）曾被整体
+    识别为纯前端并成功部署——前端能打开但无 Go 后端，不是完整服务。命中
+    本函数时不得把前端子目录单独当完整应用部署，应判 pending 并明确提示。
+
+    不误伤两类项目：
+    - 纯前端/纯 Node/Python 项目（根本无 go.mod）；
+    - 前后端分离且后端为 Node/Python 的项目（根有更强的主服务特征，
+      如 fastapi-template 的 backend/ Python——走各自识别分支，不进本规则）。
+    """
+    if "go.mod" not in summary.top_files:
+        return False
+    node_deps = {d.lower() for d in summary.node_deps}
+    if summary.has_package_json and (node_deps & NODE_FRONTEND or node_deps & NODE_BACKEND):
+        return False
+    py_bases = {d.lower().split("[")[0] for d in summary.python_deps}
+    if (py_bases & set(PYTHON_WEB)) or summary.has_manage_py:
+        return False
+    # Go 入口信号：根 main.go，或浅层（≤3 层，覆盖 cmd/<name>/main.go 惯例）
+    # 任一 .go 文件的 package main
+    if (root / "main.go").is_file():
+        return True
+    for path in _walk(root, max_depth=3):
+        if not path.is_file() or path.suffix.lower() != ".go":
+            continue
+        if _GO_PACKAGE_MAIN_RE.search(_read_text_if_exists(path)):
+            return True
+    return False
+
+
+def _go_main_service_note() -> str:
+    return (
+        "检测到 Go 主服务（源码根存在 go.mod），超出当前支持范围——"
+        "不得仅部署前端子目录充当完整服务（前端可访问但无 Go 后端），标记 pending"
+    )
 
 
 def _has_html_anywhere(root: Path, *, max_depth: int = 2) -> bool:

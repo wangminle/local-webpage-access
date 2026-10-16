@@ -124,7 +124,16 @@ def switch_fakes(monkeypatch, workspace: Workspace):
         def _admin_alive(self, **kw) -> bool:
             return state["admin_alive"]
 
-        def enable(self, instance_id, host_port, root, *, wait_health=True, alias=None):
+        def enable(
+            self,
+            instance_id,
+            host_port,
+            root,
+            *,
+            wait_health=True,
+            alias=None,
+            spa_fallback=False,
+        ):
             state["enable_calls"].append(
                 {
                     "id": instance_id,
@@ -132,6 +141,7 @@ def switch_fakes(monkeypatch, workspace: Workspace):
                     "alias": alias,
                     "backend": self.cfg.staticGateway,
                     "wait_health": wait_health,
+                    "spa_fallback": spa_fallback,
                 }
             )
             state["call_order"].append(f"enable:{instance_id}")

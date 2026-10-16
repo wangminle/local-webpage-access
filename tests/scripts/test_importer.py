@@ -624,6 +624,46 @@ def test_import_python_stdlib_http_is_container_not_pending_static(
     assert manifest.deploymentPlans
 
 
+def test_import_python_stdlib_http_with_uv_lock_uses_uv_sync(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """BUG-854：pyproject.toml + uv.lock 的 stdlib-http 项目，候选层 install 必须
+    与 scanner._python_install_command 的权威优先级一致走 uv sync，不得被
+    pyproject.toml 劫持成 pip install .。"""
+    zip_path = _make_zip(
+        tmp_path / "py-http-uv.zip",
+        {
+            "server.py": _PYTHON_STDLIB_SERVER,
+            "pyproject.toml": '[project]\nname="py-http-uv"\nversion="0.1.0"\ndependencies=[]\n',
+            "uv.lock": 'version = 1\n\n[[package]]\nname = "py-http-uv"\nversion = "0.1.0"\n',
+        },
+    )
+    result = importer.import_zip(zip_path)
+    assert result.manifest.entry is not None
+    assert result.manifest.entry.install == "uv sync"
+    python_candidates = [c for c in result.detection.candidates if c.kind == "python"]
+    assert python_candidates, "应生成 Python stdlib-http 候选"
+    assert python_candidates[0].entry.install == "uv sync"
+
+
+def test_import_python_stdlib_http_with_empty_uv_lock_falls_back(
+    importer: Importer, tmp_path: Path
+) -> None:
+    """BUG-854 / issue #13：空壳 uv.lock 不算可用安装源，候选层回退 pyproject 分支。"""
+    zip_path = _make_zip(
+        tmp_path / "py-http-empty-uv.zip",
+        {
+            "server.py": _PYTHON_STDLIB_SERVER,
+            "pyproject.toml": '[project]\nname="x"\nversion="0.1.0"\ndependencies=[]\n',
+            "uv.lock": "version = 1\n",
+        },
+    )
+    result = importer.import_zip(zip_path)
+    python_candidates = [c for c in result.detection.candidates if c.kind == "python"]
+    assert python_candidates
+    assert python_candidates[0].entry.install == "pip install ."
+
+
 def test_import_html_with_stdlib_helper_stays_static(
     importer: Importer, tmp_path: Path
 ) -> None:
@@ -1137,14 +1177,41 @@ def test_update_same_hash_skips(importer: Importer, workspace: Workspace, tmp_pa
     assert result.needs_restart is False
 
 
-def test_update_kind_change_rejected(
+def test_update_kind_change_keeps_confirmed_shape(
     importer: Importer, workspace: Workspace, tmp_path: Path
 ) -> None:
-    """新 zip 形态从 static → container：拒绝，current/ 原封不动。"""
+    """BUG-876：已确认（非 pending）实例的形态是权威值——重扫形态不同不再拒绝、
+    也不覆盖：保留既有形态（shape_disagreement 置位 + 告警），内容照常更新。"""
     static_zip = _make_static_zip(tmp_path / "demo.zip", "v1")
     r1 = importer.import_zip(static_zip)
     iid = r1.instance_id
-    original_body = (workspace.app_current(iid) / "index.html").read_text()
+    assert InstanceManifest.load(workspace.app_manifest_path(iid)).status == Status.STOPPED
+
+    container_zip = _make_zip(
+        tmp_path / "demo-api.zip",
+        {"requirements.txt": "fastapi\nuvicorn\n", "main.py": "print('hi')"},
+    )
+    result = importer.update_zip(container_zip, iid, restart=False)
+
+    assert result.rebuilt is True
+    assert result.kind_changed is True  # 重扫与既有形态确实不一致
+    assert result.shape_disagreement is True  # 但已确认形态保留、不采纳重扫形态
+
+    reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert reloaded.kind == Kind.STATIC
+    assert reloaded.runtime == Runtime.SHARED_STATIC
+    assert reloaded.status == Status.STOPPED  # 不得被 pending 检测改写为 pending
+    assert (workspace.app_current(iid) / "main.py").is_file()  # 内容已照常更新
+
+
+def test_update_kind_change_rejected_for_pending_instance(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """pending 实例尚无确认形态：重扫形态不同仍拒绝（维持既有守卫语义）。"""
+    zip_path = _make_zip(tmp_path / "mystery.zip", {"notes.txt": "hello"})
+    iid = importer.import_zip(zip_path).instance_id
+    assert InstanceManifest.load(workspace.app_manifest_path(iid)).status == Status.PENDING
+    original_body = (workspace.app_current(iid) / "notes.txt").read_text()
 
     container_zip = _make_zip(
         tmp_path / "demo-api.zip",
@@ -1153,7 +1220,7 @@ def test_update_kind_change_rejected(
     with pytest.raises(ZipImportError, match="形态发生变化"):
         importer.update_zip(container_zip, iid, restart=False)
 
-    assert (workspace.app_current(iid) / "index.html").read_text() == original_body
+    assert (workspace.app_current(iid) / "notes.txt").read_text() == original_body
 
 
 def test_update_kind_change_forced(

@@ -534,15 +534,30 @@ def _terminate_execute_process(proc: subprocess.Popen) -> None:
     kill_process_tree(proc)
 
 
-def _require_ok(result: ComposeResult, *, action: str, instance_id: str) -> ComposeResult:
-    """非零退出统一转 :class:`DockerError`，带 stderr 摘要。"""
+def _require_ok(
+    result: ComposeResult,
+    *,
+    action: str,
+    instance_id: str,
+    log_path: Path | None = None,
+) -> ComposeResult:
+    """非零退出统一转 :class:`DockerError`，带 stderr 摘要。
+
+    ``log_path``（BUG-875）：命令输出写入的日志文件——非零退出时把路径附进
+    消息，用户可直接定位细节日志（如镜像构建的 apps/<id>/logs/build.log）。
+    """
     if result.ok:
         return result
     summary = _error_summary_with_hint(result.stderr or result.stdout) or (
         f"exit {result.returncode}"
     )
+    message = (
+        f"Docker {action} 失败（实例 {instance_id}，exit {result.returncode}）：{summary}"
+    )
+    if log_path is not None:
+        message += f"；详细日志见 {log_path}"
     raise DockerError(
-        f"Docker {action} 失败（实例 {instance_id}，exit {result.returncode}）：{summary}",
+        message,
         instance_id=instance_id,
         action=action,
         returncode=result.returncode,
@@ -679,7 +694,7 @@ class DockerRuntime:
         if not result.ok:
             self._event(instance_id, "error", f"镜像构建失败（exit {result.returncode}）")
             # `_require_ok` 在非 ok 时必抛 DockerError；勿用 raise 包返回值（mypy）。
-            _require_ok(result, action="build", instance_id=instance_id)
+            _require_ok(result, action="build", instance_id=instance_id, log_path=log_path)
         return result
 
     def up(

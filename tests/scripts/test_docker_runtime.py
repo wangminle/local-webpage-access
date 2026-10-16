@@ -310,8 +310,11 @@ def test_build_failure_raises_and_marks_failed(workspace, registry, monkeypatch)
 
     build_id = registry.add_build("api", status="running")
     rt = DockerRuntime(workspace, registry)
-    with pytest.raises(DockerError, match="build 失败"):
+    with pytest.raises(DockerError, match="build 失败") as exc_info:
         rt.build("api", build_id=build_id)
+
+    # BUG-875：错误消息须指向细节日志 build.log 完整路径
+    assert str(workspace.app_logs("api") / "build.log") in str(exc_info.value)
 
     builds = registry.list_builds("api")
     assert builds[0]["status"] == "failed"

@@ -1799,3 +1799,104 @@ def test_cli_autostart_enable_passes_service_scope(monkeypatch, capsys) -> None:
     assert "manager" in out
     cli_asm.autostart_enable(service=None)
     assert captured["services"] is None
+
+
+# ---- BUG-890：unit_points_to_workspace resolve 对齐 + coordinated_* 跨工作区守卫 ----
+
+
+def test_unit_points_to_workspace_resolves_symlinked_ws_root(tmp_path, monkeypatch) -> None:
+    """BUG-890：两侧统一 resolve——单元 WorkingDirectory 写解析后的真实路径，
+    调用方传入含软链的工作区根（macOS /var ↔ /private/var 同型）也必须判真。"""
+    monkeypatch.setattr(asm, "detect_platform", lambda: "linux")
+    monkeypatch.setattr(asm, "systemd_available", lambda: True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.select_backend(asm.PLATFORM_LINUX)
+    real_root = tmp_path / "real-ws"
+    real_root.mkdir()
+    link_root = tmp_path / "link-ws"
+    link_root.symlink_to(real_root)
+    unit = backend.unit_path("daemon")
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        asm.build_systemd_unit("daemon", python_exe="/py", workspace_root=real_root.resolve()),
+        encoding="utf-8",
+    )
+    # 软链路径与真实路径指向同一工作区 → True（旧实现 value == str(ws_root) 为 False）
+    assert asm.unit_points_to_workspace(backend, "daemon", link_root)
+    assert asm.unit_points_to_workspace(backend, "daemon", real_root.resolve())
+    assert not asm.unit_points_to_workspace(backend, "daemon", tmp_path / "other")
+
+
+def test_coordinated_disable_skips_foreign_workspace_unit(tmp_path, monkeypatch) -> None:
+    """BUG-890：磁盘单元属于另一工作区时，coordinated_disable 不得停用该单元
+    （否则 lwa daemon off 会把生产工作区的守护进程停掉）。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    other = tmp_path / "prod-ws"
+    other.mkdir()
+    backend.write_unit(
+        "daemon", backend.render("daemon", python_exe="/py", workspace_root=other)
+    )
+    record: list[list[str]] = []
+    res = asm.coordinated_disable(ws, "daemon", runner=_fake_runner(record))
+    assert res.note is None  # 无任何停用动作（静默交回调用方管理本工作区进程）
+    # 不得对该单元执行任何 bootout/disable
+    assert not any(
+        "bootout" in " ".join(c) or c[:2] == ["launchctl", "disable"] for c in record
+    )
+
+
+def test_coordinated_restart_skips_foreign_workspace_unit(tmp_path, monkeypatch) -> None:
+    """BUG-890：磁盘单元属于另一工作区时，coordinated_restart 不得经监督器重启，
+    managed=False 交回调用方 stop+start（只管本工作区进程）。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    other = tmp_path / "prod-ws"
+    other.mkdir()
+    backend.write_unit(
+        "daemon", backend.render("daemon", python_exe="/py", workspace_root=other)
+    )
+    record: list[list[str]] = []
+    res = asm.coordinated_restart(ws, "daemon", runner=_fake_runner(record))
+    assert res.managed is False
+    assert res.note is None
+    assert not any("kickstart" in " ".join(c) for c in record)
+
+
+def test_coordinated_start_skips_foreign_workspace_unit(tmp_path, monkeypatch) -> None:
+    """BUG-890：磁盘单元属于另一工作区时，coordinated_start 不得经监督器
+    拉起/重启，managed=False 交回调用方 detached 启动。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    other = tmp_path / "prod-ws"
+    other.mkdir()
+    backend.write_unit(
+        "daemon", backend.render("daemon", python_exe="/py", workspace_root=other)
+    )
+    record: list[list[str]] = []
+    res = asm.coordinated_start(ws, "daemon", runner=_fake_runner(record))
+    assert res.managed is False
+    assert res.note is None
+    assert not any("kickstart" in " ".join(c) for c in record)
+
+
+def test_coordinated_restart_own_workspace_still_managed(tmp_path, monkeypatch) -> None:
+    """BUG-890 对照：单元确实指向本工作区时，监督器接管语义不变（managed=True）。"""
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    backend.write_unit(
+        "daemon", backend.render("daemon", python_exe="/py", workspace_root=root.resolve())
+    )
+    record: list[list[str]] = []
+    res = asm.coordinated_restart(ws, "daemon", runner=_fake_runner(record))
+    assert res.managed is True
+    assert res.ok is True
+    assert any(c[:3] == ["launchctl", "kickstart", "-k"] for c in record)

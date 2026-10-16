@@ -17,6 +17,7 @@ from local_webpage_access.errors import RecognitionError, ZipImportError
 from local_webpage_access.importer import Importer
 from local_webpage_access.models import (
     DesiredState,
+    EntryConfig,
     InstanceManifest,
     RouteMode,
     StaticConfig,
@@ -391,6 +392,131 @@ def test_update_ignore_alias_guard_overrides_and_audits(
     assert any(
         "--ignore-alias-guard" in (e.get("message") or "") for e in events
     )
+
+
+# ---- BUG-862：构建型前端 buildEnv base 注入豁免 ---------------------------------
+
+
+def _seed_aliased_build_frontend(workspace, registry, build_env, iid: str = "demo"):
+    """已改造（CONFIGURED）的构建型前端实例：别名 + entry.build 非空 +
+    正式配置通道的顶层 manifest.buildEnv（lwa configure --build-env 落点）。"""
+    manifest = _seed_aliased_static(workspace, registry, iid)
+    manifest.entry = EntryConfig(
+        install="npm ci",
+        build="npm run build",
+        buildOutputDir="dist",
+    )
+    manifest.buildEnv = build_env
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+    return manifest
+
+
+_SOURCE_SPA_INDEX = '<!doctype html><script type="module" src="/src/main.ts"></script>'
+
+
+def test_update_alias_guard_exempts_build_frontend_with_base_build_env(
+    workspace, registry, config, tmp_path
+):
+    """BUG-862：buildEnv 注入 /<alias>/ 的构建型前端，更新不再被源码扫描误拦
+    （A02 场景：源码 index.html 恒引用 /src/main.ts，守卫扫它必然失败）。"""
+    manifest = _seed_aliased_build_frontend(workspace, registry, {"BASE_URL": "/demo/"})
+    iid = manifest.id
+    new_zip = _write_zip(
+        tmp_path,
+        "new.zip",
+        {"index.html": _SOURCE_SPA_INDEX, "src/main.ts": "console.log(1)"},
+    )
+    importer = Importer(workspace, config, registry)
+    result = importer.update_zip(new_zip, iid, restart=False)
+    assert not result.skipped
+    reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert reloaded.static is not None
+    assert reloaded.static.routeHost == iid
+    events = registry.list_events(iid)
+    assert any("别名守卫豁免" in (e.get("message") or "") for e in events)
+
+
+def test_update_alias_guard_exempts_base_build_env_without_trailing_slash(
+    workspace, registry, config, tmp_path
+):
+    """BUG-862：buildEnv 值为 /<alias>（无尾斜杠）同样豁免。"""
+    manifest = _seed_aliased_build_frontend(workspace, registry, {"VITE_BASE_URL": "/demo"})
+    iid = manifest.id
+    new_zip = _write_zip(
+        tmp_path,
+        "new.zip",
+        {"index.html": _SOURCE_SPA_INDEX, "src/main.ts": "console.log(1)"},
+    )
+    importer = Importer(workspace, config, registry)
+    result = importer.update_zip(new_zip, iid, restart=False)
+    assert not result.skipped
+    events = registry.list_events(iid)
+    assert any("别名守卫豁免" in (e.get("message") or "") for e in events)
+
+
+def test_update_alias_guard_not_exempt_when_build_env_misses_alias(
+    workspace, registry, config, tmp_path
+):
+    """BUG-862：构建型前端但 buildEnv 未指向别名——守卫照旧拦截。"""
+    manifest = _seed_aliased_build_frontend(workspace, registry, {"NODE_ENV": "production"})
+    iid = manifest.id
+    new_zip = _write_zip(
+        tmp_path,
+        "new.zip",
+        {"index.html": _SOURCE_SPA_INDEX, "src/main.ts": "console.log(1)"},
+    )
+    importer = Importer(workspace, config, registry)
+    with pytest.raises(ZipImportError, match="别名守卫"):
+        importer.update_zip(new_zip, iid, restart=False)
+
+
+def test_update_alias_guard_not_exempt_without_build_command(
+    workspace, registry, config, tmp_path
+):
+    """BUG-862：entry.build 为空（非构建型）即使 buildEnv 指别名也不豁免——
+    静态产物以源码为最终服务内容，守卫扫描仍然有效。"""
+    manifest = _seed_aliased_static(workspace, registry)
+    iid = manifest.id
+    manifest.buildEnv = {"BASE_URL": "/demo/"}
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+    new_zip = _write_zip(
+        tmp_path,
+        "new.zip",
+        {
+            "index.html": (
+                '<!doctype html><script type="module" src="/assets/index.js"></script>'
+            ),
+            "assets/index.js": "console.log(1)",
+        },
+    )
+    importer = Importer(workspace, config, registry)
+    with pytest.raises(ZipImportError, match="别名守卫"):
+        importer.update_zip(new_zip, iid, restart=False)
+
+
+def test_update_alias_guard_exempts_build_base_from_alias(
+    workspace, registry, config, tmp_path
+):
+    """BUG-862：buildBaseFromAlias=True（别名 base 自动跟随派生 VITE_BASE）
+    的构建型前端同样豁免——生效环境由 effective_build_env 派生，无需手写
+    buildEnv。"""
+    manifest = _seed_aliased_build_frontend(workspace, registry, None)
+    iid = manifest.id
+    manifest.buildBaseFromAlias = True
+    manifest.save(workspace.app_manifest_path(iid))
+    registry.upsert_from_manifest(manifest)
+    new_zip = _write_zip(
+        tmp_path,
+        "new.zip",
+        {"index.html": _SOURCE_SPA_INDEX, "src/main.ts": "console.log(1)"},
+    )
+    importer = Importer(workspace, config, registry)
+    result = importer.update_zip(new_zip, iid, restart=False)
+    assert not result.skipped
+    events = registry.list_events(iid)
+    assert any("别名守卫豁免" in (e.get("message") or "") for e in events)
 
 
 # ---- 管理页 API 透出 -----------------------------------------------------------

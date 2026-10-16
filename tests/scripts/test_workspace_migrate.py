@@ -622,6 +622,61 @@ def test_migrate_preserves_saved_default_without_verified_success(
     assert saved.read_bytes() == before
 
 
+@pytest.mark.parametrize("blocked_path", ["file", "directory"])
+def test_migrate_completes_when_default_workspace_sync_fails(
+    ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_path: str
+) -> None:
+    """默认工作区文件不可写时，已完成的迁移仍报成功，journal 保留验收与恢复结果。
+
+    直接迁移和 --resume 都不得把这次写入失败记成主事务失败。
+    """
+    _patch_migrate_side_effects(monkeypatch)
+    monkeypatch.setattr(wm, "restore_instances", lambda *a, **k: ["demo"])
+    monkeypatch.setattr(wm, "verify_migrate", lambda *a, **k: (True, ["验收已通过"]))
+    saved = write_default_workspace(ws_root)
+    (saved if blocked_path == "file" else saved.parent).chmod(0o400)
+    new = tmp_path / "new-ws"
+
+    try:
+        result = wm.run_migrate(ws_root, new, yes=True)
+
+        assert result.ok, result.error
+        assert result.phase == "complete"
+        assert result.verify_ok is True
+        assert result.started == ["demo"]
+        assert "验收已通过" in result.verify_notes
+        assert any(
+            "默认工作区同步失败" in note and "lwa workspace use" in note
+            for note in result.verify_notes
+        )
+        journal = wm.read_journal(Workspace(new))
+        assert journal is not None
+        assert journal["phase"] == "complete"
+        assert journal["verify_ok"] is True
+        assert journal["restored_ids"] == ["demo"]
+        assert journal["verify_notes"] == result.verify_notes
+        assert journal["snapshot"]["captured_at"]
+        assert Path(journal["backup_dir"]).is_dir()
+        assert "error" not in journal
+
+        resumed = wm.run_migrate(ws_root, new, yes=True, resume=True)
+        assert resumed.ok, resumed.error
+        assert resumed.verify_ok is True
+        assert resumed.started == ["demo"]
+        resumed_journal = wm.read_journal(Workspace(new))
+        assert resumed_journal is not None
+        assert resumed_journal["phase"] == "complete"
+        assert resumed_journal["verify_ok"] is True
+        assert resumed_journal["restored_ids"] == ["demo"]
+        assert resumed_journal["verify_notes"] == resumed.verify_notes
+        assert resumed_journal["snapshot"] == journal["snapshot"]
+        assert resumed_journal["backup_dir"] == journal["backup_dir"]
+        assert "error" not in resumed_journal
+    finally:
+        saved.parent.chmod(0o700)
+        saved.chmod(0o600)
+
+
 def test_cli_saved_default_survives_relocate_and_rollback(
     ws_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

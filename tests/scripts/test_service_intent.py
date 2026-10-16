@@ -216,7 +216,8 @@ def test_restart_manager_reconcile_via_autostart_managed(
         lambda ws, cfg: spawned.append("detached") or 999,
     )
     monkeypatch.setattr(upd, "verify_manager_version", lambda cfg, **kw: (True, "V0.7.11-test"))
-    monkeypatch.setattr(asm, "select_backend", lambda *a, **k: _ManagedBackend())
+    # BUG-894：单元须指向本工作区，coordinated_start 才会走监督器在管路径
+    monkeypatch.setattr(asm, "select_backend", lambda *a, **k: _ManagedBackend(workspace.root))
 
     info = upd.restart_manager(workspace, config)
     assert info["reconciled"] is True
@@ -332,9 +333,14 @@ class _NoUnitBackend:
 
 
 class _ManagedBackend(_NoUnitBackend):
-    """单元已启用且 start 成功的后端（managed=True）。"""
+    """单元已启用且 start 成功的后端（managed=True）。
 
-    def __init__(self) -> None:
+    BUG-894：unit_points_to_workspace 按 WorkingDirectory 判断单元归属，
+    空白单元文件会被判为「指向其他工作区」而走 detached 分支——managed
+    用例必须提供指向测试工作区根的有效单元（走真实解析，非 mock 归属）。
+    """
+
+    def __init__(self, ws_root: Path | None = None) -> None:
         import tempfile
 
         self.started: list[str] = []
@@ -343,6 +349,8 @@ class _ManagedBackend(_NoUnitBackend):
 
         os.close(fd)
         self._unit_file = Path(path)
+        if ws_root is not None:
+            self._unit_file.write_text(f"WorkingDirectory={ws_root}\n", encoding="utf-8")
 
     def unit_path(self, name: str) -> Path:
         return self._unit_file
@@ -363,8 +371,8 @@ class _ManagedBackend(_NoUnitBackend):
 class _RunningManagedBackend(_ManagedBackend):
     """单元已加载/启用且**进程仍在跑**（main_pid 有值）的后端（BUG-614）。"""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, ws_root: Path | None = None) -> None:
+        super().__init__(ws_root)
         self.restarted: list[str] = []
 
     def main_pid(self, name, runner) -> int:  # noqa: ARG002
@@ -400,7 +408,7 @@ def test_restart_gateway_managed_running_unit_reports_restart(
     )
     from local_webpage_access import autostart as asm
 
-    backend = _RunningManagedBackend()
+    backend = _RunningManagedBackend(workspace.root)
     monkeypatch.setattr(asm, "select_backend", lambda *a, **k: backend)
 
     info = upd.restart_gateway(workspace, config)
