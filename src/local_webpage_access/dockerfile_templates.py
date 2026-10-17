@@ -262,6 +262,14 @@ def _render_node(
         build_step = f"RUN {manifest.entry.build}\n"
     # issue#7：构建钩子在依赖安装/构建层之后、CMD 之前逐条执行（WORKDIR=/app）。
     hooks_block = _build_hooks_block(manifest, mirrors=mirrors)
+    sqlite_mkdir = ""
+    if _is_sqlite(manifest):
+        # Python 模板在 chown 前建数据目录。Node 非 root 同样 chown 该路径，
+        # 源码未自带目录时 chown 会失败（BUG-906）。
+        if _uses_runtime_root_layout(manifest, source_dir):
+            sqlite_mkdir = "RUN mkdir -p /app/runtime/data\n"
+        else:
+            sqlite_mkdir = "RUN mkdir -p /app/data\n"
     cpfx = _copy_prefix(manifest)
     dependency_copy = _node_dependency_copy_block(install, source_dir=source_dir, copy_prefix=cpfx)
     install_run = _with_npm_registry(install, mirrors)
@@ -287,6 +295,7 @@ def _render_node(
         f"COPY {cpfx} ./",
         build_step,
         hooks_block,
+        sqlite_mkdir,
         "ENV NODE_ENV=production",
         "ENV HOST=0.0.0.0",
         f"ENV PORT={internal_port}",
@@ -818,8 +827,10 @@ def _render_python(
     elif uses_uv:
         # BUG-185：uv sync 默认会构建并安装项目本体，需要完整源码；但依赖层只 COPY 了
         # uv.lock+pyproject.toml，带 [build-system] 的 packaged 项目必然构建失败。
-        # --no-install-project 只装依赖、不构建项目本体，源码在后续 final_copy 拷入，
-        # 运行时 uv run 直接从工作目录导入（main:app 等模块无需作为包安装）。
+        # --no-install-project 只装依赖、不构建项目本体；完整源码在 final_copy 拷入后，
+        # 由下方 project_install 的第二次 uv sync 把项目本体（含控制台入口）装进
+        # 同一 venv（BUG-900），运行期 uv run --no-sync 才有完整环境可用——否则
+        # src/ 包布局项目启动即 ModuleNotFoundError。
         deps_block = (
             f"COPY {cpfx}uv.lock {cpfx}pyproject.toml ./\n"
             + _pip_run(
@@ -881,6 +892,13 @@ def _render_python(
     # 运行时依赖（项目依赖声明 gunicorn 则尊重项目版本，不重复安装）；
     # uv 流程装进 uv venv（uv pip）。不回写用户 requirements/pyproject。
     gunicorn_block = _gunicorn_platform_block(start, source_dir, mirrors, uses_uv=uses_uv)
+    # BUG-903：uv sync 会把锁文件未声明的包卸掉。平台 Gunicorn 若装在
+    # 最终同步之前，会被这次 sync 清掉。uv 路径改到项目同步之后再补装；
+    # pip 路径仍留在源码 COPY 之前，避免源码改动打掉该层。
+    gunicorn_after_sync = ""
+    if uses_uv:
+        gunicorn_after_sync = gunicorn_block
+        gunicorn_block = ""
 
     # IMP-016（WBS-20260708 阶段2.5）：Python 全栈镜像含 Node 运行时。
     # 源码含 package.json（如 Pi Agent 这类 Python + 辅助 Node 项目）时，追加
@@ -933,6 +951,11 @@ def _render_python(
     project_install = ""
     if _is_plain_pip_install_dot(install) and not needs_early_full_copy:
         project_install = _pip_run("pip install . --no-deps", mirrors=mirrors) + "\n"
+    elif uses_uv:
+        # BUG-900：依赖层 --no-install-project 跳过了项目本体；完整源码就位后
+        # 再 sync 一次把项目包（与控制台入口脚本）装进 venv。依赖已装的部分
+        # uv 命中缓存不会重复下载，本层只增量构建/安装项目本体。
+        project_install = _pip_run("uv sync --frozen --no-dev", mirrors=mirrors) + "\n"
     # issue#7：构建钩子在依赖安装层之后、CMD 之前逐条执行（WORKDIR=/app，
     # 源码已由 final_copy / 早期整包 COPY 就位）。含 apt-get 的钩子注入镜像与重试。
     hooks_block = _build_hooks_block(manifest, mirrors=mirrors)
@@ -952,6 +975,7 @@ def _render_python(
         npm_block,
         final_copy,
         project_install,
+        gunicorn_after_sync,
         frontend_build,
         sqlite_mkdir,
         hooks_block,
@@ -1002,21 +1026,30 @@ def _strip_uv_run(cmd: str) -> str:
     return rest
 
 
+# BUG-909：平台迁移包装形如 ``<pre> && exec <start>``（Django migrate、
+# Alembic、preStart）。判定平台依赖必须看最终 exec 启动的命令，否则
+# 迁移包装后首段是 python/alembic，Django 迁移路径会漏装平台 Gunicorn。
+_EXEC_CHAIN_RE = re.compile(r"&&\s*exec\s+")
+
+
 def _gunicorn_launch_command(start: str, *, uses_uv: bool) -> str:
-    """去掉平台加上的 ``uv run`` 与 ``sh -c`` 包裹，得到实际启动命令。
+    """去掉平台加上的 ``uv run``、``sh -c`` 与迁移 ``&& exec`` 包裹，得到实际启动命令。
 
     工厂目标 ``app:create_app()`` 含括号，预检会写成 ``sh -c 'gunicorn ...'``。
-    uv 流程还会在外层再加 ``uv run``。是否补装 Gunicorn 必须看内层命令。
+    uv 流程还会在外层再加 ``uv run``；Django 迁移路径内层是
+    ``python manage.py migrate --noinput && exec gunicorn ...``。是否补装
+    Gunicorn 必须看最终 exec 启动的内层命令。
     """
     cmd = _strip_uv_run(start) if uses_uv else start.strip()
     try:
         parts = shlex.split(cmd)
     except ValueError:
-        return cmd
-    if len(parts) >= 3 and parts[0] == "sh" and parts[1] == "-c":
-        inner = parts[2].strip()
-        return _strip_uv_run(inner) if uses_uv else inner
-    return cmd
+        parts = None
+    if parts is not None and len(parts) >= 3 and parts[0] == "sh" and parts[1] == "-c":
+        cmd = parts[2].strip()
+        if uses_uv:
+            cmd = _strip_uv_run(cmd)
+    return _EXEC_CHAIN_RE.split(cmd)[-1].strip()
 
 
 def _gunicorn_platform_block(
@@ -1280,8 +1313,59 @@ def _cmd_line(manifest: InstanceManifest, start: str) -> str:
     """
     pre_start = (manifest.preStart or "").strip()
     if pre_start:
-        return json.dumps(["sh", "-c", f"{pre_start} && exec {start}"])
+        # BUG-904：preStart 走自己的 sh -c，不会进入 _to_exec_form。
+        # 存量裸工厂目标和已包一层 sh -c 的内层脚本都要先补引号。
+        body = _quote_start_for_shell(start)
+        return json.dumps(["sh", "-c", f"{pre_start} && exec {body}"])
     return _to_exec_form(start)
+
+
+# 已落盘的旧 entry.start 可能仍是裸 ``flaskr:create_app()``。渲染 CMD 时补上
+# 双引号，避免容器 sh 把括号当成语法（BUG-904）。先吃掉已有引号片段，
+# 避免把 ``"flaskr:create_app()"`` 再拆开包一层。
+# BUG-911：只匹配带冒号的 Gunicorn 工厂目标 ``module:factory()``。裸
+# ``name()`` 是合法 shell 函数定义（如 ``start() { exec node server.js; }``），
+# 给它加引号会把可用的自定义入口改成 sh 语法错误。
+_BARE_CALL_RE = re.compile(
+    r"""(?P<quoted>"(?:\\.|[^"\\])*"|'[^']*'|\\.)|(?P<call>(?<![\w\\])[A-Za-z_][\w.]*:[A-Za-z_][\w.]*\(\))"""
+)
+
+
+def _quote_factory_tokens(script: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        call = match.group("call")
+        if call is None:
+            return match.group(0)
+        return f'"{call}"'
+
+    return _BARE_CALL_RE.sub(_replace, script)
+
+
+_SH_C_WRAPPER_RE = re.compile(
+    r"""^(?P<head>sh\s+-c\s+)(?P<script>'[^']*'|"(?:\\.|[^"\\])*")(?P<tail>(?:\s.*)?)$""",
+    re.DOTALL,
+)
+
+
+def _quote_bare_calls(script: str) -> str:
+    """修复实际启动命令，不把普通参数中出现的 sh -c 文本当成包装层。"""
+    return _quote_start_for_shell(script)
+
+
+def _quote_start_for_shell(start: str) -> str:
+    """给将要嵌进 ``sh -c`` 的启动命令补上工厂引号，含已有的 ``sh -c`` 内层。"""
+    stripped = start.strip()
+    command = _strip_uv_run(stripped)
+    prefix = stripped[:len(stripped) - len(command)]
+    match = _SH_C_WRAPPER_RE.fullmatch(command)
+    if match is not None:
+        # 只解开命令位置上的包装层。用 shell 转义重建变动的脚本参数，
+        # 避免双引号外层与新补的工厂双引号嵌套冲突。
+        inner = shlex.split(match["script"])[0]
+        fixed = _quote_start_for_shell(inner)
+        if fixed != inner:
+            return prefix + match["head"] + shlex.quote(fixed) + match["tail"]
+    return _quote_factory_tokens(stripped)
 
 
 def _to_exec_form(shell_cmd: str) -> str:
@@ -1300,11 +1384,12 @@ def _to_exec_form(shell_cmd: str) -> str:
         # shlex.split 能正确拆出 ``["sh", "-c", "..."]``，无需再包一层。
         try:
             parts = shlex.split(shell_cmd)
-            if len(parts) >= 2 and parts[0] == "sh" and parts[1] == "-c":
+            if len(parts) >= 3 and parts[0] == "sh" and parts[1] == "-c":
+                parts = [parts[0], parts[1], _quote_bare_calls(parts[2]), *parts[3:]]
                 return "[" + ", ".join(json.dumps(p) for p in parts) + "]"
         except ValueError:
             pass
-        return json.dumps(["sh", "-c", shell_cmd])
+        return json.dumps(["sh", "-c", _quote_bare_calls(shell_cmd)])
     # BUG-359：未闭合引号等无法解析时回退 shell 形式（与空 parts 路径一致）。
     try:
         parts = shlex.split(shell_cmd)

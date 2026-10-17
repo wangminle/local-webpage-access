@@ -131,8 +131,10 @@ _SENSITIVE_HOME_FRAGMENTS = (
     ".env",
 )
 
-# Compose 中允许的 host bind mount 源（实例自己的 data/，相对 compose 文件）
+# Compose 中允许的 host bind mount 源（实例自己的 data/，相对 compose 文件）。
+# 子目录（../data/instance）由 _is_instance_data_mount 放行，不逐个写进集合。
 _DEFAULT_ALLOWED_HOST_MOUNTS = frozenset({"./data", "../data", "./data/", "../data/"})
+_INSTANCE_DATA_ROOTS = ("../data", "data")  # normpath 会去掉 ./ 前缀
 
 # 危险的 Linux capabilities
 _DANGEROUS_CAPS = frozenset(
@@ -450,7 +452,7 @@ def _audit_volume(
                         )
                     )
                     return
-        if src not in allowed_host_mounts:
+        if not _is_instance_data_mount(src, allowed_host_mounts):
             out.append(
                 SecurityFinding(
                     LEVEL_WARN,
@@ -469,6 +471,23 @@ def _audit_volume(
                 detail="实例只应挂载自己的 data/ 目录",
             )
         )
+
+
+def _is_instance_data_mount(src: str, allowed: frozenset[str]) -> bool:
+    """实例 data/ 及其子目录，或调用方显式允许的路径。
+
+    ``posixpath.normpath`` 会把 ``../data/../../etc`` 折成 ``../etc``，
+    因此不能靠「以 ../data 开头」放过穿越。
+    """
+    if src in allowed:
+        return True
+    norm = posixpath.normpath(src.replace("\\", "/"))
+    if norm in allowed:
+        return True
+    for root in _INSTANCE_DATA_ROOTS:
+        if norm == root or norm.startswith(root + "/"):
+            return True
+    return False
 
 
 def _split_volume_source(vol: str) -> str | None:
@@ -694,11 +713,14 @@ _CONTENT_FILTERED_FILES: frozenset[str] = frozenset({".npmrc", ".yarnrc", ".yarn
 # ``legacy-peer-deps=true``、``registry=...``、``engine-strict=false`` 等构建
 # 配置行不命中；``author=...`` 之类普通键也不命中（``_auth`` 前须为非单词字符
 # 或行首，后须紧跟 ``=`` / ``:`` 或行尾）。
+# BUG-899：npm 的 INI 解析器接受带引号的键（``"//host/:_authToken"=secret``），
+# 认证键后紧跟引号而非分隔符会绕过过滤、凭据原样进入镜像——各形态在键与
+# 分隔符之间允许一个可选的收尾引号（``["']?``）。
 _CONFIG_AUTH_LINE_RE = re.compile(
-    r"(?:^|[^a-z0-9_])_auth(?:token)?(?:\s*[=:]|$)"
-    r"|_password\s*[=:]"
-    r"|(?:^|[^a-z0-9])token\s*="
-    r"|npmauth(?:token|ident)\s*:",
+    r"(?:^|[^a-z0-9_])_auth(?:token)?[\"']?(?:\s*[=:]|$)"
+    r"|_password[\"']?\s*[=:]"
+    r"|(?:^|[^a-z0-9])token[\"']?\s*="
+    r"|npmauth(?:token|ident)[\"']?\s*:",
     re.IGNORECASE,
 )
 

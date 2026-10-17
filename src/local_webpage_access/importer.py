@@ -2602,6 +2602,14 @@ def build_manifest_from_detection(
         top_plan = plans[0]
         manifest.selectedPlanId = top_plan.planId
         manifest.capabilityContract = top_plan.capabilityContract.model_dump()
+        # BUG-921：启动命令内嵌迁移前置（Alembic / Django manage.py migrate）
+        # 时契约必须声明 requiresMigrations——候选证据只认 alembic.ini，
+        # Django 自动迁移会被漏标，迁移后探针失败仍可能被判可安全自动降级。
+        from local_webpage_access.scanner import start_command_wraps_migration
+
+        entry_start = manifest.entry.start if manifest.entry is not None else None
+        if start_command_wraps_migration(entry_start):
+            manifest.capabilityContract["requiresMigrations"] = True
     if detection.evidence is not None:
         # A.R01：传递数据库配置消费信号给 manifest，供 compose.generate_env 使用
         if detection.evidence.databaseConfig is not None:
@@ -2854,7 +2862,13 @@ def apply_detection_to_manifest(
     # entry.detected 快照区分人工覆盖（保留）与旧自动生成值（随新检测更新）；
     # 无快照的存量 manifest 保守保留；issue #15 旧式 DATABASE_URL start 例外，
     # 迁移优先。快照由 build_manifest_from_detection 写入 fresh.entry。
-    _preserve_user_entry_fields(manifest.entry, fresh.entry, instance_id=manifest.id)
+    # BUG-901：显式跨形态迁移（kind/runtime 实际变化且未走 BUG-876 保留分支）
+    # 不继承旧形态入口——旧 ``npm ci``/``npm run build`` 等命令随静态/前端
+    # 形态残留会让 hosting._infer_form 按 entry.build 分派到前端构建流程，
+    # 在新源码无 package.json 时部署必败；跨形态采用目标形态的检测入口。
+    shape_adopted = not keep_confirmed_shape and detection_shape_differs(manifest, detection)
+    if not shape_adopted:
+        _preserve_user_entry_fields(manifest.entry, fresh.entry, instance_id=manifest.id)
     # BUG-876：已确认/部署过的实例（status != pending），重扫与既有形态不一致时
     # 形态整体保留——以旧 manifest 为底（kind/runtime/servingMode、static/
     # container/network、status/desiredState、身份/别名/钩子等天然不动）。

@@ -506,6 +506,10 @@ status: pending
 
 处理：`lwa scan <id>` 重新识别；仍 pending 时检查 `local-web.json` 的 `lastError`，
 或手工补特征文件后重扫。pending 实例会写入「未知 zip 来源」风险提示事件。
+**V0.9.9 起**：pending 实例的 `start` / `rebuild` / `restart` 一律拒绝（不再以静态
+形态伪成功返回未构建源码），`stop` 只登记停机意图、不会把 pending 改成 stopped。
+确认形态的官方通道是 `lwa configure <id> --kind ... --runtime ...`（V0.9.8 起），
+或修正源码后重扫、识别成功即自动升为 stopped。
 
 ### slug 冲突与冗余实例
 

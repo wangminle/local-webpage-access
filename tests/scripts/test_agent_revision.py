@@ -76,6 +76,10 @@ def test_rebuild_bumps_revision(workspace: Workspace, registry, config, monkeypa
 
     _seed(workspace, registry)
     manifest = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    # 本例验证已确认实例重建递增 revision；pending 重建应被 BUG-915 拒绝。
+    manifest.status = Status.STOPPED
+    manifest.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(manifest)
 
     monkeypatch.setattr(
         "local_webpage_access.hosting.host_instance",

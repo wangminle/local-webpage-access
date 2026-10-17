@@ -83,7 +83,7 @@ def test_flask_factory_package_infers_gunicorn_factory(tmp_path: Path) -> None:
     # CHK-V02：create_app() 的括号触发 sh -c 包裹（平台 CMD 安全惯例），
     # 内层命令应为 gunicorn 工厂形态而非 flask --app app dev server
     start = result.entry.start or ""
-    assert "gunicorn --workers 1 --threads 4 -b 0.0.0.0:8000 flaskr:create_app()" in start
+    assert 'gunicorn --workers 1 --threads 4 -b 0.0.0.0:8000 "flaskr:create_app()"' in start
     assert "flask --app app run" not in start
     # BUG-181 口径：internalPort 与启动命令绑定端口一致
     assert result.internalPort == 8000

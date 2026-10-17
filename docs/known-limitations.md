@@ -121,7 +121,8 @@ swap=4GB
 * **HTTPS**：V0.9.0 起 Caddy 可用 `gatewayTls: internal` 打开传输加密（内嵌 CA，别名 `:8443`、管理面 `:9443`；详见 [https.md](https.md)）。**builtin 网关无 TLS**；Let's Encrypt / 公网 ACME / 自定义域名证书自动化仍不在范围内。客户端须 `lwa ca export` 后手动信任根证书，禁止点穿告警。
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
-* **数据持久化**：仅自动 bind mount `data/` 目录。其他路径（如日志、上传目录）需用户在项目内处理。
+* **数据持久化**：仅自动 bind mount `data/` 目录（V0.9.9 起 Flask `instance_path` 下的 SQLite 额外自动挂载 `data/instance:/app/instance`，按 Flask 未安装包的真实语义与顶层包并列；重建前自动救出旧容器内该目录的数据，同名文件保留宿主版本）。其他路径（如日志、上传目录）需用户在项目内处理。
+* **Flask instance 救援失败**：复制失败会中止重建并保留旧容器。若恢复原文件也失败，会保留 `data/instance/.lwa-rescue-pending/` 并阻止自动重试；`old/` 中的备份沿用原文件相对路径。请保留该目录及旧容器，人工核对主库与 WAL/SHM/journal 的归属后再恢复，勿直接删除事务目录后强行重建。
 * **容器运行身份（issue #20）**：V0.8.8 起新导入实例默认非 root（UID/GID 对齐宿主 `data/` 属主，Dockerfile `USER` 与 Compose `user` 双保险）；**存量旧实例不会在一次普通 rebuild 中被自动切换**——manifest 缺 `container.runAsNonRoot` 的按 legacy root 运行并告警，经 `lwa migrate-user <id>`（先过属主/写权限预检）显式迁移；确需 root 兼容可 `--root` 或在 `local-web.json` 设 `container.runAsNonRoot=false`。
 * **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。
 * **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。路径别名的前提是应用侧显式、可配置的 base path（方案 B）；LWA 做门禁与探测，不代改应用源码（IMP-055）。无源码时优先 hostPort 或未来主机名别名。

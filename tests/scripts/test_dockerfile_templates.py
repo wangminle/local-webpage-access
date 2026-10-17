@@ -270,6 +270,25 @@ def test_python_uv_sync_path(workspace: Workspace) -> None:
     assert '"uv", "run", "--no-sync", "--no-dev", "uvicorn"' in content
 
 
+def test_python_uv_sync_installs_project_after_full_copy(workspace: Workspace) -> None:
+    """BUG-900：--no-sync 禁止运行期同步后，项目本体必须在构建期装进 venv——
+    完整源码 COPY 之后再执行一次不带 --no-install-project 的 uv sync，
+    否则 src/ 包布局项目启动即 ModuleNotFoundError、控制台入口也不生成。"""
+    m = _mk_manifest(
+        kind=Kind.PYTHON,
+        stack=["fastapi"],
+        install="uv sync",
+        start="uvicorn main:app --host 0.0.0.0 --port 8000",
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    # 依赖层（--no-install-project）→ 完整源码 → 项目本体安装层（无该旗标）
+    deps_idx = content.index("uv sync --frozen --no-dev --no-install-project")
+    copy_idx = content.index("COPY current/ ./", deps_idx)
+    project_idx = content.index("uv sync --frozen --no-dev", copy_idx)
+    assert "--no-install-project" not in content[project_idx:].splitlines()[0]
+    assert deps_idx < copy_idx < project_idx
+
+
 def test_python_uv_sync_user_start_not_double_prefixed(workspace: Workspace) -> None:
     """BUG-865：用户已写 uv run 的 start 不再叠加前缀；gunicorn 预检须剥掉标志位。"""
     from local_webpage_access.dockerfile_templates import _gunicorn_launch_command

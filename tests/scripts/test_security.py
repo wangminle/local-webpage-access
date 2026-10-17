@@ -84,6 +84,24 @@ def test_audit_compose_clean_template_no_critical() -> None:
     assert _critical_codes(findings) == []
 
 
+@pytest.mark.parametrize("source", ["../data/instance", "./data/instance"])
+def test_audit_compose_data_subdirectory_is_allowed(source: str) -> None:
+    """平台生成的 ../data/instance 属于实例自己的 data/，不得报 unexpected_host_mount。"""
+    text = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        f"      - ../data:/app/data\n      - {source}:/app/instance",
+    )
+    findings = audit_compose(text)
+    assert "unexpected_host_mount" not in _codes(findings)
+    assert _critical_codes(findings) == []
+
+    outside = _CLEAN_COMPOSE.replace(
+        "      - ../data:/app/data",
+        "      - ../other:/app/other",
+    )
+    assert "unexpected_host_mount" in _codes(audit_compose(outside))
+
+
 def test_audit_compose_detects_privileged() -> None:
     text = _CLEAN_COMPOSE.replace(
         "    restart: unless-stopped\n", "    privileged: true\n    restart: unless-stopped\n"
@@ -788,6 +806,27 @@ def test_filter_config_auth_lines_strips_credential_lines() -> None:
     # 构建配置行原样保留，认证行全部剥离
     assert filtered == "legacy-peer-deps=true\nengine-strict=false\n"
     assert [n for n, _ in removed] == [2, 3, 4, 5]
+
+
+def test_filter_config_auth_lines_strips_quoted_credential_keys() -> None:
+    """BUG-899：npm INI 解析器接受带引号的键——``"//host/:_authToken"=secret``
+    这类写法认证键后紧跟引号而非分隔符，不得绕过过滤把令牌带进镜像。"""
+    from local_webpage_access.security import filter_config_auth_lines
+
+    content = (
+        "legacy-peer-deps=true\n"
+        '"//registry.npmjs.org/:_authToken"=npm_secret\n'
+        "'//registry.npmjs.org/:_auth'=dXNlcjpwYXNz\n"
+        '"_password"=hunter2\n'
+        '"token" = abc123\n'
+        '"npmAuthToken": "yarn-secret"\n'
+        "registry=https://registry.npmmirror.com\n"
+    )
+    filtered, removed = filter_config_auth_lines(content)
+    assert filtered == (
+        "legacy-peer-deps=true\nregistry=https://registry.npmmirror.com\n"
+    )
+    assert [n for n, _ in removed] == [2, 3, 4, 5, 6]
 
 
 def test_filter_config_auth_lines_yarnrc_yml() -> None:

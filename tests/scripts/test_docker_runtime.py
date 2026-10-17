@@ -819,6 +819,39 @@ def test_rescue_container_data_copies_when_host_empty(workspace, registry, monke
     assert any(e["event_type"] == "migrate" for e in events)
 
 
+def test_rescue_bound_directory_copies_missing_when_parent_nonempty(
+    workspace, registry, monkeypatch
+) -> None:
+    """BUG-912：data/ 已有 instance 目录时，仍把容器里宿主没有的文件补进来。"""
+    from local_webpage_access.docker_runtime import _merge_tree_keep_host
+
+    _seed_compose_files(workspace, "api")
+    _seed_instance(registry, "api")
+    host_instance = workspace.app_data("api") / "instance"
+    host_instance.mkdir(parents=True)
+    (host_instance / "config.py").write_text("seed\n", encoding="utf-8")
+
+    fake = _RescueCopyFake()
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+    rescued = DockerRuntime(workspace, registry).rescue_bound_directory(
+        "api", host_instance, "/app/instance"
+    )
+    assert rescued == 1
+    assert (host_instance / "app.sqlite").read_bytes() == b"sqlite-data"
+    assert (host_instance / "config.py").read_text(encoding="utf-8") == "seed\n"
+    assert fake.cp_targets
+
+    staged = host_instance.parent / "staged"
+    staged.mkdir()
+    (staged / "config.py").write_text("from-container\n", encoding="utf-8")
+    (staged / "extra.txt").write_text("new\n", encoding="utf-8")
+    copied, conflicts = _merge_tree_keep_host(staged, host_instance)
+    assert copied == 1
+    assert conflicts == ["config.py"]
+    assert (host_instance / "config.py").read_text(encoding="utf-8") == "seed\n"
+    assert (host_instance / "extra.txt").read_text(encoding="utf-8") == "new\n"
+
+
 def test_rescue_container_data_skips_when_host_has_content(
     workspace, registry, monkeypatch
 ) -> None:

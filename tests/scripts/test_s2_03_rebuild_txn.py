@@ -17,6 +17,7 @@ import pytest
 
 from local_webpage_access import hosting, rebuild_txn
 from local_webpage_access.errors import DockerError, HostingError
+from local_webpage_access.hosting import _rescue_container_data_before_rebuild as _real_rescue
 from local_webpage_access.models import InstanceManifest, Status
 from tests.scripts._helpers import make_container_manifest
 
@@ -122,6 +123,26 @@ def test_build_first_success_builds_before_stopping_old(
     assert len(tags) == 1 and tags[0][0] == "old-image" and tags[0][1].endswith(":prev")
     assert manifest.status == Status.RUNNING
     assert manifest.lastOperation and manifest.lastOperation["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("strategy", ["build-first", "stop-first"])
+def test_flask_instance_rescue_failure_keeps_old_container(
+    workspace, registry, config, deployed, env, monkeypatch, strategy
+) -> None:
+    """instance 迁移失败必须在两种重建策略的 down 前中止。"""
+    order, rt, _ = env
+    current = workspace.app_current("demo")
+    (current / "app.py").write_text("db = os.path.join(app.instance_path, 'app.sqlite')\n")
+    _set_strategy(workspace, deployed, strategy)
+    monkeypatch.setattr(hosting, "_rescue_container_data_before_rebuild", _real_rescue)
+    rt.rescue_bound_directory.side_effect = DockerError("copy failed")
+
+    with pytest.raises(HostingError, match="救援"):
+        hosting.host_container(workspace, config, registry, "demo")
+
+    assert "down" not in order and "up" not in order
+    saved = hosting._load_manifest(workspace, "demo")
+    assert saved.container.containerId == "old-container"
 
 
 def test_build_failure_keeps_old_container_and_restores_generated_files(

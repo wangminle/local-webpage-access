@@ -289,7 +289,7 @@ def _fake_which(monkeypatch, available: set[str]):
     """桩 hosting.shutil.which：available 集合内的可执行视为在 PATH。"""
     monkeypatch.setattr(
         "local_webpage_access.hosting.shutil.which",
-        lambda name: f"/usr/bin/{name}" if name in available else None,
+        lambda name, path=None: f"/usr/bin/{name}" if name in available else None,
     )
 
 
@@ -696,7 +696,7 @@ def test_build_and_host_frontend_resolves_corepack_install(
     # pnpm 在 PATH 且 corepack 可用：安装命令应去掉 corepack enable 前缀
     monkeypatch.setattr(
         "local_webpage_access.hosting.shutil.which",
-        lambda name: f"/usr/bin/{name}" if name in ("pnpm", "corepack") else None,
+        lambda name, path=None: f"/usr/bin/{name}" if name in ("pnpm", "corepack") else None,
     )
 
     build_and_host_frontend(workspace, config, registry, "spa")
@@ -1605,3 +1605,126 @@ def test_read_declared_package_manager_rejects_non_version_chars(
     assert _read_declared_package_manager(tmp_path) is None
     _fake_which(monkeypatch, {"corepack"})
     assert _resolve_host_build_command("pnpm run build", tmp_path) == "corepack pnpm run build"
+
+
+# ---- BUG-902：构建子进程的 yarn/pnpm corepack shim ---------------------------
+
+
+def test_frontend_needs_pm_shims_when_install_rewritten_to_corepack(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-902：install 已改写为 corepack 直跑且宿主无 yarn/pnpm——build 脚本
+    内部嵌套调用（build: "yarn run compile"）没有入口会 127，需要 shim。"""
+    from local_webpage_access.hosting import _frontend_needs_pm_shims
+
+    _fake_which(monkeypatch, {"corepack"})
+    assert _frontend_needs_pm_shims(
+        tmp_path, "corepack pnpm install --frozen-lockfile", "npm run build"
+    )
+
+
+def test_frontend_needs_pm_shims_via_declared_pm_or_lockfile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-902：命令本身不含 corepack（npm ci + npm run build），但项目声明
+    packageManager=yarn 或存在 yarn.lock/pnpm-lock.yaml 时嵌套调用同样可能
+    发生——宿主缺 yarn/pnpm 即需要 shim。"""
+    from local_webpage_access.hosting import _frontend_needs_pm_shims
+
+    _fake_which(monkeypatch, {"corepack"})
+    (tmp_path / "package.json").write_text(
+        '{"packageManager": "yarn@4.5.1"}', encoding="utf-8"
+    )
+    assert _frontend_needs_pm_shims(tmp_path, "npm ci", "npm run build")
+
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
+    assert _frontend_needs_pm_shims(tmp_path, "npm ci", "npm run build")
+
+
+def test_frontend_needs_pm_shims_uses_build_path_not_process_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CHK-431：进程 PATH 有 yarn/pnpm 而构建 PATH 没有时，仍要补 shim。"""
+    from local_webpage_access.hosting import _frontend_needs_pm_shims
+
+    def which(name: str, path: str | None = None) -> str | None:
+        if path is not None:
+            return None
+        if name in {"yarn", "pnpm"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    monkeypatch.setattr("local_webpage_access.hosting.shutil.which", which)
+    assert _frontend_needs_pm_shims(
+        tmp_path,
+        "corepack pnpm install --frozen-lockfile",
+        "npm run build",
+        path="/opt/empty-build-bin",
+    )
+
+
+def test_frontend_needs_pm_shims_false_when_both_pm_on_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-902：yarn 与 pnpm 都已在 PATH 时嵌套调用本就可行，无需 shim。"""
+    from local_webpage_access.hosting import _frontend_needs_pm_shims
+
+    _fake_which(monkeypatch, {"yarn", "pnpm", "corepack"})
+    assert not _frontend_needs_pm_shims(
+        tmp_path, "corepack pnpm install --frozen-lockfile", "npm run build"
+    )
+
+
+def test_frontend_needs_pm_shims_false_for_plain_npm_project(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-902 对照：纯 npm 项目（无 packageManager/无 yarn·pnpm 锁文件、
+    命令不经 corepack）不引入 shim。"""
+    from local_webpage_access.hosting import _frontend_needs_pm_shims
+
+    _fake_which(monkeypatch, {"corepack"})
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    assert not _frontend_needs_pm_shims(tmp_path, "npm ci", "npm run build")
+
+
+def test_ensure_corepack_shim_dir_none_without_corepack(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-902：corepack 不可用时返回 None（按原链路执行，如实失败）。"""
+    from local_webpage_access.hosting import _ensure_corepack_shim_dir
+
+    _fake_which(monkeypatch, set())
+    assert _ensure_corepack_shim_dir(workspace) is None
+
+
+def test_ensure_corepack_shim_dir_creates_and_reuses(
+    workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    """BUG-902：corepack enable --install-directory 在工作区生成 yarn/pnpm
+    shim（免 root），再次调用幂等复用同一目录。"""
+    import os
+    import stat
+
+    from local_webpage_access.hosting import _ensure_corepack_shim_dir
+
+    fake = tmp_path / "corepack"
+    fake.write_text(
+        "#!/bin/sh\n"
+        '# fake corepack：corepack enable --install-directory <dir> yarn pnpm\n'
+        'for n in yarn yarnpkg pnpm pnpx; do touch "$3/$n"; done\n',
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(
+        "local_webpage_access.hosting.shutil.which",
+        lambda name: str(fake) if name == "corepack" else None,
+    )
+
+    shim_dir = _ensure_corepack_shim_dir(workspace)
+    assert shim_dir is not None
+    assert (Path(shim_dir) / "yarn").is_file()
+    assert (Path(shim_dir) / "pnpm").is_file()
+    # 幂等复用（不重复执行 corepack enable）
+    assert _ensure_corepack_shim_dir(workspace) == shim_dir
+    assert os.pathsep not in shim_dir

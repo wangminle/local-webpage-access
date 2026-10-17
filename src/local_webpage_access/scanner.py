@@ -1671,7 +1671,21 @@ def _python_start_command(
         target, reason = _infer_django_wsgi_target(summary)
         if target:
             _note_gunicorn_generated(notes)
-            return _gunicorn_start_command(target, port=8000)
+            cmd = _gunicorn_start_command(target, port=8000)
+            # 与 Alembic 相同：只包平台推断出的生产入口，且项目里确实有
+            # migrations 包。没有 migrations 时不猜测，也不改用户手写的 start。
+            if (
+                summary is not None
+                and (summary.root / "manage.py").is_file()
+                and _django_has_migrations(summary.root)
+            ):
+                if notes is not None:
+                    notes.append(
+                        "Django 项目含 migrations，启动前执行 "
+                        "python manage.py migrate --noinput；迁移失败则不启动 Gunicorn"
+                    )
+                cmd = f'sh -c "python manage.py migrate --noinput && exec {cmd}"'
+            return cmd
         if "gunicorn" in matched:
             return "gunicorn -b 0.0.0.0:8000 app:app"
         _note_wsgi_fallback(notes, "Django", reason)
@@ -1693,6 +1707,17 @@ def _python_start_command(
 
 # 066.b：平台选定的 Gunicorn 版本范围（分层安装，不回写用户依赖文件）。
 GUNICORN_PLATFORM_SPEC = ">=21,<23"
+# BUG-921：平台在启动命令里内嵌的迁移前置标记。副作用识别（C.R05）、
+# requiresMigrations 契约与迁移成功判定共用这一份，避免口径漂移。
+MIGRATION_START_MARKERS = ("alembic upgrade", "manage.py migrate")
+
+
+def start_command_wraps_migration(start: str | None) -> bool:
+    """启动命令是否内嵌迁移前置（Alembic ``alembic upgrade`` / Django
+    ``manage.py migrate`` 的 ``&& exec`` 守卫包装）。"""
+    lowered = (start or "").lower()
+    return any(marker in lowered for marker in MIGRATION_START_MARKERS)
+
 _FLASK_APP_ASSIGN_RE = re.compile(r"^\s*app\s*=\s*Flask\(", re.MULTILINE)
 _CREATE_APP_RE = re.compile(r"^\s*(async\s+)?def\s+create_app\s*\(", re.MULTILINE)
 _DJANGO_WSGI_APP_RE = re.compile(r"^\s*application\s*=", re.MULTILINE)
@@ -1811,9 +1836,36 @@ def _infer_django_wsgi_target(summary: FileSummary | None) -> tuple[str, str | N
     return "", f"Django wsgi.py 存在多个候选（{'、'.join(modules)}），不猜测"
 
 
+# 预检用单引号包裹整条 ``sh -c``。目标若含 ``()`` 等元字符，必须用双引号，
+# 否则内层 sh 会把 ``create_app()`` 当成语法（BUG-904）。
+_GUNICORN_TARGET_META_RE = re.compile(r"""[()$`"\\;&|<> \t']""")
+
+
+def _quote_gunicorn_target(target: str) -> str:
+    if not _GUNICORN_TARGET_META_RE.search(target):
+        return target
+    escaped = (
+        target.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    )
+    return f'"{escaped}"'
+
+
 def _gunicorn_start_command(target: str, *, port: int) -> str:
     # 066.e 低配参数：单 worker、小线程数（家庭服务器预算内），不按 CPU 放大。
-    return f"gunicorn --workers 1 --threads 4 -b 0.0.0.0:{port} {target}"
+    quoted = _quote_gunicorn_target(target)
+    return f"gunicorn --workers 1 --threads 4 -b 0.0.0.0:{port} {quoted}"
+
+
+def _django_has_migrations(root: Path) -> bool:
+    """存在应用级 ``migrations/__init__.py`` 才视为可自动迁移。"""
+    for path in _walk(root, max_depth=4):
+        if path.name != "__init__.py" or path.parent.name != "migrations":
+            continue
+        parts = path.relative_to(root).parts
+        if any(part in _WSGI_SKIP_DIRS or part in ("test", "tests") for part in parts):
+            continue
+        return True
+    return False
 
 
 def _note_gunicorn_generated(notes: list[str] | None) -> None:
