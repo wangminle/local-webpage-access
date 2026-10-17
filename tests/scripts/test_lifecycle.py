@@ -164,7 +164,9 @@ def _seed_container(
             containerId="cid-x" if deployed else None,
             hostPort=21000 if deployed else None,
         ),
-        status=Status.STOPPED if deployed else Status.PENDING,
+        # 已识别、尚未部署的实例是 stopped。pending 只表示形态未确认，
+        # start 会拒绝（BUG-908）。
+        status=Status.STOPPED,
         desiredState=DesiredState.STOPPED,
     )
     manifest.save(workspace.app_manifest_path(iid))
@@ -177,7 +179,7 @@ def _seed_static(workspace: Workspace, registry: Registry, iid: str = "demo") ->
     (workspace.app_current(iid) / "index.html").write_text("<html>hi</html>")
     from tests.scripts._helpers import make_static_manifest
 
-    manifest = make_static_manifest(iid)
+    manifest = make_static_manifest(iid, status=Status.STOPPED)
     manifest.save(workspace.app_manifest_path(iid))
     registry.upsert_from_manifest(manifest)
     return manifest
@@ -423,6 +425,34 @@ def test_start_recovers_via_full_rebuild_after_rebuild_failure(
     assert "build" in fake_runtime.calls
     assert "up" in fake_runtime.calls
     assert "start" not in fake_runtime.calls
+
+
+def test_start_refuses_pending_and_leaves_status(workspace, registry, config) -> None:
+    """BUG-908：pending 是未确认形态，start 不得当成静态站伪成功。"""
+    manifest = _seed_static(workspace, registry, "demo")
+    manifest.status = Status.PENDING
+    manifest.save(workspace.app_manifest_path("demo"))
+    registry.upsert_from_manifest(manifest)
+    with pytest.raises(LifecycleError, match="pending"):
+        start_instance(workspace, config, registry, "demo")
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("demo"))
+    assert reloaded.status == Status.PENDING
+
+
+def test_rebuild_and_restart_refuse_pending_container(workspace, registry, config) -> None:
+    """pending 容器走 rebuild/restart 不得绕过启动门禁。"""
+    from local_webpage_access.lifecycle import rebuild_instance, restart_instance
+
+    manifest = _seed_container(workspace, registry, "api", deployed=False)
+    manifest.status = Status.PENDING
+    manifest.save(workspace.app_manifest_path("api"))
+    registry.upsert_from_manifest(manifest)
+    with pytest.raises(LifecycleError, match="pending"):
+        rebuild_instance(workspace, config, registry, "api")
+    with pytest.raises(LifecycleError, match="pending"):
+        restart_instance(workspace, config, registry, "api")
+    reloaded = InstanceManifest.load(workspace.app_manifest_path("api"))
+    assert reloaded.status == Status.PENDING
 
 
 def test_start_static_dispatches_to_host_static(workspace, registry, config, fake_runtime) -> None:

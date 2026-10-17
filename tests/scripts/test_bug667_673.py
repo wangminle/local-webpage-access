@@ -16,6 +16,7 @@ from local_webpage_access.models import (
     ResourceProfile,
     Runtime,
     ServingMode,
+    Status,
 )
 from local_webpage_access.paths import Workspace
 
@@ -265,6 +266,8 @@ def test_restart_clears_reconcile_circuit(
     iid = "demo"
     workspace.ensure_app_dirs(iid)
     manifest = _container_manifest(iid)
+    # 本例验证已部署实例重启清熔断；pending 实例应被 BUG-915 门禁拒绝。
+    manifest.status = Status.RUNNING
     for _ in range(MANUAL_THRESHOLD):
         record_failure(manifest)
     assert manifest.reconcileCircuitManual is True

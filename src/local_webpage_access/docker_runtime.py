@@ -28,9 +28,11 @@
 from __future__ import annotations
 
 import contextlib
+import filecmp
 import json
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -568,6 +570,110 @@ def _require_ok(
 # ---- DockerRuntime ----------------------------------------------------------
 
 
+def _merge_tree_keep_host(
+    staged: Path, host_dir: Path, *, seed_dir: Path | None = None
+) -> tuple[int, list[str]]:
+    """补齐容器文件；真实宿主数据优先，仍与源码种子相同的文件可被救援替换。"""
+    copied = 0
+    conflicts: list[str] = []
+    if host_dir.is_symlink():
+        raise DockerError(f"instance 救援目标不能是符号链接：{host_dir}")
+    host_dir.mkdir(parents=True, exist_ok=True)
+    # 留有事务目录说明之前未能完成恢复，不能把残留文件当成宿主业务数据重试。
+    transaction = host_dir / ".lwa-rescue-pending"
+    if transaction.exists() or transaction.is_symlink():
+        raise DockerError(f"instance 救援有未完成事务，请人工核对备份：{transaction}")
+    files: dict[Path, tuple[Path, Path]] = {}
+    replaceable: set[Path] = set()
+    sidecars = ("-wal", "-shm", "-journal")
+    for src in staged.rglob("*"):
+        if not src.is_file() or src.is_symlink():
+            continue
+        rel = src.relative_to(staged)
+        if any(part == ".." for part in rel.parts):
+            continue
+        if rel.parts[0] == transaction.name:
+            raise DockerError(f"instance 救援来源包含保留事务路径：{rel}")
+        dest = host_dir / rel
+        if dest.is_symlink() or not dest.resolve().is_relative_to(host_dir.resolve()):
+            raise DockerError(f"instance 救援目标包含符号链接或越界：{dest}")
+        files[rel] = (src, dest)
+        if dest.exists():
+            seed = seed_dir / rel if seed_dir is not None else None
+            if (
+                seed is not None and seed.is_file() and not seed.is_symlink()
+                and dest.is_file() and not dest.is_symlink()
+                and filecmp.cmp(dest, seed, shallow=False)
+                and not any(
+                    dest.with_name(dest.name + suffix).exists()
+                    for suffix in sidecars
+                )
+            ):
+                replaceable.add(rel)
+    # 先确定冲突归属，再复制；保留宿主主库时不能混入容器的 WAL/SHM/journal。
+    # 必须在任何写入之前计算，避免结果取决于 rglob 的主库/边车遍历顺序。
+    blocked_sidecars = set()
+    for rel in files:
+        for suffix in sidecars:
+            if rel.name.endswith(suffix):
+                base = rel.with_name(rel.name[:-len(suffix)])
+                if (host_dir / base).exists() and base not in replaceable:
+                    blocked_sidecars.add(rel)
+    # BUG-920：先在同一文件系统完整准备所有文件，部分复制失败不触碰宿主。
+    # 提交仅用重命名；种子原件也用重命名备份，磁盘满时恢复不再复制文件内容。
+    pending: list[tuple[Path, Path]] = []
+    for rel, (src, dest) in files.items():
+        if rel in blocked_sidecars or (dest.exists() and rel not in replaceable):
+            conflicts.append(rel.as_posix())
+        else:
+            pending.append((src, dest))
+    if not pending:
+        return 0, conflicts
+    transaction.mkdir()
+    written: list[tuple[Path, Path | None]] = []
+    preserve_backup = False
+    try:
+        for src, dest in pending:
+            prepared = transaction / "new" / dest.relative_to(host_dir)
+            prepared.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, prepared)
+        for _, dest in pending:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            rel = dest.relative_to(host_dir)
+            backup = transaction / "old" / rel if dest.exists() else None
+            if backup is not None:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+            # 先登记再移动：移动成功后的中断也必须能找到原件。
+            written.append((dest, backup))
+            if backup is not None:
+                dest.replace(backup)
+            (transaction / "new" / rel).replace(dest)
+            copied += 1
+    except BaseException as exc:
+        # 包括用户中断；恢复过程中再次中断时，finally 也不得删除备份。
+        preserve_backup = True
+        rollback_failed = False
+        for dest, backup in reversed(written):
+            try:
+                if backup is None:
+                    dest.unlink(missing_ok=True)
+                elif backup.exists():
+                    backup.replace(dest)
+            except OSError:
+                rollback_failed = True
+                log.exception("instance 救援回滚失败（%s），备份保留在 %s", dest, transaction)
+        if rollback_failed:
+            raise DockerError(
+                f"instance 救援回滚未完成，已保留备份并禁止自动重试：{transaction}"
+            ) from exc
+        preserve_backup = False
+        raise
+    finally:
+        if not preserve_backup:
+            shutil.rmtree(transaction)
+    return copied, conflicts
+
+
 class DockerRuntime:
     """封装单个工作区下所有实例的 Docker Compose 操作。
 
@@ -869,6 +975,62 @@ class DockerRuntime:
                 )
                 return count
         return 0
+
+    def rescue_bound_directory(
+        self,
+        instance_id: str,
+        host_dir: Path,
+        container_path: str,
+        *,
+        log_path: Path | None = None,
+        seed_dir: Path | None = None,
+    ) -> int:
+        """把容器内某个目录里宿主还没有的文件拷进 ``host_dir``（BUG-912）。
+
+        与 :meth:`rescue_container_data` 不同：父级 ``data/`` 非空不能当成这份
+        目录已经持久化。宿主已有的同名业务文件保留；若仍与源码种子
+        逐字节相同，则优先救援容器内的版本，避免种子遮住真实数据库。
+        """
+        cid = self.container_id_strict(instance_id, all_containers=True)
+        if not cid:
+            return 0
+        host_dir.mkdir(parents=True, exist_ok=True)
+        run_log = log_path or self.workspace.app_logs(instance_id) / _RUN_LOG
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="lwa-instance-") as tmp:
+            staged = Path(tmp)
+            result = _execute(
+                ["docker", "cp", f"{cid}:{container_path.rstrip('/')}/.", f"{staged}/"],
+                cwd=self.workspace.app_dir(instance_id),
+                log_path=run_log,
+                timeout=_QUERY_TIMEOUT,
+            )
+            if not result.ok:
+                # 仅 Docker 明确报告目录不存在时视为无数据；权限、daemon、
+                # 超时等错误不能伪装成空目录后继续删除旧容器。
+                detail = (result.stderr or "").strip()
+                if "could not find the file" in detail.lower():
+                    return 0
+                raise DockerError(
+                    f"实例 {instance_id} 数据救援失败（{container_path}）：{detail[:200]}",
+                    instance_id=instance_id,
+                )
+            copied, conflicts = _merge_tree_keep_host(staged, host_dir, seed_dir=seed_dir)
+        if conflicts:
+            log.warning(
+                "实例 %s 从容器 %s 救援时保留宿主已有文件：%s",
+                instance_id,
+                container_path,
+                ", ".join(conflicts[:8]),
+            )
+        if copied:
+            self._event(
+                instance_id,
+                "migrate",
+                f"重建前救出容器 {container_path} 的 {copied} 个新文件 → {host_dir}",
+            )
+        return copied
 
     # ---- 日志（WBS-14.08）-------------------------------------------------
 

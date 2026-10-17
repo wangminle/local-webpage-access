@@ -90,11 +90,19 @@ def test_generated_artifact_skills_do_not_treat_hand_edits_as_durable() -> None:
     assert "重新渲染" in readme or "重新生成" in readme
 
 
-def test_fix_build_skill_configure_example_is_a_real_option() -> None:
+@pytest.mark.parametrize("color", [False, True], ids=["plain", "ansi"])
+def test_fix_build_skill_configure_example_is_a_real_option(monkeypatch, color: bool) -> None:
     """DOC-200：构建修复技能里的 configure 参数必须是已注册选项，不能是 --system-dep。"""
+    from click import unstyle
+    from typer import rich_utils
     from typer.testing import CliRunner
 
     from local_webpage_access.cli import app
+
+    # GitHub Actions 会启用 Rich 终端样式；本机默认 NO_COLOR 时也要覆盖该分支。
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", color)
 
     text = (_SKILLS / "lwa-fix-docker-build-failure" / "SKILL.md").read_text(encoding="utf-8")
     assert re.search(r"--system-dep(?!s)", text) is None
@@ -109,7 +117,9 @@ def test_fix_build_skill_configure_example_is_a_real_option() -> None:
         for flag in re.findall(r"--[a-z0-9]+(?:-[a-z0-9]+)*", line)
     }
     assert flags == {"--system-deps"}
-    help_out = CliRunner().invoke(app, ["configure", "--help"]).output
+    result = CliRunner().invoke(app, ["configure", "--help"])
+    assert result.exit_code == 0, result.output
+    help_out = unstyle(result.output)
     assert help_out
     for flag in sorted(flags):
         assert flag in help_out, flag

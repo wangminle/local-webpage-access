@@ -90,8 +90,19 @@ def host_instance(
 
     * ``shared-static`` → :func:`host_static` 或 :func:`build_and_host_frontend`；
     * ``docker-compose`` → :func:`host_container`（Phase 3）。
+
+    ``status=pending`` 表示形态未确认。直接分派到静态托管会把未构建源码
+    当成站点返回 200（BUG-908），这里与 ``start_instance`` 同样拒绝。
     """
     manifest = _load_manifest(workspace, instance_id)
+    if manifest.status == Status.PENDING:
+        from local_webpage_access.errors import LifecycleError
+
+        raise LifecycleError(
+            f"实例 {instance_id} 仍为 pending（未识别或未确认形态），已拒绝启动。"
+            "请用 lwa configure --kind 与 --runtime 确认形态，或修正项目后执行 lwa scan。",
+            instance_id=instance_id,
+        )
     runtime = manifest.runtime.value
 
     if runtime == "shared-static":
@@ -128,16 +139,33 @@ def stop_instance(
         # 但 static_sites.host_port 与 manifest.static.hostPort 仍保留旧值，
         # 于是该端口可被重新分配给别的实例，而旧实例的网关配置/字段仍指向它，
         # 造成跨实例内容混淆。保留端口登记即可让 _ensure_static_port 复用。
-        manifest.status = Status.STOPPED
+        # BUG-910：pending 是未确认形态（BUG-908），stop 不得把 status 改成
+        # stopped——否则 pending→stop→start 会绕过启动门禁直出静态源码。
+        # pending 实例从未托管，这里只登记停机意图，status 保持 pending。
+        pending = manifest.status == Status.PENDING
+        if not pending:
+            manifest.status = Status.STOPPED
         manifest.desiredState = DesiredState.STOPPED
         if manifest.static is not None:
             manifest.static.enabled = False
         manifest.touch()
         manifest.save(workspace.app_manifest_path(instance_id))
         registry.upsert_from_manifest(manifest)
-        registry.update_status(instance_id, Status.STOPPED.value)
+        registry.update_status(
+            instance_id,
+            manifest.status.value,
+            desired_state=DesiredState.STOPPED.value,
+        )
         registry.set_static_enabled(instance_id, False)
-        registry.add_event(instance_id, "stop", "静态实例已停止")
+        if pending:
+            registry.add_event(
+                instance_id,
+                "stop",
+                "pending 实例未托管，已登记停机意图（状态保持 pending，"
+                "确认形态后才能启动）",
+            )
+        else:
+            registry.add_event(instance_id, "stop", "静态实例已停止")
         return manifest
 
     if runtime == "docker-compose":
@@ -378,6 +406,77 @@ def _resolve_build_segment(segment: str, work_dir: Path) -> str:
     return segment
 
 
+# ---- BUG-902：构建子进程的 yarn/pnpm 入口（corepack shim）--------------------
+
+
+def _frontend_needs_pm_shims(
+    work_dir: Path,
+    resolved_install: str | None,
+    resolved_build: str | None,
+    *,
+    path: str | None = None,
+) -> bool:
+    """宿主前端构建是否需要为子进程补 yarn/pnpm 入口（BUG-902）。
+
+    ``corepack pnpm@x install`` 直跑改写不产生 shim——安装生命周期脚本与
+    build 脚本内部再调 yarn/pnpm（如 ``build: "yarn run compile"``）时宿主
+    没有对应入口即 127。两个包管理器都已在**构建 PATH** 上时嵌套调用本就可行，
+    无需 shim。CHK-431：构建 PATH 来自实例 buildEnv，不能用 lwa 进程自己的 PATH。
+    """
+    def _on_path(name: str) -> bool:
+        if path is None:
+            return shutil.which(name) is not None
+        return shutil.which(name, path=path) is not None
+
+    if _on_path("yarn") and _on_path("pnpm"):
+        return False
+    for cmd in (resolved_install, resolved_build):
+        if cmd and cmd.startswith("corepack"):
+            return True
+    declared = _read_declared_package_manager(work_dir)
+    if declared and declared[0].lower() in ("yarn", "pnpm"):
+        return True
+    return (work_dir / "yarn.lock").is_file() or (work_dir / "pnpm-lock.yaml").is_file()
+
+
+def _ensure_corepack_shim_dir(workspace: Workspace) -> str | None:
+    """生成（并复用）工作区内的 corepack yarn/pnpm shim 目录（BUG-902）。
+
+    ``corepack enable --install-directory <dir> yarn pnpm`` 把 shim 写进
+    工作区 ``run/`` 而非 ``/usr/local/bin``（免 root）；嵌套调用经 shim 由
+    corepack 按项目 ``packageManager`` 声明解析版本。corepack 不可用或 shim
+    生成失败返回 ``None``——调用方按原链路执行，失败信息如实进 build.log。
+    """
+    corepack = shutil.which("corepack")
+    if not corepack:
+        return None
+    shim_dir = workspace.run / "corepack-shims"
+    if (shim_dir / "yarn").is_file() and (shim_dir / "pnpm").is_file():
+        return str(shim_dir)
+    try:
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            [corepack, "enable", "--install-directory", str(shim_dir), "yarn", "pnpm"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning(
+            "corepack shim 生成失败（构建脚本内嵌 yarn/pnpm 调用可能失败）：%s", exc
+        )
+        return None
+    if proc.returncode != 0 or not (shim_dir / "yarn").is_file():
+        log.warning(
+            "corepack enable --install-directory 失败（rc=%s）：%s",
+            proc.returncode,
+            (proc.stderr or proc.stdout or "").strip()[:200],
+        )
+        return None
+    return str(shim_dir)
+
+
 def build_and_host_frontend(
     workspace: Workspace,
     config: Config,
@@ -433,11 +532,43 @@ def build_and_host_frontend(
         build_env = {**os.environ, **effective_build_env(manifest)}
         # S2-08 / issue #59：前端构建路径也写阶段记录（与容器/静态同一记录器）。
         _record_stage(workspace, registry, instance_id, "host_start")
+        # BUG-860/877/889：install 与 build 先各自完成宿主工具链解析，再统一
+        # 决定是否补 shim——shim 判定需要看到两条已解析命令。
+        install_cmd = (
+            _resolve_host_install_command(manifest.entry.install, work_dir)
+            if manifest.entry.install
+            else None
+        )
+        build_cmd = (
+            _resolve_host_build_command(manifest.entry.build, work_dir)
+            if manifest.entry.build
+            else None
+        )
+        # BUG-902：corepack 直跑改写不产生 yarn/pnpm shim——安装生命周期脚本与
+        # build 脚本内部的嵌套 yarn/pnpm 调用（如 build: "yarn run compile"）
+        # 会以 127 失败。在工作区生成 shim 目录并**追加**到 PATH（PATH 已有的
+        # 包管理器优先，shim 只补缺失入口）。
+        if _frontend_needs_pm_shims(
+            work_dir, install_cmd, build_cmd, path=build_env.get("PATH")
+        ):
+            shim_dir = _ensure_corepack_shim_dir(workspace)
+            if shim_dir:
+                existing_path = build_env.get("PATH") or ""
+                build_env["PATH"] = (
+                    f"{existing_path}{os.pathsep}{shim_dir}" if existing_path else shim_dir
+                )
+                build_env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+                write_instance_log(
+                    workspace.apps,
+                    instance_id,
+                    "build",
+                    f"已为构建子进程提供 corepack yarn/pnpm shim：{shim_dir}",
+                )
         # 1-5. 安装 + 构建（WBS-11.01~06）
         if manifest.entry.install:
             # BUG-860 / BUG-877：宿主工具链解析（corepack enable 免 root 改写 /
             # packageManager 声明版本优先），失败回退原命令如实报错。
-            install_cmd = _resolve_host_install_command(manifest.entry.install, work_dir)
+            assert install_cmd is not None
             if install_cmd != manifest.entry.install:
                 write_instance_log(
                     workspace.apps,
@@ -457,7 +588,7 @@ def build_and_host_frontend(
         if manifest.entry.build:
             # BUG-889：build 与 install 共用同一工具链解析——install 已改写为
             # corepack 包装时，裸跑 yarn/pnpm build 仍会 127 或版本不匹配。
-            build_cmd = _resolve_host_build_command(manifest.entry.build, work_dir)
+            assert build_cmd is not None
             if build_cmd != manifest.entry.build:
                 write_instance_log(
                     workspace.apps,
@@ -613,11 +744,28 @@ def _rescue_container_data_before_rebuild(
     ``data/`` 非空视为两侧数据冲突、未救出任何文件、或过程异常，均抛
     :class:`HostingError` 中止，要求人工确认数据归属后再 ``lwa rebuild``——
     禁止带着不确定性继续 down/up（新容器可能改用旧版或种子库，造成 split-brain）。
-    """
-    from local_webpage_access.compose import _is_sqlite, container_data_paths
 
-    if not _is_sqlite(manifest):
-        return  # 非 SQLite 文件库无 data/ 挂载，无需迁移
+    自动管理的 Flask instance 挂载始终采用 fail-safe：仅旧容器/目录明确
+    不存在时允许空救援，观测与复制异常必须中止重建（BUG-912）。
+    """
+    from local_webpage_access.compose import (
+        _extra_targets,
+        _flask_instance_mount,
+        _is_sqlite,
+        container_data_paths,
+    )
+
+    source_dir = workspace.app_current(instance_id)
+    flask_mount = _flask_instance_mount(
+        source_dir, source_subdir=getattr(manifest, "sourceSubdir", None)
+    )
+    if (
+        flask_mount is not None and manifest.container is not None
+        and _extra_targets(manifest.container.extraVolumes, flask_mount[0])
+    ):
+        flask_mount = None  # 显式挂载由用户管理，不能写入另一个未使用的宿主目录
+    if not _is_sqlite(manifest) and flask_mount is None:
+        return  # 没有可迁移的文件库
     try:
         host_data = workspace.app_data(instance_id)
         try:
@@ -638,8 +786,20 @@ def _rescue_container_data_before_rebuild(
                 f"请人工比对新旧两侧数据后执行 lwa rebuild {instance_id}",
                 instance_id=instance_id,
             )
-        candidates = container_data_paths(workspace.app_current(instance_id), manifest)
-        rescued = runtime.rescue_container_data(instance_id, host_data, candidates)
+        candidates = container_data_paths(source_dir, manifest)
+        rescued = 0
+        if _is_sqlite(manifest):
+            rescued = runtime.rescue_container_data(instance_id, host_data, candidates)
+        # BUG-912：新挂载的 instance 目录会让 data/ 变非空，不能因此跳过
+        # 旧容器可写层里的 instance 库。源码种子不能压住容器内真实数据。
+        if flask_mount is not None:
+            container_path, source_instance = flask_mount
+            bound = getattr(runtime, "rescue_bound_directory", None)
+            if bound is not None:
+                rescued += bound(
+                    instance_id, host_data / "instance", container_path,
+                    seed_dir=source_instance,
+                )
         if strict and rescued <= 0:
             raise HostingError(
                 f"实例 {instance_id} 数据挂载漂移，但未能从旧容器救出任何数据"
@@ -649,7 +809,7 @@ def _rescue_container_data_before_rebuild(
             )
         if rescued:
             log.warning(
-                "BUG-205：实例 %s 宿主 data/ 原为空，已从旧容器救出 %d 个文件，"
+                "BUG-205/912：实例 %s 已从旧容器救出 %d 个文件，"
                 "重建将复用（避免丢库）",
                 instance_id,
                 rescued,
@@ -657,10 +817,10 @@ def _rescue_container_data_before_rebuild(
     except HostingError:
         raise
     except Exception as exc:  # noqa: BLE001
-        if strict:
-            log.exception("BUG-424 挂载漂移数据救援异常（fail-safe，中止修复）")
+        if strict or flask_mount is not None:
+            log.exception("BUG-424/912 数据救援异常（fail-safe，中止重建）")
             raise HostingError(
-                f"实例 {instance_id} 挂载漂移数据救援异常，已中止自动修复：{exc}",
+                f"实例 {instance_id} 数据救援异常，已中止重建：{exc}",
                 instance_id=instance_id,
             ) from exc
         log.exception("BUG-205 重建前数据迁移异常（忽略，继续重建）")
@@ -1825,6 +1985,11 @@ def recreate_container_runtime(
         log.info("实例 %s 无法 runtime recreate，回退完整重建", instance_id)
         return host_container(workspace, config, registry, instance_id)
 
+    # BUG-919：force-recreate 同样会替换旧容器，可写层里未被挂载的数据
+    # （如本次新增 instance 挂载启用前的 /app/instance 库——只改
+    # runtimeConfigHash 时 start/restart 走的正是这条路径）必须先救出。
+    # 与完整重建同序：救援失败即中止，不替换旧容器。
+    _rescue_container_data_before_rebuild(workspace, manifest, instance_id, runtime)
     # S2-01/#54：先停机、成功后才动身份——停机失败即中止且 manifest 身份保持完整。
     stop_or_abort(runtime, instance_id, purpose="runtime recreate", down=False)
     manifest.container.containerId = None
@@ -2040,6 +2205,25 @@ def stop_container(
             instance_id=instance_id,
             runtime=manifest.runtime.value,
         )
+    # BUG-910：pending 是未确认形态（BUG-908），stop 不得把 status 改成
+    # stopped，否则 pending→stop→start 绕过启动门禁。pending 容器从未部署，
+    # 无容器可停，这里只登记停机意图，status 保持 pending。
+    if manifest.status == Status.PENDING:
+        manifest.desiredState = DesiredState.STOPPED
+        manifest.touch()
+        manifest.save(workspace.app_manifest_path(instance_id))
+        registry.upsert_from_manifest(manifest)
+        registry.update_status(
+            instance_id,
+            Status.PENDING.value,
+            desired_state=DesiredState.STOPPED.value,
+        )
+        registry.add_event(
+            instance_id,
+            "stop",
+            "pending 实例未部署，已登记停机意图（状态保持 pending，确认形态后才能启动）",
+        )
+        return manifest
     runtime = DockerRuntime(workspace, registry)
     runtime.stop(instance_id)
 
@@ -2389,15 +2573,23 @@ def _migration_command_succeeded(
     *,
     liveness_ok: bool,
 ) -> bool:
-    """判定 Alembic 是否作为服务启动的受控前置命令已成功。"""
+    """判定迁移是否作为服务启动的受控前置命令已成功（Alembic / Django）。
+
+    BUG-921：Django 的 ``manage.py migrate`` 守卫包装与 Alembic 同判定——
+    存活即说明 ``&&`` 之后的服务命令已执行，迁移前置已通过。
+    """
     if not liveness_ok:
         return False
     command = (manifest.entry.start or "").strip()
     lowered = command.lower()
-    alembic_pos = lowered.find("alembic upgrade")
-    if alembic_pos < 0:
+    marker_pos = -1
+    for marker in ("alembic upgrade", "manage.py migrate"):
+        pos = lowered.find(marker)
+        if pos >= 0 and (marker_pos < 0 or pos < marker_pos):
+            marker_pos = pos
+    if marker_pos < 0:
         return False
-    guard_pos = lowered.find("&&", alembic_pos)
+    guard_pos = lowered.find("&&", marker_pos)
     if guard_pos < 0:
         return False
     return bool(command[guard_pos + 2 :].strip(" '\""))
@@ -2412,7 +2604,7 @@ def _collect_side_effect_records(
     """C.R05：收集本次 attempt 产生的外部副作用记录。
 
     目前检测的副作用类型：
-    - migration：Alembic 迁移作为容器启动前置命令执行
+    - migration：Alembic / Django 迁移作为容器启动前置命令执行（BUG-921 补 Django）
     - pre_start：未来扩展（manifest.entry.preStart）
 
     返回 ``SideEffectRecord`` 列表。未知写入默认 ``autoRecoverable=False``。
@@ -2423,9 +2615,15 @@ def _collect_side_effect_records(
     records: list[SideEffectRecord] = []
     now = datetime.now(timezone.utc).isoformat()
 
-    # 检测 Alembic 迁移
+    # 检测迁移前置命令（Alembic / Django manage.py migrate）
     start_cmd = (manifest.entry.start or "").strip() if manifest.entry else ""
-    if "alembic upgrade" in start_cmd.lower():
+    lowered = start_cmd.lower()
+    migration_flavor: str | None = None
+    if "alembic upgrade" in lowered:
+        migration_flavor = "Alembic"
+    elif "manage.py migrate" in lowered:
+        migration_flavor = "Django"
+    if migration_flavor is not None:
         migration_succeeded = _migration_command_succeeded(
             manifest,
             liveness_ok=liveness_ok,
@@ -2436,11 +2634,16 @@ def _collect_side_effect_records(
         records.append(
             SideEffectRecord(
                 kind="migration",
-                description=f"Alembic 迁移作为启动前置命令执行（{start_cmd[:100]}）",
-                intent="容器启动时执行 alembic upgrade head 以更新数据库 schema",
+                description=f"{migration_flavor} 迁移作为启动前置命令执行（{start_cmd[:100]}）",
+                intent=(
+                    f"容器启动时执行 {migration_flavor} 迁移以更新数据库 schema"
+                ),
                 executedAt=now,
                 result=result,
-                compensationMethod="alembic downgrade（需人工执行，无法自动确定回退目标版本）",
+                compensationMethod=(
+                    "需人工回退（Alembic downgrade 或 Django 手工反向迁移），"
+                    "无法自动确定回退目标版本"
+                ),
                 recoveryEvidence=None,
                 # 迁移不可自动恢复--schema 变更可能影响数据完整性
                 autoRecoverable=False,

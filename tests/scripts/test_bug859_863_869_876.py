@@ -466,6 +466,54 @@ def test_bug876_force_kind_change_with_pending_detection_keeps_shape(
     assert reloaded.container is not None and reloaded.container.hostPort == 21001
 
 
+def test_bug901_force_kind_change_does_not_inherit_old_shape_entry(
+    importer: Importer,
+    workspace: Workspace,
+    registry: Registry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-901：跨形态迁移不得继承旧形态入口命令。
+
+    存量 Node 容器（无 entry.detected 快照）--force-kind-change 更新为纯静态站
+    时，旧的 npm ci / npm run build 残留会让 hosting._infer_form 按 entry.build
+    分派到前端构建流程——新源码没有 package.json，部署必败。
+    """
+    iid = importer.import_zip(_container_zip(tmp_path / "api.zip", "app=1\n")).instance_id
+    _seed_deployed_container(workspace, registry, iid)
+    # 伪装成快照机制之前的存量 Node 容器（entry.detected=None，保守保留路径）
+    mpath = workspace.app_manifest_path(iid)
+    legacy = InstanceManifest.load(mpath)
+    legacy.kind = Kind.NODE
+    legacy.stack = ["node"]
+    legacy.entry.install = "npm ci"
+    legacy.entry.build = "npm run build"
+    legacy.entry.start = "node server.js"
+    legacy.entry.detected = None
+    legacy.save(mpath)
+    registry.upsert_from_manifest(legacy)
+    monkeypatch.setattr(
+        "local_webpage_access.hosting.stop_instance",
+        lambda *a, **k: InstanceManifest.load(workspace.app_manifest_path(iid)),
+    )
+
+    result = importer.update_zip(
+        _static_zip(tmp_path / "demo.zip", "v1"),
+        iid,
+        restart=False,
+        force_kind_change=True,
+    )
+
+    assert result.kind_changed is True
+    reloaded = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert reloaded.kind == Kind.STATIC
+    assert reloaded.runtime == Runtime.SHARED_STATIC
+    # 目标形态的检测入口：不残留旧 Node 形态的 install/build/start
+    assert reloaded.entry.install is None
+    assert reloaded.entry.build is None
+    assert reloaded.entry.start is None or "server.js" not in reloaded.entry.start
+
+
 # ---- BUG-859：folder 源更新消息指纹单位统一 --------------------------------
 
 

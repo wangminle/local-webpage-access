@@ -354,6 +354,17 @@ def _is_deployed_container(manifest: InstanceManifest) -> bool:
 # ---- 公开生命周期入口 -------------------------------------------------------
 
 
+def _refuse_pending_start(manifest: InstanceManifest) -> None:
+    """pending 是未确认形态，不能启动。确认后的实例状态是 stopped。"""
+    if manifest.status != Status.PENDING:
+        return
+    raise LifecycleError(
+        f"实例 {manifest.id} 仍为 pending（未识别或未确认形态），已拒绝启动。"
+        "请用 lwa configure --kind 与 --runtime 确认形态，或修正项目后执行 lwa scan。",
+        instance_id=manifest.id,
+    )
+
+
 def start_instance(
     workspace: Workspace,
     config: Config,
@@ -394,6 +405,7 @@ def start_instance(
     with instance_lock(workspace, instance_id):
         _ensure_revision_locked(registry, instance_id, expected_revision)
         manifest = _load(workspace, instance_id)
+        _refuse_pending_start(manifest)
         if not from_reconcile:
             clear_circuit(manifest)
             with contextlib.suppress(Exception):
@@ -1978,6 +1990,7 @@ def _restart_instance_locked(
     from local_webpage_access.reconcile_circuit import clear_circuit
 
     manifest = _load(workspace, instance_id)
+    _refuse_pending_start(manifest)
     clear_circuit(manifest)
     with contextlib.suppress(Exception):
         manifest.save(workspace.app_manifest_path(instance_id))
@@ -2194,6 +2207,7 @@ def rebuild_instance(
     with instance_lock(workspace, instance_id):
         _ensure_revision_locked(registry, instance_id, expected_revision)
         manifest = _load(workspace, instance_id)
+        _refuse_pending_start(manifest)
         clear_circuit(manifest)
         with contextlib.suppress(Exception):
             manifest.save(workspace.app_manifest_path(instance_id))
