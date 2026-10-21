@@ -21,6 +21,7 @@ from local_webpage_access.doctor import (
     check_caddy,
     check_caddy_health,
     check_lan_url_stale,
+    check_wsl_lan_exposure,
     check_backend_handoff,
     check_port_contention,
     check_disk_space,
@@ -1009,8 +1010,60 @@ def test_check_lan_url_stale_ok_when_current(env, monkeypatch) -> None:
     ws, config, reg = env
     _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://192.168.1.50:18000")
     monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: None
+    )
     r = check_lan_url_stale(ws, config, reg)
     assert r.status == STATUS_OK
+
+
+def test_check_lan_url_stale_warns_on_wsl_nat_even_when_consistent(
+    env, monkeypatch
+) -> None:
+    """BUG-923：WSL NAT 下地址一致也不能报局域网 OK。"""
+    from types import SimpleNamespace
+
+    ws, config, reg = env
+    _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://172.22.148.94:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "172.22.148.94")
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: SimpleNamespace(guest_reachability="windows-host"),
+    )
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status == STATUS_WARN
+    assert "宿主" in r.message
+
+
+def test_check_wsl_lan_exposure_skips_off_wsl(env, monkeypatch) -> None:
+    ws, config, reg = env
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: None
+    )
+    r = check_wsl_lan_exposure(ws, config, reg)
+    assert r.status == STATUS_SKIP
+
+
+def test_check_wsl_lan_exposure_warns_when_nat_entry_missing(env, monkeypatch) -> None:
+    from tests.scripts.test_wsl_network import _yi14_snapshot
+
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws,
+        reg,
+        "hello-lwa",
+        host_port=18000,
+        alias="hello-lwa",
+        lan_url="http://172.22.148.94:18000",
+    )
+    snap = _yi14_snapshot()
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: snap
+    )
+    r = check_wsl_lan_exposure(ws, config, reg)
+    assert r.status == STATUS_WARN
+    assert r.suggestion
+    assert "不会自动" in (r.suggestion or "") or "不自动" in (r.suggestion or "")
 
 
 def test_check_lan_url_stale_warns_when_lan_ip_unresolvable(env, monkeypatch) -> None:

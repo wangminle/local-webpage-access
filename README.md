@@ -67,7 +67,7 @@ lwa start my-site
 lwa status my-site
 ```
 
-Replace the zip path with your file. Use the instance ID printed by import if it differs from `my-site`. Open the LAN URL printed by `lwa start` from another device on the same LAN; firewall and WSL2 networking guidance is in the [access checklist](docs/known-limitations.md#lan-访问与防火墙).
+Replace the zip path with your file. Use the instance ID printed by import if it differs from `my-site`. Open the LAN URL printed by `lwa start` from another device on the same LAN; under WSL2 NAT mode that URL is only reachable from the Windows host until port forwarding is configured on Windows. Firewall and WSL2 networking guidance is in the [access checklist](docs/known-limitations.md#lan-访问与防火墙).
 
 Other import sources:
 
@@ -200,7 +200,7 @@ lwa start my-site
 lwa status my-site
 ```
 
-把 zip 路径换成实际文件。若导入结果中的实例 ID 不是 `my-site`，后续命令使用实际 ID。在同一局域网的其他设备打开 `lwa start` 输出的局域网地址；防火墙与 WSL2 网络配置见[访问检查说明](docs/known-limitations.md#lan-访问与防火墙)。
+把 zip 路径换成实际文件。若导入结果中的实例 ID 不是 `my-site`，后续命令使用实际 ID。在同一局域网的其他设备打开 `lwa start` 输出的局域网地址；WSL2 NAT 模式下该地址仅 Windows 宿主可达，需先在 Windows 侧配置端口转发。防火墙与 WSL2 网络配置见[访问检查说明](docs/known-limitations.md#lan-访问与防火墙)。
 
 也可从其他来源导入：
 

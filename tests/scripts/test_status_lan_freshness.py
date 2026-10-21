@@ -132,3 +132,29 @@ def test_manual_strategy_uses_manual_ip(ws_reg, monkeypatch) -> None:
     assert data["currentLanIp"] == "192.168.9.9"
     assert data["lanUrlSource"] == "manual"
     assert data["lanAddressStale"] is True
+
+
+def test_status_wsl_nat_does_not_advertise_guest_ip_as_lan(ws_reg, monkeypatch) -> None:
+    """BUG-923：DTO 保留 guest lanUrl，但标明仅宿主可达且无局域网入口。"""
+    from tests.scripts.test_wsl_network import _yi14_snapshot
+
+    ws, reg = ws_reg
+    _seed(ws, reg, lan_url="http://172.22.148.94:21000", route_host="hello-lwa")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "172.22.148.94")
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: _yi14_snapshot(),
+    )
+    cfg = Config(
+        lanIpStrategy="auto",
+        staticGatewayPort=8080,
+        portPool=PortPool(start=21000, end=21050),
+    )
+    data = instance_status(ws, cfg, reg, "demo").to_dict()
+    assert data["lanUrl"] == "http://172.22.148.94:21000"
+    assert data["lanReachability"] == "windows-host"
+    assert data["lanExposure"] == "entry-missing"
+    assert data["hostLanIp"] == "10.180.105.74"
+    assert data["hostLanUrl"] is None
+    assert data["wslNetworkMode"] == "nat"
+    assert data["lanAddressStale"] is False

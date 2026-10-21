@@ -19,6 +19,26 @@ from local_webpage_access.errors import LwaError
 app = typer.Typer(help="控制 Caddy 网关（master 生命周期与 :8080 别名入口）")
 
 
+def _echo_wsl_nat_alias_note() -> None:
+    """BUG-923：WSL NAT 下别名 URL 的 host 不是局域网入口。"""
+    try:
+        from local_webpage_access.wsl_network import (
+            REACH_WINDOWS_HOST,
+            collect_wsl_network_snapshot,
+        )
+
+        snap = collect_wsl_network_snapshot()
+    except Exception:  # noqa: BLE001
+        return
+    if snap is None or snap.guest_reachability != REACH_WINDOWS_HOST:
+        return
+    typer.secho(
+        "  该入口在 WSL NAT 下仅 Windows 宿主可达；局域网设备请看 `lwa doctor`。"
+        "LWA 不会自动修改 Windows 网络。",
+        fg=typer.colors.YELLOW,
+    )
+
+
 def _require_caddy_version(config) -> None:
     """``lwa gateway on/off`` 前置：校验 ``staticGateway=caddy`` 且 Caddy 满足最低版本。
 
@@ -121,6 +141,7 @@ def gateway_on(
                     f"  别名入口：{entry_scheme(config)}://"
                     f"{format_http_host(lan_ip)}:{port}/<alias>/"
                 )
+                _echo_wsl_nat_alias_note()
             typer.echo("  停止：lwa gateway off；状态：lwa gateway status")
             typer.echo("  刷新地址：lwa access refresh")
             # G6：交接收尾后默认复核访问；可选自动 rebuild。
@@ -232,6 +253,7 @@ def gateway_status_cmd() -> None:
             from local_webpage_access.ports import format_http_host
 
             typer.echo(f"  别名入口：http://{format_http_host(lan_ip)}:{port}/<alias>/")
+            _echo_wsl_nat_alias_note()
         if not st["running"] and st["backend"] == "caddy":
             typer.echo("  启动：lwa gateway on")
     except LwaError as exc:

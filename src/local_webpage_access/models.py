@@ -669,7 +669,7 @@ class InstanceManifest(BaseModel):
     # （禁止存 "HEAD"）；commit 存完整 OID（短 SHA 仅展示）。
     sourceGitUrl: str | None = None
     sourceGitRef: str | None = None
-    sourceGitRefKind: str | None = None  # "branch" | "tag"
+    sourceGitRefKind: str | None = None  # "branch" | "tag" | "commit"
     sourceGitCommit: str | None = None
     # git 源打包根（仓库相对子目录；None = 整仓打包）。与 scanner 的
     # sourceSubdir（识别/构建上下文）是两个字段：本字段决定 update 重打包范围，

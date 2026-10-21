@@ -106,6 +106,8 @@ class DoctorReport:
     drifted_instance_ids: list[str] = field(default_factory=list)
     # IMP-038：可选 access review（doctor --access）
     access_review: Any = None
+    # BUG-923：WSL 网络快照（非 WSL 为 None）
+    wsl_network: Any = None
 
     @property
     def overall(self) -> str:
@@ -1521,6 +1523,23 @@ def check_lan_url_stale(ws: Workspace, config: Config, registry: Registry) -> Ch
             detail="漂移实例：" + ", ".join(drifted[:8]),
             suggestion="运行 `lwa access refresh` 用当前 LAN IP 刷新所有实例访问地址",
         )
+    from local_webpage_access.wsl_network import (
+        REACH_WINDOWS_HOST,
+        collect_wsl_network_snapshot,
+    )
+
+    try:
+        snap = collect_wsl_network_snapshot()
+    except Exception:  # noqa: BLE001
+        snap = None
+    if snap is not None and snap.guest_reachability == REACH_WINDOWS_HOST:
+        return CheckResult(
+            "lan_url_stale",
+            STATUS_WARN,
+            f"实例 lanUrl 与 guest 地址（{lan_ip}）一致，但该地址仅 Windows 宿主可达，"
+            "不是局域网入口",
+            suggestion="查看 wsl_lan_exposure；LWA 不会自动修改 Windows 网络",
+        )
     return CheckResult(
         "lan_url_stale",
         STATUS_OK,
@@ -1554,6 +1573,103 @@ def _collect_lan_drifted_ids(
         if lan_ip and host and host not in (lan_ip, "127.0.0.1"):
             drifted.append((iid, host))
     return drifted, skipped
+
+
+def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
+    """BUG-923：WSL 下只读检查 Windows 入口与局域网暴露，不修改网络。"""
+    from local_webpage_access.wsl_network import (
+        EXPOSURE_CANDIDATE_UNVERIFIED,
+        EXPOSURE_ENTRY_MISSING,
+        collect_wsl_network_snapshot,
+        describe_instance_access,
+    )
+
+    try:
+        snap = collect_wsl_network_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            "wsl_lan_exposure",
+            STATUS_WARN,
+            "WSL 网络探测失败，不能确认局域网入口",
+            detail=str(exc),
+            suggestion="检查 WSL interop 后重跑 lwa doctor；LWA 不会自动修改 Windows 网络",
+        )
+    if snap is None:
+        return CheckResult("wsl_lan_exposure", STATUS_SKIP, "非 WSL，跳过 Windows 入口发现")
+
+    route_host = None
+    host_port = None
+    for row in registry.list_instances():
+        manifest_path = ws.app_manifest_path(row["id"])
+        if not manifest_path.is_file():
+            continue
+        try:
+            from local_webpage_access.models import InstanceManifest
+
+            manifest = InstanceManifest.load(manifest_path)
+        except Exception:  # noqa: BLE001
+            continue
+        net = manifest.network
+        if net and net.hostPort:
+            host_port = net.hostPort
+        if net and net.routeMode == "name" and net.routeHost:
+            route_host = net.routeHost
+            break
+    view = describe_instance_access(
+        snap, host_port=host_port, route_host=route_host, config=config
+    )
+    details = [
+        f"mode={snap.networking_mode}",
+        f"windows={snap.windows_product or 'unknown'} {snap.windows_nt_version or ''}".rstrip(),
+        f"package={snap.package_version or 'unknown'}",
+        f"guestIp={snap.guest_ip or '-'}",
+        f"hostLanIp={snap.host_lan_ip or '-'}",
+        f"exposure={view.lan_exposure}",
+    ]
+    if snap.declared_networking_mode and snap.declared_networking_mode != snap.networking_mode:
+        details.append(
+            f"declared={snap.declared_networking_mode} observed={snap.observed_networking_mode}"
+        )
+    if view.dynamic_ip_forwarding:
+        details.append("现有 portproxy 指向会漂移的 WSL guest IP")
+    unknown_caps = [
+        f"{name}:{cap.status}({cap.reason})"
+        for name, cap in snap.capabilities.items()
+        if cap.status == "unknown"
+    ]
+    if unknown_caps:
+        details.append("能力未知：" + ", ".join(unknown_caps))
+    # BUG-937：缺口端口与 guidance 命令同源——无路径别名的实例取其 hostPort，
+    # 不能一律写网关入口端口（否则标题说缺 :8080、命令却转发 18000）。
+    entry_port = view.expected_port
+    suggestion = view.guidance
+    if view.lan_exposure == EXPOSURE_ENTRY_MISSING:
+        return CheckResult(
+            "wsl_lan_exposure",
+            STATUS_WARN,
+            "未发现可用的 Windows 局域网入口"
+            + (f"（缺 :{entry_port} 转发）" if entry_port else ""),
+            detail="；".join(details),
+            suggestion=suggestion,
+        )
+    if view.lan_exposure == EXPOSURE_CANDIDATE_UNVERIFIED:
+        msg = "已发现 Windows 入口候选，尚未从其他局域网设备验证"
+        if view.host_lan_url:
+            msg += f"：{view.host_lan_url}"
+        return CheckResult(
+            "wsl_lan_exposure",
+            STATUS_WARN,
+            msg,
+            detail="；".join(details),
+            suggestion=suggestion,
+        )
+    return CheckResult(
+        "wsl_lan_exposure",
+        STATUS_WARN,
+        view.note or "WSL 网络范围未能确认为局域网可达",
+        detail="；".join(details),
+        suggestion=suggestion,
+    )
 
 
 def check_source_freshness(ws: Workspace) -> CheckResult:
@@ -2832,8 +2948,14 @@ def run_doctor(
         caddy_probe_registry = None
     try:
         from local_webpage_access.ports import resolve_lan_ip
+        from local_webpage_access.wsl_network import collect_wsl_network_snapshot
 
         report.current_lan_ip = resolve_lan_ip(config)
+        try:
+            snap = collect_wsl_network_snapshot()
+            report.wsl_network = snap.to_dict() if snap is not None else None
+        except Exception:  # noqa: BLE001
+            report.wsl_network = None
         if caddy_probe_registry is not None:
             drifted_pairs, _skipped = _collect_lan_drifted_ids(
                 ws, caddy_probe_registry, report.current_lan_ip
@@ -2867,6 +2989,11 @@ def run_doctor(
             check_lan_url_stale(ws, config, caddy_probe_registry)
             if caddy_probe_registry is not None
             else CheckResult("lan_url_stale", STATUS_SKIP, "registry 不可用，跳过 lanUrl 漂移检测"),
+            check_wsl_lan_exposure(ws, config, caddy_probe_registry)
+            if caddy_probe_registry is not None
+            else CheckResult(
+                "wsl_lan_exposure", STATUS_SKIP, "registry 不可用，跳过 WSL 入口发现"
+            ),
             check_workspace_path_consistency(ws, config, registry=caddy_probe_registry),
             # S3-02 / DEV-158：副本一致性巡检（WARN 级，只读）
             check_state_consistency(ws, config, caddy_probe_registry, runner=runner)
@@ -3343,6 +3470,7 @@ __all__ = [
     "check_caddy_health",
     "check_workspace_path_consistency",
     "check_lan_url_stale",
+    "check_wsl_lan_exposure",
     "check_source_freshness",
     "check_database_url_alignment",
     "check_backend_handoff",

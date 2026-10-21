@@ -79,6 +79,14 @@ class InstanceStatus:
     persisted_lan_ip: str | None = None
     lan_address_stale: bool = False
     lan_url_source: str | None = None  # live|manual|manifest
+    # BUG-923：WSL 下 lanUrl 可能只是 guest/宿主地址；另报范围与 Windows 入口
+    lan_reachability: str | None = None
+    lan_exposure: str | None = None
+    host_lan_ip: str | None = None
+    host_lan_url: str | None = None
+    wsl_network_mode: str | None = None
+    access_scope_note: str | None = None
+    dynamic_ip_forwarding: bool = False
     source_size_bytes: int | None = None
     public_size_bytes: int | None = None
     data_size_bytes: int | None = None
@@ -174,6 +182,13 @@ class InstanceStatus:
             "persistedLanIp": self.persisted_lan_ip,
             "lanAddressStale": self.lan_address_stale,
             "lanUrlSource": self.lan_url_source,
+            "lanReachability": self.lan_reachability,
+            "lanExposure": self.lan_exposure,
+            "hostLanIp": self.host_lan_ip,
+            "hostLanUrl": self.host_lan_url,
+            "wslNetworkMode": self.wsl_network_mode,
+            "accessScopeNote": self.access_scope_note,
+            "dynamicIpForwarding": self.dynamic_ip_forwarding,
             "sourceSizeBytes": self.source_size_bytes,
             "publicSizeBytes": self.public_size_bytes,
             "dataSizeBytes": self.data_size_bytes,
@@ -337,6 +352,13 @@ def instance_status(
         persisted_lan_ip=net["persisted_lan_ip"],
         lan_address_stale=net["lan_address_stale"],
         lan_url_source=net["lan_url_source"],
+        lan_reachability=net.get("lan_reachability"),
+        lan_exposure=net.get("lan_exposure"),
+        host_lan_ip=net.get("host_lan_ip"),
+        host_lan_url=net.get("host_lan_url"),
+        wsl_network_mode=net.get("wsl_network_mode"),
+        access_scope_note=net.get("access_scope_note"),
+        dynamic_ip_forwarding=bool(net.get("dynamic_ip_forwarding")),
         source_size_bytes=_as_int(resources.get("source_size_bytes")),
         public_size_bytes=_as_int(resources.get("public_size_bytes")),
         data_size_bytes=_as_int(resources.get("data_size_bytes")),
@@ -667,6 +689,44 @@ def _resolve_route(workspace: Workspace, instance_id: str) -> tuple[str | None, 
     return None, None
 
 
+def _wsl_access_overlay(
+    config: Config, host_port: int | None, route_host: str | None
+) -> dict[str, Any]:
+    """BUG-923：附加 WSL 地址范围；非 WSL 或探测失败时字段为 None。"""
+    empty = {
+        "lan_reachability": None,
+        "lan_exposure": None,
+        "host_lan_ip": None,
+        "host_lan_url": None,
+        "wsl_network_mode": None,
+        "access_scope_note": None,
+        "dynamic_ip_forwarding": False,
+    }
+    try:
+        from local_webpage_access.wsl_network import (
+            collect_wsl_network_snapshot,
+            describe_instance_access,
+        )
+
+        snap = collect_wsl_network_snapshot()
+    except Exception:  # noqa: BLE001 — 状态页不得因 Windows 探测失败而整体不可用
+        return empty
+    if snap is None:
+        return empty
+    view = describe_instance_access(
+        snap, host_port=host_port, route_host=route_host, config=config
+    )
+    return {
+        "lan_reachability": view.guest_reachability,
+        "lan_exposure": view.lan_exposure,
+        "host_lan_ip": snap.host_lan_ip,
+        "host_lan_url": view.host_lan_url,
+        "wsl_network_mode": snap.networking_mode,
+        "access_scope_note": view.note,
+        "dynamic_ip_forwarding": view.dynamic_ip_forwarding,
+    }
+
+
 def _resolve_network_urls(
     workspace: Workspace,
     config: Config,
@@ -694,6 +754,13 @@ def _resolve_network_urls(
         "persisted_lan_ip": None,
         "lan_address_stale": False,
         "lan_url_source": None,
+        "lan_reachability": None,
+        "lan_exposure": None,
+        "host_lan_ip": None,
+        "host_lan_url": None,
+        "wsl_network_mode": None,
+        "access_scope_note": None,
+        "dynamic_ip_forwarding": False,
     }
 
     manifest_path = workspace.app_manifest_path(instance_id)
@@ -751,6 +818,7 @@ def _resolve_network_urls(
     _pl = _normalize_ip(persisted_lan or "") or persisted_lan
     _ci = _normalize_ip(current_ip or "") or current_ip
     stale = bool(persisted_lan and current_ip and _pl not in (_ci, "127.0.0.1"))
+    overlay = _wsl_access_overlay(config, host_port, route_host if route_mode_name else None)
     return {
         "lan_url": lan_url,
         "route_host": route_host if route_mode_name else None,
@@ -759,6 +827,7 @@ def _resolve_network_urls(
         "persisted_lan_ip": persisted_lan,
         "lan_address_stale": stale,
         "lan_url_source": source,
+        **overlay,
     }
 
 

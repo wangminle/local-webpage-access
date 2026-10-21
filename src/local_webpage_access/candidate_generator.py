@@ -177,7 +177,7 @@ def generate_candidates(evidence: ProjectEvidence) -> list[DeploymentCandidate]:
             continue
         node_backend = set(signal.nodeDeps.keys()) & _NODE_BACKEND
         if node_backend or _is_node_backend_start_script(signal.nodeScripts.get("start")):
-            candidate = _make_node_subdir_candidate(signal, node_backend)
+            candidate = _make_node_subdir_candidate(evidence, signal, node_backend)
             candidates.append(candidate)
 
     # ---- Node 根目录候选 ----
@@ -201,9 +201,13 @@ def generate_candidates(evidence: ProjectEvidence) -> list[DeploymentCandidate]:
         frontend_deps = set(signal.nodeDeps.keys()) & _NODE_FRONTEND
         if frontend_deps and "build" in signal.nodeScripts:
             if has_backend_candidate:
-                candidate = _make_frontend_subdir_candidate(signal, tier="alternate")
+                candidate = _make_frontend_subdir_candidate(
+                    evidence, signal, tier="alternate"
+                )
             else:
-                candidate = _make_frontend_subdir_candidate(signal, tier="primary")
+                candidate = _make_frontend_subdir_candidate(
+                    evidence, signal, tier="primary"
+                )
             candidates.append(candidate)
 
     # R-frontend-root: 根目录有 NODE_FRONTEND + build script
@@ -392,16 +396,16 @@ def _make_node_root_candidate(
 
 
 def _make_node_subdir_candidate(
+    evidence: ProjectEvidence,
     signal: SubdirSignal,
     backend_deps: set[str],
 ) -> DeploymentCandidate:
     """R-node-subdir：子目录有 NODE_BACKEND（如 backend/package.json 含 express）。"""
     has_build = "build" in signal.nodeScripts
     has_start = "start" in signal.nodeScripts
-    has_lock = bool(signal.nodeDeps)  # 简化：有依赖即用 npm ci
 
     entry = EntryConfig(
-        install="npm ci" if has_lock else "npm install",
+        install=_node_install_command_for_subdir(evidence, signal),
         build="npm run build" if has_build else None,
         start="npm run start" if has_start else "node server.js",
     )
@@ -429,12 +433,13 @@ def _make_node_subdir_candidate(
 
 
 def _make_frontend_subdir_candidate(
+    evidence: ProjectEvidence,
     signal: SubdirSignal,
     tier: str = "primary",
 ) -> DeploymentCandidate:
     """R-frontend-subdir：子目录有 NODE_FRONTEND + build script。"""
     entry = EntryConfig(
-        install="npm ci",
+        install=_node_install_command_for_subdir(evidence, signal),
         build="npm run build",
         start=None,
         buildOutputDir=f"{signal.path}/dist",
@@ -487,18 +492,19 @@ def _make_frontend_root_candidate(
 
 def _node_install_command(evidence: ProjectEvidence) -> str:
     """推断 Node 安装命令。"""
-    root_files = set(evidence.rootFiles)
-    if "pnpm-lock.yaml" in root_files:
-        return "pnpm install --frozen-lockfile"
-    if "yarn.lock" in root_files:
-        return "yarn install --frozen-lockfile"
-    # BUG-873（#104）：bun.lock（现行文本锁）与 bun.lockb（旧二进制锁）都走
-    # bun install——此前 bun.lockb 被错映射为 npm ci、bun.lock 完全不识别。
-    if "bun.lock" in root_files or "bun.lockb" in root_files:
-        return "bun install --frozen-lockfile"
-    if "package-lock.json" in root_files:
-        return "npm ci"
-    return "npm install"
+    from local_webpage_access.node_toolchain import install_command_for
+
+    return install_command_for(Path(evidence.root))
+
+
+def _node_install_command_for_subdir(
+    evidence: ProjectEvidence, signal: SubdirSignal
+) -> str:
+    from local_webpage_access.node_toolchain import install_command_for
+
+    root = Path(evidence.root)
+    workdir = root / signal.path if signal.path else root
+    return install_command_for(root, workdir=workdir)
 
 
 def _has_primary_backend(candidates: list[DeploymentCandidate]) -> bool:
@@ -869,6 +875,10 @@ _NODE_ROUTE_RE = re.compile(
     r"""(?<![\"'])\b(?:app|router|server|api|rest)\s*\.\s*(get|head)\s*\(\s*["']([^"']+)["']""",
     re.IGNORECASE,
 )
+_DJANGO_PATH_RE = re.compile(
+    r"""(?<![\"'])\b(?:path|re_path|url)\s*\(\s*[rf]?["']([^"']+)["']""",
+    re.IGNORECASE,
+)
 # 仅把健康类路径当作可安全 GET 的门槛探针；其余路由可能需鉴权/仅 POST，探测会假红。
 # S1-04：允许带前缀的命名（public-health、healthcheck、health-check、health_check）。
 _HEALTH_PATH_RE = re.compile(
@@ -969,6 +979,27 @@ def _discover_health_probes(
         routes_total += len(route_re.findall(text))
         texts[file_path] = text
 
+    django_routes = 0
+    extra_health: list[tuple[str, str]] = []
+    if backend.kind == "python":
+        for text in texts.values():
+            django_hits = _DJANGO_PATH_RE.findall(text)
+            if not django_hits:
+                continue
+            django_routes += len(django_hits)
+            routes_total += len(django_hits)
+            for route in django_hits:
+                if "{" in route or "<" in route:
+                    continue
+                if not _HEALTH_PATH_RE.search(route):
+                    continue
+                path = route if route.startswith("/") else f"/{route}"
+                extra_health.append(("GET", path))
+        if django_routes:
+            backend.reasoning.append(
+                f"扫描到 {django_routes} 条 Django 路由，其中 {len(extra_health)} 条健康端点"
+            )
+
     if backend.kind == "python":
         composed = route_prefix.compose_python_routes(scan_root, texts)
     else:
@@ -1004,7 +1035,7 @@ def _discover_health_probes(
             _DISCOVERY_MAX_DEPTH,
         )
 
-    return [
+    probes = [
         ProbeSpec(
             path=item.path,
             method=item.method,
@@ -1020,6 +1051,25 @@ def _discover_health_probes(
         )
         for item in found
     ]
+    seen_paths = {(p.method, p.path) for p in probes}
+    for method, path in extra_health:
+        if (method, path) in seen_paths:
+            continue
+        seen_paths.add((method, path))
+        probes.append(
+            ProbeSpec(
+                path=path,
+                method=method,
+                expectedStatus=200,
+                isMandatory=False,
+                source="discovered",
+                confidence="medium",
+                description=(
+                    f"Django urls 发现的健康端点（HTTP {method} {path}，可选证据）"
+                ),
+            )
+        )
+    return probes
 
 
 def _walk_source_files(root: Path, extensions: tuple[str, ...], *, max_depth: int):

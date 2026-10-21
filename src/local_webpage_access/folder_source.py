@@ -149,33 +149,33 @@ def pack_source_dir(
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
     file_count = 0
 
-    with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(source_dir, followlinks=False):
-            # 原地修改 dirs 以跳过冗余目录（os.walk 惯例）
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-            root_path = Path(root)
+    members: list[tuple[str, Path]] = []
+    for root, dirs, files in os.walk(source_dir, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
+        root_path = Path(root)
+        for fname in sorted(files):
+            if fname in _SKIP_FILES:
+                continue
+            fpath = root_path / fname
+            if fpath.is_symlink() or not fpath.is_file():
+                continue
+            arcname = str(fpath.relative_to(source_dir)).replace("\\", "/")
+            members.append((arcname, fpath))
+    members.sort(key=lambda item: item[0])
 
-            for fname in files:
-                if fname in _SKIP_FILES:
-                    continue
-                fpath = root_path / fname
-                # 跳过符号链接（安全）
-                if fpath.is_symlink():
-                    continue
-                if not fpath.is_file():
-                    continue
-                # arcname 相对于源目录根。用固定时间戳的 ZipInfo 流式写入，
-                # 保证「同内容 → 同 zip 字节流 → 同 hash」（大文件不进内存）。
-                arcname = str(fpath.relative_to(source_dir))
-                try:
-                    zi = zipfile.ZipInfo(arcname, date_time=_ZIP_FIXED_DATE)
-                    zi.compress_type = zipfile.ZIP_DEFLATED
-                    zi.external_attr = (fpath.stat().st_mode & 0xFFFF) << 16
-                    with fpath.open("rb") as src_fh, zf.open(zi, "w") as dst_fh:
-                        shutil.copyfileobj(src_fh, dst_fh, length=1024 * 1024)
-                    file_count += 1
-                except OSError as exc:
-                    log.warning("打包时跳过文件 %s：%s", fpath, exc)
+    with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, fpath in members:
+            try:
+                zi = zipfile.ZipInfo(arcname, date_time=_ZIP_FIXED_DATE)
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                mode = fpath.stat().st_mode
+                normalized = 0o755 if (mode & 0o111) else 0o644
+                zi.external_attr = (normalized & 0xFFFF) << 16
+                with fpath.open("rb") as src_fh, zf.open(zi, "w") as dst_fh:
+                    shutil.copyfileobj(src_fh, dst_fh, length=1024 * 1024)
+                file_count += 1
+            except OSError as exc:
+                log.warning("打包时跳过文件 %s：%s", fpath, exc)
 
     log.info("源目录 %s 已打包为 %s（%d 个文件）", source_dir, dest_zip, file_count)
     return dest_zip

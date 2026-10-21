@@ -1159,6 +1159,16 @@ def reconcile(
             # 完整 lifecycle_stage 由 hosting._stage 镜像（见 hosting.py）。
             # S3-01 / DEV-157：最近一次操作失败且容器缺失时，优先拉回上一可用
             # 镜像版本（selfHealPreferLastGood，默认开），而不是按当前源码重建。
+            from local_webpage_access.build_sources import manual_build_blocks_heal
+
+            blocked = manual_build_blocks_heal(workspace, iid)
+            if blocked:
+                log.info(
+                    "daemon reconcile: 实例 %s 存在手动构建（%s），自愈让路",
+                    iid,
+                    blocked.get("reason"),
+                )
+                continue
             if (
                 runtime == "docker-compose"
                 and getattr(config, "selfHealPreferLastGood", True)

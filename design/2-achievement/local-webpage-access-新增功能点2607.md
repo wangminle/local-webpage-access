@@ -1,7 +1,7 @@
 # 新增功能点计划 IMP-025～IMP-028 / IMP-030 / IMP-031～043 / WSL2 实机排障反哺（202607）
 
 > **后续月份**：202608 新增功能点主账已收口归档，见 [`local-webpage-access-新增功能点2608.md`](./local-webpage-access-新增功能点2608.md)（含 2607 完成度核对与延期项转交）。
-> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机清单已写入 `docs/acceptance-checklist.md`，真机勾选仍属运维验收）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机清单已写入 acceptance，真机勾选仍属运维验收）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 平台矩阵清单已写入 acceptance；036.09 daemon/manager 的 Windows DETACHED 启动分支已删除/硬拒绝）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。**§23 已于 2026-07-29 根据 WSL2 Mirrored + Full Profile 实机排障补入；BUG-376～381 / DOC-077 已落地，纳入 V0.6.8。** **§24 IMP-042「LWA 工作区迁移」主路径已落地（2026-07-29，DEV-089）；跨盘/跨机（IMP-042.b）明确延期。** **V0.6.9：事务机加固 BUG-386～405 及 IMP-023 连接失败误判修复已纳入。** **V0.6.10：能力缓存假红 BUG-406/407、FAQ DOC-083、角色局部 overall ADJ-035、caddy_start 并行探活 ADJ-036、三角色收敛 TST-001、036.09 Windows DETACHED 启动硬拒绝、033.13/035.06/036.08 实机清单入 acceptance；§25 IMP-043 显示名（主页 `<title>`）已落地；名称列/实例表 CSS 固定布局设想已废弃，经 BUG-413/414 恢复为 V0.6.9 前端 CSS 布局（仅保留名称最多两行截断）。**编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](../achievement/local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
+> **状态**：IMP-025～028 已落地（见 `task-list` DEV-068～072）；**IMP-030 跨平台自启动已落地（2026-07-16，见 `task-list` DEV-073～076，关闭 BUG-138/139）**；**IMP-031 / IMP-032 已落地（2026-07-17，DEV-074 / DEV-075）**；**IMP-033 Full Profile 权限与能力闭环主路径已落地（2026-07-19，DEV-076/078，关闭 BUG-231；033.13 实机清单已写入 `docs/acceptance-checklist.md`，真机勾选仍属运维验收）**；**IMP-034 日志可观测性补强已落地（2026-07-19，DEV-077/079）**；**IMP-035 管理页安全删除主路径已落地（2026-07-20，DEV-080 / DOC-052；035.06 浏览器实机清单已写入 acceptance，真机勾选仍属运维验收）**；**IMP-036 正式支持平台收敛主路径已落地（2026-07-20，DEV-081；036.08 平台矩阵清单已写入 acceptance；036.09 daemon/manager 的 Windows DETACHED 启动分支已删除/硬拒绝）**；**IMP-037 / IMP-038 / IMP-039 / IMP-040 / IMP-041 已落地（2026-07-20，DEV-082 / DEV-083 / DEV-084 / DEV-087 / DEV-088）**；原 IMP-040 `update --pull` / IMP-041 Vite 端口元数据已从范围删除。**§23 已于 2026-07-29 根据 WSL2 Mirrored + Full Profile 实机排障补入；BUG-376～381 / DOC-077 已落地，纳入 V0.6.8。** **§24 IMP-042「LWA 工作区迁移」主路径已落地（2026-07-29，DEV-089）；跨盘/跨机（IMP-042.b）明确延期。** **V0.6.9：事务机加固 BUG-386～405 及 IMP-023 连接失败误判修复已纳入。** **V0.6.10：能力缓存假红 BUG-406/407、FAQ DOC-083、角色局部 overall ADJ-035、caddy_start 并行探活 ADJ-036、三角色收敛 TST-001、036.09 Windows DETACHED 启动硬拒绝、033.13/035.06/036.08 实机清单入 acceptance；§25 IMP-043 显示名（主页 `<title>`）已落地；名称列/实例表 CSS 固定布局设想已废弃，经 BUG-413/414 恢复为 V0.6.9 前端 CSS 布局（仅保留名称最多两行截断）。**编号续接 IMP-024（见已归档的 [`local-webpage-access-imp010-021-plan-20260707.md`](local-webpage-access-imp010-021-plan-20260707.md)）；IMP-029 见 [`待改进功能点记录-20260706.md`](./待改进功能点记录-20260706.md)。
 > **范围**：§0～§9 为管理页浏览量统计改进；§10 为 macOS / Linux（含 WSL）自启动配置与完备性检查；§11 为 Docker 国内源安装脚本；§12 为 setup/init 的 `--default` / `--full` 环境装配档位；§13 为 `--full` 下 LWA、Caddy、Docker 的统一权限契约、运行协作与可执行 WBS；§14 为日志可观测性补强；§15 为管理页任意项目的二次确认安全删除；§16 为正式支持平台矩阵；§17 为 `design/achievement/` 全量功能反查；§18～§20 依次为网关后端原子切换、升级后访问闭环、进行中构建取消；§21 为管理页/访问地址在 LAN IP 变化后的新鲜度与自愈；§22 为删除/purge 阶段日志与容器别名清理（IMP-034 后续 + BUG-268）；§23 为 2026-07-29 WSL2 实机排障对能力缓存、HTTP 探针、别名子资源和宿主网络文档的反哺；§24 为 **LWA 工作区迁移**（同盘原子改名事务 + CLI + Skill）；§25 为管理页**实例显示名（主页 `<title>`）**；原「名称列宽固定 / `table-layout: fixed`」前端设想已撤销，布局以 V0.6.9 为准。
 
 ---
@@ -20,7 +20,7 @@
 
 详情抽屉里「独立 IP N 个」当前是纯文本。**期望**：把它做成可点击链接，点击后弹出一个小面板（tips 形式），列出所有访问过的 IP 地址（带每 IP 的访问次数与最近时间）。
 
-**补充要求（2026-07-15）**：在该 IP 列表里，凡是**本机实际持有的地址**——无论是 `127.0.0.1`、本机的局域网 IP（如 `10.181.239.115`），还是将来的 Tailscale 地址（通常落在 `100.64.0.0/10`）——都要在 IP 后标记「（本机）」。不能把整个 Tailscale CGNAT 网段都视为本机，否则其他 tailnet 节点也会被误标。
+**补充要求（2026-07-15）**：在该 IP 列表里，凡是**本机实际持有的地址**——无论是 `127.0.0.1`、本机的局域网 IP（如 `<本机LAN地址>`），还是将来的 Tailscale 地址（通常落在 `100.64.0.0/10`）——都要在 IP 后标记「（本机）」。不能把整个 Tailscale CGNAT 网段都视为本机，否则其他 tailnet 节点也会被误标。
 
 ---
 
@@ -165,7 +165,7 @@
 ## 8. IMP-027 — Docker 容器真实访客 IP 统计（经 Caddy 别名日志）
 
 > **状态**：2026-07-15 补充。承接 §0/§1 之后对「容器 IP 统计」的核查结论。
-> **背景**：IMP-025 的 page 过滤对容器**已生效**（`_is_page_view` → `record_hits` 对所有源统一），但容器走 `_ingest_container` 读 `docker logs`，存在两个 IP 维度的固有问题：(1) `parse_container_log_line` 兜底正则不抓行首 IP，`remote` 常为空 → `pageview_ip_stats` 为 0 条；(2) 即便抓到，源 IP 恒为 Docker 桥接网关（如 `192.168.65.1`），分不出真实访客。实测 prd-workflow：22 次 hits、`uniqueIpList` 为空。
+> **背景**：IMP-025 的 page 过滤对容器**已生效**（`_is_page_view` → `record_hits` 对所有源统一），但容器走 `_ingest_container` 读 `docker logs`，存在两个 IP 维度的固有问题：(1) `parse_container_log_line` 兜底正则不抓行首 IP，`remote` 常为空 → `pageview_ip_stats` 为 0 条；(2) 即便抓到，源 IP 恒为 Docker 桥接网关（如 `<Docker桥接网关地址>`），分不出真实访客。实测 prd-workflow：22 次 hits、`uniqueIpList` 为空。
 
 ### 8.1 方案
 
@@ -947,7 +947,7 @@ Overall                   READY
   "workspaceRoot": "/path/to/workspace",
   "profile": "full",
   "overall": "degraded",
-  "serviceUser": "fenix",
+  "serviceUser": "service-user",
   "capabilities": {
     "dockerEngine": "ready",
     "dockerCompose": "ready",
@@ -1786,20 +1786,22 @@ audit remove instance=<id> purge=<bool> force=<bool> status=<http> code=<error_c
 > 调查项，不提前登记成代码 Bug。
 >
 > **来源环境**：Windows 11 + WSL2 Ubuntu 24.04，`networkingMode=mirrored`；
-> 工作区 `/home/fenix-haier/local-webpage-access-20260717`；LWA V0.6.7；
-> AI Review 业务实例 `ai-review-prd-v0-2-7`；Windows/WSL 共享 LAN IP
-> `10.181.224.39/23`。
+> 工作区 `<工作区根目录>`；LWA V0.6.7；
+> 示例业务实例 `example-backend`；Windows/WSL 共享 LAN IP
+> `<Windows/WSL共享LAN地址及前缀>`。
 >
 > **结论摘要**：BUG-102、BUG-198、BUG-205 与 IMP-023 的既有方向成立；
 > BUG-376～378补上了 gateway 能力快照和升级收尾的一部分缺口；BUG-379～381 与
 > DOC-077 已按本节设计落地（manager 300s 周期刷新+单飞、内部探针直连、
 > alias_resource_mismatch、Hyper-V firewall 文档）。`data/data/` 溯源仍为 P2 调查项。
 
-### 23.1 工作区配置基线与运行契约
+> **公开范围**：本节保留系统类型、缺陷与设计约束；工作区、服务用户、业务标识和地址已泛化，示例端口不代表某台现有机器的完整配置。原始现场分析与实机操作记录仅本地保留。
 
-现场 `local-web.yml` 的关键配置为：
+### 23.1 类型化配置与运行契约
 
-| 配置 | 现场值 | 对本次排障的含义 |
+下表从历史配置提炼角色关系，具体部署值应以本机配置为准：
+
+| 配置 | 示例/角色 | 对排障的含义 |
 | --- | --- | --- |
 | `managerHost` / `managerPort` | `0.0.0.0` / `17800` | manager 确实监听所有网卡；LAN 不可达时需继续查 Hyper-V firewall、宿主策略与真实外部客户端，不能归因于只绑定回环 |
 | `managerEnabled` | `true` | 管理页属于该工作区的正式运行组件 |
@@ -1807,7 +1809,7 @@ audit remove instance=<id> purge=<bool> force=<bool> status=<http> code=<error_c
 | `portPool` | `18000–19999` | 是实例端口**分配范围**，不是应默认全量开放的防火墙范围；当前实例实际使用 `18000` |
 | `lanIpStrategy` / `manualLanIp` | `auto` / `null` | URL 由当前出口网卡自动推导；多网卡、VPN、换网时仍须接受漂移检测与 refresh/review |
 | `profile` | `full` | Caddy、Docker、manager、daemon、gateway 任一强制字段为 unknown/degraded 即 `unready`；不能用改成 default 掩盖假红 |
-| `serviceUser` | `fenix-haier` | Caddy owner 与 Docker 权限均应以该用户的真实后台上下文验收 |
+| `serviceUser` | `<服务用户>` | Caddy owner 与 Docker 权限均应以该用户的真实后台上下文验收 |
 | `buildConcurrency` | `1` | 与本次网络、能力缓存和数据库路径问题无直接因果 |
 | `defaultResourceLimits` | `512m` / `0.75` | 仅是新实例默认资源档位；无 OOM/CPU throttling 证据时不纳入本次根因 |
 | `staticRateLimit.enabled` | `false` | 不导致本次故障；即使开启也不能替代 manager token 或业务登录限流 |
@@ -2041,7 +2043,7 @@ AND prefixed.content_length > 0
    - WSL 内 `127.0.0.1:<port>`：证明服务自身；
    - Windows `localhost:<port>`：证明宿主/WSL localhost 互通；
    - Windows 自身 NIC IP：只记录现场结果，不作为 LAN 最终结论；
-   - 另一台物理机/手机访问 `10.181.224.39:<port>`：最终 LAN 验收。
+   - 另一台物理机/手机访问 `<Windows/WSL共享LAN地址>:<port>`：最终 LAN 验收。
 7. “Windows 用自身 NIC IP 失败是 WSL 已知行为”目前缺少足够官方证据，只能写作现场
    观察；在另一台物理机验证前，不得宣称 LAN 已通或配置必错。
 
@@ -2051,7 +2053,7 @@ AND prefixed.content_length > 0
 
 1. 应用配置 `database.path: runtime/data/app.db`，在容器内解析为
    `/app/runtime/data/app.db`。
-2. 宿主 `apps/ai-review-prd-v0-2-7/data/` bind mount 到容器
+2. 宿主 `apps/example-backend/data/` bind mount 到容器
    `/app/runtime/data`。
 3. 故障时宿主同时存在：
    - `data/app.db`：应用实际读取，初始只有默认 admin；
@@ -2102,7 +2104,7 @@ AND prefixed.content_length > 0
 | **23.06** | P1 | 实现通用 alias resource mismatch 与兼容输出 | `access.py`、CLI/API 报告格式 | 空 200/404/错误 MIME 均可解释；rebuild 后复检同口径 |
 | **23.07** | P1 | 修正 WSL2 Mirrored 防火墙、端口和验收文档 | `docs/known-limitations.md`、`docs/autostart.md`、`docs/operations-playbook.md`、README | Hyper-V firewall 与逐端口规则准确；不开放 2019；外部物理机为最终验收 |
 | **23.08** | P1 | 跑单元、静态检查与全量回归 | capability/access/health/gateway/updater tests、ruff、mypy、pytest | 定向与全量测试无回归，`git diff --check` 通过 |
-| **23.09** | P1 | WSL2 Mirrored Full 实机闭环 | 10.181.224.39 或等价测试机 | manager/daemon/gateway 缓存自动收敛；代理开关不影响探针；另一台设备访问 17800/8080/实际实例端口 |
+| **23.09** | P1 | WSL2 Mirrored Full 实机闭环 | <Windows/WSL共享LAN地址> 或等价测试机 | manager/daemon/gateway 缓存自动收敛；代理开关不影响探针；另一台设备访问 17800/8080/实际实例端口 |
 | **23.10** | P2 | 取证 `data/data/` 来源并决定是否开发多库诊断 | 原始 zip、历史 compose、run/event、应用历史源码 | 形成可复核证据链；无证据不自动迁库、不错误归因 |
 
 ### 23.7 验收矩阵
@@ -2141,9 +2143,9 @@ AND prefixed.content_length > 0
    - `localhost:8080/<alias>/`
    - 自身 NIC IP 结果单独记录，不作为最终 LAN 判定。
 3. 另一台物理机/手机：
-   - `10.181.224.39:17800`（带 token 登录）
-   - `10.181.224.39:8080/<alias>/`
-   - 仅在确需直连时测试 `10.181.224.39:<实际实例端口>`。
+   - `<Windows/WSL共享LAN地址>:17800`（带 token 登录）
+   - `<Windows/WSL共享LAN地址>:8080/<alias>/`
+   - 仅在确需直连时测试 `<Windows/WSL共享LAN地址>:<实际实例端口>`。
 4. 代理回归：
    - 开启 Windows/WSL 代理配置；
    - 保持互联网依赖下载可用；
@@ -2208,7 +2210,7 @@ AND prefixed.content_length > 0
 
 > **前置运行时修复**：BUG-382（外部 down 后 start → `up -d`）、BUG-383（pageviews 路径无关游标）、BUG-384（`autostart repair` 保留 gateway）。
 
-> **文档**：人工逃生舱 [`docs/workspace-rename.md`](../../docs/workspace-rename.md)（DOC-081）；实现计划 [`design/plans/…实施计划合集` · 工作区迁移](../plans/local-webpage-access-实施计划合集-20260804.md#2026-07-29-工作区迁移workspace-relocate实施计划)（PLN-027）。
+> **文档**：人工逃生舱 [`docs/workspace-rename.md`](../../docs/workspace-rename.md)（DOC-081）；实现计划 [`design/plans/…实施计划合集` · 工作区迁移](local-webpage-access-实施计划合集-20260804.md#2026-07-29-工作区迁移workspace-relocate实施计划)（PLN-027）。
 
 > **实现跟踪**：`DEV-089`。
 
@@ -2368,7 +2370,7 @@ preflight → backup → quiesce → move → rebind → regenerate → restore 
 | **043.b** | 优先级 | `--name`（user）> HTML title（html_title）> `titleize(slug)`（slug） |
 | **043.c** | 溯源字段 | manifest 新增可选 `nameSource`：`user` \| `html_title` \| `slug`。旧实例为 `null` 时，仅当 `name == titleize(id)` 才允许 title 回填（避免误改用户手工名）。 |
 | **043.d** | 旧实例回填 | `status.all_statuses` 拉列表时对可覆盖名调用 `refresh_display_name_from_homepage`（写回 manifest + registry）；已是 user/html_title 则跳过。 |
-| **043.e** | 列宽 / 表格布局 | **已废弃原方案**（原：`table-layout: fixed` + `.col-name` / `.cell-name` 固定 200px）。**现行**：恢复 V0.6.9 布局；仅名称按钮 `-webkit-line-clamp: 2`。详见 BUG-413 / BUG-414 与 [`design/plans/…实施计划合集` · 管理页表布局](../plans/local-webpage-access-实施计划合集-20260804.md#2026-07-30-管理页实例表布局修复设计)。 |
+| **043.e** | 列宽 / 表格布局 | **已废弃原方案**（原：`table-layout: fixed` + `.col-name` / `.cell-name` 固定 200px）。**现行**：恢复 V0.6.9 布局；仅名称按钮 `-webkit-line-clamp: 2`。详见 BUG-413 / BUG-414 与 [`design/plans/…实施计划合集` · 管理页表布局](local-webpage-access-实施计划合集-20260804.md#2026-07-30-管理页实例表布局修复设计)。 |
 | **043.f** | update | `import --update`：若旧名仍可覆盖（slug / 旧 null+titleize 匹配），则按新包主页 title 刷新。 |
 
 ### 25.4 触点

@@ -56,7 +56,7 @@ from local_webpage_access.verification_config import effective_capability_contra
 
 log = get_logger("hosting")
 
-_BUILD_TIMEOUT = 600
+_BUILD_TIMEOUT = 1800
 _BUILD_OUTPUT_DIRS = ("dist", "build", "out", ".output", ".svelte-kit")
 # 容器启动后等待 HTTP 就绪的最大尝试次数与间隔（小主机性能弱，留足预热时间）
 _CONTAINER_HEALTH_ATTEMPTS = 30
@@ -530,6 +530,15 @@ def build_and_host_frontend(
         from local_webpage_access.instance_settings import effective_build_env
 
         build_env = {**os.environ, **effective_build_env(manifest)}
+        from local_webpage_access.build_sources import (
+            host_build_timeout,
+            inject_pkg_cache_env,
+        )
+        from local_webpage_access.node_toolchain import inspect_node_toolchain
+
+        tool = inspect_node_toolchain(current_dir, workdir=work_dir)
+        build_env = inject_pkg_cache_env(build_env, workspace, tool.manager)
+        build_timeout = host_build_timeout(config, monorepo=tool.workspaces)
         # S2-08 / issue #59：前端构建路径也写阶段记录（与容器/静态同一记录器）。
         _record_stage(workspace, registry, instance_id, "host_start")
         # BUG-860/877/889：install 与 build 先各自完成宿主工具链解析，再统一
@@ -583,7 +592,13 @@ def build_and_host_frontend(
             write_instance_log(
                 workspace.apps, instance_id, "build", f"安装：{install_cmd}"
             )
-            run_command(install_cmd, cwd=work_dir, log_path=build_log, env=build_env)
+            run_command(
+                install_cmd,
+                cwd=work_dir,
+                log_path=build_log,
+                env=build_env,
+                timeout=build_timeout,
+            )
             _record_stage(workspace, registry, instance_id, "install_done")
         if manifest.entry.build:
             # BUG-889：build 与 install 共用同一工具链解析——install 已改写为
@@ -601,7 +616,13 @@ def build_and_host_frontend(
             write_instance_log(
                 workspace.apps, instance_id, "build", f"构建：{build_cmd}"
             )
-            run_command(build_cmd, cwd=work_dir, log_path=build_log, env=build_env)
+            run_command(
+                build_cmd,
+                cwd=work_dir,
+                log_path=build_log,
+                env=build_env,
+                timeout=build_timeout,
+            )
             _record_stage(workspace, registry, instance_id, "build_done")
         else:
             raise BuildError(
@@ -757,7 +778,8 @@ def _rescue_container_data_before_rebuild(
 
     source_dir = workspace.app_current(instance_id)
     flask_mount = _flask_instance_mount(
-        source_dir, source_subdir=getattr(manifest, "sourceSubdir", None)
+        source_dir, source_subdir=getattr(manifest, "sourceSubdir", None),
+        managed_data_path=container_data_paths(source_dir, manifest)[0],
     )
     if (
         flask_mount is not None and manifest.container is not None
@@ -3337,8 +3359,15 @@ def run_command(
         return False
 
     with open_append(log_path) as fh:
-        fh.write(f"\n$ {cmd}\n")
-        fh.flush()
+        from local_webpage_access.build_sources import write_build_segment
+
+        write_build_segment(
+            fh,
+            instance_id=instance_id or "-",
+            attempt=str(build_token or "host"),
+            command=cmd,
+            owner="manual" if instance_id else "system",
+        )
         proc = subprocess.Popen(cmd, **popen_kwargs)
         identity = worker_identity_token(cmd)
         if instance_id is not None:
@@ -3395,8 +3424,10 @@ def run_command(
                 instance_id=instance_id,
             )
         if timed_out:
+            from local_webpage_access.build_sources import timeout_hint
+
             raise BuildError(
-                f"命令超时（{timeout}s）：{cmd}；详细日志见 {log_path}",
+                f"{timeout_hint(timeout)} 命令：{cmd}；详细日志见 {log_path}",
                 command=cmd,
                 timeout=timeout,
             )

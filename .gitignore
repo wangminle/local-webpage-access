@@ -91,8 +91,10 @@ design/2-achievement/lwa-eval/
 design/4-issues/
 design/5-checkpoints/
 
-# ---- 真实应用 Eval 本地源码（版本与配置见 tests/evals/evals-readme.md）---------
-# 通配排除全部评测应用目录（新增应用自动覆盖），仅反向包含 readme
+# ---- Eval：通用文档公开，实际操作与原始证据仅本地 --------------------------
+# 公开方案位于 design/3-plans，类型化结论位于 design/2-achievement。
+# 真实主机、SSH 操作手册、逐机报告与原始证据统一留在已忽略的检查点目录。
+# 本地第三方源码/归档/运行制品不提交，仅保留可复现样本说明。
 /tests/evals/*
 !/tests/evals/evals-readme.md
 

@@ -167,6 +167,21 @@ def _error_summary_with_hint(text: str | None, limit: int = 1200) -> str:
     classified = classify_build_failure(blob)
     hint = registry_timeout_hint(blob)
     extras = [str(p) for p in (classified, hint) if p]
+    networky = is_registry_timeout_error(blob) or any(
+        sig in blob.lower() for sig in _NETWORK_SIGNALS
+    )
+    if networky:
+        from local_webpage_access.build_sources import (
+            diagnose_proxy_path,
+            extract_download_sources,
+        )
+
+        extras.append(diagnose_proxy_path(env=None, command=blob))
+        sources = extract_download_sources(blob)
+        if sources:
+            extras.append(
+                "下载源：" + "、".join(sources[:4]) + "（失败冷却见工作区 run/source-health.json）"
+            )
     extra = "\n".join(extras)
     if not extra:
         return blob[-limit:] if blob else ""
@@ -174,6 +189,28 @@ def _error_summary_with_hint(text: str | None, limit: int = 1200) -> str:
     head = blob[-room:] if room else ""
     summary = f"{extra}\n——\n{head}" if head else extra
     return summary[:limit]
+
+
+def _record_failed_sources(workspace: Workspace, text: str | None) -> None:
+    """DEV-145：仅在网络/Hub 失败路径记录源冷却，成功不清除历史失败。"""
+    blob = text or ""
+    if not is_registry_timeout_error(blob) and not any(
+        sig in blob.lower() for sig in _NETWORK_SIGNALS
+    ):
+        return
+    from local_webpage_access.build_sources import (
+        extract_download_sources,
+        record_source_failure,
+    )
+
+    sources = extract_download_sources(blob)
+    if not sources and is_registry_timeout_error(blob):
+        sources = ["docker.io"]
+    for src in sources:
+        try:
+            record_source_failure(workspace, src, error=blob[:300])
+        except OSError:
+            log.debug("记录下载源失败状态失败：%s", src, exc_info=True)
 
 
 def probe_docker_permission() -> str | None:
@@ -360,8 +397,15 @@ def _execute_streaming(
 
     try:
         with open_append(log_path) as fh:
-            fh.write(f"\n$ {' '.join(args)}\n")
-            fh.flush()
+            from local_webpage_access.build_sources import write_build_segment
+
+            write_build_segment(
+                fh,
+                instance_id=instance_id or "-",
+                attempt=str(build_token or "docker"),
+                command=" ".join(args),
+                owner="system",
+            )
             try:
                 proc = subprocess.Popen(
                     args,
@@ -787,6 +831,7 @@ class DockerRuntime:
                     status="failed",
                     error_summary=_error_summary_with_hint(str(exc)),
                 )
+            _record_failed_sources(self.workspace, str(exc))
             raise
         if build_id is not None and self.registry is not None:
             if result.ok:
@@ -798,6 +843,7 @@ class DockerRuntime:
                     error_summary=_error_summary_with_hint(result.stderr or result.stdout),
                 )
         if not result.ok:
+            _record_failed_sources(self.workspace, result.stderr or result.stdout)
             self._event(instance_id, "error", f"镜像构建失败（exit {result.returncode}）")
             # `_require_ok` 在非 ok 时必抛 DockerError；勿用 raise 包返回值（mypy）。
             _require_ok(result, action="build", instance_id=instance_id, log_path=log_path)

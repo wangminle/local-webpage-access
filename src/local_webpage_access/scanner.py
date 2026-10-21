@@ -18,6 +18,11 @@ from enum import Enum
 from pathlib import Path
 
 from local_webpage_access.logging import get_logger
+from local_webpage_access.node_toolchain import (
+    describe_import_toolchain,
+    inspect_node_toolchain,
+    install_command_for,
+)
 from local_webpage_access.package_classifier import classify_and_select as _classify_monorepo
 from local_webpage_access.preflight import check_and_fix as _preflight_check
 from local_webpage_access.evidence_collector import collect as _collect_evidence
@@ -147,6 +152,7 @@ class FileSummary:
     """项目目录的确定性事实摘要。"""
 
     root: Path
+    workspace_root: Path | None = None  # 仓库根；summarize_package 时与 root（子包）不同
     top_files: set[str] = field(default_factory=set)  # 顶层文件名（小写）
     has_index_html: bool = False
     has_html: bool = False  # 任意 .html（含非 index 名）
@@ -173,7 +179,7 @@ class FileSummary:
 
 def summarize(root: Path) -> FileSummary:
     """收集项目目录的文件摘要（仅扫顶层 + 浅层，避免大目录过慢）。"""
-    summary = FileSummary(root=root)
+    summary = FileSummary(root=root, workspace_root=root)
 
     # 顶层文件
     for entry in root.iterdir():
@@ -246,7 +252,7 @@ def summarize_package(root: Path, package_path: str) -> FileSummary:
     （install 在根执行）。
     """
     pkg_dir = root / package_path
-    summary = FileSummary(root=pkg_dir)
+    summary = FileSummary(root=pkg_dir, workspace_root=root)
 
     # 子包 package.json 的 deps/scripts
     pkg = _read_package_json(pkg_dir / "package.json")
@@ -761,6 +767,7 @@ class Scanner:
                 result.pending = True
                 result.confidence = "low"
                 result.kind = Kind.NODE
+                result.notes.extend(describe_import_toolchain(project_dir))
                 # 仍执行预检（无害）
                 preflight = _preflight_check(result, project_dir)
                 _apply_preflight(result, preflight)
@@ -797,6 +804,7 @@ class Scanner:
             # 用子目录作为工程根进行识别
             subdir = project_dir / subdir_candidate.sourceSubdir
             subdir_summary = summarize(subdir)
+            subdir_summary.workspace_root = project_dir
             result.source_subdir = subdir_candidate.sourceSubdir
 
             # BUG-497：子目录重型数据库依赖也要标记 pending（此前只在根目录检查）。
@@ -1095,14 +1103,15 @@ class Scanner:
         has_sqlite_dep = bool(SQLITE_MARKERS & {d.lower() for d in summary.python_deps}) or bool(
             SQLITE_MARKERS & {d.lower() for d in summary.node_deps}
         )
-        if summary.sqlite_files or has_sqlite_dep:
+        orm_sqlite, orm_filename = _detect_declared_sqlite(summary.root)
+        if summary.sqlite_files or has_sqlite_dep or orm_sqlite:
             result.hasDatabase = True
             # BUG-198：RUNTIME_ROOT 应用写 runtime/data，compose 据此挂载
             data_dir = "runtime/data" if summary.has_runtime_paths else "data"
             # IMP-058 Gate-A CHK-V03：记录源 SQLite 文件名，供 compose.generate_env
             # 注入保留原文件名的 DATABASE_URL（避免 BUG-474 硬编码 app.sqlite 把
             # 应用指向全新空库）。取第一个文件名；多个时用首个作为主库。
-            db_filename = summary.sqlite_files[0] if summary.sqlite_files else None
+            db_filename = summary.sqlite_files[0] if summary.sqlite_files else orm_filename
             result.database = DatabaseConfig(
                 type="sqlite",
                 dataDir=data_dir,
@@ -1110,6 +1119,11 @@ class Scanner:
             )
             if summary.sqlite_files:
                 result.notes.append(f"发现 SQLite 文件：{', '.join(summary.sqlite_files[:3])}")
+            elif orm_sqlite:
+                result.notes.append(
+                    "源码声明 SQLite（Django ENGINE 或 Flask instance_path），"
+                    "尚未生成库文件时仍记 hasDatabase"
+                )
             if summary.has_runtime_paths:
                 result.notes.append("检测到 runtime_paths，SQLite 持久化目录为 runtime/data")
 
@@ -1227,6 +1241,11 @@ class Scanner:
                 result.pending = True
                 result.confidence = "low"
                 result.notes.append("Node 项目缺少明确的 frontend/backend 特征，标记 pending")
+        result.notes.extend(
+            inspect_node_toolchain(
+                summary.workspace_root or summary.root, workdir=summary.root
+            ).notes
+        )
 
     # ---- Python ------------------------------------------------------------
 
@@ -1330,24 +1349,25 @@ class Scanner:
 
 
 def _has_lockfile(summary: FileSummary) -> bool:
-    return any(f in summary.top_files for f in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml"))
+    return any(
+        f in summary.top_files
+        for f in (
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "bun.lock",
+            "bun.lockb",
+        )
+    )
 
 
 def _node_install_command(summary: FileSummary) -> str:
-    """根据锁文件选择包管理器，避免 pnpm/yarn 项目误走 npm ci。"""
-    files = summary.top_files
-    if "pnpm-lock.yaml" in files:
-        return "corepack enable && pnpm install --frozen-lockfile"
-    if "yarn.lock" in files:
-        return "corepack enable && yarn install --frozen-lockfile"
-    # BUG-873（#104）：bun.lock 是现行文本锁、bun.lockb 是旧二进制锁——
-    # 两者都应走 bun install（此前 bun.lockb 被错映射为 npm ci，bun.lock
-    # 完全不识别）。宿主 bun 工具链缺失是运行环境问题，不在识别层兜底。
-    if "bun.lock" in files or "bun.lockb" in files:
-        return "bun install --frozen-lockfile"
-    if "package-lock.json" in files:
-        return "npm ci"
-    return "npm install"
+    """根据锁文件选择包管理器，避免 pnpm/yarn 项目误走 npm ci。
+
+    summarize_package 的 ``root`` 是子包目录，锁文件在仓库根（workspace_root）。
+    """
+    repo = summary.workspace_root or summary.root
+    return install_command_for(repo, workdir=summary.root)
 
 
 # BUG-788（S2-10 实案 patent-disclosure-workflow-v1）：workspaces 根的
@@ -1661,7 +1681,26 @@ def _python_start_command(
             _note_gunicorn_generated(notes)
             # BUG-867（#98）：工厂包形态（flaskr:create_app()）按内部端口约定
             # 8000 绑定；模块文件形态（app:app）沿用 flask 惯例 5000。
-            return _gunicorn_start_command(target, port=_flask_target_port(target))
+            cmd = _gunicorn_start_command(target, port=_flask_target_port(target))
+            spec = (
+                _flask_init_db_spec(summary.root, target, notes)
+                if summary is not None and "create_app()" in target
+                else None
+            )
+            if spec is not None:
+                init_cmd, db_path, config_paths = spec
+                if notes is not None:
+                    notes.append(
+                        "Flask 工厂含唯一 init-db；仅当 instance 库文件不存在时执行，"
+                        "避免教程命令清空已有数据"
+                    )
+                # BUG-931：db_path 是源码证明的容器内库绝对路径（含子目录与
+                # 自定义 instance_path），不再硬编码 /app/instance/<basename>。
+                checks = [f"[ ! -f {db_path} ]"]
+                # 可选配置文件一旦存在，默认 DATABASE 就不再是已证明的最终值。
+                checks.extend(f"[ ! -e {path} ]" for path in config_paths)
+                cmd = f"sh -c 'if {' && '.join(checks)}; then {init_cmd}; fi && exec {cmd}'"
+            return cmd
         if "gunicorn" in matched:
             # 066.a：已声明生产服务器优先——入口不可证明时沿用既有 app:app 形态。
             return "gunicorn -b 0.0.0.0:5000 app:app"
@@ -1709,7 +1748,7 @@ def _python_start_command(
 GUNICORN_PLATFORM_SPEC = ">=21,<23"
 # BUG-921：平台在启动命令里内嵌的迁移前置标记。副作用识别（C.R05）、
 # requiresMigrations 契约与迁移成功判定共用这一份，避免口径漂移。
-MIGRATION_START_MARKERS = ("alembic upgrade", "manage.py migrate")
+MIGRATION_START_MARKERS = ("alembic upgrade", "manage.py migrate", "init-db")
 
 
 def start_command_wraps_migration(start: str | None) -> bool:
@@ -1866,6 +1905,339 @@ def _django_has_migrations(root: Path) -> bool:
             continue
         return True
     return False
+
+
+_CLICK_INIT_DB_RE = re.compile(r"""@click\.command\(\s*['"]init-db['"]\s*\)""")
+_DJANGO_SQLITE_ENGINE_RE = re.compile(r"django\.db\.backends\.sqlite3")
+_FLASK_INSTANCE_SQLITE_RE = re.compile(
+    r"instance_path.*?['\"]([^'\"]+\.(?:sqlite3?|db))['\"]",
+    re.DOTALL | re.IGNORECASE,
+)
+_SQLITE_NAME_RE = re.compile(r"['\"]([^'\"]+\.(?:sqlite3?|db))['\"]", re.IGNORECASE)
+
+
+def _detect_declared_sqlite(root: Path) -> tuple[bool, str | None]:
+    """CHK-421：Django ENGINE / Flask instance_path 声明 SQLite 即记 hasDatabase。"""
+    filename: str | None = None
+    found = False
+    for path in _walk(root, max_depth=4):
+        if not path.is_file() or path.suffix != ".py":
+            continue
+        parts = path.relative_to(root).parts
+        if any(part in _WSGI_SKIP_DIRS or part in ("test", "tests") for part in parts):
+            continue
+        text = _read_text_if_exists(path)
+        if not text:
+            continue
+        if _DJANGO_SQLITE_ENGINE_RE.search(text):
+            found = True
+            names = _SQLITE_NAME_RE.findall(text)
+            if names:
+                filename = Path(names[-1]).name
+            break
+        if _FLASK_INSTANCE_SQLITE_RE.search(text):
+            found = True
+            filename = _flask_instance_sqlite_relpath(text)
+            break
+    return found, filename
+
+
+def _safe_instance_sqlite_relpath(raw: str) -> str | None:
+    """Flask instance 下的相对库路径；含 ``..`` / 绝对路径则视为不确定。"""
+    # 容器使用 POSIX 路径；反斜杠是文件名字符，不能擅自改成目录分隔符。
+    text = raw or ""
+    if not text or text.startswith("/") or re.match(r"^[A-Za-z]:/", text):
+        return None
+    while text.startswith("./"):
+        text = text[2:]
+    parts = [p for p in text.split("/") if p and p != "."]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    if not all(re.fullmatch(r"[A-Za-z0-9._-]+", p) for p in parts):
+        return None
+    if not re.search(r"\.(?:sqlite3?|db)$", parts[-1], re.IGNORECASE):
+        return None
+    return "/".join(parts)
+
+
+class _FactoryDefaultBranches(ast.NodeTransformer):
+    """只剪除工厂默认参数能证明不会执行的 None 分支；不执行用户代码。"""
+
+    def __init__(self) -> None:
+        self.defaults: dict[str, ast.expr] = {}
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        previous = self.defaults
+        self.defaults = {}
+        if node.name == "create_app":
+            args = node.args.posonlyargs + node.args.args
+            self.defaults = dict(zip(
+                (arg.arg for arg in args[len(args) - len(node.args.defaults):]),
+                node.args.defaults,
+            ))
+            # 参数一旦被重赋值，就不能再用签名默认值推断控制流。
+            for item in ast.walk(node):
+                if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store):
+                    self.defaults.pop(item.id, None)
+        result = self.generic_visit(node)
+        self.defaults = previous
+        return result
+
+    def visit_If(self, node: ast.If):
+        test = node.test
+        if (
+            isinstance(test, ast.Compare) and len(test.ops) == 1
+            and isinstance(test.left, ast.Name) and test.left.id in self.defaults
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None
+            and isinstance(test.ops[0], (ast.Is, ast.IsNot))
+            and isinstance(self.defaults[test.left.id], ast.Constant)
+        ):
+            is_none = self.defaults[test.left.id].value is None
+            take_body = is_none if isinstance(test.ops[0], ast.Is) else not is_none
+            chosen = ast.Module(body=node.body if take_body else node.orelse, type_ignores=[])
+            return self.generic_visit(chosen).body
+        return self.generic_visit(node)
+
+
+def _flask_source_tree(text: str) -> ast.Module | None:
+    try:
+        return _FactoryDefaultBranches().visit(ast.parse(text))
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _flask_app_constructor(tree: ast.Module) -> tuple[str, ast.Call] | None:
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and (
+        isinstance(node.func, ast.Name) and node.func.id == "Flask"
+        or isinstance(node.func, ast.Attribute) and node.func.attr == "Flask"
+    )]
+    if len(calls) != 1:
+        return None
+    call = calls[0]
+    assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                   and node.value is call and len(node.targets) == 1
+                   and isinstance(node.targets[0], ast.Name)]
+    if len(assignments) != 1:
+        return None
+    target = assignments[0].targets[0]
+    if any(isinstance(node, ast.Name) and node.id == target.id
+           and isinstance(node.ctx, ast.Store) and node is not target for node in ast.walk(tree)):
+        return None
+    return target.id, call
+
+
+def _app_attribute(node: ast.AST, owner: str, attribute: str) -> bool:
+    return (isinstance(node, ast.Attribute) and node.attr == attribute
+            and isinstance(node.value, ast.Name) and node.value.id == owner)
+
+
+def _string_literal(node: ast.AST) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _instance_sqlite_expression(node: ast.expr, owner: str) -> str | None:
+    """仅接受完整的 join、字符串加法、Path 除法或 f-string，不截取内部调用。"""
+    parts: list[str | None]
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Attribute)
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "os" and node.func.value.attr == "path"
+            and node.func.attr == "join" and node.args and not node.keywords
+            and _app_attribute(node.args[0], owner, "instance_path")):
+        parts = [_string_literal(arg) for arg in node.args[1:]]
+        if not parts or any(part is None or part.startswith(("/", "\\")) for part in parts):
+            return None
+        raw = "/".join(parts)
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Div)):
+        operator = type(node.op)
+        leaves: list[ast.expr] = []
+
+        def flatten(expr: ast.expr) -> None:
+            if isinstance(expr, ast.BinOp) and isinstance(expr.op, operator):
+                flatten(expr.left)
+                flatten(expr.right)
+            else:
+                leaves.append(expr)
+
+        flatten(node)
+        first = leaves[0]
+        parts = [_string_literal(piece) for piece in leaves[1:]]
+        if any(part is None for part in parts):
+            return None
+        if operator is ast.Add and _app_attribute(first, owner, "instance_path"):
+            joined = "".join(parts)
+            if not joined.startswith("/"):
+                return None
+            raw = joined[1:]
+        elif (operator is ast.Div and isinstance(first, ast.Call)
+              and isinstance(first.func, ast.Name) and first.func.id == "Path"
+              and len(first.args) == 1 and not first.keywords
+              and _app_attribute(first.args[0], owner, "instance_path")):
+            if any(part.startswith(("/", "\\")) for part in parts):
+                return None
+            raw = "/".join(parts)
+        else:
+            return None
+    elif isinstance(node, ast.JoinedStr) and node.values:
+        first, *rest = node.values
+        if (not isinstance(first, ast.FormattedValue) or first.conversion != -1
+                or first.format_spec is not None
+                or not _app_attribute(first.value, owner, "instance_path")):
+            return None
+        parts = [_string_literal(piece) for piece in rest]
+        if any(part is None for part in parts):
+            return None
+        joined = "".join(parts)
+        if not joined.startswith("/"):
+            return None
+        raw = joined[1:]
+    else:
+        return None
+    return _safe_instance_sqlite_relpath(raw)
+
+
+def _flask_instance_sqlite_relpath(text: str) -> str | None:
+    """从 DATABASE 的完整赋值和更新证明路径；动态覆盖或歧义一律返回 None。"""
+    tree = _flask_source_tree(text)
+    app = _flask_app_constructor(tree) if tree is not None else None
+    if app is None:
+        return None
+    owner, _ctor = app
+    values: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if (isinstance(target, ast.Subscript)
+                        and _app_attribute(target.value, owner, "config")
+                        and _string_literal(target.slice) == "DATABASE"):
+                    if isinstance(node, ast.AugAssign) or node.value is None:
+                        return None
+                    values.append(node.value)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and _app_attribute(node.func.value, owner, "config")
+                and node.func.attr in {"from_mapping", "update"}):
+            if node.args or any(kw.arg is None for kw in node.keywords):
+                return None
+            values.extend(kw.value for kw in node.keywords if kw.arg == "DATABASE")
+    if not values:
+        return None
+    # 其他 instance SQLite 表达式也不得暗中指向第二个库。沿 AST 到完整表达式，
+    # 而不是像旧正则那样停在 join(...) 或 f-string 的结尾。
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    for node in ast.walk(tree):
+        if not _app_attribute(node, owner, "instance_path"):
+            continue
+        expr = node
+        while isinstance(parents.get(expr), ast.expr):
+            expr = parents[expr]
+        if any(isinstance(item, ast.Constant) and isinstance(item.value, str)
+               and re.search(r"\.(?:sqlite3?|db)\b", item.value, re.IGNORECASE)
+               for item in ast.walk(expr)):
+            values.append(expr)
+    paths = {_instance_sqlite_expression(value, owner) for value in values}
+    return paths.pop() if len(paths) == 1 and None not in paths else None
+
+
+def _flask_instance_base(text: str, *, default_base: str = "/app/instance") -> str | None:
+    """只在找到唯一构造且没有参数展开/后续路径修改时证明 instance 目录。"""
+    tree = _flask_source_tree(text)
+    app = _flask_app_constructor(tree) if tree is not None else None
+    if app is None:
+        return None
+    owner, ctor = app
+    if len(ctor.args) != 1 or isinstance(ctor.args[0], ast.Starred):
+        return None
+    if any(kw.arg is None for kw in ctor.keywords):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+            if _app_attribute(node, owner, "instance_path"):
+                return None
+    values = [kw.value for kw in ctor.keywords if kw.arg == "instance_path"]
+    if not values:
+        return default_base
+    literal = _string_literal(values[0])
+    if (literal is None or not re.fullmatch(r"/[A-Za-z0-9._/-]*", literal)
+            or ".." in literal.split("/")):
+        return None
+    return "/" + literal.strip("/")
+
+
+def _flask_configuration_guards(text: str, base: str) -> tuple[str, ...] | None:
+    """可选 instance 配置仅在文件不存在时安全；其他动态配置加载不自动初始化。"""
+    tree = _flask_source_tree(text)
+    app = _flask_app_constructor(tree) if tree is not None else None
+    if app is None:
+        return None
+    owner, ctor = app
+    instance_relative = any(kw.arg == "instance_relative_config"
+                            and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                            for kw in ctor.keywords)
+    guards: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+            if _app_attribute(node, owner, "config"):
+                return None
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+            if _app_attribute(node.value, owner, "config") and _string_literal(node.slice) is None:
+                return None
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and _app_attribute(node.func.value, owner, "config")):
+            continue
+        if node.func.attr in {"from_mapping", "update", "get", "items", "keys", "values"}:
+            continue
+        if node.func.attr != "from_pyfile" or not instance_relative or len(node.args) != 1:
+            return None
+        filename = _string_literal(node.args[0])
+        if (filename is None or not re.fullmatch(r"[A-Za-z0-9._/-]+", filename)
+                or filename.startswith("/") or ".." in filename.split("/")):
+            return None
+        if not (len(node.keywords) == 1 and node.keywords[0].arg == "silent"
+                and isinstance(node.keywords[0].value, ast.Constant)
+                and node.keywords[0].value.value is True):
+            return None
+        guards.add(f"{base}/{filename}")
+    return tuple(sorted(guards))
+
+
+def _flask_init_db_spec(
+    root: Path, target: str, notes: list[str] | None = None
+) -> tuple[str, str, tuple[str, ...]] | None:
+    """CHK-418：唯一 click init-db 才包装；库已存在则跳过，避免清空教程库。
+
+    BUG-931：守卫检查的必须是源码能**完整证明**的实际库路径（见
+    :func:`_flask_instance_sqlite_relpath` / :func:`_flask_instance_base`）。
+    返回 ``(init 命令, 库绝对路径, 必须不存在的可选配置文件)``。
+    """
+    module = target.split(":", 1)[0]
+    if not module:
+        return None
+    pkg = root / module.replace(".", "/")
+    files: list[Path] = []
+    if pkg.is_dir():
+        files.extend(sorted(p for p in pkg.glob("*.py") if p.is_file()))
+    elif (root / f"{module}.py").is_file():
+        files.append(root / f"{module}.py")
+    texts = [_read_text_if_exists(path) for path in files]
+    hits = [text for text in texts if _CLICK_INIT_DB_RE.search(text)]
+    if len(hits) != 1:
+        return None
+    text = "\n".join(texts)
+    base = _flask_instance_base(text)
+    relpath = _flask_instance_sqlite_relpath(text)
+    guards = _flask_configuration_guards(text, base) if base else None
+    if base is None or relpath is None or guards is None:
+        if notes is not None and _FLASK_INSTANCE_SQLITE_RE.search(text):
+            notes.append(
+                "Flask 工厂含 init-db，但 instance 库路径无法从源码完整证明"
+                "（动态路径、配置覆盖或构造参数不确定），未自动包装 init-db；"
+                "请确认库路径后手动初始化"
+            )
+        return None
+    return f"flask --app {module} init-db", f"{base}/{relpath}", guards
 
 
 def _note_gunicorn_generated(notes: list[str] | None) -> None:

@@ -561,7 +561,9 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <id>
   管线）；实例内不保留 `.git`，不缓存仓库。
 * **更新**＝ `git ls-remote` 探测远端：无新提交提示「无需更新」（零重建）；
   有新提交重新克隆并原地升级（保留 id / 端口 / data / 别名）。`--update` 传入
-  的仓库必须与实例记录一致（换仓库先删除再导入）。
+  的仓库必须与实例记录一致（换仓库先删除再导入）。用完整 commit SHA 导入（钉版）
+  的实例，`--update` 不探测远端、始终报「无变更」；要换版本请显式传新 `--ref`
+  并加 `--allow-source-change`（改 ref / 子目录同样需要，避免静默换版本）。
 * **无凭据快速失败**：git 子进程带 `GIT_TERMINAL_PROMPT=0` 且关闭 stdin——私有仓 401 时不会在后台等终端输入直到超时，而是立即失败（credential helper
 是非交互的，不受影响；克隆超时杀整个进程组，不残留 `git-remote-https`）。
 * **私有仓 / 代理**：凭据（credential helper / `gh auth`）与 `https_proxy` 都
@@ -704,6 +706,16 @@ MOVE 不会执行，`--force-quiesce` 可显式越过。
 （低内存小主机的逃生口）恢复旧的先停后建顺序——此时构建失败没有旧版本可回退；
 首次部署（无旧容器）也谈不上回滚。
 
+### 宿主前端构建「命令超时（1800s）」
+
+宿主侧 install / build 单步超时默认 1800s（`local-web.yml` 的 `hostBuildTimeout`，
+60～7200；monorepo 首次 install 至少按 1800s 计）。超时报错会注明「缓存已独立于
+current/，不必重装全部依赖」——包管理器缓存在工作区 `run/pkg-cache/<包管理器>/`，
+网络抖动时直接重试即可，不会从零下载。大仓库确实装不完时再提高 `hostBuildTimeout`。
+构建错误摘要会附下载源与代理路径诊断；某个源连续失败的冷却记录见
+`run/source-health.json`。`build.log` 按 `======== LWA-BUILD … attempt=N ========`
+分段追加，排障只看最后一段。
+
 ### 构建失败（OOM）
 
 小主机并发构建易 OOM。`local-web.yml` 的 `buildConcurrency` 默认 1，
@@ -826,12 +838,21 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
 
 换 Wi-Fi / DHCP 续约后，本机 LAN IP 变了，但实例 `local-web.json` 里可能仍是旧 `lanUrl`：
 
-* **即时可用**：管理页列表的「端口」链接按**当前** LAN IP 读时合成（IMP-040），一般无需手动操作即可点开。
+* **即时可用**：管理页列表的「端口」链接（WSL NAT 下显示为「宿主」）按**当前** IP 读时合成（IMP-040），一般无需手动操作即可点开；WSL 下局域网设备打不开时见下节「WSL 里 lwa status / 管理页地址打不开」。
 * **落盘自愈**：列表轮询会节流调用 `access refresh`；也可 `POST /api/access/refresh` 或 CLI `lwa access refresh`。
 * **HTTPS 别名入口（V0.9.1）**：`gatewayTls: internal` 且 Caddy 已在线时，刷新会在 8443 或 9443 仍绑旧 IP / 只剩回环时重载主 Caddyfile（两个端口分开判断）。网关已关闭则不拉起；reload 失败再执行 `lwa gateway on`。
 * **升级后**：`lwa update` 在重启 manager/daemon 之后固定 refresh（可选 `--no-review-access` 跳过轻量复核）。
 * **诊断**：`lwa doctor --json` 含 `currentLanIp` / `driftedInstanceIds`；深度探活用 `lwa doctor --access` 或 `lwa access review`（与 update report 同源）。
 * **`lanIpStrategy=manual`**：不会自动改写落盘；请确认 `manualLanIp` 仍正确。
+
+### WSL 里 `lwa status` / 管理页地址打不开（手机/其他电脑超时）
+
+这通常不是服务没起，而是 **NAT 下的 guest 地址只有 Windows 本机能打开**。WSL 软件包 2.x 和 3.x 都一样；Windows 10 没有 mirrored，Windows 11 也要实际启用才算。
+
+* 看 `lwa status` 是否标明「仅 Windows 宿主可达」，以及 `lwa doctor` 的 `wsl_lan_exposure` / `--json` 里的 `wslNetwork`。
+* `lanAddressStale=false` 只表示地址没漂，**不能**证明局域网已通。
+* LWA **不会**自动改 portproxy 或防火墙。缺少转发时 doctor 会给出供管理员审阅的命令；有转发也只标「候选」，最终须用另一台设备打开 Windows 局域网 IP。
+* 管理页经 Windows 转发访问时仍须带 token；本机 `127.0.0.1` 才免 token。详见 [已知限制 · LAN 访问与防火墙](known-limitations.md#lan-访问与防火墙)。
 
 ### 别名入口白屏（页面空白 / 资源空 200 或 404）
 

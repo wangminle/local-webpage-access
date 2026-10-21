@@ -120,7 +120,7 @@ cat > static-gateway/Caddyfile <<'EOF'
 
 # IMP-006 路径别名统一入口（端口 8080）
 :8080 {
-	import `/Users/fenix-macmini/Documents/VSCode/1-AI-Coding/6-自制小工具/8-本地简单网页部署基座/local-webpage-access/runtime/static-gateway/aliases/prd-workflow.conf`
+	import `<仓库根目录>/runtime/static-gateway/aliases/prd-workflow.conf`
 }
 EOF
 
@@ -194,6 +194,6 @@ lwa restart voiceprint-v3-demo
 
 ## 7. 关联文档
 
-- [Runtime 运维复盘（2026-07-07）](../../docs/local-webpage-access-runtime-analysis-20260707.md)
+- [Runtime 运维复盘（2026-07-07）](local-webpage-access-runtime-analysis-20260707.md)
 - [IMP-010~021 改进规划](./local-webpage-access-imp010-021-plan-20260707.md)
 - [Runtime 工作区说明](../../docs/runtime-workspace.md)

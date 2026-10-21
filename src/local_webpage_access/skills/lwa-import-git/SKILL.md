@@ -33,7 +33,7 @@ description: >-
    （不是浏览器那台机器）。LWA 不保存/不回显任何凭据。
 4. 不做 webhook / 定时拉取 / GitHub App / `git push`——更新永远由用户/Agent 触发。
 5. URL 里出现 `/tree/`、`/blob/` 等网页段时：改用仓库根地址 + `--ref`（分支/
-   标签）+ `--subdir`（子目录），不要硬传网页 URL。
+   标签/完整 commit SHA）+ `--subdir`（子目录），不要硬传网页 URL。
 
 ## 导入（新建）
 
@@ -52,7 +52,8 @@ lwa import --from-git https://github.com/<owner>/<repo> -n "My App" --path-alias
 
 导入后：`sourceKind=git`，`sourceDirPath` 恒为空；manifest 记录规范化 url、
 真实分支/tag 名（`sourceGitRef`/`sourceGitRefKind`，不是 `HEAD`）、完整 commit
-OID（`sourceGitCommit`）；内容在 `apps/<id>/current/`。
+OID（`sourceGitCommit`）；内容在 `apps/<id>/current/`。按完整 40 位 SHA 导入
+（钉版）时 `sourceGitRefKind=commit`，此后普通 `--update` 不再跟踪远端。
 
 ## 更新
 
@@ -62,6 +63,9 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <instance-id>
 
 - 远端 OID 未变 → 「无需更新」跳过，不 clone、不 rebuild、不重启。
 - 有新提交 → 重新浅克隆 → 原地升级（保留 id / 端口 / data / 别名）。
+- 钉版实例（`sourceGitRefKind=commit`）的 `--update` 不探测远端、始终「无需更新」；
+  换版本或改分支/标签/子目录须显式传新 `--ref` / `--subdir` 并加
+  `--allow-source-change`，否则报 `ref_change_requires_allow`（避免静默换版本）。
 - git 实例传入 URL 规范化后必须与实例记录一致（换**另一个仓库**会被拒，
   `source_mismatch`；须先 `lwa remove` 再重新导入）。
 - **源类型切换**（V0.8.12 / issue #28）：zip/folder 源实例显式传
@@ -80,7 +84,8 @@ lwa import --from-git https://github.com/<owner>/<repo> --update <instance-id>
 | `userinfo_forbidden` | URL 带用户名/密码 → 凭据配到宿主机 credential helper |
 | `git_missing` | 宿主机没装 git → 先装 git |
 | `remote_unreachable` | 网络/代理/凭据问题；私有仓需宿主机已配凭据（无凭据会快速失败，不会卡住） |
-| `ref_not_found` | 分支/标签不存在 → 核对 `--ref` |
+| `ref_not_found` | 分支/标签不存在，或短 SHA 无法作为浅克隆 refspec → 核对 `--ref`；钉 commit 须提供完整 40 位 SHA |
+| `ref_change_requires_allow` | 已有 git 实例改 `--ref`/`--subdir` 未加 `--allow-source-change` → 确认要换版本后补该旗标 |
 | `clone_timeout` / `size_exceeded` | 仓库过大（>180s / >2GiB）→ 建议改用文件夹导入 |
 | `source_mismatch` | 更新时传了另一个仓库 → 先删除实例再导入 |
 

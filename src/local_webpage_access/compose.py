@@ -232,7 +232,8 @@ def generate_compose(
     # BUG-905 / CHK-430：未安装的 Flask 包，instance 与顶层包并列（/app/instance）。
     # 源码里已有的 instance/ 文件先种进宿主目录且不覆盖已有文件，避免空挂载遮住它们。
     flask_mount = _flask_instance_mount(
-        source_dir, source_subdir=getattr(manifest, "sourceSubdir", None)
+        source_dir, source_subdir=getattr(manifest, "sourceSubdir", None),
+        managed_data_path=data_volume.split(":", 1)[1],
     )
     if flask_mount is not None:
         container_path, source_instance = flask_mount
@@ -305,10 +306,6 @@ def generate_compose(
     return out_path
 
 
-_FLASK_INSTANCE_SQLITE_RE = re.compile(
-    r"""instance_path\s*(?:,\s*|/\s*)['\"][^'\"]+\.(?:sqlite3?|db)['\"]""",
-    re.IGNORECASE,
-)
 # CHK-430：只读源码探测，跳过异常大的 .py，避免把生成物整文件读进内存。
 _FLASK_PY_MAX_BYTES = 1_048_576
 
@@ -357,7 +354,7 @@ def _find_instance_sqlite_py(scan_root: Path) -> Path | None:
                 text = entry.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if _FLASK_INSTANCE_SQLITE_RE.search(text):
+            if "instance_path" in text and re.search(r"\.(?:sqlite3?|db)\b", text, re.IGNORECASE):
                 found.append(entry)
     if not found:
         return None
@@ -385,23 +382,44 @@ def _instance_dir_for_py(scan_root: Path, py_file: Path) -> Path:
 
 
 def _flask_instance_mount(
-    source_dir: Path, *, source_subdir: str | None
-) -> tuple[str, Path] | None:
+    source_dir: Path, *, source_subdir: str | None, managed_data_path: str = "/app/data",
+) -> tuple[str, Path | None] | None:
     """返回 ``(容器挂载点, 源码中的 instance 目录)``。"""
     scan_root = _flask_scan_root(source_dir, source_subdir)
     match = _find_instance_sqlite_py(scan_root)
     if match is None:
         return None
     rel = _instance_dir_for_py(scan_root, match)
-    return "/app/" + rel.as_posix(), scan_root / rel
+    # 与 init-db 守卫使用同一构造参数解析；不把容器 /data 当作宿主 /data 读取。
+    from local_webpage_access.scanner import _flask_instance_base
+
+    files = [match]
+    initializer = match.parent / "__init__.py"
+    if initializer != match and initializer.is_file():
+        files.insert(0, initializer)
+    try:
+        if any(path.stat().st_size > _FLASK_PY_MAX_BYTES for path in files):
+            return None
+        text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in files)
+    except OSError:
+        return None
+    base = _flask_instance_base(text, default_base="/app/" + rel.as_posix())
+    if base is None or Path("/app").is_relative_to(Path(base)):
+        log.warning("无法安全证明 Flask instance 挂载点，请用 container.extraVolumes 显式配置")
+        return None
+    target = Path(base)
+    if target.is_relative_to(Path(managed_data_path)):
+        return None  # 目录已经由默认 data bind 持久化，不重复或嵌套挂载。
+    seed = scan_root / target.relative_to("/app") if target.is_relative_to("/app") else None
+    return target.as_posix(), seed
 
 
-def _seed_instance_dir(host_dir: Path, source_instance: Path) -> None:
+def _seed_instance_dir(host_dir: Path, source_instance: Path | None) -> None:
     """把源码 instance/ 里尚不存在于宿主的文件种进去。已有文件保持不动。"""
     if host_dir.is_symlink():
         raise PathError(f"instance 种子目标不能是符号链接：{host_dir}")
     host_dir.mkdir(parents=True, exist_ok=True)
-    if not source_instance.is_dir():
+    if source_instance is None or not source_instance.is_dir():
         return
     for src in source_instance.rglob("*"):
         if not src.is_file() or src.is_symlink():

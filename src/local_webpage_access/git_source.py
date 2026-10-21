@@ -70,6 +70,21 @@ ERROR_KINDS = frozenset(
 )
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+_SHORT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+def looks_like_commit_ref(ref: str | None) -> bool:
+    """CHK-419 / BUG-926：仅完整 OID 登记为 commit，避免十六进制分支名被误判。"""
+    if not ref:
+        return False
+    return bool(_SHA_RE.fullmatch(ref.strip().lower()))
+
+
+def _looks_like_abbreviated_sha(ref: str | None) -> bool:
+    if not ref:
+        return False
+    text = ref.strip()
+    return bool(_SHORT_SHA_RE.fullmatch(text)) and not looks_like_commit_ref(text)
 
 #: GitHub 网页段（§17.2.2）：命中时提示改用仓库根地址 + ``--ref`` / ``--subdir``
 _WEB_PATH_SEGMENTS = (
@@ -235,7 +250,7 @@ class CloneResult:
 
     commit: str  # 完整 OID（40 hex；sha256 仓库为 64 hex）
     ref: str  # 真实分支名或 tag 名（禁止 "HEAD"）
-    ref_kind: str  # "branch" | "tag"
+    ref_kind: str  # "branch" | "tag" | "commit"
     directory: Path
 
 
@@ -321,12 +336,69 @@ def _build_clone_argv(url: str, dest: Path, ref: str | None, template_dir: Path)
     return argv
 
 
+def _clone_at_commit(
+    url: str,
+    dest: Path,
+    sha: str,
+    template_dir: Path,
+    timeout: int,
+) -> subprocess.CompletedProcess:
+    """浅取指定 commit（``git clone --branch`` 不接受 SHA）。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    if not looks_like_commit_ref(sha):
+        return subprocess.CompletedProcess(
+            ["git", "fetch", "--depth", "1", "origin", sha],
+            1,
+            stdout="",
+            stderr=f"couldn't find remote ref {sha}: 短 SHA 无法浅取，请提供完整 40 位 commit",
+        )
+    hooks_off = ["-c", "core.hooksPath=/dev/null"]
+    init = _run_git_no_prompt(
+        ["git", *hooks_off, "init", f"--template={template_dir}", str(dest)],
+        timeout=timeout,
+    )
+    if init.returncode != 0:
+        return init
+    configured = _run_git_no_prompt(
+        ["git", "-C", str(dest), *hooks_off, "config", "core.hooksPath", "/dev/null"],
+        timeout=30,
+    )
+    if configured.returncode != 0:
+        return configured
+    remote = _run_git_no_prompt(
+        ["git", "-C", str(dest), *hooks_off, "remote", "add", "origin", url],
+        timeout=30,
+    )
+    if remote.returncode != 0:
+        return remote
+    fetched = _run_git_no_prompt(
+        ["git", "-C", str(dest), *hooks_off, "fetch", "--depth", "1", "origin", sha],
+        timeout=timeout,
+    )
+    if fetched.returncode != 0:
+        return fetched
+    return _run_git_no_prompt(
+        ["git", "-C", str(dest), *hooks_off, "checkout", "--detach", "FETCH_HEAD"],
+        timeout=30,
+    )
+
+
 def _classify_clone_failure(stderr: str, *, ref: str | None) -> GitSourceError:
     """把 clone 失败的 stderr 尾行映射到闭集 errorKind（065.p）。"""
     tail = (stderr or "").strip().splitlines()
     last = tail[-1].strip() if tail else ""
     lowered = last.lower()
-    if ref and ("not found in upstream" in lowered or f"remote branch {ref.lower()}" in lowered):
+    if ref and (
+        "not found in upstream" in lowered
+        or f"remote branch {ref.lower()}" in lowered
+        or "couldn't find remote ref" in lowered
+    ):
+        if _looks_like_abbreviated_sha(ref):
+            return _git_error(
+                "ref_not_found",
+                f"短 SHA {ref!r} 无法作为浅克隆 refspec；请提供完整 40 位 commit",
+                ref=ref,
+            )
         return _git_error(
             "ref_not_found",
             f"远端不存在分支/标签 {ref!r}；请核对 --ref",
@@ -396,7 +468,10 @@ def _resolve_ref_and_commit(dest: Path, *, requested_ref: str | None) -> tuple[s
         else:  # pragma: no cover - refs/heads 之外的附着形态
             ref, kind = full_ref, "branch"
     elif requested_ref:
-        ref, kind = requested_ref, "tag"
+        if looks_like_commit_ref(requested_ref):
+            ref, kind = requested_ref, "commit"
+        else:
+            ref, kind = requested_ref, "tag"
     else:
         raise _git_error(
             "ref_not_found",
@@ -413,7 +488,33 @@ def _resolve_ref_and_commit(dest: Path, *, requested_ref: str | None) -> tuple[s
     commit = proc.stdout.strip().lower()
     if proc.returncode != 0 or not _SHA_RE.match(commit):
         raise _git_error("remote_unreachable", f"无法解析克隆后的 commit OID：{dest}")
+    if kind == "commit":
+        ref = commit
     return ref, kind, commit
+
+
+def _remote_named_ref_exists(url: str, ref: str, *, timeout: int) -> bool:
+    """BUG-926：十六进制短名先查远端分支/标签，避免误当 commit。"""
+    try:
+        proc = _run_git_no_prompt(
+            ["git", "ls-remote", "--heads", "--tags", url, ref],
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _git_error(
+            "remote_unreachable",
+            f"git ls-remote 超时（>{timeout}s）：{url}",
+        ) from exc
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()
+        last = tail[-1].strip() if tail else ""
+        raise _git_error("remote_unreachable", f"git ls-remote 失败：{last or url}")
+    prefixes = {f"refs/heads/{ref}", f"refs/tags/{ref}"}
+    for line in (proc.stdout or "").splitlines():
+        _sha, _, name = line.partition("\t")
+        if name.strip() in prefixes:
+            return True
+    return False
 
 
 @contextlib.contextmanager
@@ -448,10 +549,25 @@ def stage_git_clone(
         staging_root = Path(tempfile.mkdtemp(prefix="lwa-git-clone-"))
         template_dir = Path(tempfile.mkdtemp(prefix="lwa-git-template-"))
         dest = staging_root / (target.repo or "repo")
-        argv = _build_clone_argv(clone_url or target.url, dest, ref, template_dir)
         log.info("浅克隆 %s（ref=%s）→ %s", target.url, ref or "远端 HEAD", dest)
+        remote = clone_url or target.url
         try:
-            proc = _run_git_no_prompt(argv, timeout=timeout)
+            if looks_like_commit_ref(ref):
+                proc = _clone_at_commit(remote, dest, ref or "", template_dir, timeout)
+            elif _looks_like_abbreviated_sha(ref):
+                if _remote_named_ref_exists(remote, ref or "", timeout=min(timeout, LS_REMOTE_TIMEOUT)):
+                    argv = _build_clone_argv(remote, dest, ref, template_dir)
+                    proc = _run_git_no_prompt(argv, timeout=timeout)
+                else:
+                    raise _git_error(
+                        "ref_not_found",
+                        f"短 SHA {ref!r} 无法作为浅克隆 refspec；"
+                        "请提供完整 40 位 commit，或使用真实存在的分支/标签名",
+                        ref=ref,
+                    )
+            else:
+                argv = _build_clone_argv(remote, dest, ref, template_dir)
+                proc = _run_git_no_prompt(argv, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise _git_error(
                 "clone_timeout",
@@ -561,4 +677,5 @@ __all__ = [
     "require_git_binary",
     "stage_git_clone",
     "probe_remote_commit",
+    "looks_like_commit_ref",
 ]

@@ -1539,7 +1539,11 @@ def _infer_failure_layer(exc: Exception) -> str:
 def _suggest_fix(exc: Exception) -> str:
     """Gate-C C.08：从异常推断修复建议。"""
     exc_str = str(exc).lower()
-    if "dockerfile" in exc_str:
+    if "bun.lock" in exc_str or "bun 工具链" in exc_str:
+        return "缺少 bun 工具链或 bun monorepo 超出当前托管形态，不要把失败归因于 Dockerfile 语法"
+    if "未找到可托管的 html" in exc_str or "hosting_error" in exc_str:
+        return "静态托管未找到 HTML；若源码含 bun.lock/官方 Dockerfile，说明未走对应工具链或容器路径，而非 Dockerfile 语法错误"
+    if "dockerfile" in exc_str and "语法" in exc_str:
         return "检查 Dockerfile 语法与源码兼容性"
     if "port" in exc_str:
         return "检查端口占用或手动指定端口"
@@ -2222,10 +2226,21 @@ def rebuild_instance(
         is_container = manifest.runtime.value == "docker-compose"
 
         def _builder(iid: str) -> InstanceManifest:
-            if is_container:
-                # host_container 内部会 down 旧容器再 build + up
-                return host_container(workspace, config, registry, iid)
-            return host_instance(workspace, config, registry, iid)
+            from local_webpage_access.build_sources import (
+                clear_build_owner,
+                mark_build_owner,
+            )
+
+            mark_build_owner(
+                workspace, iid, owner="manual", reason="lwa rebuild / 用户发起"
+            )
+            try:
+                if is_container:
+                    # host_container 内部会 down 旧容器再 build + up
+                    return host_container(workspace, config, registry, iid)
+                return host_instance(workspace, config, registry, iid)
+            finally:
+                clear_build_owner(workspace, iid)
 
         queue = get_build_queue(config, registry)
         manifest = queue.run(instance_id, _builder)

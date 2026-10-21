@@ -49,8 +49,8 @@
 
 | 项 | 值 |
 |----|-----|
-| 本机当前 LAN IP（`en1` / `detect_lan_ip()`） | **`10.181.239.115`** |
-| 实例 `local-web.json` / API 中的 `lanUrl`/`routeUrl` | 仍为 **`10.181.239.49`** |
+| 本机当前 LAN IP（`en1` / `detect_lan_ip()`） | **`<当前LAN地址>`** |
+| 实例 `local-web.json` / API 中的 `lanUrl`/`routeUrl` | 仍为 **`<旧LAN地址>`** |
 | 对 `.49` 的探测 | 超时 / `No route to host` / `Host is down` |
 | 对 `127.0.0.1` 与 `.115` 的 hostPort | **HTTP 200** |
 
@@ -290,17 +290,17 @@ lwa access review --rebuild-if-needed
 | Caddy | pid 93524；`:8080` / `:2019` / `:18000` / `:18001`（`gateway on` 曾 pingback 超时误报，见 §2.7） |
 | 切换前孤儿 | pytest 泄漏 Caddy pid **75224** 曾占 `:2019`（已手工清理，OPS-031） |
 | 残留 builtin | pid 65599→18000，65793→18001（**双开未清**） |
-| 当前 LAN IP | `10.181.239.115` |
-| 管理页链接 IP | 仍为 `10.181.239.49`（失效） |
+| 当前 LAN IP | `<当前LAN地址>` |
+| 管理页链接 IP | 仍为 `<旧LAN地址>`（失效） |
 | 别名 | `vp-app-demo-v3` → 18001；`prd-workflow` → 18002 |
 | 直连可用（回环） | `127.0.0.1:18000/18001/18002` HTML+资源完整 |
 | 别名入口 | HTML 200；绝对 `/assets`/`/css` 在 `:8080` 根上为空 200（IMP-023） |
 
 **临时可用地址（不依赖管理页旧链接）：**
 
-- demo-static：`http://127.0.0.1:18000/` 或 `http://10.181.239.115:18000/`  
-- voiceprint：`http://127.0.0.1:18001/` 或 `http://10.181.239.115:18001/`  
-- prd-workflow：`http://127.0.0.1:18002/` 或 `http://10.181.239.115:18002/`  
+- demo-static：`http://127.0.0.1:18000/` 或 `http://<当前LAN地址>:18000/`
+- voiceprint：`http://127.0.0.1:18001/` 或 `http://<当前LAN地址>:18001/`
+- prd-workflow：`http://127.0.0.1:18002/` 或 `http://<当前LAN地址>:18002/`
 - 别名：需 SPA 按 IMP-023 重构建后才建议作为主入口
 
 ---
@@ -392,7 +392,7 @@ Darwin 实测：`pgrep -af` **只输出 PID**；`pgrep -lf` / `-fl` 才带完整
 
 ### 10.4 运行时观察（审查时）
 
-- 18000/18001 已无 Python+Caddy 双开；LAN IP 已刷新为 `10.181.239.115`。  
+- 18000/18001 已无 Python+Caddy 双开；LAN IP 已刷新为 `<当前LAN地址>`。
 - `voiceprint` `public/index.html` 可能再次变为绝对 `/assets/...`（未固化 `vite.config.js` 的 `base: './'`）→ `access review` 仍应 WARN。  
 - `prd-workflow`：`static.routeHost=prd-workflow` 但 `network.routeUrl=null`；`:8080/css/main.css` 空 200、带前缀有实体——**I2 漏检实例**（修复后应 WARN）。
 

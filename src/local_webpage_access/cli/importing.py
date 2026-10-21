@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def import_cmd(
     ref: str = typer.Option(
         None,
         "--ref",
-        help="IMP-065：GitHub 分支或标签名；缺省跟仓库默认分支（仅 --from-git 时可用）",
+        help="IMP-065：GitHub 分支、标签或完整 commit SHA；缺省跟仓库默认分支（仅 --from-git 时可用）。已有 git 实例改 ref 须加 --allow-source-change",
     ),
     subdir: str = typer.Option(
         None,
@@ -159,17 +160,8 @@ def import_cmd(
             if from_git is not None:
                 # IMP-065：GitHub 源
                 if update is not None:
-                    # BUG-556：更新按实例已记录的 ref/打包子目录进行；
-                    # 显式传 --ref/--subdir 会被静默丢弃，须直接拒绝。
-                    if ref is not None or subdir is not None:
-                        typer.secho(
-                            "--ref / --subdir 不能与 --from-git --update 同时使用："
-                            "更新按实例导入时记录的分支与子目录进行；"
-                            "如需更换，请删除实例后用新参数重新导入。",
-                            fg=typer.colors.RED,
-                            err=True,
-                        )
-                        raise typer.Exit(code=2)
+                    # CHK-419：切 git 源时允许显式 --ref/--subdir 钉版本。
+                    # 已有 git 实例改 ref 仍须 --allow-source-change，避免静默换分支。
                     _do_update_from_git(
                         importer,
                         ws,
@@ -183,6 +175,9 @@ def import_cmd(
                         dry_run=dry_run,
                         force_kind_change=force_kind_change,
                         ignore_alias_guard=ignore_alias_guard,
+                        ref=ref,
+                        subdir=subdir,
+                        allow_source_change=allow_source_change,
                     )
                 else:
                     result = importer.import_from_git(
@@ -315,12 +310,18 @@ def _print_import_result(result, config) -> None:
         "  业务密钥/自定义环境变量：填入 docker/.env.local（compose 自动注入，缺失不报错）",
         fg=typer.colors.CYAN,
     )
+    current_dir = result.app_dir / "current"
+    from local_webpage_access.node_toolchain import describe_import_toolchain
+
+    for line in describe_import_toolchain(current_dir):
+        typer.secho(f"  {line}", fg=typer.colors.CYAN)
+    for line in _database_env_hints(current_dir):
+        typer.secho(f"  {line}", fg=typer.colors.CYAN)
     # issue #12：源目录 .env 会被 .dockerignore 排除、运行时也不注入容器，
     # 明确告警并指引迁移路径；绝不自动复制进镜像（密钥可能入 layer）。
     # BUG-591 同步：.dockerignore 用 **/.env 排除所有层级，检测同样覆盖
     # resolve_source_workdir 之后的实际项目根（sourceSubdir/monorepo，
     # 如 current/backend/.env），消息展示相对 current/ 的路径。
-    current_dir = result.app_dir / "current"
     env_candidates: list[tuple[Path, str]] = [(current_dir, ".env")]
     source_subdir = getattr(result.manifest, "sourceSubdir", None)
     if source_subdir:
@@ -436,6 +437,9 @@ def _do_update_from_git(
     dry_run: bool,
     force_kind_change: bool,
     ignore_alias_guard: bool = False,
+    ref: str | None = None,
+    subdir: str | None = None,
+    allow_source_change: bool = False,
 ) -> None:
     """IMP-065：``lwa import --from-git <url> --update <id>`` 的编排。
 
@@ -483,6 +487,9 @@ def _do_update_from_git(
         dry_run=dry_run,
         force_kind_change=force_kind_change,
         ignore_alias_guard=ignore_alias_guard,
+        ref=ref,
+        subdir=subdir,
+        allow_source_change=allow_source_change,
     )
 
     prev_oid = (prev_commit or "")[:12] or "∅"
@@ -937,6 +944,46 @@ def scan(
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+_DB_ENV_KEYS = ("CMD_DB_URL", "DATABASE_URL", "DB_URL", "DB_TYPE", "LD_DB_ENGINE")
+
+
+def _database_env_hints(root: Path) -> list[str]:
+    """CHK-425：引导已有 docker/.env.local，不新增配置出口。"""
+    if not root.is_dir():
+        return []
+    found: list[str] = []
+    texts: list[str] = []
+    for name in (
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        "app.json",
+        "config.json.example",
+        "config.json",
+        "package.json",
+    ):
+        path = root / name
+        if path.is_file():
+            try:
+                texts.append(path.read_text(encoding="utf-8", errors="replace")[:80_000])
+            except OSError:
+                continue
+    joined = "\n".join(texts)
+    for key in _DB_ENV_KEYS:
+        if key not in found and re.search(rf"\b{re.escape(key)}\b", joined):
+            found.append(key)
+    if not found:
+        return []
+    example = "sqlite:////app/data/app.db"
+    if "CMD_DB_URL" in found:
+        example = "sqlite:////app/data/hedgedoc.db"
+    return [
+        "检测到数据库连接变量 "
+        + "、".join(found)
+        + f"：请写入实例 docker/.env.local（compose 已可选注入，不会自动填写）。SQLite 示例 {example}"
+    ]
 
 
 def register(app: typer.Typer) -> None:

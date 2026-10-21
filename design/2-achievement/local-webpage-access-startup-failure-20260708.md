@@ -141,7 +141,7 @@ while not stop_event.is_set():
 
 ```bash
 # 0. 进入项目目录
-cd /Users/fenix-macmini/Documents/VSCode/1-AI-Coding/6-自制小工具/8-本地简单网页部署基座/local-webpage-access
+cd "$LWA_REPO"  # LWA_REPO 为本机仓库根目录
 
 # 1. 备份并重置悬空的主 Caddyfile（只保留 admin，让 caddy 能裸启）
 cp runtime/static-gateway/Caddyfile runtime/static-gateway/Caddyfile.broken-20260708

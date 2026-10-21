@@ -92,7 +92,7 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/update-from-dir` | 从关联文件夹源同步更新实例（IMP-047；仅 sourceKind=folder；支持 body `expectedRevision`，S2-09） |
 | POST | `/api/import-from-dir` | 从本机文件夹导入新实例（IMP-047） |
 | POST | `/api/import-from-git` | 从 GitHub 仓库一键导入新实例（IMP-065；不限 loopback，LAN + token 可用；body：`url`/`ref`/`subdir`/`name`/`pathAlias`） |
-| POST | `/api/instances/{id}/update-from-git` | 从 GitHub 远端更新 git 源实例（IMP-065；`ls-remote` 无变更探测，OID 未变返回 `skipped=true`；仅 sourceKind=git） |
+| POST | `/api/instances/{id}/update-from-git` | 从 GitHub 远端更新 git 源实例（IMP-065；`ls-remote` 无变更探测，OID 未变返回 `skipped=true`；按完整 commit SHA 钉版的实例不探测远端、始终 `skipped=true`，换版本须用 CLI `--ref` + `--allow-source-change`；仅 sourceKind=git） |
 | GET | `/api/instances/{id}/verification` | 读取实例验证探针覆盖层（继承探针 + 用户覆盖 + 合并后的有效探针，CHK-252） |
 | PATCH | `/api/instances/{id}/verification` | 更新实例 `verificationOverrides`（写入即持久化，重扫/rebuild 不覆盖；CLI：`lwa probe show\|set\|reset\|auto`） |
 | POST | `/api/pick-directory` | 在 **LWA 宿主机**打开原生目录选择器（IMP-051）；**仅 loopback** 客户端可用，成功返回 `{path}`；局域网即使有 token 也 403 `loopback_required` |
@@ -249,7 +249,9 @@ Content-Type: application/json
   ref/tag 类型做 `git ls-remote` 探测。zip/folder 源实例显式传 `url` 时
   原地切换为 git 源（issue #28，换源不换实例）。
 * 远端 OID 未变 → `skipped=true`（「无需更新」，零克隆零重建）；有新提交 →
-  重新浅克隆 → 既有原地升级（保留 id / 端口 / data / 别名）。
+  重新浅克隆 → 既有原地升级（保留 id / 端口 / data / 别名）。按完整 commit SHA
+  钉版导入的实例不探测远端、始终 `skipped=true`；换版本须用 CLI 显式传新 `--ref`
+  并加 `--allow-source-change`（管理页按钮不接受 ref / subdir）。
 * git 实例传入 `url` 与实例 `sourceGitUrl` 不一致 → 400（`source_mismatch`）；
   更换仓库请先删除实例再导入。
 * git 源实例不能用 zip `update` 更新（会被拒绝）；可用 CLI
@@ -291,12 +293,17 @@ Content-Type: application/json
 | `portMappingLabel` | 形如 `33001 → 18001` 的映射说明 |
 | `routeHost` | 路径别名 slug（无则为 null） |
 | `routeUrl` | 统一入口 URL（`routeMode=name` 且 Caddy 可用时） |
-| `lanUrl` | 当前应打开的局域网直达 URL（读时按当前 LAN IP 合成，不盲信落盘） |
+| `lanUrl` | 当前合成的直达 URL（读时按 guest/LAN 探测 IP 合成，不盲信落盘）。**WSL NAT 下这是仅宿主可达的地址，不是局域网入口** |
 | `localhostUrl` | 本机回环兜底 URL（`http://127.0.0.1:<hostPort>/`，LAN 不通时可用） |
-| `currentLanIp` | 当前探测/配置的 LAN IP（IMP-040） |
+| `currentLanIp` | 当前探测/配置的 IP（IMP-040；WSL NAT 下为 guest 地址） |
 | `persistedLanIp` | 落盘 `lanUrl` 中的 host（可能已陈旧） |
-| `lanAddressStale` | 落盘 host 与当前 LAN IP 是否不一致 |
+| `lanAddressStale` | 落盘 host 与当前探测 IP 是否不一致（只表示漂移，不表示局域网可达） |
 | `lanUrlSource` | `live` / `manual` / `manifest` |
+| `lanReachability` | 地址范围：`loopback` / `windows-host` / `lan` / `unknown`（非 WSL 为 null） |
+| `lanExposure` | 暴露状态：`entry-missing` / `candidate-unverified` / `unknown`（portproxy 探测超时或读取被拒时保留 `unknown`，不武断判 `entry-missing`）；候选入口未经其他设备验证 |
+| `hostLanIp` / `hostLanUrl` | Windows 物理网卡 IP，以及已发现转发时的局域网候选 URL |
+| `wslNetworkMode` / `accessScopeNote` | 实际网络模式（nat/mirrored/…）与给用户看的范围说明 |
+| `dynamicIpForwarding` | 已有 portproxy 规则指向会随 WSL 重启漂移的 guest IP 时为 true（doctor `wsl_lan_exposure` 与 `lwa status` 的「转发风险」同步提示；非 WSL 恒为 false） |
 | `redundant` | 是否为同 zip 指纹分组中的冗余实例（非最早者，IMP-019） |
 | `configLossReasons` | 冗余实例携带的「删除即丢失」独立配置清单（路径别名 / buildEnv，issue #31；非冗余实例为空数组） |
 | `reconcileCircuit` | 构建熔断提示（issue #35）：连续构建失败进入小时级退避、达人工阈值后停止自动重试；`lwa start` / `lwa rebuild` 清熔断。仅熔断激活时返回，详情面板显示为「构建熔断」 |
@@ -413,8 +420,8 @@ Authorization: Bearer <token>
 
 单页前端（`/`，Vue 3）提供：
 
-* **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）；任一实例 `lanAddressStale` 时另有 **LAN 地址漂移**横幅，并可一键「刷新访问地址」（`POST /api/access/refresh`，IMP-040）。
-* **实例列表**：每行显示名称（**IMP-043**：导入优先显式 `--name`，其次主页 HTML `<title>`——含 `dist/`/`build/` 等托管产物入口，实体按浏览器语义解码——否则 slug 美化；`nameSource` 区分 `user` / `html_title` / `slug`；旧自动名回填持实例锁；名称最多两行省略，列宽随内容自然分配；**ADJ-048**：名称列上限 220→440px，宽度来自访问地址改两行排版后的让渡）、冗余实例带「冗余」徽章与行高亮、状态、期望态、形态、运行层、技术栈、访问地址（**ADJ-048**：两行排版——第一行「端口 · 本机」，第二行路径别名；列宽取两行中较宽者，即端口/本机为下限、最长别名为上限）、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **取消构建** / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing/cancelling` 时相应禁用）；状态为 `queued` / `building` / `cancelling` 时显示「取消构建」（IMP-039）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043；CLI：`lwa recover <id>`）。
+* **概览面板**：实例总数、各状态计数（含「需恢复」）、类型分布、主机 CPU/内存/磁盘、端口池占用；**能力降级横幅**（Full / Docker / Caddy overall≠ready 时显示原因与建议命令）；任一实例 `lanAddressStale` 时另有 **LAN 地址漂移**横幅，并可一键「刷新访问地址」（`POST /api/access/refresh`，IMP-040）；任一实例 `lanReachability=windows-host` 或 `lanExposure=entry-missing` 时另有 **「WSL 地址不是局域网入口」**横幅（展示 `accessScopeNote` 与 Windows 局域网 IP；LWA 不代改 Windows 网络，详见 `lwa doctor`）。
+* **实例列表**：每行显示名称（**IMP-043**：导入优先显式 `--name`，其次主页 HTML `<title>`——含 `dist/`/`build/` 等托管产物入口，实体按浏览器语义解码——否则 slug 美化；`nameSource` 区分 `user` / `html_title` / `slug`；旧自动名回填持实例锁；名称最多两行省略，列宽随内容自然分配；**ADJ-048**：名称列上限 220→440px，宽度来自访问地址改两行排版后的让渡）、冗余实例带「冗余」徽章与行高亮、状态、期望态、形态、运行层、技术栈、访问地址（**ADJ-048**：两行排版——第一行「端口 · 本机」，第二行路径别名；列宽取两行中较宽者，即端口/本机为下限、最长别名为上限；WSL NAT 下端口链接显示为「宿主」并提示仅 Windows 宿主可达，存在 `hostLanUrl` 时追加未经外部验证的「局域网候选」链接，详情面板相应新增局域网候选 / Windows 局域网 IP / 地址范围 / 暴露状态 / 网络说明 / WSL 网络模式六行）、端口、资源、**浏览量**、更新时间；操作区含日志 / **路径别名** / 浏览量详情 / start / stop / restart / rebuild / **取消构建** / **删除**（**所有实例**均有入口，不再仅冗余；`building/starting/stopping/removing/cancelling` 时相应禁用）；状态为 `queued` / `building` / `cancelling` 时显示「取消构建」（IMP-039）；Docker 能力降级时容器启停按钮禁用；状态为 `网关不可达`（gateway_down）或 `配置无效`（config_invalid）时额外显示「恢复」按钮（DEV-043；CLI：`lwa recover <id>`）。
 * **筛选**：按状态 / 形态搜索；「仅待处理/失败」与「仅冗余」勾选；顶部可「批量删除冗余」（仍只处理冗余，每组保留最早者；工具栏同时显示琥珀竖条释义）。
 * **批量删除冗余确认（issue #31）**：点「批量删除冗余」不再弹原生 confirm，改为模态逐项列出处置——表格含实例 / 状态 / 别名 / 更新时间 / 处置 / 保留六列；运行或过渡态始终跳过，独立配置默认跳过。底部可显式勾选允许损失配置，可删数为0时确认禁用；「有意保留」使实例退出候选。提交后 toast 汇总「已清理 N 个，跳过 M 个」。
 * **删除确认（IMP-035）**：受控双阶段模态——① 选择「仅移除」（默认，`purge=false`）或「彻底删除」（`purge=true`）；② 输入完整项目 ID；彻底删除须勾选「理解数据不可恢复」。非空 `data/` 首次 purge 得 409 `data_nonempty` 后，再勾选强制确认才发 `force=true`（不自动重试）。打开时焦点进入对话框，Tab 限制在模态内，Esc/关闭后恢复触发按钮焦点。

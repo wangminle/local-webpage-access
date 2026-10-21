@@ -224,7 +224,8 @@ lwa import --from-git https://github.com/<owner>/<repo>
 lwa import --from-git https://github.com/<owner>/<repo> --ref dev --subdir frontend
 lwa import --from-git https://github.com/<owner>/<repo> --name "My App" --path-alias myapp
 
-# 从 GitHub 远端更新（ls-remote 无变更探测，远端 OID 未变则零操作跳过）
+# 从 GitHub 远端更新（ls-remote 无变更探测，远端 OID 未变则零操作跳过；
+# 按完整 commit SHA 钉版导入的实例不探测远端、始终报无变更，换版本须显式 --ref 并加 --allow-source-change）
 lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 ```
 
@@ -546,7 +547,7 @@ lwa update           # 一键升级（V0.8.0 含源码快进）收尾：后台�
 lwa doctor --access  # 诊断同时复用 access review
 ```
 
-DHCP 换网后管理页「端口」链接会**读时合成**当前 IP（无需先 refresh）；落盘由管理页列表旁路 / daemon reconcile **节流**自愈。`lwa gateway on` 与 `lwa update` 也会刷新。doctor 的 `lan_url_stale` 检查会告警漂移；`--json` 含 `currentLanIp` / `driftedInstanceIds`。
+DHCP 换网后管理页「端口」链接会**读时合成**当前 IP（无需先 refresh）；落盘由管理页列表旁路 / daemon reconcile **节流**自愈。`lwa gateway on` 与 `lwa update` 也会刷新。doctor 的 `lan_url_stale` 检查会告警漂移；`--json` 含 `currentLanIp` / `driftedInstanceIds`。WSL NAT 下该「当前 IP」是仅宿主可达的 guest 地址（链接文案显示为「宿主」），refresh 只刷新 guest 地址落盘、不能替代 Windows 侧转发——局域网入口判断见 §7.5 的 `wsl_lan_exposure`。
 
 `lanIpStrategy=manual` 时不自动覆盖落盘。AI 协作流程见 Skill `lwa-review-access-urls`。
 
@@ -582,7 +583,8 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 
 `lwa doctor` 新增：
 
-- `lan_url_stale`——实例 lanUrl 是否指向失效（漂移）LAN IP（WARN，提示 `lwa access refresh`）。
+- `lan_url_stale`——实例 lanUrl 是否指向失效（漂移）LAN IP（WARN，提示 `lwa access refresh`）。在 **WSL NAT** 下，即使 host 与当前 guest 地址一致也会 WARN：该地址仅 Windows 宿主可达，不能当作局域网已通。
+- `wsl_lan_exposure`——WSL 下只读发现 Windows 网卡、portproxy 与实际网络模式（SKIP 非 WSL）。缺少局域网转发、仅有未经验证的候选、或模式/权限未知时 WARN；建议命令供管理员审阅，LWA 不会自动执行。`--json` 另含 `wslNetwork`。
 - `backend_handoff`——enabled 静态 hostPort 上是否 builtin + caddy 双开（FAIL，提示 `lwa gateway off` 再 `on`）。
 - `port_contention`——admin 分配端口（未分配为 :2019，§2.7 现场即 pytest 泄漏的 Caddy 占 :2019）/ 别名入口上是否有非预期监听者（测试/外部孤儿）；仅 caddy 后端检查；缺少 lsof 无法校验监听者身份时给 WARN「归属未确认（缺少 lsof）」（S2-07），不再静默 SKIP。
 - `port_pool`（建议 H）——排除 lwa 自用端口（managerPort、staticGatewayPort、registry 已分配 hostPort），不再把这些合法自用端口误报为冲突。

@@ -299,6 +299,16 @@ assert.ok(htmlAliasOnly.indexOf('class="url-line url-alias"') !== -1, htmlAliasO
 var htmlEmpty = urlHtml({{}});
 assert.ok(htmlEmpty.indexOf("cell-muted") !== -1, htmlEmpty);
 assert.ok(htmlEmpty.indexOf("url-line") === -1, htmlEmpty);
+
+// WSL NAT：guest 地址改称「宿主」，另给局域网候选
+var htmlWsl = urlHtml({{
+  lanUrl: "http://172.22.148.94:18000/", localhostUrl: "http://127.0.0.1:18000/",
+  lanReachability: "windows-host", hostLanUrl: "http://10.180.105.74:8080/hello-lwa/"
+}});
+assert.ok(htmlWsl.indexOf(">宿主</a>") !== -1, htmlWsl);
+assert.ok(htmlWsl.indexOf(">端口</a>") === -1, htmlWsl);
+assert.ok(htmlWsl.indexOf(">局域网候选</a>") !== -1, htmlWsl);
+assert.ok(htmlWsl.indexOf("不是局域网") !== -1, htmlWsl);
 """
     )
 

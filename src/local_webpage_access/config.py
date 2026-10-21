@@ -235,6 +235,9 @@ class Config(BaseModel):
     # 不被占用。``None`` 表示彻底关闭别名入口（即便实例配置了 alias 也只走端口）。
     staticGatewayPort: int | None = Field(default=STATIC_GATEWAY_PORT_DEFAULT, ge=1, le=65535)
     buildConcurrency: int = Field(default=1, ge=1, le=8)
+    # CHK-422：宿主前端/Node 构建单步超时（秒）。excalidraw 级 monorepo 首次
+    # install 在 registry 抖动时 600s 不够；与容器构建 1800s 对齐。
+    hostBuildTimeout: int = Field(default=1800, ge=60, le=7200)
     # S3-01 / DEV-157：镜像版本留档——每个实例保留最近 N 个成功构建的镜像
     # 标签（lwa-<id>-app:b<build_id>）与生成物快照；超出的由部署成功后 GC 清理。
     # 正在使用的镜像与上一个可用版本永远不被 GC 删除。
@@ -604,6 +607,10 @@ instanceBindHost: 0.0.0.0
 
 # 构建并发数（小主机建议保持 1）
 buildConcurrency: 1
+
+# 宿主前端/Node 构建单步超时（秒）。excalidraw 级 monorepo 首次 install
+# 在 registry 抖动时 600s 不够，默认与容器构建对齐为 1800
+hostBuildTimeout: 1800
 
 # 镜像版本留档（S3-01）：每个实例保留最近 N 个成功构建的镜像与生成物快照，
 # 供 `lwa versions` / `lwa rollback` 使用；部署成功后自动 GC 超出版本

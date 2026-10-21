@@ -18,6 +18,25 @@ from local_webpage_access.errors import LwaError
 app = typer.Typer(help="控制管理页 HTTP 服务")
 
 
+def _manager_url_label() -> str:
+    """BUG-923：WSL NAT 下管理页合成地址不是局域网入口。"""
+    try:
+        from local_webpage_access.wsl_network import (
+            REACH_WINDOWS_HOST,
+            collect_wsl_network_snapshot,
+            guest_url_caption,
+        )
+
+        snap = collect_wsl_network_snapshot()
+    except Exception:  # noqa: BLE001
+        return "局域网"
+    if snap is None:
+        return "局域网"
+    if snap.guest_reachability == REACH_WINDOWS_HOST:
+        return guest_url_caption(snap.guest_reachability)
+    return "局域网"
+
+
 @app.command("on")
 def manager_on() -> None:
     """后台启动管理页（默认 init 后自动执行；managerEnabled=false 时禁用）。"""
@@ -52,7 +71,7 @@ def manager_on() -> None:
         # W05/W07：TLS 模式下 manager 收敛回环，本机仍可直连明文回环口；
         # 局域网入口为 https 反代（独立 origin 端口）
         typer.echo(f"  本机：http://127.0.0.1:{config.managerPort}/")
-        typer.echo(f"  局域网：{lan_entry}")
+        typer.echo(f"  {_manager_url_label()}：{lan_entry}")
         typer.echo(f"  token：{token}")
         typer.echo("  停止：lwa manager off")
     except LwaError as exc:
@@ -120,7 +139,7 @@ def manager_status_cmd() -> None:
         lan_entry = manager_entry_url(config, lan_ip) or (
             f"http://{format_http_host(lan_ip)}:{st['port']}/"
         )
-        typer.echo(f"  地址：{lan_entry}")
+        typer.echo(f"  {_manager_url_label()}：{lan_entry}")
         token = read_token(ws)
         if token:
             typer.echo(f"  token：{token}")

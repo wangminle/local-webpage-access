@@ -88,7 +88,7 @@
 
 导入后若实例为 `pending`（未能识别运行形态），导入器会写入一条 `security` 事件：
 
-> ⚠️ 未知 zip 来源：未能识别项目类型，请人工确认内容安全后再启动。
+> 该 zip 来源未经信任确认。zip 内可能包含构建脚本（npm postinstall、pip install 脚本、Dockerfile RUN）、挂载声明或对外服务，存在供应链与运行时风险。请在确认来源可信后，再执行构建或启动；uncertain 实例默认保持 pending，不会自动构建或启动。
 
 提示用户在 `lwa start` 前检查 `apps/<id>/current/` 的实际内容。
 

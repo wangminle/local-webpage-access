@@ -689,6 +689,28 @@ def test_api_localhost_bypass_without_token(manager_env: EnvBundle) -> None:
     assert exc.value.status_code == 401
 
 
+def test_portproxy_lan_host_does_not_inherit_loopback_exemption(
+    manager_env: EnvBundle,
+) -> None:
+    """BUG-923：peer 为 127.0.0.1 但 Host 是 Windows 局域网 IP 时不得免 token。"""
+    from unittest.mock import Mock
+
+    from fastapi import HTTPException
+
+    from local_webpage_access.manager_api import _is_localhost_client, require_token
+
+    request = Mock()
+    request.client = Mock(host="127.0.0.1")
+    request.method = "GET"
+    request.app = manager_env.app
+    request.headers = {"host": "10.180.105.74:17800"}
+    request.query_params = Mock(get=lambda _k: None)
+    assert _is_localhost_client(request) is False
+    with pytest.raises(HTTPException) as exc:
+        require_token(request)
+    assert exc.value.status_code == 401
+
+
 def test_api_rejects_wrong_token(manager_env: EnvBundle) -> None:
     resp = manager_env.client.get("/api/instances", headers={"Authorization": "Bearer wrong-token"})
     assert resp.status_code == 401

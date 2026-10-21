@@ -64,6 +64,10 @@ swap=4GB
 * LWA 面向**局域网 HTTP**：统一入口默认 `:8080`（`staticGatewayPort`），管理页默认 `:17800`（`managerPort`），实例另占端口池（常见 `18000–19999`）。
 * **端口最小化**：防火墙只放行**实际在用**的业务口（例如当前实例 `18000`），不要把 `portPool` 整段 `18000–19999` 默认全开；管理页 `17800` 仅在确需 LAN 管理时开放，并依赖 manager token。
 * **不要**把 Caddy **admin 端口**（`:2019` 或 `run/admin-port` 登记的分配端口）暴露到 LAN 或公网——仅供本机 `127.0.0.1` 管理 reload。
+* **WSL 网络模式按运行态判断**（BUG-923）：不要用「WSL 2.x / 3.x」或「Windows 10.0」字样代替实际模式。WSL 软件包 2.x 与 3.x 都是 WSL2 架构；Win10/Win11 都可能报告 NT `10.0`，须看 Build（≥22000 为 Windows 11）。`lwa status` / 管理页 / `lwa doctor` 的 `wsl_lan_exposure` 会区分：guest 内网地址、Windows 本机入口、局域网候选。**LWA 只读发现已有监听与转发，不会自动改 Windows 网卡、portproxy、防火墙或 `networkingMode`。**
+  * **NAT（Windows 10 默认；Windows 11 未开 mirrored 时同样）**：`lwa` 报出的 `172.x` guest 地址只对 Windows 宿主可达。局域网设备要走 Windows 物理网卡 IP + 已有转发。`lanAddressStale=false` / `lan_url_stale` 一致只说明地址没漂，**不能**证明局域网已通。若缺少对应端口转发，doctor 会 WARN 并给出**供管理员审阅**的命令（默认建议 `portproxy` 指向 `127.0.0.1`，依赖 localhost 转发；不要指向会随 WSL 重启变化的 guest IP）。检查与命令按实例入口端口取值——有路径别名取网关入口（默认 `:8080`），无别名实例取其 hostPort（如 `:18000`），标题与建议命令同一端口。
+  * **mirrored（仅 Windows 11 22H2+，且实际已启用）**：guest 可与 Windows 共用局域网 IP，一般不需要 portproxy。入站由 **Hyper-V firewall** 管理（WSL 包 ≥2.0.9）。Windows 10 上写 `networkingMode=mirrored` 会回退 NAT，LWA 按实际模式说明，不声称已启用。
+  * **其他/未知模式、interop 超时或规则读取被拒**：保留 unknown，不报局域网 OK。
 * **Windows / WSL2 Mirrored（Windows 11 22H2+、WSL ≥2.0.9）**：入站由 **Hyper-V firewall** 管理，不是普通「Windows 防火墙」规则 alone。应在 **PowerShell（管理员）** 按 WSL `VMCreatorId` 逐端口放行，例如：
 
   ```powershell
@@ -121,10 +125,11 @@ swap=4GB
 * **HTTPS**：V0.9.0 起 Caddy 可用 `gatewayTls: internal` 打开传输加密（内嵌 CA，别名 `:8443`、管理面 `:9443`；详见 [https.md](https.md)）。**builtin 网关无 TLS**；Let's Encrypt / 公网 ACME / 自定义域名证书自动化仍不在范围内。客户端须 `lwa ca export` 后手动信任根证书，禁止点穿告警。
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
-* **数据持久化**：仅自动 bind mount `data/` 目录（V0.9.9 起 Flask `instance_path` 下的 SQLite 额外自动挂载 `data/instance:/app/instance`，按 Flask 未安装包的真实语义与顶层包并列；重建前自动救出旧容器内该目录的数据，同名文件保留宿主版本）。其他路径（如日志、上传目录）需用户在项目内处理。
+* **数据持久化**：仅自动 bind mount `data/` 目录（V0.9.9 起 Flask `instance_path` 下的 SQLite 额外自动挂载 `data/instance:<instance 基目录>`，按 Flask 未安装包的真实语义与顶层包并列，默认容器侧为 `/app/instance`；V0.9.10 起源码以字面量自定义 `instance_path`（如 `Flask(__name__, instance_path='/data')`）时挂载点跟随该字面量，路径无法从源码安全证明时不自动挂载并告警，请用 `container.extraVolumes` 显式配置；重建前自动救出旧容器内该目录的数据，同名文件保留宿主版本）。其他路径（如日志、上传目录）需用户在项目内处理。
 * **Flask instance 救援失败**：复制失败会中止重建并保留旧容器。若恢复原文件也失败，会保留 `data/instance/.lwa-rescue-pending/` 并阻止自动重试；`old/` 中的备份沿用原文件相对路径。请保留该目录及旧容器，人工核对主库与 WAL/SHM/journal 的归属后再恢复，勿直接删除事务目录后强行重建。
 * **容器运行身份（issue #20）**：V0.8.8 起新导入实例默认非 root（UID/GID 对齐宿主 `data/` 属主，Dockerfile `USER` 与 Compose `user` 双保险）；**存量旧实例不会在一次普通 rebuild 中被自动切换**——manifest 缺 `container.runAsNonRoot` 的按 legacy root 运行并告警，经 `lwa migrate-user <id>`（先过属主/写权限预检）显式迁移；确需 root 兼容可 `--root` 或在 `local-web.json` 设 `container.runAsNonRoot=false`。
-* **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。
+* **环境变量**：生成的 `.env` 仅含端口与资源限额等基础设施变量；应用所需业务密钥请写入 `docker/.env.local`（IMP-015，compose 可选注入，缺失不报错），不要改写由 lwa 生成的 `.env`。导入时若源码出现 `CMD_DB_URL` / `DB_TYPE` / `DATABASE_URL` 等数据库变量，会提示写入同一 `.env.local`，不另开配置出口。
+* **Flask init-db**：仅当工厂应用含唯一 `@click.command("init-db")`、且源码能完整证明实际库路径（含自定义 `instance_path` 字面量与子目录，如 `instance/db/prod.sqlite`）时，才在启动命令前包装条件初始化；执行条件是该库文件与可选 instance 配置文件（`from_pyfile(..., silent=True)` 所指）均不存在，库已在挂载卷中则跳过，避免教程命令清空已有数据。路径无法从源码证明（动态路径、配置覆盖、构造参数不确定、多库歧义）时不自动执行，扫描备注会提示手动初始化。
 * **路径别名**：统一入口依赖 Caddy；`builtin` 下设置别名会被拦截（IMP-022）。容器实例支持别名（IMP-014），但须先 start。路径别名的前提是应用侧显式、可配置的 base path（方案 B）；LWA 做门禁与探测，不代改应用源码（IMP-055）。无源码时优先 hostPort 或未来主机名别名。
 * **别名下 SPA 绝对资源路径（IMP-023 / IMP-055）**：别名入口 `handle_path` 去掉 `/<alias>/` 前缀转发，相对路径资源（`./assets/…`）正常；但 Vue/React 等 SPA 若构建时用绝对 `base: '/'`，资源（`/assets/…`）会绕过别名打到入口根 -> **空 200、404 或错误 MIME（如 JS 请求得到 text/html）**，页面白屏。
 
@@ -159,7 +164,7 @@ swap=4GB
   并发导入按既有闸门排队、staging 互不干扰。窗口内其它导入（zip/文件夹）会等待；
   `lwa update` 重启 manager/daemon 前等待导入空闲（约 180s），若克隆恰在此时进行，
   超时后跳过重启并提示 doctor 复核（不会打断导入）。长克隆期间管理页「克隆中…」属预期。
-* **GitHub 源导入（IMP-065）**：仅支持 `https://github.com`（精确 host、仅 443；MVP 不放开 GitHub Enterprise / Gitea / GitLab，常量预留）。一次性浅克隆（`--depth 1`）不做仓库缓存与增量 fetch；实例内不保留 `.git`；不递归 submodule；Git LFS 对象只保留指针文件（`GIT_LFS_SKIP_SMUDGE=1`）。克隆超 180s 或源码 >2 GiB 拒绝导入。凭据与代理零托管：私有仓靠 LWA 宿主机的 credential helper，代理靠 `https_proxy` / git `http.proxy`；从 LAN 浏览器导入私有仓失败属预期。git 源实例不能用 zip `--update` 覆盖更新（会切断内容与远端身份的关联），但可用 `--from-dir <目录> --update` 原地切换为文件夹源（issue #28）；`--from-git --update` 传入的仓库必须与实例记录一致，zip/folder 源实例传 `--from-git <url> --update` 则**原地切换为 git 源**（换源不换实例：保留 id / hostPort / 路径别名 / data/，仅覆盖 current/ 并登记新 git 身份）。git 导入/更新全程持全局导入锁（含约 30s 探测 + 最长 180s 克隆的网络等待），期间 `lwa update` 会等待导入空闲（最多 180s）。webhook / 定时拉取 / PR preview / GitHub App / `git push` receive-pack 一律不做。
+* **GitHub 源导入（IMP-065）**：仅支持 `https://github.com`（精确 host、仅 443；MVP 不放开 GitHub Enterprise / Gitea / GitLab，常量预留）。一次性浅克隆（`--depth 1`）不做仓库缓存与增量 fetch；实例内不保留 `.git`；不递归 submodule；Git LFS 对象只保留指针文件（`GIT_LFS_SKIP_SMUDGE=1`）。克隆超 180s 或源码 >2 GiB 拒绝导入。凭据与代理零托管：私有仓靠 LWA 宿主机的 credential helper，代理靠 `https_proxy` / git `http.proxy`；从 LAN 浏览器导入私有仓失败属预期。git 源实例不能用 zip `--update` 覆盖更新（会切断内容与远端身份的关联），但可用 `--from-dir <目录> --update` 原地切换为文件夹源（issue #28）；`--from-git --update` 传入的仓库必须与实例记录一致，zip/folder 源实例传 `--from-git <url> --update` 则**原地切换为 git 源**（换源不换实例：保留 id / hostPort / 路径别名 / data/，仅覆盖 current/ 并登记新 git 身份；可用 `--ref` 钉分支/标签/完整 commit SHA）。已有 git 实例改 ref/子目录须加 `--allow-source-change`，避免静默换版本。git 导入/更新全程持全局导入锁（含约 30s 探测 + 最长 180s 克隆的网络等待），期间 `lwa update` 会等待导入空闲（最多 180s）。webhook / 定时拉取 / PR preview / GitHub App / `git push` receive-pack 一律不做。
 * **选择文件夹（IMP-051 / V0.7.1）**：管理页原生目录对话框仅 **loopback** 可用；局域网即使持有 token 也不能远程弹窗，须手输宿主机绝对路径。
 * **升级与导入互斥（V0.7.1）**：`lwa update` 重启 manager/daemon 前会等待导入空闲（约 180s）；超时跳过重启，避免打断进行中的导入。
 * **多工作区（IMP-053）**：默认端口（`managerPort=17800` / `staticGatewayPort` / `portPool`）按**一机一工作区**设计。`lwa init` 在默认端口已有其它工作区管理页运行时，会输出黄色软提示建议复用既有工作区（不阻断）。确需第二工作区，须改全三段端口，否则会抢同一端口、实例列表分裂。
@@ -263,5 +268,5 @@ swap=4GB
   没有 apt 切源、重试和 cache mount。`buildHooks` 在 npm 安装之后，不能用来补安装期缺失的编译工具。
 
 * **导入预览（#30）**：`lwa import --dry-run` 仅支持带 `--update <id>` 的原地更新。全新 zip、folder、git 导入传该选项会在打开工作区/下载前以退出码 2 拒绝，不会静默执行真实导入。
-* **构建环境**：`buildEnv` / `buildBaseFromAlias` 用于宿主前端安装/构建命令，容器实例则经 Docker `ARG`/`ENV` 与 Compose `build.args` **字面值**注入（issue #39；不写入 `docker/.env`，也不能用 `HOST_PORT` 等管理键覆盖 LWA 分配的端口）。这不是容器**运行期**环境（运行期仍用 `docker/.env` / `.env.local`）。Vite 项目须主动读取 `VITE_BASE`；Python 模板不执行 `entry.build`，预编译 `backend/static` 需在含 `frontend/` 的源码上走镜像内 `npm run build`（或 `buildHooks`）。别名跟随仅在下次构建生效，不会自动重构建或改写源码。手改 `entry.build --base` 不属于重扫保留清单，请优先使用 `lwa configure` 的持久配置。
+* **构建环境**：`buildEnv` / `buildBaseFromAlias` 用于宿主前端安装/构建命令，容器实例则经 Docker `ARG`/`ENV` 与 Compose `build.args` **字面值**注入（issue #39；不写入 `docker/.env`，也不能用 `HOST_PORT` 等管理键覆盖 LWA 分配的端口）。这不是容器**运行期**环境（运行期仍用 `docker/.env` / `.env.local`）。Vite 项目须主动读取 `VITE_BASE`；Python 模板不执行 `entry.build`，预编译 `backend/static` 需在含 `frontend/` 的源码上走镜像内 `npm run build`（或 `buildHooks`）。别名跟随仅在下次构建生效，不会自动重构建或改写源码。手改 `entry.build --base` 不属于重扫保留清单，请优先使用 `lwa configure` 的持久配置。宿主 Node 安装按 lockfile 选择 npm/pnpm/yarn/bun，缓存在工作区 `run/pkg-cache/`（不随 `current/` 重建丢失）。`hostBuildTimeout` 默认 1800 秒（monorepo 首次 install 下限同样 1800）。构建日志按 attempt 分段追加，不截断已有轮转。bun monorepo 若被判 pending/STATIC，失败原因是工具链/形态缺口，不是 Dockerfile 语法。
 * **冗余清理**：运行中、期望运行、构建/排队/验证/取消中等过渡态以及配置不可读的实例始终跳过，`allowConfigLoss` 和 `force` 不绕过这条保护。请先停止，或明确选择单实例删除；`redundancyAcknowledged` 实例不会进入冗余候选。

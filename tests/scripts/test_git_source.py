@@ -368,6 +368,65 @@ class TestStageGitClone:
         ) as clone:
             assert (clone.ref, clone.ref_kind) == ("trunk", "branch")
 
+    def test_hex_branch_name_clones_as_branch_not_commit(self, git_env: GitEnv) -> None:
+        """BUG-926：20261020 这类十六进制分支名不得登记为 commit。"""
+        _git(git_env.seed, "checkout", "-b", "20261020")
+        _git(git_env.seed, "push", "origin", "20261020")
+        _git(git_env.seed, "checkout", "trunk")
+        target = git_source.parse_github_url("https://github.com/acme/mysite")
+        with git_source.stage_git_clone(
+            target, ref="20261020", clone_url=str(git_env.remote)
+        ) as clone:
+            assert clone.ref == "20261020"
+            assert clone.ref_kind == "branch"
+
+    def test_commit_clone_does_not_run_repo_hooks(
+        self, git_env: GitEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """按完整 SHA 导入也必须禁用 hooks，不能执行仓库 post-checkout。"""
+        hooks = git_env.seed / ".githooks"
+        hooks.mkdir()
+        script = hooks / "post-checkout"
+        script.write_text("#!/bin/sh\ntouch HOOK_RAN\n", encoding="utf-8")
+        script.chmod(0o755)
+        _git(git_env.seed, "add", "-A")
+        _git(git_env.seed, "update-index", "--chmod=+x", ".githooks/post-checkout")
+        _git(git_env.seed, "commit", "-m", "add hooks")
+        _git(git_env.seed, "push", "origin", "trunk")
+        oid = git_env.head_oid()
+        cfg = tmp_path / "host-gitconfig"
+        cfg.write_text("[core]\n\thooksPath = .githooks\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+        target = git_source.parse_github_url("https://github.com/acme/mysite")
+        with git_source.stage_git_clone(
+            target, ref=oid, clone_url=str(git_env.remote)
+        ) as clone:
+            assert clone.ref_kind == "commit"
+            assert not (clone.directory / "HOOK_RAN").exists()
+
+    def test_full_commit_sha_clones_detached(self, git_env: GitEnv) -> None:
+        oid = git_env.head_oid()
+        target = git_source.parse_github_url("https://github.com/acme/mysite")
+        with git_source.stage_git_clone(
+            target, ref=oid, clone_url=str(git_env.remote)
+        ) as clone:
+            assert clone.ref_kind == "commit"
+            assert clone.commit == oid
+
+    def test_short_sha_rejected_when_not_a_named_ref(self, git_env: GitEnv) -> None:
+        """BUG-927：短 SHA 不能当 fetch refspec；请提供完整 OID。"""
+        short = git_env.head_oid()[:7]
+        target = git_source.parse_github_url("https://github.com/acme/mysite")
+        with pytest.raises(GitSourceError) as ei:
+            with git_source.stage_git_clone(
+                target, ref=short, clone_url=str(git_env.remote)
+            ):
+                pass  # pragma: no cover - 不会到达
+        assert _kind_of(ei) == "ref_not_found"
+        message = str(ei.value)
+        assert "40" in message or "完整" in message
+
     def test_tag_clone_records_kind_tag_and_peeled_commit(self, git_env: GitEnv) -> None:
         target = git_source.parse_github_url("https://github.com/acme/mysite")
         with git_source.stage_git_clone(
@@ -1806,8 +1865,8 @@ class TestCliGuardsChk238:
                     "--ref", "other", "--update", "mysite",
                 ],
             )
-            assert r.exit_code == 2
-            assert "不能与 --from-git --update 同时使用" in r.output
+            assert r.exit_code in (1, 2)
+            assert "allow-source-change" in r.output
 
             r = runner.invoke(
                 app,
@@ -1816,7 +1875,8 @@ class TestCliGuardsChk238:
                     "--subdir", "docs", "--update", "mysite",
                 ],
             )
-            assert r.exit_code == 2
+            assert r.exit_code in (1, 2)
+            assert "allow-source-change" in r.output
         finally:
             os.chdir(cwd)
 

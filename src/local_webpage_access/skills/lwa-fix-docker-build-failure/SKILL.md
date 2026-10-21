@@ -44,11 +44,14 @@ description: >-
 ## 处理流程
 
 0. 若仍在 `queued` / `building`：先 `lwa cancel-build <id>`（或管理页「取消构建」）停掉当前工作，**不删**缓存/镜像/用户数据；`cancelling` 结束后再改文件。
-1. 解析 `build.log`，按常见模式归类：
-   - 依赖安装失败（网络/版本冲突/平台不匹配）。
+1. 解析 `build.log`，按常见模式归类（日志按 `======== LWA-BUILD <时间> instance=… attempt=… ========` 分段追加，只看最后一段）：
+   - 依赖安装失败（网络/版本冲突/平台不匹配）。失败摘要会附下载源列表与代理路径诊断；
+     源失败冷却记录在工作区 `run/source-health.json`，先判断是源不可达还是依赖本身有问题。
    - `COPY`/`ADD` 路径不存在（`.dockerignore` 误排除、源文件缺失）。
    - 编译错误（原生模块、TypeScript、C 扩展）。
    - 端口/EXPOSE 与实际不符（不影响构建，记录备用）。
+   - 摘要提示「缺少 bun 工具链」「静态托管未找到 HTML」时，是形态/工具链未选容器路径，
+     **不要归因于 Dockerfile 语法**；先按 [lwa-detect-stack](../lwa-detect-stack/SKILL.md) 确认 `kind` / `runtime`。
 2. 针对性修复（写入 manifest 或源码依赖，不写生成的 Dockerfile）：
    - 依赖版本冲突：改 `current/` 里的锁文件或依赖声明，必要时收紧 `entry.install`。
    - 缺少系统库 / 编译器：写入 `systemDeps`（如 `["python3", "make", "g++"]`），或 `lwa configure <id> --system-deps python3 --system-deps make --system-deps g++`。

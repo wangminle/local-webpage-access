@@ -268,7 +268,10 @@
         kvList(inst, [
           ["id", "ID"], ["name", "名称"], ["status", "状态"],
           ["desiredState", "期望状态"], ["kind", "技术族"], ["runtime", "运行层"],
-          ["lanUrl", "访问地址"], ["hostPort", "宿主端口"], ["internalPort", "内部端口"],
+          ["lanUrl", "访问地址"], ["hostLanUrl", "局域网候选"], ["hostLanIp", "Windows 局域网 IP"],
+          ["lanReachability", "地址范围"], ["lanExposure", "暴露状态"],
+          ["accessScopeNote", "网络说明"], ["wslNetworkMode", "WSL 网络模式"],
+          ["hostPort", "宿主端口"], ["internalPort", "内部端口"],
           ["portMappingLabel", "端口映射"], ["routeHost", "路径别名"],
           ["routeUrl", "路径入口"], ["lastError", "最近错误"],
           ["reconcileCircuit", "构建熔断"],
@@ -654,6 +657,19 @@
           return {
             count: stale.length,
             currentLanIp: ip,
+          };
+        },
+        wslLanBanner: function () {
+          var list = this.instances || [];
+          var hit = list.filter(function (i) {
+            return i.lanExposure === "entry-missing" || i.lanReachability === "windows-host";
+          });
+          if (!hit.length) return null;
+          var first = hit[0] || {};
+          return {
+            note: first.accessScopeNote || "WSL NAT 下当前展示地址不是局域网入口",
+            hostLanIp: first.hostLanIp || "",
+            missing: hit.some(function (i) { return i.lanExposure === "entry-missing"; }),
           };
         },
         capabilityBanner: function () {
@@ -1779,6 +1795,12 @@
     '<span v-if="lanStaleBanner.currentLanIp">（{{ lanStaleBanner.currentLanIp }}）</span>',
     '不一致；列表链接已按新地址显示，可同步落盘。</span>',
     '  <button class="btn btn-sm btn-ghost" type="button" :disabled="accessRefreshing" @click="refreshAccessUrls">刷新访问地址</button>',
+    "</div>",
+    '<div class="capability-banner" v-if="wslLanBanner" role="status" data-overall="degraded">',
+    '  <strong>WSL 地址不是局域网入口</strong>',
+    '  <span>{{ wslLanBanner.note }}',
+    '<span v-if="wslLanBanner.hostLanIp"> Windows 局域网 IP {{ wslLanBanner.hostLanIp }}。</span>',
+    ' LWA 不会自动修改 Windows 网络，详见 lwa doctor。</span>',
     "</div>",
     // 顶部统计
     '<section class="stats" aria-label="整机与实例统计">',

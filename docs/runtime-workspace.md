@@ -97,6 +97,7 @@ runtime/                      ← 工作区根（Runtime 根目录）
   - `pageviews.db` — 浏览量聚合、page 过滤、独立 IP 与摄入游标（IMP-024～026）
   - `capability-manager.json` / `capability-daemon.json` / `capability-gateway.json` — 各进程真实身份写入的能力缓存（IMP-033；CLI 不得冒充）
   - `full-setup-state.json` — Full Profile 安装进度与 `sessionRefreshRequired` 等状态
+  - `pkg-cache/<包管理器>/` / `source-health.json` / `build-owners/<id>.json` — 宿主前端构建的包管理器缓存（独立于 `current/`，超时重试不必重装全部依赖）、下载源失败与冷却记录、手动构建 owner 标记（daemon 自愈据此让路；进程退出或超时后自动失效，V0.9.10）
 
 ## 网关与开机自启
 
@@ -164,6 +165,8 @@ lwa restart <id>
 | 实例 | 18000–19999 | `portPool` 内分配，每实例一个 hostPort |
 | 实例端口访问 | `http://<LAN-IP>:<hostPort>/` | `lwa start` 后输出的 `lanUrl` |
 | 实例路径访问 | `http://<LAN-IP>:<staticGatewayPort>/<alias>/` | 显式启用路径别名时（IMP-006，Caddy 模式） |
+
+WSL2 NAT 模式下表中的 `<LAN-IP>` 是仅 Windows 宿主可达的 guest 地址，局域网入口需 Windows 侧转发，见[已知限制 · LAN 访问与防火墙](known-limitations.md#lan-访问与防火墙)。
 
 每个实例 hostPort **独立**，可同时 running（见 IMP-004）。路径别名（IMP-006 / IMP-014）为**可选**：未设置时行为与 V1 一致，仍只用 hostPort；设置后可通过统一入口 `/<slug>/` 访问，与 hostPort **并存**。**设置别名需要 Caddy**（IMP-022）；容器实例须先 `lwa start` 拿到 hostPort 再 `lwa alias set`。
 

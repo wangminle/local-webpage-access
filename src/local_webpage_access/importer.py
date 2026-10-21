@@ -1805,6 +1805,9 @@ class Importer:
         clone_url: str | None = None,
         expected_revision: int | None = None,
         ignore_alias_guard: bool = False,
+        ref: str | None = None,
+        subdir: str | None = None,
+        allow_source_change: bool = False,
     ) -> UpdateResult:
         """从 GitHub 远端更新 git 源实例（IMP-065 §17.2.3 / 065.15–18）。
 
@@ -1858,6 +1861,9 @@ class Importer:
                 clone_url=clone_url,
                 expected_revision=expected_revision,
                 ignore_alias_guard=ignore_alias_guard,
+                ref=ref,
+                subdir=subdir,
+                allow_source_change=allow_source_change,
             )
 
     def _update_from_git_locked(
@@ -1873,6 +1879,9 @@ class Importer:
         clone_url: str | None = None,
         expected_revision: int | None = None,
         ignore_alias_guard: bool = False,
+        ref: str | None = None,
+        subdir: str | None = None,
+        allow_source_change: bool = False,
     ) -> UpdateResult:
         from local_webpage_access import git_source
         from local_webpage_access.folder_source import pack_source_dir
@@ -1920,6 +1929,29 @@ class Importer:
                 url,
             )
 
+        if switching_to_git:
+            stored_ref = ref
+            stored_subdir = subdir
+            if ref and git_source.looks_like_commit_ref(ref):
+                stored_kind = "commit"
+            elif ref:
+                stored_kind = None
+        elif ref is not None or subdir is not None:
+            changing_ref = ref is not None and ref != stored_ref
+            changing_subdir = subdir is not None and subdir != stored_subdir
+            if (changing_ref or changing_subdir) and not allow_source_change:
+                raise ZipImportError(
+                    f"实例 {instance_id} 已关联 git {stored_ref or ''}；"
+                    "更换版本或子目录请加 --allow-source-change，避免静默改写已记录的 ref",
+                    instance_id=instance_id,
+                    code="ref_change_requires_allow",
+                )
+            if ref is not None:
+                stored_ref = ref
+                stored_kind = "commit" if git_source.looks_like_commit_ref(ref) else stored_kind
+            if subdir is not None:
+                stored_subdir = subdir
+
         target = git_source.parse_github_url(url) if url is not None else None
         if switching_to_git:
             assert target is not None  # 切源路径 url 必传（上方已校验）
@@ -1936,14 +1968,20 @@ class Importer:
             if target is None:
                 target = git_source.parse_github_url(stored_url)
 
-            remote_oid = git_source.probe_remote_commit(
-                clone_url or stored_url,
-                ref=stored_ref,
-                ref_kind=stored_kind,
-            )
+            retargeted = ref is not None or subdir is not None
+            if stored_kind == "commit" and not retargeted:
+                remote_oid = stored_commit
+            elif not retargeted:
+                remote_oid = git_source.probe_remote_commit(
+                    clone_url or stored_url,
+                    ref=stored_ref,
+                    ref_kind=stored_kind,
+                )
+            else:
+                remote_oid = None
 
             # 无变更短路（065.b / 065.16）：OID 相同 → 无需更新，不 clone 不 rebuild
-            if remote_oid == stored_commit:
+            if remote_oid is not None and remote_oid == stored_commit:
                 log.info(
                     "实例 %s 的 git 源无变更（%s %s @ %s），跳过更新",
                     instance_id,
@@ -1976,7 +2014,7 @@ class Importer:
                 stored_kind,
                 stored_ref,
                 stored_commit[:12],
-                remote_oid[:12],
+                (remote_oid or "retarget")[:12],
             )
 
         fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip", prefix="lwa-git-update-")

@@ -146,7 +146,7 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 | Ubuntu 22.04 | init → import → start → status | setup --full + doctor --profile full |
 | Ubuntu 24.04 | 同上 | 同上 |
 | Debian 12 | 同上；apt 源不为 Ubuntu | 同上 |
-| WSL2 Ubuntu | 工作区在 Linux 盘；拒绝 `/mnt/<drive>` Full 写路径 | systemd user + doctor ready |
+| WSL2 Ubuntu / Debian | 工作区在 Linux 盘；拒绝 `/mnt/<drive>` Full 写路径。记录 Windows Build、WSL 包版本、**实际**网络模式（NAT/mirrored）。NAT 下 guest IP 不得当作局域网已通；`wsl_lan_exposure` 不得假绿。最终 LAN 须另一台设备验收 | systemd user + doctor ready；LAN 暴露按实际模式与已有转发分层记录 |
 | macOS arm64 | 同上 smoke | Docker Desktop 可用时 Full |
 | macOS Intel（仍承诺时） | smoke 即可 | 不要求与 arm64 同等 Full |
 

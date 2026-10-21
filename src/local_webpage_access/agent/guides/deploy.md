@@ -1,6 +1,6 @@
 # LWA Agent 部署闭环指南
 
-> 适用版本：V0.9.9。面向通过 `/api/agent/v1/*`（或 `lwa mcp` 适配器）操作 LWA 的 Agent。
+> 适用版本：V0.9.10。面向通过 `/api/agent/v1/*`（或 `lwa mcp` 适配器）操作 LWA 的 Agent。
 > 前置阅读：`quickstart.md`（三条底线与工作区确认）。
 
 ## 1. 部署是一个两段式闭环：plan → apply → 轮询 operation
@@ -42,5 +42,7 @@
 ## 4. 部署后
 
 - `lwa_get_access_urls` 返回的是**服务器视角**观测；`localhost` 地址仅服务器本机有效，
-  `lan` 地址请自行验证客户端可达性（`clientReachability` 字段只是提示）。
+  `lan` 地址请自行验证客户端可达性（`clientReachability` 字段只是提示）。服务器若运行在
+  WSL2 NAT 模式，`lan` 条目仅 Windows 宿主可达，须以 `GET /api/instances` 的
+  `lanReachability` / `hostLanUrl` 或 `lwa doctor` 的 `wsl_lan_exposure` 判断真实局域网入口。
 - `lwa_get_logs`（`instanceId` 或 `operationId` 二选一）排查运行问题。

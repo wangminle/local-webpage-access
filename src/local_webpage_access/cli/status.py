@@ -72,6 +72,42 @@ def _echo_source_lines(status: object) -> None:
         typer.echo(f"  ↳ 来源：{git_source_label(status)}")
 
 
+def _echo_access_lines(status: object) -> None:
+    """BUG-923：按可达性打印路径/局域网，避免把 WSL guest IP 叫作局域网。"""
+    from local_webpage_access.wsl_network import (
+        InstanceAccessView,
+        format_cli_network_lines,
+        guest_url_caption,
+    )
+
+    if not getattr(status, "wsl_network_mode", None):
+        if getattr(status, "route_url", None):
+            typer.secho(f"  ↳ 路径：{status.route_url}", fg=typer.colors.CYAN)
+        return
+    access = InstanceAccessView(
+        guest_reachability=getattr(status, "lan_reachability", None) or "unknown",
+        lan_exposure=getattr(status, "lan_exposure", None) or "unknown",
+        host_lan_url=getattr(status, "host_lan_url", None),
+        dynamic_ip_forwarding=bool(getattr(status, "dynamic_ip_forwarding", False)),
+        note=getattr(status, "access_scope_note", None),
+    )
+    lines = format_cli_network_lines(
+        lan_url=getattr(status, "lan_url", None),
+        route_url=getattr(status, "route_url", None),
+        access=access,
+    )
+    for label, value in lines:
+        if label == "路径":
+            extra = f"（{guest_url_caption(access.guest_reachability)}）"
+            typer.secho(f"  ↳ 路径：{value}{extra}", fg=typer.colors.CYAN)
+        elif label in {"局域网入口", "转发风险"}:
+            typer.secho(f"  ↳ {label}：{value}", fg=typer.colors.YELLOW)
+        elif label == "局域网候选":
+            typer.secho(f"  ↳ {label}：{value}", fg=typer.colors.CYAN)
+        else:
+            typer.echo(f"  ↳ {label}：{value}")
+
+
 def _echo_compatibility_line(status: object) -> None:
     """C.01（IMP-056 后置包）：实例已有兼容性预检 findings 时显示 ⚠ 与最高等级。
 
@@ -131,9 +167,8 @@ def status(
             _echo_source_lines(s)
             # C.01：兼容性预检提示（无 findings 不输出）
             _echo_compatibility_line(s)
-            # IMP-006：路径别名入口 URL
-            if s.route_url:
-                typer.secho(f"  ↳ 路径：{s.route_url}", fg=typer.colors.CYAN)
+            # IMP-006 / BUG-923：路径别名与地址范围
+            _echo_access_lines(s)
             if s.last_error:
                 typer.secho(f"  ↳ lastError: {s.last_error}", fg=typer.colors.RED)
             # S2-02 / D4：实例 status 为观测态，操作失败另以操作态一行展示
@@ -275,6 +310,12 @@ def list_cmd() -> None:
             _echo_source_lines(s)
             # C.01：兼容性预检提示（无 findings 不输出）
             _echo_compatibility_line(s)
+        if any(getattr(s, "wsl_network_mode", None) for s in statuses):
+            typer.secho(
+                "  WSL：上表端口是 guest 内地址；局域网入口见 `lwa status` / `lwa doctor`。"
+                "LWA 不会自动修改 Windows 网络。",
+                fg=typer.colors.YELLOW,
+            )
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

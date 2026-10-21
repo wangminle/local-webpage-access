@@ -53,7 +53,7 @@
 
 ## 5. 结果与 URL
 
-返回的访问地址是**服务器视角**观测；`localhost` 地址仅服务器本机有效；远程 Agent 拿 LAN 地址后应自行验证可达性。
+返回的访问地址是**服务器视角**观测；`localhost` 地址仅服务器本机有效；远程 Agent 拿 LAN 地址后应自行验证可达性。服务器若运行在 WSL2 NAT 模式，LAN 地址仅 Windows 宿主可达，须以 `GET /api/instances` 的 `lanReachability` / `hostLanUrl` 或 `lwa doctor` 的 `wsl_lan_exposure` 判断真实局域网入口。
 
 ## 6. M1 本机 Agent 专用通道（本机可用）
 

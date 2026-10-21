@@ -35,7 +35,7 @@ description: >-
 - `servingMode`：`shared-static` / `container`。
 - `stack`：数组，如 `["React", "Vite"]` 或 `["node-stdlib-http"]`。
 - `resourceProfile`：`tiny` / `small` / `medium` / `heavy`。
-- `database.type`：有 SQLite 文件时写 `sqlite`。MySQL / PostgreSQL / Redis 只在诊断里说明，不要为此改生成的 compose。
+- `database.type`：发现 SQLite 文件，或源码声明 SQLite（Django `ENGINE=django.db.backends.sqlite3` / Flask `instance_path` 下的库）时写 `sqlite`，库文件尚未生成也算。MySQL / PostgreSQL / Redis 只在诊断里说明，不要为此改生成的 compose。
 - `entry.install` / `entry.build` / `entry.start`：命令在 `entry` 对象内，不是顶层字段。
 - `container.internalPort`：容器监听端口，不是顶层 `internalPort`。
 - `buildHooks`（issue#7）：构建钩子命令数组，镜像构建期在依赖安装后逐条执行（如 `["python scripts/build_skills_bundle.py"]`）；仅在有明确构建期脚本证据时填写，值不得含换行。

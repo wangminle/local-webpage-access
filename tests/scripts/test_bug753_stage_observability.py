@@ -197,7 +197,7 @@ def test_frontend_build_path_records_stages(workspace, registry, config, monkeyp
     registry.upsert_from_manifest(manifest)
     _mock_gateway(monkeypatch, workspace)
 
-    def _fake_run_command(cmd, cwd=None, log_path=None, env=None):
+    def _fake_run_command(cmd, cwd=None, log_path=None, env=None, **_kwargs):
         (cwd / "dist").mkdir(exist_ok=True)
         (cwd / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
@@ -238,7 +238,7 @@ def test_frontend_build_failure_still_records_early_stages(
     manifest.save(workspace.app_manifest_path("spa"))
     registry.upsert_from_manifest(manifest)
 
-    def _failing_run_command(cmd, cwd=None, log_path=None, env=None):
+    def _failing_run_command(cmd, cwd=None, log_path=None, env=None, **_kwargs):
         raise BuildError("模拟构建失败", instance_id="spa")
 
     monkeypatch.setattr(hosting, "run_command", _failing_run_command)

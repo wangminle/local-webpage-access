@@ -240,7 +240,8 @@ def test_run_command_stdout_not_duplicated(tmp_path: Path) -> None:
     # 若 stdout 被二次 drain 翻倍，"3" 会出现两次。
     run_command("seq 5", cwd=tmp_path, log_path=log)
     text = log.read_text(encoding="utf-8")
-    assert text.count("3") == 1, f"stdout 被重复收集：\n{text}"
+    numbered = [ln.strip() for ln in text.splitlines() if ln.strip().isdigit()]
+    assert numbered == ["1", "2", "3", "4", "5"], f"stdout 被重复收集：\n{text}"
 
 
 def test_run_command_rotates_log_before_append(tmp_path: Path, monkeypatch) -> None:

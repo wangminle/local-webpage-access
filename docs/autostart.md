@@ -131,7 +131,7 @@ test -f run/capability-gateway.json   # Full + --with-caddy 时建议存在
 
 ### WSL 网络（可选 mirrored）
 
-默认多为 **NAT**：发行版有独立 IP，换网或休眠后地址可能变，管理页 LAN 链接会漂移——此时执行：
+默认多为 **NAT**：发行版有独立 IP，该地址通常**只有 Windows 宿主能打开**，不是给手机/其他电脑用的局域网地址。换网、休眠或 WSL 重启后 guest IP 还可能变。先看 `lwa status` / `lwa doctor` 的地址范围与 `wsl_lan_exposure`，不要把 guest `172.x` 分享到局域网。需要局域网访问时，在 Windows 上自行配置转发或改 mirrored（LWA 不会代改）。guest IP 变化后执行：
 
 ```bash
 lwa access refresh

@@ -29,10 +29,11 @@
 | --- | --- |
 | `lwa import <zip> --name <名称>` | 从 zip 创建实例 |
 | `lwa import --from-dir <目录>` | 复制本机文件夹到工作区，不在原始目录内运行 |
-| `lwa import --from-git <URL> --ref <分支或标签> --subdir <子目录>` | 从 GitHub 导入；`--ref` 与 `--subdir` 可省略，仅支持 github.com |
+| `lwa import --from-git <URL> --ref <分支、标签或完整 commit SHA> --subdir <子目录>` | 从 GitHub 导入；`--ref` 与 `--subdir` 可省略，仅支持 github.com |
 | `lwa import <zip> --update <ID>` | 原地更新 zip 源，保留实例 ID、端口、别名及数据目录 |
 | `lwa import --from-dir <目录> --update <ID>` | 从文件夹更新；也可把 zip/GitHub 源实例切换为文件夹源 |
-| `lwa import --from-git <URL> --update <ID>` | 从 GitHub 更新；也可切换既有实例的源类型 |
+| `lwa import --from-git <URL> --update <ID>` | 从 GitHub 更新；也可切换既有实例的源类型。按完整 commit SHA 钉版的实例不探测远端、始终报无变更 |
+| `lwa import --from-git <URL> --update <ID> --ref <新ref> --allow-source-change` | 更换已有 git 实例的分支 / 标签 / commit 或 `--subdir`，保留原实例 |
 | `lwa import --from-dir <新目录> --update <ID> --allow-source-change` | 更换已关联的文件夹路径，保留原实例 |
 | `lwa import <zip> --update <ID> --dry-run` | 预览更新；全新导入不支持 `--dry-run` |
 | `lwa scan <ID>` | 重新识别指定实例；省略 ID 时扫描待识别实例 |

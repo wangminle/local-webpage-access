@@ -119,13 +119,48 @@ def start(
         typer.echo(f"  形态：{manifest.runtime} / {manifest.servingMode}")
         if manifest.network.hostPort:
             typer.echo(f"  端口：{manifest.network.hostPort}")
-        if manifest.network.lanUrl:
-            typer.echo(f"  局域网：{manifest.network.lanUrl}")
-        # IMP-006：路径别名入口 URL（routeMode=name 时填充）
-        if manifest.network.routeUrl:
-            typer.secho(f"  路径：{manifest.network.routeUrl}", fg=typer.colors.CYAN)
-        elif (
-            manifest.static is not None
+        from local_webpage_access.wsl_network import (
+            collect_wsl_network_snapshot,
+            describe_instance_access,
+            format_cli_network_lines,
+            guest_url_caption,
+        )
+
+        try:
+            snap = collect_wsl_network_snapshot()
+            access = (
+                describe_instance_access(
+                    snap,
+                    host_port=manifest.network.hostPort,
+                    route_host=manifest.network.routeHost
+                    if manifest.network.routeMode == "name"
+                    else None,
+                    config=config,
+                )
+                if snap is not None
+                else None
+            )
+        except Exception:  # noqa: BLE001
+            access = None
+        printed = False
+        for label, value in format_cli_network_lines(
+            lan_url=manifest.network.lanUrl,
+            route_url=manifest.network.routeUrl,
+            access=access,
+        ):
+            printed = True
+            if label == "路径":
+                extra = ""
+                if access:
+                    extra = f"（{guest_url_caption(access.guest_reachability)}）"
+                typer.secho(f"  {label}：{value}{extra}", fg=typer.colors.CYAN)
+            elif label in {"局域网入口", "转发风险"}:
+                typer.secho(f"  {label}：{value}", fg=typer.colors.YELLOW)
+            else:
+                typer.echo(f"  {label}：{value}")
+        if (
+            not printed
+            and manifest.static is not None
             and manifest.static.routeMode == "name"
             and manifest.static.routeHost
         ):

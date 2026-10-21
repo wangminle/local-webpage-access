@@ -379,6 +379,7 @@ def doctor_cmd(
                 "currentLanIp": report.current_lan_ip,
                 "driftedInstanceIds": report.drifted_instance_ids,
                 "platformSupport": _platform_report().to_dict(),
+                "wslNetwork": report.wsl_network,
             }
             if report.access_review is not None:
                 payload["accessReview"] = report.access_review.to_dict()

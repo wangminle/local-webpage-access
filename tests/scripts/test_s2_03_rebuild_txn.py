@@ -132,7 +132,11 @@ def test_flask_instance_rescue_failure_keeps_old_container(
     """instance 迁移失败必须在两种重建策略的 down 前中止。"""
     order, rt, _ = env
     current = workspace.app_current("demo")
-    (current / "app.py").write_text("db = os.path.join(app.instance_path, 'app.sqlite')\n")
+    (current / "app.py").write_text(
+        "import os\nfrom flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "app.config['DATABASE'] = os.path.join(app.instance_path, 'app.sqlite')\n"
+    )
     _set_strategy(workspace, deployed, strategy)
     monkeypatch.setattr(hosting, "_rescue_container_data_before_rebuild", _real_rescue)
     rt.rescue_bound_directory.side_effect = DockerError("copy failed")

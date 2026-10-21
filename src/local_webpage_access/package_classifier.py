@@ -33,6 +33,7 @@ from pathlib import Path
 
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import PackageClassification, PackageType
+from local_webpage_access.node_toolchain import workspace_contains
 
 log = get_logger("package_classifier")
 
@@ -111,6 +112,10 @@ def detect_workspaces(root: Path) -> list[str]:
                     seen.add(rel)
                     pkg_dirs.append(rel)
 
+    # 明确声明了成员范围时，弱信号不得重新纳入被排除的独立项目。
+    # 与工具链选择共用判断，避免 scanner 编排成 npm -w，而 install 已选子目录。
+    if patterns:
+        pkg_dirs = [rel for rel in pkg_dirs if workspace_contains(root, root / rel)]
     return sorted(pkg_dirs)
 
 

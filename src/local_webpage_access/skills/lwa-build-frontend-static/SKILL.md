@@ -47,7 +47,12 @@ description: >-
    - Vite 默认 `dist`
    - CRA 默认 `build`
    - Next 静态导出 `out`
-3. 设定 `entry.install`（优先 `npm ci`，无 `package-lock.json` 时 `npm install`）。
+3. 设定 `entry.install`：按锁文件选择——`package-lock.json`→`npm ci`、
+   `pnpm-lock.yaml`→`corepack enable && pnpm install --frozen-lockfile`、
+   `yarn.lock`→`corepack enable && yarn install --frozen-lockfile`、
+   `bun.lock`/`bun.lockb`→`bun install --frozen-lockfile`、无锁文件→`npm install`。
+   monorepo/workspace 在仓库根安装；独立前端子目录用自己的锁文件，不被仓库根
+   遗留的 `package-lock.json` 覆盖（pnpm/yarn 项目写 `npm ci` 会直接失败）。
 4. 设定 `entry.build` 为 `package.json` 的 `scripts.build`。
 5. 设定 `entry.buildOutputDir` 为输出目录相对路径。不要改 `static.root`。
 6. 写回 `local-web.json`。

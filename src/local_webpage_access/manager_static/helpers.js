@@ -204,10 +204,24 @@
   LWA.urlHtml = function (i) {
     var primary = [];
     if (i.lanUrl) {
+      var hostOnly = i.lanReachability === "windows-host";
       primary.push(
         '<a href="' +
           LWA.esc(i.lanUrl) +
-          '" target="_blank" rel="noopener" title="宿主端口访问（LAN IP）">端口</a>'
+          '" target="_blank" rel="noopener" title="' +
+          (hostOnly
+            ? "WSL 内部地址，仅 Windows 宿主可达，不是局域网"
+            : "宿主端口访问（LAN IP）") +
+          '">' +
+          (hostOnly ? "宿主" : "端口") +
+          "</a>"
+      );
+    }
+    if (i.hostLanUrl) {
+      primary.push(
+        '<a href="' +
+          LWA.esc(i.hostLanUrl) +
+          '" target="_blank" rel="noopener" title="Windows 局域网候选，尚未从其他设备验证">局域网候选</a>'
       );
     }
     // 建议项 D：始终提供 127.0.0.1 本机链接作兜底——DHCP/换网后 LAN IP 漂移，
