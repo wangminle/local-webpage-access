@@ -153,6 +153,31 @@ def test_main_config_plain_port_optional(workspace: Workspace) -> None:
     assert ":8080 {" in text, "gatewayPlainPort 显式保留时明文块在场"
 
 
+def test_wsl_tls_san_includes_windows_host_lan_ip_without_binding_it(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """草案 §3.3：HTTPS 对外地址须覆盖 Windows 入口 IP；guest 不能绑定该地址。"""
+    from tests.scripts.test_wsl_network import _yi14_snapshot
+
+    snap = _yi14_snapshot()
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: snap,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_ip",
+        lambda _cfg: "172.22.148.94",
+    )
+    ws = workspace
+    config = _tls_config()
+    _gateway_with_aliases(ws, config)
+    text = StaticGateway(ws, config)._assemble_main_config()
+    assert "https://172.22.148.94:8443" in text
+    assert "https://10.180.105.74:8443" in text
+    assert "https://10.180.105.74:9443" in text
+    assert "\tbind 0.0.0.0" in text
+
+
 def test_site_config_binds_instance_host(workspace: Workspace, tmp_path: Path) -> None:
     ws = workspace
     site_root = tmp_path / "site"

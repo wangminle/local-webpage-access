@@ -257,6 +257,90 @@ def test_custom_flask_instance_directory_is_persisted(workspace: Workspace, expr
     assert persisted.read_bytes() == b"existing database"
 
 
+def test_constructor_in_separate_entry_keeps_default_instance_mount(workspace: Workspace) -> None:
+    """构造在 app.py、SQLite 访问在 db.py 时仍挂载既有 /app/instance。"""
+    root = workspace.app_current("api")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "app.py").write_text(
+        "from flask import Flask\napp = Flask(__name__)\n",
+        encoding="utf-8",
+    )
+    (root / "db.py").write_text(
+        "import os\nfrom flask import current_app\n"
+        "def db_path():\n"
+        "    return os.path.join(current_app.instance_path, 'app.sqlite')\n",
+        encoding="utf-8",
+    )
+    manifest = _compose_manifest(has_database=True, database_type="sqlite")
+    content = generate_compose(manifest, workspace, host_port=18000).read_text()
+    assert "../data/instance:/app/instance" in content
+
+
+@pytest.mark.parametrize("entry_path, db_path, source_subdir, instance_rel", [
+    ("app.py", "storage/db.py", None, "instance"),
+    ("service/app.py", "db.py", None, "service/instance"),
+    ("vendor/flaskr/__init__.py", "storage/db.py", None, "vendor/instance"),
+    ("backend/app.py", "backend/storage/db.py", "backend", "instance"),
+])
+def test_cross_directory_constructor_controls_instance_mount(
+    workspace: Workspace, entry_path: str, db_path: str,
+    source_subdir: str | None, instance_rel: str,
+) -> None:
+    """BUG-941：目录与种子库都属于构造文件，且重建不得覆盖已持久化数据。"""
+    root = workspace.app_current("api")
+    entry = root / entry_path
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("from flask import Flask\napp = Flask(__name__)\n")
+    db = root / db_path
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.write_text("from flask import current_app\np = current_app.instance_path + '/app.sqlite'\n")
+    scan_root = root / source_subdir if source_subdir else root
+    seed = scan_root / instance_rel / "app.sqlite"
+    seed.parent.mkdir(parents=True)
+    seed.write_bytes(b"source database")
+    manifest = _compose_manifest(has_database=True, database_type="sqlite")
+    manifest.sourceSubdir = source_subdir
+    content = generate_compose(manifest, workspace, host_port=18000).read_text()
+    assert f"../data/instance:/app/{instance_rel}" in content
+    persisted = workspace.app_data("api") / "instance" / "app.sqlite"
+    assert persisted.read_bytes() == b"source database"
+    persisted.write_bytes(b"live database")
+    generate_compose(manifest, workspace, host_port=18000)
+    assert persisted.read_bytes() == b"live database"
+
+
+@pytest.mark.parametrize("constructors", [
+    {"app.py": "app = Flask(__name__)\nother = Flask(__name__)",
+     "helper.py": "helper = Flask(__name__, instance_path='/unused')"},
+    {"app.py": "app = Flask(__name__)", "helper.py": "helper = Flask(__name__)"},
+    {"db.py": "app = Flask(__name__)",
+     "helper.py": "helper = Flask(__name__)\nother = Flask(__name__)"},
+    {"db.py": "app = Flask(__name__)", "a.py": "a = Flask(__name__)",
+     "b.py": "b = Flask(__name__)"},
+    {"app.py": "def create_app():\n    return Flask(__name__)",
+     "helper.py": "helper = Flask(__name__, instance_path='/unused')"},
+    {"app.py": "from flask import Flask as FlaskApp\napp = FlaskApp(__name__)",
+     "helper.py": "helper = Flask(__name__, instance_path='/unused')"},
+    {"db.py": "app = Flask(__name__)",
+     "helper.py": "from flask.app import Flask as FlaskApp\nother = FlaskApp(__name__)"},
+    {"db.py": "from flask import Flask as FlaskApp\n"
+     "app = Flask(__name__)\nother = FlaskApp(__name__)"},
+])
+def test_ambiguous_flask_constructors_do_not_get_a_guessed_mount(
+    workspace: Workspace, constructors: dict[str, str],
+) -> None:
+    """BUG-942：多构造或不可证明的构造不能被忽略后选中无关入口。"""
+    root = workspace.app_current("api")
+    root.mkdir(parents=True, exist_ok=True)
+    for filename, body in constructors.items():
+        (root / filename).write_text("from flask import Flask\n" + body + "\n")
+    with (root / "db.py").open("a") as stream:
+        stream.write("from flask import current_app\np = current_app.instance_path + '/app.sqlite'\n")
+    manifest = _compose_manifest(has_database=True, database_type="sqlite")
+    content = generate_compose(manifest, workspace, host_port=18000).read_text()
+    assert "../data/instance:" not in content
+
+
 def test_unknown_instance_path_does_not_get_a_guessed_mount(workspace: Workspace) -> None:
     _write_factory(workspace.app_current("api"), "os.path.join(app.instance_path, 'prod.sqlite')",
                    ctor="Flask(__name__, instance_path=DATA_DIR)")

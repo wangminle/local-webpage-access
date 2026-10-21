@@ -359,6 +359,15 @@ def test_build_log_segment_keeps_history(tmp_path: Path) -> None:
     assert text.count("LWA-BUILD") == 2
 
 
+def test_download_source_host_stops_at_following_error_text() -> None:
+    from local_webpage_access.build_sources import extract_download_sources
+
+    found = extract_download_sources(
+        "registry.npmjs.org ECONNRESET during install"
+    )
+    assert found == ["registry.npmjs.org"]
+
+
 def test_source_health_cooldown_and_success_remain_uncertain(tmp_path: Path) -> None:
     ws = Workspace(tmp_path)
     ws.ensure_workspace_dirs()

@@ -1199,25 +1199,47 @@ class StaticGateway:
             lines.extend(self._tls_blocks(aliases))
         return "\n".join(lines) + "\n"
 
-    def _tls_addresses(self, tls_port: int) -> str:
+    def _tls_addresses(self, tls_port: int) -> tuple[str, bool]:
         """D4：TLS 站点地址——回环 + 当前 LAN IP（internal CA 按地址签 IP SAN）。
 
         LAN IP 解析失败时仅保留回环（本机仍可验收），并告警提示配置
-        ``lanIpStrategy: manual``。
+        ``lanIpStrategy: manual``。WSL NAT 下额外纳入 Windows 局域网 IP 作为
+        证书 SAN；该地址不属于 guest，须 ``bind 0.0.0.0`` 而不能让 Caddy
+        去绑定 Windows IP。
         """
         from local_webpage_access.ports import format_http_host, resolve_lan_ip
 
         addresses = [f"https://127.0.0.1:{tls_port}"]
+        seen: set[str] = {"127.0.0.1"}
+        bind_all = False
         lan_ip = resolve_lan_ip(self.config)
         if lan_ip:
             addresses.append(f"https://{format_http_host(lan_ip)}:{tls_port}")
+            seen.add(lan_ip)
         else:
             log.warning(
                 "gatewayTls=internal 但无法解析 LAN IP——TLS 站点仅覆盖 127.0.0.1，"
                 "局域网客户端无法访问；请在 local-web.yml 配置 lanIpStrategy: manual"
                 " + manualLanIp 后重启网关",
             )
-        return ", ".join(addresses)
+        extra = self._wsl_tls_extra_ip()
+        if extra and extra not in seen:
+            addresses.append(f"https://{format_http_host(extra)}:{tls_port}")
+            bind_all = True
+        return ", ".join(addresses), bind_all
+
+    def _wsl_tls_extra_ip(self) -> str | None:
+        try:
+            from local_webpage_access.wsl_network import collect_wsl_network_snapshot
+
+            snap = collect_wsl_network_snapshot()
+        except Exception:  # noqa: BLE001
+            snap = None
+        if snap and snap.host_lan_ip:
+            return snap.host_lan_ip
+        if self.config.lanIpStrategy == "manual" and self.config.manualLanIp:
+            return self.config.manualLanIp
+        return None
 
     def _tls_blocks(self, aliases: list[Path]) -> list[str]:
         """W04：别名 HTTPS 入口块 + 管理面独立 HTTPS origin 反代块。
@@ -1233,7 +1255,10 @@ class StaticGateway:
         if aliases:
             lines.append("")
             lines.append(f"# HTTPS 别名统一入口（W04，端口 {tls_port}，Caddy internal CA）")
-            lines.append(f"{self._tls_addresses(tls_port)} {{")
+            entry_addrs, bind_all = self._tls_addresses(tls_port)
+            lines.append(f"{entry_addrs} {{")
+            if bind_all:
+                lines.append("\tbind 0.0.0.0")
             lines.append("\ttls internal")
             access_log = self.ws.logs / "static-access.log"
             access_log.parent.mkdir(parents=True, exist_ok=True)
@@ -1259,7 +1284,10 @@ class StaticGateway:
             f"# HTTPS 管理面独立 origin（W04/W05，端口 {manager_tls} →"
             f" 回环 manager:{manager_port}）"
         )
-        lines.append(f"{self._tls_addresses(manager_tls)} {{")
+        manager_addrs, manager_bind_all = self._tls_addresses(manager_tls)
+        lines.append(f"{manager_addrs} {{")
+        if manager_bind_all:
+            lines.append("\tbind 0.0.0.0")
         lines.append("\ttls internal")
         lines.append(f"\treverse_proxy 127.0.0.1:{manager_port}")
         lines.append("}")

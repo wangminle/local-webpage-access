@@ -22,6 +22,7 @@ compose.yaml 用字符串模板而非 ``yaml.safe_dump`` 渲染，保证 ``${}``
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -361,6 +362,63 @@ def _find_instance_sqlite_py(scan_root: Path) -> Path | None:
     return min(found, key=lambda p: p.as_posix())
 
 
+def _unique_flask_constructor_file(scan_root: Path) -> Path | None:
+    """扫描范围内恰有一个可证明的 Flask 构造时，返回其所在文件。"""
+    from local_webpage_access.scanner import _flask_app_constructor, _flask_source_tree
+
+    if not scan_root.is_dir():
+        return None
+    skip = {".venv", "venv", "node_modules", ".git", "__pycache__", "site-packages", "dist", "build"}
+    stack = [(scan_root, 0)]
+    found: list[Path] = []
+    while stack:
+        current, depth = stack.pop()
+        if depth > 3:
+            continue
+        try:
+            entries = sorted(current.iterdir(), key=lambda p: p.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir():
+                if entry.name.lower() in skip or entry.name.startswith("."):
+                    continue
+                stack.append((entry, depth + 1))
+                continue
+            if entry.suffix != ".py" or entry.is_symlink():
+                continue
+            try:
+                if entry.stat().st_size > _FLASK_PY_MAX_BYTES:
+                    continue
+                text = entry.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            tree = _flask_source_tree(text)
+            if tree is None:
+                continue
+            names = {"Flask"} | {
+                alias.asname or alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module in {"flask", "flask.app"}
+                for alias in node.names if alias.name == "Flask"
+            }
+            constructors = [
+                node for node in ast.walk(tree) if isinstance(node, ast.Call) and (
+                    isinstance(node.func, ast.Name) and node.func.id in names
+                    or isinstance(node.func, ast.Attribute) and node.func.attr == "Flask"
+                )
+            ]
+            if not constructors:
+                continue
+            # 包括导入别名；证明器不支持的构造也不能当作不存在后误选其他入口。
+            if len(constructors) != 1 or _flask_app_constructor(tree) is None or found:
+                return None
+            found.append(entry)
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
 def _instance_dir_for_py(scan_root: Path, py_file: Path) -> Path:
     """未安装的 Flask 包：instance 与顶层包并列（``/app/instance``）。
 
@@ -389,7 +447,11 @@ def _flask_instance_mount(
     match = _find_instance_sqlite_py(scan_root)
     if match is None:
         return None
-    rel = _instance_dir_for_py(scan_root, match)
+    entry = _unique_flask_constructor_file(scan_root)
+    if entry is None:
+        log.warning("无法唯一证明 Flask 构造文件，请用 container.extraVolumes 显式配置")
+        return None
+    rel = _instance_dir_for_py(scan_root, entry)
     # 与 init-db 守卫使用同一构造参数解析；不把容器 /data 当作宿主 /data 读取。
     from local_webpage_access.scanner import _flask_instance_base
 
@@ -397,6 +459,8 @@ def _flask_instance_mount(
     initializer = match.parent / "__init__.py"
     if initializer != match and initializer.is_file():
         files.insert(0, initializer)
+    if entry not in files:
+        files.insert(0, entry)
     try:
         if any(path.stat().st_size > _FLASK_PY_MAX_BYTES for path in files):
             return None

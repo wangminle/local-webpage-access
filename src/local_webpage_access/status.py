@@ -701,6 +701,7 @@ def _wsl_access_overlay(
         "wsl_network_mode": None,
         "access_scope_note": None,
         "dynamic_ip_forwarding": False,
+        "wsl_guest_ip": None,
     }
     try:
         from local_webpage_access.wsl_network import (
@@ -724,6 +725,7 @@ def _wsl_access_overlay(
         "wsl_network_mode": snap.networking_mode,
         "access_scope_note": view.note,
         "dynamic_ip_forwarding": view.dynamic_ip_forwarding,
+        "wsl_guest_ip": snap.guest_ip,
     }
 
 
@@ -794,6 +796,11 @@ def _resolve_network_urls(
 
     current_ip = resolve_lan_ip(config)
     source = "manual" if config.lanIpStrategy == "manual" else "live"
+    overlay = _wsl_access_overlay(config, host_port, route_host if route_mode_name else None)
+    guest_ip = overlay.pop("wsl_guest_ip", None)
+    if guest_ip and current_ip and guest_ip != current_ip:
+        current_ip = guest_ip
+        source = "live"
     if current_ip:
         # BUG-714：读时合成同样按 TLS 入口（lan_entry_port + config）——
         # 否则 TLS 模式下管理页展示指向已关闭的 8080 明文入口死链接；
@@ -818,7 +825,6 @@ def _resolve_network_urls(
     _pl = _normalize_ip(persisted_lan or "") or persisted_lan
     _ci = _normalize_ip(current_ip or "") or current_ip
     stale = bool(persisted_lan and current_ip and _pl not in (_ci, "127.0.0.1"))
-    overlay = _wsl_access_overlay(config, host_port, route_host if route_mode_name else None)
     return {
         "lan_url": lan_url,
         "route_host": route_host if route_mode_name else None,

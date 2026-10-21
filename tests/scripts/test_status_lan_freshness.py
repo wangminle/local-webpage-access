@@ -158,3 +158,27 @@ def test_status_wsl_nat_does_not_advertise_guest_ip_as_lan(ws_reg, monkeypatch) 
     assert data["hostLanUrl"] is None
     assert data["wslNetworkMode"] == "nat"
     assert data["lanAddressStale"] is False
+
+
+def test_status_wsl_nat_manual_ip_does_not_replace_guest_lan_url(
+    ws_reg, monkeypatch
+) -> None:
+    """草案 §3.3：不能把 resolve_lan_ip / manualLanIp 直接换成 Windows IP。"""
+    from tests.scripts.test_wsl_network import _yi14_snapshot
+
+    ws, reg = ws_reg
+    _seed(ws, reg, lan_url="http://172.22.148.94:21000", route_host="hello-lwa")
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: _yi14_snapshot(),
+    )
+    cfg = Config(
+        lanIpStrategy="manual",
+        manualLanIp="10.180.105.74",
+        staticGatewayPort=8080,
+        portPool=PortPool(start=21000, end=21050),
+    )
+    data = instance_status(ws, cfg, reg, "demo").to_dict()
+    assert data["lanUrl"] == "http://172.22.148.94:21000"
+    assert data["lanReachability"] == "windows-host"
+    assert data["hostLanIp"] == "10.180.105.74"

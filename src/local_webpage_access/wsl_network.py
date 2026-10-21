@@ -117,6 +117,7 @@ class InteropOutputs:
     netip_text: str | None = None
     netroute_text: str | None = None
     portproxy_text: str | None = None
+    netprofile_text: str | None = None
     errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -138,6 +139,9 @@ class WslNetworkSnapshot:
     portproxy_rules: list[PortProxyRule] = field(default_factory=list)
     capabilities: dict[str, CapabilityStatus] = field(default_factory=dict)
     captured_at: str | None = None
+    localhost_forwarding: bool | None = None
+    network_profiles: list[tuple[str, str]] = field(default_factory=list)
+    host_lan_ip_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -157,6 +161,12 @@ class WslNetworkSnapshot:
             "portproxyRules": [r.to_dict() for r in self.portproxy_rules],
             "capabilities": {k: v.to_dict() for k, v in self.capabilities.items()},
             "capturedAt": self.captured_at,
+            "localhostForwarding": self.localhost_forwarding,
+            "networkProfiles": [
+                {"alias": alias, "category": category}
+                for alias, category in self.network_profiles
+            ],
+            "hostLanIpReason": self.host_lan_ip_reason,
         }
 
 
@@ -186,6 +196,7 @@ class InstanceAccessView:
             "dynamicIpForwarding": self.dynamic_ip_forwarding,
             "guidance": self.guidance,
             "note": self.note,
+            "expectedPort": self.expected_port,
         }
 
 
@@ -230,9 +241,10 @@ def parse_networking_mode_text(text: str | None) -> str:
     return _MODE_ALIASES.get(token, token)
 
 
-def parse_wslconfig_networking_mode(text: str | None) -> str | None:
+def _parse_wslconfig_keys(text: str | None) -> dict[str, str]:
+    keys: dict[str, str] = {}
     if not text:
-        return None
+        return keys
     in_wsl2 = False
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
@@ -241,14 +253,30 @@ def parse_wslconfig_networking_mode(text: str | None) -> str | None:
         if line.startswith("[") and line.endswith("]"):
             in_wsl2 = line.lower() == "[wsl2]"
             continue
-        if not in_wsl2:
-            continue
-        if "=" not in line:
+        if not in_wsl2 or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key.strip().lower() == "networkingmode":
-            parsed = parse_networking_mode_text(value)
-            return None if parsed == MODE_UNKNOWN else parsed
+        keys[key.strip().lower()] = value.strip().strip("\"'")
+    return keys
+
+
+def parse_wslconfig_networking_mode(text: str | None) -> str | None:
+    raw = _parse_wslconfig_keys(text).get("networkingmode")
+    if not raw:
+        return None
+    parsed = parse_networking_mode_text(raw)
+    return None if parsed == MODE_UNKNOWN else parsed
+
+
+def parse_wslconfig_localhost_forwarding(text: str | None) -> bool | None:
+    raw = _parse_wslconfig_keys(text).get("localhostforwarding")
+    if raw is None:
+        return None
+    token = raw.lower()
+    if token in {"true", "1", "yes"}:
+        return True
+    if token in {"false", "0", "no"}:
+        return False
     return None
 
 
@@ -290,16 +318,51 @@ def parse_portproxy_text(text: str | None) -> list[PortProxyRule]:
     return rules
 
 
+def parse_netprofile_text(text: str | None) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 2 and parts[0]:
+            rows.append((parts[0], parts[1]))
+    return rows
+
+
 def select_host_lan_ip(nics: list[WindowsNic], default_route_aliases: list[str]) -> str | None:
+    ip, _reason = _select_host_lan(nics, default_route_aliases)
+    return ip
+
+
+def _select_host_lan(
+    nics: list[WindowsNic], default_route_aliases: list[str]
+) -> tuple[str | None, str | None]:
     usable = [n for n in nics if _is_physical_lan_nic(n)]
     if not usable:
-        return None
+        return None, None
     route_set = {a.lower() for a in default_route_aliases}
     on_route = [n for n in usable if n.alias.lower() in route_set]
     pool = on_route or usable
     dhcp = [n for n in pool if n.prefix_origin.lower() == "dhcp"]
     chosen = dhcp[0] if dhcp else pool[0]
-    return chosen.ip
+    if on_route:
+        reason = f"默认路由网卡 {chosen.alias}（{chosen.ip}）"
+    else:
+        reason = f"物理网卡 {chosen.alias}（{chosen.ip}）"
+    others = [n for n in usable if n.ip != chosen.ip]
+    if others:
+        reason += "；其他候选：" + "、".join(f"{n.alias} {n.ip}" for n in others)
+    return chosen.ip, reason
+
+
+def exposure_after_network_change(
+    exposure: str, previous_fingerprint: str, current_fingerprint: str
+) -> str:
+    """网络/映射变化后，历史「外部已验证」失效为待验证候选。"""
+    if (
+        exposure == EXPOSURE_EXTERNALLY_VERIFIED
+        and previous_fingerprint != current_fingerprint
+    ):
+        return EXPOSURE_CANDIDATE_UNVERIFIED
+    return exposure
 
 
 def snapshot_fingerprint(snapshot: WslNetworkSnapshot | None) -> str:
@@ -366,6 +429,7 @@ def describe_instance_access(
     )
 
     entry_port = lan_entry_port(config)
+    host_lan_ip = _effective_host_lan_ip(snapshot, config)
     match = None
     if route_host and entry_port:
         match = _matching_forward(snapshot, entry_port)
@@ -375,24 +439,24 @@ def describe_instance_access(
     host_lan_url = None
     listen_port = connect_port = None
     connect_address = None
-    if match and snapshot.host_lan_ip:
+    if match and host_lan_ip:
         listen_port = match.listen_port
         connect_port = match.connect_port
         connect_address = match.connect_address
         if route_host and connect_port == entry_port:
             host_lan_url = build_route_url(
-                snapshot.host_lan_ip, listen_port, route_host, config=config
+                host_lan_ip, listen_port, route_host, config=config
             )
         else:
-            host_lan_url = build_lan_url(snapshot.host_lan_ip, listen_port, config=config)
+            host_lan_url = build_lan_url(host_lan_ip, listen_port)
         exposure = EXPOSURE_CANDIDATE_UNVERIFIED
-    elif snapshot.networking_mode == MODE_MIRRORED and snapshot.host_lan_ip:
+    elif snapshot.networking_mode == MODE_MIRRORED and host_lan_ip:
         if route_host and entry_port:
             host_lan_url = build_route_url(
-                snapshot.host_lan_ip, entry_port, route_host, config=config
+                host_lan_ip, entry_port, route_host, config=config
             )
         elif host_port:
-            host_lan_url = build_lan_url(snapshot.host_lan_ip, host_port, config=config)
+            host_lan_url = build_lan_url(host_lan_ip, host_port)
         exposure = EXPOSURE_CANDIDATE_UNVERIFIED
     elif _portproxy_status_unknown(snapshot):
         exposure = EXPOSURE_UNKNOWN
@@ -418,6 +482,16 @@ def describe_instance_access(
             entry_port=entry_port, host_port=host_port, route_host=route_host
         ),
     )
+
+
+def _effective_host_lan_ip(snapshot: WslNetworkSnapshot, config: Config) -> str | None:
+    """发现的 Windows 局域网 IP；读不到时才用用户提供的 manualLanIp 作候选。"""
+    if snapshot.host_lan_ip:
+        return snapshot.host_lan_ip
+    if config.lanIpStrategy == "manual" and config.manualLanIp:
+        if config.manualLanIp != snapshot.guest_ip:
+            return config.manualLanIp
+    return None
 
 
 def guest_url_caption(reachability: str) -> str:
@@ -485,7 +559,7 @@ def _collect_uncached(
             observed = None
     nics = parse_netip_text(data.netip_text)
     routes = parse_netroute_aliases(data.netroute_text)
-    host_lan = select_host_lan_ip(nics, routes)
+    host_lan, host_lan_reason = _select_host_lan(nics, routes)
     ip = guest_ip if guest_ip is not None else detect_lan_ip()
     rules = parse_portproxy_text(data.portproxy_text)
     for rule in rules:
@@ -510,6 +584,9 @@ def _collect_uncached(
         portproxy_rules=rules,
         capabilities=caps,
         captured_at=captured,
+        localhost_forwarding=parse_wslconfig_localhost_forwarding(data.wslconfig_text),
+        network_profiles=parse_netprofile_text(data.netprofile_text),
+        host_lan_ip_reason=host_lan_reason,
     )
 
 
@@ -558,6 +635,14 @@ def _gather_outputs(runner: Runner, caps: dict[str, CapabilityStatus]) -> Intero
         "portproxy",
         errors,
     )
+    netprofile_text = _run_powershell(
+        runner,
+        "Get-NetConnectionProfile | ForEach-Object { "
+        "'{0}|{1}' -f $_.InterfaceAlias, $_.NetworkCategory }",
+        caps,
+        "netprofile",
+        errors,
+    )
     wslconfig_text, cfg_err = _read_wslconfig(runner)
     if cfg_err:
         errors["wslconfig"] = cfg_err
@@ -574,6 +659,7 @@ def _gather_outputs(runner: Runner, caps: dict[str, CapabilityStatus]) -> Intero
         netip_text=netip_text,
         netroute_text=netroute_text,
         portproxy_text=portproxy_text,
+        netprofile_text=netprofile_text,
         errors=errors,
     )
 
@@ -586,6 +672,7 @@ def _fill_capability_from_outputs(
         "netip": data.netip_text,
         "netroute": data.netroute_text,
         "portproxy": data.portproxy_text,
+        "netprofile": data.netprofile_text,
         "wsl_version": data.wsl_version_text,
         "wslconfig": data.wslconfig_text,
     }
@@ -794,6 +881,17 @@ def _portproxy_status_unknown(snapshot: WslNetworkSnapshot) -> bool:
     return cap is not None and cap.status == "unknown"
 
 
+def _direct_or_gateway_scheme(
+    config: Config, port: int | None, entry_port: int | None
+) -> str:
+    """网关 TLS 入口用 https；实例直连端口仍是 HTTP。"""
+    from local_webpage_access.config import tls_enabled
+
+    if tls_enabled(config) and port is not None and port == entry_port:
+        return "https"
+    return "http"
+
+
 def _guidance(
     snapshot: WslNetworkSnapshot,
     config: Config,
@@ -802,8 +900,6 @@ def _guidance(
     *,
     route_host: str | None = None,
 ) -> str | None:
-    from local_webpage_access.config import tls_enabled
-
     if snapshot.networking_mode == MODE_MIRRORED:
         port = _guidance_port(
             entry_port=entry_port, host_port=host_port, route_host=route_host
@@ -830,7 +926,7 @@ def _guidance(
     )
     if not port:
         return None
-    scheme = "https" if tls_enabled(config) else "http"
+    scheme = _direct_or_gateway_scheme(config, port, entry_port)
     loopback = f"{scheme}://127.0.0.1:{port}/"
     lines = [
         "当前为 WSL NAT。guest 地址仅 Windows 宿主可达。LWA 不会自动执行下列命令。",
@@ -846,6 +942,16 @@ def _guidance(
         ),
         "转发目标请用 127.0.0.1（依赖 localhost 转发），不要指向会随 WSL 重启变化的 guest IP。",
     ]
+    if snapshot.localhost_forwarding is False:
+        lines.append(
+            "当前 .wslconfig 声明 localhostForwarding=false，指向 127.0.0.1 的 "
+            "portproxy 不可用；LWA 不会修改该设置。"
+        )
+    if any(category.lower() == "public" for _alias, category in snapshot.network_profiles):
+        lines.append(
+            "当前 Windows 网络配置文件含 Public，入站可能被防火墙拦截。"
+            "LWA 不会修改网络类别。"
+        )
     parsed = _split_nt(snapshot.windows_nt_version)
     if snapshot.windows_product == "windows11" and parsed and parsed[2] >= _WIN11_22H2_BUILD:
         lines.append("也可评估 .wslconfig 中 networkingMode=mirrored（需 Windows 11 22H2+）。")
@@ -914,6 +1020,9 @@ __all__ = [
     "parse_windows_nt_version",
     "parse_networking_mode_text",
     "parse_wslconfig_networking_mode",
+    "parse_wslconfig_localhost_forwarding",
+    "parse_netprofile_text",
+    "exposure_after_network_change",
     "parse_netip_text",
     "parse_netroute_aliases",
     "parse_portproxy_text",

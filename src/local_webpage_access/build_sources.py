@@ -26,7 +26,7 @@ _OWNER_FILE = "build-owner.json"
 _REGISTRY_HOST_RE = re.compile(
     r"(?:^|[\s\"'])((?:https?://)?(?:ghcr\.io|docker\.io|registry-1\.docker\.io|"
     r"quay\.io|gcr\.io|mcr\.microsoft\.com|registry\.npmjs\.org|registry\.yarnpkg\.com|"
-    r"registry\.npmmirror\.com|pypi\.org|files\.pythonhosted\.org)[^\\s\"']*)",
+    r"registry\.npmmirror\.com|pypi\.org|files\.pythonhosted\.org)[^\s\"']*)",
     re.IGNORECASE,
 )
 

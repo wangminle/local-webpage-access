@@ -6,7 +6,9 @@ from local_webpage_access.config import Config
 from local_webpage_access.wsl_network import (
     EXPOSURE_CANDIDATE_UNVERIFIED,
     EXPOSURE_ENTRY_MISSING,
+    EXPOSURE_EXTERNALLY_VERIFIED,
     EXPOSURE_UNKNOWN,
+    MODE_CONSOMME,
     MODE_MIRRORED,
     MODE_NAT,
     MODE_UNKNOWN,
@@ -25,6 +27,7 @@ from local_webpage_access.wsl_network import (
     reset_wsl_network_cache,
     snapshot_fingerprint,
 )
+from local_webpage_access import wsl_network as wn
 
 YI14_WSL_VERSION = """\
 WSL version: 3.0.3.0
@@ -414,6 +417,29 @@ def test_https_candidate_uses_tls_port_not_plaintext_8080() -> None:
     )
     assert access.host_lan_url == "https://10.180.105.74:8443/hello-lwa/"
     assert "8080" not in (access.host_lan_url or "")
+    assert "https://127.0.0.1:8443/" in (access.guidance or "")
+
+
+def test_direct_instance_port_stays_http_when_gateway_tls_enabled() -> None:
+    """TLS 只在网关终止；无别名或只匹配 hostPort 时直连候选保持 HTTP。"""
+    proxy = "0.0.0.0            18000      127.0.0.1         18000\n"
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text=proxy,
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    config = Config(gatewayTls="internal", staticGateway="caddy")
+    access = describe_instance_access(
+        snap, host_port=18000, route_host=None, config=config
+    )
+    assert access.host_lan_url == "http://10.180.105.74:18000"
+    guidance = access.guidance or ""
+    assert "http://127.0.0.1:18000/" in guidance
+    assert "https://127.0.0.1:18000" not in guidance
+    assert "https://" not in (access.host_lan_url or "")
 
 
 def test_fingerprint_changes_when_guest_ip_or_proxy_changes() -> None:
@@ -431,3 +457,309 @@ def test_fingerprint_changes_when_guest_ip_or_proxy_changes() -> None:
     assert snapshot_fingerprint(snap1) != snapshot_fingerprint(snap2)
     snap3 = _yi14_snapshot(guest_ip="172.22.148.100")
     assert snapshot_fingerprint(snap1) != snapshot_fingerprint(snap3)
+
+
+def test_n10_2_wsl_package_2x_nat_same_as_3x() -> None:
+    """N10-2 策略：Win10 + 包 2.x + NAT 与 3.x 同一套地址范围，不因包号升格。"""
+    outputs = InteropOutputs(
+        wsl_version_text="WSL version: 2.4.13.0\nWindows version: 10.0.19045.6456\n",
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl",
+        guest_ip="172.22.148.94",
+        outputs=outputs,
+        use_cache=False,
+    )
+    assert snap is not None
+    assert snap.windows_product == "windows10"
+    assert snap.package_version == "2.4.13.0"
+    assert snap.networking_mode == MODE_NAT
+    assert snap.guest_reachability == REACH_WINDOWS_HOST
+    access = describe_instance_access(
+        snap, host_port=18000, route_host="hello-lwa", config=Config()
+    )
+    assert access.lan_exposure == EXPOSURE_ENTRY_MISSING
+    assert access.host_lan_url is None
+
+
+def test_n11_nat_does_not_assume_mirrored() -> None:
+    """N11-2/N11-3：Win11 未开 mirrored 时与 Win10 NAT 同策略。"""
+    outputs = InteropOutputs(
+        wsl_version_text="WSL version: 2.4.13.0\nWindows version: 10.0.22621.2428\n",
+        wslinfo_text="nat\n",
+        wslconfig_text="[wsl2]\nmemory=8GB\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl",
+        guest_ip="172.22.148.94",
+        outputs=outputs,
+        use_cache=False,
+    )
+    assert snap is not None
+    assert snap.windows_product == "windows11"
+    assert snap.networking_mode == MODE_NAT
+    assert snap.guest_reachability == REACH_WINDOWS_HOST
+    access = describe_instance_access(
+        snap, host_port=18000, route_host="hello-lwa", config=Config()
+    )
+    assert access.lan_exposure == EXPOSURE_ENTRY_MISSING
+    assert "mirrored" in (access.guidance or "")
+
+
+def test_n11_3_package_3x_nat_same_as_2x() -> None:
+    outputs = InteropOutputs(
+        wsl_version_text="WSL version: 3.0.3.0\nWindows version: 10.0.26100.1\n",
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl",
+        guest_ip="172.22.148.94",
+        outputs=outputs,
+        use_cache=False,
+    )
+    assert snap is not None
+    assert snap.package_version == "3.0.3.0"
+    assert snap.windows_product == "windows11"
+    assert snap.networking_mode == MODE_NAT
+    assert snap.guest_reachability == REACH_WINDOWS_HOST
+
+
+def test_m11_mirrored_without_portproxy_is_candidate_not_verified() -> None:
+    """M11：mirrored 不要求 portproxy，也不得写成外部已验证。"""
+    outputs = InteropOutputs(
+        wsl_version_text="WSL version: 2.4.13.0\nWindows version: 10.0.22621.2428\n",
+        wslinfo_text="mirrored\n",
+        wslconfig_text="[wsl2]\nnetworkingMode=mirrored\n",
+        netip_text="10.180.105.74|WLAN|Dhcp\n127.0.0.1|Loopback Pseudo-Interface 1|WellKnown\n",
+        netroute_text="WLAN|10.180.105.1|0\n",
+        portproxy_text="",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl",
+        guest_ip="10.180.105.74",
+        outputs=outputs,
+        use_cache=False,
+    )
+    access = describe_instance_access(
+        snap, host_port=18000, route_host="hello-lwa", config=Config()
+    )
+    assert snap is not None
+    assert snap.networking_mode == MODE_MIRRORED
+    assert snap.guest_reachability == REACH_LAN
+    assert access.lan_exposure == EXPOSURE_CANDIDATE_UNVERIFIED
+    assert access.host_lan_url == "http://10.180.105.74:8080/hello-lwa/"
+    assert "portproxy" not in (access.guidance or "").lower()
+
+
+def test_x10_m_does_not_claim_mirrored_enabled() -> None:
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        wslconfig_text="[wsl2]\nnetworkingMode=mirrored\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    assert snap is not None
+    assert snap.declared_networking_mode == MODE_MIRRORED
+    assert snap.networking_mode == MODE_NAT
+    access = describe_instance_access(
+        snap, host_port=18000, route_host="hello-lwa", config=Config()
+    )
+    guidance = access.guidance or ""
+    assert "当前为 mirrored" not in guidance
+    assert "不支持 mirrored" in (snap.networking_mode_reason or "")
+    assert access.guest_reachability == REACH_WINDOWS_HOST
+
+
+def test_x_unk_preserves_future_mode_name() -> None:
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="future-mode-xyz\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    assert snap is not None
+    assert snap.networking_mode == "future-mode-xyz"
+    assert snap.guest_reachability == REACH_WINDOWS_HOST
+    access = describe_instance_access(
+        snap, host_port=18000, route_host=None, config=Config()
+    )
+    assert "future-mode-xyz" in (access.guidance or "")
+    assert access.lan_exposure != EXPOSURE_EXTERNALLY_VERIFIED
+
+
+def test_consomme_mode_keeps_name_and_does_not_claim_lan() -> None:
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="consomme\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    assert snap is not None
+    assert snap.networking_mode == MODE_CONSOMME
+    assert snap.guest_reachability == REACH_WINDOWS_HOST
+
+
+def test_manual_lan_ip_used_as_candidate_when_windows_nics_unreadable() -> None:
+    """interop 读不到网卡时，用户提供的 Windows IP 只作候选，不改 guest lanUrl。"""
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        errors={"netip": "timeout", "netroute": "timeout"},
+        portproxy_text="0.0.0.0            8080       127.0.0.1         8080\n",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl",
+        guest_ip="172.22.148.94",
+        outputs=outputs,
+        use_cache=False,
+    )
+    assert snap is not None
+    assert snap.host_lan_ip is None
+    config = Config(lanIpStrategy="manual", manualLanIp="10.180.105.74")
+    access = describe_instance_access(
+        snap,
+        host_port=18000,
+        route_host="hello-lwa",
+        config=config,
+    )
+    assert access.host_lan_url == "http://10.180.105.74:8080/hello-lwa/"
+    assert access.lan_exposure == EXPOSURE_CANDIDATE_UNVERIFIED
+    assert access.guest_reachability == REACH_WINDOWS_HOST
+
+
+def test_parse_wslconfig_localhost_forwarding() -> None:
+    assert wn.parse_wslconfig_localhost_forwarding(
+        "[wsl2]\nlocalhostForwarding=false\n"
+    ) is False
+    assert wn.parse_wslconfig_localhost_forwarding(
+        "[wsl2]\nlocalhostForwarding=true\n"
+    ) is True
+    assert wn.parse_wslconfig_localhost_forwarding("[wsl2]\nmemory=8GB\n") is None
+
+
+def test_localhost_forwarding_disabled_warns_against_loopback_target() -> None:
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        wslconfig_text="[wsl2]\nlocalhostForwarding=false\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    assert snap is not None
+    assert snap.localhost_forwarding is False
+    access = describe_instance_access(
+        snap, host_port=18000, route_host="hello-lwa", config=Config()
+    )
+    guidance = access.guidance or ""
+    assert "localhostForwarding" in guidance
+    assert "127.0.0.1" in guidance
+    assert "不可用" in guidance or "关闭" in guidance or "false" in guidance.lower()
+
+
+def test_public_network_profile_is_independent_capability() -> None:
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="",
+        netprofile_text="WLAN|Public\n",
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    assert snap is not None
+    assert snap.network_profiles == [("WLAN", "Public")]
+    assert snap.capabilities["netprofile"].status == "available"
+    access = describe_instance_access(
+        snap, host_port=18000, route_host="hello-lwa", config=Config()
+    )
+    assert "Public" in (access.guidance or "")
+
+
+def test_netprofile_read_failure_does_not_drop_portproxy() -> None:
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="0.0.0.0            8080       127.0.0.1         8080\n",
+        errors={"netprofile": "access-denied"},
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    assert snap is not None
+    assert snap.capabilities["netprofile"].status == "unknown"
+    assert snap.capabilities["portproxy"].status == "available"
+    access = describe_instance_access(
+        snap, host_port=18000, route_host="hello-lwa", config=Config()
+    )
+    assert access.lan_exposure == EXPOSURE_CANDIDATE_UNVERIFIED
+
+
+def test_multi_nic_records_selection_reason() -> None:
+    netip = (
+        "10.180.105.74|WLAN|Dhcp\n"
+        "10.8.0.2|Ethernet 2|Dhcp\n"
+        "127.0.0.1|Loopback Pseudo-Interface 1|WellKnown\n"
+    )
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=netip,
+        netroute_text="WLAN|10.180.105.1|0\n",
+        portproxy_text="",
+    )
+    snap = _yi14_snapshot(outputs=outputs)
+    assert snap is not None
+    assert snap.host_lan_ip == "10.180.105.74"
+    assert snap.host_lan_ip_reason is not None
+    assert "WLAN" in snap.host_lan_ip_reason
+    assert "Ethernet 2" in snap.host_lan_ip_reason
+
+
+def test_exposure_after_network_change_invalidates_external_verification() -> None:
+    previous = snapshot_fingerprint(_yi14_snapshot())
+    changed = snapshot_fingerprint(_yi14_snapshot(guest_ip="172.22.148.100"))
+    assert (
+        wn.exposure_after_network_change(
+            EXPOSURE_EXTERNALLY_VERIFIED, previous, previous
+        )
+        == EXPOSURE_EXTERNALLY_VERIFIED
+    )
+    assert (
+        wn.exposure_after_network_change(
+            EXPOSURE_EXTERNALLY_VERIFIED, previous, changed
+        )
+        == EXPOSURE_CANDIDATE_UNVERIFIED
+    )
+    assert (
+        wn.exposure_after_network_change(
+            EXPOSURE_ENTRY_MISSING, previous, changed
+        )
+        == EXPOSURE_ENTRY_MISSING
+    )
+
+
+def test_expected_port_is_in_access_view_dict() -> None:
+    snap = _yi14_snapshot()
+    access = describe_instance_access(
+        snap, host_port=18000, route_host=None, config=Config()
+    )
+    assert access.to_dict()["expectedPort"] == 18000
