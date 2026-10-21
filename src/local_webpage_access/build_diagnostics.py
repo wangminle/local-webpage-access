@@ -25,6 +25,13 @@ _OOM_RE = re.compile(
 )
 _KILLED_RE = re.compile(r"\bKilled\b", re.IGNORECASE)
 _DISK_RE = re.compile(r"No space left on device", re.IGNORECASE)
+# BUG-947：pip/gcc 编译失败常和「Failed to fetch」字样同时出现，但根因是
+# 缺编译器或头文件，不是镜像源。必须先于 apt 分类。
+_COMPILE_RE = re.compile(
+    r"Failed building wheel|error: command|subprocess-exited-with-error|"
+    r"fatal error:.*No such file or directory|pcre\.h",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -89,6 +96,16 @@ def classify_build_failure(text: str | None) -> FailureHint | None:
         return None
     region = _failure_region(blob)
     evidence = _clip_evidence(region)
+    if _COMPILE_RE.search(region):
+        return FailureHint(
+            kind="compile",
+            summary=(
+                "依赖编译失败（Failed building wheel / gcc / 缺少头文件）。"
+                "这不是镜像源不可达。请按日志补 systemDeps 或确认模板已安装对应编译包后重试。"
+            ),
+            confidence="likely",
+            evidence=evidence,
+        )
     if _APT_FETCH_RE.search(region):
         return FailureHint(
             kind="apt",

@@ -376,7 +376,13 @@ def detect_wsl_package_version(
 
 
 def _decode_wsl_cli_output(raw: bytes | str | None) -> str:
-    """解码 ``wsl.exe`` stdout/stderr（UTF-8 / UTF-16LE / 含 NUL 的误解码）。"""
+    """解码 Windows 互操作输出（UTF-8 / UTF-16LE / 中文控制台 GBK）。
+
+    ``wsl.exe`` 默认常为 UTF-16LE（ASCII 字节之间夹 NUL）。中文 Windows 的
+    ``netsh`` 使用控制台代码页 GBK（CP936），字节流里没有 NUL；UTF-8 失败后
+    再按 UTF-16LE 解会把规则行打乱，portproxy 被读成空（BUG-943）。
+    含 NUL 的失败流仍走 UTF-16LE，避免把真正的宽字符输出误判成 GBK。
+    """
     if raw is None:
         return ""
     if isinstance(raw, str):
@@ -392,7 +398,10 @@ def _decode_wsl_cli_output(raw: bytes | str | None) -> str:
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
-            text = data.decode("utf-16-le", errors="replace")
+            if b"\x00" in data:
+                text = data.decode("utf-16-le", errors="replace")
+            else:
+                text = data.decode("gbk", errors="replace")
         else:
             # UTF-16LE ASCII 无 BOM 时常被 utf-8「成功」解出夹 NUL
             if "\x00" in text:

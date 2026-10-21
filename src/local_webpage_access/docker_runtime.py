@@ -1127,6 +1127,12 @@ class DockerRuntime:
         查询失败（非零退出）抛 :class:`DockerError`——调用方须 fail-safe，
         禁止把查询失败当作"无容器"进而跳过安全检查（BUG-429）。
         """
+        # BUG-946：首次部署尚未写出 compose.yaml。此时 docker compose -f
+        # 会以「no such file」非零退出。那是「还没有旧容器」，不是 daemon
+        # 查询失败；strict 救援不得因此中止第一次启动。
+        compose_file = self.workspace.app_compose_path(instance_id)
+        if not compose_file.is_file():
+            return None
         ps_args = ("ps", "--all", "-q") if all_containers else ("ps", "-q")
         result = _execute(
             self._compose_cmd(instance_id, *ps_args),

@@ -1150,6 +1150,12 @@ class StaticGateway:
             if tls_enabled(self.config):
                 lines.append("\tauto_https disable_redirects")
                 lines.append("\tskip_install_trust")
+                # BUG-944：浏览器访问 IP 字面量通常不发送 SNI（RFC 6066）。
+                # 站点块第一张证书是 127.0.0.1，无 SNI 时 Windows/局域网入口
+                # 会拿到回环证书并校验失败。default_sni 指向客户端实际访问的 IP。
+                default_sni = self._tls_default_sni()
+                if default_sni:
+                    lines.append(f"\tdefault_sni {default_sni}")
             lines.append("}")
             lines.append("")
         sites = sorted(self.ws.static_sites.glob("*.conf"))
@@ -1227,6 +1233,18 @@ class StaticGateway:
             addresses.append(f"https://{format_http_host(extra)}:{tls_port}")
             bind_all = True
         return ", ".join(addresses), bind_all
+
+    def _tls_default_sni(self) -> str | None:
+        """无 SNI 时要出示的证书名：Windows 入口 IP 优先，否则当前 LAN IP。"""
+        windows = self._wsl_tls_extra_ip()
+        if windows and windows not in {"127.0.0.1", "::1"}:
+            return windows
+        from local_webpage_access.ports import resolve_lan_ip
+
+        lan_ip = resolve_lan_ip(self.config)
+        if lan_ip and lan_ip not in {"127.0.0.1", "::1"}:
+            return lan_ip
+        return None
 
     def _wsl_tls_extra_ip(self) -> str | None:
         try:

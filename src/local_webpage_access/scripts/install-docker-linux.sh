@@ -264,9 +264,13 @@ already_good() {
 
 uninstall_conflicts_apt() {
   # https://docs.docker.com/engine/install/ubuntu/#uninstall-old-versions
-  log "卸载可能冲突的旧包（docker.io / podman-docker 等）…"
+  # https://docs.docker.com/engine/install/debian/#uninstall-old-versions
+  # BUG-945：Debian 13 把发行版 Docker 拆成 docker-cli / docker-buildx，
+  # 分别占用 /usr/bin/docker 与 buildx 插件路径。只卸 docker.io 时这两个
+  # 包会留下来，随后安装 CE 的 cli 与 buildx 插件因文件冲突失败。
+  log "卸载可能冲突的旧包（docker.io / docker-cli / docker-buildx 等）…"
   local pkgs
-  pkgs="$(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc 2>/dev/null | cut -f1 || true)"
+  pkgs="$(dpkg --get-selections docker.io docker-cli docker-buildx docker-compose docker-compose-v2 docker-doc podman-docker containerd runc 2>/dev/null | cut -f1 || true)"
   if [[ -n "${pkgs}" ]]; then
     # shellcheck disable=SC2086
     apt_get remove -y $pkgs || true

@@ -7,7 +7,7 @@
 
 | 网关 | gatewayTls=internal | 说明 |
 | --- | --- | --- |
-| caddy | ✅ | Caddy 内嵌 CA（internal CA）自动签发，证书 SAN 覆盖 `127.0.0.1` 与当前 LAN IP；WSL NAT 下另含 Windows 物理网卡 IP（guest 不绑定该地址） |
+| caddy | ✅ | Caddy 内嵌 CA（internal CA）自动签发，证书 SAN 覆盖 `127.0.0.1` 与当前 LAN IP；WSL NAT 下另含 Windows 物理网卡 IP（guest 不绑定该地址）。浏览器访问 IP 字面量通常不发送 SNI，全局 `default_sni` 指向 Windows 入口 IP（没有时用 LAN IP），避免无 SNI 时出示回环证书 |
 | builtin | ❌ | `http.server` 无 TLS 能力；配置校验直接拒绝 `builtin + gatewayTls=internal` |
 | nginx | — | 已收敛（IMP-067）：不再是合法新值；旧配置加载时按 builtin 兼容，`lwa update` 自动迁移 |
 

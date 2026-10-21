@@ -116,6 +116,31 @@ def test_node_dockerfile_supports_pnpm_lockfile(workspace: Workspace) -> None:
     assert "COPY current/package*.json ./" not in content
 
 
+def test_yarn_git_dependency_installs_git(workspace: Workspace) -> None:
+    """BUG-948：yarn.lock 含 git 依赖时，alpine 镜像要先有 git。"""
+    current = workspace.app_current("api")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text(
+        '{"dependencies":{"codemirror":"git+https://github.com/hackmdio/codemirror.git"}}\n',
+        encoding="utf-8",
+    )
+    (current / "yarn.lock").write_text(
+        '"codemirror@https://github.com/hackmdio/codemirror.git#npm":\n'
+        '  resolved "https://github.com/hackmdio/codemirror.git#abc"\n',
+        encoding="utf-8",
+    )
+    m = _mk_manifest(
+        kind=Kind.NODE,
+        install="corepack enable && yarn install --frozen-lockfile",
+        start="node server.js",
+        internal_port=3000,
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "apk add --no-cache git" in content
+    body = content.split("WORKDIR /app", 1)[1]
+    assert body.index("apk add") < body.index("yarn install")
+
+
 def test_node_dockerfile_supports_yarn_lockfile(workspace: Workspace) -> None:
     """BUG-041：yarn 项目应复制 yarn.lock 并运行 yarn install。"""
     m = _mk_manifest(
@@ -719,6 +744,43 @@ def test_dockerfile_strips_pytest_extras_and_leading_space(workspace: Workspace)
 # ---- IMP-054：Python 包 -> apt 系统库自动探测 --------------------------------
 
 
+def test_uwsgi_in_uv_lock_installs_compile_deps(workspace: Workspace) -> None:
+    """BUG-947：uv.lock / pyproject 里的 uwsgi 要在 pip 之前装编译依赖。"""
+    current = workspace.app_current("api")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "pyproject.toml").write_text(
+        '[project]\nname = "linkding"\ndependencies = ["uwsgi>=2.0"]\n',
+        encoding="utf-8",
+    )
+    (current / "uv.lock").write_text(
+        '[[package]]\nname = "uwsgi"\nversion = "2.0.28"\n',
+        encoding="utf-8",
+    )
+    m = _mk_manifest(
+        install="pip install uv && uv sync --frozen --no-dev",
+        start="uwsgi --http :9090",
+    )
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    for pkg in ("gcc", "libc6-dev", "libpcre3-dev"):
+        assert pkg in content
+    body = content.split("WORKDIR /app", 1)[1]
+    assert body.index("libpcre3-dev") < body.index("uv sync")
+    assert "依赖编译失败" in content
+    assert "这不是镜像源不可达" in content
+
+
+def test_pip_compile_failure_hint_is_not_unconditional_mirror(workspace: Workspace) -> None:
+    """BUG-947：编译失败不得一律打印镜像源不可达。"""
+    workspace.ensure_app_dirs("api")
+    (workspace.app_current("api") / "requirements.txt").write_text(
+        "uwsgi>=2.0\n", encoding="utf-8"
+    )
+    m = _mk_manifest(install="pip install -r requirements.txt", start="uwsgi")
+    content = generate_dockerfile(m, workspace).read_text(encoding="utf-8")
+    assert "Failed building wheel" in content
+    assert "grep -E" in content
+
+
 def test_pyzbar_in_requirements_triggers_apt_install(workspace: Workspace) -> None:
     """IMP-054：requirements.txt 含 pyzbar 时自动追加 apt-get install libzbar0。"""
     workspace.ensure_app_dirs("api")
@@ -1069,9 +1131,10 @@ def test_pip_run_wraps_failure_hint(workspace: Workspace) -> None:
         "pip install pipenv && pipenv install --system --skip-lock",
         mirrors=mirrors,
     )
-    assert ") || ( echo '" in out
+    assert "> /tmp/lwa-pip.log 2>&1" in out
     assert "buildMirrors" in out
-    assert "exit 1" in out
+    assert 'exit "$status"' in out
+    assert "Failed building wheel" in out
     assert "( pip install pipenv" in out
 
 

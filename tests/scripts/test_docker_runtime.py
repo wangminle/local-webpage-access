@@ -993,6 +993,21 @@ def test_bind_mounts_inspect_failure_raises(workspace, monkeypatch) -> None:
         DockerRuntime(workspace).bind_mounts("api")
 
 
+def test_container_id_strict_missing_compose_is_no_container(workspace, monkeypatch) -> None:
+    """BUG-946：首次部署还没有 compose.yaml 时，缺文件不是查询失败。"""
+    workspace.ensure_app_dirs("api")
+    called = {"n": 0}
+
+    def fake_execute(*_a, **_k):
+        called["n"] += 1
+        raise AssertionError("没有 Compose 文件时不应调用 docker")
+
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake_execute)
+    runtime = DockerRuntime(workspace)
+    assert runtime.container_id_strict("api", all_containers=True) is None
+    assert called["n"] == 0
+
+
 def test_container_id_strict_raises_on_ps_failure(workspace, monkeypatch) -> None:
     """BUG-429：ps 查询失败——strict 版抛 DockerError；宽松版仍折叠为 None。"""
     _seed_compose_files(workspace, "api")

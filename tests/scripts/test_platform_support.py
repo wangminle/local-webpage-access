@@ -787,6 +787,25 @@ def test_detect_wsl_package_version_parses_utf16le_bytes(monkeypatch) -> None:
     assert detect_wsl_package_version(runner=runner) == "2.4.13.0"
 
 
+def test_decode_wsl_cli_output_gbk_netsh_is_not_utf16() -> None:
+    """BUG-943：中文 Windows 的 netsh 是 GBK，无 NUL 时不得按 UTF-16LE 解码。"""
+    from local_webpage_access.platform_support import _decode_wsl_cli_output
+    from local_webpage_access.wsl_network import parse_portproxy_text
+
+    sample = (
+        "侦听 ipv4:                 连接到 ipv4:\n"
+        "\n"
+        "地址            端口        地址            端口\n"
+        "0.0.0.0         8443        127.0.0.1       8443\n"
+    )
+    text = _decode_wsl_cli_output(sample.encode("gbk"))
+    assert "侦听" in text
+    rules = parse_portproxy_text(text)
+    assert len(rules) == 1
+    assert rules[0].listen_port == 8443
+    assert rules[0].connect_address == "127.0.0.1"
+
+
 def test_detect_wsl_package_version_parses_utf8_and_zh(monkeypatch) -> None:
     """BUG-282：UTF-8 / 中文「WSL 版本」行亦可解析。"""
     from types import SimpleNamespace

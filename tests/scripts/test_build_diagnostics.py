@@ -8,6 +8,22 @@ from local_webpage_access.build_diagnostics import (
 )
 
 
+def test_classify_compile_failure_is_not_mirror() -> None:
+    """BUG-947：uwsgi/gcc 编译失败不得归成镜像源不可达。"""
+    text = (
+        "#9 12.1 gcc -pthread -fPIC -c plugins/pcre/pcre_plugin.c\n"
+        "#9 12.2 fatal error: pcre.h: No such file or directory\n"
+        "#9 12.4 error: command '/usr/bin/gcc' failed with exit code 1\n"
+        "#9 12.5 Failed building wheel for uwsgi\n"
+        "#9 ERROR: process did not complete successfully\n"
+    )
+    hint = classify_build_failure(text)
+    assert hint is not None
+    assert hint.kind == "compile"
+    assert hint.summary.startswith("依赖编译失败")
+    assert "apt 拉取失败" not in hint.summary
+
+
 def test_classify_apt_fetch_failure() -> None:
     text = (
         "Err:170 http://mirrors.aliyun.com/debian trixie/main arm64 libllvm19\n"

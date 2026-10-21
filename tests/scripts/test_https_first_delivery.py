@@ -176,6 +176,28 @@ def test_wsl_tls_san_includes_windows_host_lan_ip_without_binding_it(
     assert "https://10.180.105.74:8443" in text
     assert "https://10.180.105.74:9443" in text
     assert "\tbind 0.0.0.0" in text
+    header = text[: text.index("}") + 1]
+    assert "default_sni 10.180.105.74" in header
+
+
+def test_tls_default_sni_uses_lan_ip_when_not_wsl(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BUG-944：访问 IP 字面量通常不带 SNI，默认证书不能停在 127.0.0.1。"""
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: None,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_ip",
+        lambda _cfg: "192.168.1.40",
+    )
+    config = _tls_config()
+    _gateway_with_aliases(workspace, config)
+    text = StaticGateway(workspace, config)._assemble_main_config()
+    header = text[: text.index("}") + 1]
+    assert "default_sni 192.168.1.40" in header
+    assert "https://192.168.1.40:8443" in text
 
 
 def test_site_config_binds_instance_host(workspace: Workspace, tmp_path: Path) -> None:

@@ -957,6 +957,12 @@
 | BUG-940 | 修复 | P3：下载源正则把空白转义多写一层，错误文本被截进 registry 源键 | 2026-10-21 10:25 | 2026-10-21 10:28 | 已修复 | 审查复现：_REGISTRY_HOST_RE 否定字符类写成 [^\\\\s\\"']，排除的是反斜杠和字母 s，不是空白。registry.npmjs.org ECONNRESET during install 被提取为 registry.npmjs.org ECONNRE。已改为 [^\\s\\"']。回归 test_download_source_host_stops_at_following_error_text，结果为 ['registry.npmjs.org']。gate 4017 passed / 21 skipped。未提交 Git。 |
 | BUG-941 | 修复 | P1：Flask 构造与 SQLite 访问文件跨目录时，默认 instance 挂载点仍按数据库文件位置推导 | 2026-10-21 16:08 | 2026-10-21 16:14 | 已修复 | BUG-938 复核发现；临时目录实测：根目录 app.py 创建 Flask(__name__)，storage/db.py 使用 current_app.instance_path，返回 /app/storage/instance，实际应为 /app/instance。应根据实际构造文件计算默认目录并补充跨目录回归。；本轮修复：唯一构造文件统一参与路径证明，默认 instance 目录改从该文件推导。新增跨目录模块、嵌套包、sourceSubdir 四个场景，验证挂载目标、种子库复制与重生成不覆盖已有数据库。先以失败测试复现旧行为；相关测试 176 passed。bash tests/gate.sh：4026 passed / 21 skipped / 0 failed，ruff 与双 diff-check 全通过。；最终补充验证：含别名防歧义修复后的完整门禁 4029 passed / 21 skipped / 0 failed；12 个新增场景全部通过，独立复核无剩余 P1/P2。 |
 | BUG-942 | 修复 | P1：Flask 入口扫描忽略多构造文件，可能将无关单构造文件误认作唯一入口并挂载错误目录 | 2026-10-21 16:08 | 2026-10-21 16:14 | 已修复 | BUG-938 复核发现；临时目录实测：app.py 含两个构造，helper.py 含一个 instance_path=/unused 的构造，最终返回 /unused 挂载点。_flask_app_constructor 的 None 混淆无构造与多构造，应在发现歧义时停止推断。；本轮修复：扫描不再排除数据库文件和初始化文件；区分无构造与多构造或构造不可证明，发现歧义即停止自动推断，不再误选 helper。新增五个歧义场景（含一个原有安全行为对照），四个在旧实现失败；修复后全部通过。bash tests/gate.sh：4026 passed / 21 skipped / 0 failed。；独立复核补充发现导入别名遗漏，新增 flask/flask.app 别名及同文件原名与别名混用三个失败场景后修复：将导入别名计入构造数，证明器不支持时保守停止推断。最终八个歧义场景全部通过，完整门禁 4029 passed / 21 skipped / 0 failed；独立复核确认遗漏关闭。 |
+| BUG-943 | 修复 | 中文 Windows 的 netsh portproxy 输出为 GBK，被按 UTF-16 解码后规则识别为空 | 2026-10-21 17:34 | 2026-10-21 17:40 | 已修复 | `_decode_wsl_cli_output`：UTF-8 失败且字节流无 NUL 时按 GBK 解码；含 NUL 仍走 UTF-16LE。回归 test_decode_wsl_cli_output_gbk_netsh_is_not_utf16。未在中文 Windows 实机重放 netsh。 |
+| BUG-944 | 修复 | WSL NAT 下 HTTPS IP 入口未发送 SNI 时默认选中回环证书，Windows 入口 IP 校验失败 | 2026-10-21 17:34 | 2026-10-21 17:40 | 已修复 | Caddy 全局块增加 default_sni：有 Windows hostLanIp 时用它，否则用当前 LAN IP。站点地址列表不变。回归 test_wsl_tls_san_includes_windows_host_lan_ip_without_binding_it、test_tls_default_sni_uses_lan_ip_when_not_wsl。未做双设备 HTTPS 实机。 |
+| BUG-945 | 修复 | Debian 从发行版 Docker 升级到 Docker CE 时，残留 docker-cli 与 docker-buildx 与 CE 包抢文件 | 2026-10-21 17:34 | 2026-10-21 17:40 | 已修复 | uninstall_conflicts_apt 的 dpkg 清单加入 docker-cli、docker-buildx，不包含 docker-buildx-plugin。回归 test_linux_script_follows_official_ubuntu_apt_flow。未在 Debian 13 实机执行安装脚本。 |
+| BUG-946 | 修复 | 首次部署尚未生成 Compose 文件时，严格数据救援把缺文件当成容器查询失败并中止启动 | 2026-10-21 17:34 | 2026-10-21 17:40 | 已修复 | container_id_strict 在 compose.yaml 不存在时返回 None，不调用 docker。daemon 查询失败（文件已在且 ps 非零）仍抛 DockerError。回归 test_container_id_strict_missing_compose_is_no_container。未跑真实 Flask 首次部署。 |
+| BUG-947 | 修复 | linkding 构建 uwsgi 缺少 gcc/libc6-dev/libpcre3-dev，且编译错误被提示成镜像源不可达 | 2026-10-21 17:34 | 2026-10-21 17:40 | 已修复 | `_PYTHON_APT_DEPS` 增加 uwsgi；`_detect_apt_deps` 同时读 pyproject.toml 与 uv.lock。pip RUN 按日志区分编译失败与镜像源失败；`classify_build_failure` 增加 compile 且先于 apt。回归 test_uwsgi_in_uv_lock_installs_compile_deps、test_pip_compile_failure_hint_is_not_unconditional_mirror、test_classify_compile_failure_is_not_mirror。未重跑 linkding 镜像构建。 |
+| BUG-948 | 修复 | HedgeDoc 的 yarn git 依赖在 node:alpine 中 spawn git ENOENT | 2026-10-21 17:34 | 2026-10-21 17:40 | 已修复 | package.json / yarn.lock / pnpm-lock / package-lock 出现 git 协议或 `.git#` 时，apk 在安装依赖前加入 git。回归 test_yarn_git_dependency_installs_git。未重跑 HedgeDoc 镜像构建。 |
 
 ## 调整事项
 
@@ -2160,7 +2166,7 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 942 | 942 | 0 | 100% |
+| 代码 Bug | 948 | 948 | 0 | 100% |
 | 调整事项 | 54 | 54 | 0 | 100% |
 | 检查事项 | 452 | 451 | 1 | 99.8% |
 | 测试数据 | 9 | 9 | 0 | 100% |
@@ -2168,4 +2174,4 @@
 | 功能开发 | 167 | 167 | 0 | 100% |
 | 配置运维 | 216 | 216 | 0 | 100% |
 | 规划事项 | 54 | 49 | 5 | 90.7% |
-| **总计** | 2105 | 2099 | 6 | 99.7% |
+| **总计** | 2111 | 2105 | 6 | 99.7% |

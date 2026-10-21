@@ -22,6 +22,7 @@ import json
 import posixpath
 import re
 import shlex
+import tomllib
 from pathlib import Path
 
 from local_webpage_access.config import BuildMirrors, Config, default_config
@@ -79,6 +80,8 @@ _PYTHON_APT_DEPS: dict[str, list[str]] = {
     "psycopg2": ["libpq-dev", "pkg-config"],
     "python-ldap": ["libldap2-dev", "libsasl2-dev"],
     "xmlsec": ["libxml2", "libxmlsec1-dev", "libxmlsec1-openssl", "pkg-config"],
+    # BUG-947：linkding 等项目的 uwsgi 没有可用 wheel，需在 pip 前装编译链。
+    "uwsgi": ["gcc", "libc6-dev", "libpcre3-dev"],
 }
 
 _HEADER = """\
@@ -277,6 +280,10 @@ def _render_node(
     # 在 npm install 阶段就需要 python3/make/g++，必须先于依赖安装层；alpine
     # 用 apk（apt 切源链不适用，不走 mirrors）。为空时渲染保持逐字不变。
     system_pkgs = [str(p).strip() for p in (manifest.systemDeps or []) if str(p).strip()]
+    # BUG-948：HedgeDoc 等 yarn.lock 用 git 仓库作依赖。node:alpine 没有 git，
+    # yarn 会 spawn git ENOENT。只在锁文件或 package.json 出现 git 协议时安装。
+    if _node_declares_git_dependency(source_dir) and "git" not in system_pkgs:
+        system_pkgs.append("git")
     apk_block = f"RUN apk add --no-cache {' '.join(system_pkgs)}\n" if system_pkgs else ""
     # 评审 P2：bun 安装命令需先在镜像内补齐 bun 工具链（node:24-alpine 不含 bun）
     bun_toolchain = _bun_global_install_line(install, source_dir, cpfx)
@@ -317,6 +324,11 @@ _PIP_FAIL_HINT = (
     "lwa: 依赖安装失败。可能是镜像源不可达或过慢——可在 local-web.yml 的 "
     "buildMirrors 中调整 pip / pipFallbacks / pipRetries / pipTimeout，"
     "或 enabled: false 走官方 PyPI，然后重试构建"
+)
+# BUG-947：编译失败（uwsgi 缺 pcre.h / gcc）不得套用镜像源文案。
+_COMPILE_FAIL_HINT = (
+    "lwa: 依赖编译失败（Failed building wheel / gcc / 缺少头文件）。"
+    "这不是镜像源不可达——请补 systemDeps 或确认模板已安装 gcc/libc6-dev 等编译包后重试"
 )
 
 
@@ -422,9 +434,21 @@ def _pip_run(shell_cmd: str, *, mirrors: BuildMirrors | None = None) -> str:
     if "uv sync" in cmd or cmd.startswith("uv ") or "UV_DEFAULT_INDEX=" in cmd:
         mounts.append("--mount=type=cache,target=/root/.cache/uv")
     mount_prefix = " ".join(mounts)
+    # dash 没有 PIPESTATUS。先把安装输出落盘，成功时再打回构建日志；
+    # 失败时按编译特征选择提示，避免 gcc/uwsgi 失败被说成镜像源不可达。
+    classify = (
+        "status=$?; cat /tmp/lwa-pip.log; "
+        'if [ "$status" -ne 0 ]; then '
+        "if grep -E -q 'Failed building wheel|error: command|"
+        "subprocess-exited-with-error|pcre\\.h|gcc:' /tmp/lwa-pip.log; then "
+        f"echo '{_COMPILE_FAIL_HINT}'; "
+        "else "
+        f"echo '{_PIP_FAIL_HINT}'; "
+        "fi; exit \"$status\"; fi"
+    )
     return (
         f"RUN {mount_prefix} \\\n"
-        f"  ( {cmd} ) || ( echo '{_PIP_FAIL_HINT}' && exit 1 )"
+        f"  ( {cmd} ) > /tmp/lwa-pip.log 2>&1; {classify}"
     )
 
 
@@ -769,23 +793,66 @@ def _parse_requirements_packages(req_text: str) -> set[str]:
     return names
 
 
-def _detect_apt_deps(source_dir: Path | None, install: str) -> list[str]:
-    """扫描 requirements 文件，返回需要 apt-get install 的系统包列表（IMP-054）。
+def _pyproject_dependency_names(text: str) -> set[str]:
+    """PEP 621 ``project.dependencies`` / optional-dependencies 的包名。"""
+    if not text.strip():
+        return set()
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return set()
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return set()
+    specs: list[str] = []
+    deps = project.get("dependencies") or []
+    if isinstance(deps, list):
+        specs.extend(str(item) for item in deps)
+    optional = project.get("optional-dependencies") or {}
+    if isinstance(optional, dict):
+        for group in optional.values():
+            if isinstance(group, list):
+                specs.extend(str(item) for item in group)
+    return {name for spec in specs if (name := _requirement_name(spec)) and name != "python"}
 
-    读取 install 命令中指定的 requirements 文件（默认 requirements.txt），
-    对照 ``_PYTHON_APT_DEPS`` 映射，合并去重后返回。
+
+def _requirement_name(spec: str) -> str:
+    token = spec.strip().split(";", 1)[0].strip()
+    token = re.split(r"[\[<>=!~ ]", token, maxsplit=1)[0].strip()
+    return re.sub(r"[-_.]+", "-", token).lower()
+
+
+def _uv_lock_package_names(text: str) -> set[str]:
+    names: set[str] = set()
+    for match in re.finditer(r'(?m)^name = "([^"]+)"', text):
+        name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+        if name and name != "python":
+            names.add(name)
+    return names
+
+
+def _detect_apt_deps(source_dir: Path | None, install: str) -> list[str]:
+    """扫描依赖声明，返回需要 apt-get install 的系统包列表（IMP-054）。
+
+    来源：install 命令指向的 requirements、``pyproject.toml`` 与 ``uv.lock``
+    （BUG-947：uv 项目没有 requirements.txt，只扫前者会漏掉 uwsgi）。
     """
     if source_dir is None:
         return []
+    packages: set[str] = set()
     req_file = _extract_requirements_file(install)
     req_path = source_dir / req_file
-    if not req_path.is_file():
-        return []
-    try:
-        text = req_path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    packages = _parse_requirements_packages(text)
+    if req_path.is_file():
+        try:
+            packages |= _parse_requirements_packages(req_path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+    pyproject = _read_source_text(source_dir / "pyproject.toml")
+    if pyproject:
+        packages |= _pyproject_dependency_names(pyproject)
+    lock = _read_source_text(source_dir / "uv.lock")
+    if lock:
+        packages |= _uv_lock_package_names(lock)
     apt_deps: list[str] = []
     seen: set[str] = set()
     for pkg in sorted(packages):
@@ -794,6 +861,23 @@ def _detect_apt_deps(source_dir: Path | None, install: str) -> list[str]:
                 seen.add(apt)
                 apt_deps.append(apt)
     return apt_deps
+
+
+_GIT_DEP_RE = re.compile(
+    r"(?:git\+(?:https?|ssh)://|git://|git@[\w.-]+:|github:[A-Za-z0-9_.-]+/|\.git(?:#|[\"']))",
+    re.IGNORECASE,
+)
+
+
+def _node_declares_git_dependency(source_dir: Path | None) -> bool:
+    """package.json 或锁文件是否引用 git 仓库依赖（BUG-948）。"""
+    if source_dir is None:
+        return False
+    for name in ("package.json", "yarn.lock", "pnpm-lock.yaml", "package-lock.json"):
+        text = _read_source_text(source_dir / name)
+        if text and _GIT_DEP_RE.search(text):
+            return True
+    return False
 
 
 def _render_python(
