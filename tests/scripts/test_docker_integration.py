@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import subprocess
 import textwrap
@@ -100,7 +101,7 @@ class TestGateCRequiredProbe:
         project = tmp_path / "fastapi-app"
         project.mkdir()
         (project / "requirements.txt").write_text(
-            "fastapi\nuvicorn[standard]\n",
+            "fastapi==0.146.0\nuvicorn==0.54.0\npydantic==2.14.1\n",
             encoding="utf-8",
         )
         (project / "app.py").write_text(
@@ -125,12 +126,14 @@ class TestGateCRequiredProbe:
         """),
             encoding="utf-8",
         )
+        # 探针测试固定依赖，避免上游版本漂移；允许实机使用明确登记的下载源。
+        pip_index = shlex.quote(os.environ.get("LWA_TEST_PIP_INDEX_URL", "https://pypi.org/simple"))
         (project / "Dockerfile").write_text(
-            textwrap.dedent("""\
+            textwrap.dedent(f"""\
             FROM python:3.13-slim
             WORKDIR /app
             COPY requirements.txt .
-            RUN pip install --no-cache-dir -r requirements.txt
+            RUN pip install --only-binary=:all: --no-cache-dir -i {pip_index} -r requirements.txt
             COPY app.py .
             CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
         """),

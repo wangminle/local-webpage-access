@@ -7,6 +7,7 @@ status 与 manager 实例 API 输出 ``revision``；生命周期接口与更新�
 
 from __future__ import annotations
 
+import os
 import subprocess
 import zipfile
 from pathlib import Path
@@ -391,9 +392,7 @@ def test_update_from_git_accepts_expected_revision(
 
 
 def _run_node(script: str) -> None:
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
-    import os
-
+    env = {"PATH": os.environ.get("PATH", os.defpath)}
     run_env = {**os.environ, **env}
     prelude = 'const fs = require("node:fs");\nconst vm = require("node:vm");\n'
     subprocess.run(["node", "-e", prelude + script], check=True, env=run_env)

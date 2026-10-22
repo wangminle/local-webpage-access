@@ -166,6 +166,7 @@ def test_gc_removes_real_tag_but_keeps_in_use(stack: dict) -> None:
 
     reg = Registry(ws.root / "registry" / "local-web.db")
     reg.open()
+    stale = []
     try:
         manifest = InstanceManifest(
             id="demo", name="Demo", version="1", kind=Kind.PYTHON,
@@ -179,15 +180,16 @@ def test_gc_removes_real_tag_but_keeps_in_use(stack: dict) -> None:
             desiredState=DesiredState.RUNNING, status=Status.RUNNING,
         )
         reg.upsert_from_manifest(manifest)
-        # 最旧的一行 = 早期版本（image_v1）；其后 4 行均为 image_v2（在用 + 上一可用）
+        # 最旧的一行是不同于在用镜像的上一可用版本，必须保护其真实标签。
         prev = reg.add_build("demo", status="running")
         reg.finish_build(prev, status="success")
         reg.record_build_artifacts(
             prev, image_ref=f"{repo}:bprev", image_id=image_v1,
             source_hash="h-prev", config_snapshot=None,
         )
-        stale = []
-        for i in range(4):  # retention=3：bprev 超出保留且不受保护，应被 GC
+        versions.tag_build_image(image_v1, f"{repo}:bprev")
+        stale_ids = []
+        for i in range(4):  # retention=3：清理最旧的重复镜像构建，保留上一可用版本。
             bid = reg.add_build("demo", status="running")
             reg.finish_build(bid, status="success")
             reg.record_build_artifacts(
@@ -196,17 +198,21 @@ def test_gc_removes_real_tag_but_keeps_in_use(stack: dict) -> None:
             )
             versions.tag_build_image(image_v2, f"{repo}:old{i}")
             stale.append(f"{repo}:old{i}")
+            stale_ids.append(bid)
 
         result = versions.gc_build_artifacts(ws, _config(), reg, "demo",
                                              in_use_image_id=image_v2)
-        assert result["removed"] == [prev]
-        assert versions.image_exists(f"{repo}:bprev") is False
+        assert result["removed"] == [stale_ids[0]]
+        assert prev in result["kept"]
+        assert versions.image_exists(f"{repo}:bprev") is True
+        assert versions.image_exists(stale[0]) is False
         assert versions.image_exists(stale[-1]) is True
         # 在用镜像本身（latest 与 derived 指向的 image_v2）不受影响
         assert versions.image_exists(f"{repo}:latest") is True
         assert versions.image_exists(f"{repo}:derived") is True
     finally:
         reg.close()
+        _run(["docker", "image", "rm", f"{repo}:bprev", f"{repo}:derived", *stale])
 
 
 def _config():

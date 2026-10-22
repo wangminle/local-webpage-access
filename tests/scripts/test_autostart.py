@@ -27,6 +27,11 @@ def test_is_wsl_via_proc_version(monkeypatch) -> None:
 
     monkeypatch.setattr(pd.platform, "system", lambda: "Linux")
     monkeypatch.delenv("WSL_INTEROP", raising=False)
+    # 仅验证 /proc/version 分支，屏蔽真实 WSL 的目录快捷判定。
+    real_isdir = pd.os.path.isdir
+    monkeypatch.setattr(
+        pd.os.path, "isdir", lambda path: False if path == "/run/WSL" else real_isdir(path)
+    )
     # _read_proc_version 真实实现会 .lower()，故 mock 给小写内容
     monkeypatch.setattr(pd, "_read_proc_version", lambda: "linux version ... microsoft")
     assert pd.is_wsl() is True

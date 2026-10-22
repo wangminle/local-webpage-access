@@ -703,8 +703,13 @@ def _run_first(
         if err:
             last_err = err
             continue
+        try:
+            decoded = _decode_wsl_cli_output(text)
+        except UnicodeDecodeError:
+            last_err = "decode-error"
+            continue
         caps[name] = CapabilityStatus(name, "available", source=args[0])
-        return _decode_wsl_cli_output(text)
+        return decoded
     errors[name] = last_err
     caps[name] = CapabilityStatus(name, "unknown", reason=last_err, source="interop")
     return None
@@ -763,7 +768,10 @@ def _read_wslconfig(runner: Runner) -> tuple[str | None, str | None]:
     text, err = _run_capture(runner, [ps, "-NoProfile", "-Command", "Write-Output $env:USERPROFILE"])
     if err or not text:
         return None, err or "unavailable"
-    win_path = _decode_wsl_cli_output(text).strip().splitlines()
+    try:
+        win_path = _decode_wsl_cli_output(text).strip().splitlines()
+    except UnicodeDecodeError:
+        return None, "decode-error"
     if not win_path:
         return None, "unavailable"
     profile = win_path[0].strip().strip('"')

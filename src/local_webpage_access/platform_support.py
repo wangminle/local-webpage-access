@@ -376,7 +376,11 @@ def detect_wsl_package_version(
 
 
 def _decode_wsl_cli_output(raw: bytes | str | None) -> str:
-    """解码 ``wsl.exe`` stdout/stderr（UTF-8 / UTF-16LE / 含 NUL 的误解码）。"""
+    """严格解码 Windows 命令输出（UTF-8 / UTF-16 / GBK）。
+
+    UTF-16 须有 BOM 或交错 NUL 证据，不能仅因 UTF-8 失败就盲选；
+    无法解码时抛出 UnicodeDecodeError，由调用方保留探测失败状态。
+    """
     if raw is None:
         return ""
     if isinstance(raw, str):
@@ -384,19 +388,16 @@ def _decode_wsl_cli_output(raw: bytes | str | None) -> str:
     data = bytes(raw)
     if not data:
         return ""
-    if data.startswith(b"\xff\xfe"):
-        text = data.decode("utf-16-le", errors="replace")
-    elif data.startswith(b"\xfe\xff"):
-        text = data.decode("utf-16-be", errors="replace")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = data.decode("utf-16")
+    elif data[1::2].count(0) > data[::2].count(0):
+        # 无 BOM 的 WSL UTF-16LE：ASCII 字符的高位字节呈交错 NUL。
+        text = data.decode("utf-16-le")
     else:
         try:
-            text = data.decode("utf-8")
+            text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
-            text = data.decode("utf-16-le", errors="replace")
-        else:
-            # UTF-16LE ASCII 无 BOM 时常被 utf-8「成功」解出夹 NUL
-            if "\x00" in text:
-                text = data.decode("utf-16-le", errors="replace")
+            text = data.decode("gbk")
     return text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
 
 

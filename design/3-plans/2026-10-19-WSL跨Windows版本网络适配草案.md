@@ -1,6 +1,6 @@
 # WSL 跨 Windows 版本网络适配：需求与验收草案
 
-日期：2026-10-19。状态：第一、二批产品实现已落地；2026-10-21 补齐 HTTPS SAN、用户入口候选、localhostForwarding / 网络配置文件只读与策略模拟。N10-3 已复验产品口径（Win10 22H2 Build 19045.6456 / WSL 包 3.0.3.0 / Debian 13 / NAT）：guest 地址标为仅 Windows 宿主可达，缺 :8080 转发时 lan_url_stale 与 wsl_lan_exposure 为 WARN。独立 LAN 客户端页面/CSS/HTTPS 与其余组合仍待实机，不把模拟或单机通过写成矩阵全支持。
+日期：2026-10-19。状态：第一、二批产品实现已落地；2026-10-21 补齐 HTTPS SAN、用户入口候选、localhostForwarding / 网络配置文件只读与策略模拟。同日晚间在 V0.9.11（`ee7b515`）上复验 N10-3（Win10 22H2 Build 19045.6456 / WSL 包 3.0.3.0 / Debian 13 / NAT）：guest 地址仍标为仅 Windows 宿主可达；WSL 内与 Windows localhost 的页面、CSS、JS 内容一致且为 200；独立局域网客户端能解析 Windows 网卡，但网页端口 TCP 超时，与「没有 :8080 转发」一致。中文 Windows 的 portproxy 文本被错误解码，规则列表为空，见 BUG-943，修复前不能把这次「缺入口」当成转发匹配已经验过。HTTPS 与其余组合仍待实机，不把模拟或单机通过写成矩阵全支持。
 
 ## 1. 目标与版本口径
 
@@ -78,7 +78,7 @@ Windows 的 listen IP/port 与 guest 的 connect IP/port 分开记录；不要�
 | 编号 | Windows | WSL 软件包 | 网络策略 | 当前证据 |
 | --- | --- | --- | --- | --- |
 | N10-2 | Windows 10 22H2 | 2.x（不低于现有最低线） | NAT | 2026-10-21 策略模拟通过（包 2.4.13.0 / NAT / 仅宿主可达）。待实机 |
-| N10-3 | Windows 10 22H2 | 3.x | NAT | 2026-10-20 产品口径复验通过：Build 19045.6456 / 包 3.0.3.0 / Debian 13。status/list/API/doctor 将 172.22.148.94 标为仅 Windows 宿主可达；hostLanIp 为物理 WLAN；无 :8080 portproxy 时暴露为入口未发现。2026-10-21 从当前 macOS 探测该 Windows IP 无响应，独立 LAN 客户端页面/CSS/HTTPS 仍未做，不升格为矩阵全通过 |
+| N10-3 | Windows 10 22H2 | 3.x | NAT | 2026-10-20 产品口径复验：Build 19045.6456 / 包 3.0.3.0 / Debian 13。status/list/API/doctor 将 172.22.148.94 标为仅 Windows 宿主可达；hostLanIp 为物理 WLAN。2026-10-21 晚间同一组合、V0.9.11 重启后再验：口径不变；WSL 与 Windows localhost 的页面/CSS/JS 均为 200 且内容一致；独立局域网客户端 ARP 成功，ping 与 8080/18000/17800 TCP 超时。现有转发只有 SSH 端口，没有网页端口，所以「局域网页面未通过」与入口缺失一致，不是服务没起来。guest IP 与 Windows WLAN 地址这次重启后未变。未安装自启单元，重启后 gateway/manager 不在监听，手动拉起后恢复。HTTPS 仍关闭。portproxy 采集在中文代码页下为空，见 BUG-943。不升格为矩阵全通过 |
 | N11-2 | Windows 11 | 2.x（不低于现有最低线） | NAT | 2026-10-21 策略模拟通过：Win11 + NAT 不假设 mirrored。待实机 |
 | N11-3 | Windows 11 | 3.x | NAT | 2026-10-21 策略模拟通过（包 3.0.3.0 / Win11 NAT）。待实机 |
 | M11-2 | Windows 11 22H2+ 且实际具备相应能力 | 2.x（满足该功能的实际前置条件） | mirrored | 2026-10-21 策略模拟通过：无 portproxy 仍为候选未验证。待实机 |
@@ -109,13 +109,16 @@ Win11 的版本/Build 与能力边界应覆盖；不能把“Windows 11”四个
 - [x] 扩展现有 WSL 用户指南、已知限制、平台与自启验收矩阵，不另建冲突说明。
 - [x] 2026-10-21：补 HTTPS SAN（Windows 入口 IP + bind 0.0.0.0）、manualLanIp 仅作候选、localhostForwarding / Public 配置文件只读提示，以及 N10-2/N11/M11/X10-M/X-UNK 策略模拟。
 - [ ] 准备主要组合的隔离验收环境，按本矩阵记录真实证据；不足环境保持待测。
-- [x] 关联 BUG-923 的现象修复与本跨版本适配范围，分别核对实现完成和组合验收完成（实现已完成；组合验收仅 N10-3 口径复验）。
+- [x] 关联 BUG-923 的现象修复与本跨版本适配范围，分别核对实现完成和组合验收完成（实现已完成；组合验收仅 N10-3 口径复验，2026-10-21 晚间补了分层页面的 WSL/Windows localhost 证据）。
+- [ ] 修复 BUG-943 后，在同一台中文 Windows 上重读 portproxy：既有 SSH 转发必须出现在快照里，网页端口在没有对应规则时仍为入口未发现。然后再决定是否由管理员添加网页端口转发，用另一台局域网设备做正向页面/CSS 验收。
+- [ ] N10-3 的 HTTPS：在测试工作区打开 internal CA 后核对证书 SAN（含 Windows 入口 IP、guest 不绑定该地址）、客户端信任和管理面鉴权。当前 `gatewayTls` 仍为 off。
+- [ ] 真实容器复验不在本草案内收口。这台 Debian 13 尚无 Docker，且安装需要管理员密码；11 个样本与 Flask 自定义数据库目录的重建持久化仍按 Eval 方案另做。Docker 26.1.5 / Compose 2.26.1 继续归 CHK-439。
 
 本草案不触发安装、降级/升级 WSL、修改 Windows 全局设置或产品代码提交。真实 SSH/主机信息与原始证据只放已忽略的本地检查点；本文件仅含通用版本、规则和验收目标。
 
 ## 7. 开发就绪度与关联 issue（2026-10-20 核查）
 
-第一、二批已落地：以 BUG-923 / issue #140 为主线，共享 `wsl_network` 快照，统一地址范围与诊断证据，并只读发现 Windows 网卡与 portproxy。lanUrl 仍是 guest 绑定地址，不再宣传为局域网入口；缺少匹配转发时 doctor 报 WARN。2026-10-21 补齐 TLS SAN、用户入口候选与只读能力字段，并用模拟输出覆盖主要组合策略；N10-3 已复验产品口径，独立 LAN 客户端与其余组合仍待实机。
+第一、二批已落地：以 BUG-923 / issue #140 为主线，共享 `wsl_network` 快照，统一地址范围与诊断证据，并只读发现 Windows 网卡与 portproxy。lanUrl 仍是 guest 绑定地址，不再宣传为局域网入口；缺少匹配转发时 doctor 报 WARN。2026-10-21 补齐 TLS SAN、用户入口候选与只读能力字段，并用模拟输出覆盖主要组合策略。同日晚间 N10-3 在 V0.9.11 上复验了口径，以及 WSL / Windows localhost 的页面与 CSS/JS；独立局域网客户端确认网页端口不可达。中文 Windows 上 portproxy 解码失败（BUG-943）使「已有规则」这条证据链还不可用。其余组合、HTTPS 与正向局域网访问仍待实机。
 
 ### 7.1 开发批次
 

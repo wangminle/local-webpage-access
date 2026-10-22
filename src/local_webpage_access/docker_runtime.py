@@ -39,8 +39,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from local_webpage_access.errors import DockerError
+from local_webpage_access.errors import DockerError, SchemaError
 from local_webpage_access.logging import get_logger
+from local_webpage_access.models import InstanceManifest
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
 from local_webpage_access.version_requirements import (
@@ -1126,22 +1127,62 @@ class DockerRuntime:
 
         查询失败（非零退出）抛 :class:`DockerError`——调用方须 fail-safe，
         禁止把查询失败当作"无容器"进而跳过安全检查（BUG-429）。
+        Compose 尚未生成或丢失时，按 manifest 的固定 project/service labels
+        严格查询 Docker；文件缺失本身不能证明旧容器及其数据不存在。
         """
         ps_args = ("ps", "--all", "-q") if all_containers else ("ps", "-q")
+        missing_compose = not self.workspace.app_compose_path(instance_id).exists()
+        if missing_compose:
+            try:
+                manifest = InstanceManifest.load(self.workspace.app_manifest_path(instance_id))
+            except SchemaError as exc:
+                raise DockerError(
+                    f"查询容器失败（实例 {instance_id}）：无法读取 manifest 容器身份：{exc}",
+                    instance_id=instance_id, action="ps",
+                ) from exc
+            container = manifest.container
+            if manifest.id != instance_id or container is None or not container.serviceName.strip():
+                raise DockerError(
+                    f"查询容器失败（实例 {instance_id}）：manifest 容器身份不完整或不匹配",
+                    instance_id=instance_id, action="ps",
+                )
+            # 与 generate_compose 的 name 渲染规则保持一致，不从目录或缓存 id 猜身份。
+            project = container.projectName
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", project or ""):
+                project = manifest.id
+            # Compose 将顶层 name 转小写并移除点号等字符后再写入 project label。
+            project = re.sub(r"[^a-z0-9_-]", "", project.lower()).lstrip("_-")
+            if not project:
+                raise DockerError(
+                    f"查询容器失败（实例 {instance_id}）：manifest 项目身份无效",
+                    instance_id=instance_id, action="ps",
+                )
+            command = [
+                "docker", *ps_args,
+                "--filter", f"label=com.docker.compose.project={project}",
+                "--filter", f"label=com.docker.compose.service={container.serviceName}",
+            ]
+        else:
+            command = self._compose_cmd(instance_id, *ps_args)
         result = _execute(
-            self._compose_cmd(instance_id, *ps_args),
+            command,
             cwd=self.workspace.app_dir(instance_id),
             timeout=_QUERY_TIMEOUT,
         )
         if not result.ok:
             summary = (result.stderr or result.stdout or "").strip()[:300]
             raise DockerError(
-                f"查询容器失败（实例 {instance_id}，compose ps，"
+                f"查询容器失败（实例 {instance_id}，{'docker ps' if missing_compose else 'compose ps'}，"
                 f"exit {result.returncode}）：{summary or '无详细输出'}",
                 instance_id=instance_id,
                 action="ps",
             )
         cid = result.stdout.strip().splitlines()
+        if missing_compose and len(cid) > 1:
+            raise DockerError(
+                f"查询容器失败（实例 {instance_id}）：同一 project/service 匹配多个容器，已中止",
+                instance_id=instance_id, action="ps",
+            )
         return cid[0] if cid else None
 
     def image_id(self, instance_id: str) -> str | None:

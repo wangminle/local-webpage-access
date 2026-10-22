@@ -3041,6 +3041,10 @@ def test_list_instances_lan_url_live_when_manifest_stale(
     """旧落盘 lanUrl + mock 新 IP → 列表 API 返回新地址。"""
     from local_webpage_access.models import InstanceManifest
 
+    # 本用例模拟原生 LAN，避免宿主 WSL 快照覆盖 mock IP。
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda: None
+    )
     iid = manager_env.instance_id
     path = manager_env.workspace.app_manifest_path(iid)
     manifest = InstanceManifest.load(path)
@@ -3130,6 +3134,10 @@ def test_manual_strategy_list_does_not_auto_refresh(manager_env: EnvBundle, monk
     from local_webpage_access import access_workflow as aw
     from local_webpage_access.models import InstanceManifest
 
+    # 本用例模拟原生 LAN，避免宿主 WSL 快照覆盖手动 IP。
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda: None
+    )
     manager_env.config.lanIpStrategy = "manual"
     manager_env.config.manualLanIp = "192.168.9.9"
     iid = manager_env.instance_id

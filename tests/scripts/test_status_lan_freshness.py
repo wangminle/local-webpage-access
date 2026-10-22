@@ -80,6 +80,10 @@ def ws_reg(tmp_path: Path):
 
 def test_status_synthesizes_live_lan_url_when_persisted_stale(ws_reg, monkeypatch) -> None:
     """旧落盘 IP + mock 新 IP → DTO lanUrl 已是新地址。"""
+    # 本用例模拟原生 LAN，避免宿主 WSL 快照覆盖 mock IP。
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda: None
+    )
     ws, reg = ws_reg
     _seed(ws, reg, lan_url="http://10.0.0.99:21000")
     monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
@@ -94,6 +98,10 @@ def test_status_synthesizes_live_lan_url_when_persisted_stale(ws_reg, monkeypatc
 
 
 def test_status_synthesizes_route_url_host_on_drift(ws_reg, monkeypatch) -> None:
+    # 本用例模拟原生 LAN，避免宿主 WSL 快照覆盖 mock IP。
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda: None
+    )
     ws, reg = ws_reg
     _seed(
         ws,
@@ -115,6 +123,10 @@ def test_status_synthesizes_route_url_host_on_drift(ws_reg, monkeypatch) -> None
 
 def test_manual_strategy_uses_manual_ip(ws_reg, monkeypatch) -> None:
     """manual：用配置 IP 合成；不盲信落盘，也不用 detect。"""
+    # 本用例模拟原生 LAN，避免宿主 WSL 快照覆盖手动 IP。
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda: None
+    )
     ws, reg = ws_reg
     _seed(ws, reg, lan_url="http://10.0.0.99:21000")
     monkeypatch.setattr(

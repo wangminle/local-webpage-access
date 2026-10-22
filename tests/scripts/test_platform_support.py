@@ -733,6 +733,10 @@ def test_doctor_json_platform_support_without_workspace(monkeypatch, tmp_path: P
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.chdir(empty)
+    # 空目录场景不得回退到用户配置或 LWA_WORKSPACE 指向的真实工作区。
+    monkeypatch.setattr(
+        "local_webpage_access.paths.read_saved_default_workspace", lambda: (None, "")
+    )
     monkeypatch.setattr(
         ps,
         "collect_platform_support_report",
@@ -785,6 +789,25 @@ def test_detect_wsl_package_version_parses_utf16le_bytes(monkeypatch) -> None:
 
     monkeypatch.setattr(ps, "detect_platform", lambda: "wsl")
     assert detect_wsl_package_version(runner=runner) == "2.4.13.0"
+
+
+def test_decode_wsl_cli_output_gbk_netsh_is_not_utf16() -> None:
+    """BUG-943：中文 Windows 的 netsh 是 GBK，无 NUL 时不得按 UTF-16LE 解码。"""
+    from local_webpage_access.platform_support import _decode_wsl_cli_output
+    from local_webpage_access.wsl_network import parse_portproxy_text
+
+    sample = (
+        "侦听 ipv4:                 连接到 ipv4:\n"
+        "\n"
+        "地址            端口        地址            端口\n"
+        "0.0.0.0         8443        127.0.0.1       8443\n"
+    )
+    text = _decode_wsl_cli_output(sample.encode("gbk"))
+    assert "侦听" in text
+    rules = parse_portproxy_text(text)
+    assert len(rules) == 1
+    assert rules[0].listen_port == 8443
+    assert rules[0].connect_address == "127.0.0.1"
 
 
 def test_detect_wsl_package_version_parses_utf8_and_zh(monkeypatch) -> None:

@@ -264,9 +264,15 @@ already_good() {
 
 uninstall_conflicts_apt() {
   # https://docs.docker.com/engine/install/ubuntu/#uninstall-old-versions
+  # https://docs.docker.com/engine/install/debian/#uninstall-old-versions
   log "卸载可能冲突的旧包（docker.io / podman-docker 等）…"
-  local pkgs
-  pkgs="$(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc 2>/dev/null | cut -f1 || true)"
+  local family="$1" pkgs
+  local -a conflicts=(docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc)
+  if [[ "$family" == "debian" ]]; then
+    # Debian 拆分的 CLI / buildx 包分别与 CE CLI / buildx 插件文件冲突。
+    conflicts+=(docker-cli docker-buildx)
+  fi
+  pkgs="$(dpkg --get-selections "${conflicts[@]}" 2>/dev/null | cut -f1 || true)"
   if [[ -n "${pkgs}" ]]; then
     # shellcheck disable=SC2086
     apt_get remove -y $pkgs || true
@@ -561,7 +567,7 @@ main() {
     setup_dnf_repo
     install_packages_fedora
   else
-    uninstall_conflicts_apt
+    uninstall_conflicts_apt "$family"
     setup_apt_repo "$family" "$codename"
     install_packages
   fi

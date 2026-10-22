@@ -1,13 +1,13 @@
 # HTTPS 传输加密（gatewayTls）
 
-> 适用版本：V0.9.11（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
+> 适用版本：V0.9.12（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
 > 目标：保护 LAN 管理凭据与应用登录的传输安全——明文只存在于回环。
 
 ## 1. 支持矩阵
 
 | 网关 | gatewayTls=internal | 说明 |
 | --- | --- | --- |
-| caddy | ✅ | Caddy 内嵌 CA（internal CA）自动签发，证书 SAN 覆盖 `127.0.0.1` 与当前 LAN IP；WSL NAT 下另含 Windows 物理网卡 IP（guest 不绑定该地址） |
+| caddy | ✅ | Caddy 内嵌 CA（internal CA）自动签发，证书 SAN 覆盖 `127.0.0.1` 与当前 LAN IP；WSL NAT 下另含 Windows 物理网卡 IP（guest 不绑定该地址），此时三个地址落在**同一张**由工作区 CA 根直签的证书上（见 §7，需 guest 内有 `openssl`） |
 | builtin | ❌ | `http.server` 无 TLS 能力；配置校验直接拒绝 `builtin + gatewayTls=internal` |
 | nginx | — | 已收敛（IMP-067）：不再是合法新值；旧配置加载时按 builtin 兼容，`lwa update` 自动迁移 |
 
@@ -80,6 +80,8 @@ curl / Agent 客户端：`curl --cacert lwa-root-ca.crt https://…`；Python：
 ## 7. LAN IP 变化与运维
 
 证书 SAN 覆盖签发时的 LAN IP。WSL NAT 下还会纳入 Windows 物理网卡 IP；该地址不属于 guest，Caddy 对这些额外名称使用 `bind 0.0.0.0`，不会尝试绑定 Windows IP。`lanIpStrategy: auto` 时，地址刷新（管理页列表节流、daemon 周期检查或 `lwa access refresh`）若发现主 Caddyfile 的 8443/9443 仍绑旧 IP 或只剩回环，且 Caddy 已在线，会按当前 LAN IP 重写并 reload；两个端口分别判断，不会因为别名入口已更新就放过管理面。网关处于关闭状态时不会被这次检查重新拉起，下次 `lwa gateway on` 会按当前 IP 重写。reload 失败时 manifest 已更新，可再执行 `lwa gateway on`。固定 IP 环境建议 `lanIpStrategy: manual` + `manualLanIp`。WSL 上 `manualLanIp` 只作为局域网候选，不会把 guest `lanUrl` 改成 Windows 地址。
+
+**WSL NAT 的单张多 SAN 证书**：浏览器 / curl / Python 按 IP 字面量访问时不发送 SNI，Caddy 对无 SNI 连接按**连接的本地地址**选证书；经 Windows portproxy 到达 guest 的连接本地地址只会是 guest 或回环，若回环、guest、Windows IP 各签一张证书，客户端按 Windows IP 校验时永远拿到的是另一张（BUG-944）。因此只要入口地址里含有不属于 guest 的地址，LWA 就用工作区 CA 根（`run/caddy-data/caddy/pki/authorities/local/root.{crt,key}`，与 `lwa ca export` 同一根；全新工作区由 LWA 先行生成，Caddy 之后沿用）直签一张覆盖全部入口地址的叶证书，写到 `run/tls/entry/`（私钥 0600），Caddyfile 用 `tls <cert> <key>` 引用。guest IP 漂移、根证书变化或剩余有效期不足 400 天时在下一次渲染重签，并以 `caddy reload --force` 让 Caddy 重新读文件。签发依赖 guest 内的 `openssl`（Debian/Ubuntu 默认带有）；缺失或签发失败时退回逐地址 `tls internal` 并在网关日志以 `BUG-944` 字样告警——此时本机与 guest 地址仍正常，只有按 Windows IP 访问的 HTTPS 会报证书名称不匹配。非 WSL 主机（回环与 LAN IP 都是本机地址）不受影响，仍按地址逐张签发。
 
 验收清单（至少两台设备）：
 

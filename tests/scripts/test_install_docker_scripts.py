@@ -38,6 +38,12 @@ def test_linux_script_follows_official_ubuntu_apt_flow() -> None:
     assert "docker-buildx-plugin" in text
     assert "docker-compose-plugin" in text
     assert "docker.io" in text  # 冲突包卸载
+    apt = _bash_function(text, "uninstall_conflicts_apt")
+    # BUG-945：Debian 13 把 CLI / buildx 拆成独立包，与 docker-ce-cli、
+    # docker-buildx-plugin 抢同一路径。必须在安装 CE 前卸掉。
+    assert "docker-cli" in apt
+    assert "docker-buildx" in apt
+    assert "docker-buildx-plugin" not in apt
     assert "podman-docker" in text
     # 阿里云默认包源
     assert "mirrors.aliyun.com/docker-ce" in text

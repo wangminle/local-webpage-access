@@ -25,6 +25,13 @@ _OOM_RE = re.compile(
 )
 _KILLED_RE = re.compile(r"\bKilled\b", re.IGNORECASE)
 _DISK_RE = re.compile(r"No space left on device", re.IGNORECASE)
+# BUG-947：pip/gcc 编译失败常和「Failed to fetch」字样同时出现，但根因是
+# 缺编译器或头文件，不是镜像源。必须先于 apt 分类。
+_COMPILE_RE = re.compile(
+    r"Failed building wheel|error: command|subprocess-exited-with-error|"
+    r"fatal error:.*No such file or directory|pcre\.h",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -82,13 +89,57 @@ def _failure_region(blob: str) -> str:
     return f"{keep}\n{blob[start:]}" if keep else blob[start:]
 
 
+_STEP_OUTPUT_RE = re.compile(r"^#\d+\s+\d+(?:\.\d+)?\s+")
+_BUILDKIT_META_RE = re.compile(
+    r"^#\d+\s+(?:\[|DONE|CACHED|ERROR: process |internal)",
+    re.IGNORECASE,
+)
+
+
+def _strip_docker_echo(region: str) -> str:
+    """去掉 BuildKit 的 RUN 命令回显与 Dockerfile 摘录，只留步骤实际输出。
+
+    失败 RUN 的命令文本里常含「Failed building wheel」等分类正则（CHK-460），
+    纯网络失败会被误判为 compile。
+    """
+    kept: list[str] = []
+    skipping_run_echo = False
+    for line in region.splitlines():
+        if _STEP_OUTPUT_RE.match(line):
+            skipping_run_echo = False
+            kept.append(line)
+            continue
+        if _BUILDKIT_META_RE.match(line) or (line.startswith("#") and " RUN " in line):
+            skipping_run_echo = " RUN " in line or line.rstrip().endswith("\\")
+            continue
+        if skipping_run_echo:
+            if not line.startswith("#") or line.rstrip().endswith("\\"):
+                continue
+            skipping_run_echo = False
+        stripped = line.strip()
+        if stripped == "------" or stripped.startswith("> ["):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def classify_build_failure(text: str | None) -> FailureHint | None:
     """从构建输出识别可行动根因；未命中返回 ``None``。"""
     blob = (text or "").strip()
     if not blob:
         return None
-    region = _failure_region(blob)
+    region = _strip_docker_echo(_failure_region(blob))
     evidence = _clip_evidence(region)
+    if _COMPILE_RE.search(region):
+        return FailureHint(
+            kind="compile",
+            summary=(
+                "依赖编译失败（Failed building wheel / gcc / 缺少头文件）。"
+                "这不是镜像源不可达。请按日志补 systemDeps 或确认模板已安装对应编译包后重试。"
+            ),
+            confidence="likely",
+            evidence=evidence,
+        )
     if _APT_FETCH_RE.search(region):
         return FailureHint(
             kind="apt",

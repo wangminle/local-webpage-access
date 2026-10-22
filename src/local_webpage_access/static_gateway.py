@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import ssl
@@ -26,11 +28,12 @@ import tempfile
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 from local_webpage_access.admin_port import (
     LEGACY_ADMIN_PORT,
@@ -253,6 +256,287 @@ def make_https_ssl_context(workspace: Workspace) -> ssl.SSLContext:
     return context
 
 
+# ---- BUG-944：多地址 TLS 入口的单张多 SAN 证书 -------------------------------------
+#
+# certmagic 对**无 SNI** 连接按连接的本地地址选证书，而浏览器 / Python / curl 按 IP
+# 字面量访问时不发 SNI。WSL NAT 下 Windows 局域网 IP 不是 guest 的本地地址：经
+# portproxy 到达 guest 时本地地址只会是 guest 或回环，逐地址 ``tls internal`` 签出
+# 的单 SAN 证书永远选不到 Windows IP 那张，客户端按 Windows IP 校验必失败。
+# 这里改为用工作区 Caddy internal CA 的 root 直接签一张覆盖全部入口地址的叶证书
+# 交给 Caddy（``tls <cert> <key>``）：无论按哪个本地地址选中，拿到的都覆盖 Windows IP。
+# 直签 root 而不经 Caddy 的中间证书——中间证书默认 7 天轮换，叶证书若挂在旧中间
+# 证书下会在轮换后链断。
+
+_ENTRY_CERT_DAYS = 820  # ≤ 825：iOS 13+ / macOS 10.15+ 对 TLS 服务器证书有效期的上限
+_ENTRY_CERT_RENEW_BEFORE = timedelta(days=400)  # 剩余不足时在下一次渲染重签
+_ROOT_CERT_DAYS = 3650
+_OPENSSL_TIMEOUT = 30
+_ENTRY_LOCK_TIMEOUT = 30.0
+
+
+class _OpensslError(RuntimeError):
+    """openssl 不可用或执行失败——上层退回逐地址 ``tls internal``。"""
+
+
+def _openssl_binary() -> str | None:
+    return shutil.which("openssl")
+
+
+def entry_tls_dir(workspace: Workspace) -> Path:
+    """多 SAN 入口证书目录（``run/tls/entry/``，0700）。"""
+    return workspace.run / "tls" / "entry"
+
+
+def entry_tls_cert_paths(workspace: Workspace) -> tuple[Path, Path]:
+    """返回 ``(cert.pem, key.pem)``；交给 Caddyfile ``tls <cert> <key>``。"""
+    directory = entry_tls_dir(workspace)
+    return directory / "cert.pem", directory / "key.pem"
+
+
+def entry_tls_meta_path(workspace: Workspace) -> Path:
+    """签发记录（SAN 集合、到期时间、所用 root 指纹），用于判断是否需要重签。"""
+    return entry_tls_dir(workspace) / "meta.json"
+
+
+def _run_openssl(binary: str, args: Sequence[str], *, cwd: Path) -> None:
+    proc = subprocess.run(
+        [binary, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=_OPENSSL_TIMEOUT,
+        cwd=str(cwd),
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()[:400]
+        raise _OpensslError(f"openssl {args[0]} 失败（exit={proc.returncode}）：{detail}")
+
+
+def _chmod_quiet(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
+def _ensure_workspace_root_ca(workspace: Workspace, binary: str) -> Path:
+    """返回 root.crt；root.crt / root.key 都缺时按 Caddy pki 布局自举。
+
+    Caddy 的 pki 应用启动时若磁盘已有 root 就直接加载，因此自举的 root 会被后续
+    ``tls internal`` 沿用，``lwa ca export`` 的指纹口径不变。只缺其一视为损坏，
+    不覆盖——让上层退回 ``tls internal``，由人工处理。
+    """
+    root_crt = caddy_root_cert_path(workspace)
+    root_key = root_crt.with_name("root.key")
+    if root_crt.is_file() and root_key.is_file():
+        return root_crt
+    if root_crt.exists() or root_key.exists():
+        raise _OpensslError(
+            f"Caddy CA 不完整（{root_crt.parent}）：root.crt 与 root.key 须同时存在，不自动覆盖"
+        )
+    data_root = caddy_data_root(workspace)
+    for directory in (data_root.parent, data_root, *reversed(root_crt.parents[:3])):
+        directory.mkdir(parents=True, exist_ok=True)
+        _chmod_quiet(directory, 0o700)
+    with tempfile.TemporaryDirectory(dir=root_crt.parent) as tmp:
+        work = Path(tmp)
+        key_tmp, crt_tmp, cnf = work / "root.key", work / "root.crt", work / "root.cnf"
+        cnf.write_text(
+            "[req]\n"
+            "distinguished_name = dn\n"
+            "x509_extensions = v3_ca\n"
+            "prompt = no\n"
+            "[dn]\n"
+            "CN = Local Webpage Access Root CA\n"
+            "O = local-webpage-access\n"
+            "[v3_ca]\n"
+            "basicConstraints = critical, CA:TRUE\n"
+            "keyUsage = critical, keyCertSign, cRLSign\n"
+            "subjectKeyIdentifier = hash\n",
+            encoding="utf-8",
+        )
+        _run_openssl(
+            binary,
+            ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(key_tmp)],
+            cwd=work,
+        )
+        key_tmp.chmod(0o600)
+        _run_openssl(
+            binary,
+            [
+                "req", "-x509", "-new", "-sha256",
+                "-key", str(key_tmp),
+                "-days", str(_ROOT_CERT_DAYS),
+                "-config", str(cnf),
+                "-out", str(crt_tmp),
+            ],
+            cwd=work,
+        )
+        os.replace(key_tmp, root_key)
+        os.replace(crt_tmp, root_crt)
+    log.info("已自举工作区 TLS 根证书（Caddy 后续 tls internal 沿用同一 root）：%s", root_crt)
+    return root_crt
+
+
+def _entry_cert_current(workspace: Workspace, sans: Sequence[str], root_fp: str | None) -> bool:
+    cert, key = entry_tls_cert_paths(workspace)
+    meta = entry_tls_meta_path(workspace)
+    if not (cert.is_file() and key.is_file() and meta.is_file()):
+        return False
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+        not_after = datetime.fromisoformat(str(data["notAfter"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if sorted(data.get("sans") or []) != sorted(sans):
+        return False
+    if data.get("rootFingerprint") != root_fp:
+        return False
+    if not_after.tzinfo is None:
+        not_after = not_after.replace(tzinfo=timezone.utc)
+    return not_after - datetime.now(timezone.utc) >= _ENTRY_CERT_RENEW_BEFORE
+
+
+def _sign_entry_leaf(
+    workspace: Workspace, binary: str, root_crt: Path, sans: Sequence[str], root_fp: str | None
+) -> None:
+    root_key = root_crt.with_name("root.key")
+    cert_path, key_path = entry_tls_cert_paths(workspace)
+    directory = entry_tls_dir(workspace)
+    directory.mkdir(parents=True, exist_ok=True)
+    _chmod_quiet(directory, 0o700)
+    issued_at = datetime.now(timezone.utc).replace(microsecond=0)
+    not_after = issued_at + timedelta(days=_ENTRY_CERT_DAYS)
+    with tempfile.TemporaryDirectory(dir=directory) as tmp:
+        work = Path(tmp)
+        key_tmp, csr, crt_tmp = work / "key.pem", work / "entry.csr", work / "cert.pem"
+        cnf, ext = work / "req.cnf", work / "ext.cnf"
+        cnf.write_text(
+            "[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = Local Webpage Access Gateway\n",
+            encoding="utf-8",
+        )
+        ext.write_text(
+            "[v3_leaf]\n"
+            "basicConstraints = critical, CA:FALSE\n"
+            "keyUsage = critical, digitalSignature\n"
+            "extendedKeyUsage = serverAuth\n"
+            "subjectKeyIdentifier = hash\n"
+            "authorityKeyIdentifier = keyid\n"
+            "subjectAltName = " + ", ".join(f"IP:{ip}" for ip in sans) + "\n",
+            encoding="utf-8",
+        )
+        _run_openssl(
+            binary,
+            ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(key_tmp)],
+            cwd=work,
+        )
+        key_tmp.chmod(0o600)
+        _run_openssl(
+            binary,
+            ["req", "-new", "-key", str(key_tmp), "-config", str(cnf), "-out", str(csr)],
+            cwd=work,
+        )
+        _run_openssl(
+            binary,
+            [
+                "x509", "-req", "-sha256",
+                "-in", str(csr),
+                "-CA", str(root_crt),
+                "-CAkey", str(root_key),
+                "-set_serial", "0x" + secrets.token_hex(16),
+                "-days", str(_ENTRY_CERT_DAYS),
+                "-extfile", str(ext),
+                "-extensions", "v3_leaf",
+                "-out", str(crt_tmp),
+            ],
+            cwd=work,
+        )
+        meta_tmp = work / "meta.json"
+        meta_tmp.write_text(
+            json.dumps(
+                {
+                    "sans": sorted(sans),
+                    "issuedAt": issued_at.isoformat(),
+                    "notAfter": not_after.isoformat(),
+                    "rootFingerprint": root_fp,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        # 先换密钥再换证书，最后落签发记录：任一步失败都不会留下自洽的半成品
+        os.replace(key_tmp, key_path)
+        os.replace(crt_tmp, cert_path)
+        os.replace(meta_tmp, entry_tls_meta_path(workspace))
+
+
+@contextmanager
+def _entry_tls_lock(workspace: Workspace) -> Iterator[None]:
+    """并发渲染互斥：两次签发交叉替换 cert/key 会让 Caddy 读到不配对的密钥。"""
+    directory = entry_tls_dir(workspace)
+    directory.mkdir(parents=True, exist_ok=True)
+    _chmod_quiet(directory, 0o700)
+    fd = os.open(str(directory / ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        ensure_lockable(fd)
+        deadline = time.monotonic() + _ENTRY_LOCK_TIMEOUT
+        while True:
+            try:
+                try_acquire_exclusive(fd)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise _OpensslError("等待入口证书签发锁超时") from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            release_exclusive(fd)
+    finally:
+        os.close(fd)
+
+
+class EntryTlsMaterial(NamedTuple):
+    cert: Path
+    key: Path
+    renewed: bool  # 本次调用是否重签（调用方据此 ``caddy reload --force``）
+
+
+def ensure_entry_tls_cert(workspace: Workspace, sans: Sequence[str]) -> EntryTlsMaterial | None:
+    """保证存在一张覆盖 ``sans`` 的入口证书。
+
+    SAN 集合变化（guest IP 漂移）、root 指纹变化或剩余有效期不足时重签；其余情况
+    复用。openssl 缺失或签发失败返回 ``None`` 并告警——调用方退回逐地址
+    ``tls internal``，网关仍可启动，只是 BUG-944 的场景不被覆盖。
+    """
+    binary = _openssl_binary()
+    if binary is None:
+        log.warning(
+            "BUG-944：未找到 openssl，无法为多地址 TLS 入口签发多 SAN 证书，退回逐地址"
+            " tls internal——按 Windows 入口 IP 访问的无 SNI 客户端证书校验可能失败；"
+            "请安装 openssl 后执行 lwa gateway on 重新渲染",
+        )
+        return None
+    names = list(dict.fromkeys(sans))
+    renewed = False
+    try:
+        with _entry_tls_lock(workspace):
+            root = _ensure_workspace_root_ca(workspace, binary)
+            root_fp = caddy_root_cert_fingerprint(workspace)
+            if not _entry_cert_current(workspace, names, root_fp):
+                _sign_entry_leaf(workspace, binary, root, names, root_fp)
+                renewed = True
+                log.info("已签发多 SAN TLS 入口证书（%s）", ", ".join(names))
+    except (_OpensslError, OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("BUG-944：签发多 SAN TLS 入口证书失败，退回逐地址 tls internal：%s", exc)
+        return None
+    cert, key = entry_tls_cert_paths(workspace)
+    return EntryTlsMaterial(cert, key, renewed)
+
+
 def _refuse_caddy_admin_in_pytest(action: str) -> None:
     """BUG-121：pytest 下默认拒绝真实 caddy reload/start，防止覆盖生产 :2019。"""
     if not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -384,6 +668,9 @@ class StaticGateway:
         self._procs: dict[str, subprocess.Popen] = {}
         # IMP-005：Caddy rate_limit 模块能力探测缓存（None=未探测）。
         self._supports_rate_limit: bool | None = None
+        # BUG-944：本次渲染是否重签了多 SAN 入口证书——证书文件变了而 Caddyfile 文本
+        # 未变时 Caddy 会把 reload 当作「配置未变化」跳过，须 ``caddy reload --force``。
+        self._entry_cert_renewed = False
 
     # ---- 后端探测 -----------------------------------------------------------
 
@@ -1028,6 +1315,10 @@ class StaticGateway:
             "--address",
             admin_address(self.ws),
         ]
+        if self._entry_cert_renewed:
+            # BUG-944：只有证书文件变了、Caddyfile 文本未变时 Caddy 会判「配置未变化」
+            # 而跳过 reload，继续用内存里的旧证书；--force 让它重新读文件。
+            cmd.append("--force")
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=_CADDY_OP_TIMEOUT)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
@@ -1130,6 +1421,7 @@ class StaticGateway:
         的歧义。无别名或端口关闭时不追加该块，保持端口不被占用。
         """
         lines: list[str] = []
+        self._entry_cert_renewed = False
         # 全局选项块（Caddyfile 首块，唯一）：
         # BUG-783：已分配独立 admin 端口的工作区必须渲染 ``admin 127.0.0.1:<port>``
         #   ——否则 master 会绑回 Caddy 默认 :2019，reload 目标与归属校验全部错位；
@@ -1199,23 +1491,22 @@ class StaticGateway:
             lines.extend(self._tls_blocks(aliases))
         return "\n".join(lines) + "\n"
 
-    def _tls_addresses(self, tls_port: int) -> tuple[str, bool]:
-        """D4：TLS 站点地址——回环 + 当前 LAN IP（internal CA 按地址签 IP SAN）。
+    def _tls_hosts(self) -> tuple[list[str], bool]:
+        """D4：TLS 入口地址（原始 IP，即证书 SAN）与是否含不属于本机的地址。
 
-        LAN IP 解析失败时仅保留回环（本机仍可验收），并告警提示配置
-        ``lanIpStrategy: manual``。WSL NAT 下额外纳入 Windows 局域网 IP 作为
-        证书 SAN；该地址不属于 guest，须 ``bind 0.0.0.0`` 而不能让 Caddy
-        去绑定 Windows IP。
+        回环 + 当前 LAN IP；LAN IP 解析失败时仅保留回环（本机仍可验收），并告警
+        提示配置 ``lanIpStrategy: manual``。WSL NAT 下额外纳入 Windows 局域网 IP：
+        该地址不属于 guest，Caddy 须 ``bind 0.0.0.0`` 而不能去绑定它；同时它也是
+        BUG-944 的触发条件——无 SNI 连接按本地地址选证书永远选不到它，所以这种
+        情况下全部地址要落在同一张证书上（见 :func:`ensure_entry_tls_cert`）。
         """
-        from local_webpage_access.ports import format_http_host, resolve_lan_ip
+        from local_webpage_access.ports import resolve_lan_ip
 
-        addresses = [f"https://127.0.0.1:{tls_port}"]
-        seen: set[str] = {"127.0.0.1"}
-        bind_all = False
+        hosts = ["127.0.0.1"]
         lan_ip = resolve_lan_ip(self.config)
         if lan_ip:
-            addresses.append(f"https://{format_http_host(lan_ip)}:{tls_port}")
-            seen.add(lan_ip)
+            if lan_ip not in hosts:
+                hosts.append(lan_ip)
         else:
             log.warning(
                 "gatewayTls=internal 但无法解析 LAN IP——TLS 站点仅覆盖 127.0.0.1，"
@@ -1223,10 +1514,17 @@ class StaticGateway:
                 " + manualLanIp 后重启网关",
             )
         extra = self._wsl_tls_extra_ip()
-        if extra and extra not in seen:
-            addresses.append(f"https://{format_http_host(extra)}:{tls_port}")
-            bind_all = True
-        return ", ".join(addresses), bind_all
+        foreign = False
+        if extra and extra not in hosts:
+            hosts.append(extra)
+            foreign = True
+        return hosts, foreign
+
+    @staticmethod
+    def _tls_addresses(hosts: Sequence[str], tls_port: int) -> str:
+        from local_webpage_access.ports import format_http_host
+
+        return ", ".join(f"https://{format_http_host(host)}:{tls_port}" for host in hosts)
 
     def _wsl_tls_extra_ip(self) -> str | None:
         try:
@@ -1241,6 +1539,19 @@ class StaticGateway:
             return self.config.manualLanIp
         return None
 
+    def _tls_directive(self, hosts: Sequence[str], foreign: bool) -> str:
+        """逐地址 ``tls internal``；含不属于本机的入口地址时改用单张多 SAN 证书（BUG-944）。"""
+        if foreign:
+            material = ensure_entry_tls_cert(self.ws, hosts)
+            if material is not None:
+                if material.renewed:
+                    self._entry_cert_renewed = True
+                return (
+                    f"tls {_caddy_quote(material.cert.as_posix())}"
+                    f" {_caddy_quote(material.key.as_posix())}"
+                )
+        return "tls internal"
+
     def _tls_blocks(self, aliases: list[Path]) -> list[str]:
         """W04：别名 HTTPS 入口块 + 管理面独立 HTTPS origin 反代块。
 
@@ -1252,14 +1563,15 @@ class StaticGateway:
         """
         lines: list[str] = []
         tls_port = self.config.gatewayTlsPort
+        hosts, bind_all = self._tls_hosts()
+        tls_directive = self._tls_directive(hosts, bind_all)
         if aliases:
             lines.append("")
             lines.append(f"# HTTPS 别名统一入口（W04，端口 {tls_port}，Caddy internal CA）")
-            entry_addrs, bind_all = self._tls_addresses(tls_port)
-            lines.append(f"{entry_addrs} {{")
+            lines.append(f"{self._tls_addresses(hosts, tls_port)} {{")
             if bind_all:
                 lines.append("\tbind 0.0.0.0")
-            lines.append("\ttls internal")
+            lines.append(f"\t{tls_directive}")
             access_log = self.ws.logs / "static-access.log"
             access_log.parent.mkdir(parents=True, exist_ok=True)
             lines.append("\tlog {")
@@ -1284,11 +1596,10 @@ class StaticGateway:
             f"# HTTPS 管理面独立 origin（W04/W05，端口 {manager_tls} →"
             f" 回环 manager:{manager_port}）"
         )
-        manager_addrs, manager_bind_all = self._tls_addresses(manager_tls)
-        lines.append(f"{manager_addrs} {{")
-        if manager_bind_all:
+        lines.append(f"{self._tls_addresses(hosts, manager_tls)} {{")
+        if bind_all:
             lines.append("\tbind 0.0.0.0")
-        lines.append("\ttls internal")
+        lines.append(f"\t{tls_directive}")
         lines.append(f"\treverse_proxy 127.0.0.1:{manager_port}")
         lines.append("}")
         # 明文入口按需保留（默认关闭；保留时非安全边界，见 docs/https.md）

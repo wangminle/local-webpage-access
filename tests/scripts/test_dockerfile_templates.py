@@ -1943,3 +1943,65 @@ def test_npm_workspaces_follow_source_subdir(workspace) -> None:
         "COPY current/server/packages/api/package.json packages/api/package.json" in text
     )
     assert "rootonly" not in text
+
+
+def test_uv_lock_uwsgi_installs_compiler_before_sync(workspace: Workspace) -> None:
+    """BUG-947：uv.lock 里的 uwsgi 要在 uv sync 之前装 gcc，否则 3.13 上取版本会崩。"""
+    workspace.ensure_app_dirs("api")
+    current = workspace.app_current("api")
+    (current / "pyproject.toml").write_text(
+        '[project]\nname="linkding"\nversion="1.46.2"\ndependencies=["uwsgi==2.0.31"]\n',
+        encoding="utf-8",
+    )
+    (current / "uv.lock").write_text(
+        '[[package]]\nname = "uwsgi"\nversion = "2.0.31"\n',
+        encoding="utf-8",
+    )
+    manifest = _mk_manifest(
+        install="uv sync --frozen --no-dev",
+        start="uwsgi --http :8000",
+    )
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    body = text.split("FROM ", 1)[1]
+    assert "gcc" in body
+    assert "libc6-dev" in body
+    assert "libpcre3-dev" not in body
+    assert body.index("gcc") < body.index("uv sync")
+    pip_hint = next(line for line in text.splitlines() if "lwa: 依赖安装失败" in line)
+    assert "可能是镜像源不可达" not in pip_hint
+    assert "编译错误" in pip_hint
+
+
+def test_yarn_git_dependency_installs_git_before_yarn(workspace: Workspace) -> None:
+    """BUG-948：yarn.lock 含 git 依赖时，安装前要有 git。"""
+    manifest = _node_manifest("hedge")
+    manifest.entry = EntryConfig(
+        install="corepack enable && yarn install --frozen-lockfile",
+        start="node server.js",
+    )
+    current = workspace.app_current("hedge")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text('{"name":"hedge"}\n', encoding="utf-8")
+    (current / "yarn.lock").write_text(
+        "lz-string@https://github.com/hackmdio/lz-string.git#commit=abc:\n",
+        encoding="utf-8",
+    )
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    body = text.split("FROM ", 1)[1]
+    assert "apk add --no-cache git" in body
+    assert body.index("apk add --no-cache git") < body.index("yarn install")
+
+
+def test_yarn_without_git_dependency_does_not_add_git(workspace: Workspace) -> None:
+    """普通 yarn 锁文件不额外安装 git。"""
+    manifest = _node_manifest("plain")
+    manifest.entry = EntryConfig(
+        install="corepack enable && yarn install --frozen-lockfile",
+        start="node server.js",
+    )
+    current = workspace.app_current("plain")
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "package.json").write_text('{"name":"plain"}\n', encoding="utf-8")
+    (current / "yarn.lock").write_text("lodash@1.0.0:\n  version: 1.0.0\n", encoding="utf-8")
+    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
+    assert "apk add --no-cache git" not in text

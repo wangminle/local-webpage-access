@@ -79,6 +79,9 @@ _PYTHON_APT_DEPS: dict[str, list[str]] = {
     "psycopg2": ["libpq-dev", "pkg-config"],
     "python-ldap": ["libldap2-dev", "libsasl2-dev"],
     "xmlsec": ["libxml2", "libxmlsec1-dev", "libxmlsec1-openssl", "pkg-config"],
+    # BUG-947：uwsgi 2.0.31 在没有 gcc 时把版本探测成 None 再 .split，构建崩溃。
+    # Debian 13 基础镜像没有 libpcre3-dev，不把整个 apt 安装拖失败。
+    "uwsgi": ["gcc", "g++", "make", "libc6-dev"],
 }
 
 _HEADER = """\
@@ -277,6 +280,9 @@ def _render_node(
     # 在 npm install 阶段就需要 python3/make/g++，必须先于依赖安装层；alpine
     # 用 apk（apt 切源链不适用，不走 mirrors）。为空时渲染保持逐字不变。
     system_pkgs = [str(p).strip() for p in (manifest.systemDeps or []) if str(p).strip()]
+    # BUG-948：yarn/npm 的 git 依赖（如 github.com/...git）需要镜像内的 git。
+    if _node_source_needs_git(source_dir) and "git" not in system_pkgs:
+        system_pkgs.append("git")
     apk_block = f"RUN apk add --no-cache {' '.join(system_pkgs)}\n" if system_pkgs else ""
     # 评审 P2：bun 安装命令需先在镜像内补齐 bun 工具链（node:24-alpine 不含 bun）
     bun_toolchain = _bun_global_install_line(install, source_dir, cpfx)
@@ -314,9 +320,9 @@ _PIP_RETRIES = 3
 _PIP_TIMEOUT = 60
 # issue #18：依赖安装失败时的可行动提示（写入 build 日志，指向换源出口）。
 _PIP_FAIL_HINT = (
-    "lwa: 依赖安装失败。可能是镜像源不可达或过慢——可在 local-web.yml 的 "
+    "lwa: 依赖安装失败。若日志是超时、连接失败或找不到版本，可在 local-web.yml 的 "
     "buildMirrors 中调整 pip / pipFallbacks / pipRetries / pipTimeout，"
-    "或 enabled: false 走官方 PyPI，然后重试构建"
+    "或 enabled: false 走官方 PyPI；若是编译错误（缺少 gcc 或系统库），换源不会解决"
 )
 
 
@@ -769,23 +775,50 @@ def _parse_requirements_packages(req_text: str) -> set[str]:
     return names
 
 
+def _python_packages_from_project_files(source_dir: Path) -> set[str]:
+    """从 pyproject 依赖和 uv.lock 的包名收集 Python 发行包（BUG-947）。"""
+    names: set[str] = set()
+    pyproject = source_dir / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            data = {}
+        for dep in (data.get("project") or {}).get("dependencies") or []:
+            if isinstance(dep, str):
+                names |= _parse_requirements_packages(dep)
+    lock = source_dir / "uv.lock"
+    if lock.is_file():
+        try:
+            text = lock.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        for match in re.finditer(r'(?m)^name = "([^"]+)"', text):
+            pkg = re.sub(r"[-_.]+", "-", match.group(1).strip().lower())
+            if pkg:
+                names.add(pkg)
+    return names
+
+
 def _detect_apt_deps(source_dir: Path | None, install: str) -> list[str]:
-    """扫描 requirements 文件，返回需要 apt-get install 的系统包列表（IMP-054）。
+    """扫描依赖声明，返回需要 apt-get install 的系统包列表（IMP-054）。
 
     读取 install 命令中指定的 requirements 文件（默认 requirements.txt），
-    对照 ``_PYTHON_APT_DEPS`` 映射，合并去重后返回。
+    并合并 pyproject / uv.lock 中的包名。对照 ``_PYTHON_APT_DEPS`` 去重后返回。
     """
     if source_dir is None:
         return []
+    packages: set[str] = set()
     req_file = _extract_requirements_file(install)
     req_path = source_dir / req_file
-    if not req_path.is_file():
-        return []
-    try:
-        text = req_path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    packages = _parse_requirements_packages(text)
+    if req_path.is_file():
+        try:
+            packages |= _parse_requirements_packages(req_path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+    packages |= _python_packages_from_project_files(source_dir)
     apt_deps: list[str] = []
     seen: set[str] = set()
     for pkg in sorted(packages):
@@ -1479,6 +1512,35 @@ def _node_workspace_package_copies(
                     f"COPY {copy_prefix}{posixpath.join(str(rel), 'package.json')} {posixpath.join(str(rel), 'package.json')}"
                 )
     return lines
+
+
+_NODE_GIT_DEP_RE = re.compile(
+    r"git\+|github:|gitlab:|bitbucket:|git@|github\.com/\S+\.git",
+    re.IGNORECASE,
+)
+
+
+def _node_source_needs_git(source_dir: Path | None) -> bool:
+    """锁文件或 package.json 含 git 依赖时，安装阶段需要 git（BUG-948）。"""
+    if source_dir is None:
+        return False
+    for name in (
+        "package.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "bun.lock",
+    ):
+        path = source_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if _NODE_GIT_DEP_RE.search(text):
+            return True
+    return False
 
 
 def _node_dependency_copy_block(

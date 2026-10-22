@@ -993,6 +993,68 @@ def test_bind_mounts_inspect_failure_raises(workspace, monkeypatch) -> None:
         DockerRuntime(workspace).bind_mounts("api")
 
 
+def _seed_compose_identity_manifest(
+    workspace: Workspace, iid: str = "api", *, project: str = "lwa-api", service: str = "app"
+) -> None:
+    """写出含 Compose project/service 身份的 manifest，供缺 compose.yaml 时查询。"""
+    from tests.scripts._helpers import make_container_manifest
+
+    workspace.ensure_app_dirs(iid)
+    manifest = make_container_manifest(iid)
+    manifest.container.projectName = project
+    manifest.container.serviceName = service
+    manifest.save(workspace.app_manifest_path(iid))
+
+
+def test_container_id_strict_missing_compose_finds_old_container_by_identity(
+    workspace, monkeypatch
+) -> None:
+    """CHK-460 / BUG-946：compose.yaml 缺失时仍须按 manifest 身份查询 Docker。"""
+    _seed_compose_identity_manifest(workspace, project="lwa-api", service="app")
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="oldcid123\n")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    cid = DockerRuntime(workspace).container_id_strict("api", all_containers=True)
+    assert cid == "oldcid123"
+    args = fake.calls[0]["args"]
+    assert args[:2] == ["docker", "ps"]
+    joined = " ".join(args)
+    assert "com.docker.compose.project=lwa-api" in joined
+    assert "com.docker.compose.service=app" in joined
+    assert "-a" in args or "-aq" in args or "--all" in args
+
+
+def test_container_id_strict_missing_compose_empty_query_is_no_container(
+    workspace, monkeypatch
+) -> None:
+    """CHK-460：缺 compose.yaml 且 Docker 成功查空，才视为无旧容器。"""
+    _seed_compose_identity_manifest(workspace)
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(args=[], returncode=0, stdout="")
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    runtime = DockerRuntime(workspace)
+    assert runtime.container_id_strict("api", all_containers=True) is None
+    assert fake.calls, "成功查空前必须实际查询 Docker"
+
+
+def test_container_id_strict_missing_compose_docker_failure_raises(
+    workspace, monkeypatch
+) -> None:
+    """CHK-460：缺 compose.yaml 时 Docker 查询失败仍不得当成无容器。"""
+    _seed_compose_identity_manifest(workspace)
+    fake = _FakeExecute()
+    fake.by_subcmd["ps"] = ComposeResult(
+        args=[], returncode=1, stdout="", stderr="Cannot connect to the Docker daemon"
+    )
+    monkeypatch.setattr("local_webpage_access.docker_runtime._execute", fake)
+
+    runtime = DockerRuntime(workspace)
+    with pytest.raises(DockerError, match="查询容器失败"):
+        runtime.container_id_strict("api", all_containers=True)
+
+
 def test_container_id_strict_raises_on_ps_failure(workspace, monkeypatch) -> None:
     """BUG-429：ps 查询失败——strict 版抛 DockerError；宽松版仍折叠为 None。"""
     _seed_compose_files(workspace, "api")

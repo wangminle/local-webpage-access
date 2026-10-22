@@ -8,6 +8,46 @@ from local_webpage_access.build_diagnostics import (
 )
 
 
+def test_classify_ignores_compile_regex_in_docker_run_echo() -> None:
+    """CHK-460：失败 RUN 的命令回显含 Failed building wheel 时，不得把网络失败当成 compile。"""
+    text = (
+        "#7 [5/9] RUN --mount=type=cache,target=/root/.cache/pip \\\n"
+        "  ( pip install -r requirements.txt ) > /tmp/lwa-pip.log 2>&1; status=$?; "
+        "cat /tmp/lwa-pip.log; if [ \"$status\" -ne 0 ]; then if grep -E -q "
+        "'Failed building wheel|error: command|subprocess-exited-with-error|pcre.h'; "
+        "then echo '依赖编译失败。这不是镜像源不可达'; fi; fi\n"
+        "#7 0.412 WARNING: Retrying (Retry(total=4, connect=None, read=None, "
+        "redirect=None, status=None)) after connection broken by "
+        "'NewConnectionError': Failed to establish a new connection: "
+        "[Errno 101] Network is unreachable\n"
+        "#7 1.008 Failed to fetch http://mirrors.aliyun.com/debian/pool/main/u/uwsgi\n"
+        "#7 ERROR: process \"/bin/sh -c ( pip install ) ; grep Failed building "
+        "wheel\" did not complete successfully\n"
+        "failed to solve: process did not complete successfully\n"
+    )
+    hint = classify_build_failure(text)
+    assert hint is not None
+    assert hint.kind != "compile"
+    assert "这不是镜像源不可达" not in hint.summary
+    assert hint.kind == "apt"
+
+
+def test_classify_compile_failure_is_not_mirror() -> None:
+    """BUG-947：uwsgi/gcc 编译失败不得归成镜像源不可达。"""
+    text = (
+        "#9 12.1 gcc -pthread -fPIC -c plugins/pcre/pcre_plugin.c\n"
+        "#9 12.2 fatal error: pcre.h: No such file or directory\n"
+        "#9 12.4 error: command '/usr/bin/gcc' failed with exit code 1\n"
+        "#9 12.5 Failed building wheel for uwsgi\n"
+        "#9 ERROR: process did not complete successfully\n"
+    )
+    hint = classify_build_failure(text)
+    assert hint is not None
+    assert hint.kind == "compile"
+    assert hint.summary.startswith("依赖编译失败")
+    assert "apt 拉取失败" not in hint.summary
+
+
 def test_classify_apt_fetch_failure() -> None:
     text = (
         "Err:170 http://mirrors.aliyun.com/debian trixie/main arm64 libllvm19\n"
