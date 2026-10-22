@@ -41,10 +41,10 @@ from local_webpage_access.models import (
     CapabilityContract,
     DesiredState,
     InstanceManifest,
-    NetworkConfig,
     RouteMode,
     StaticConfig,
     Status,
+    merge_network_entry,
 )
 from local_webpage_access.ownership import Ownership
 from local_webpage_access.paths import Workspace, resolve_source_workdir
@@ -85,6 +85,8 @@ def host_instance(
     config: Config,
     registry: Registry,
     instance_id: str,
+    *,
+    force_hooks: bool = False,
 ) -> InstanceManifest:
     """根据 manifest 的 runtime/form 自动选择静态、前端或容器流程。
 
@@ -112,7 +114,9 @@ def host_instance(
         return host_static(workspace, config, registry, instance_id)
 
     if runtime == "docker-compose":
-        return host_container(workspace, config, registry, instance_id)
+        return host_container(
+            workspace, config, registry, instance_id, force_hooks=force_hooks
+        )
 
     raise HostingError(
         f"实例 {instance_id} 的 runtime={runtime} 暂不支持",
@@ -1237,6 +1241,8 @@ def host_container(
     config: Config,
     registry: Registry,
     instance_id: str,
+    *,
+    force_hooks: bool = False,
 ) -> InstanceManifest:
     """Docker Compose 容器实例托管流程（WBS-15 / WBS-16）。
 
@@ -1272,6 +1278,12 @@ def host_container(
             instance_id=instance_id,
             runtime=manifest.runtime.value,
         )
+
+    from local_webpage_access.dockerfile_templates import refuse_destructive_artifact_hooks
+
+    refuse_destructive_artifact_hooks(
+        manifest, workspace, force=force_hooks, registry=registry
+    )
 
     # 1. Docker 前置条件（WBS-15.05 前置）
     DockerRuntime.ensure_available()
@@ -1616,7 +1628,7 @@ def _commit_verifying_state(ctx: _ContainerDeploy) -> None:
         internal_port=manifest.container.internalPort,
         path_alias=_container_path_alias(manifest),
     )
-    manifest.network = NetworkConfig(**entry)
+    manifest.network = merge_network_entry(manifest.network, entry)
 
     # Gate-C C.04：状态机 VERIFYING → RUNNING/DEGRADED/FAILED。
     # build/up 成功后不立即写 RUNNING，先进入 VERIFYING 评估成功谓词。
@@ -1907,7 +1919,7 @@ def start_container(
         internal_port=manifest.container.internalPort,
         path_alias=_container_path_alias(manifest),
     )
-    manifest.network = NetworkConfig(**entry)
+    manifest.network = merge_network_entry(manifest.network, entry)
 
     # Gate-C C.04：轻量 start 也至少执行必选存活探针（§6.5 触发条件表）。
     # 先进入 VERIFYING，再根据存活探针结果定状态。
@@ -3125,7 +3137,7 @@ def _enable_static(
     # BUG-422：防御性一致化派生路径（含 gatewayConfigPath / appPath）
     _refresh_manifest_workspace_paths(workspace, manifest)
     entry = build_network_entry(config, host_port, path_alias=path_alias)
-    manifest.network = NetworkConfig(**entry)
+    manifest.network = merge_network_entry(manifest.network, entry)
     registry.set_static_enabled(instance_id, True)
     return manifest
 

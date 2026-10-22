@@ -189,6 +189,18 @@ class NetworkConfig(BaseModel):
     routeUrl: str | None = None
     lanUrl: str | None = None
     healthUrl: str | None = None
+    # DEV-168：独立设备外部观测（位置/协议/响应/时间/网络指纹），网络变化后由
+    # describe_instance_access 判定失效，不把 guest/Windows 本机探测升格为已验证。
+    externalLanObservation: dict[str, Any] | None = None
+
+
+def merge_network_entry(
+    network: NetworkConfig | None, entry: dict[str, Any]
+) -> NetworkConfig:
+    """用端口/别名入口覆盖 network，保留观测等未出现在 entry 里的字段。"""
+    if network is None:
+        return NetworkConfig(**entry)
+    return network.model_copy(update=entry)
 
 
 class EntryConfig(BaseModel):

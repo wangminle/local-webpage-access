@@ -48,6 +48,11 @@ lwa doctor --access --json
 lwa access review --rebuild-if-needed
 # 或对单个实例：
 lwa rebuild <id>
+
+# 4. 有独立 LAN 设备的实测结果时（可选，DEV-168）：记录外部观测，
+#    仅协议/端口/路径与当前入口一致且网络指纹未变才升格「已从其他设备验证」
+lwa access record-observation <id> --vantage lan-client --protocol http \
+    --evidence content-match --status 200
 ```
 
 升级路径（IMP-038）：`lwa update` 在重启 manager/daemon **之后**固定 refresh，默认轻量 review；

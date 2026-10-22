@@ -55,7 +55,7 @@
 > manifest `systemDeps`（V0.8.16，issue #35）只接受 Debian 包名字符集
 > （`[A-Za-z0-9][A-Za-z0-9.+-]*`），内插进 `apt-get install`，不接受 shell 元素。
 
-> V1 生成的 Dockerfile 默认非 root（`node:24-alpine` 用 `node` 用户，
+> V1 生成的 Dockerfile 默认非 root（`node:24.22.1-alpine` 用 `node` 用户，
 > `python:3.13-slim` 创建 `app` 用户并切换）。warn/info 仍记录日志但不阻断写出。
 > 手工改写 `docker/Dockerfile` 且不经 `generate_dockerfile` 的路径本期不扫描；
 > 下次 `lwa rebuild` / 宿主流程重新生成时会再次过门禁。

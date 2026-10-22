@@ -204,6 +204,11 @@
         var val = obj ? obj[key] : null;
         if (val === null || val === undefined || val === "") val = "—";
         else if (LWA.isDateTimeKey(key)) val = LWA.formatLocalDateTime(val);
+        else if (key === "lanObservation" && typeof val === "object") {
+          val = [val.vantage, val.protocol, val.evidence, val.statusCode, val.observedAt, val.url]
+            .filter(function (part) { return part !== undefined && part !== null && part !== ""; })
+            .join(" ");
+        }
         dl += "<dt>" + LWA.esc(label) + "</dt><dd>" + LWA.esc(String(val)) + "</dd>";
       });
       return dl + "</dl>";
@@ -270,6 +275,8 @@
           ["desiredState", "期望状态"], ["kind", "技术族"], ["runtime", "运行层"],
           ["lanUrl", "访问地址"], ["hostLanUrl", "局域网候选"], ["hostLanIp", "Windows 局域网 IP"],
           ["lanReachability", "地址范围"], ["lanExposure", "暴露状态"],
+          ["lanObservation", "外部观测"], ["lanObservationStale", "观测已失效"],
+          ["windowsListening", "Windows 监听"],
           ["accessScopeNote", "网络说明"], ["wslNetworkMode", "WSL 网络模式"],
           ["hostPort", "宿主端口"], ["internalPort", "内部端口"],
           ["portMappingLabel", "端口映射"], ["routeHost", "路径别名"],

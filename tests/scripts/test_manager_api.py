@@ -1875,6 +1875,26 @@ def test_restart_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
     assert called == [manager_env.instance_id]
 
 
+def test_rebuild_operation_force_true_forwards_force_hooks(
+    manager_env: EnvBundle,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_rebuild(ws, cfg, reg, iid, out=None, force_hooks=False):
+        captured["force_hooks"] = force_hooks
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "local_webpage_access.lifecycle.rebuild_instance", _fake_rebuild
+        )
+        resp = manager_env.client.post(
+            f"/api/instances/{manager_env.instance_id}/rebuild?force=true",
+            headers=manager_env.auth_headers(),
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured.get("force_hooks") is True
+
+
 def test_rebuild_operation_calls_lifecycle(manager_env: EnvBundle) -> None:
     with pytest.MonkeyPatch.context() as mp:
         called: list[str] = []
@@ -3190,6 +3210,135 @@ def test_post_access_refresh(manager_env: EnvBundle, monkeypatch) -> None:
     body = resp.json()
     assert body["ok"] is True
     assert body["lanIp"] == "192.168.1.50"
+
+
+def test_post_lan_observation_rejects_unconstrained_vantage(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    from tests.scripts.test_wsl_network import _yi14_snapshot
+
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: _yi14_snapshot(),
+    )
+    resp = manager_env.client.post(
+        f"/api/instances/{manager_env.instance_id}/lan-observation",
+        headers=manager_env.auth_headers(),
+        json={"vantage": "loopback", "protocol": "http", "evidence": "page", "statusCode": 200},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "LAN_OBSERVATION_INVALID"
+
+
+def test_post_lan_observation_persists_and_returns_instance(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    from tests.scripts.test_wsl_network import _yi14_snapshot
+
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: _yi14_snapshot(),
+    )
+    resp = manager_env.client.post(
+        f"/api/instances/{manager_env.instance_id}/lan-observation",
+        headers=manager_env.auth_headers(),
+        json={
+            "vantage": "lan-client",
+            "protocol": "http",
+            "evidence": "content-match",
+            "statusCode": 200,
+            "url": "http://10.180.105.74:8080/",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["lanObservation"]["vantage"] == "lan-client"
+    from local_webpage_access.models import InstanceManifest
+
+    saved = InstanceManifest.load(
+        manager_env.workspace.app_manifest_path(manager_env.instance_id)
+    )
+    assert saved.network is not None
+    assert saved.network.externalLanObservation["vantage"] == "lan-client"
+    listed = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
+    item = next(
+        i for i in listed.json()["instances"] if i["id"] == manager_env.instance_id
+    )
+    assert item["lanObservation"]["evidence"] == "content-match"
+
+
+@pytest.mark.parametrize("url", [
+    "http://192.0.2.10:bad/demo/", "http://[invalid/demo/",
+    "http://host^invalid/demo/",
+    "http://unrelated.invalid\\@10.180.105.74:8080/demo/",
+])
+def test_invalid_lan_observation_returns_400_without_saving(
+    manager_env: EnvBundle, monkeypatch, url
+) -> None:
+    from tests.scripts.test_wsl_network import _yi14_snapshot
+
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: _yi14_snapshot(),
+    )
+    path = manager_env.workspace.app_manifest_path(manager_env.instance_id)
+    before = path.read_bytes()
+    response = manager_env.client.post(
+        f"/api/instances/{manager_env.instance_id}/lan-observation",
+        headers=manager_env.auth_headers(),
+        json={"vantage": "lan-client", "protocol": "http", "evidence": "page",
+              "statusCode": 200, "url": url},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "LAN_OBSERVATION_INVALID"
+    assert path.read_bytes() == before
+    assert manager_env.client.get(
+        "/api/instances", headers=manager_env.auth_headers()
+    ).status_code == 200
+
+
+@pytest.mark.parametrize("url", [
+    "http://192.0.2.10:bad/demo/", "http://[invalid/demo/",
+])
+def test_legacy_invalid_lan_observation_does_not_break_list_or_detail(
+    manager_env: EnvBundle, monkeypatch, url
+) -> None:
+    from local_webpage_access.models import InstanceManifest, NetworkConfig
+    from local_webpage_access.wsl_network import snapshot_fingerprint
+    from tests.scripts.test_wsl_network import (
+        InteropOutputs, YI14_OUTPUTS, _yi14_snapshot,
+    )
+
+    snap = _yi14_snapshot(outputs=InteropOutputs(
+        **{**YI14_OUTPUTS.__dict__,
+           "portproxy_text": "0.0.0.0 8080 127.0.0.1 8080\n"}
+    ))
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: snap
+    )
+    path = manager_env.workspace.app_manifest_path(manager_env.instance_id)
+    manifest = InstanceManifest.load(path)
+    manifest.network = NetworkConfig(
+        hostPort=18000, routeMode="name", routeHost="demo",
+        externalLanObservation={
+            "vantage": "lan-client", "protocol": "http", "evidence": "page",
+            "statusCode": 200, "observedAt": "2026-10-22T04:00:00Z",
+            "fingerprint": snapshot_fingerprint(snap), "url": url,
+        },
+    )
+    manifest.save(path)
+    listing = manager_env.client.get("/api/instances", headers=manager_env.auth_headers())
+    assert listing.status_code == 200
+    item = next(i for i in listing.json()["instances"] if i["id"] == manager_env.instance_id)
+    assert item["lanObservationStale"] is True
+    assert item["lanExposure"] != "externally-verified"
+    assert item["lanObservation"]["url"] == url
+    detail = manager_env.client.get(
+        f"/api/instances/{manager_env.instance_id}", headers=manager_env.auth_headers()
+    )
+    assert detail.status_code == 200
+    assert InstanceManifest.load(path).network.externalLanObservation["url"] == url
 
 
 def test_post_gateway_switch_dry_run(manager_env: EnvBundle, monkeypatch) -> None:

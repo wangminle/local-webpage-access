@@ -78,7 +78,7 @@ def test_node_dockerfile_uses_alpine_and_npm_ci(workspace: Workspace) -> None:
     path = generate_dockerfile(m, workspace)
     assert path == workspace.app_dockerfile_path("api")
     content = path.read_text(encoding="utf-8")
-    assert "FROM node:24-alpine" in content
+    assert "FROM node:24.22.1-alpine" in content
     assert "COPY current/package*.json ./" in content
     assert "RUN npm ci" in content
     assert "COPY current/ ./" in content
@@ -432,7 +432,7 @@ def test_dockerfile_python_with_node(workspace: Workspace) -> None:
     assert "FROM python:3.13-slim" in content
     # 追加 Node 工具链（默认国内 nodejs-release 镜像，BUG-200）
     assert "mirrors.aliyun.com/nodejs-release" in content
-    # BUG-114：与纯 Node 基线 node:24-alpine 同一 major（非 v22）
+    # BUG-114：与纯 Node 基线 node:24.22.1-alpine 同一 major（非 v22）
     assert "/v24." in content
     assert "node-v24." in content
     assert "v22.19.0" not in content
@@ -1678,7 +1678,7 @@ def _bun_project(
 
 
 def test_bun_install_adds_toolchain_and_lock_copy(workspace) -> None:
-    """评审 P2：bun 项目走 node:24-alpine 必须先补 bun 工具链（版本取
+    """评审 P2：bun 项目走 node:24.22.1-alpine 必须先补 bun 工具链（版本取
     packageManager 的 bun@<ver>），且依赖层复制 bun.lock* 而非 package*.json。"""
     manifest = _bun_manifest("bun873a")
     current = workspace.app_current("bun873a")

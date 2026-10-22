@@ -1146,8 +1146,8 @@ def test_extract_failed_registry_image() -> None:
 
     assert extract_failed_registry_image(_HUB_TIMEOUT_STDERR) == "python:3.13-slim"
     assert (
-        extract_failed_registry_image("#3 load metadata for docker.io/library/node:24-alpine")
-        == "node:24-alpine"
+        extract_failed_registry_image("#3 load metadata for docker.io/library/node:24.22.1-alpine")
+        == "node:24.22.1-alpine"
     )
     assert extract_failed_registry_image("no image reference here") is None
 

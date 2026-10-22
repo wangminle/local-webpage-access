@@ -157,6 +157,25 @@ autoProxy=true
 * `.wslconfig` 变更需 `wsl --shutdown` 后生效；若环境依赖旧 NAT 端口转发脚本，切换前先在测试机验证 `lwa doctor` 与别名入口。
 * 最终 LAN 验收必须用**另一台物理机/手机**访问共享 NIC IP；Windows 用自身 NIC IP 自测失败只能记为现场观察，不能单独定论。
 
+### WSL 恢复后的核对
+
+自启单元安装成功、Windows 能唤醒发行版、网页恢复对 LAN 可达是三项不同结果。休眠、WSL 关闭重开、Windows 重启分别安排测试窗口并记录；不要用一次手动 `lwa gateway on` 的成功代替开机自启结论。
+
+恢复后先确认实际模式和服务，再执行地址刷新与访问复核：
+
+```bash
+wslinfo --networking-mode
+lwa autostart status --json
+lwa autostart check --json
+lwa access refresh
+lwa access review
+lwa doctor --json
+```
+
+以上 LWA 命令在原工作区中执行，或显式带 `--workspace`。NAT 需重新核对映射目标与端口；mirrored 需重新核对实际监听及入站条件。若地址变了，HTTPS 入口证书也须覆盖新名称；内部健康检查、地址新鲜度或 Windows localhost 成功均不能代替另一台 LAN 设备的访问、证书和管理鉴权验证。
+
+完整步骤与逐场景结果表见 [验收清单 · WSL 网络分层与恢复](acceptance-checklist.md#wsl-网络分层验收)。没有实际执行的重启/换网事件保持待测。
+
 ## 停服与自启的协调（重要）
 
 由于单元 `KeepAlive`/`Restart` 会把崩溃的进程拉回，**停服前必须先停用自启**，否则

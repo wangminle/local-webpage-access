@@ -26,10 +26,10 @@ from local_webpage_access.file_lock import (
 from local_webpage_access.logging import get_logger, now_iso
 from local_webpage_access.models import (
     InstanceManifest,
-    NetworkConfig,
     RouteMode,
     Runtime,
     StaticConfig,
+    merge_network_entry,
 )
 from local_webpage_access.paths import Workspace, validate_path_alias
 from local_webpage_access.ports import build_network_entry
@@ -709,7 +709,7 @@ def _apply_manifest_alias(
             internal_port=internal_port,
             path_alias=alias,
         )
-        manifest.network = NetworkConfig(**entry)
+        manifest.network = merge_network_entry(manifest.network, entry)
         return
 
     # 评审-组8：无 hostPort 且 network 为 None 的最小化 manifest 此前直接

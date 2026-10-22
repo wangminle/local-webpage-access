@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -194,3 +195,189 @@ def test_status_wsl_nat_manual_ip_does_not_replace_guest_lan_url(
     assert data["lanUrl"] == "http://172.22.148.94:21000"
     assert data["lanReachability"] == "windows-host"
     assert data["hostLanIp"] == "10.180.105.74"
+
+
+def test_status_consumes_persisted_lan_observation(ws_reg, monkeypatch) -> None:
+    from local_webpage_access.access import record_lan_observation
+    from local_webpage_access.models import InstanceManifest
+    from local_webpage_access.wsl_network import EXPOSURE_EXTERNALLY_VERIFIED
+    from tests.scripts.test_wsl_network import YI14_NETIP, YI14_NETROUTE, YI14_WSL_VERSION
+    from local_webpage_access.wsl_network import InteropOutputs, collect_wsl_network_snapshot
+
+    ws, reg = ws_reg
+    _seed(
+        ws,
+        reg,
+        lan_url="http://172.22.148.94:21000",
+        route_host="hello-lwa",
+        route_url="http://172.22.148.94:8080/hello-lwa/",
+    )
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="0.0.0.0            8080       127.0.0.1         8080\n",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl", guest_ip="172.22.148.94", outputs=outputs, use_cache=False
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: snap,
+    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "172.22.148.94")
+    cfg = Config(
+        lanIpStrategy="auto",
+        staticGatewayPort=8080,
+        portPool=PortPool(start=21000, end=21050),
+    )
+    record_lan_observation(
+        ws,
+        cfg,
+        "demo",
+        vantage="lan-client",
+        protocol="http",
+        evidence="content-match",
+        status_code=200,
+        url="http://10.180.105.74:8080/hello-lwa/",
+    )
+    saved = InstanceManifest.load(ws.app_manifest_path("demo"))
+    assert saved.network.externalLanObservation["vantage"] == "lan-client"
+    data = instance_status(ws, cfg, reg, "demo").to_dict()
+    assert data["lanExposure"] == EXPOSURE_EXTERNALLY_VERIFIED
+    assert data["lanObservation"]["protocol"] == "http"
+    assert data["lanObservationStale"] is False
+
+
+def test_status_invalidates_observation_after_network_change(ws_reg, monkeypatch) -> None:
+    from local_webpage_access.access import record_lan_observation
+    from local_webpage_access.wsl_network import EXPOSURE_CANDIDATE_UNVERIFIED
+    from tests.scripts.test_wsl_network import YI14_NETIP, YI14_NETROUTE, YI14_WSL_VERSION
+    from local_webpage_access.wsl_network import InteropOutputs, collect_wsl_network_snapshot
+
+    ws, reg = ws_reg
+    _seed(
+        ws,
+        reg,
+        lan_url="http://172.22.148.94:21000",
+        route_host="hello-lwa",
+        route_url="http://172.22.148.94:8080/hello-lwa/",
+    )
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="0.0.0.0            8080       127.0.0.1         8080\n",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl", guest_ip="172.22.148.94", outputs=outputs, use_cache=False
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: snap,
+    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "172.22.148.94")
+    cfg = Config(
+        lanIpStrategy="auto",
+        staticGatewayPort=8080,
+        portPool=PortPool(start=21000, end=21050),
+    )
+    record_lan_observation(
+        ws,
+        cfg,
+        "demo",
+        vantage="lan-client",
+        protocol="http",
+        evidence="page",
+        status_code=200,
+        url="http://10.180.105.74:8080/hello-lwa/",
+    )
+    changed = collect_wsl_network_snapshot(
+        platform="wsl", guest_ip="172.22.148.100", outputs=outputs, use_cache=False
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        lambda **_k: changed,
+    )
+    data = instance_status(ws, cfg, reg, "demo").to_dict()
+    assert data["lanExposure"] == EXPOSURE_CANDIDATE_UNVERIFIED
+    assert data["lanObservationStale"] is True
+    assert data["lanObservation"]["vantage"] == "lan-client"
+
+
+def test_record_lan_observation_does_not_clobber_concurrent_build_env(
+    ws_reg, monkeypatch
+) -> None:
+    """记录观测必须持实例锁再读改写，不能把并发 configure 的 buildEnv 覆盖掉。"""
+    from local_webpage_access.access import record_lan_observation
+    from local_webpage_access.instance_settings import update_instance_settings
+    from local_webpage_access.models import InstanceManifest
+    from tests.scripts.test_wsl_network import YI14_NETIP, YI14_NETROUTE, YI14_WSL_VERSION
+    from local_webpage_access.wsl_network import InteropOutputs, collect_wsl_network_snapshot
+
+    ws, reg = ws_reg
+    _seed(
+        ws,
+        reg,
+        lan_url="http://172.22.148.94:21000",
+        route_host="hello-lwa",
+        route_url="http://172.22.148.94:8080/hello-lwa/",
+    )
+    outputs = InteropOutputs(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="0.0.0.0            8080       127.0.0.1         8080\n",
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl", guest_ip="172.22.148.94", outputs=outputs, use_cache=False
+    )
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def _slow_collect(**_k):
+        started.set()
+        assert proceed.wait(timeout=5)
+        return snap
+
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot",
+        _slow_collect,
+    )
+    cfg = Config(
+        lanIpStrategy="auto",
+        staticGatewayPort=8080,
+        portPool=PortPool(start=21000, end=21050),
+    )
+    errors: list[BaseException] = []
+
+    def _record() -> None:
+        try:
+            record_lan_observation(
+                ws,
+                cfg,
+                "demo",
+                vantage="lan-client",
+                protocol="http",
+                evidence="content-match",
+                status_code=200,
+                url="http://10.180.105.74:8080/hello-lwa/",
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=_record)
+    thread.start()
+    assert started.wait(timeout=5)
+    update_instance_settings(ws, reg, "demo", {"buildEnv": {"VITE_BASE": "/hello-lwa/"}})
+    proceed.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert errors == []
+    saved = InstanceManifest.load(ws.app_manifest_path("demo"))
+    assert saved.buildEnv == {"VITE_BASE": "/hello-lwa/"}
+    assert saved.network.externalLanObservation is not None
+    assert saved.network.externalLanObservation["vantage"] == "lan-client"

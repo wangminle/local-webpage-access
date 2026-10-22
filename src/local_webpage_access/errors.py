@@ -185,6 +185,15 @@ class DataNonemptyError(LifecycleError):
     code = "data_nonempty"
 
 
+class DestructiveBuildHooksError(LifecycleError):
+    """buildHooks 含会删除前端产物目录的命令，重建须确认或清空钩子（issue #141）。
+
+    稳定错误码 ``destructive_build_hooks``，供 CLI ``--force`` 与管理 API 409 映射。
+    """
+
+    code = "destructive_build_hooks"
+
+
 # ---- 管理页锁（BUG-641/642）-----------------------------------------------
 
 

@@ -78,6 +78,7 @@ def _echo_access_lines(status: object) -> None:
         InstanceAccessView,
         format_cli_network_lines,
         guest_url_caption,
+        observation_from_dict,
     )
 
     if not getattr(status, "wsl_network_mode", None):
@@ -90,6 +91,9 @@ def _echo_access_lines(status: object) -> None:
         host_lan_url=getattr(status, "host_lan_url", None),
         dynamic_ip_forwarding=bool(getattr(status, "dynamic_ip_forwarding", False)),
         note=getattr(status, "access_scope_note", None),
+        windows_listening=getattr(status, "windows_listening", None),
+        observation=observation_from_dict(getattr(status, "lan_observation", None)),
+        observation_stale=bool(getattr(status, "lan_observation_stale", False)),
     )
     lines = format_cli_network_lines(
         lan_url=getattr(status, "lan_url", None),
@@ -310,6 +314,9 @@ def list_cmd() -> None:
             _echo_source_lines(s)
             # C.01：兼容性预检提示（无 findings 不输出）
             _echo_compatibility_line(s)
+            exposure = getattr(s, "lan_exposure", None)
+            if exposure:
+                typer.secho(f"  ↳ WSL 暴露：{exposure}", fg=typer.colors.YELLOW)
         if any(getattr(s, "wsl_network_mode", None) for s in statuses):
             typer.secho(
                 "  WSL：上表端口是 guest 内地址；局域网入口见 `lwa status` / `lwa doctor`。"

@@ -152,6 +152,52 @@ python3 -c "from tests.fixtures import build_all, SAMPLES; build_all('acceptance
 
 Windows 原生：任意实际 `lwa` 命令须在写工作区前 fail-fast（已由门禁覆盖；实机抽查即可）。
 
+#### WSL 网络分层验收
+
+每个组合单独记录 Windows 完整 Build、WSL 架构与软件包完整版本、Linux 发行版、`wslinfo --networking-mode` 的实际结果、LWA 提交和测试工作区。NAT 与 mirrored 分开验收；软件包升级或 `.wslconfig` 的声明不能替代实际模式。
+
+使用独立测试工作区、专用端口和带有唯一标记的静态页面、相对 CSS/JS。先核对现有服务和端口，测试后只清理本次创建的实例与服务。不要在业务工作区上反复切换 TLS、绑定地址或重启实例。
+
+| 观察点 | HTTP 与资源 | HTTPS 与信任 | 管理鉴权 |
+| --- | --- | --- | --- |
+| WSL 内 | 回环与 guest 地址分别获取页面/CSS/JS，记录内容哈希 | 按实际入口名称校验 SAN 和工作区 CA；不指定 CA 时应出现预期的不信任结果 | 分别记录回环和非回环来源的现有鉴权行为 |
+| Windows 本机 | localhost 与 Windows 网卡入口分别记录，不能互相代替 | 显式指定导出的工作区 CA；按 IP 访问须覆盖无 SNI 场景 | 有效 token、无 token、伪造回环 Host/XFF 分开记录 |
+| 另一台物理 LAN 设备 | 直接访问实际 Windows 入口和端口，页面与资源内容必须一致 | 直接访问 HTTPS 入口并校验证书；HTTPS 成功后仍须验证管理面 | 无 token 和伪造回环头须拒绝，有效 token 可读预期实例；不记录 token 原文 |
+
+TCP 连通、HTTP 200 和资源成功下载分别保留证据；200 返回错误页、登录页或资源内容不匹配均不能算通过。页面交互须另用真实浏览器执行并记录结果，下载 JS 文件不等于执行了 JS。
+
+在独立 LAN 客户端可按实际端口运行以下命令，命令中的占位符先替换为本次工作区信息：
+
+```bash
+# 禁用客户端代理，证明走实际 LAN 入口；不通过 SSH 隧道或端口转发验证 LAN。
+curl --noproxy '*' --fail --show-error --max-time 20 \
+  'http://<Windows入口IP>:<HTTP入口端口>/<路径别名>/index.html'
+curl --noproxy '*' --fail --show-error --max-time 20 \
+  --cacert ./lwa-root-ca.crt \
+  'https://<Windows入口IP>:<HTTPS入口端口>/<路径别名>/index.html'
+```
+
+CA 通过 `lwa ca export` 导出，先核对来自正确测试工作区；不使用 `--insecure` 绕过验证。Windows localhost 的连接映射测试可用于验证证书选择机制，但须注明实际连接位置，不能作为独立 LAN 通过证据。
+
+NAT 下同时核对已有 portproxy 的 listen 地址/端口和 connect 地址/端口，二者可以不同；读取失败记 unknown，不能记为无规则。缺少网页映射时记录入口缺失，供管理员审阅实际业务端口的配置建议。mirrored 不以有无 portproxy 判定可达；分别核对监听、Hyper-V/Windows 防火墙可读证据和外部实测。LWA 不自动更改这些规则。
+
+启用 HTTPS 并收敛 `instanceBindHost=127.0.0.1` 后，重启测试实例使新绑定生效，再核对 HTTPS 页面和管理面仍可用、原实例明文口和管理后端不向 LAN 暴露。仅重新渲染网关不能替代实例绑定配置更新；外部超时也不能单独证明 Linux 监听已收敛。
+
+#### WSL 恢复场景验收
+
+恢复场景应在用户安排的测试维护窗口逐项执行，不擅自重启承载业务的 Windows/WSL。每项同时保存事件前后版本、实际网络模式、guest/Windows 地址、映射、监听、服务状态、`lwa doctor` 和三处观察点结果。
+
+| 场景 | 额外核对 | 通过或保留边界 |
+| --- | --- | --- |
+| 仅测试实例/网关停止再启动 | 内容、端口、别名、TLS 与管理鉴权 | 只证明产品进程恢复，不计作 WSL 或 Windows 重启 |
+| 地址变化或网络切换 | `lwa access refresh` 后的地址、候选及证书；旧的外部验证证据失效 | 未发生真实变化时记待测，不能用模拟地址替代 |
+| 休眠恢复 | Windows 与 WSL 是否恢复、监听与规则是否仍匹配 | 从另一台设备重新验证，宿主本机结果单列 |
+| WSL 关闭后重新启动 | Windows 唤醒条件、已安装 systemd 单元、guest IP 与转发目标 | 手动拉起通过不能写成自动恢复通过 |
+| Windows 重启 | 登录/唤醒任务、WSL 生命周期、自启、规则和客户端信任 | 无维护窗口或环境时保留待测 |
+
+未提供的 Windows/WSL 组合、不可读规则、不可达入口和未安排的恢复事件分别记录。模拟回归、单机实测、双设备通过三类结论不能混写；Docker/Compose 最低版本验收按独立专项处理。
+
+
 ### IMP-042.b — 跨盘 / 跨机迁移（延期）
 
 **不在本期实现。** `lwa workspace relocate` 仅同卷；跨盘预检 blocking。人工路径见 [workspace-rename.md](workspace-rename.md)。V0.6.12 起对裸 `mv` 提供代码防复发与 doctor 诊断，V0.6.13 加固挂载查询 fail-safe 与 registry SKIP，但仍不能替代正式 relocate。

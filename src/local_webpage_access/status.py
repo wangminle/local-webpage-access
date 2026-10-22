@@ -87,6 +87,9 @@ class InstanceStatus:
     wsl_network_mode: str | None = None
     access_scope_note: str | None = None
     dynamic_ip_forwarding: bool = False
+    lan_observation: dict[str, Any] | None = None
+    lan_observation_stale: bool = False
+    windows_listening: bool | None = None
     source_size_bytes: int | None = None
     public_size_bytes: int | None = None
     data_size_bytes: int | None = None
@@ -189,6 +192,9 @@ class InstanceStatus:
             "wslNetworkMode": self.wsl_network_mode,
             "accessScopeNote": self.access_scope_note,
             "dynamicIpForwarding": self.dynamic_ip_forwarding,
+            "lanObservation": self.lan_observation,
+            "lanObservationStale": self.lan_observation_stale,
+            "windowsListening": self.windows_listening,
             "sourceSizeBytes": self.source_size_bytes,
             "publicSizeBytes": self.public_size_bytes,
             "dataSizeBytes": self.data_size_bytes,
@@ -359,6 +365,9 @@ def instance_status(
         wsl_network_mode=net.get("wsl_network_mode"),
         access_scope_note=net.get("access_scope_note"),
         dynamic_ip_forwarding=bool(net.get("dynamic_ip_forwarding")),
+        lan_observation=net.get("lan_observation"),
+        lan_observation_stale=bool(net.get("lan_observation_stale")),
+        windows_listening=net.get("windows_listening"),
         source_size_bytes=_as_int(resources.get("source_size_bytes")),
         public_size_bytes=_as_int(resources.get("public_size_bytes")),
         data_size_bytes=_as_int(resources.get("data_size_bytes")),
@@ -690,7 +699,10 @@ def _resolve_route(workspace: Workspace, instance_id: str) -> tuple[str | None, 
 
 
 def _wsl_access_overlay(
-    config: Config, host_port: int | None, route_host: str | None
+    config: Config,
+    host_port: int | None,
+    route_host: str | None,
+    observation: Any | None = None,
 ) -> dict[str, Any]:
     """BUG-923：附加 WSL 地址范围；非 WSL 或探测失败时字段为 None。"""
     empty = {
@@ -702,20 +714,30 @@ def _wsl_access_overlay(
         "access_scope_note": None,
         "dynamic_ip_forwarding": False,
         "wsl_guest_ip": None,
+        "lan_observation": None,
+        "lan_observation_stale": False,
+        "windows_listening": None,
     }
-    try:
-        from local_webpage_access.wsl_network import (
-            collect_wsl_network_snapshot,
-            describe_instance_access,
-        )
+    from local_webpage_access.wsl_network import (
+        collect_wsl_network_snapshot,
+        describe_instance_access,
+        observation_from_dict,
+    )
 
+    parsed = observation_from_dict(observation if isinstance(observation, dict) else None)
+    empty["lan_observation"] = parsed.to_dict() if parsed else None
+    try:
         snap = collect_wsl_network_snapshot()
     except Exception:  # noqa: BLE001 — 状态页不得因 Windows 探测失败而整体不可用
         return empty
     if snap is None:
         return empty
     view = describe_instance_access(
-        snap, host_port=host_port, route_host=route_host, config=config
+        snap,
+        host_port=host_port,
+        route_host=route_host,
+        config=config,
+        observation=parsed,
     )
     return {
         "lan_reachability": view.guest_reachability,
@@ -726,6 +748,9 @@ def _wsl_access_overlay(
         "access_scope_note": view.note,
         "dynamic_ip_forwarding": view.dynamic_ip_forwarding,
         "wsl_guest_ip": snap.guest_ip,
+        "lan_observation": view.observation.to_dict() if view.observation else None,
+        "lan_observation_stale": view.observation_stale,
+        "windows_listening": view.windows_listening,
     }
 
 
@@ -763,6 +788,9 @@ def _resolve_network_urls(
         "wsl_network_mode": None,
         "access_scope_note": None,
         "dynamic_ip_forwarding": False,
+        "lan_observation": None,
+        "lan_observation_stale": False,
+        "windows_listening": None,
     }
 
     manifest_path = workspace.app_manifest_path(instance_id)
@@ -770,6 +798,7 @@ def _resolve_network_urls(
     route_host: str | None = None
     persisted_route: str | None = None
     route_mode_name = False
+    observation: dict[str, Any] | None = None
     if manifest_path.is_file():
         from local_webpage_access.models import InstanceManifest
 
@@ -785,18 +814,27 @@ def _resolve_network_urls(
                 route_mode_name = True
                 route_host = net.routeHost
                 persisted_route = net.routeUrl
+            raw_obs = net.externalLanObservation
+            if isinstance(raw_obs, dict):
+                observation = raw_obs
 
     if not host_port:
         # 无端口时仍返回路径别名元数据（停服实例 PATCH path-alias 依赖 routeHost）
         empty["route_host"] = route_host if route_mode_name else None
         empty["persisted_lan_ip"] = persisted_lan
+        empty["lan_observation"] = observation
         return empty
 
     from local_webpage_access.ports import lan_entry_port
 
     current_ip = resolve_lan_ip(config)
     source = "manual" if config.lanIpStrategy == "manual" else "live"
-    overlay = _wsl_access_overlay(config, host_port, route_host if route_mode_name else None)
+    overlay = _wsl_access_overlay(
+        config,
+        host_port,
+        route_host if route_mode_name else None,
+        observation,
+    )
     guest_ip = overlay.pop("wsl_guest_ip", None)
     if guest_ip and current_ip and guest_ip != current_ip:
         current_ip = guest_ip
@@ -825,7 +863,7 @@ def _resolve_network_urls(
     _pl = _normalize_ip(persisted_lan or "") or persisted_lan
     _ci = _normalize_ip(current_ip or "") or current_ip
     stale = bool(persisted_lan and current_ip and _pl not in (_ci, "127.0.0.1"))
-    return {
+    result = {
         "lan_url": lan_url,
         "route_host": route_host if route_mode_name else None,
         "route_url": route_url if route_mode_name else None,
@@ -835,6 +873,9 @@ def _resolve_network_urls(
         "lan_url_source": source,
         **overlay,
     }
+    if observation and not result.get("lan_observation"):
+        result["lan_observation"] = observation
+    return result
 
 
 def _registry_status(registry: Registry, instance_id: str) -> str | None:

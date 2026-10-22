@@ -49,6 +49,7 @@
 | `lwa recover <ID>` | 尝试恢复实例，必要时先拉起网关 |
 | `lwa rebuild <ID>` | 通过构建队列强制重建当前工作区中的项目副本 |
 | `lwa rebuild <ID> --sync` | 先同步关联文件夹或 GitHub 源，再重建 |
+| `lwa rebuild <ID> --force` | 确认继续执行会删除前端产物目录的旧 `buildHooks`（默认拒绝，见 issue #141） |
 | `lwa cancel-build <ID>` | 取消排队或进行中的构建，不删除缓存、镜像与数据 |
 | `lwa versions <ID>` | 查看留档的容器镜像版本 |
 | `lwa rollback <ID> [--to BUILD_ID]` | 回到上一可用容器版本，或指定留档版本 |
@@ -82,6 +83,7 @@
 | `lwa alias set <ID> <别名>` / `lwa alias clear <ID>` | 设置或清除路径别名；设置需要 Caddy，并经过路径兼容性检查 |
 | `lwa access refresh` | 换网或 IP 变化后刷新访问地址 |
 | `lwa access review [--json] [--rebuild-if-needed]` | 复核实际访问入口、资源和 API 路径 |
+| `lwa access record-observation <ID> --vantage <lan-client/windows-host/guest> --protocol <http/https> --evidence <证据> [--status N] [--url URL]` | 记录一次来自独立设备的外部观测（LWA 不自行跨设备探测）；成功观测仅在协议/端口/路径与当前入口一致且网络指纹未变时升格为已验证 |
 | `lwa gateway on` / `lwa gateway off` / `lwa gateway status` | 管理工作区的 Caddy 网关 |
 | `lwa gateway switch <caddy或builtin> [--dry-run]` | 预检或切换静态网关后端，失败回滚 |
 | `lwa probe show <ID>` | 查看继承、覆盖及最终生效的探针 |

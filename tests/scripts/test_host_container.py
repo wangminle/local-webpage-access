@@ -353,7 +353,7 @@ def test_host_container_sqlite_project_injects_database_url(
 def test_host_container_node_project_uses_node_template(
     workspace, registry, config, fake_runtime
 ) -> None:
-    """Node 项目生成 node:24-alpine Dockerfile。"""
+    """Node 项目生成 node:24.22.1-alpine Dockerfile。"""
     workspace.ensure_app_dirs("node-api")
     current = workspace.app_current("node-api")
     (current / "package.json").write_text('{"scripts":{"start":"node server.js"}}')
@@ -379,7 +379,7 @@ def test_host_container_node_project_uses_node_template(
 
     host_container(workspace, config, registry, "node-api")
     dockerfile_text = workspace.app_dockerfile_path("node-api").read_text(encoding="utf-8")
-    assert "FROM node:24-alpine" in dockerfile_text
+    assert "FROM node:24.22.1-alpine" in dockerfile_text
 
 
 # ---- 失败路径 ---------------------------------------------------------------

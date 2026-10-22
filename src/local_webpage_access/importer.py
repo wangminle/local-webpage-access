@@ -25,7 +25,9 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import GitSourceError, LwaError, RecognitionError, ZipImportError
@@ -517,16 +519,8 @@ class Importer:
                     instance_id=instance_id,
                 )
 
-            # BUG-469：导入期别名与运行时 set_instance_path_alias 必须过同一道
-            # IMP-023 / IMP-055 硬守卫，否则用户可在 import 阶段带 --path-alias
-            # 绕过门禁，首次启动后生成不可用别名路由（白屏）。此时实例尚未运行，
-            # 直接从解压后的 current/ 读入口 HTML 做绝对路径资源检测。
-            if path_alias is not None and not detection.pending:
-                self._assert_alias_no_absolute_spa_assets(
-                    current_dir, alias=path_alias, instance_id=instance_id
-                )
-
-            # 构建 manifest
+            # 构建 manifest 后再跑导入期别名守卫：构建型前端需要 entry.build /
+            # buildBaseFromAlias 才能复用 BUG-862 豁免（issue #142）。
             manifest = self._build_manifest(
                 instance_id,
                 display_name,
@@ -535,6 +529,17 @@ class Importer:
                 path_alias=path_alias,
                 name_source=name_source,
             )
+            # BUG-469：导入期别名与运行时 set_instance_path_alias 必须过同一道
+            # IMP-023 / IMP-055 硬守卫。BUG-952：构建型前端源码入口（/src/main.*）
+            # 在导入期产物尚未生成，不得当预构建 SPA 误拦。
+            import_alias_exempt: str | None = None
+            if path_alias is not None and not detection.pending:
+                import_alias_exempt = self._guard_import_path_alias(
+                    current_dir,
+                    alias=path_alias,
+                    instance_id=instance_id,
+                    manifest=manifest,
+                )
             # IMP-056 Gate-2：兼容性预检（CHK-P03/P04），不阻断导入
             try:
                 from local_webpage_access.compatibility_checker import (
@@ -577,6 +582,13 @@ class Importer:
                 else f"导入完成，sha256={zip_hash[:12]}，未识别（pending）"
             )
             self.registry.add_event(instance_id, "import", event_msg)
+            if import_alias_exempt is not None and path_alias is not None:
+                self.registry.add_event(
+                    instance_id,
+                    "path-alias",
+                    f"导入期别名守卫豁免（{import_alias_exempt} 指向别名 "
+                    f"/{path_alias}/，构建型前端）",
+                )
             # IMP-058 Gate-A：预检修正/警告记为 registry 事件（A.08）。
             for note in detection.notes:
                 if note.startswith("[预检修正]"):
@@ -2332,6 +2344,50 @@ class Importer:
                 f"（或安装 caddy 可执行文件），或去掉 --path-alias 改用端口直达。",
             )
 
+    def _guard_import_path_alias(
+        self,
+        current_dir: Path,
+        *,
+        alias: str,
+        instance_id: str,
+        manifest: InstanceManifest,
+    ) -> str | None:
+        """导入期别名硬守卫，并对构建型前端源码入口复用 BUG-862 豁免。
+
+        用户显式 ``--path-alias`` 且入口是尚未构建的 Vite 源码时，开启
+        ``buildBaseFromAlias``，使首次镜像构建注入 ``VITE_BASE=/{alias}/``。
+        预构建产物里的绝对 ``/assets/`` 仍拒绝。
+        不得仅凭 ``entry.build`` 自动设跟随别名并豁免——普通 Vite 配置
+        不会读取 ``VITE_BASE``，注入变量不能证明产物路径正确。
+        豁免时返回依据字符串，事件须在 registry 落盘后再记。
+        """
+        if _is_vite_source_entry(current_dir, alias=alias):
+            manifest.buildBaseFromAlias = True
+            index = find_homepage_index(current_dir)
+            if index is None:
+                exempt = "vite-source-entry"
+            else:
+                try:
+                    rel = index.relative_to(current_dir).as_posix()
+                except ValueError:
+                    rel = index.name
+                exempt = f"source-index={rel}"
+        else:
+            exempt = None
+        if exempt is not None:
+            log.warning(
+                "实例 %s 导入期别名守卫豁免：%s 指向别名 /%s/"
+                "（构建型前端，源码 index.html 扫描不适用）",
+                instance_id,
+                exempt,
+                alias,
+            )
+            return exempt
+        self._assert_alias_no_absolute_spa_assets(
+            current_dir, alias=alias, instance_id=instance_id
+        )
+        return None
+
     def _assert_alias_no_absolute_spa_assets(
         self, current_dir: Path, *, alias: str, instance_id: str
     ) -> None:
@@ -2390,6 +2446,60 @@ class Importer:
 
 
 # ---- 辅助 -------------------------------------------------------------------
+
+
+class _ModuleScriptCollector(HTMLParser):
+    """仅收集真正的模块脚本标签，忽略注释、正文和内联 JS 中的路径。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.sources: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = dict(attrs)
+        if tag == "script" and (attr.get("type") or "").strip().lower() == "module":
+            if src := attr.get("src"):
+                self.sources.append(src)
+
+
+def _is_vite_source_entry(current_dir: Path, *, alias: str | None = None) -> bool:
+    """源码豁免只覆盖存在的模块入口；其他绝对加载资源继续硬拦截。"""
+    from local_webpage_access.access import scan_absolute_spa_resources
+
+    index = find_homepage_index(current_dir)
+    if index is None:
+        return False
+    try:
+        html = index.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    collector = _ModuleScriptCollector()
+    collector.feed(html)
+    collector.close()
+    source_urls: set[str] = set()
+    for src in collector.sources:
+        try:
+            parsed = urlsplit(src)
+        except ValueError:
+            continue
+        if parsed.scheme or parsed.netloc or not re.fullmatch(
+            r"/src/main\.[cm]?[jt]sx?", parsed.path
+        ):
+            continue
+        if (index.parent / parsed.path.lstrip("/")).is_file():
+            source_urls.add(src)
+    if not source_urls:
+        return False
+    scan = scan_absolute_spa_resources(html, alias=alias)
+    if any(path not in source_urls for path in scan.load_paths):
+        return False
+    parent = index.parent
+    if (parent / "package.json").is_file():
+        return True
+    return any(
+        (parent / name).is_file()
+        for name in ("vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs")
+    )
 
 
 def _alias_guard_build_env_exemption(manifest: InstanceManifest, alias: str) -> str | None:

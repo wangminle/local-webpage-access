@@ -1064,6 +1064,40 @@ def test_check_wsl_lan_exposure_warns_when_nat_entry_missing(env, monkeypatch) -
     assert r.status == STATUS_WARN
     assert r.suggestion
     assert "不会自动" in (r.suggestion or "") or "不自动" in (r.suggestion or "")
+    assert "tcp_listen" in (r.detail or "")
+    assert "firewall" in (r.detail or "")
+
+
+def test_check_wsl_lan_exposure_reports_independent_listen_unknown(env, monkeypatch) -> None:
+    from local_webpage_access.wsl_network import InteropOutputs, collect_wsl_network_snapshot
+    from tests.scripts.test_wsl_network import YI14_NETIP, YI14_NETROUTE, YI14_PORTPROXY, YI14_WSL_VERSION
+
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws, reg, "hello-lwa", host_port=18000, alias="hello-lwa"
+    )
+    snap = collect_wsl_network_snapshot(
+        platform="wsl",
+        guest_ip="172.22.148.94",
+        outputs=InteropOutputs(
+            wsl_version_text=YI14_WSL_VERSION,
+            wslinfo_text="nat\n",
+            netip_text=YI14_NETIP,
+            netroute_text=YI14_NETROUTE,
+            portproxy_text=YI14_PORTPROXY,
+            errors={"tcp_listen": "timeout", "hyperv_firewall": "exit-1"},
+            firewall_text="Private|Block\n",
+        ),
+        use_cache=False,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: snap
+    )
+    r = check_wsl_lan_exposure(ws, config, reg)
+    assert r.status == STATUS_WARN
+    assert "tcp_listen:unknown(timeout)" in (r.detail or "")
+    assert "hyperv_firewall:unknown(exit-1)" in (r.detail or "")
+    assert "firewall:available" in (r.detail or "") or "Private" in (r.detail or "")
 
 
 def test_check_lan_url_stale_warns_when_lan_ip_unresolvable(env, monkeypatch) -> None:

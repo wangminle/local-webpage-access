@@ -71,6 +71,12 @@ def _runner_snapshot(monkeypatch, portproxy: bytes, *, profile: bytes = b""):
             out = "无线网络|10.180.105.1|0\r\n".encode("utf-8")
         elif "Get-NetConnectionProfile" in args[-1]:
             out = "无线网络|Private\r\n".encode("utf-8")
+        elif "Get-NetTCPConnection" in args[-1]:
+            out = b"0.0.0.0|8080\n"
+        elif "Get-NetFirewallProfile" in args[-1]:
+            out = b"Private|Block\n"
+        elif "Get-NetFirewallHyperV" in args[-1]:
+            out = b"S|WSL|Block\n"
         elif args[-1] == "Write-Output $env:USERPROFILE":
             out = profile
         else:

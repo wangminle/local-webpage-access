@@ -84,7 +84,7 @@ lwa manager off         # 停止
 | POST | `/api/instances/{id}/confirm-fallback` | Gate-C 降级确认（C.R03）：降级弹窗确认后调用，以 `auto-equivalent` 策略重试启动；幂等--实例已在 fallback 后运行则直接返回当前状态；同样支持 `?expectedRevision=`（S2-09） |
 | POST | `/api/instances/{id}/stop` | 停止实例（同上，含 `?expectedRevision=`，S2-09） |
 | POST | `/api/instances/{id}/restart` | 重启实例（同上，含 `?expectedRevision=`，S2-09） |
-| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上，含 `?expectedRevision=`，S2-09）。V0.8.5 起响应带 `sourceStaleWarnings`（关联 folder/git 源已漂移的提示，前端暂未展示） |
+| POST | `/api/instances/{id}/rebuild` | 重建实例（经构建队列限流；同上，含 `?expectedRevision=`，S2-09）。V0.8.5 起响应带 `sourceStaleWarnings`（关联 folder/git 源已漂移的提示，前端暂未展示）。旧产物拷贝 `buildHooks` 会删除模板保护的 `static/` 时返回 **409 `destructive_build_hooks`**；确认后加 `?force=true` |
 | POST | `/api/instances/{id}/cancel-build` | 取消排队中或进行中的构建（IMP-039）；返回 `outcome`：`cancelled` / `cancel_failed` / `noop` / `already_done`；`cancel_failed` 为 **409**；不删缓存/镜像/用户数据；`cancelling` 期间其它生命周期操作返回 409 |
 | POST | `/api/instances/{id}/rollback` | **S3-01 / V0.9.4**：有限回滚到指定（默认上一可用）留档版本；body `{"toBuildId": null, "expectedRevision": null, "confirm": false}`（`confirm` 必须是 JSON 布尔值，字符串 `"false"` 返回 400）；D8：只回滚镜像与生成配置，**不回滚 `data/`**；preStart 含迁移命令且未 `confirm=true` 时 409 `rollback_needs_yes`；`expectedRevision` 过期 409 `revision_conflict`；回滚后验证失败自动尝试恢复原版本，恢复结果经实证验证（未通过时实例标 `failed`、错误如实报「未能恢复原版本」） |
 | POST | `/api/instances/{id}/recover` | 一键恢复 `gateway_down`/`config_invalid`；容器路径同样受能力门禁；CLI：`lwa recover <id>`；支持 `?expectedRevision=`（S2-09，仅锁外预检） |
@@ -115,7 +115,7 @@ lwa manager off         # 停止
 {"error": {"code": "not_found", "message": "实例 xxx 不存在"}}
 ```
 
-常见 code：`unauthorized`、`csrf_forbidden`（回环非同源写请求）、`not_found`、`bad_request`、`conflict`、`data_nonempty`（IMP-035：purge 遇非空 data/）、`lifecycle_error`、`capability_denied`、`recognition_error`、`internal`。
+常见 code：`unauthorized`、`csrf_forbidden`（回环非同源写请求）、`not_found`、`bad_request`、`conflict`、`data_nonempty`（IMP-035：purge 遇非空 data/）、`destructive_build_hooks`（issue #141：旧产物拷贝钩子）、`lifecycle_error`、`capability_denied`、`recognition_error`、`internal`。
 
 ### 能力降级（IMP-033）
 
@@ -300,8 +300,10 @@ Content-Type: application/json
 | `lanAddressStale` | 落盘 host 与当前探测 IP 是否不一致（只表示漂移，不表示局域网可达） |
 | `lanUrlSource` | `live` / `manual` / `manifest` |
 | `lanReachability` | 地址范围：`loopback` / `windows-host` / `lan` / `unknown`（非 WSL 为 null） |
-| `lanExposure` | 暴露状态：`entry-missing` / `candidate-unverified` / `unknown`（portproxy 探测超时或读取被拒时保留 `unknown`，不武断判 `entry-missing`）；候选入口未经其他设备验证 |
+| `lanExposure` | 暴露状态：`entry-missing` / `candidate-unverified` / `externally-verified` / `unknown`（portproxy 探测超时或读取被拒时保留 `unknown`，不武断判 `entry-missing`）。只有观察位置为 `lan-client`、且协议/主机/端口/路径与**当前入口**一致的成功观测才能升格为 `externally-verified`；guest 或 Windows 本机成功不能代替；HTTP 观测不能给随后改成的 HTTPS 入口当已验证 |
 | `hostLanIp` / `hostLanUrl` | Windows 物理网卡 IP，以及已发现转发时的局域网候选 URL |
+| `lanObservation` / `lanObservationStale` | 最近一次受约束的外部观测（位置、协议、响应证据、时间）；网络/映射变化，或观测的协议/主机/端口/路径与当前入口不一致时 `lanObservationStale=true`，暴露状态回到待验证。重启/重建会保留该记录，不会静默删除 |
+| `windowsListening` | Windows 是否在**对外监听端口**上有 TCP 监听（有 portproxy 时用规则的 `listen_port`，没有映射时才用实例/网关端口）；监听读取失败时为 `null`，不与「没有入口」混为一谈 |
 | `wslNetworkMode` / `accessScopeNote` | 实际网络模式（nat/mirrored/…）与给用户看的范围说明 |
 | `dynamicIpForwarding` | 已有 portproxy 规则指向会随 WSL 重启漂移的 guest IP 时为 true（doctor `wsl_lan_exposure` 与 `lwa status` 的「转发风险」同步提示；非 WSL 恒为 false） |
 | `redundant` | 是否为同 zip 指纹分组中的冗余实例（非最早者，IMP-019） |
@@ -324,7 +326,29 @@ POST /api/access/refresh
 Authorization: Bearer <token>
 ```
 
-立即用当前 LAN IP 重算并落盘各实例 `lanUrl`/`routeUrl`（与 `lwa access refresh` 同源）。管理页在 `lanAddressStale` 时会提示并可一键调用。
+立即用当前 LAN IP 重算并落盘各实例 `lanUrl`/`routeUrl`（与 `lwa access refresh` 同源）。管理页在 `lanAddressStale` 时会提示并可一键调用。已记录的外部观测不会被这次刷新删掉；网络指纹或入口协议/主机/端口/路径变了会在读时标为失效。
+
+### 记录外部观测
+
+```http
+POST /api/instances/{id}/lan-observation
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "vantage": "lan-client",
+  "protocol": "https",
+  "evidence": "content-match",
+  "statusCode": 200,
+  "url": "https://<windows-lan-ip>:8443/alias/"
+}
+```
+
+记录一次受约束的外部观测（与 `lwa access record-observation` 同源）。`vantage` 只接受 `lan-client` / `windows-host` / `guest`；`evidence` 只接受 `content-match` / `page` / `timeout` / `connection-refused` / `tls-error` / `auth-401`。LWA 不会自己从其他设备探测，也不会把 guest 或 Windows 本机成功写成局域网已通。
+
+`url` 须为完整 HTTP(S) URL，且协议与 `protocol` 一致。非法 URL 返回 **400 `LAN_OBSERVATION_INVALID`**，不会覆盖已有观测。
+只有 URL 的协议、主机、端口、路径都与当前候选入口一致，成功观测才可升格为外部已验证。
+省略 `url` 时只保存证据、不升格；旧的非法 URL 记录仍可查看，但 `lanObservationStale=true`，不会让列表或详情返回 500。
 
 ### 网关后端切换（IMP-037）
 

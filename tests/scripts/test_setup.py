@@ -43,7 +43,7 @@ def test_run_setup_all_ok_with_mocked_tools() -> None:
         {
             ("docker", "version"): _proc(0, stdout="29.6.1\n"),
             ("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n"),
-            ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
+            ("node", "--version"): _proc(0, stdout="v24.22.1\n"),
         }
     )
     report = run_setup(static_gateway="builtin", runner=runner)
@@ -74,7 +74,7 @@ def test_run_setup_supported_compose_v2_is_ready_with_warning() -> None:
         {
             ("docker", "version"): _proc(0, stdout="29.6.1\n"),
             ("docker", "compose", "version"): _proc(0, stdout="2.40.3\n"),
-            ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
+            ("node", "--version"): _proc(0, stdout="v24.22.1\n"),
         }
     )
     report = run_setup(static_gateway="builtin", runner=runner)
@@ -88,7 +88,7 @@ def test_run_setup_default_caddy_missing_is_ready_with_warning(monkeypatch) -> N
         {
             ("docker", "version"): _proc(0, stdout="29.6.1\n"),
             ("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n"),
-            ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
+            ("node", "--version"): _proc(0, stdout="v24.22.1\n"),
         }
     )
     monkeypatch.setattr("local_webpage_access.doctor.shutil.which", lambda _: None)
@@ -105,7 +105,7 @@ def test_format_setup_report_mentions_next_steps() -> None:
         {
             ("docker", "version"): _proc(0, stdout="29.6.1\n"),
             ("docker", "compose", "version"): _proc(0, stdout="v5.2.0\n"),
-            ("node", "--version"): _proc(0, stdout="v24.16.0\n"),
+            ("node", "--version"): _proc(0, stdout="v24.22.1\n"),
         }
     )
     report = run_setup(static_gateway="builtin", runner=runner)

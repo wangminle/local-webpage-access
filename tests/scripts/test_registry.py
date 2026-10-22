@@ -609,6 +609,47 @@ def test_registry_concurrent_reads_thread_safe(registry: Registry) -> None:
     assert all(c == 30 for c in counts)
 
 
+def test_registry_close_waits_for_connection_lock(registry: Registry) -> None:
+    """close() 必须先拿到连接锁再关 SQLite，避免并发 fetch 时底层段错误。"""
+    from local_webpage_access.errors import RegistryError
+    from local_webpage_access.registry.connection import _get_lock
+
+    conn = registry.conn
+    lock = _get_lock(conn)
+    started = threading.Event()
+    closed = threading.Event()
+    errors: list[BaseException] = []
+
+    def _closer() -> None:
+        started.set()
+        try:
+            registry.close()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            closed.set()
+
+    lock.acquire()
+    held = True
+    try:
+        thread = threading.Thread(target=_closer, name="registry-close")
+        thread.start()
+        assert started.wait(timeout=2)
+        assert not closed.wait(timeout=0.3), "close() 未等待连接锁就关闭了 SQLite"
+        lock.release()
+        held = False
+        assert closed.wait(timeout=2)
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    finally:
+        if held:
+            lock.release()
+
+    assert errors == []
+    with pytest.raises(RegistryError, match="未打开"):
+        _ = registry.conn
+
+
 # ---- 回归测试：BUG-333 ----------------------------------------------------
 
 

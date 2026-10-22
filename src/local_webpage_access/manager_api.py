@@ -54,6 +54,7 @@ from local_webpage_access.errors import (
     BuildError,
     ConfigError,
     DataNonemptyError,
+    DestructiveBuildHooksError,
     DirectoryPickerError,
     DockerError,
     FolderSourceError,
@@ -330,6 +331,7 @@ _ERROR_STATUS: dict[str, int] = {
     # S2-09 / BUG-751：乐观并发——实例 revision 与期望不符
     "revision_conflict": status.HTTP_409_CONFLICT,
     "data_nonempty": status.HTTP_409_CONFLICT,  # IMP-035：purge 非空 data/
+    "destructive_build_hooks": status.HTTP_409_CONFLICT,  # issue #141
     "unauthorized": status.HTTP_401_UNAUTHORIZED,
     "loopback_required": status.HTTP_403_FORBIDDEN,  # IMP-051
     "cancelled": status.HTTP_400_BAD_REQUEST,  # IMP-051 pick-directory
@@ -1057,6 +1059,64 @@ def _register_routes(app: FastAPI) -> None:
         report = refresh_network_entries(ctx.workspace, ctx.config, ctx.registry)
         return {"ok": True, **report.to_dict()}
 
+    @app.post(
+        "/api/instances/{instance_id}/lan-observation",
+        dependencies=[api],
+        tags=["access"],
+    )
+    def record_instance_lan_observation(
+        instance_id: str, payload: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        from local_webpage_access.access import record_lan_observation
+        from local_webpage_access.errors import LwaError
+        from local_webpage_access.status import instance_status
+
+        ctx = _Ctx(app)
+        vantage = str(payload.get("vantage") or "").strip()
+        protocol = str(payload.get("protocol") or "").strip()
+        evidence = str(payload.get("evidence") or "").strip()
+        url = payload.get("url")
+        status_raw = payload.get("statusCode", payload.get("status"))
+        status_code: int | None = None
+        if status_raw is not None:
+            try:
+                status_code = int(status_raw)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error": {
+                            "code": "LAN_OBSERVATION_INVALID",
+                            "message": "statusCode 必须是整数",
+                        }
+                    },
+                ) from exc
+        try:
+            result = record_lan_observation(
+                ctx.workspace,
+                ctx.config,
+                instance_id,
+                vantage=vantage,
+                protocol=protocol,
+                evidence=evidence,
+                status_code=status_code,
+                url=str(url).strip() if url else None,
+            )
+        except LwaError as exc:
+            code = (
+                status.HTTP_404_NOT_FOUND
+                if exc.code == "INSTANCE_NOT_FOUND"
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(
+                status_code=code,
+                detail={"error": {"code": exc.code, "message": exc.message}},
+            ) from exc
+        snap = instance_status(
+            ctx.workspace, ctx.config, ctx.registry, instance_id
+        )
+        return {"ok": True, **result, "instance": snap.to_dict()}
+
     # ---- IMP-037：网关后端原子切换（薄封装 switch_gateway）----
     @app.post("/api/gateway/switch", dependencies=[api], tags=["gateway"])
     def switch_gateway_backend(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
@@ -1392,17 +1452,25 @@ def _register_routes(app: FastAPI) -> None:
             alias="expectedRevision",
             description="S2-09 乐观并发：列表快照里的 revision，不符返回 409 revision_conflict",
         ),
+        force: bool = Query(
+            False,
+            description="issue #141：确认继续执行会删除前端产物目录的旧 buildHooks",
+        ),
     ) -> dict[str, Any]:
         from local_webpage_access.lifecycle import rebuild_instance
 
         # issue #8：把 rebuild 前的源码陈旧警告透出到响应（不阻断重建）
         stale_warnings: list[str] = []
+        extra: dict[str, Any] = {}
+        if force:
+            extra["force_hooks"] = True
         result = _lifecycle_op(
             instance_id,
             rebuild_instance,
             label="rebuild",
             out=stale_warnings,
             expected_revision=expected_revision,
+            **extra,
         )
         if stale_warnings:
             result["sourceStaleWarnings"] = stale_warnings
@@ -2406,6 +2474,11 @@ def _lwa_error_code(exc: LwaError) -> str:
     """
     if isinstance(exc, DataNonemptyError) or getattr(exc, "code", None) == "data_nonempty":
         return "data_nonempty"
+    if (
+        isinstance(exc, DestructiveBuildHooksError)
+        or getattr(exc, "code", None) == "destructive_build_hooks"
+    ):
+        return "destructive_build_hooks"
     # S2-09 / BUG-751：revision 乐观锁冲突——LifecycleError/ZipImportError 等携带
     # code="revision_conflict"（与 Agent 通道同契约），优先于按类映射（否则会被
     # LifecycleError→internal / ZipImportError→bad_request 吞掉）

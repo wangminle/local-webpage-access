@@ -32,6 +32,7 @@ from typing import Any, Callable
 from urllib.parse import urljoin, urlparse, urlsplit
 
 from local_webpage_access.config import Config
+from local_webpage_access.errors import LwaError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.ports import entry_scheme as _entry_scheme_of
@@ -452,6 +453,72 @@ def _extract_host_port_alias(
     return host_port, path_alias, internal_port
 
 
+def record_lan_observation(
+    workspace: Workspace,
+    config: Config,
+    instance_id: str,
+    *,
+    vantage: str,
+    protocol: str,
+    evidence: str,
+    status_code: int | None = None,
+    url: str | None = None,
+    observed_at: str | None = None,
+) -> dict[str, Any]:
+    """把一次受约束的外部观测写入实例 manifest，供 status/API/doctor 消费。"""
+    from local_webpage_access.models import InstanceManifest, NetworkConfig
+    from local_webpage_access.wsl_network import (
+        build_lan_observation,
+        collect_wsl_network_snapshot,
+        describe_instance_access,
+    )
+
+    path = workspace.app_manifest_path(instance_id)
+    if not path.is_file():
+        raise LwaError(f"实例 {instance_id} 的 manifest 不存在", code="INSTANCE_NOT_FOUND")
+    snap = collect_wsl_network_snapshot()
+    try:
+        observation = build_lan_observation(
+            snapshot=snap,
+            vantage=vantage,
+            protocol=protocol,
+            evidence=evidence,
+            status_code=status_code,
+            url=url,
+            observed_at=observed_at,
+        )
+    except ValueError as exc:
+        raise LwaError(str(exc), code="LAN_OBSERVATION_INVALID") from exc
+    from local_webpage_access.lifecycle import instance_lock
+
+    with instance_lock(workspace, instance_id):
+        if not path.is_file():
+            raise LwaError(
+                f"实例 {instance_id} 的 manifest 不存在", code="INSTANCE_NOT_FOUND"
+            )
+        manifest = InstanceManifest.load(path)
+        if manifest.network is None:
+            manifest.network = NetworkConfig()
+        manifest.network.externalLanObservation = observation.to_dict()
+        view = describe_instance_access(
+            snap,
+            host_port=manifest.network.hostPort,
+            route_host=(
+                manifest.network.routeHost if manifest.network.routeMode == "name" else None
+            ),
+            config=config,
+            observation=observation,
+        )
+        manifest.save(path)
+    return {
+        "instanceId": instance_id,
+        "lanExposure": view.lan_exposure,
+        "lanObservationStale": view.observation_stale,
+        "lanObservation": observation.to_dict(),
+        "hostLanUrl": view.host_lan_url,
+    }
+
+
 def refresh_network_entries(
     workspace: Workspace, config: Config, registry: Registry
 ) -> RefreshReport:
@@ -469,7 +536,7 @@ def refresh_network_entries(
     LAN IP。manifest 写完后若磁盘上的绑定仍是旧 IP（或仅回环），且 Caddy admin
     已在线，则 ``reload_all``。网关被关掉时不拉起。
     """
-    from local_webpage_access.models import InstanceManifest, NetworkConfig
+    from local_webpage_access.models import InstanceManifest, merge_network_entry
     from local_webpage_access.ports import build_network_entry
 
     lan_ip = resolve_lan_ip(config)
@@ -506,10 +573,7 @@ def refresh_network_entries(
             lan_ip=lan_ip,
         )
         # BUG-365：NetworkConfig(extra=allow) 的附加字段须保留，不可 **entry 重建抹掉。
-        if manifest.network is not None:
-            manifest.network = manifest.network.model_copy(update=entry)
-        else:
-            manifest.network = NetworkConfig(**entry)
+        manifest.network = merge_network_entry(manifest.network, entry)
         manifest.touch()
         try:
             manifest.save(manifest_path)
@@ -1789,6 +1853,7 @@ __all__ = [
     "RefreshedInstance",
     "RefreshReport",
     "caddyfile_tls_bind_stale",
+    "record_lan_observation",
     "refresh_network_entries",
     "sync_caddy_tls_bind",
     "review_access",

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import posixpath
 import re
@@ -31,9 +32,9 @@ from local_webpage_access.paths import Workspace, frontend_artifact_dest
 
 log = get_logger("dockerfile")
 
-_NODE_IMAGE = "node:24-alpine"
+_NODE_IMAGE = "node:24.22.1-alpine"
 # Python 全栈镜像内嵌 Node 官方二进制版本（与 _NODE_IMAGE major 对齐，OPS-001 / BUG-114）
-_NODE_DIST_VERSION = "24.16.0"
+_NODE_DIST_VERSION = "24.22.1"
 _PYTHON_IMAGE = "python:3.13-slim"
 _OFFICIAL_NODE_DIST = "https://nodejs.org/dist"
 
@@ -215,7 +216,7 @@ def _bun_global_install_line(
 ) -> str:
     """bun 安装命令的容器工具链层（评审 P2 / BUG-873 补齐）。
 
-    node:24-alpine 基础镜像不含 bun——install 推断为 ``bun install
+    node:24.22.1-alpine 基础镜像不含 bun——install 推断为 ``bun install
     --frozen-lockfile`` 时构建必在 RUN 处失败。经 ``npm install -g bun``
     安装（npm 包按平台自动选择 glibc/musl 与架构二进制），版本取工程根
     package.json ``packageManager`` 的 ``bun@<ver>``（未声明装最新）。
@@ -284,7 +285,7 @@ def _render_node(
     if _node_source_needs_git(source_dir) and "git" not in system_pkgs:
         system_pkgs.append("git")
     apk_block = f"RUN apk add --no-cache {' '.join(system_pkgs)}\n" if system_pkgs else ""
-    # 评审 P2：bun 安装命令需先在镜像内补齐 bun 工具链（node:24-alpine 不含 bun）
+    # 评审 P2：bun 安装命令需先在镜像内补齐 bun 工具链（node:24.22.1-alpine 不含 bun）
     bun_toolchain = _bun_global_install_line(install, source_dir, cpfx)
 
     # BUG-122：安装/构建阶段不可设 NODE_ENV=production，否则 npm 会 omit
@@ -1336,6 +1337,143 @@ def _build_hooks_block(
             continue
         chunks.append(f"RUN {text}\n")
     return "".join(chunks)
+
+
+def artifact_dest_for_manifest(manifest: InstanceManifest, workspace: Workspace) -> str:
+    """当前实例前端产物在镜像内的落点（与模板 COPY 前缀一致）。"""
+    source = workspace.app_current(manifest.id)
+    source_dir = source if source.is_dir() else None
+    return frontend_artifact_dest(_copy_prefix(manifest), source_dir)
+
+
+def destructive_artifact_copy_hooks(
+    manifest: InstanceManifest, workspace: Workspace
+) -> list[str]:
+    """检查直接 rm 命令的操作数；仅分词，不执行或展开用户 shell。"""
+    hooks = getattr(manifest, "buildHooks", None) or []
+    if not hooks:
+        return []
+    dests = {"/app/static", "/app/backend/static"}
+    with contextlib.suppress(Exception):
+        dest = artifact_dest_for_manifest(manifest, workspace)
+        dests.update({dest, dest.rstrip("/")})
+    hits: list[str] = []
+    for hook in hooks:
+        text = str(hook).strip()
+        if not text:
+            continue
+        if _rm_operands_hit_dests(text, dests):
+            hits.append(hook)
+    return hits
+
+
+# 保留原始引号以区分字面量 ">" 与重定向；单词内容仍交给 shlex 解码。
+_SHELL_TOKEN_RE = re.compile(
+    r"(?P<comment>\#[^\n]*)|"
+    r"""(?P<word>(?:[^\s;&|<>()'"\\]|\\[\s\S]|"(?:\\[\s\S]|[^"\\])*"|'[^']*')+)"""
+    r"|(?P<operator>&>>?|<<<|<<-?|[<>]&|<>|>\||>>|&&|\|\||\|&|[;&|<>()\n])"
+)
+
+
+def _rm_operands_hit_dests(text: str, dests: set[str]) -> bool:
+    """仅当某条 ``rm -rf/-f`` 的操作数命中产物目录时为破坏性钩子。"""
+    dest_norm = {posixpath.normpath(item) for item in dests if item}
+    if not dest_norm:
+        return False
+    tokens = list(_SHELL_TOKEN_RE.finditer(text))
+    end = 0
+    for match in tokens:
+        if text[end:match.start()].strip():
+            return False  # 未闭合引号等语法不能当作删除操作数。
+        end = match.end()
+    if text[end:].strip():
+        return False
+    commands: list[list[str]] = []
+    command: list[str] = []
+    redirect_target = False
+    for index, match in enumerate(tokens):
+        token = match.group()
+        if match.lastgroup == "comment":
+            break
+        operator = match.lastgroup == "operator"
+        if redirect_target:
+            redirect_target = False
+            continue
+        if operator and ("<" in token or ">" in token):
+            redirect_target = True
+        elif operator:
+            commands.append(command)
+            command = []
+        else:
+            # 2>log 中的 2 是 fd；与空格分隔的数字文件名不同。
+            if token.isdecimal() and index + 1 < len(tokens):
+                following = tokens[index + 1]
+                if following.start() == match.end() and following.lastgroup == "operator":
+                    if "<" in following.group() or ">" in following.group():
+                        continue
+            command.extend(shlex.split(token))
+    commands.append(command)
+    for words in commands:
+        if not words or words[0] not in {"rm", "/bin/rm", "/usr/bin/rm"}:
+            continue
+        destructive = False
+        options = True
+        operands: list[str] = []
+        for token in words[1:]:
+            if options and token == "--":
+                options = False
+                continue
+            if options and token.startswith("-"):
+                destructive |= token in {"--force", "--recursive"} or (
+                    not token.startswith("--") and any(char in "rRfF" for char in token[1:])
+                )
+                continue
+            operands.append(posixpath.normpath(token))
+        if not destructive:
+            continue
+        for operand in operands:
+            if operand in dest_norm or any(
+                operand.startswith(dest + "/") for dest in dest_norm
+            ):
+                return True
+    return False
+
+
+def destructive_artifact_hooks_message(instance_id: str, hooks: list[str]) -> str:
+    preview = "; ".join(item.strip() for item in hooks[:2])
+    extra = " …" if len(hooks) > 2 else ""
+    return (
+        f"实例 {instance_id} 的 buildHooks 含会删除前端产物目录的命令"
+        f"（V0.9.2 起模板自行把产物落到 static/ 且不 rm -rf，该钩子会删掉同目录下"
+        f"应用自有文件）：{preview}{extra}。"
+        f"建议 `lwa configure {instance_id} --clear-build-hooks` 后重建；"
+        f"确认仍要执行该钩子时用 `lwa rebuild {instance_id} --force`。"
+    )
+
+
+def refuse_destructive_artifact_hooks(
+    manifest: InstanceManifest,
+    workspace: Workspace,
+    *,
+    force: bool = False,
+    registry: object | None = None,
+) -> None:
+    """重建/生成镜像前审查破坏性产物钩子。不擅自删除用户钩子。"""
+    hits = destructive_artifact_copy_hooks(manifest, workspace)
+    if not hits:
+        return
+    message = destructive_artifact_hooks_message(manifest.id, hits)
+    if registry is not None:
+        add_event = getattr(registry, "add_event", None)
+        if callable(add_event):
+            with contextlib.suppress(Exception):
+                add_event(manifest.id, "build_hooks", message)
+    if force:
+        log.warning("%s（--force 继续）", message)
+        return
+    from local_webpage_access.errors import DestructiveBuildHooksError
+
+    raise DestructiveBuildHooksError(message, instance_id=manifest.id)
 
 
 def _cmd_line(manifest: InstanceManifest, start: str) -> str:

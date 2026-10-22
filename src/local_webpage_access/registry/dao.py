@@ -109,10 +109,18 @@ class Registry:
         return self
 
     def close(self) -> None:
-        if self._conn is not None:
-            release_connection_lock(self._conn)
-            self._conn.close()
-            self._conn = None
+        """关闭连接。必须先拿到连接锁，避免并发查询时 SQLite C 层段错误。"""
+        conn = self._conn
+        if conn is None:
+            return
+        self._conn = None
+        try:
+            with locked_connection(conn):
+                conn.close()
+        except sqlite3.ProgrammingError:
+            pass
+        finally:
+            release_connection_lock(conn)
 
     def __enter__(self) -> Registry:
         return self.open()

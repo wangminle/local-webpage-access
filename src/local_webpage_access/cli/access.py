@@ -5,6 +5,8 @@
 * ``lwa access review`` —— 对声明 URL 做真探活（入口 HTML + 抽样绝对路径子资源
   + 端口独占），避免「入口 200 ≠ 页面可渲染」（G2/G5）；G6 默认提示需 rebuild
   的实例，``--rebuild-if-needed`` 时对 IMP-023 命中实例自动重建。
+* ``lwa access record-observation`` —— 记录一次受约束的外部观测（位置/协议/
+  响应/时间）。guest 或 Windows 本机成功不能升格为局域网已验证。
 """
 
 from __future__ import annotations
@@ -105,6 +107,61 @@ def access_review(
             typer.echo(format_review_report(report, rebuild_report=rebuild_report))
         if report.has_failures or not rebuild_report.all_ok:
             raise typer.Exit(code=1)
+    except LwaError as exc:
+        log.error(str(exc), extra=exc.context)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("record-observation")
+def access_record_observation(
+    instance_id: str = typer.Argument(..., help="实例 ID"),
+    vantage: str = typer.Option(
+        ...,
+        "--vantage",
+        help="观察位置：lan-client / windows-host / guest",
+    ),
+    protocol: str = typer.Option(..., "--protocol", help="http 或 https"),
+    evidence: str = typer.Option(
+        ...,
+        "--evidence",
+        help="响应证据：content-match / page / timeout / connection-refused / tls-error / auth-401",
+    ),
+    status_code: int | None = typer.Option(
+        None, "--status", help="HTTP 状态码；成功证据必填"
+    ),
+    url: str | None = typer.Option(None, "--url", help="实际访问的完整 HTTP(S) URL；省略则仅留证，不升格为外部已验证"),
+) -> None:
+    """记录一次外部观测。LWA 不会自己从其他设备探测。"""
+    from local_webpage_access.access import record_lan_observation
+
+    try:
+        ws, config, reg = open_workspace_registry()
+        try:
+            result = record_lan_observation(
+                ws,
+                config,
+                instance_id,
+                vantage=vantage,
+                protocol=protocol,
+                evidence=evidence,
+                status_code=status_code,
+                url=url,
+            )
+        finally:
+            reg.close()
+        typer.secho("已记录外部观测", fg=typer.colors.GREEN)
+        typer.echo(f"  暴露状态：{result['lanExposure']}")
+        obs = result.get("lanObservation") or {}
+        typer.echo(
+            "  证据："
+            f"{obs.get('vantage')} {obs.get('protocol')} "
+            f"{obs.get('evidence')} {obs.get('observedAt')}"
+        )
+        if result.get("lanObservationStale"):
+            typer.secho("  观测 URL 缺失、无效或与当前网络/入口不匹配，不能作为外部已验证", fg=typer.colors.YELLOW)
+        if result.get("hostLanUrl"):
+            typer.echo(f"  候选：{result['hostLanUrl']}")
     except LwaError as exc:
         log.error(str(exc), extra=exc.context)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)

@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
@@ -36,6 +37,15 @@ EXPOSURE_ENTRY_MISSING = "entry-missing"
 EXPOSURE_CANDIDATE_UNVERIFIED = "candidate-unverified"
 EXPOSURE_EXTERNALLY_VERIFIED = "externally-verified"
 EXPOSURE_UNKNOWN = "unknown"
+
+VANTAGE_GUEST = "guest"
+VANTAGE_WINDOWS_HOST = "windows-host"
+VANTAGE_LAN_CLIENT = "lan-client"
+_VANTAGES = {VANTAGE_GUEST, VANTAGE_WINDOWS_HOST, VANTAGE_LAN_CLIENT}
+_PROTOCOLS = {"http", "https"}
+_EVIDENCE_SUCCESS = {"content-match", "page"}
+_EVIDENCE_FAILURE = {"timeout", "connection-refused", "tls-error", "auth-401"}
+_EVIDENCE = _EVIDENCE_SUCCESS | _EVIDENCE_FAILURE
 
 _CACHE_TTL_SEC = 45.0
 _CMD_TIMEOUT_SEC = 5.0
@@ -108,6 +118,68 @@ class PortProxyRule:
 
 
 @dataclass
+class TcpListen:
+    address: str
+    port: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"address": self.address, "port": self.port}
+
+
+@dataclass
+class HyperVFirewall:
+    default_inbound: str | None = None
+    vm_name: str | None = None
+    rules: list[tuple[str, str, str, str, str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "defaultInbound": self.default_inbound,
+            "vmName": self.vm_name,
+            "rules": [
+                {
+                    "displayName": name,
+                    "direction": direction,
+                    "action": action,
+                    "protocol": protocol,
+                    "localPorts": ports,
+                }
+                for name, direction, action, protocol, ports in self.rules
+            ],
+        }
+
+
+@dataclass
+class ExternalLanObservation:
+    vantage: str
+    protocol: str
+    evidence: str
+    observed_at: str
+    fingerprint: str
+    status_code: int | None = None
+    url: str | None = None
+
+    def is_success(self) -> bool:
+        if self.evidence not in _EVIDENCE_SUCCESS or self.status_code is None:
+            return False
+        return 200 <= self.status_code < 300
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "vantage": self.vantage,
+            "protocol": self.protocol,
+            "evidence": self.evidence,
+            "observedAt": self.observed_at,
+            "fingerprint": self.fingerprint,
+        }
+        if self.status_code is not None:
+            d["statusCode"] = self.status_code
+        if self.url:
+            d["url"] = self.url
+        return d
+
+
+@dataclass
 class InteropOutputs:
     """测试注入的只读命令输出；生产路径由 runner 填充。"""
 
@@ -118,6 +190,9 @@ class InteropOutputs:
     netroute_text: str | None = None
     portproxy_text: str | None = None
     netprofile_text: str | None = None
+    tcp_listen_text: str | None = None
+    firewall_text: str | None = None
+    hyperv_firewall_text: str | None = None
     errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -142,6 +217,9 @@ class WslNetworkSnapshot:
     localhost_forwarding: bool | None = None
     network_profiles: list[tuple[str, str]] = field(default_factory=list)
     host_lan_ip_reason: str | None = None
+    tcp_listens: list[TcpListen] = field(default_factory=list)
+    firewall_profiles: list[tuple[str, str]] = field(default_factory=list)
+    hyperv_firewall: HyperVFirewall | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,6 +245,14 @@ class WslNetworkSnapshot:
                 for alias, category in self.network_profiles
             ],
             "hostLanIpReason": self.host_lan_ip_reason,
+            "tcpListens": [item.to_dict() for item in self.tcp_listens],
+            "firewallProfiles": [
+                {"name": name, "defaultInbound": action}
+                for name, action in self.firewall_profiles
+            ],
+            "hypervFirewall": (
+                self.hyperv_firewall.to_dict() if self.hyperv_firewall else None
+            ),
         }
 
 
@@ -184,6 +270,9 @@ class InstanceAccessView:
     # BUG-937：该实例入口在 Windows 侧应被转发/放行的端口——有路径别名取
     # 网关入口端口，否则取实例 hostPort；doctor 文案与 guidance 命令共用此值。
     expected_port: int | None = None
+    windows_listening: bool | None = None
+    observation: ExternalLanObservation | None = None
+    observation_stale: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -197,6 +286,9 @@ class InstanceAccessView:
             "guidance": self.guidance,
             "note": self.note,
             "expectedPort": self.expected_port,
+            "windowsListening": self.windows_listening,
+            "lanObservation": self.observation.to_dict() if self.observation else None,
+            "lanObservationStale": self.observation_stale,
         }
 
 
@@ -327,6 +419,119 @@ def parse_netprofile_text(text: str | None) -> list[tuple[str, str]]:
     return rows
 
 
+def parse_tcp_listen_text(text: str | None) -> list[TcpListen]:
+    listens: list[TcpListen] = []
+    seen: set[tuple[str, int]] = set()
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2 or not _valid_ipv4(parts[0]):
+            continue
+        try:
+            port = int(parts[1])
+        except ValueError:
+            continue
+        key = (parts[0], port)
+        if key in seen:
+            continue
+        seen.add(key)
+        listens.append(TcpListen(address=parts[0], port=port))
+    return listens
+
+
+def parse_firewall_profile_text(text: str | None) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 2 and parts[0]:
+            rows.append((parts[0], parts[1]))
+    return rows
+
+
+def parse_hyperv_firewall_text(text: str | None) -> HyperVFirewall:
+    result = HyperVFirewall()
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if not parts:
+            continue
+        kind = parts[0].upper()
+        if kind == "S" and len(parts) >= 3:
+            if result.vm_name is None:
+                result.vm_name = parts[1] or None
+                result.default_inbound = parts[2] or None
+        elif kind == "R" and len(parts) >= 6:
+            result.rules.append((parts[1], parts[2], parts[3], parts[4], parts[5]))
+    return result
+
+
+def build_lan_observation(
+    *,
+    snapshot: WslNetworkSnapshot | None,
+    vantage: str,
+    protocol: str,
+    evidence: str,
+    status_code: int | None = None,
+    url: str | None = None,
+    observed_at: str | None = None,
+) -> ExternalLanObservation:
+    """受约束的外部观测：位置/协议/证据/时间齐全，且取值来自固定枚举。"""
+    if vantage not in _VANTAGES:
+        raise ValueError("vantage 必须是 guest / windows-host / lan-client")
+    if protocol not in _PROTOCOLS:
+        raise ValueError("protocol 必须是 http 或 https")
+    if evidence not in _EVIDENCE:
+        raise ValueError("evidence 不在允许的响应证据集合中")
+    if evidence in _EVIDENCE_SUCCESS and status_code is None:
+        raise ValueError("成功响应证据必须提供 status")
+    if snapshot is None:
+        raise ValueError("缺少当前网络快照，无法记录外部观测")
+    if url:
+        _observation_url_identity(url, protocol)
+    stamp = observed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return ExternalLanObservation(
+        vantage=vantage,
+        protocol=protocol,
+        evidence=evidence,
+        observed_at=stamp,
+        fingerprint=snapshot_fingerprint(snapshot),
+        status_code=status_code,
+        url=url or None,
+    )
+
+
+def observation_from_dict(data: dict[str, Any] | None) -> ExternalLanObservation | None:
+    if not isinstance(data, dict):
+        return None
+    vantage = str(data.get("vantage") or "")
+    protocol = str(data.get("protocol") or "")
+    evidence = str(data.get("evidence") or "")
+    observed_at = str(data.get("observedAt") or data.get("observed_at") or "")
+    fingerprint = str(data.get("fingerprint") or "")
+    if not (vantage and protocol and evidence and observed_at and fingerprint):
+        return None
+    if vantage not in _VANTAGES or protocol not in _PROTOCOLS or evidence not in _EVIDENCE:
+        return None
+    raw_status = data.get("statusCode", data.get("status_code"))
+    try:
+        status_code = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        return None
+    url = data.get("url")
+    return ExternalLanObservation(
+        vantage=vantage,
+        protocol=protocol,
+        evidence=evidence,
+        observed_at=observed_at,
+        fingerprint=fingerprint,
+        status_code=status_code,
+        url=str(url) if url else None,
+    )
+
+
+def observation_from_network(network: Any) -> ExternalLanObservation | None:
+    raw = getattr(network, "externalLanObservation", None) if network is not None else None
+    return observation_from_dict(raw if isinstance(raw, dict) else None)
+
+
 def select_host_lan_ip(nics: list[WindowsNic], default_route_aliases: list[str]) -> str | None:
     ip, _reason = _select_host_lan(nics, default_route_aliases)
     return ip
@@ -369,17 +574,35 @@ def snapshot_fingerprint(snapshot: WslNetworkSnapshot | None) -> str:
     if snapshot is None:
         return "none"
     rules = tuple(
-        (r.listen_address, r.listen_port, r.connect_address, r.connect_port)
-        for r in snapshot.portproxy_rules
+        sorted(
+            (r.listen_address, r.listen_port, r.connect_address, r.connect_port)
+            for r in snapshot.portproxy_rules
+        )
     )
+    listens = tuple(sorted((item.address, item.port) for item in snapshot.tcp_listens))
+    profiles = tuple(sorted(snapshot.firewall_profiles))
+    hyperv = ""
+    if snapshot.hyperv_firewall:
+        hyperv = (
+            f"{snapshot.hyperv_firewall.default_inbound}|"
+            f"{tuple(sorted(snapshot.hyperv_firewall.rules))}"
+        )
     return "|".join(
         [
             snapshot.networking_mode,
             snapshot.guest_ip or "",
             snapshot.host_lan_ip or "",
             repr(rules),
+            f"listen:{_cap_status(snapshot, 'tcp_listen')}:{listens!r}",
+            f"fw:{_cap_status(snapshot, 'firewall')}:{profiles!r}",
+            f"hv:{_cap_status(snapshot, 'hyperv_firewall')}:{hyperv}",
         ]
     )
+
+
+def _cap_status(snapshot: WslNetworkSnapshot, name: str) -> str:
+    cap = snapshot.capabilities.get(name)
+    return cap.status if cap is not None else "missing"
 
 
 def collect_wsl_network_snapshot(
@@ -415,12 +638,14 @@ def describe_instance_access(
     host_port: int | None,
     route_host: str | None,
     config: Config,
+    observation: ExternalLanObservation | None = None,
 ) -> InstanceAccessView:
     if snapshot is None:
         return InstanceAccessView(
             guest_reachability=REACH_LAN,
             lan_exposure=EXPOSURE_UNKNOWN,
             host_lan_url=None,
+            observation=observation,
         )
     from local_webpage_access.ports import (
         build_lan_url,
@@ -468,6 +693,27 @@ def describe_instance_access(
     guidance = _guidance(
         snapshot, config, entry_port, host_port, route_host=route_host
     )
+    expected_port = _guidance_port(
+        entry_port=entry_port, host_port=host_port, route_host=route_host
+    )
+    observation_stale = False
+    if observation is not None:
+        current_fp = snapshot_fingerprint(snapshot)
+        entry_mismatch = not _observation_matches_current_entry(
+            observation, host_lan_url
+        )
+        observation_stale = observation.fingerprint != current_fp or entry_mismatch
+        if (
+            observation.vantage == VANTAGE_LAN_CLIENT
+            and observation.is_success()
+            and not observation_stale
+            and exposure in {EXPOSURE_CANDIDATE_UNVERIFIED, EXPOSURE_EXTERNALLY_VERIFIED}
+        ):
+            exposure = EXPOSURE_EXTERNALLY_VERIFIED
+        exposure = exposure_after_network_change(
+            exposure, observation.fingerprint, current_fp
+        )
+    listen_check_port = listen_port if listen_port is not None else expected_port
     return InstanceAccessView(
         guest_reachability=snapshot.guest_reachability,
         lan_exposure=exposure,
@@ -478,9 +724,10 @@ def describe_instance_access(
         dynamic_ip_forwarding=dynamic,
         guidance=guidance,
         note=note,
-        expected_port=_guidance_port(
-            entry_port=entry_port, host_port=host_port, route_host=route_host
-        ),
+        expected_port=expected_port,
+        windows_listening=_windows_listening(snapshot, listen_check_port),
+        observation=observation,
+        observation_stale=observation_stale,
     )
 
 
@@ -524,7 +771,23 @@ def format_cli_network_lines(
     if route_url:
         lines.append(("路径", route_url))
     if access and access.host_lan_url:
-        lines.append(("局域网候选", f"{access.host_lan_url}（已发现转发，尚未从其他设备验证）"))
+        if access.lan_exposure == EXPOSURE_EXTERNALLY_VERIFIED:
+            shown = access.host_lan_url
+            extra = "已从其他设备验证"
+            if access.observation:
+                obs = access.observation
+                shown = obs.url or shown
+                extra = (
+                    f"已从其他设备验证：{obs.vantage} {obs.protocol} "
+                    f"{obs.evidence} {obs.observed_at}"
+                )
+            lines.append(("局域网入口", f"{shown}（{extra}）"))
+        elif access.observation_stale:
+            lines.append(
+                ("局域网候选", f"{access.host_lan_url}（观测已失效：网络或入口不匹配，或缺少有效 URL）")
+            )
+        else:
+            lines.append(("局域网候选", f"{access.host_lan_url}（尚未从其他设备验证）"))
     elif access and access.lan_exposure == EXPOSURE_ENTRY_MISSING:
         lines.append(("局域网入口", "未发现（LWA 不会自动配置 Windows 转发）"))
     if access and access.dynamic_ip_forwarding:
@@ -587,6 +850,13 @@ def _collect_uncached(
         localhost_forwarding=parse_wslconfig_localhost_forwarding(data.wslconfig_text),
         network_profiles=parse_netprofile_text(data.netprofile_text),
         host_lan_ip_reason=host_lan_reason,
+        tcp_listens=parse_tcp_listen_text(data.tcp_listen_text),
+        firewall_profiles=parse_firewall_profile_text(data.firewall_text),
+        hyperv_firewall=(
+            parse_hyperv_firewall_text(data.hyperv_firewall_text)
+            if data.hyperv_firewall_text is not None
+            else None
+        ),
     )
 
 
@@ -643,6 +913,33 @@ def _gather_outputs(runner: Runner, caps: dict[str, CapabilityStatus]) -> Intero
         "netprofile",
         errors,
     )
+    tcp_listen_text = _run_powershell(
+        runner,
+        "Get-NetTCPConnection -State Listen -ErrorAction Stop | "
+        "ForEach-Object { '{0}|{1}' -f $_.LocalAddress, $_.LocalPort }",
+        caps,
+        "tcp_listen",
+        errors,
+    )
+    firewall_text = _run_powershell(
+        runner,
+        "Get-NetFirewallProfile -ErrorAction Stop | ForEach-Object { "
+        "'{0}|{1}' -f $_.Name, $_.DefaultInboundAction }",
+        caps,
+        "firewall",
+        errors,
+    )
+    hyperv_firewall_text = _run_powershell(
+        runner,
+        "Get-NetFirewallHyperVVMSetting -ErrorAction Stop | ForEach-Object { "
+        "'S|{0}|{1}' -f $_.Name, $_.DefaultInboundAction }; "
+        "Get-NetFirewallHyperVRule -ErrorAction Stop | ForEach-Object { "
+        "'R|{0}|{1}|{2}|{3}|{4}' -f $_.DisplayName, $_.Direction, $_.Action, "
+        "$_.Protocol, (($_.LocalPorts | ForEach-Object { $_ }) -join ',') }",
+        caps,
+        "hyperv_firewall",
+        errors,
+    )
     wslconfig_text, cfg_err = _read_wslconfig(runner)
     if cfg_err:
         errors["wslconfig"] = cfg_err
@@ -660,6 +957,9 @@ def _gather_outputs(runner: Runner, caps: dict[str, CapabilityStatus]) -> Intero
         netroute_text=netroute_text,
         portproxy_text=portproxy_text,
         netprofile_text=netprofile_text,
+        tcp_listen_text=tcp_listen_text,
+        firewall_text=firewall_text,
+        hyperv_firewall_text=hyperv_firewall_text,
         errors=errors,
     )
 
@@ -673,6 +973,9 @@ def _fill_capability_from_outputs(
         "netroute": data.netroute_text,
         "portproxy": data.portproxy_text,
         "netprofile": data.netprofile_text,
+        "tcp_listen": data.tcp_listen_text,
+        "firewall": data.firewall_text,
+        "hyperv_firewall": data.hyperv_firewall_text,
         "wsl_version": data.wsl_version_text,
         "wslconfig": data.wslconfig_text,
     }
@@ -889,6 +1192,86 @@ def _portproxy_status_unknown(snapshot: WslNetworkSnapshot) -> bool:
     return cap is not None and cap.status == "unknown"
 
 
+def _observation_matches_current_entry(
+    observation: ExternalLanObservation, host_lan_url: str | None
+) -> bool:
+    """成功观测必须对应正在展示的协议/端口/路径，不能只比网络指纹。"""
+    if not host_lan_url or not observation.url:
+        return False
+    try:
+        return _observation_url_identity(
+            observation.url, observation.protocol
+        ) == _observation_url_identity(host_lan_url, observation.protocol)
+    except ValueError:
+        # 历史坏记录保留作证据，读时失效，不能让 status/API/doctor 整体失败。
+        return False
+
+
+def _observation_url_identity(url: str, protocol: str) -> tuple[str, str, int, str]:
+    """写入前严格验证；读取时由调用方把历史非法 URL 当作入口不匹配。"""
+    try:
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        port = _url_port(parsed)
+        if (
+            scheme not in _PROTOCOLS
+            or scheme != protocol
+            or not host
+            or not parsed.netloc
+            or parsed.netloc.endswith(":")
+            or "\\" in url
+            or any(char.isspace() or ord(char) < 32 for char in url)
+            or port is None
+            or not 1 <= port <= 65535
+        ):
+            raise ValueError("invalid entry")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            ascii_host = host.rstrip(".").encode("idna").decode("ascii")
+            if len(ascii_host) > 253 or any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label, re.I)
+                for label in ascii_host.split(".")
+            ):
+                raise ValueError("invalid host")
+        return scheme, host.lower(), port, _normalize_entry_path(parsed.path)
+    except ValueError as exc:
+        raise ValueError("url 必须是协议一致且主机、端口有效的完整 HTTP(S) URL") from exc
+
+
+def _url_port(parsed: Any) -> int | None:
+    if parsed.port is not None:
+        return int(parsed.port)
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return None
+
+
+def _normalize_entry_path(path: str) -> str:
+    text = path or "/"
+    if not text.startswith("/"):
+        text = "/" + text
+    if not text.endswith("/"):
+        text = text + "/"
+    return text
+
+
+def _windows_listening(snapshot: WslNetworkSnapshot, port: int | None) -> bool | None:
+    cap = snapshot.capabilities.get("tcp_listen")
+    if cap is None or cap.status != "available" or port is None:
+        return None
+    host = snapshot.host_lan_ip
+    for item in snapshot.tcp_listens:
+        if item.port != port:
+            continue
+        if item.address in {"0.0.0.0", "*", host or ""}:
+            return True
+    return False
+
+
 def _direct_or_gateway_scheme(
     config: Config, port: int | None, entry_port: int | None
 ) -> str:
@@ -1017,9 +1400,15 @@ __all__ = [
     "EXPOSURE_CANDIDATE_UNVERIFIED",
     "EXPOSURE_EXTERNALLY_VERIFIED",
     "EXPOSURE_UNKNOWN",
+    "VANTAGE_GUEST",
+    "VANTAGE_WINDOWS_HOST",
+    "VANTAGE_LAN_CLIENT",
     "CapabilityStatus",
     "WindowsNic",
     "PortProxyRule",
+    "TcpListen",
+    "HyperVFirewall",
+    "ExternalLanObservation",
     "InteropOutputs",
     "WslNetworkSnapshot",
     "InstanceAccessView",
@@ -1030,6 +1419,12 @@ __all__ = [
     "parse_wslconfig_networking_mode",
     "parse_wslconfig_localhost_forwarding",
     "parse_netprofile_text",
+    "parse_tcp_listen_text",
+    "parse_firewall_profile_text",
+    "parse_hyperv_firewall_text",
+    "build_lan_observation",
+    "observation_from_dict",
+    "observation_from_network",
     "exposure_after_network_change",
     "parse_netip_text",
     "parse_netroute_aliases",

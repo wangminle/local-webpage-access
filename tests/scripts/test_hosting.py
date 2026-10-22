@@ -1050,6 +1050,39 @@ def test_host_static_restart_kills_old_process(
 # 路径释放刚分配的端口。host_container 在 build/up 失败时同理释放实例端口。
 
 
+def test_enable_static_keeps_external_lan_observation(
+    workspace: Workspace, registry: Registry, config: Config, monkeypatch
+) -> None:
+    """重启/重建写回 network 时必须保留外部观测，不能 NetworkConfig(**entry) 整对象替换抹掉。"""
+    from local_webpage_access.hosting import _enable_static
+    from local_webpage_access.models import InstanceManifest
+    from local_webpage_access.static_gateway import StaticGateway
+
+    _seed_static_instance(workspace, registry, "demo")
+    public = workspace.app_public("demo")
+    public.mkdir(parents=True, exist_ok=True)
+    path = workspace.app_manifest_path("demo")
+    manifest = InstanceManifest.load(path)
+    observation = {
+        "vantage": "lan-client",
+        "protocol": "http",
+        "evidence": "content-match",
+        "observedAt": "2026-10-22T04:00:00Z",
+        "fingerprint": "keep-me",
+        "statusCode": 200,
+        "url": "http://10.180.105.74:8080/demo/",
+    }
+    manifest.network.externalLanObservation = observation
+    manifest.save(path)
+    monkeypatch.setattr(StaticGateway, "enable", lambda *a, **k: None)
+    monkeypatch.setattr(StaticGateway, "detect_backend", lambda self: "builtin")
+    updated = _enable_static(workspace, config, registry, "demo", manifest, public)
+    assert updated.network.externalLanObservation == observation
+    updated.save(path)
+    saved = InstanceManifest.load(path)
+    assert saved.network.externalLanObservation == observation
+
+
 def test_enable_static_releases_port_on_gateway_failure(
     workspace: Workspace, registry: Registry, config: Config, monkeypatch
 ) -> None:

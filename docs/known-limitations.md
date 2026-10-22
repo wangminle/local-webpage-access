@@ -21,7 +21,7 @@
   Linux 上 LWA 以 `serviceUser` 访问 `docker.sock`（须在 `docker` 组）；`usermod -aG docker` 后须重登并重启 manager/daemon，或对 system unit 使用 `SupplementaryGroups=docker`（`lwa autostart` 默认 user unit 仍依赖会话组）。
   观测失败写 `unknown` / `runtimeAccess`，不把运行中容器误标 stopped；管理页与 API 在能力降级时阻断容器操作。
 * **Caddy 所有权（Full）**：禁止静默复用系统 `caddy.service`；admin 端口（V0.9.3 起按工作区独立分配并登记 `run/admin-port`，未分配为 legacy `:2019`）必须属于本工作区 LWA Caddy。Default 档在无 Caddy 时可降级 builtin；Full 不得假绿。
-* **架构**：基线镜像 `node:24-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
+* **架构**：基线镜像 `node:24.22.1-alpine` / `python:3.13-slim` 以 x86_64 / arm64 为主；
   其他架构需用户自备镜像或调整模板。
 
 ## WSL2 宿主准备（运行前）
@@ -64,7 +64,7 @@ swap=4GB
 * LWA 面向**局域网 HTTP**：统一入口默认 `:8080`（`staticGatewayPort`），管理页默认 `:17800`（`managerPort`），实例另占端口池（常见 `18000–19999`）。
 * **端口最小化**：防火墙只放行**实际在用**的业务口（例如当前实例 `18000`），不要把 `portPool` 整段 `18000–19999` 默认全开；管理页 `17800` 仅在确需 LAN 管理时开放，并依赖 manager token。
 * **不要**把 Caddy **admin 端口**（`:2019` 或 `run/admin-port` 登记的分配端口）暴露到 LAN 或公网——仅供本机 `127.0.0.1` 管理 reload。
-* **WSL 网络模式按运行态判断**（BUG-923）：不要用「WSL 2.x / 3.x」或「Windows 10.0」字样代替实际模式。WSL 软件包 2.x 与 3.x 都是 WSL2 架构；Win10/Win11 都可能报告 NT `10.0`，须看 Build（≥22000 为 Windows 11）。`lwa status` / 管理页 / `lwa doctor` 的 `wsl_lan_exposure` 会区分：guest 内网地址、Windows 本机入口、局域网候选。**LWA 只读发现已有监听与转发，不会自动改 Windows 网卡、portproxy、防火墙或 `networkingMode`。**
+* **WSL 网络模式按运行态判断**（BUG-923）：不要用「WSL 2.x / 3.x」或「Windows 10.0」字样代替实际模式。WSL 软件包 2.x 与 3.x 都是 WSL2 架构；Win10/Win11 都可能报告 NT `10.0`，须看 Build（≥22000 为 Windows 11）。`lwa status` / 管理页 / `lwa doctor` 的 `wsl_lan_exposure` 会区分：guest 内网地址、Windows 本机入口、局域网候选。**LWA 只读发现已有监听、转发与防火墙配置文件，不会自动改 Windows 网卡、portproxy、防火墙或 `networkingMode`。** Windows TCP 监听、Windows 防火墙配置文件、Hyper-V 防火墙各自失败时只把该项标为 unknown，不连带把网卡或 portproxy 说成不可读。guest 或 Windows 本机打开成功不能写成「外部已验证」；独立设备的结果用 `lwa access record-observation`（或管理 API）按观察位置/协议/响应/时间记录。网络或映射变化后旧记录失效，须重新验证。
   * **NAT（Windows 10 默认；Windows 11 未开 mirrored 时同样）**：`lwa` 报出的 `172.x` guest 地址只对 Windows 宿主可达。局域网设备要走 Windows 物理网卡 IP + 已有转发。`lanAddressStale=false` / `lan_url_stale` 一致只说明地址没漂，**不能**证明局域网已通。不要把 `manualLanIp` 设成 Windows 地址来改 guest `lanUrl`——该值只在读不到网卡时作为局域网候选。若缺少对应端口转发，doctor 会 WARN 并给出**供管理员审阅**的命令（默认建议 `portproxy` 指向 `127.0.0.1`，依赖 localhost 转发；`.wslconfig` 声明 `localhostForwarding=false` 时会说明回环目标不可用）。检查与命令按实例入口端口取值——有路径别名取网关入口（默认 `:8080`），无别名实例取其 hostPort（如 `:18000`），标题与建议命令同一端口。HTTPS 开启时证书 SAN 会额外纳入 Windows 局域网 IP；Caddy 不绑定该地址。此时回环、guest、Windows IP 落在**同一张**由工作区 CA 根直签的证书上——按 IP 访问的客户端不发 SNI，Caddy 按连接的本地地址选证书，分开签发时经 portproxy 到达的连接永远选不到 Windows IP 那张（BUG-944）；签发依赖 guest 内的 `openssl`，缺失时退回逐地址签发并在网关日志告警，按 Windows IP 访问的 HTTPS 会报证书名称不匹配。实例直连端口的候选地址和回环检查保持 `http`；只有匹配到网关 TLS 入口时才用 `https`。
   * **mirrored（仅 Windows 11 22H2+，且实际已启用）**：guest 可与 Windows 共用局域网 IP，一般不需要 portproxy。入站由 **Hyper-V firewall** 管理（WSL 包 ≥2.0.9）。Windows 10 上写 `networkingMode=mirrored` 会回退 NAT，LWA 按实际模式说明，不声称已启用。
   * **其他/未知模式、interop 超时或规则读取被拒**：保留 unknown，不报局域网 OK。网络配置文件（Domain/Private/Public）只读；Public 时提示入站可能被拦，不改网络类别。
@@ -264,6 +264,11 @@ swap=4GB
 * **`buildHooks` 含 apt-get**：钩子原样写入 Dockerfile，**不会**自动注入 apt 镜像。
   系统包请迁到 `systemDeps`（`lwa configure <id> --system-deps ffmpeg`），以便切源、
   重试与层缓存命中。旧 hook 示例：删掉 `apt-get install … ffmpeg`，改配 `systemDeps: [ffmpeg]`。
+* **旧版产物拷贝钩子**（issue #141）：V0.9.2 起模板把前端产物落到后端 `static/` 且不
+  `rm -rf`。issue #47 文档化的 `rm -rf /app/static && … cp frontend/dist` 仍会按原样执行，
+  从而删掉后端自有 static 文件。重建前会拒绝并提示
+  `lwa configure <id> --clear-build-hooks`；`lwa doctor` 的 `build_hooks_artifact_conflict`
+  同样告警。确认风险后可用 `lwa rebuild --force`。LWA 不自动清空用户钩子。
 * **Node / Alpine 的 `systemDeps`**：以 `apk add --no-cache` 插在依赖安装层之前，
   没有 apt 切源、重试和 cache mount。`buildHooks` 在 npm 安装之后，不能用来补安装期缺失的编译工具。
 

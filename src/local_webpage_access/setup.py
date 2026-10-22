@@ -425,7 +425,7 @@ _SCRIPT_GENERIC = """\
 # 请根据操作系统查阅：
 #   lwa setup          # 检测并查看安装指引
 #   docs/faq.md        # 排障文档
-# 组件要求：Python 3.13+、Docker ≥ 29.0.0、Compose ≥ 2.40.2（推荐 ≥ 5.2.0）、Caddy ≥ 2.10.0（可选）、Node ≥ 24.0.0（前端构建）
+# 组件要求：Python 3.13+、Docker ≥ 29.0.0、Compose ≥ 2.40.2（推荐 ≥ 5.2.0）、Caddy ≥ 2.10.0（可选）、Node ≥ 24.22.1（前端构建）
 """
 
 

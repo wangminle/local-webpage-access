@@ -88,6 +88,34 @@ def test_non_git_install_skips(ws, monkeypatch) -> None:
     assert "源码根" in result.message
 
 
+def test_editable_source_without_git_skips_without_creating_metadata(ws, monkeypatch) -> None:
+    """源码复制安装仍可定位项目，但不能让取 Git 锁中断整份诊断。"""
+    repo = ws.root / "copied-source"
+    repo.mkdir()
+    monkeypatch.setattr("local_webpage_access.updater.locate_repo", lambda: repo)
+
+    result = check_version_freshness(ws)
+
+    assert result.status == "skip"
+    assert "git" in result.message.lower()
+    assert not (repo / ".git").exists()
+    assert not (ws.run / "version-check.json").exists()
+
+
+def test_version_lock_permission_denied_is_skip(ws, monkeypatch) -> None:
+    import local_webpage_access.update_source as us
+
+    monkeypatch.setattr("local_webpage_access.updater.locate_repo", lambda: ws.root)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("read-only source")
+
+    monkeypatch.setattr(us, "acquire_repo_lock", denied)
+    result = check_version_freshness(ws)
+    assert result.status == "skip"
+    assert "read-only source" in result.message
+
+
 def test_update_available_warns_and_suggests_update(ws, monkeypatch) -> None:
     """落后 → WARN + `lwa update` 建议；结论写缓存。"""
     import local_webpage_access.update_source as us

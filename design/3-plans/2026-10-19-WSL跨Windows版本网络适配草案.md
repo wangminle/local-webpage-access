@@ -1,6 +1,10 @@
 # WSL 跨 Windows 版本网络适配：需求与验收草案
 
-日期：2026-10-19。状态：第一、二批产品实现已落地；2026-10-21 补齐 HTTPS SAN、用户入口候选、localhostForwarding / 网络配置文件只读与策略模拟。同日晚间在 V0.9.11（`ee7b515`）上复验 N10-3（Win10 22H2 Build 19045.6456 / WSL 包 3.0.3.0 / Debian 13 / NAT）：guest 地址仍标为仅 Windows 宿主可达；WSL 内与 Windows localhost 的页面、CSS、JS 内容一致且为 200；独立局域网客户端能解析 Windows 网卡，但网页端口 TCP 超时，与「没有 :8080 转发」一致。中文 Windows 的 portproxy 文本被错误解码，规则列表为空，见 BUG-943，修复前不能把这次「缺入口」当成转发匹配已经验过。HTTPS 与其余组合仍待实机，不把模拟或单机通过写成矩阵全支持。
+创建日期：2026-10-19。验证结果汇总更新至：**2026-10-22**。
+
+第一、二批核心适配与策略模拟已落地，但逐条核对仍有产品集成缺口（见 §3.5），不能将全文功能标为全部开发完成；第三批已有两台 Debian 实机的部分证据：**N10-3（Win10 + WSL 包 3.0.3.0 + NAT）**与 **M11-3（Win11 + WSL 包 3.0.4.0 + mirrored）**。两台均为 **WSL2 架构**，软件包 3.x 不表示 WSL3 架构。Win10 已补 portproxy 解码实测、真实 Docker 与样本部署；Win11 已补本机 HTTP/HTTPS、鉴权及独立物理 LAN 客户端负向实测。
+
+**当前结论：两台机器的独立 LAN 正向页面访问均未通过，不能据此宣称 NAT / mirrored 已完成局域网验收或全部矩阵已支持。** 分层结果、缺口和证据来源集中见 §4.1～§4.4；本记录汇总既有证据与本轮 N10-3 的新增隔离实测；没有重启宿主或修改 Windows 网络。
 
 ## 1. 目标与版本口径
 
@@ -71,6 +75,17 @@ Windows 的 listen IP/port 与 guest 的 connect IP/port 分开记录；不要�
 - Windows 管理权限仅在用户执行对应变更时需要；诊断阶段保持只读、拒绝或缺失能力明确降级。
 - 管理面经 TCP 转发后要验收客户端身份和鉴权，远程请求不能因 peer/Host/XFF 变化获得本机免鉴权或本机专用 API 权限。
 
+### 3.5 逐条实现核对后的剩余功能（2026-10-22）
+
+核心地址语义、模式与版本识别、网卡/portproxy/网络类别只读采集、CLI/API/管理页/doctor、HTTPS 多 SAN 及配置建议已实现。此前“第一、二批产品实现已落地”只概括这些主干，不能代替第3节逐条交付判定。
+
+以下两项仍有明确的产品实现工作，不仅是缺少实机验收环境：
+
+- [x] **Windows 实际监听与防火墙证据**（对应 §3.1、§3.2，DEV-168）：共享快照采集 Windows TCP 监听、Windows 防火墙配置文件默认入站、Hyper-V 防火墙设置/规则；各自失败保留独立 unknown，不把网卡或 portproxy 误报为不可读。网络类别仍不等于防火墙规则证据；检查点中的人工取证也不等于产品自动采集。正向 LAN 实机仍待验。
+- [x] **外部验证证据闭环**（对应 §3.3，DEV-168）：`describe_instance_access` 消费持久化观测并调用 `snapshot_fingerprint` / `exposure_after_network_change`。受约束入口为 `lwa access record-observation` 与 `POST /api/instances/{id}/lan-observation`（位置/协议/证据枚举；仅 `lan-client` 成功可升格 `externally-verified`）。CLI/API/管理页/doctor 展示同一记录；网络/映射变化后读时失效，不删除历史记录。不能凭本机 `access review` 或辅助函数单测宣称局域网已通。正向 LAN 实机仍待验。
+
+这些缺口不改变“不自动修改 Windows 网络”的边界。第三批中尚未完成的正向 LAN、版本组合与恢复事件验收仍单独保留；功能开发完成与实机验收完成分别判断。
+
 ## 4. 主要组合验收矩阵
 
 以下是目标矩阵，**不是已支持/已通过的声明**。每次运行填写完整 Windows Build、WSL 包版本、发行版与实际模式；不只填写“2.x/3.x”。
@@ -78,15 +93,61 @@ Windows 的 listen IP/port 与 guest 的 connect IP/port 分开记录；不要�
 | 编号 | Windows | WSL 软件包 | 网络策略 | 当前证据 |
 | --- | --- | --- | --- | --- |
 | N10-2 | Windows 10 22H2 | 2.x（不低于现有最低线） | NAT | 2026-10-21 策略模拟通过（包 2.4.13.0 / NAT / 仅宿主可达）。待实机 |
-| N10-3 | Windows 10 22H2 | 3.x | NAT | 2026-10-20 产品口径复验：Build 19045.6456 / 包 3.0.3.0 / Debian 13。status/list/API/doctor 将 172.22.148.94 标为仅 Windows 宿主可达；hostLanIp 为物理 WLAN。2026-10-21 晚间同一组合、V0.9.11 重启后再验：口径不变；WSL 与 Windows localhost 的页面/CSS/JS 均为 200 且内容一致；独立局域网客户端 ARP 成功，ping 与 8080/18000/17800 TCP 超时。现有转发只有 SSH 端口，没有网页端口，所以「局域网页面未通过」与入口缺失一致，不是服务没起来。guest IP 与 Windows WLAN 地址这次重启后未变。未安装自启单元，重启后 gateway/manager 不在监听，手动拉起后恢复。HTTPS 仍关闭。portproxy 采集在中文代码页下为空，见 BUG-943。不升格为矩阵全通过 |
+| N10-3 | Windows 10 22H2 | 3.x | NAT | 2026-10-20～22 部分实机：Build 19045.6456 / 包 3.0.3.0 / Debian 13.7。guest 仅宿主可达，两条 SSH 转发可读，网页规则缺失。本轮 V0.9.12 隔离快照补齐 WSL 与 Windows 本机 HTTP/HTTPS 共24项资源内容匹配、显式 CA 与无 SNI Windows IP 校验、非回环管理鉴权、明文收敛和测试进程恢复。独立 Mac 的网页/管理端口均未连通，真实外部转发及恢复矩阵仍待验；历史 Docker/八个样本结果另记 §4 |
 | N11-2 | Windows 11 | 2.x（不低于现有最低线） | NAT | 2026-10-21 策略模拟通过：Win11 + NAT 不假设 mirrored。待实机 |
 | N11-3 | Windows 11 | 3.x | NAT | 2026-10-21 策略模拟通过（包 3.0.3.0 / Win11 NAT）。待实机 |
 | M11-2 | Windows 11 22H2+ 且实际具备相应能力 | 2.x（满足该功能的实际前置条件） | mirrored | 2026-10-21 策略模拟通过：无 portproxy 仍为候选未验证。待实机 |
-| M11-3 | Windows 11 22H2+ 且实际具备相应能力 | 3.x | mirrored | 与 M11-2 同一策略模拟；待实机 |
+| M11-3 | Windows 11 22H2+ 且实际具备相应能力 | 3.x | mirrored | 2026-10-22 部分实机：Win11 Insider Preview 28020.3262 / 包 3.0.4.0 / Debian 13.7。运行态 mirrored，空 portproxy 仍为 candidate-unverified；Debian 内和 Windows localhost 的 HTTP/HTTPS 页面/CSS/JS、显式 CA 与本机鉴权通过。独立物理 LAN 设备 ARP 可解析，HTTP/HTTPS 网页及管理入口均 TCP 超时；Windows 自身 WLAN 地址同样超时。本 Debian Docker、恢复和独立 LAN 正向验收仍待完成，见 §4 |
 | X10-M | Windows 10 | 支持范围内版本 | 请求/误配 mirrored | 2026-10-21 策略模拟通过：声明 mirrored 实际 NAT，不声称已启用、不自动修改全局配置。待实机确认 wslinfo 回退 |
 | X-UNK | 支持范围内 Windows | 支持范围内版本 | 新模式/模式回退/探测失败 | 2026-10-21 策略模拟通过：保留 future-mode-xyz / consomme 原名，超时 unknown，不崩溃、不假绿。待可获得的实机 |
 
 Win11 的版本/Build 与能力边界应覆盖；不能把“Windows 11”四个字当作所有网络功能均可用的证明。未取得的环境保留待测，不用模拟测试替代实机通过记录。
+
+### 4.1 两台已验证机器的环境口径
+
+这里按实际软件包版本归入 N10-3 / M11-3；用户所称 Win10 的“WSL2”和 Win11 的“WSL3”分别涉及架构与软件包号，不能直接当成两个架构比较。
+
+| 维度 | 另一台机器：N10-3 | 本机：M11-3 |
+| --- | --- | --- |
+| Windows | Windows 10 22H2，10.0.19045.6456 | Windows 11 专业版 Insider Preview，10.0.28020.3262 |
+| WSL 架构 / 软件包 | WSL2 / 3.0.3.0 | WSL2 / 3.0.4.0 |
+| Linux 与实际模式 | Debian 13.7 / NAT（wslinfo 实测） | Debian 13.7 / mirrored（配置与 wslinfo 一致） |
+| 证据时间 / 产品口径 | 2026-10-20～22 历史 V0.9.11 网络及 BUG-943～948 修复；本轮为 V0.9.12 基线 8e4f99c 加本地 BUG-949/950 的独立快照，不混作一次运行 | 2026-10-22；V0.9.12 基线 8e4f99c，另含本轮未提交 BUG-949/950 修复 |
+| Docker 后端 | Debian 内 Docker Engine 29.7.2 / Compose 5.5.0，已有真实测试 | 本 Debian 无可用 Docker 集成；Windows 存在 Docker Desktop 不等于该发行版可用 |
+
+两台均为 Debian WSL，不能作为原生 Debian、Ubuntu 或其他 Windows/WSL 组合的完成证据；Win11 实测还需保留 Insider Preview 身份，不推广为所有 Win11 Build 均通过。
+
+### 4.2 分层验证结果对照
+
+| 验证层 | N10-3：Win10 / NAT | M11-3：Win11 / mirrored |
+| --- | --- | --- |
+| 网络识别与地址语义 | guest 标为仅 Windows 宿主可达；物理 WLAN 作为 Windows 入口候选来源；缺网页转发为 entry-missing | 正确区分架构/包号，七项只读采集 available；按默认路由选物理 WLAN；guest 与 Windows LAN IP 相同；无 portproxy 仍为 candidate-unverified |
+| 已有转发识别 | BUG-943 曾使中文输出误解码；修复后同机确认两条 SSH 转发可见，网页转发仍缺失。不能继续用修复前空列表代表当前规则 | portproxy 实际为空；mirrored 不要求添加 NAT 转发，也未因模式启用就声称外部可达 |
+| Debian 内 HTTP | 最小页面、相对 CSS/JS 为 200 且内容一致；真实样本首页另见下行 | 实例直连与路径别名为 200；页面、相对 CSS/JS 哈希与样本一致 |
+| Windows localhost HTTP | 页面、CSS、JS 为 200 且与 Debian 内容一致 | 实例直连与路径别名的页面、CSS、JS 均为 200，哈希一致 |
+| HTTPS / CA | 本轮 WSL 与 Windows 本机 HTTPS 页面/CSS/JS 共12项内容匹配，显式 CA 通过、不指定 CA 失败；Windows IP 无 SNI 校验以 connect-to 映射 localhost 验证，实际 LAN 转发入口尚未连通 | Debian 内 localhost/LAN 地址及 Windows localhost 的 HTTPS 页面、CSS、JS 通过显式 CA 校验；不指定 CA 的反向校验失败。未导入系统/浏览器信任库 |
+| 管理鉴权与明文旁路 | 本轮 guest 地址及保留 Windows Host 的本机连接映射请求无 token 为401、有效 token 为200；guest 非回环来源伪造 Host/XFF 仍401。回环绑定并重启实例后，guest 上三个明文口拒绝连接。实际 localhost + 回环 Host 仍为本机免 token 路径，不能替代真实外部转发鉴权 | Debian 经 LAN 地址访问 HTTP/HTTPS 管理 API：无 token / 伪造回环 Host、XFF 为 401，有效 token 为 200。回环绑定并重启实例后，Debian LAN 地址不能访问明文直连口、管理后端和旧 HTTP 别名口。仍不等于独立设备正向鉴权验收 |
+| 独立物理 LAN 客户端 | 本轮独立 Mac 直连：HTTP阶段3个端口、HTTPS阶段两个TLS与三个明文端口均未连通，未取得页面或鉴权正向证据。网页映射缺失，未新增规则；不将超时唯一归因为防火墙 | 经用户指定物理设备、物理 WLAN 直连，无 SSH 隧道；ARP 可解析，HTTP 实例/别名/管理与 HTTPS 别名/管理均 TCP 超时。Windows 自身 WLAN 地址也超时；Hyper-V 默认入站 Block 是排查线索，尚未定位具体丢弃规则 |
+| 浏览器样例交互 | 本轮通过临时仅回环SSH通道在真实Chromium浏览器点击按钮0→1→2，已留AX与截图；只证明样例JS执行，不计LAN或真实应用业务验收 | 已验证资源字节，交互式浏览器业务仍待验 |
+| Docker 与真实应用（独立于网络验收） | 真实 Docker 20 项及 M1 容器 1 项通过；A01～A07、A09 共八个样本首页 200，A08/A10/A11 保持 pending 且 start 被拒绝。A06/A09 修复后同机复跑通过，A09 仍需应用自身 CMD_DB_URL。不是 11 项完整生命周期全部通过 | 仅静态验证；本 Debian Docker、Compose、宿主前端构建和有状态应用未验，不借用 N10-3 结果填充 |
+| 恢复与自启 | 历史重启后未安装自启单元、手动恢复。本轮仅在测试工作区执行实例 restart、网关 off/on，三个HTTPS资源内容不变且CA未变；不算WSL/Windows重启、换网、休眠或自动恢复通过 | 未执行 Windows/WSL 重启、休眠或地址变更；临时服务已停止，未安装自启 |
+
+两台的共同结论是：**服务本机可用与地址/诊断语义已有证据，独立 LAN 正向访问仍未成立。** NAT 的网页转发缺口与 mirrored 的入站链路超时分别记录，不能将两者合并成同一根因，也不能因后者不需要 portproxy 就跳过防火墙和独立客户端验收。
+
+### 4.3 修复、回归与当前验收边界
+
+- **BUG-943 已修复且同机读规则验证完成**；后续待办是网页入口正向访问，不再是修复解码或重读 SSH 规则。
+- **BUG-944 已修复**；本轮在 N10-3 隔离工作区补了真实 Windows 本机显式 CA、按 Windows IP 校验的无 SNI 连接与内容验证；连接映射到 localhost，不升格为实际 LAN 转发入口通过，后者仍待可用网页入口。
+- **BUG-945～948** 的 Debian Docker 安装、首次部署、构建依赖等后续结果按台账及 Eval 方案保留；不将容器构建/首页 200 升格为局域网网络验收。
+- **BUG-949/950** 来自 M11-3：移除候选“已发现转发”的无证据表述；无 Git 源码或取锁不可用时版本检查降级 SKIP，不中断整份 doctor。修复后 doctor 正常输出；其 overall=FAIL 仍因本 Debian Docker/Compose 不可用，不能写成整机健康通过。
+- N10-3 当时 Debian 常规门禁为 **4077 passed / 27 skipped**，真实 Docker 另跑 **20 + 1 项通过**；M11-3 九个相关模块为 **446 passed / 0 skipped / 0 failed**，含显式启用的真实 Caddy TLS 测试。两者对应不同时间、代码与测试范围，不合并成一次门禁，也不将跳过项算通过。
+
+### 4.4 证据索引与汇总方式
+
+- N10-3 网络与真实容器：台账 CHK-455、CHK-456、CHK-458；HTTPS 机制：CHK-459。样本范围与后续状态见 [真实应用跨系统 Eval 方案](2026-10-12-LWA真实应用跨系统Eval方案.md) 的 H-DEB-WSL 行。
+- M11-3 本机验证与独立 LAN 负向结果：台账 CHK-462、CHK-463，详细结论见 [Win11 / WSL 包 3.x / Debian mirrored 验证记录](../2-achievement/2026-10-22-Win11-WSL软件包3.x-Debian-mirrored本机验证.md)。
+- 原始快照、SSH/实际主机信息、监听、请求及测试日志仅留在已忽略的本地检查点。本规划仅保留版本、类型化结论、关联编号和后续工作，不复制真实地址或接入信息。
+- 既有汇总任务本身没有重新执行测试；本轮 N10-3 新增实测另见 [第三批续验记录](../2-achievement/2026-10-22-WSL第三批N10-3实机验收续验.md)，包括24项资源内容、独立 Mac 负向访问、测试进程恢复及清理核验。新增执行计划或环境初探不替代尚未执行步骤的通过证据。
 
 ## 5. 每组验收的内容与分层
 
@@ -109,16 +170,22 @@ Win11 的版本/Build 与能力边界应覆盖；不能把“Windows 11”四个
 - [x] 扩展现有 WSL 用户指南、已知限制、平台与自启验收矩阵，不另建冲突说明。
 - [x] 2026-10-21：补 HTTPS SAN（Windows 入口 IP + bind 0.0.0.0）、manualLanIp 仅作候选、localhostForwarding / Public 配置文件只读提示，以及 N10-2/N11/M11/X10-M/X-UNK 策略模拟。
 - [ ] 准备主要组合的隔离验收环境，按本矩阵记录真实证据；不足环境保持待测。
-- [x] 关联 BUG-923 的现象修复与本跨版本适配范围，分别核对实现完成和组合验收完成（实现已完成；组合验收仅 N10-3 口径复验，2026-10-21 晚间补了分层页面的 WSL/Windows localhost 证据）。
-- [ ] 修复 BUG-943 后，在同一台中文 Windows 上重读 portproxy：既有 SSH 转发必须出现在快照里，网页端口在没有对应规则时仍为入口未发现。然后再决定是否由管理员添加网页端口转发，用另一台局域网设备做正向页面/CSS 验收。
-- [ ] N10-3 的 HTTPS：在测试工作区打开 internal CA 后核对证书 SAN（含 Windows 入口 IP、guest 不绑定该地址）、客户端信任和管理面鉴权。当前 `gatewayTls` 仍为 off。
-- [ ] 真实容器复验不在本草案内收口。这台 Debian 13 尚无 Docker，且安装需要管理员密码；11 个样本与 Flask 自定义数据库目录的重建持久化仍按 Eval 方案另做。Docker 26.1.5 / Compose 2.26.1 继续归 CHK-439。
+- [x] 2026-10-21～22：N10-3 完成 BUG-943 修复后的同机规则读取，确认两条既有 SSH 转发可见、网页规则仍缺失；Docker Engine 与真实容器、样本结果按 §4 汇总。N10-3 不再描述为“尚无 Docker”或“BUG-943 待修复”。
+- [x] 2026-10-22：M11-3 完成本机分层 HTTP/HTTPS、静态资源哈希、显式 CA 信任与不信任反向验证、管理鉴权及回环绑定后的明文旁路检查；修复 BUG-949/950，446 项相关回归通过。Windows 自身 WLAN 地址超时；恢复和本 Debian 容器仍待验。
+- [x] 2026-10-22 同日补测独立物理 LAN 客户端：经用户指定 SSH 别名执行客户端直连，无隧道。ARP 可解析，HTTP 实例/别名/管理及 HTTPS 别名/管理入口均 TCP 超时；Debian 本机各阶段页面仍正常。Hyper-V 防火墙默认入站 Block，未自动改规则，具体丢弃层尚未定位。记录负向实测，正向 LAN 验收继续待完成。
+- [x] 关联 BUG-923 的产品实现与组合验收边界；已取得 N10-3 和 M11-3 的部分实机证据，不能标记完整组合验收完成。
+- [ ] N10-3 正向 LAN：由用户/管理员审阅已有入口与实际所需端口，具备网页入口后从独立 LAN 设备核对页面、CSS/JS、端口映射与鉴权。既有 SSH 转发不代替网页入口，LWA 不自动添加转发或防火墙规则。
+- [x] 2026-10-22 N10-3 本机 HTTPS：隔离工作区启用 internal CA，补齐 WSL/Windows localhost 内容、按 Windows IP 校验的无 SNI 本机连接、显式 CA/不信任反向验证、非回环鉴权及明文收敛；测试进程恢复与清理已留证。
+- [ ] N10-3 实际 LAN 转发入口 HTTPS：网页入口可用后，从独立设备核对真实 Windows URL 的证书、内容和管理鉴权；本机 connect-to 验证不能代替实际转发入口。
+- [ ] M11-3 正向 LAN：只读定位 Windows/Hyper-V 入站链路的超时原因；用户/管理员完成必要网络处置后，复测独立设备 HTTP/HTTPS、资源内容与管理鉴权。当前不得改写为“已外部验证”。
+- [ ] 两台的恢复场景：分别补休眠、WSL 关闭重开、地址变化、Windows 重启与自启；N10-3 的一次手动拉起观察不替代完整恢复矩阵。
+- [ ] 容器与 Eval 独立收口：N10-3 已有真实 Docker 和八个样本首页证据，完整生命周期及持久化仍按 Eval 方案逐项确认；M11-3 本 Debian 的 Docker 集成/容器仍未验。Docker 26.1.5 / Compose 2.26.1 最低版本完整验收继续归 CHK-439，不用较新版本结果代替。
 
 本草案不触发安装、降级/升级 WSL、修改 Windows 全局设置或产品代码提交。真实 SSH/主机信息与原始证据只放已忽略的本地检查点；本文件仅含通用版本、规则和验收目标。
 
 ## 7. 开发就绪度与关联 issue（2026-10-20 核查）
 
-第一、二批已落地：以 BUG-923 / issue #140 为主线，共享 `wsl_network` 快照，统一地址范围与诊断证据，并只读发现 Windows 网卡与 portproxy。lanUrl 仍是 guest 绑定地址，不再宣传为局域网入口；缺少匹配转发时 doctor 报 WARN。2026-10-21 补齐 TLS SAN、用户入口候选与只读能力字段，并用模拟输出覆盖主要组合策略。同日晚间 N10-3 在 V0.9.11 上复验了口径，以及 WSL / Windows localhost 的页面与 CSS/JS；独立局域网客户端确认网页端口不可达。中文 Windows 上 portproxy 解码失败（BUG-943）使「已有规则」这条证据链还不可用。其余组合、HTTPS 与正向局域网访问仍待实机。
+第一、二批已落地：以 BUG-923 / issue #140 为主线，共享 `wsl_network` 快照，统一地址范围与诊断证据，并只读发现 Windows 网卡与 portproxy。NAT 的 guest 地址不宣传为局域网入口；缺少匹配转发时 doctor 报 WARN，mirrored 的候选也不等于外部已验证。2026-10-21～22 后续已补 BUG-943 同机规则读取、BUG-944 多 SAN 证书机制，以及 N10-3 / M11-3 分层实机证据，当前结果统一见 §4，不再沿用“已有规则不可读”“尚无 Docker”作为 N10-3 当前状态。两台正向 LAN、其他主要组合和完整恢复仍未闭环；本节 issue 状态表仍是 2026-10-20 的历史关联核查，不是本次重新查询远端状态。
 
 ### 7.1 开发批次
 

@@ -584,7 +584,7 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 `lwa doctor` 新增：
 
 - `lan_url_stale`——实例 lanUrl 是否指向失效（漂移）LAN IP（WARN，提示 `lwa access refresh`）。在 **WSL NAT** 下，即使 host 与当前 guest 地址一致也会 WARN：该地址仅 Windows 宿主可达，不能当作局域网已通。
-- `wsl_lan_exposure`——WSL 下只读发现 Windows 网卡、portproxy 与实际网络模式（SKIP 非 WSL）。缺少局域网转发、仅有未经验证的候选、或模式/权限未知时 WARN；建议命令供管理员审阅，LWA 不会自动执行。`--json` 另含 `wslNetwork`。
+- `wsl_lan_exposure`——WSL 下只读发现 Windows 网卡、portproxy、TCP 监听、Windows/Hyper-V 防火墙与实际网络模式（SKIP 非 WSL）。缺少局域网转发、仅有未经验证的候选、或模式/权限未知时 WARN；已记录独立设备验证时仍 WARN（网络变化后须复验）。建议命令供管理员审阅，LWA 不会自动执行。`--json` 另含 `wslNetwork`（含 `tcpListens` / `firewallProfiles` / `hypervFirewall`）。独立设备结果用 `lwa access record-observation` 记录，不能用 `lwa access review` 的本机探活代替。
 - `backend_handoff`——enabled 静态 hostPort 上是否 builtin + caddy 双开（FAIL，提示 `lwa gateway off` 再 `on`）。
 - `port_contention`——admin 分配端口（未分配为 :2019，§2.7 现场即 pytest 泄漏的 Caddy 占 :2019）/ 别名入口上是否有非预期监听者（测试/外部孤儿）；仅 caddy 后端检查；缺少 lsof 无法校验监听者身份时给 WARN「归属未确认（缺少 lsof）」（S2-07），不再静默 SKIP。
 - `port_pool`（建议 H）——排除 lwa 自用端口（managerPort、staticGatewayPort、registry 已分配 hostPort），不再把这些合法自用端口误报为冲突。
@@ -594,6 +594,7 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 - `caddy_health` admin 归属诊断（V0.9.6 / BUG-794）——master 未运行时用 lsof 诊断登记 admin 端口的占用者（name/pid），被外部进程占用时 WARN 并给出针对性处置建议；缺 lsof 时如实标注「归属未确认」。不做自动换端口（admin 端口已渲染进主配置）。
 - `dev_server_fallback`（V0.9.6 / IMP-066，WARN 级）——容器实例仍以框架开发服务器（`flask run` / `manage.py runserver`，含 `./manage.py` 相对路径形态）启动时告警；判定谓词与扫描期 fallback 备注同源。
 - `frontend_artifacts_staleness`（V0.9.6 / #61 检查部分，WARN 级）——预构建 `static/` 产物时效性分级：同仓布局前端源码晚于产物记「疑似」（WARN + 重建建议）；前端源不在导入树内（跨仓）或 mtime 不可区分记「无法判断」（信息性汇总，不升 WARN）；确证需构建期源码指纹（#61 预构建落地后接入）。只告警不自动构建，与别名资源检查（base 配错）相互独立。
+- `build_hooks_artifact_conflict`（issue #141，WARN 级）——`buildHooks` 含对前端产物目录的 `rm -rf` / `rm -f`（#47 旧绕过）。模板已自行落位产物且不删除后端自有文件；建议 `lwa configure <id> --clear-build-hooks`。不擅自删钩子。
 - `node_toolchain`（V0.9.8 / BUG-860·877，WARN 级）——宿主前端构建（frontend-static 实例）依赖的 Node 工具链预检：node / corepack / pnpm / yarn 可达性与版本如实列出，缺失只影响宿主构建路径（纯静态 / 容器实例不受影响）。宿主构建按 `packageManager` 声明经 corepack 协商版本（如 `corepack pnpm@<ver>`），不再要求 `corepack enable`——macOS 无 sudo 写 `/usr/local/bin`、Ubuntu apt 版 node 无 corepack 均可工作；构建失败提示附 `apps/<id>/logs/build.log` 路径。
 
 ### 7.6 管理页兜底链接（建议 D）

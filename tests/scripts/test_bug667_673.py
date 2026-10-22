@@ -121,14 +121,14 @@ def test_node_toolchain_retries_distinct_tarball_urls(workspace: Workspace) -> N
     content = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
     urls = set()
     for token in content.replace("\\\n", " ").split():
-        if "node-v24.16.0-linux-" in token and "http" in token:
+        if "node-v24.22.1-linux-" in token and "http" in token:
             urls.add(token.strip('"'))
     assert len(urls) >= 2
     apt_runs = [line for line in content.splitlines() if "apt-get" in line]
-    tarball_runs = [line for line in content.splitlines() if "node-v24.16.0-linux-" in line]
+    tarball_runs = [line for line in content.splitlines() if "node-v24.22.1-linux-" in line]
     assert apt_runs
     assert tarball_runs
-    assert all("node-v24.16.0-linux-" not in line for line in apt_runs)
+    assert all("node-v24.22.1-linux-" not in line for line in apt_runs)
     assert "nodeDistBase" in content
 
 

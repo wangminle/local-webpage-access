@@ -309,6 +309,15 @@ assert.ok(htmlWsl.indexOf(">宿主</a>") !== -1, htmlWsl);
 assert.ok(htmlWsl.indexOf(">端口</a>") === -1, htmlWsl);
 assert.ok(htmlWsl.indexOf(">局域网候选</a>") !== -1, htmlWsl);
 assert.ok(htmlWsl.indexOf("不是局域网") !== -1, htmlWsl);
+
+var htmlVerified = urlHtml({{
+  lanUrl: "http://172.22.148.94:18000/", localhostUrl: "http://127.0.0.1:18000/",
+  lanReachability: "windows-host", lanExposure: "externally-verified",
+  hostLanUrl: "http://10.180.105.74:8080/hello-lwa/"
+}});
+assert.ok(htmlVerified.indexOf(">局域网</a>") !== -1, htmlVerified);
+assert.ok(htmlVerified.indexOf(">局域网候选</a>") === -1, htmlVerified);
+assert.ok(htmlVerified.indexOf("已从其他局域网设备验证") !== -1, htmlVerified);
 """
     )
 

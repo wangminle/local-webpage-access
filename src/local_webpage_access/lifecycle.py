@@ -2183,6 +2183,7 @@ def rebuild_instance(
     out: list[str] | None = None,
     expected_revision: int | None = None,
     ignore_alias_guard: bool = False,
+    force_hooks: bool = False,
 ) -> InstanceManifest:
     """重建实例（WBS-17.04）：强制重新构建。
 
@@ -2224,6 +2225,14 @@ def rebuild_instance(
             if out is not None:
                 out.append(warning)
         is_container = manifest.runtime.value == "docker-compose"
+        if is_container:
+            from local_webpage_access.dockerfile_templates import (
+                refuse_destructive_artifact_hooks,
+            )
+
+            refuse_destructive_artifact_hooks(
+                manifest, workspace, force=force_hooks, registry=registry
+            )
 
         def _builder(iid: str) -> InstanceManifest:
             from local_webpage_access.build_sources import (
@@ -2237,8 +2246,12 @@ def rebuild_instance(
             try:
                 if is_container:
                     # host_container 内部会 down 旧容器再 build + up
-                    return host_container(workspace, config, registry, iid)
-                return host_instance(workspace, config, registry, iid)
+                    return host_container(
+                        workspace, config, registry, iid, force_hooks=force_hooks
+                    )
+                return host_instance(
+                    workspace, config, registry, iid, force_hooks=force_hooks
+                )
             finally:
                 clear_build_owner(workspace, iid)
 

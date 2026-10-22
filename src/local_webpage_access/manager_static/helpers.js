@@ -218,10 +218,22 @@
       );
     }
     if (i.hostLanUrl) {
+      var verified = i.lanExposure === "externally-verified";
+      var staleObs = i.lanObservationStale;
+      var lanTitle = verified
+        ? "已从其他局域网设备验证"
+        : staleObs
+          ? "观测已失效：网络或入口不匹配，或缺少有效 URL"
+          : "Windows 局域网候选，尚未从其他设备验证";
+      var lanLabel = verified ? "局域网" : "局域网候选";
       primary.push(
         '<a href="' +
           LWA.esc(i.hostLanUrl) +
-          '" target="_blank" rel="noopener" title="Windows 局域网候选，尚未从其他设备验证">局域网候选</a>'
+          '" target="_blank" rel="noopener" title="' +
+          lanTitle +
+          '">' +
+          lanLabel +
+          "</a>"
       );
     }
     // 建议项 D：始终提供 127.0.0.1 本机链接作兜底——DHCP/换网后 LAN IP 漂移，

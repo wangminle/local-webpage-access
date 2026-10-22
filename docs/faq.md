@@ -357,7 +357,7 @@ privileged / Docker socket 等为 **critical**，
 ffmpeg 等**运行时**系统包请写入 `systemDeps`（不要只塞进 `buildHooks`）。Python（Debian）
 会渲染到 `COPY current/` **之前**，并走与 pip 对称的 apt 源链（china 默认阿里云 → 清华 →
 官方 `deb.debian.org`，每源 `Acquire::Retries=2` / 超时 30s，带 BuildKit apt cache mount）。
-Node（`node:24-alpine`）则用 `apk add --no-cache`，并且位于 npm 依赖安装层**之前**
+Node（`node:24.22.1-alpine`）则用 `apk add --no-cache`，并且位于 npm 依赖安装层**之前**
 （node-gyp 缺 `python3` / `make` / `g++` 走这里）；这条路径不走 apt 切源。`buildHooks`
 仍在依赖安装之后，补不了安装期已经失败的原生模块。
 
@@ -427,6 +427,15 @@ lwa rebuild <id>
 `--ignore-alias-guard` 可显式跳过守卫（记审计事件）。`import --update` 时若实例
 已有别名，新内容会在**换入前**过同一道守卫，未通过即拒绝且 `current/` 零副作用
 （决策 D3），拒绝文案给出补救命令；`--ignore-alias-guard` 可越过。
+
+`lwa import --path-alias` 遇到 Vite 源码入口（`frontend/index.html` 引用
+`/src/main.ts`，产物尚未生成）时**不会误拦**（issue #142）：导入会开启
+`buildBaseFromAlias`，首次构建注入 `VITE_BASE=/{alias}/`。已经构建好、入口仍是
+绝对 `/assets/…` 的静态产物照旧拒绝。
+
+源码豁免只识别实际的模块脚本标签，并确认引用的源码文件存在；注释、正文、内联脚本
+里的 `/src/main.ts` 字符串不算入口。同页其他未带别名前缀的绝对加载资源仍会被拒绝。
+项目配置仍须读取 `VITE_BASE`，或使用显式 `--base` 构建参数，才能生成正确的产物路径。
 
 ### 回滚会把数据（data/）也退回旧版本吗？（V0.9.4 / S3-01，决策 D8）
 
@@ -625,6 +634,15 @@ lwa configure <id> --clear-extra-volumes   # 清空
 * 两个字段都不允许换行符；下载后直接交给 shell / Python / Node
   等解释器的高危执行链会被 Dockerfile 安全审计拒绝落盘。该审计是
   高危模式门禁，不等同于构建沙箱。改完后 `lwa rebuild <id>` 生效。
+* **V0.9.2 起模板自行把前端产物拷到后端 `static/`，且不 `rm -rf`。** 旧文档
+  （issue #47）里的绕过钩子
+  `rm -rf /app/static && mkdir -p /app/static && cp -a /app/frontend/dist/. /app/static/`
+  会删掉同目录下应用自有文件（例如 Skills bundle）。存量实例请
+  `lwa configure <id> --clear-build-hooks` 后重建；`lwa doctor` 的
+  `build_hooks_artifact_conflict` 会告警。确认仍要执行该钩子时用
+  `lwa rebuild <id> --force`。LWA **不会**擅自删除用户钩子。
+  检查会区分删除目标和管道、重定向目标：例如 `rm -rf /tmp/cache > /app/static/cleanup.log`
+  不会被当成删除 `static/`；在管道中实际执行 `rm -rf /app/static` 仍会被阻止。
 
 ### 前端构建需要注入环境变量怎么办？（buildEnv，DEV-132）
 
@@ -851,8 +869,13 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
 
 * 看 `lwa status` 是否标明「仅 Windows 宿主可达」，以及 `lwa doctor` 的 `wsl_lan_exposure` / `--json` 里的 `wslNetwork`。
 * `lanAddressStale=false` 只表示地址没漂，**不能**证明局域网已通。
-* LWA **不会**自动改 portproxy 或防火墙。缺少转发时 doctor 会给出供管理员审阅的命令；有转发也只标「候选」，最终须用另一台设备打开 Windows 局域网 IP。
+* LWA **不会**自动改 portproxy 或防火墙。缺少转发时 doctor 会给出供管理员审阅的命令；有转发也只标「候选」，最终须用另一台设备打开 Windows 局域网 IP。独立设备验证后用 `lwa access record-observation --vantage lan-client` 记录；`lwa access review` 的本机探活不能升格为外部已验证。网络变了，或后来改了 HTTPS/端口/路径，旧记录会失效，但不会在重启或重建时被删掉。
 * 管理页经 Windows 转发访问时仍须带 token；本机 `127.0.0.1` 才免 token。详见 [已知限制 · LAN 访问与防火墙](known-limitations.md#lan-访问与防火墙)。
+
+记录外部验证时，请用 `--url` 填写实际访问的完整 HTTP(S) 地址。只有协议、主机、端口、
+路径与当前候选入口一致、网络指纹未变且独立设备返回成功时，才能标为外部已验证。
+省略 URL 可以保存证据，但不能升格；非法 URL 会被拒绝且不写入。
+升级前已有的非法 URL 记录会保留并标为失效，不会阻断实例列表或详情。
 
 ### 别名入口白屏（页面空白 / 资源空 200 或 404）
 

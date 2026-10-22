@@ -39,6 +39,7 @@ description: >-
 - 不直接运行 `npm install`/`npm run build`（只产出**计划**，执行由 `lwa` 完成）。
 - 不修改 `package.json` 的依赖（除非为修正明显错误，并在诊断中说明）。
 - 不在容器中构建（V1 前端走宿主构建 + 共享静态网关，节省资源）。
+- `lwa rebuild` 因破坏性历史钩子被拒（HTTP 409 `destructive_build_hooks`，issue #141）时不绕过：建议把 `buildHooks` 里 `rm -rf` 前端产物目录的命令改为只清临时目录（产物拷贝由模板完成）；确需保留旧行为须经用户确认后 `lwa rebuild <id> --force`（会记事件），不得擅改 manifest 删钩子了事。
 
 ## 处理流程
 

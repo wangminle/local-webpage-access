@@ -1575,13 +1575,46 @@ def _collect_lan_drifted_ids(
     return drifted, skipped
 
 
+def _wsl_cap_detail(snap: Any, name: str, extra: str) -> str:
+    cap = snap.capabilities.get(name) if getattr(snap, "capabilities", None) else None
+    if cap is None:
+        return f"{name}:missing"
+    reason = f"({cap.reason})" if cap.reason else ""
+    suffix = f" {extra}" if extra else ""
+    return f"{name}:{cap.status}{reason}{suffix}".rstrip()
+
+
+def _listen_summary(snap: Any) -> str:
+    items = getattr(snap, "tcp_listens", None) or []
+    if not items:
+        return ""
+    return ",".join(f"{item.address}:{item.port}" for item in items[:8])
+
+
+def _firewall_summary(snap: Any) -> str:
+    rows = getattr(snap, "firewall_profiles", None) or []
+    if not rows:
+        return ""
+    return ",".join(f"{name}:{action}" for name, action in rows)
+
+
+def _hyperv_summary(snap: Any) -> str:
+    hyperv = getattr(snap, "hyperv_firewall", None)
+    if hyperv is None:
+        return ""
+    inbound = hyperv.default_inbound or "-"
+    return f"defaultInbound={inbound}"
+
+
 def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
     """BUG-923：WSL 下只读检查 Windows 入口与局域网暴露，不修改网络。"""
     from local_webpage_access.wsl_network import (
         EXPOSURE_CANDIDATE_UNVERIFIED,
         EXPOSURE_ENTRY_MISSING,
+        EXPOSURE_EXTERNALLY_VERIFIED,
         collect_wsl_network_snapshot,
         describe_instance_access,
+        observation_from_network,
     )
 
     try:
@@ -1599,6 +1632,7 @@ def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) ->
 
     route_host = None
     host_port = None
+    observation = None
     for row in registry.list_instances():
         manifest_path = ws.app_manifest_path(row["id"])
         if not manifest_path.is_file():
@@ -1614,9 +1648,16 @@ def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) ->
             host_port = net.hostPort
         if net and net.routeMode == "name" and net.routeHost:
             route_host = net.routeHost
+            observation = observation_from_network(net)
             break
+        if observation is None:
+            observation = observation_from_network(net)
     view = describe_instance_access(
-        snap, host_port=host_port, route_host=route_host, config=config
+        snap,
+        host_port=host_port,
+        route_host=route_host,
+        config=config,
+        observation=observation,
     )
     details = [
         f"mode={snap.networking_mode}",
@@ -1625,6 +1666,9 @@ def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) ->
         f"guestIp={snap.guest_ip or '-'}",
         f"hostLanIp={snap.host_lan_ip or '-'}",
         f"exposure={view.lan_exposure}",
+        _wsl_cap_detail(snap, "tcp_listen", _listen_summary(snap)),
+        _wsl_cap_detail(snap, "firewall", _firewall_summary(snap)),
+        _wsl_cap_detail(snap, "hyperv_firewall", _hyperv_summary(snap)),
     ]
     if snap.declared_networking_mode and snap.declared_networking_mode != snap.networking_mode:
         details.append(
@@ -1654,12 +1698,31 @@ def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) ->
         )
     if view.lan_exposure == EXPOSURE_CANDIDATE_UNVERIFIED:
         msg = "已发现 Windows 入口候选，尚未从其他局域网设备验证"
+        if view.observation_stale:
+            msg = "观测 URL 缺失、无效或与当前网络/入口不匹配，入口仍待重新验证"
         if view.host_lan_url:
             msg += f"：{view.host_lan_url}"
         return CheckResult(
             "wsl_lan_exposure",
             STATUS_WARN,
             msg,
+            detail="；".join(details),
+            suggestion=suggestion,
+        )
+    if view.lan_exposure == EXPOSURE_EXTERNALLY_VERIFIED:
+        obs = view.observation
+        extra = ""
+        if obs:
+            extra = (
+                f"（{obs.vantage} {obs.protocol} {obs.evidence} {obs.observed_at}）"
+            )
+        return CheckResult(
+            "wsl_lan_exposure",
+            STATUS_WARN,
+            "已记录独立局域网设备验证"
+            + (f"：{obs.url}" if obs and obs.url else "")
+            + extra
+            + "；网络或映射变化后须重新验证",
             detail="；".join(details),
             suggestion=suggestion,
         )
@@ -2887,6 +2950,56 @@ def check_frontend_artifacts_staleness(ws: Workspace, registry: Registry | None)
     )
 
 
+def check_build_hooks_artifact_conflict(
+    ws: Workspace, registry: Registry | None
+) -> CheckResult:
+    """issue #141：buildHooks 若 ``rm -rf`` 前端产物目录，与模板保护冲突。
+
+    只告警，不删除用户钩子。建议 ``lwa configure <id> --clear-build-hooks``。
+    """
+    if registry is None:
+        return CheckResult(
+            "build_hooks_artifact_conflict",
+            STATUS_SKIP,
+            "registry 不可用，跳过 buildHooks 产物冲突检查",
+        )
+    from local_webpage_access.dockerfile_templates import destructive_artifact_copy_hooks
+    from local_webpage_access.models import InstanceManifest
+
+    try:
+        rows = registry.list_instances()
+    except Exception:  # noqa: BLE001
+        return CheckResult(
+            "build_hooks_artifact_conflict", STATUS_SKIP, "实例列表不可读"
+        )
+    hits: list[str] = []
+    for row in rows:
+        iid = str(row.get("id") or "")
+        path = ws.app_manifest_path(iid)
+        if not path.is_file():
+            continue
+        try:
+            manifest = InstanceManifest.load(path)
+        except Exception:  # noqa: BLE001
+            continue
+        if destructive_artifact_copy_hooks(manifest, ws):
+            hits.append(iid)
+    if not hits:
+        return CheckResult(
+            "build_hooks_artifact_conflict",
+            STATUS_OK,
+            "buildHooks 未发现删除前端产物目录的命令",
+        )
+    preview = "、".join(hits[:5]) + ("…" if len(hits) > 5 else "")
+    return CheckResult(
+        "build_hooks_artifact_conflict",
+        STATUS_WARN,
+        f"{len(hits)} 个实例的 buildHooks 会删除模板保护的 static/ 产物目录：{preview}",
+        suggestion="lwa configure <id> --clear-build-hooks 后 lwa rebuild <id>；"
+        "确认仍要保留该钩子时用 lwa rebuild <id> --force",
+    )
+
+
 def check_state_consistency(
     ws: Workspace,
     config: Config,
@@ -3007,6 +3120,8 @@ def run_doctor(
             check_dev_server_fallback(ws, caddy_probe_registry),
             # #61（检查部分 / DEV-164）：预构建前端产物时效性（WARN 级，只告警）
             check_frontend_artifacts_staleness(ws, caddy_probe_registry),
+            # issue #141：旧产物拷贝 buildHooks 与模板保护冲突（WARN，不删钩子）
+            check_build_hooks_artifact_conflict(ws, caddy_probe_registry),
             # issue #15：SQLite DATABASE_URL 指向错位（WARN 级，纯离线）
             check_database_url_alignment(ws),
             check_backend_handoff(ws, config, caddy_probe_registry)
@@ -3305,6 +3420,10 @@ def check_version_freshness(ws: Workspace) -> CheckResult:
         repo_fd = us.acquire_repo_lock(repo)
     except us.UpdateLockBusy:
         return _skip("更新锁被占用（已有 update/check 在执行），跳过本次版本检查")
+    except us.SourceUpdateError as exc:
+        return _skip(f"版本探测失败：{exc.message}")
+    except OSError as exc:
+        return _skip(f"版本检查锁不可用：{exc}")
     try:
         report = us.run_source_check(repo)
     except us.SourceUpdateError as exc:

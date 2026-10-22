@@ -124,6 +124,7 @@ def start(
             describe_instance_access,
             format_cli_network_lines,
             guest_url_caption,
+            observation_from_network,
         )
 
         try:
@@ -136,6 +137,7 @@ def start(
                     if manifest.network.routeMode == "name"
                     else None,
                     config=config,
+                    observation=observation_from_network(manifest.network),
                 )
                 if snap is not None
                 else None
@@ -323,6 +325,11 @@ def rebuild(
         "--ignore-alias-guard",
         help="S2-05：跳过重建后的别名活验证守卫（记审计事件；用于已知风险场景）",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="确认继续执行会删除前端产物目录的旧 buildHooks（issue #141；默认拒绝）",
+    ),
 ) -> None:
     """重建实例（强制重新构建镜像 / 产物，经构建队列限流）。
 
@@ -338,8 +345,17 @@ def rebuild(
             if sync:
                 _sync_source_before_rebuild(ws, config, reg, instance_id)
             stale_warnings: list[str] = []
+            rebuild_kwargs: dict[str, object] = {}
+            if force:
+                rebuild_kwargs["force_hooks"] = True
             manifest = rebuild_instance(
-                ws, config, reg, instance_id, out=stale_warnings, ignore_alias_guard=ignore_alias_guard
+                ws,
+                config,
+                reg,
+                instance_id,
+                out=stale_warnings,
+                ignore_alias_guard=ignore_alias_guard,
+                **rebuild_kwargs,
             )
         finally:
             reg.close()

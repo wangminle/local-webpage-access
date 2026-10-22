@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.9.12 当前实际可用的接入方式。**
+> **状态：本文描述 V0.9.13 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -128,6 +128,9 @@ lwa import --from-git <url> --update <实例ID>                # 更新既有实
 lwa rebuild <id> / lwa start|stop|restart <id>
 lwa access refresh                # 刷新各实例 LAN 访问地址
 lwa access review                 # 复核各实例访问地址可用性
+lwa access record-observation <ID> --vantage lan-client --protocol http \
+                                   --evidence page --status 200  # 记录独立设备观测
+
 lwa doctor                        # 环境与依赖诊断
 lwa configure <id> --build-env K=V  # 实例级构建环境变量
 ```
