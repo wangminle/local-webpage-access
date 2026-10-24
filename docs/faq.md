@@ -752,6 +752,8 @@ current/，不必重装全部依赖」——包管理器缓存在工作区 `run/
 * API：`POST /api/instances/{id}/cancel-build`
 
 取消只停止当前工作，**不会**自动删除构建缓存、旧镜像或用户数据。
+首次 `lwa start` 触发的构建同样可取消（BUG-990）：取消会使该次 `start`
+以非零退出码结束，不会触发 Gate-C 回滚降级。
 排队任务直接 `cancelled`；进行中会先进入 `cancelling`，再落到
 `cancelled` 或 `cancel_failed`（不会仅因发出请求就假报已停）。
 

@@ -286,45 +286,44 @@ def host_static(
 # ---- WBS-11 前端构建 -------------------------------------------------------
 
 
-# BUG-897：packageManager 的版本号来自导入的 package.json（外部内容），会被
-# 拼进宿主 ``sh -c`` 命令与 Dockerfile ``RUN``——只接受纯版本字符，含其余
-# 字符（空格/引号/;/$ 等）一律按未声明处理，杜绝命令注入。
-_PM_VERSION_RE = re.compile(r"[0-9A-Za-z._-]+")
-
-
+# BUG-897：packageManager 版本号白名单（防注入）与解析实现已下沉至
+# node_toolchain.PM_VERSION_RE / read_declared_package_manager（BUG-966 统一
+# 宿主与推断两处逻辑），此处仅保留兼容包装。
 def _read_declared_package_manager(work_dir: Path) -> tuple[str, str] | None:
     """读取 ``work_dir/package.json`` 的 ``packageManager`` 字段（BUG-877）。
 
-    返回 ``(包管理器名, 版本)``（形如 ``("pnpm", "11.0.1")``）；未声明、
-    文件缺失或解析失败返回 ``None``。
+    实现见 :func:`node_toolchain.read_declared_package_manager`（含 +sha512
+    后缀剥离与版本字符白名单）。
     """
-    import json
+    from local_webpage_access.node_toolchain import read_declared_package_manager
 
-    pkg_path = work_dir / "package.json"
-    if not pkg_path.is_file():
+    return read_declared_package_manager(work_dir)
+
+
+_COREPACK_MISSING_HINT = (
+    "宿主缺少 corepack 且 {pm} 不在 PATH；安装 corepack：npm i -g corepack"
+    "（Node.js 16.13+ 自带，可能需 corepack enable）"
+)
+
+
+def _pm_path_version(pm: str) -> tuple[int, int, int] | None:
+    """PATH 中 ``pm --version`` 的版本（timeout <=5s）；缺失/失败返回 None。"""
+    from local_webpage_access.node_toolchain import parse_node_version
+
+    exe = shutil.which(pm)
+    if not exe:
         return None
     try:
-        data = json.loads(pkg_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        out = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    declared = str(data.get("packageManager") or "").strip()
-    # 形如 "pnpm@11.0.1"（name@version）；两段都非空才生效
-    if "@" not in declared:
-        return None
-    name, _, version = declared.rpartition("@")
-    name = name.strip()
-    # Corepack 规范允许带哈希校验后缀（"pnpm@9.12.0+sha512...."）；CLI 参数
-    # <pm>@<version> 只接受纯版本号，须剥离 "+sha..." 段。
-    version = version.split("+", 1)[0].strip()
-    if not name or not version:
-        return None
-    if not _PM_VERSION_RE.fullmatch(version):
-        return None
-    return name, version
+    return parse_node_version((out.stdout or "").strip())
 
 
 def _resolve_host_install_command(install: str, work_dir: Path) -> str:
-    """宿主前端安装命令的工具链解析（BUG-860 / BUG-877）。
+    """宿主前端安装命令的工具链解析（BUG-860 / BUG-877 / BUG-966）。
 
     scanner 生成的 ``corepack enable && pnpm install --frozen-lockfile`` 原样在
     宿主执行有两个高频失败：macOS 上 ``corepack enable`` 写 /usr/local/bin 需
@@ -335,12 +334,59 @@ def _resolve_host_install_command(install: str, work_dir: Path) -> str:
        声明版本，避免宿主老版本 pnpm 与 lockfile 不匹配）；
     2. ``<pm>`` 已在 PATH → 去掉 ``corepack enable &&`` 前缀直接执行（免 root）；
     3. corepack 可用 → ``corepack <pm> install ...``（免 enable 形式）；
-    4. 都不可用 → 原样执行（如实失败，BUILD_ERROR 消息已带 build.log 路径）。
+    4. 都不可用 → 原样执行（如实失败），并给出可操作的 corepack 安装提示
+       （BUG-966：``corepack: not found`` 本身不告知如何补救）。
 
-    非 ``corepack enable && ...`` 形态的命令（``npm ci`` / ``npm install``）原样返回。
+    BUG-966 钉版形式 ``corepack <pm>@<ver> install ...``（声明优先 / 旧锁兜底
+    生成）单独解析：corepack 可用 → 去 ``corepack enable &&`` 前缀的免 root
+    钉版形式（评审 P2：全局 enable 在系统 Corepack bin 目录不可写时 EACCES；
+    下游裸 ``pnpm``/``yarn`` 由 BUG-902 工作区 shim 目录兜底）；corepack 不可用
+    但 PATH 有 ``<pm>`` → 比对 PATH 版本 major，一致则去钉版用 PATH，不一致则
+    保留钉版命令并告警（PATH 版本未必读得了对应 lockfile）；都不可用 → 保留
+    原命令 + 可操作告警。BUG-984 起钉版形式带 ``corepack enable &&`` 前缀——
+    该前缀服务于容器 Dockerfile 渲染（镜像内恢复 shim 生成，下游裸
+    ``pnpm run build`` 可执行），宿主解析时一律剥离，解析语义与无前缀钉版一致。
+
+    非 ``corepack enable && ...`` / ``corepack <pm>@<ver> ...`` 形态的命令
+    （``npm ci`` / ``npm install`` / ``bun install``）原样返回。
     """
-    import re
-
+    pinned = re.match(
+        r"^\s*corepack\s+enable\s*&&\s*corepack\s+(pnpm|yarn)@([0-9A-Za-z._-]+)(\s+.*?)\s*$",
+        install,
+        re.IGNORECASE,
+    ) or re.match(
+        r"^\s*corepack\s+(pnpm|yarn)@([0-9A-Za-z._-]+)(\s+.*?)\s*$",
+        install,
+        re.IGNORECASE,
+    )
+    if pinned:
+        pm = pinned.group(1).lower()
+        version = pinned.group(2)
+        rest = pinned.group(3).strip()
+        if shutil.which("corepack"):
+            # 评审 P2：剥离全局 ``corepack enable``——系统 Corepack bin 目录
+            # 普通用户不可写时创建/替换全局 shim 会 EACCES；免 enable 钉版直跑，
+            # 下游裸 pnpm/yarn 由 BUG-902 工作区 shim 目录（追加进构建 PATH）兜底。
+            return f"corepack {pm}@{version} {rest}"
+        if shutil.which(pm):
+            path_version = _pm_path_version(pm)
+            if path_version is not None and path_version[0] == _version_major(
+                version
+            ):
+                return f"{pm} {rest}"
+            log.warning(
+                "PATH 中 %s %s 与锁文件/声明要求的 %s@%s 不匹配；"
+                "请安装 corepack（npm i -g corepack）或 %s@%s",
+                pm,
+                ".".join(map(str, path_version)) if path_version else "(未知)",
+                pm,
+                version,
+                pm,
+                version,
+            )
+            return install
+        log.warning(_COREPACK_MISSING_HINT.format(pm=pm))
+        return install
     m = re.match(
         r"^\s*corepack\s+enable\s*&&\s*(pnpm|yarn)(\s+.*?)\s*$", install, re.IGNORECASE
     )
@@ -365,11 +411,120 @@ def _resolve_host_install_command(install: str, work_dir: Path) -> str:
         return f"{pm} {rest}"
     if corepack:
         return f"corepack {pm} {rest}"
-    log.warning("corepack 与 %s 均不在 PATH，安装命令按原样执行（大概率失败）：%s", pm, install)
+    log.warning(
+        "%s 原样执行（大概率失败）。%s",
+        install,
+        _COREPACK_MISSING_HINT.format(pm=pm),
+    )
     return install
 
 
-def _resolve_host_build_command(build: str, work_dir: Path) -> str:
+def _version_major(version: str) -> int | None:
+    """钉版字符串的主版本号；无法解析返回 None。"""
+    try:
+        return int(version.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _apply_engines_compat(
+    install_cmd: str | None,
+    work_dir: Path,
+    *,
+    ignore_engines: bool = False,
+    workspace_root: Path | None = None,
+) -> str | None:
+    """宿主 Node 与 ``engines.node`` 失配时的处理（BUG-967，CHK-485 修订）。
+
+    宿主过新（如 Node 24 装 engines ``18.0.0 - 22.x.x`` 的 Excalidraw）与
+    过旧（Astro 要求更新的 Node）都会让 engines 校验在安装阶段直接失败。
+    D3 边界：不默认忽略 engines——默认**明确阻断**（HostingError，给出
+    兼容 Node 建议与显式忽略开关）；仅当工作区配置
+    ``nodeEnginesIgnore: true``（显式选择）时才按包管理器受控忽略并告警：
+
+    - yarn：追加 ``--ignore-engines``（yarn 1 语义确定；钉版 yarn major
+      >=2 的 berry 对该 flag 支持不确定，保持如实失败 + 警告）；
+    - pnpm：仅当项目根 ``.npmrc`` 声明 ``engine-strict=true`` 时才强制校验，
+      失配时追加 ``--config.engine-strict=false``；
+    - npm：默认不强制 engines，仅告警。
+
+    monorepo（评审 P2）：``engines.node`` / ``.npmrc`` 常声明在 workspace
+    根而非 ``sourceSubdir`` 子目录——``work_dir`` 读不到时回退
+    ``workspace_root``（:func:`inspect_node_toolchain` 的判定口径）。
+    engines 或宿主版本不可解析/不可得时不处理（宁未知不误判）。
+    """
+    if not install_cmd:
+        return install_cmd
+    from local_webpage_access.node_toolchain import (
+        engines_mismatch_direction,
+        host_node_version,
+        node_version_in_range,
+        read_node_engines,
+    )
+
+    engines = read_node_engines(work_dir)
+    if (
+        not engines
+        and workspace_root is not None
+        and workspace_root.resolve() != work_dir.resolve()
+    ):
+        engines = read_node_engines(workspace_root)
+    host = host_node_version()
+    if not engines or host is None:
+        return install_cmd
+    if node_version_in_range(engines, host) is not False:
+        return install_cmd
+    direction = engines_mismatch_direction(engines, host)
+    host_text = ".".join(map(str, host))
+    if not ignore_engines:
+        raise HostingError(
+            f"宿主 Node {host_text} 不在项目声明的 engines.node 范围（{engines}）内"
+            f"{f'（{direction}）' if direction else ''}，宿主构建已阻断。"
+            "请改用满足范围的 Node 版本（如经 nvm/fnm 安装），或在确认兼容风险后"
+            "于 local-web.yml 设置 nodeEnginesIgnore: true 强制忽略 engines"
+            "（受控忽略仅对 yarn 1 / pnpm 生效；容器构建不受影响，"
+            "镜像已按 engines 自动选择）"
+        )
+    log.warning(
+        "宿主 Node %s 不在项目声明的 engines.node 范围（%s）内%s；"
+        "nodeEnginesIgnore=true 已显式启用，安装时将受控忽略 engines（yarn 1）"
+        "或解除 engine-strict（pnpm），过旧 Node 缺少真实 API 的风险由使用者承担",
+        host_text,
+        engines,
+        f"（{direction}）" if direction else "",
+    )
+    yarn = re.search(r"(?:^|\s)yarn(?:@([0-9A-Za-z._-]+))?\s+install\b", install_cmd)
+    if yarn and "--ignore-engines" not in install_cmd:
+        pinned = yarn.group(1)
+        if pinned is None or (_version_major(pinned) or 0) == 1:
+            return f"{install_cmd} --ignore-engines"
+        return install_cmd
+    pnpm = re.search(r"(?:^|\s)pnpm(?:@([0-9A-Za-z._-]+))?\s+install\b", install_cmd)
+    if pnpm:
+        # monorepo（评审 P2）：engine-strict 可能声明在 workspace 根的 .npmrc
+        npmrc_bases = [work_dir]
+        if workspace_root is not None and workspace_root.resolve() != work_dir.resolve():
+            npmrc_bases.append(workspace_root)
+        engine_strict = False
+        for base in npmrc_bases:
+            try:
+                npmrc_text = (base / ".npmrc").read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+            except OSError:
+                continue
+            if re.search(r"engine-strict\s*=\s*true", npmrc_text, re.IGNORECASE):
+                engine_strict = True
+                break
+        if engine_strict:
+            if "--config.engine-strict=false" not in install_cmd:
+                return f"{install_cmd} --config.engine-strict=false"
+    return install_cmd
+
+
+def _resolve_host_build_command(
+    build: str, work_dir: Path, *, pinned: tuple[str, str] | None = None
+) -> str:
     """宿主前端构建命令的工具链解析（BUG-889，与 install 侧 BUG-860/877 同策）。
 
     scanner 生成的 ``entry.build`` 多以 ``yarn ``/``pnpm `` 开头（如 monorepo
@@ -377,8 +532,11 @@ def _resolve_host_build_command(build: str, work_dir: Path) -> str:
     :func:`_resolve_host_install_command` 改写为 corepack 包装执行，但 build
     裸跑时宿主可能没有全局 yarn/pnpm（只有 corepack），或 PATH 版本与
     lockfile 声明版本不一致——同一工程两条命令必须用同一工具链。解析优先级
-    与 install 侧一致：声明版本+corepack 固定版本 → PATH 原样 → corepack
-    代理 → 原样如实失败。非 yarn/pnpm 开头的命令（npm run build 等）原样返回。
+    与 install 侧一致：声明版本+corepack 固定版本 → install 钉版透传
+    （``pinned``，评审 P1：仅靠 pnpm-lock.yaml 兜底钉版时无 packageManager
+    声明，build 段也须钉同一版本，不能退回 PATH 上不同 major 的 pnpm）→
+    PATH 原样 → corepack 代理 → 原样如实失败。非 yarn/pnpm 开头的命令
+    （npm run build 等）原样返回。
 
     BUG-896：monorepo 拓扑构建是 ``&&`` 连接的多段命令
     （``yarn workspace a run build && yarn workspace b run build``）——按
@@ -386,11 +544,15 @@ def _resolve_host_build_command(build: str, work_dir: Path) -> str:
     含 ``&&`` 的普通命令不会被改写）。
     """
     if "&&" not in build:
-        return _resolve_build_segment(build, work_dir)
-    return "&&".join(_resolve_build_segment(part, work_dir) for part in build.split("&&"))
+        return _resolve_build_segment(build, work_dir, pinned=pinned)
+    return "&&".join(
+        _resolve_build_segment(part, work_dir, pinned=pinned) for part in build.split("&&")
+    )
 
 
-def _resolve_build_segment(segment: str, work_dir: Path) -> str:
+def _resolve_build_segment(
+    segment: str, work_dir: Path, *, pinned: tuple[str, str] | None = None
+) -> str:
     """单个构建分段的工具链解析（BUG-889/896；保留分段前后空白）。"""
     m = re.match(r"^(\s*)(pnpm|yarn)(\s+.*?)(\s*)$", segment, re.IGNORECASE)
     if not m:
@@ -403,6 +565,11 @@ def _resolve_build_segment(segment: str, work_dir: Path) -> str:
     corepack = shutil.which("corepack")
     if declared and declared[0].lower() == pm and corepack:
         return f"{lead}corepack {pm}@{declared[1]} {rest}{trail}"
+    if pinned and pinned[0] == pm and corepack:
+        # install 已钉版（声明或 pnpm-lock.yaml 旧锁兜底，BUG-966）而本目录无
+        # packageManager 声明时，build 必须沿用同一钉版（评审 P1）——否则
+        # install 用 corepack pnpm@8.15.9、build 却走 PATH 上的 pnpm 10。
+        return f"{lead}corepack {pm}@{pinned[1]} {rest}{trail}"
     if shutil.which(pm):
         return segment
     if corepack:
@@ -533,7 +700,24 @@ def build_and_host_frontend(
 
         from local_webpage_access.instance_settings import effective_build_env
 
-        build_env = {**os.environ, **effective_build_env(manifest)}
+        from local_webpage_access.build_proxy import (
+            config_with_latest_build_proxy,
+            merge_into,
+            overlay_build_env,
+        )
+
+        config = config_with_latest_build_proxy(workspace, config)
+        build_env = overlay_build_env(
+            merge_into({**os.environ}, config),
+            effective_build_env(manifest),
+        )
+        if config.buildProxy.proxy_env():
+            write_instance_log(
+                workspace.apps,
+                instance_id,
+                "build",
+                f"宿主机前端构建使用工作区代理 {config.buildProxy.redacted_url()}",
+            )
         from local_webpage_access.build_sources import (
             host_build_timeout,
             inject_pkg_cache_env,
@@ -552,8 +736,28 @@ def build_and_host_frontend(
             if manifest.entry.install
             else None
         )
+        # BUG-967：宿主 Node 与 engines.node 失配（过新/过旧）——默认明确阻断
+        # （HostingError，建议兼容 Node）；仅工作区配置 nodeEnginesIgnore: true
+        # 显式选择时才受控忽略：yarn 1 追加 --ignore-engines；pnpm 仅在项目
+        # .npmrc 声明 engine-strict=true 时追加 --config.engine-strict=false。
+        install_cmd = _apply_engines_compat(
+            install_cmd,
+            work_dir,
+            ignore_engines=bool(getattr(config, "nodeEnginesIgnore", False)),
+            workspace_root=tool.workspace_root,
+        )
+        # install 钉版（packageManager 声明或 pnpm-lock.yaml 旧锁兜底改写后的
+        # ``corepack <pm>@<ver> install``）透传给 build 段——同一工程两条命令
+        # 必须用同一工具链（评审 P1：仅锁文件兜底钉版时 build 段读不到声明）。
+        install_pin: tuple[str, str] | None = None
+        if install_cmd:
+            pin_m = re.search(
+                r"corepack\s+(pnpm|yarn)@([0-9A-Za-z._-]+)", install_cmd, re.IGNORECASE
+            )
+            if pin_m:
+                install_pin = (pin_m.group(1).lower(), pin_m.group(2))
         build_cmd = (
-            _resolve_host_build_command(manifest.entry.build, work_dir)
+            _resolve_host_build_command(manifest.entry.build, work_dir, pinned=install_pin)
             if manifest.entry.build
             else None
         )
@@ -577,6 +781,15 @@ def build_and_host_frontend(
                     "build",
                     f"已为构建子进程提供 corepack yarn/pnpm shim：{shim_dir}",
                 )
+        # corepack 按需下载声明版本时会在交互环境弹下载确认，构建子进程非 TTY，
+        # 统一关闭提示避免挂起。评审 P1：不再只在 install 被改写或需要 shim 时
+        # 注入——任一已解析命令经 corepack 执行（含 && 分段）即注入，PATH 同时
+        # 有 pnpm/yarn 而无需 shim 的场景也不能漏。
+        if any(
+            cmd and re.search(r"(?:^|&&)\s*corepack(\s|$)", cmd)
+            for cmd in (install_cmd, build_cmd)
+        ):
+            build_env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
         # 1-5. 安装 + 构建（WBS-11.01~06）
         if manifest.entry.install:
             # BUG-860 / BUG-877：宿主工具链解析（corepack enable 免 root 改写 /
@@ -589,10 +802,6 @@ def build_and_host_frontend(
                     "build",
                     f"安装命令已按宿主工具链改写：{install_cmd}",
                 )
-                if install_cmd.startswith("corepack"):
-                    # corepack 按需下载声明版本时会在交互环境弹下载确认，
-                    # 构建子进程非 TTY，统一关闭提示避免挂起
-                    build_env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
             write_instance_log(
                 workspace.apps, instance_id, "build", f"安装：{install_cmd}"
             )
@@ -1389,6 +1598,10 @@ def _prepare_previous_container(ctx: _ContainerDeploy) -> None:
 
 def _render_container_artifacts(ctx: _ContainerDeploy) -> None:
     """生成 Dockerfile、分配/复用端口、生成 Compose 与 .env。"""
+    from local_webpage_access.build_proxy import config_with_latest_build_proxy
+
+    # daemon 启动后保存的代理要进入这一次生成的 Compose 参数。
+    ctx.config = config_with_latest_build_proxy(ctx.workspace, ctx.config)
     # 3. 生成 Dockerfile（BUG-200：注入 config.buildMirrors，避免手改被覆盖）
     generate_dockerfile(ctx.manifest, ctx.workspace, config=ctx.config)
     _record_stage(ctx.workspace, ctx.registry, ctx.instance_id, "dockerfile_ready")

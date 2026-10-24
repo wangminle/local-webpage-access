@@ -179,14 +179,25 @@ def _health_check_host(bind_host: str) -> str:
     return bind_host
 
 
-def _fetch_health(host: str, port: int, *, timeout: float = 1.0) -> dict[str, Any] | None:
-    """``GET /api/health`` 解析 JSON；失败或非 200 时返回 ``None``。"""
+def _fetch_health(
+    host: str, port: int, *, timeout: float = 1.0, token: str | None = None
+) -> dict[str, Any] | None:
+    """``GET /api/health`` 解析 JSON；失败或非 200 时返回 ``None``。
+
+    BUG-980：WSL NAT 下回环免鉴权停用，``workspaceRoot`` 需凭有效 token 解锁；
+    归属探测方应经 ``token`` 携带本工作区管理 token。
+    """
     from local_webpage_access.ports import format_http_host
 
     probe = format_http_host(_health_check_host(host))
     url = f"http://{probe}:{port}/api/health"
+    request: str | urllib.request.Request = url
+    if token:
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        request = req
     try:
-        with urlopen_direct(url, timeout=timeout) as resp:  # noqa: S310
+        with urlopen_direct(request, timeout=timeout) as resp:  # noqa: S310
             if resp.status != 200:
                 return None
             data = json.loads(resp.read().decode("utf-8"))
@@ -215,8 +226,15 @@ def health_matches_workspace(
     本工作区已启用且记录的 ``pid`` 仍存活时，视为本工作区进程（BUG-065），以便
     ``lwa update`` 能重启旧版管理页。foreign 占用场景勿传可证明归属的 ``state``，
     仍会由 ``start_manager`` 的 ``health_ok`` 分支拒绝。
+
+    BUG-980：WSL NAT 下 health 的 ``workspaceRoot`` 需有效 token 解锁，探测时
+    自动携带本工作区 token（读不到 token 时退化为旧行为）。
     """
-    data = _fetch_health(host, port, timeout=timeout)
+    from local_webpage_access.manager_api import read_token_for_root
+
+    data = _fetch_health(
+        host, port, timeout=timeout, token=read_token_for_root(workspace_root)
+    )
     if not data or not data.get("ok"):
         return False
     remote = data.get("workspaceRoot")

@@ -49,7 +49,13 @@ description: >-
    - CRA 默认 `build`
    - Next 静态导出 `out`
 3. 设定 `entry.install`：按锁文件选择——`package-lock.json`→`npm ci`、
-   `pnpm-lock.yaml`→`corepack enable && pnpm install --frozen-lockfile`、
+   `pnpm-lock.yaml`→`corepack enable && pnpm install --frozen-lockfile`（BUG-966：
+   无 `packageManager` 声明时旧锁按 `lockfileVersion` 精确钉版——5.0~5.3 钉
+   pnpm 6（`corepack enable && corepack pnpm@6.35.1 install --frozen-lockfile`）、
+   5.4 钉 pnpm 7（7.33.7）、6.0 钉 pnpm 8（8.15.9），>=9 不钉；声明了
+   `pnpm@X` 则钉声明版 `corepack enable && corepack pnpm@X install --frozen-lockfile`；
+   BUG-984：钉版保留 `corepack enable &&` 前缀以生成 pnpm shim，下游裸
+   `pnpm run build` 才不会 127）、
    `yarn.lock`→`corepack enable && yarn install --frozen-lockfile`、
    `bun.lock`/`bun.lockb`→`bun install --frozen-lockfile`、无锁文件→`npm install`。
    monorepo/workspace 在仓库根安装；独立前端子目录用自己的锁文件，不被仓库根

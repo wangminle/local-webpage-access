@@ -27,6 +27,7 @@ from local_webpage_access.package_classifier import classify_and_select as _clas
 from local_webpage_access.preflight import check_and_fix as _preflight_check
 from local_webpage_access.evidence_collector import collect as _collect_evidence
 from local_webpage_access.candidate_generator import generate_candidates as _generate_candidates
+from local_webpage_access.security import is_os_metadata_name
 from local_webpage_access.models import (
     DatabaseConfig,
     EntryConfig,
@@ -184,6 +185,10 @@ def summarize(root: Path) -> FileSummary:
     # 顶层文件
     for entry in root.iterdir():
         if entry.is_file():
+            # BUG-991：AppleDouble ``._*`` / .DS_Store 是 OS 元数据，不是项目文件
+            #（``._app.sqlite`` 排序在前还会抢占 sqlite_files[0] 的库名推断）。
+            if is_os_metadata_name(entry.name):
+                continue
             name = entry.name.lower()
             summary.top_files.add(name)
             summary.total_files += 1
@@ -306,6 +311,9 @@ def _walk(root: Path, *, max_depth: int):
                         continue
                     stack.append((entry, depth + 1))
                 else:
+                    # BUG-991：AppleDouble ``._*`` / .DS_Store 不参与任何统计。
+                    if is_os_metadata_name(entry.name):
+                        continue
                     yield entry
         except (PermissionError, OSError):
             continue
@@ -1691,12 +1699,13 @@ def _python_start_command(
                 init_cmd, db_path, config_paths = spec
                 if notes is not None:
                     notes.append(
-                        "Flask 工厂含唯一 init-db；仅当 instance 库文件不存在时执行，"
-                        "避免教程命令清空已有数据"
+                        "Flask 工厂含唯一 init-db；仅当 instance 库文件不存在或可证明为空"
+                        "（0 字节或无表）时执行，避免教程命令清空已有数据"
                     )
                 # BUG-931：db_path 是源码证明的容器内库绝对路径（含子目录与
                 # 自定义 instance_path），不再硬编码 /app/instance/<basename>。
-                checks = [f"[ ! -f {db_path} ]"]
+                # BUG-978：0 字节空库/无表库允许安全重初始化（可自愈），真库跳过。
+                checks = [_flask_empty_db_condition(db_path)]
                 # 可选配置文件一旦存在，默认 DATABASE 就不再是已证明的最终值。
                 checks.extend(f"[ ! -e {path} ]" for path in config_paths)
                 cmd = f"sh -c 'if {' && '.join(checks)}; then {init_cmd}; fi && exec {cmd}'"
@@ -2203,6 +2212,23 @@ def _flask_configuration_guards(text: str, base: str) -> tuple[str, ...] | None:
     return tuple(sorted(guards))
 
 
+def _flask_empty_db_condition(db_path: str) -> str:
+    """BUG-978：库缺失或可证明为空（0 字节 / sqlite 无表）才允许 init-db。
+
+    Flask 首次请求会对缺失库 connect 出 0 字节文件，旧的 ``[ ! -f ]`` 守卫
+    此后永远跳过 init-db，实例无法自愈（首页 500 no such table）。有表的
+    真库与无法解析的文件一律按非空处理，保护已有数据不被教程命令清空。
+    探测经容器内 python 执行；python 缺失时按非空处理（退化为旧守卫行为）。
+    """
+    probe = (
+        '"$(command -v python || command -v python3)" -c "'
+        "import sqlite3,sys;"
+        "sys.exit(0 if sqlite3.connect(sys.argv[1]).execute(sys.argv[2]).fetchone()[0]==0 else 1)"
+        f'" {db_path} "select count(*) from sqlite_master"'
+    )
+    return f"{{ [ ! -f {db_path} ] || [ ! -s {db_path} ] || {probe}; }}"
+
+
 def _flask_init_db_spec(
     root: Path, target: str, notes: list[str] | None = None
 ) -> tuple[str, str, tuple[str, ...]] | None:
@@ -2210,6 +2236,8 @@ def _flask_init_db_spec(
 
     BUG-931：守卫检查的必须是源码能**完整证明**的实际库路径（见
     :func:`_flask_instance_sqlite_relpath` / :func:`_flask_instance_base`）。
+    BUG-978：``._*`` 等 OS 元数据文件（AppleDouble/.DS_Store）不参与拼接——
+    其二进制内容混入全包文本会让 AST 证明整体失败，init-db 包装被静默放弃。
     返回 ``(init 命令, 库绝对路径, 必须不存在的可选配置文件)``。
     """
     module = target.split(":", 1)[0]
@@ -2218,7 +2246,9 @@ def _flask_init_db_spec(
     pkg = root / module.replace(".", "/")
     files: list[Path] = []
     if pkg.is_dir():
-        files.extend(sorted(p for p in pkg.glob("*.py") if p.is_file()))
+        files.extend(sorted(
+            p for p in pkg.glob("*.py") if p.is_file() and not p.name.startswith(".")
+        ))
     elif (root / f"{module}.py").is_file():
         files.append(root / f"{module}.py")
     texts = [_read_text_if_exists(path) for path in files]

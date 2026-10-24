@@ -2859,6 +2859,9 @@ def apply_detection_to_manifest(
     DEV-132：亦保留 ``buildEnv``（实例级构建环境变量，如
     ``{"VITE_BASE": "/<alias>/"}``）；重建默认 None，不透传会与 entry.build
     烤入值同途被静默清空（别名实例 --update 后白屏的根因之一）。
+    亦保留 ``network.externalLanObservation``。该记录不从源码推导；
+    不透传会在 scan / import --update / rebuild --sync 后变成 None，
+    读取时才根据网络指纹判断它是否失效。
     BUG-787：亦保留容器运维态（``containerId``/``imageId``/``image``/
     ``hostPort``/``projectName``/``serviceName``/``extraVolumes``/
     ``rebuildStrategy``）与 ``lastOperation`` / ``deploymentFingerprints``。
@@ -3005,6 +3008,12 @@ def apply_detection_to_manifest(
     # 烤入值被抹是同族缺口。深拷贝避免与旧 manifest 共享可变结构。
     fresh.buildEnv = copy.deepcopy(getattr(manifest, "buildEnv", None))
     fresh.buildBaseFromAlias = manifest.buildBaseFromAlias
+    # 外部局域网观测不从源码推导。重建 manifest 时丢掉后，merge_network_entry
+    # 无法把 URL、时间和指纹找回来。记录是否失效留给读取时的网络指纹判断。
+    if manifest.network is not None and fresh.network is not None:
+        fresh.network.externalLanObservation = copy.deepcopy(
+            manifest.network.externalLanObservation
+        )
     fresh.redundancyAcknowledged = manifest.redundancyAcknowledged
     # BUG-863（修订）：entry 的 install/build/start/buildOutputDir 按
     # entry.detected 快照区分人工覆盖（保留）与旧自动生成值（随新检测更新）；

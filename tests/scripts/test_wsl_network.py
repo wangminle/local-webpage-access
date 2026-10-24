@@ -1046,6 +1046,10 @@ def test_lan_client_observation_marks_externally_verified() -> None:
         status_code=200,
         url="http://10.180.105.74:8080/hello-lwa/",
         observed_at="2026-10-22T02:00:00Z",
+        # BUG-981：写侧与 describe 读取侧同口径，按实例入口端口作用域化指纹
+        host_port=18000,
+        route_host="hello-lwa",
+        config=Config(),
     )
     access = describe_instance_access(
         snap,
@@ -1231,3 +1235,420 @@ def test_equivalent_default_port_still_accepts_matching_observation() -> None:
     )
     assert access.lan_exposure == EXPOSURE_EXTERNALLY_VERIFIED
     assert access.observation_stale is False
+
+
+def _profile_snapshot(category: str | None, *, netprofile_error: str | None = None):
+    """IP、监听和防火墙默认策略相同，只变 Windows 网络类别。"""
+    errors = {"netprofile": netprofile_error} if netprofile_error else {}
+    return _yi14_snapshot(
+        outputs=InteropOutputs(
+            wsl_version_text=YI14_WSL_VERSION,
+            wslinfo_text="nat\n",
+            netip_text=YI14_NETIP,
+            netroute_text=YI14_NETROUTE,
+            portproxy_text="0.0.0.0            8080       127.0.0.1         8080\n",
+            tcp_listen_text="0.0.0.0|8080\n",
+            firewall_text="Private|Block\nPublic|Block\n",
+            netprofile_text=None if category is None else f"WLAN|{category}\n",
+            hyperv_firewall_text="S|WSL|Block\n",
+            errors=errors,
+        )
+    )
+
+
+def test_network_category_change_invalidates_external_verification() -> None:
+    """Private→Public 时防火墙默认策略列表不变，指纹仍须变化并撤销已验证。"""
+    private = _profile_snapshot("Private")
+    public = _profile_snapshot("Public")
+    assert snapshot_fingerprint(private) != snapshot_fingerprint(public)
+    observation = wn.build_lan_observation(
+        snapshot=private,
+        vantage="lan-client",
+        protocol="http",
+        evidence="page",
+        status_code=200,
+        url="http://10.180.105.74:8080/hello-lwa/",
+        # BUG-981：写侧与 describe 读取侧同口径，按实例入口端口作用域化指纹
+        host_port=18000,
+        route_host="hello-lwa",
+        config=Config(),
+    )
+    same = describe_instance_access(
+        private,
+        host_port=18000,
+        route_host="hello-lwa",
+        config=Config(),
+        observation=observation,
+    )
+    changed = describe_instance_access(
+        public,
+        host_port=18000,
+        route_host="hello-lwa",
+        config=Config(),
+        observation=observation,
+    )
+    assert same.lan_exposure == EXPOSURE_EXTERNALLY_VERIFIED
+    assert same.observation_stale is False
+    assert changed.lan_exposure == EXPOSURE_CANDIDATE_UNVERIFIED
+    assert changed.observation_stale is True
+
+
+def test_network_profile_read_status_is_part_of_fingerprint() -> None:
+    unread = _profile_snapshot(None, netprofile_error="access-denied")
+    empty = _profile_snapshot(None)
+    assert snapshot_fingerprint(unread) != snapshot_fingerprint(empty)
+
+
+def test_hyperv_firewall_keeps_wsl_setting_not_the_first_row() -> None:
+    """其他 Hyper-V 组件排在前面时，不能采用它的默认策略或规则。"""
+    wsl_id = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
+    other_id = "{11111111-2222-3333-4444-555555555555}"
+    foreign_first = (
+        f"S|Default Switch|{other_id}|Allow\n"
+        f"S|WSL|{wsl_id}|Block\n"
+        f"R|{other_id}|Foreign|Inbound|Allow|TCP|1\n"
+        f"R|{wsl_id}|WSL-In-TCP-22|Inbound|Allow|TCP|22\n"
+    )
+    parsed = wn.parse_hyperv_firewall_text(foreign_first)
+    assert parsed.default_inbound == "Block"
+    assert parsed.vm_name == "WSL"
+    assert parsed.rules == [("WSL-In-TCP-22", "Inbound", "Allow", "TCP", "22")]
+
+    allow = _yi14_snapshot(
+        outputs=InteropOutputs(
+            wsl_version_text=YI14_WSL_VERSION,
+            wslinfo_text="nat\n",
+            netip_text=YI14_NETIP,
+            netroute_text=YI14_NETROUTE,
+            portproxy_text="",
+            hyperv_firewall_text=(
+                f"S|Default Switch|{other_id}|Allow\n"
+                f"S|WSL|{wsl_id}|Allow\n"
+            ),
+        )
+    )
+    block = _yi14_snapshot(
+        outputs=InteropOutputs(
+            wsl_version_text=YI14_WSL_VERSION,
+            wslinfo_text="nat\n",
+            netip_text=YI14_NETIP,
+            netroute_text=YI14_NETROUTE,
+            portproxy_text="",
+            hyperv_firewall_text=(
+                f"S|Default Switch|{other_id}|Allow\n"
+                f"S|WSL|{wsl_id}|Block\n"
+            ),
+        )
+    )
+    assert snapshot_fingerprint(allow) != snapshot_fingerprint(block)
+
+
+def test_hyperv_query_emits_wsl_creator_identity() -> None:
+    query = wn.HYPERV_FIREWALL_QUERY
+    assert "Get-NetFirewallHyperVVMSetting" in query
+    assert "Get-NetFirewallHyperVRule" in query
+    assert "VMCreatorId" in query
+
+
+# ---- BUG-989：采集生效策略（ActiveStore），回退默认存储并标明来源 -------------
+
+
+def test_hyperv_active_query_targets_active_store() -> None:
+    """生效策略查询对 setting 与 rule 两个 cmdlet 都带 -PolicyStore ActiveStore；
+    回退查询保持原样（默认持久存储），供旧 PowerShell/旧 Windows 使用。"""
+    active = wn.HYPERV_FIREWALL_QUERY_ACTIVE
+    assert active.count("-PolicyStore ActiveStore") == 2
+    assert "Get-NetFirewallHyperVVMSetting" in active
+    assert "Get-NetFirewallHyperVRule" in active
+    assert "PolicyStore" not in wn.HYPERV_FIREWALL_QUERY
+    sources = [source for _query, source in wn.HYPERV_FIREWALL_QUERY_CANDIDATES]
+    assert sources == ["active", "persistent"]
+
+
+def test_hyperv_parse_marks_policy_store_source() -> None:
+    parsed = wn.parse_hyperv_firewall_text("P|active\nS|WSL|Block\n")
+    assert parsed.policy_store == "active"
+    assert parsed.default_inbound == "Block"
+    assert parsed.to_dict()["policyStore"] == "active"
+    legacy = wn.parse_hyperv_firewall_text("S|WSL|Block\n")
+    assert legacy.policy_store is None
+
+
+def test_hyperv_candidates_prefer_active_store() -> None:
+    """首个候选（ActiveStore）成功时只用一次调用，输出标注 active 来源。"""
+    calls: list[str] = []
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN202
+        command = args[3]
+        calls.append(command)
+        assert "-PolicyStore ActiveStore" in command
+        return _Proc(b"S|WSL|Block\n")
+
+    caps: dict = {}
+    errors: dict = {}
+    text = wn._run_powershell_candidates(
+        runner, list(wn.HYPERV_FIREWALL_QUERY_CANDIDATES), caps, "hyperv_firewall", errors
+    )
+    assert text == "P|active\nS|WSL|Block\n"
+    assert len(calls) == 1
+    assert caps["hyperv_firewall"].status == "available"
+    assert caps["hyperv_firewall"].source == "active"
+    assert "hyperv_firewall" not in errors
+
+
+def test_hyperv_candidates_fall_back_to_persistent_on_old_powershell() -> None:
+    """旧 PowerShell/旧 Windows 不支持 -PolicyStore：退化为原查询并标注 persistent。"""
+    calls: list[str] = []
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN202
+        command = args[3]
+        calls.append(command)
+        if "-PolicyStore ActiveStore" in command:
+            return _Proc(b"", 1)
+        return _Proc(b"S|WSL|NotConfigured\n")
+
+    caps: dict = {}
+    errors: dict = {}
+    text = wn._run_powershell_candidates(
+        runner, list(wn.HYPERV_FIREWALL_QUERY_CANDIDATES), caps, "hyperv_firewall", errors
+    )
+    assert text == "P|persistent\nS|WSL|NotConfigured\n"
+    assert len(calls) == 2
+    assert caps["hyperv_firewall"].status == "available"
+    assert caps["hyperv_firewall"].source == "persistent"
+    assert "hyperv_firewall" not in errors
+
+
+def test_hyperv_candidates_all_fail_stay_unknown() -> None:
+    """权限/能力失败保持 unknown，不冒充可达（与既有 unknown 处理一致）。"""
+    caps: dict = {}
+    errors: dict = {}
+    text = wn._run_powershell_candidates(
+        lambda *_a, **_k: _Proc(b"", 1),
+        list(wn.HYPERV_FIREWALL_QUERY_CANDIDATES),
+        caps,
+        "hyperv_firewall",
+        errors,
+    )
+    assert text is None
+    assert caps["hyperv_firewall"].status == "unknown"
+    assert caps["hyperv_firewall"].reason == "exit-1"
+    assert errors["hyperv_firewall"] == "exit-1"
+
+
+def test_hyperv_active_store_block_not_masked_by_persistent_notconfigured() -> None:
+    """BUG-989 实机场景：默认查询 DefaultInboundAction=NotConfigured，ActiveStore 生效为 Block。"""
+    snap = _yi14_snapshot(
+        outputs=InteropOutputs(
+            wsl_version_text=YI14_WSL_VERSION,
+            wslinfo_text="mirrored\n",
+            netip_text=YI14_NETIP,
+            netroute_text=YI14_NETROUTE,
+            portproxy_text="",
+            hyperv_firewall_text="P|active\nS|WSL|Block\n",
+        )
+    )
+    assert snap is not None
+    assert snap.hyperv_firewall is not None
+    assert snap.hyperv_firewall.default_inbound == "Block"
+    assert snap.hyperv_firewall.policy_store == "active"
+    assert snap.to_dict()["hypervFirewall"]["policyStore"] == "active"
+
+
+# ---- BUG-981：观测指纹按实例入口端口作用域化 ---------------------------------
+
+
+def _bug981_outputs(**overrides) -> InteropOutputs:  # noqa: ANN003
+    base = dict(
+        wsl_version_text=YI14_WSL_VERSION,
+        wslinfo_text="nat\n",
+        netip_text=YI14_NETIP,
+        netroute_text=YI14_NETROUTE,
+        portproxy_text="0.0.0.0            8080       127.0.0.1         8080\n",
+        tcp_listen_text="0.0.0.0|8080\n127.0.0.1|18000\n",
+    )
+    base.update(overrides)
+    return InteropOutputs(**base)
+
+
+def test_scoped_fingerprint_ignores_unrelated_listen_churn() -> None:
+    """BUG-981：整机无关监听增删不再使实例观测指纹变化（遗留整机口径仍敏感）。"""
+    snap_a = _yi14_snapshot(outputs=_bug981_outputs())
+    snap_b = _yi14_snapshot(
+        outputs=_bug981_outputs(
+            tcp_listen_text="0.0.0.0|8080\n127.0.0.1|18000\n127.0.0.1|50231\n"
+        )
+    )
+    relevant = wn._observation_entry_ports(
+        route_host="hello-lwa", host_port=18000, config=Config()
+    )
+    assert snapshot_fingerprint(snap_a, relevant) == snapshot_fingerprint(snap_b, relevant)
+    assert snapshot_fingerprint(snap_a) != snapshot_fingerprint(snap_b)
+
+
+def test_scoped_fingerprint_changes_when_entry_listen_drops() -> None:
+    """BUG-981：本实例入口相关监听关闭仍须使指纹变化。"""
+    with_listen = _yi14_snapshot(outputs=_bug981_outputs())
+    without_listen = _yi14_snapshot(outputs=_bug981_outputs(tcp_listen_text="0.0.0.0|8080\n"))
+    relevant = wn._observation_entry_ports(route_host=None, host_port=18000, config=Config())
+    assert snapshot_fingerprint(with_listen, relevant) != snapshot_fingerprint(
+        without_listen, relevant
+    )
+
+
+def test_scoped_fingerprint_tracks_rule_changes_for_entry_ports_only() -> None:
+    """BUG-981：相关转发规则变化失效；无关规则增删不影响。"""
+    relevant = wn._observation_entry_ports(route_host=None, host_port=18000, config=Config())
+    base = _yi14_snapshot(
+        outputs=_bug981_outputs(
+            portproxy_text="0.0.0.0            18000      127.0.0.1         18000\n"
+        )
+    )
+    retarget = _yi14_snapshot(
+        outputs=_bug981_outputs(
+            portproxy_text="0.0.0.0            18000      127.0.0.1         18001\n"
+        )
+    )
+    unrelated = _yi14_snapshot(
+        outputs=_bug981_outputs(
+            portproxy_text=(
+                "0.0.0.0            18000      127.0.0.1         18000\n"
+                "0.0.0.0            9999       127.0.0.1         9999\n"
+            )
+        )
+    )
+    assert snapshot_fingerprint(base, relevant) != snapshot_fingerprint(retarget, relevant)
+    assert snapshot_fingerprint(base, relevant) == snapshot_fingerprint(unrelated, relevant)
+
+
+def test_scoped_fingerprint_still_covers_capability_transitions() -> None:
+    """BUG-981：tcp_listen 能力 unknown→available 的保守失效在作用域口径下保留。"""
+    unread = _yi14_snapshot(
+        outputs=_bug981_outputs(
+            tcp_listen_text=None, errors={"tcp_listen": "access-denied"}
+        )
+    )
+    readable = _yi14_snapshot(outputs=_bug981_outputs())
+    relevant = wn._observation_entry_ports(route_host=None, host_port=18000, config=Config())
+    assert snapshot_fingerprint(unread, relevant) != snapshot_fingerprint(readable, relevant)
+
+
+def test_scoped_fingerprint_isolates_instances() -> None:
+    """BUG-981：甲实例入口端口变化不影响乙实例的观测指纹。"""
+    snap_a = _yi14_snapshot(outputs=_bug981_outputs())
+    snap_b = _yi14_snapshot(
+        outputs=_bug981_outputs(
+            tcp_listen_text="0.0.0.0|8080\n127.0.0.1|18000\n0.0.0.0|18001\n"
+        )
+    )
+    alpha = wn._observation_entry_ports(route_host=None, host_port=18000, config=Config())
+    beta = wn._observation_entry_ports(route_host=None, host_port=18001, config=Config())
+    assert snapshot_fingerprint(snap_a, alpha) == snapshot_fingerprint(snap_b, alpha)
+    assert snapshot_fingerprint(snap_a, beta) != snapshot_fingerprint(snap_b, beta)
+
+
+def test_observation_survives_unrelated_listen_churn_end_to_end() -> None:
+    """BUG-981：写入观测后整机无关监听变化，describe 不再判 stale / 误降级。"""
+    snap_record = _yi14_snapshot(outputs=_bug981_outputs())
+    observation = wn.build_lan_observation(
+        snapshot=snap_record,
+        vantage="lan-client",
+        protocol="http",
+        evidence="page",
+        status_code=200,
+        url="http://10.180.105.74:8080/hello-lwa/",
+        host_port=18000,
+        route_host="hello-lwa",
+        config=Config(),
+    )
+    snap_churn = _yi14_snapshot(
+        outputs=_bug981_outputs(
+            tcp_listen_text="0.0.0.0|8080\n127.0.0.1|18000\n127.0.0.1|50999\n"
+        )
+    )
+    view = describe_instance_access(
+        snap_churn,
+        host_port=18000,
+        route_host="hello-lwa",
+        config=Config(),
+        observation=observation,
+    )
+    assert view.observation_stale is False
+    assert view.lan_exposure == EXPOSURE_EXTERNALLY_VERIFIED
+
+
+# ---- BUG-982：启动路径轻量网络模式探测 -------------------------------------------
+
+
+class _Proc:
+    def __init__(self, stdout: bytes | None, returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def test_light_probe_runs_only_wslinfo_with_short_timeout() -> None:
+    """BUG-982：仅一条 wslinfo --networking-mode，超时取轻量预算而非完整采集的 5 秒。"""
+    calls: list[tuple[list[str], dict]] = []
+
+    def runner(args, **kwargs):  # noqa: ANN001, ANN202
+        calls.append((list(args), kwargs))
+        return _Proc(b"NAT\r\n")
+
+    assert wn.probe_networking_mode_light(runner=runner) == MODE_NAT
+    assert len(calls) == 1
+    assert calls[0][0] == ["wslinfo", "--networking-mode"]
+    assert calls[0][1]["timeout"] == wn._LIGHT_MODE_TIMEOUT_SEC
+    assert wn._LIGHT_MODE_TIMEOUT_SEC < wn._CMD_TIMEOUT_SEC
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        (b"mirrored\n", MODE_MIRRORED),
+        (b"nat\n", MODE_NAT),
+        (b"virtioproxy\n", MODE_CONSOMME),
+        ("mirrored", MODE_MIRRORED),
+        (b"\n", None),
+        (b"", None),
+        (None, None),
+    ],
+)
+def test_light_probe_parses_mode_or_returns_none(stdout, expected) -> None:
+    result = wn.probe_networking_mode_light(runner=lambda *_a, **_k: _Proc(stdout))
+    assert result == expected
+
+
+def test_light_probe_fails_closed_on_timeout_missing_or_nonzero_exit() -> None:
+    """BUG-982：超时 / 缺命令 / 非零退出一律 None，由调用方 fail-closed。"""
+    import subprocess
+
+    def timeout_runner(args, **kwargs):  # noqa: ANN001, ANN202
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    def missing_runner(*_a, **_k):  # noqa: ANN202
+        raise FileNotFoundError("wslinfo")
+
+    assert wn.probe_networking_mode_light(runner=timeout_runner) is None
+    assert wn.probe_networking_mode_light(runner=missing_runner) is None
+    assert (
+        wn.probe_networking_mode_light(runner=lambda *_a, **_k: _Proc(b"nat\n", 1))
+        is None
+    )
+
+
+def test_light_probe_honours_explicit_timeout_override() -> None:
+    seen: dict[str, float] = {}
+
+    def runner(_args, **kwargs):  # noqa: ANN001, ANN202
+        seen["timeout"] = kwargs["timeout"]
+        return _Proc(b"nat\n")
+
+    wn.probe_networking_mode_light(runner=runner, timeout=0.25)
+    assert seen["timeout"] == 0.25
+
+
+def test_light_probe_does_not_touch_snapshot_cache() -> None:
+    """BUG-982：轻量探测不读不写完整快照缓存（诊断口径不被启动路径污染）。"""
+    reset_wsl_network_cache()
+    wn.probe_networking_mode_light(runner=lambda *_a, **_k: _Proc(b"nat\n"))
+    assert wn._cache is None

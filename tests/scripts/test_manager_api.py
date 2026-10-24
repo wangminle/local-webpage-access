@@ -2696,9 +2696,15 @@ def test_cli_manager_start_rejects_lan_binding_without_token(
     from local_webpage_access.cli import app
     from local_webpage_access.init_workspace import init_workspace
 
+    # Linux/WSL 的 init 默认会拉起真实后台 manager 并颁发 token。
+    # 本用例只验证前台 CLI 的无 token 绑定守卫，初始化不得先制造有 token 环境。
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.maybe_start_manager", lambda *args, **kwargs: None
+    )
     init_workspace(workspace_root)
     monkeypatch.chdir(workspace_root)
     monkeypatch.setattr("local_webpage_access.manager_api.ensure_token", lambda ws: "")
+    monkeypatch.setattr("local_webpage_access.manager_api.read_token", lambda ws: None)
     monkeypatch.setattr(
         "local_webpage_access.manager_api.run_manager",
         lambda *args, **kwargs: None,
@@ -3630,3 +3636,249 @@ def test_instance_settings_api_validates_and_acknowledges(manager_env: EnvBundle
     saved = InstanceManifest.load(path)
     assert saved.buildEnv == {'VITE_BASE':'/demo/'}
     assert saved.buildBaseFromAlias and saved.redundancyAcknowledged
+
+
+# ---- BUG-980：WSL NAT 回环转发下停用回环免鉴权 -------------------------------
+
+
+def test_compute_loopback_identity_trusted_non_wsl(monkeypatch) -> None:
+    """BUG-980：非 WSL 平台回环身份可信，既有免 token 行为不变。"""
+    from local_webpage_access.manager_api import _compute_loopback_identity_trusted
+
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.detect_platform", lambda: "macos"
+    )
+    assert _compute_loopback_identity_trusted() is True
+
+
+def test_compute_loopback_identity_trusted_wsl_nat_and_mirrored(monkeypatch) -> None:
+    """BUG-980：WSL NAT 不可信（回环转发不可区分），mirrored 维持可信。"""
+    from local_webpage_access.manager_api import _compute_loopback_identity_trusted
+
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.detect_platform", lambda: "wsl"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.probe_networking_mode_light",
+        lambda **_k: "nat",
+    )
+    assert _compute_loopback_identity_trusted() is False
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.probe_networking_mode_light",
+        lambda **_k: "mirrored",
+    )
+    assert _compute_loopback_identity_trusted() is True
+
+
+def test_compute_loopback_identity_trusted_wsl_probe_failure_fails_closed(
+    monkeypatch,
+) -> None:
+    """BUG-980/982：轻量探测无结果（None）或自身异常均 fail-closed。"""
+    from local_webpage_access.manager_api import _compute_loopback_identity_trusted
+
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.detect_platform", lambda: "wsl"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.probe_networking_mode_light",
+        lambda **_k: None,
+    )
+    assert _compute_loopback_identity_trusted() is False
+
+    def _boom(**_k):  # noqa: ANN202
+        raise RuntimeError("interop broken")
+
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.probe_networking_mode_light", _boom
+    )
+    assert _compute_loopback_identity_trusted() is False
+
+
+# ---- BUG-982：启动判定不得同步跑完整网络采集（15 秒启动预算）------------------
+
+
+def test_bug982_startup_trust_probe_never_runs_full_snapshot(monkeypatch) -> None:
+    """BUG-982：启动判定只允许轻量探测，不得调用十余条互操作命令的完整采集。"""
+    from local_webpage_access import wsl_network
+    from local_webpage_access.manager_api import _compute_loopback_identity_trusted
+
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.detect_platform", lambda: "wsl"
+    )
+
+    def _no_full_snapshot(**_k):  # noqa: ANN202
+        raise AssertionError("启动判定不得调用 collect_wsl_network_snapshot")
+
+    monkeypatch.setattr(
+        wsl_network, "collect_wsl_network_snapshot", _no_full_snapshot
+    )
+    monkeypatch.setattr(
+        wsl_network, "probe_networking_mode_light", lambda **_k: "nat"
+    )
+    assert _compute_loopback_identity_trusted() is False
+
+
+def test_bug982_startup_trust_bounded_by_short_probe_timeout(
+    monkeypatch, tmp_path
+) -> None:
+    """BUG-982：wslinfo 卡死（模拟慢 guest）时启动判定受短超时约束并 fail-closed。
+
+    完整采集在受控复现中仅三条无关 Windows 诊断各超时 5 秒即耗尽 15.079 秒、
+    超过 start_manager 健康等待预算；轻量探测必须真正被子进程超时截断，而不是
+    结构上「通常很快」。用 PATH 注入一个睡 5 秒的假 wslinfo、把超时收紧到
+    0.5 秒实测：判定总耗时应远小于命令自身耗时，且返回不可信。
+    """
+    import os
+    import sys
+    import time
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX PATH 注入假 wslinfo 脚本")
+    from local_webpage_access import wsl_network
+    from local_webpage_access.manager_api import _compute_loopback_identity_trusted
+
+    fake_bin = tmp_path / "wslinfo"
+    fake_bin.write_text("#!/bin/sh\nexec sleep 5\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.detect_platform", lambda: "wsl"
+    )
+    monkeypatch.setattr(wsl_network, "_LIGHT_MODE_TIMEOUT_SEC", 0.5)
+
+    started = time.monotonic()
+    trusted = _compute_loopback_identity_trusted()
+    elapsed = time.monotonic() - started
+    assert trusted is False
+    # 0.5 秒超时必须生效；留 3 倍余量避免负载抖动误报，仍远小于命令的 5 秒
+    assert elapsed < 1.5, f"启动判定耗时 {elapsed:.2f}s，未受短超时约束"
+
+
+def test_wsl_nat_untrusted_loopback_get_requires_token(manager_env: EnvBundle) -> None:
+    """BUG-980：回环转发路径伪造回环 Host 的 GET 不得再免 token。"""
+    manager_env.app.state.loopback_identity_trusted = False
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as forwarded:
+        forged = forwarded.get("/api/capability", headers={"host": "127.0.0.1"})
+        assert forged.status_code == 401
+        authed = forwarded.get("/api/capability", headers=manager_env.auth_headers())
+        assert authed.status_code == 200
+
+
+def test_wsl_nat_tls_forwarded_loopback_requires_token(manager_env: EnvBundle) -> None:
+    """BUG-980：HTTPS 反代路径伪造回环 XFF 同样不得免 token。"""
+    manager_env.app.state.loopback_identity_trusted = False
+    manager_env.app.state.gateway_tls = True
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as forwarded:
+        forged = forwarded.get(
+            "/api/capability",
+            headers={"host": "127.0.0.1", "x-forwarded-for": "127.0.0.1"},
+        )
+        assert forged.status_code == 401
+
+
+def test_wsl_nat_untrusted_loopback_write_requires_token(manager_env: EnvBundle) -> None:
+    """BUG-980：伪造 same-origin 标记的写请求须 401，不得越过鉴权进入实例查找。"""
+    manager_env.app.state.loopback_identity_trusted = False
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as forwarded:
+        forged = forwarded.post(
+            "/api/instances/lwa-bug980-missing/start",
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert forged.status_code == 401
+        # 有效 token 正向路径仍可用（实例不存在 → 404，证明鉴权已通过）
+        authed = forwarded.post(
+            "/api/instances/lwa-bug980-missing/start",
+            headers=manager_env.auth_headers(),
+        )
+        assert authed.status_code == 404
+
+
+def test_wsl_nat_health_workspace_root_requires_token(manager_env: EnvBundle) -> None:
+    """BUG-980：回环不可信时 health 不再向无 token 请求泄露 workspaceRoot。"""
+    manager_env.app.state.loopback_identity_trusted = False
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as forwarded:
+        anon = forwarded.get("/api/health")
+        assert anon.status_code == 200
+        assert anon.json()["ok"] is True
+        assert "workspaceRoot" not in anon.json()
+        authed = forwarded.get("/api/health", headers=manager_env.auth_headers())
+        assert authed.json()["workspaceRoot"] == str(
+            manager_env.workspace.root.resolve()
+        )
+
+
+def test_wsl_nat_pick_directory_rejects_forwarded_loopback(
+    manager_env: EnvBundle,
+) -> None:
+    """BUG-980：本机专属目录选择在回环不可信时不可用（403 loopback_required）。"""
+    manager_env.app.state.loopback_identity_trusted = False
+    with TestClient(
+        manager_env.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1"
+    ) as forwarded:
+        resp = forwarded.post(
+            "/api/pick-directory", headers=manager_env.auth_headers()
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "loopback_required"
+
+
+def test_fetch_health_attaches_bearer_token(monkeypatch) -> None:
+    """BUG-980：健康探测支持携带 token（WSL NAT 下 workspaceRoot 需凭 token 解锁）。"""
+    from local_webpage_access import manager_service
+
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *exc) -> bool:  # noqa: ANN002, ANN204
+            return False
+
+    def fake_open(req: Any, timeout: float | None = None) -> Any:
+        captured["req"] = req
+        return _Resp()
+
+    monkeypatch.setattr(manager_service, "urlopen_direct", fake_open)
+    data = manager_service._fetch_health("127.0.0.1", 17800, token="tok-123")
+    assert data == {"ok": True}
+    assert captured["req"].get_header("Authorization") == "Bearer tok-123"
+
+    data = manager_service._fetch_health("127.0.0.1", 17800)
+    assert data == {"ok": True}
+    assert isinstance(captured["req"], str)  # 无 token 时保持纯 URL 字符串
+
+
+def test_health_matches_workspace_carries_workspace_token(
+    manager_env: EnvBundle, monkeypatch
+) -> None:
+    """BUG-980：health_matches_workspace 自动携带本工作区 token 做归属探测。"""
+    from local_webpage_access import manager_service
+
+    captured: dict[str, Any] = {}
+
+    def fake_fetch(host, port, *, timeout=1.0, token=None):  # noqa: ANN001, ANN202
+        captured["token"] = token
+        return {"ok": True, "workspaceRoot": str(manager_env.workspace.root.resolve())}
+
+    monkeypatch.setattr(manager_service, "_fetch_health", fake_fetch)
+    assert (
+        manager_service.health_matches_workspace(
+            "127.0.0.1", 17800, manager_env.workspace.root
+        )
+        is True
+    )
+    assert captured["token"] == manager_env.token

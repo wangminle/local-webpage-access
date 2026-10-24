@@ -206,6 +206,18 @@ def read_token(workspace: Workspace) -> str | None:
     return token or None
 
 
+def read_token_for_root(root: Path) -> str | None:
+    """按工作区根目录读取 token（BUG-980：归属探测方只有 root ``Path`` 时使用）。
+
+    WSL NAT 下回环免鉴权停用后，``/api/health`` 的 ``workspaceRoot`` 需凭有效
+    token 解锁；manager_service 的归属探测以此取本工作区 token 随请求携带。
+    """
+    try:
+        return read_token(Workspace(Path(root)))
+    except Exception:  # noqa: BLE001 — 根目录异常按无 token 处理
+        return None
+
+
 def read_token_metadata(workspace: Workspace) -> dict[str, str | None]:
     """IMP-046：读取 token 文件元数据（token + createdAt）。
 
@@ -403,6 +415,53 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _compute_loopback_identity_trusted() -> bool:
+    """BUG-980：当前平台上回环 peer 能否证明「本机」身份（进程启动时判定一次）。
+
+    WSL NAT 下项目官方指引的 portproxy → ``127.0.0.1`` 经 localhostForwarding
+    进入 guest，远端流量的 peer 与本机连接完全同形，Host/XFF/Origin/Fetch-Site
+    又全部可伪造——回环不再能证明本机身份，回环免鉴权必须整体停用（一律要求
+    token）。mirrored 模式 loopback 与 Windows 宿主共享、来源保留，维持既有
+    豁免；非 WSL 平台行为不变。网络模式切换需要 ``wsl --shutdown``，manager
+    进程随之退出，故启动时判定一次足够。
+
+    BUG-982：此处运行在 ``create_app`` 内、uvicorn 开始监听之前，而
+    ``start_manager`` 的健康等待预算只有 15 秒。完整快照采集串行十余条 Windows
+    互操作命令、单条可等 5 秒，慢互操作下会在尚未监听时就被父进程判启动失败。
+    因此只做轻量探测（单条 ``wslinfo``、短超时）；探测失败/超时/未识别一律
+    fail-closed（回环不可信、一律要求 token），不得在未取得证据时先启用豁免。
+    """
+    from local_webpage_access.platform_detect import PLATFORM_WSL, detect_platform
+
+    try:
+        if detect_platform() != PLATFORM_WSL:
+            return True
+    except Exception:  # noqa: BLE001 — 平台判定失败不改变 macOS/Linux 既有行为
+        return True
+    from local_webpage_access.wsl_network import (
+        MODE_MIRRORED,
+        probe_networking_mode_light,
+    )
+
+    try:
+        mode = probe_networking_mode_light()
+    except Exception:  # noqa: BLE001 — 已确认 WSL 但探测本身异常：fail-closed
+        log.warning(
+            "WSL 网络模式轻量探测异常，回环免鉴权暂停（所有 /api/* 请求需携带 token）",
+            exc_info=True,
+        )
+        return False
+    if mode == MODE_MIRRORED:
+        return True
+    log.warning(
+        "WSL 网络模式判定为 %s，回环连接可能来自 Windows 回环转发，回环免 token "
+        "已停用（BUG-980）；本机访问管理页请携带 token（lwa manager token 查看），"
+        "Agent M1 通道同期暂停（BUG-983）",
+        mode or "unknown（wslinfo 不可用或超时）",
+    )
+    return False
+
+
 def _is_self_connection(request: Request, config: Config) -> bool:
     """请求是否为 manager 经自身绑定地址的自连（managerHost=LAN IP 时探活，BUG-194）。
 
@@ -411,6 +470,9 @@ def _is_self_connection(request: Request, config: Config) -> bool:
     故比对相等即可识别"manager 探自己"，安全地返回 workspaceRoot 做归属校验。
     通配绑定（``0.0.0.0``/``::``）由 :func:`_is_localhost_client` 覆盖，此处跳过。
     """
+    # BUG-980：回环身份不可信（WSL NAT）时，回环绑定下的"自连"同样不可证。
+    if not getattr(request.app.state, "loopback_identity_trusted", True):
+        return False
     client = request.client
     if client is None:
         return False
@@ -529,6 +591,10 @@ def _is_localhost_client(request: Request) -> bool:
     if client is None:
         return False
     if not _is_loopback_host(client.host):
+        return False
+    # BUG-980：WSL NAT 下回环 peer 可能来自 Windows portproxy → 127.0.0.1 转发，
+    # 与本机连接不可区分；此时回环不再证明本机身份，不享受免 token 豁免。
+    if not getattr(request.app.state, "loopback_identity_trusted", True):
         return False
     if _request_from_trusted_proxy_chain(request):
         return _host_header_is_local(request)
@@ -831,6 +897,9 @@ def create_app(
     from local_webpage_access.config import tls_enabled as _tls_enabled
 
     app.state.gateway_tls = _tls_enabled(config)
+    # BUG-980：WSL NAT 下回环 peer 不再证明本机身份（portproxy 回环转发不可区分），
+    # 启动时判定一次并固化到 app.state；判定为不可信时所有 /api/* 一律要求 token。
+    app.state.loopback_identity_trusted = _compute_loopback_identity_trusted()
     # BUG-254：health 只读缓存；优先已有 capability-manager.json，否则 unknown 占位
     app.state.capability_fragment = read_capability_health_fragment(workspace.root) or {
         "profile": getattr(config, "profile", None) or "default",
@@ -909,11 +978,16 @@ def _register_routes(app: FastAPI) -> None:
         # managerHost 配 LAN IP / 双栈 :: 时，本机经该地址自连的 client.host 等于
         # 绑定地址（或呈 ::ffff:127.0.0.1），也算可信——仅本机自连能命中，局域网他机源
         # IP 不同，不会泄露。
+        # BUG-980：WSL NAT 下回环身份不可信，归属探测凭有效 token 解锁 workspaceRoot；
+        # 仅在回环不可信时 token 可解锁（可信平台上维持「路径仅本机可见」）。
         local_ok = _is_localhost_client(request) or _is_self_connection(request, app.state.config)
-        if local_ok:
+        token_ok = _verify_token(ws, _extract_token(request))
+        if local_ok or (
+            token_ok and not getattr(app.state, "loopback_identity_trusted", True)
+        ):
             body["workspaceRoot"] = str(ws.root.resolve())
         # BUG-236：已鉴权局域网客户端也应拿到完整 capabilities（供管理页降级 UI）
-        auth_ok = local_ok or _verify_token(ws, _extract_token(request))
+        auth_ok = local_ok or token_ok
         # BUG-254：存活检查不得同步跑昂贵 Docker/Caddy 探测；只用启动/后台缓存。
         # BUG-277：廉价合并新鲜 gateway 缓存，纠偏 manager 早于 gateway 就绪的陈旧片段。
         from local_webpage_access.capability import overlay_gateway_access_from_cache
@@ -1058,6 +1132,41 @@ def _register_routes(app: FastAPI) -> None:
         ctx = _Ctx(app)
         report = refresh_network_entries(ctx.workspace, ctx.config, ctx.registry)
         return {"ok": True, **report.to_dict()}
+
+    @app.get("/api/build-proxy", dependencies=[api], tags=["config"])
+    def get_build_proxy() -> dict[str, Any]:
+        from local_webpage_access.config import load_config
+
+        ctx = _Ctx(app)
+        # CLI 直接改 config.json 后内存配置已过期；按写入侧同一口径读磁盘最新值。
+        proxy = load_config(ctx.workspace).buildProxy
+        return {"enabled": proxy.enabled, "url": proxy.url}
+
+    @app.put("/api/build-proxy", dependencies=[api], tags=["config"])
+    def put_build_proxy(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from pydantic import ValidationError
+
+        from local_webpage_access.build_proxy import write_build_proxy
+        from local_webpage_access.config import BuildProxy, load_config
+
+        ctx = _Ctx(app)
+        try:
+            proxy = BuildProxy.model_validate(
+                {
+                    "enabled": _body_bool(payload, "enabled", False),
+                    "url": "" if payload.get("url") is None else str(payload.get("url")),
+                }
+            )
+        except ValidationError as exc:
+            message = "代理配置无效"
+            if exc.errors():
+                message = str(exc.errors()[0].get("msg") or message)
+                message = message.removeprefix("Value error, ")
+            raise HTTPException(status_code=400, detail=message) from exc
+        write_build_proxy(ctx.workspace.config_path, proxy)
+        saved = load_config(ctx.workspace).buildProxy
+        app.state.config.buildProxy = saved
+        return {"ok": True, "enabled": saved.enabled, "url": saved.url}
 
     @app.post(
         "/api/instances/{instance_id}/lan-observation",
@@ -2617,6 +2726,7 @@ __all__ = [
     "ensure_token",
     "rotate_token",
     "read_token",
+    "read_token_for_root",
     "read_token_metadata",
     "should_rotate_token",
     "maybe_rotate_token",

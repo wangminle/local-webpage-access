@@ -10,6 +10,13 @@ Dockerfile、compose.yaml 与 .env。这样：
 
 手改检测：上次成功部署时记录的 ``configHash`` 是盘上生成物的基线。若重渲染前盘上
 内容既不等于基线、也不等于新渲染结果，说明它被手工修改过，本次按 manifest 覆盖并告警。
+
+基线同步（BUG-989）：若重渲染前盘上内容与基线一致（``before == stored``），而本次
+重渲染由 converge 自己改写了内容（``before != after``，如仅修改构建代理——决策用的
+运行/构建指纹不含 Compose build 段，action 仍为 ``none``），盘上生成物会偏离
+``configHash`` 基线。:attr:`ConvergeResult.baseline_advanced` 标记这一情形，调用方
+须据此把基线跟进到新渲染值；否则下一次 start/restart/recover 会把
+``before != stored`` 误判为手工修改（manual_overwritten）。
 """
 
 from __future__ import annotations
@@ -29,6 +36,9 @@ log = get_logger("generated_convergence")
 class ConvergeResult:
     rendered: bool
     manual_overwritten: bool = False
+    # BUG-989：盘上原与基线一致、本次由 converge 自己改写（before==stored 且
+    # before!=after）。调用方应同步 configHash 基线，详见模块 docstring。
+    baseline_advanced: bool = False
     notes: list[str] = field(default_factory=list)
 
 
@@ -68,12 +78,19 @@ def converge_generated_artifacts(
     before = _config_hash(workspace, manifest)
     stored = _stored_config_hash(manifest)
 
+    from local_webpage_access.build_proxy import config_with_latest_build_proxy
+
+    config = config_with_latest_build_proxy(workspace, config)
     generate_dockerfile(manifest, workspace, config=config)
     generate_compose(manifest, workspace, host_port=container.hostPort, config=config)
     generate_env(manifest, workspace, host_port=container.hostPort)
 
     after = _config_hash(workspace, manifest)
     manual = stored is not None and before != stored and before != after
+    # 仅当盘上原本与基线一致、改写由本次重渲染自身造成时才标记；真手改
+    # （before != stored 且 before != after）与「盘=渲染值≠基线」的保守场景不标记，
+    # 原有 manual_overwritten 语义保持不变。
+    baseline_advanced = stored is not None and before == stored and before != after
     if manual:
         log.warning(
             "实例 %s 的生成物被手工修改，已按 manifest 覆盖；持久化修改请使用 manifest 字段"
@@ -83,4 +100,6 @@ def converge_generated_artifacts(
     notes = ["生成物已按 manifest 重渲染"]
     if manual:
         notes.append("检测到手工修改的生成物，已覆盖")
-    return ConvergeResult(rendered=True, manual_overwritten=manual, notes=notes)
+    return ConvergeResult(
+        rendered=True, manual_overwritten=manual, baseline_advanced=baseline_advanced, notes=notes
+    )

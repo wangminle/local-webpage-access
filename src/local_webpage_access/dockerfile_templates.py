@@ -142,6 +142,9 @@ def generate_dockerfile(
             identity.docker_user(),
             chown_tree=_non_root_chown_tree(manifest, source_dir),
         )
+    # BUG-969：不在 Dockerfile 显式声明代理 ARG。代理经 compose build.args
+    # 以 Docker 内置代理构建参数传入，默认排除在镜像历史与缓存之外；显式
+    # ARG 会把代理地址与凭据留在 docker history 里。
 
     # 与 generate_compose 对称：写出前审计；pipe_to_shell / add_remote_url 为
     # critical，拒绝落盘（防止模板改动或 entry.install/build 注入供应链风险）。
@@ -236,10 +239,174 @@ def _bun_global_install_line(
         # BUG-893：Corepack 允许 "bun@1.2.3+sha512..."；npm install -g bun@<ver> 只接受纯版本号。
         ver = pm[len("bun@") :].split("+", 1)[0].strip() if pm.startswith("bun@") else ""
         # BUG-897：版本号来自导入的 package.json，直接拼进 RUN——只接受纯版本
-        # 字符（与 hosting._PM_VERSION_RE 同步），否则按未声明装最新 bun。
+        # 字符（与 node_toolchain.PM_VERSION_RE 同步），否则按未声明装最新 bun。
         if ver and re.fullmatch(r"[0-9A-Za-z._-]+", ver):
             spec = f"bun@{ver}"
     return f"RUN npm install -g {spec}"
+
+
+def _is_yarn_berry_project(project_root: Path) -> bool:
+    """Yarn berry（2+）项目：仓库自带 .yarn/releases 或 yarn.lock 含 __metadata（BUG-987）。"""
+    if (project_root / ".yarn" / "releases").is_dir():
+        return True
+    lock = project_root / "yarn.lock"
+    if lock.is_file():
+        try:
+            return "__metadata" in lock.read_text(encoding="utf-8", errors="ignore")[:4096]
+        except OSError:
+            return False
+    return False
+
+
+# Docker Hub major.minor moving tag 的"保证存在"下限：各 LTS 线已发布的最高
+# 次版本（评审 P2：宽上界如 ``<=22.99.0`` 会把 hi 解析成次版本 99，拼出
+# node:22.99-alpine 这类不存在的 tag，构建拉取直接 404）。表值是保守下限——
+# 线上若有更新次版本，moving tag 依然可用；解析次版本超过表值时不拼钉版，
+# 由调用方回退整条线 moving tag（真实最新次版本多半低于该上界；万一越界，
+# 容器内 engines 校验诚实失败，好过一个必然 404 的 tag）。
+_KNOWN_LATEST_NODE_MINOR = {24: 22, 22: 21, 20: 19, 18: 20}
+
+
+def _minor_pin_tag(major: int, hi: tuple[int, int, int]) -> str | None:
+    """线内上界 ``hi``（半开区间）对应的最高可用次版本 moving tag。
+
+    上界为 ``<X.Y.0`` → 最高可用次版本 Y-1；``<X.Y.Z``（Z>0）→ Y。
+    解析次版本超出该线已知发布的最高次版本时返回 None（评审 P2，见
+    ``_KNOWN_LATEST_NODE_MINOR``），调用方回退整条线 moving tag。
+    """
+    minor = hi[1] - 1 if hi[2] == 0 else hi[1]
+    if minor < 0 or minor > _KNOWN_LATEST_NODE_MINOR.get(major, -1):
+        return None
+    return f"node:{major}.{minor}-alpine"
+
+
+def _engines_compat_image(engines: str, default_major: int) -> str | None:
+    """默认镜像精确版本不满足 ``engines`` 时，按区间交集选兼容镜像标签（BUG-967）。
+
+    依次考察默认 major 线与 22/20/18 线：交集在线内有上界时钉线内最高可用
+    次版本标签（``>=24.0.0 <24.10.0`` → ``node:24.9-alpine``；``>=22.0.0
+    <22.5.0`` → ``node:22.4-alpine``）；交集延伸到线尾时用整条线的 moving
+    tag（``>=22.12.0 <23`` → ``node:22-alpine``）。默认 major 线交集延伸到
+    线尾但精确默认版本不满足（下界高于默认版本，如 ``>24.22.1``）时该线
+    moving tag 与默认同版本，跳过。均无可选返回 None。
+
+    次版本标签（``node:24.9-alpine``）是 Docker Hub 的 major.minor moving
+    tag：上界带补丁段（如 ``<22.5.3``）时解析到的最新补丁可能越界，此时
+    容器内 engines 校验如实失败（诚实失败，不错装）；补丁级上界属稀有
+    场景，不为它放弃 minor 钉版覆盖的主流成功案例。解析次版本超出该线
+    已知发布的最高次版本时（``_KNOWN_LATEST_NODE_MINOR``，如宽上界
+    ``<=22.99.0``）不拼必然 404 的 tag，回退整条线 moving tag（评审 P2）。
+    """
+    from local_webpage_access.node_toolchain import node_range_major_intersection
+
+    for major in (default_major, 22, 20, 18):
+        inter = node_range_major_intersection(engines, major)
+        if inter is None or inter is False:
+            continue
+        _lo, hi = inter
+        if hi is not None:
+            tag = _minor_pin_tag(major, hi)
+            if tag is not None:
+                return tag
+            # 上界超出已知次版本：默认 major 线的 moving tag 与默认镜像同
+            # 版本（本就不满足 engines），跳过；其余线回退 moving tag。
+            if major == default_major:
+                continue
+        elif major == default_major:
+            # 默认 major 线交集延伸到线尾但精确默认版本不满足（下界高于
+            # 默认版本）：moving tag 与默认同版本，跳过。
+            continue
+        return f"node:{major}-alpine"
+    return None
+
+
+def _node_image_for_engines(source_dir: Path | None, copy_prefix: str = "current/") -> str:
+    """按 ``engines.node`` 选择 Node 基础镜像（BUG-967）。
+
+    判定一律用真实完整版本/区间交集，不再用 ``major.0.0`` 代表整条线
+    （CHK-485 实测两类误判：``>=22.12.0 <23`` 因 22.0.0 不满足而错回默认
+    24 镜像；``>=24.0.0 <24.10.0`` 因 24.0.0 满足而错选实际不满足的
+    24.22.1）。规则：
+
+    1. 默认镜像 ``_NODE_IMAGE`` 的**精确版本**（如 24.22.1）满足 → 默认镜像；
+    2. 不满足但与默认 major 线有交集 → 线内次版本钉版（见
+       :func:`_engines_compat_image`）；
+    3. 与 22/20/18 线有交集 → 对应 moving tag 或次版本钉版；
+    4. 均不满足 → 保持默认镜像并告警，容器内 engines 校验如实失败；
+       engines 缺失/不可解析同样保持默认（宁未知不误判）。
+
+    BUG-987：Yarn berry 在 Node 24 镜像内 fetch 确定性崩溃
+    （``The onCancel handler was attached after the promise settled``，
+    HedgeDoc 实案：同源码/锁/yarn 4.13.0/镜像源/网络，node:24 两次复现、
+    node:22 fetch 通过）。berry 项目选中默认镜像且 engines 未排除 22 时
+    优先 node:22-alpine（上游 yarn/Node 24 兼容问题，产品侧规避）；
+    与 22 线的交集在线内有上界时不盲用 moving tag，按上界钉线内最高
+    可用次版本标签（评审 P2，同 :func:`_engines_compat_image` 规则）。
+    """
+    if source_dir is None:
+        return _NODE_IMAGE
+    from local_webpage_access.node_toolchain import (
+        node_range_major_intersection,
+        node_version_in_range,
+        parse_node_version,
+        read_node_engines,
+    )
+
+    project_root = _node_lifecycle_root(source_dir, copy_prefix)
+    engines = read_node_engines(project_root)
+    default_ver = parse_node_version(_NODE_IMAGE.split(":", 1)[1].split("-", 1)[0])
+    if default_ver is None:
+        return _NODE_IMAGE
+    chosen = _NODE_IMAGE
+    if engines and node_version_in_range(engines, default_ver) is False:
+        picked = _engines_compat_image(engines, default_ver[0])
+        if picked is not None:
+            chosen = picked
+        else:
+            log.warning(
+                "engines.node（%s）与默认镜像 %s 及候选 22/20/18 线均无交集；"
+                "保持默认镜像，容器内 engines 校验将如实失败",
+                engines,
+                _NODE_IMAGE,
+            )
+    if chosen == _NODE_IMAGE and _is_yarn_berry_project(project_root):
+        inter22 = node_range_major_intersection(engines, 22) if engines else None
+        if not engines:
+            return "node:22-alpine"
+        if inter22:  # 与 22 线有交集的区间（None=不可解析 / False=无交集 → 保持 chosen）
+            # 评审 P2：交集在线内有上界时 moving tag node:22-alpine 可能越界
+            # （如 >=24 || >=22.0.0 <22.5.0：默认镜像满足但 berry 在 24 必崩，
+            # 22.5+ 又违反声明）——与 _engines_compat_image 同规则钉线内次版本；
+            # 解析次版本超出已知发布范围时回退 moving tag（不拼 404 tag）。
+            _lo, hi = inter22
+            if hi is not None:
+                tag = _minor_pin_tag(22, hi)
+                if tag is not None:
+                    return tag
+            return "node:22-alpine"
+    return chosen
+
+
+_APK_REPO_HOST = "dl-cdn.alpinelinux.org"
+_APK_MIRROR_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(:[0-9]{1,5})?$")
+
+
+def _apk_add_block(system_pkgs: list[str], mirrors: BuildMirrors | None) -> str:
+    """alpine 系统依赖安装层（BUG-988）。
+
+    官方 ``dl-cdn.alpinelinux.org`` 在慢网络宿主上确定性装不完（实测 39 包
+    30 分钟仅 11 个、两次撞构建超时；阿里镜像同批 7m22s）。resolved 镜像
+    配置带 ``apkMirror`` 时在同一 RUN 内先把 ``/etc/apk/repositories`` 的
+    仓库主机替换为镜像主机再安装——不额外加层。主机名做字符白名单校验，
+    非法值不注入（宁慢不错）。无系统依赖时返回空串（渲染逐字不变）。
+    """
+    if not system_pkgs:
+        return ""
+    cmd = f"apk add --no-cache {' '.join(system_pkgs)}"
+    host = (mirrors.apkMirror or "").strip() if mirrors else ""
+    if host and host != _APK_REPO_HOST and _APK_MIRROR_HOST_RE.fullmatch(host):
+        cmd = f"sed -i 's|{_APK_REPO_HOST}|{host}|g' /etc/apk/repositories && {cmd}"
+    return f"RUN {cmd}\n"
 
 
 # ---- Node -------------------------------------------------------------------
@@ -275,16 +442,28 @@ def _render_node(
         else:
             sqlite_mkdir = "RUN mkdir -p /app/data\n"
     cpfx = _copy_prefix(manifest)
+    node_image = _node_image_for_engines(source_dir, cpfx)
     dependency_copy = _node_dependency_copy_block(install, source_dir=source_dir, copy_prefix=cpfx)
     install_run = _with_npm_registry(install, mirrors)
     # DOC-201（V0.9.7）：Node(alpine) 同样消费 systemDeps——node-gyp 等原生构建
     # 在 npm install 阶段就需要 python3/make/g++，必须先于依赖安装层；alpine
-    # 用 apk（apt 切源链不适用，不走 mirrors）。为空时渲染保持逐字不变。
+    # 用 apk。BUG-988：apk 层支持 buildMirrors.apkMirror 仓库主机替换（慢网络
+    # 宿主官方 CDN 确定性超时）。为空时渲染保持逐字不变。
     system_pkgs = [str(p).strip() for p in (manifest.systemDeps or []) if str(p).strip()]
     # BUG-948：yarn/npm 的 git 依赖（如 github.com/...git）需要镜像内的 git。
-    if _node_source_needs_git(source_dir) and "git" not in system_pkgs:
+    # 评审 P3：与 native 探测同口径走 _node_lifecycle_root——sourceSubdir
+    # monorepo 的 git 依赖声明在子目录 package.json 时不能漏检。
+    if (
+        _node_source_needs_git(_node_lifecycle_root(source_dir, cpfx) if source_dir else None)
+        and "git" not in system_pkgs
+    ):
         system_pkgs.append("git")
-    apk_block = f"RUN apk add --no-cache {' '.join(system_pkgs)}\n" if system_pkgs else ""
+    # BUG-986：原生模块（sqlite3 等）的 node-gyp 构建需要 python3/make/g++。
+    if _node_source_needs_native_toolchain(_node_lifecycle_root(source_dir, cpfx) if source_dir else None):
+        for pkg in ("python3", "make", "g++"):
+            if pkg not in system_pkgs:
+                system_pkgs.append(pkg)
+    apk_block = _apk_add_block(system_pkgs, mirrors)
     # 评审 P2：bun 安装命令需先在镜像内补齐 bun 工具链（node:24.22.1-alpine 不含 bun）
     bun_toolchain = _bun_global_install_line(install, source_dir, cpfx)
 
@@ -292,7 +471,7 @@ def _render_node(
     # devDependencies，导致 tsc/vite 等构建工具缺失。运行期再切 production。
     lines = [
         header,
-        f"FROM {_NODE_IMAGE}",
+        f"FROM {node_image}",
         _build_env_arg_block(manifest),
         "WORKDIR /app",
         apk_block,
@@ -435,8 +614,21 @@ def _pip_run(shell_cmd: str, *, mirrors: BuildMirrors | None = None) -> str:
     )
 
 
+_PNPM_YARN_INSTALL_RE = re.compile(r"\b(pnpm|yarn)(@[0-9A-Za-z._-]+)?\s+install\b")
+
+
+def _is_pm_install(install: str, pm: str) -> bool:
+    """安装命令是否为 ``<pm> install``（BUG-966：兼容钉版 ``pnpm@8.15.9 install``）。"""
+    m = re.search(rf"\b{pm}(?:@[0-9A-Za-z._-]+)?\s+install\b", install)
+    return m is not None
+
+
 def _with_npm_registry(cmd: str, mirrors: BuildMirrors | None) -> str:
-    """给 npm/pnpm/yarn/bun 安装命令追加 registry（BUG-200）。"""
+    """给 npm/pnpm/yarn/bun 安装命令追加 registry（BUG-200）。
+
+    BUG-966：pnpm/yarn 兼容钉版形式（``corepack pnpm@8.15.9 install ...``），
+    注入 ``--registry`` 时保留版本段。
+    """
     if not mirrors or not mirrors.npm:
         return cmd
     registry = mirrors.npm.rstrip("/")
@@ -447,10 +639,9 @@ def _with_npm_registry(cmd: str, mirrors: BuildMirrors | None) -> str:
             return seg
         if "bun install" in seg:
             return seg.replace("bun install", f"bun install --registry={registry}", 1)
-        if "pnpm install" in seg:
-            return seg.replace("pnpm install", f"pnpm install --registry={registry}", 1)
-        if "yarn install" in seg:
-            return seg.replace("yarn install", f"yarn install --registry={registry}", 1)
+        m = _PNPM_YARN_INSTALL_RE.search(seg)
+        if m:
+            return f"{seg[:m.end()]} --registry={registry}{seg[m.end():]}"
         for token in ("npm ci", "npm install"):
             if token in seg:
                 return seg.replace(token, f"{token} --registry={registry}", 1)
@@ -1657,6 +1848,48 @@ _NODE_GIT_DEP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# BUG-986：已知含 node-gyp 原生构建的依赖（构建失败即 install 失败）。
+_NODE_NATIVE_PACKAGES = (
+    "sqlite3", "better-sqlite3", "bcrypt", "node-sass", "canvas",
+    "grpc", "deasync", "leveldown", "farmhash", "cpu-features",
+)
+_NODE_NATIVE_DEP_RE = re.compile(
+    r"(?<![\w-])(?:" + "|".join(_NODE_NATIVE_PACKAGES) + r")@"
+    r"|\"node_modules/(?:" + "|".join(_NODE_NATIVE_PACKAGES) + r")\""
+    r"|\"(?:" + "|".join(_NODE_NATIVE_PACKAGES) + r")\":"
+    # 评审 P3：pnpm v5 锁文件的包键是斜杠分隔（``/sqlite3/5.1.7:``），
+    # 不匹配 @ 形式；行首缩进后 ``/name/数字`` 才是锁键，避免误伤路径文本。
+    r"|(?<![\w])/(?:" + "|".join(_NODE_NATIVE_PACKAGES) + r")/\d"
+)
+
+
+def _node_source_needs_native_toolchain(source_dir: Path | None) -> bool:
+    """依赖声明/锁文件含已知原生模块时，install 阶段需要 node-gyp 工具链（BUG-986）。
+
+    HedgeDoc 实案：node:22-alpine 内 yarn install 走到 sqlite3@5.1.7 的
+    node-gyp 构建，镜像 apk 层只有 git（无 python3/make/g++）而失败。
+    原生依赖可能是传递依赖，项目 scripts 不含任何原生构建命令也会触发。
+    """
+    if source_dir is None:
+        return False
+    for name in (
+        "package.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "bun.lock",
+    ):
+        path = source_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if _NODE_NATIVE_DEP_RE.search(text):
+            return True
+    return False
+
 
 def _node_source_needs_git(source_dir: Path | None) -> bool:
     """锁文件或 package.json 含 git 依赖时，安装阶段需要 git（BUG-948）。"""
@@ -1720,7 +1953,7 @@ def _node_dependency_copy_block(
             if copy_line not in lines:
                 lines.append(copy_line)
         return "\n".join(lines)
-    if "pnpm install" in install:
+    if _is_pm_install(install, "pnpm"):
         lines = [f"COPY {copy_prefix}package.json {copy_prefix}pnpm-lock.yaml ./"]
         if source_dir is not None:
             root = _node_lifecycle_root(source_dir, copy_prefix)
@@ -1738,7 +1971,7 @@ def _node_dependency_copy_block(
             if copy_line not in lines:
                 lines.append(copy_line)
         return "\n".join(lines)
-    if "yarn install" in install:
+    if _is_pm_install(install, "yarn"):
         lines = [f"COPY {copy_prefix}package.json {copy_prefix}yarn.lock ./"]
         if source_dir is not None:
             root = _node_lifecycle_root(source_dir, copy_prefix)

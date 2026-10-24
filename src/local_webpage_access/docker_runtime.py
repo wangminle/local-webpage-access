@@ -160,8 +160,16 @@ def registry_timeout_hint(text: str | None) -> str:
     return "\n".join(lines)
 
 
-def _error_summary_with_hint(text: str | None, limit: int = 1200) -> str:
-    """失败摘要：分类诊断优先，其次 Hub 指引，再附原始尾部。"""
+def _error_summary_with_hint(
+    text: str | None, limit: int = 1200, *, proxy_env: dict[str, str] | None = None
+) -> str:
+    """失败摘要：分类诊断优先，其次 Hub 指引，再附原始尾部。
+
+    ``proxy_env``：构建实际生效的环境（``subprocess_env(build_config)``）。
+    None 表示未配置工作区代理、构建沿用父进程环境，诊断回退读进程
+    ``os.environ``；配置 buildProxy 时必须传构建时使用的环境，否则网络类
+    失败会误报「构建环境未设置 HTTP_PROXY/HTTPS_PROXY」。
+    """
     from local_webpage_access.build_diagnostics import classify_build_failure
 
     blob = (text or "").strip()
@@ -177,7 +185,7 @@ def _error_summary_with_hint(text: str | None, limit: int = 1200) -> str:
             extract_download_sources,
         )
 
-        extras.append(diagnose_proxy_path(env=None, command=blob))
+        extras.append(diagnose_proxy_path(env=proxy_env, command=blob))
         sources = extract_download_sources(blob)
         if sources:
             extras.append(
@@ -237,6 +245,25 @@ def probe_docker_permission() -> str | None:
     return None
 
 
+def _daemon_pull_uses_proxy() -> bool | None:
+    """探测 daemon 侧是否已配置代理（``docker info`` 的 HTTP(S)Proxy 字段）。
+
+    BUG-971：基础镜像拉取发生在 daemon/BuildKit 侧，CLI 环境变量对其无效。
+    返回 ``True``/``False``；探测失败返回 ``None``（不确定时不告警）。
+    """
+    try:
+        result = _execute(
+            ["docker", "info", "--format", "{{.HTTPProxy}} {{.HTTPSProxy}}"],
+            cwd=Path.cwd(),
+            timeout=10,
+        )
+    except DockerError:
+        return None
+    if not result.ok:
+        return None
+    return bool(result.stdout.strip())
+
+
 # ---- 结果数据类 --------------------------------------------------------------
 
 
@@ -291,6 +318,7 @@ def _execute(
     cwd: Path,
     log_path: Path | None = None,
     timeout: int = _QUERY_TIMEOUT,
+    env: dict[str, str] | None = None,
 ) -> ComposeResult:
     """执行外部命令（WBS-14.12 超时/失败处理、WBS-14.13 日志）。
 
@@ -308,8 +336,8 @@ def _execute(
         DockerError: 命令未找到、超时。
     """
     if log_path is not None:
-        return _execute_streaming(args, cwd=cwd, log_path=log_path, timeout=timeout)
-    return _execute_captured(args, cwd=cwd, timeout=timeout)
+        return _execute_streaming(args, cwd=cwd, log_path=log_path, timeout=timeout, env=env)
+    return _execute_captured(args, cwd=cwd, timeout=timeout, env=env)
 
 
 def _execute_captured(
@@ -317,6 +345,7 @@ def _execute_captured(
     *,
     cwd: Path,
     timeout: int,
+    env: dict[str, str] | None = None,
 ) -> ComposeResult:
     """无日志路径时整段捕获（查询类短命令）。"""
     try:
@@ -328,6 +357,7 @@ def _execute_captured(
             timeout=timeout,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
     except FileNotFoundError as exc:
         raise DockerError(
@@ -357,6 +387,7 @@ def _execute_streaming(
     cwd: Path,
     log_path: Path,
     timeout: int,
+    env: dict[str, str] | None = None,
 ) -> ComposeResult:
     """有日志路径时先写命令头，再边跑边追加输出（BUG-229 / IMP-039）。
 
@@ -417,6 +448,7 @@ def _execute_streaming(
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    env=env,
                     **popen_new_session_kwargs(),
                 )
             except FileNotFoundError as exc:
@@ -794,7 +826,7 @@ class DockerRuntime:
         *,
         build_id: int | None = None,
         log_path: Path | None = None,
-        timeout: int = _BUILD_TIMEOUT,
+        timeout: int | None = None,
     ) -> ComposeResult:
         """``docker compose build``（WBS-14.02 / .14 / .13）。
 
@@ -802,15 +834,51 @@ class DockerRuntime:
             instance_id: 实例 id。
             build_id: 若提供且 registry 已设置，按结果 finish 该 build 行。
             log_path: 默认 ``logs/build.log``。
-            timeout: 构建超时秒数。
+            timeout: 构建超时秒数；None 时取工作区配置 ``buildTimeout``
+                （默认 1800，BUG-988——慢网络宿主 apk 层/大依赖项目可调高）。
         """
         log_path = log_path or self.workspace.app_logs(instance_id) / _BUILD_LOG
+        from local_webpage_access.build_proxy import subprocess_env
+        from local_webpage_access.config import load_config
+
+        build_config = load_config(self.workspace)
+        if timeout is None:
+            timeout = int(getattr(build_config, "buildTimeout", 0) or _BUILD_TIMEOUT)
+        proxy_env = subprocess_env(build_config)
+        if proxy_env is not None:
+            proxy = build_config.buildProxy
+            log.info(
+                "镜像构建使用工作区代理 %s",
+                proxy.redacted_url(),
+            )
+            if proxy.uses_loopback_host():
+                # BUG-968：容器内安装改经 host.docker.internal 访问宿主机，
+                # 代理只监听 127.0.0.1 时仍会连接失败，必须提前说清。
+                from local_webpage_access.config import HOST_GATEWAY_NAME
+
+                log.warning(
+                    "代理 %s 指向宿主机回环：容器内安装将改用 %s 访问宿主机，"
+                    "请确认代理允许来自宿主机网络的连接"
+                    "（如开启「允许局域网连接」/监听 0.0.0.0）",
+                    proxy.redacted_url(),
+                    HOST_GATEWAY_NAME,
+                )
+            if _daemon_pull_uses_proxy() is False:
+                # BUG-971：基础镜像由 daemon/BuildKit 拉取，CLI 环境对 daemon
+                # 无效——honest 告警，不承诺该地址覆盖拉镜像链路。
+                log.warning(
+                    "基础镜像拉取由 Docker daemon 执行，不会使用工作区代理 %s；"
+                    "若拉镜像需要代理，请配置 Docker daemon/Desktop 代理或 "
+                    "registry-mirrors（容器内安装命令不受影响）",
+                    proxy.redacted_url(),
+                )
         try:
             result = _execute(
                 self._compose_cmd(instance_id, "build"),
                 cwd=self.workspace.app_dir(instance_id),
                 log_path=log_path,
                 timeout=timeout,
+                env=proxy_env,
             )
         except Exception as exc:
             from local_webpage_access.errors import BuildCancelled
@@ -830,7 +898,7 @@ class DockerRuntime:
                 self.registry.finish_build(
                     build_id,
                     status="failed",
-                    error_summary=_error_summary_with_hint(str(exc)),
+                    error_summary=_error_summary_with_hint(str(exc), proxy_env=proxy_env),
                 )
             _record_failed_sources(self.workspace, str(exc))
             raise
@@ -841,7 +909,9 @@ class DockerRuntime:
                 self.registry.finish_build(
                     build_id,
                     status="failed",
-                    error_summary=_error_summary_with_hint(result.stderr or result.stdout),
+                    error_summary=_error_summary_with_hint(
+                        result.stderr or result.stdout, proxy_env=proxy_env
+                    ),
                 )
         if not result.ok:
             _record_failed_sources(self.workspace, result.stderr or result.stdout)

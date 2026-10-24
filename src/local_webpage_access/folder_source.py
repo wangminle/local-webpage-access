@@ -19,6 +19,7 @@ from pathlib import Path
 
 from local_webpage_access.errors import FolderSourceError
 from local_webpage_access.logging import get_logger
+from local_webpage_access.security import is_os_metadata_name
 
 log = get_logger("folder_source")
 
@@ -154,7 +155,9 @@ def pack_source_dir(
         dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
         root_path = Path(root)
         for fname in sorted(files):
-            if fname in _SKIP_FILES:
+            # BUG-991：AppleDouble ``._*`` 与 .DS_Store 不打进 zip（否则会被
+            # COPY 进镜像并干扰下游扫描）；Thumbs.db 维持既有跳过。
+            if fname in _SKIP_FILES or is_os_metadata_name(fname):
                 continue
             fpath = root_path / fname
             if fpath.is_symlink() or not fpath.is_file():
@@ -207,7 +210,8 @@ def compute_source_hash(source_dir: Path) -> str:
         root_path = Path(root)
 
         for fname in sorted(files):
-            if fname in _SKIP_FILES:
+            # BUG-991：AppleDouble ``._*`` 变化不得引起指纹抖动（无谓重部署）。
+            if fname in _SKIP_FILES or is_os_metadata_name(fname):
                 continue
             fpath = root_path / fname
             if fpath.is_symlink() or not fpath.is_file():

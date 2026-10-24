@@ -50,6 +50,28 @@ def _open_agent_workspace(workspace: str):
     return ws, config, reg
 
 
+def _loopback_identity_trusted_hint() -> bool:
+    """BUG-983：本机视角的回环信任自检，与 manager 启动判定同口径。
+
+    WSL NAT 下回环 peer 可能是 Windows 回环转发，manager 会整体暂停 Agent M1
+    通道（``permission_denied``）；此处用同一轻量探测（BUG-982）提前告知 Agent
+    「为何 403」。非 WSL 恒可信；探测失败按不可信（与 manager fail-closed 一致）。
+    """
+    from local_webpage_access.platform_detect import PLATFORM_WSL, detect_platform
+
+    try:
+        if detect_platform() != PLATFORM_WSL:
+            return True
+        from local_webpage_access.wsl_network import (
+            MODE_MIRRORED,
+            probe_networking_mode_light,
+        )
+
+        return probe_networking_mode_light() == MODE_MIRRORED
+    except Exception:  # noqa: BLE001 — 自检失败不阻断 connection-info 输出
+        return False
+
+
 def _collect_connection_info(workspace: str) -> dict[str, Any]:
     """汇总连接信息与配置自检结果。"""
     from local_webpage_access.agent.contracts import AGENT_CONTRACT_VERSION
@@ -82,6 +104,7 @@ def _collect_connection_info(workspace: str) -> dict[str, Any]:
             "bindHost": bind_host,
             "port": port,
             "loopbackReachable": loopback_reachable,
+            "loopbackIdentityTrusted": _loopback_identity_trusted_hint(),
         },
         "agent": {
             "allowedSourceRoots": [str(p) for p in config.agent.allowedSourceRoots],
@@ -128,6 +151,12 @@ def agent_connection_info(
         + ("回环可达" if mgr["loopbackReachable"] else "回环不可达——请把 managerHost 改为 0.0.0.0 或 127.0.0.1")
         + "）"
     )
+    if not mgr["loopbackIdentityTrusted"]:
+        typer.echo(
+            "loopbackIdentityTrusted: false——WSL NAT（或网络模式探测失败）下回环无法证明"
+            "本机身份，Agent M1 通道与 lwa mcp 均被 403 permission_denied 暂停；"
+            "切换 WSL mirrored 网络后重启 manager 可恢复，管理 API 携带 token 仍可用"
+        )
     roots = info["agent"]["allowedSourceRoots"]
     typer.echo(
         "allowedSourceRoots: " + (", ".join(roots) if roots else "(空——server_directory 源将全部被拒绝)")

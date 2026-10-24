@@ -1374,7 +1374,8 @@ def test_node_system_deps_rendered_before_install(workspace) -> None:
     manifest.systemDeps = ["python3", "make", "g++"]
     out = generate_dockerfile(manifest, workspace)
     text = out.read_text(encoding="utf-8")
-    assert "RUN apk add --no-cache python3 make g++" in text
+    # BUG-988：默认国内源带 apkMirror 时，apk 安装与仓库主机替换在同一 RUN 内。
+    assert "apk add --no-cache python3 make g++" in text
     assert text.index("apk add") < text.index("RUN npm ci")
 
 

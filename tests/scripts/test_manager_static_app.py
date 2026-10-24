@@ -878,6 +878,8 @@ const ctx = Object.assign({{}}, state, {{
   requireToken: function () {{}},
   refresh: capturedRoot.methods.refresh,
   noteLoadError: capturedRoot.methods.noteLoadError,
+  // ADJ-056：bootstrap 会调用 loadBuildProxy，测试 ctx 必须同步绑定
+  loadBuildProxy: capturedRoot.methods.loadBuildProxy,
   openDetail: function () {{}},
 }});
 

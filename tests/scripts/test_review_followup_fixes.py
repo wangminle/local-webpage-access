@@ -317,7 +317,7 @@ def test_node_container_saves_system_deps_before_npm(workspace, registry) -> Non
     )
     assert updated.systemDeps == ["python3", "make", "g++"]
     text = generate_dockerfile(updated, workspace).read_text(encoding="utf-8")
-    apk_at = text.index("RUN apk add --no-cache python3 make g++")
+    apk_at = text.index("apk add --no-cache python3 make g++")
     npm_at = text.index("RUN npm ci")
     hook_at = text.index("RUN echo after-install")
     assert apk_at < npm_at < hook_at
@@ -356,7 +356,7 @@ def test_configure_cli_node_system_deps_match_skill_example(
     saved = InstanceManifest.load(workspace.app_manifest_path("demo"))
     assert saved.systemDeps == ["python3", "make", "g++"]
     text = generate_dockerfile(saved, workspace).read_text(encoding="utf-8")
-    assert text.index("RUN apk add --no-cache python3 make g++") < text.index("RUN npm ci")
+    assert text.index("apk add --no-cache python3 make g++") < text.index("RUN npm ci")
 
 
 def test_non_node_python_container_still_rejects_system_deps(workspace, registry) -> None:

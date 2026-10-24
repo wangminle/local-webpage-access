@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover
 from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest
 from local_webpage_access.paths import Workspace, resolve_source_workdir
+from local_webpage_access.security import is_os_metadata_name
 
 log = get_logger("compose")
 
@@ -81,7 +82,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-{build_args_block}    container_name: lwa-{instance_id}
+{build_extra_hosts_block}{build_args_block}    container_name: lwa-{instance_id}
 {user_block}    ports:
       - {ports_line}
     env_file:
@@ -157,17 +158,45 @@ def container_data_paths(source_dir: Path, manifest: InstanceManifest) -> list[s
     return ["/app/data", "/app/runtime/data"]
 
 
-def _build_args_block(manifest: InstanceManifest) -> str:
-    """issue #39 / BUG-681：compose build.args 写入字面值，避免宿主环境与 $ 二次展开。"""
+def _build_args_block(manifest: InstanceManifest, config: Config | None = None) -> str:
+    """issue #39 / BUG-681：compose build.args 写入字面值，避免宿主环境与 $ 二次展开。
+
+    工作区构建代理先写入，实例 ``buildEnv`` 后写入，因此实例显式设置的同名变量优先。
+    这些值只作为构建参数，不进入容器运行环境。
+
+    BUG-968 / BUG-969：代理走 Docker 内置代理构建参数（无需 Dockerfile 声明
+    ARG，也不会留在镜像历史）；写入的是**容器视角**地址——宿主机回环代理已
+    改写为 ``host.docker.internal``（与 ``_build_extra_hosts_block`` 配套）。
+    """
+    from local_webpage_access.build_proxy import overlay_build_env
     from local_webpage_access.instance_settings import effective_build_env
 
-    env = effective_build_env(manifest)
+    env: dict[str, str] = {}
+    if config is not None:
+        env.update(config.buildProxy.container_proxy_env())
+    env = overlay_build_env(env, effective_build_env(manifest))
     if not env:
         return ""
     lines = ["      args:"]
     for key, value in env.items():
         lines.append(f"        {key}: {_compose_literal_scalar(value)}")
     return "\n".join(lines) + "\n"
+
+
+def _build_extra_hosts_block(config: Config | None = None) -> str:
+    """BUG-968：回环代理改写为 host.docker.internal 后，把它映射到宿主网关。
+
+    Docker Desktop 原生解析该名；Linux 需要 ``host-gateway`` 映射（Docker
+    20.10+ 支持）。仅在代理启用且指向宿主机回环时注入。
+    """
+    if config is None:
+        return ""
+    proxy = config.buildProxy
+    if not proxy.proxy_env() or not proxy.uses_loopback_host():
+        return ""
+    from local_webpage_access.config import HOST_GATEWAY_NAME
+
+    return f'      extra_hosts:\n        - "{HOST_GATEWAY_NAME}:host-gateway"\n'
 
 
 def _compose_literal_scalar(value: str) -> str:
@@ -285,7 +314,8 @@ def generate_compose(
         env_local_block=_ENV_LOCAL_BLOCK,
         extra_environment=extra_environment,
         user_block=user_block,
-        build_args_block=_build_args_block(manifest),
+        build_args_block=_build_args_block(manifest, config),
+        build_extra_hosts_block=_build_extra_hosts_block(config),
     )
     # WBS-25.03/04/05：自检生成的 compose 是否含 critical 安全问题
     # （模板本身安全；此检查防止模板被改动或 skill 覆盖后引入风险）。
@@ -347,6 +377,10 @@ def _find_instance_sqlite_py(scan_root: Path) -> Path | None:
                     continue
                 stack.append((entry, depth + 1))
                 continue
+            # BUG-991：``._db.py`` 的 suffix 也是 .py，且 ``.`` 排序在前会被
+            # min() 优先选中；AppleDouble 元数据不得进入候选。
+            if is_os_metadata_name(entry.name):
+                continue
             if entry.suffix != ".py" or entry.is_symlink():
                 continue
             try:
@@ -384,6 +418,10 @@ def _unique_flask_constructor_file(scan_root: Path) -> Path | None:
                 if entry.name.lower() in skip or entry.name.startswith("."):
                     continue
                 stack.append((entry, depth + 1))
+                continue
+            # BUG-991：AppleDouble ``._*.py`` 含 NUL 字节，混入拼接文本会让
+            # ast.parse 失败、挂载证明整体返回 None（持久化挂载静默丢失）。
+            if is_os_metadata_name(entry.name):
                 continue
             if entry.suffix != ".py" or entry.is_symlink():
                 continue
@@ -488,6 +526,9 @@ def _seed_instance_dir(host_dir: Path, source_instance: Path | None) -> None:
     for src in source_instance.rglob("*"):
         if not src.is_file() or src.is_symlink():
             continue
+        # BUG-991：AppleDouble ``._*`` / .DS_Store 不种进持久化目录。
+        if is_os_metadata_name(src.name):
+            continue
         rel = src.relative_to(source_instance)
         if any(part == ".." for part in rel.parts):
             continue
@@ -523,6 +564,10 @@ def _scan_existing_db_files(host_data_dir: Path) -> list[Path]:
     candidates: list[Path] = []
     for entry in sorted(host_data_dir.iterdir()):
         if not entry.is_file():
+            continue
+        # BUG-991：``._bookshelf.db``（AppleDouble）非空时会与真库并列成多个
+        # 候选，把本应「唯一非空候选」的决策误判成 fail-closed。
+        if is_os_metadata_name(entry.name):
             continue
         name = entry.name.lower()
         if name.endswith(("-wal", "-shm")):

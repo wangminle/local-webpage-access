@@ -39,6 +39,25 @@ from local_webpage_access.models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _direct_build_queue(monkeypatch):
+    """BUG-990 后 ``_try_host_with_fallback`` 经 BuildQueue 登记执行。
+
+    本文件用 MagicMock config/registry 聚焦 Gate-C 验证/诊断语义；队列编排
+    本身由 test_build_queue.py 与 test_bug990_start_build_cancel.py 覆盖，
+    此处以直通替身保持既有语义。
+    """
+    from local_webpage_access import build_queue
+
+    class _DirectQueue:
+        def run(self, instance_id, builder, **kwargs):
+            return builder(instance_id)
+
+    monkeypatch.setattr(
+        build_queue, "get_build_queue", lambda config, registry: _DirectQueue()
+    )
+
+
 # ---- C.01：能力契约模型 -----------------------------------------------------
 
 

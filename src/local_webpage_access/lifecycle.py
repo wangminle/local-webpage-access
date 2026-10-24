@@ -35,6 +35,7 @@ from local_webpage_access.logging import get_logger
 from local_webpage_access.models import InstanceManifest, Status
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
+from local_webpage_access.security import is_os_metadata_name
 
 log = get_logger("lifecycle")
 
@@ -545,10 +546,40 @@ def _try_host_with_fallback(
     # C.R04：Prepare 阶段快照--在 attempt 前捕获可恢复状态
     snapshot = _snapshot_attempt(workspace, registry, instance_id, manifest)
 
+    # BUG-990：start/full_rebuild 的构建同样经 BuildQueue 登记执行——否则
+    # build_tasks 无记录、docker worker PID 不落库（build_token 仅在
+    # queue.run 的 enter_build_context 中设置），进行中的首次构建对
+    # cancel-build 不可见（返回 noop、停不掉 compose 进程）。登记口径与
+    # rebuild_instance 的 _builder 一致；取消时 queue.run 抛 LifecycleError，
+    # 不进下方 (HostingError, DockerError) 回滚/降级链，直接上抛。
+    from local_webpage_access.build_queue import get_build_queue
+
+    def _make_builder(call: Any) -> Any:
+        def _builder(iid: str) -> InstanceManifest:
+            from local_webpage_access.build_sources import (
+                clear_build_owner,
+                mark_build_owner,
+            )
+
+            mark_build_owner(
+                workspace, iid, owner="manual", reason="lwa start / 用户发起"
+            )
+            try:
+                return call(iid)
+            finally:
+                clear_build_owner(workspace, iid)
+
+        return _builder
+
+    queue = get_build_queue(config, registry)
+
+    def _host_top1(iid: str) -> InstanceManifest:
+        return host_fn(workspace, config, registry, iid)
+
     # 尝试 top-1
     attempt_id = f"attempt-{instance_id}-0"
     try:
-        return host_fn(workspace, config, registry, instance_id)
+        return queue.run(instance_id, _make_builder(_host_top1))
     except (HostingError, DockerError) as exc:
         # C.R05：从异常 context 提取副作用记录
         exc_context = getattr(exc, "context", {}) or {}
@@ -775,16 +806,18 @@ def _try_host_with_fallback(
             )
             # C.R04：fallback attempt 前也做快照
             fb_snapshot = _snapshot_attempt(workspace, registry, instance_id, manifest)
-            try:
+
+            def _host_fallback(iid: str, _plan: dict = plan_dict) -> InstanceManifest:
                 return _apply_plan_and_host(
-                    workspace,
-                    config,
-                    registry,
-                    instance_id,
-                    manifest,
-                    plan_dict,
-                    host_fn,
+                    workspace, config, registry, iid, manifest, _plan, host_fn
                 )
+
+            try:
+                return queue.run(instance_id, _make_builder(_host_fallback))
+            except LifecycleError:
+                # BUG-990：取消/排队超时不视为候选失败——直接上抛，
+                # 不回滚、不继续尝试后续 fallback 候选。
+                raise
             except Exception as fallback_exc:  # noqa: BLE001
                 # CHK-192/P1：fallback 候选的 DockerError 同样需要捕获；
                 # 评审-组2：OSError/sqlite/pydantic 等非业务异常也不得炸穿
@@ -892,7 +925,9 @@ def _compute_source_fingerprint(app_path: str | None) -> str:
         dirs[:] = sorted(d for d in dirs if d not in skip_dirs)
         root_path = Path(root)
         for fname in sorted(files):
-            if fname in skip_files:
+            # BUG-991：与 folder_source.compute_source_hash 同口径，
+            # AppleDouble ``._*`` 不参与指纹，避免元文件导致无谓重建。
+            if fname in skip_files or is_os_metadata_name(fname):
                 continue
             fpath = root_path / fname
             if fpath.is_symlink() or not fpath.is_file():
@@ -977,18 +1012,68 @@ def _compute_build_config_fingerprint(
     return h.hexdigest()
 
 
+# BUG-992：v3 起运行指纹纳入 docker/.env.local（业务环境文件）——其存在、内容
+# 变化与删除都须触发 runtime recreate（compose stop/start 不会重读 env_file）。
+# 不做 v2→v3 静默迁移：v2 及更早的基线从未记录 .env.local，无法证明运行中容器的
+# 环境与当前文件一致，静默迁移会把用户在升级前对 .env.local 的修改/删除吞掉
+# （基线被推进而新值始终不注入）。存量实例升级后首次 start/restart/recover 会有
+# 一次轻量 force-recreate（不重建镜像、保留数据卷与端口），随后写入 v3 基线。
+_RUNTIME_CONFIG_HASH_VERSION = 3
+
+
+def _runtime_compose_bytes(raw: bytes) -> bytes:
+    """BUG-976：运行指纹只覆盖运行配置——剔除 Compose ``build`` 段。
+
+    ``build.args`` / ``build.extra_hosts``（含工作区构建代理）只影响镜像构建，
+    仅修改构建代理不应导致下一次 start/restart/recover 重建应用容器。
+    端口、环境、卷等运行字段变化仍须触发 recreate。解析失败或非映射结构时
+    退回原始字节（保守：无法识别结构时任何变化都视为运行配置变化）。
+    """
+    import yaml
+
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return raw
+    if not isinstance(data, dict):
+        return raw
+    services = data.get("services")
+    if isinstance(services, dict):
+        for service in services.values():
+            if isinstance(service, dict):
+                service.pop("build", None)
+    return yaml.safe_dump(data, sort_keys=True, allow_unicode=True).encode("utf-8")
+
+
 def _compute_runtime_config_fingerprint(
     compose_path: Path | None,
     env_path: Path | None,
+    env_local_path: Path | None = None,
+    *,
+    legacy: bool = False,
 ) -> str:
-    """CHK-252：Compose + .env 的运行时指纹（变更时 compose recreate，不 rebuild）。"""
+    """CHK-252：Compose + .env 的运行时指纹（变更时 compose recreate，不 rebuild）。
+
+    BUG-976：Compose 侧只哈希运行段（剔除 ``build``），构建参数变化不触发
+    容器重建。BUG-992：传入 ``env_local_path`` 时（v3 口径）把 ``.env.local``
+    字节一并纳入——业务环境文件的创建/修改/删除都改变指纹，文件缺失哈希为
+    ``<missing>`` 哨兵。与 ``.env`` 同口径按字节哈希，日志只暴露字段名。
+    不传 ``env_local_path`` 保持 v2 口径（仅供旧基线校验），``legacy`` 只供
+    BUG-977 校验存量原始字节指纹。
+    """
+    entries: list[tuple[str, Path | None]] = [("compose", compose_path), ("env", env_path)]
+    if env_local_path is not None:
+        entries.append(("env-local", env_local_path))
     h = hashlib.sha256()
-    for label, path in [("compose", compose_path), ("env", env_path)]:
+    for label, path in entries:
         h.update(label.encode("utf-8"))
         h.update(b"\0")
         if path and isinstance(path, Path) and path.is_file():
             try:
-                h.update(path.read_bytes())
+                content = path.read_bytes()
+                if label == "compose" and not legacy:
+                    content = _runtime_compose_bytes(content)
+                h.update(content)
             except OSError:
                 h.update(b"<read-error>")
         else:
@@ -1022,18 +1107,20 @@ def _compute_deployment_fingerprints(
     compose_path = None
     dockerfile_path = None
     env_path = None
+    env_local_path = None
     if manifest.container:
         if manifest.container.composePath:
             compose_path = Path(manifest.container.composePath)
         if manifest.container.dockerfilePath:
             dockerfile_path = Path(manifest.container.dockerfilePath)
         env_path = workspace.app_env_path(manifest.id)
+        env_local_path = workspace.app_env_local_path(manifest.id)
     config_hash = _compute_config_fingerprint(compose_path, dockerfile_path, env_path)
     build_hash = _compute_build_config_fingerprint(
         dockerfile_path,
         system_deps=list(getattr(manifest, "systemDeps", None) or []),
     )
-    runtime_hash = _compute_runtime_config_fingerprint(compose_path, env_path)
+    runtime_hash = _compute_runtime_config_fingerprint(compose_path, env_path, env_local_path)
 
     # image fingerprint
     image_id = ""
@@ -1046,6 +1133,7 @@ def _compute_deployment_fingerprints(
         "configHash": config_hash,
         "buildConfigHash": build_hash,
         "runtimeConfigHash": runtime_hash,
+        "runtimeConfigHashVersion": _RUNTIME_CONFIG_HASH_VERSION,
         "imageId": image_id,
     }
 
@@ -1078,6 +1166,8 @@ def _deployed_action(
         )
         return "none", []
 
+    # 快照盘上生成物：full_rebuild 决策时恢复旧状态用，runtime_recreate 的补偿
+    # （hosting._recreate_restore_previous）也依赖这份 .prev 快照拉起旧容器。
     rebuild_txn.snapshot_generated(workspace, instance_id)
     artifacts_missing = not (
         workspace.app_compose_path(instance_id).is_file()
@@ -1087,6 +1177,7 @@ def _deployed_action(
         # BUG-382：生成物缺失说明部署状态已不完整（镜像也未必存在），保持完整重建语义，
         # 不因重渲染而退化为仅 up。
         return "full_rebuild", ["generatedArtifacts"]
+    stored_fps = getattr(manifest, "deploymentFingerprints", None)
     result = converge_generated_artifacts(workspace, config, manifest)
     if result.manual_overwritten:
         with contextlib.suppress(Exception):
@@ -1098,10 +1189,21 @@ def _deployed_action(
     if not result.rendered:
         return "full_rebuild", ["hostPort"]
     current_fps = _compute_deployment_fingerprints(workspace, manifest)
-    stored_fps = getattr(manifest, "deploymentFingerprints", None)
+    # BUG-992：v3 之前的运行基线不含 .env.local，不做静默迁移——旧基线与 v3
+    # 当前值必然不同，走一次轻量 runtime_recreate 后由部署流程写入 v3 基线。
     action, changed_fields = _fingerprint_change_action(stored_fps, current_fps)
     if action == "full_rebuild":
         rebuild_txn.restore_generated(workspace, instance_id)
+    elif action == "none":
+        # 仅安全的无变化路径就地同步基线；真实变化在部署成功后由已有流程登记指纹。
+        # BUG-989：converge 自身改写生成物（如仅 buildProxy 变化，决策哈希不含
+        # build 段 → action 仍为 none）时，须同步 configHash 基线，否则下次 start
+        # 会把 before != stored 误判为手工修改。真手改（manual_overwritten）与
+        # 「盘=渲染值≠基线」场景 result.baseline_advanced 为 False，基线不动。
+        if stored_fps and result.baseline_advanced:
+            manifest.deploymentFingerprints = {**stored_fps, "configHash": current_fps["configHash"]}
+            manifest.save(workspace.app_manifest_path(instance_id))
+            log.info("实例 %s 生成物内容已按配置更新，configHash 基线已同步", instance_id)
     return action, changed_fields
 
 

@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.9.13 当前实际可用的接入方式。**
+> **状态：本文描述 V0.9.14 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -46,7 +46,7 @@ token 由 LWA 工作区管理员提供，存放于服务器工作区 `run/manage
 | 本机 loopback | 写方法（POST/PATCH/DELETE） | **不免**：非浏览器客户端无 token 会得到 `403 csrf_forbidden`（浏览器同源请求除外） |
 | 局域网其他机器 | 任何方法 | **全部需要 token**，缺失/无效返回 `401 unauthorized` |
 
-注意：本机免 token 读仅是调试便利，**不等于**"本机进程天然拥有管理权限"；本机脚本写请求同样要带 token。
+注意：本机免 token 读仅是调试便利，**不等于**"本机进程天然拥有管理权限"；本机脚本写请求同样要带 token。**WSL NAT 例外（BUG-980）**：WSL NAT 模式下回环连接可能来自 Windows 回环转发、无法证明本机身份，回环免 token 豁免整体停用——在 WSL NAT 上所有请求（含 GET）都须携带 token。**Agent 专用通道同口径（BUG-983）**：回环身份不可信时 `/api/agent/v1/*` 与 `lwa mcp` stdio 桥整体暂停，即使携带有效 token 也返回 `403 permission_denied`——M1 没有「仅凭 token」的远程通道（远程主体属 M2）；`lwa agent connection-info` 的 `manager.loopbackIdentityTrusted` 会提前告知该状态。
 
 ### 3.4 token 会自动轮换
 
@@ -161,7 +161,7 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 
 > 接入前先装 MCP extra：`pip install 'local-webpage-access[mcp]'`（这是安装步骤不是排错步骤——缺它时 `lwa mcp` 无法启动，MCP 客户端只见「服务器无响应」；stderr 里的 `lwaMcpFatal` JSON 行可 grep 定位，`lwa doctor` 的 mcp_dependency 检查也会报出）。
 
-面向**与 LWA 同机运行**的 Agent。鉴权规则：仅接受本机回环连接（127.0.0.1 / ::1，Host 头为本机名），非回环来源一律 `403 permission_denied`（远程主体属 M2）；**回环同样必须携带有效管理 token**（仅 `Authorization: Bearer` 或 `X-LWA-Token` 头，无 `?token=` 通道，缺失/无效 → `401 unauthenticated`）。token 由管理员在服务器本机用 `lwa manager token` 查看后提供给 Agent。
+面向**与 LWA 同机运行**的 Agent。鉴权规则：仅接受本机回环连接（127.0.0.1 / ::1，Host 头为本机名），非回环来源一律 `403 permission_denied`（远程主体属 M2）；**回环同样必须携带有效管理 token**（仅 `Authorization: Bearer` 或 `X-LWA-Token` 头，无 `?token=` 通道，缺失/无效 → `401 unauthenticated`）。token 由管理员在服务器本机用 `lwa manager token` 查看后提供给 Agent。**WSL NAT（或网络模式探测失败）下回环身份不可信，Agent 通道整体暂停（BUG-983）**：有效 token 也返回 `403 permission_denied`——M1 仅本机、没有凭 token 的远程通道；切换 WSL mirrored 网络后重启 manager 可恢复，期间请改用管理 API（携带 token）。
 
 **接入步骤：**
 
@@ -200,7 +200,7 @@ lwa configure <id> --build-env K=V  # 实例级构建环境变量
 | code | HTTP | 可重试 | 含义 |
 | --- | --- | --- | --- |
 | `unauthenticated` | 401 | 否 | 凭据无效或缺失（回环同样需 token） |
-| `permission_denied` | 403 | 否 | 非回环来源（M1 仅本机）或越权操作 |
+| `permission_denied` | 403 | 否 | 非回环来源（M1 仅本机）、回环身份不可信（WSL NAT，BUG-983）或越权操作 |
 | `revision_conflict` | 409 | 否 | 实例 revision 与期望不符 |
 | `idempotency_conflict` | 409 | 否 | 幂等键复用但请求内容不同 |
 | `source_not_allowed` | 400 | 否 | 部署来源不在允许范围 |

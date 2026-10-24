@@ -112,6 +112,7 @@
   （管理页新标签等）；**查询参数会进入浏览器历史 / Referer / 反代 access log**，属有意保留的便利通道，日常优先用 Header。详见 [管理页鉴权](manager-page.md#鉴权)。
 * **回环写请求 CSRF（BUG-295）**：本机 `GET`/`HEAD`/`OPTIONS` 仍可免 token；无有效 token 的写请求须 `Sec-Fetch-Site: same-origin` 或匹配的 `Origin`，否则 403 `csrf_forbidden`。
 * **DNS rebinding Host 校验（BUG-576）**：loopback 免鉴权判定 = 客户端地址为回环 **且** Host 头主机名属于 `127.0.0.1` / `localhost` / `::1`；攻击者域名解析到 127.0.0.1 时浏览器虽视为同源，也无法借免 token 路径发起写操作（缺 Host 头的非浏览器客户端放行）。
+* **WSL NAT 回环身份不可信（BUG-980）**：Windows portproxy → `127.0.0.1` 的回环转发会丢失真实来源，peer/Host/XFF/Origin 均不能证明本机身份。WSL NAT（或网络模式探测失败，fail-closed）时回环免 token 豁免整体停用——所有 `/api/*` 须有效 token，`/api/health` 的 `workspaceRoot` 凭 token 解锁（CLI 归属探测自动携带工作区 token）；`pick-directory` 等本机专属能力在该模式下不可用。Agent M1 通道（`/api/agent/v1/*`、`lwa mcp`）消费同一信任状态：不可信时整体 `permission_denied`，有效 token 不解锁（BUG-983）——M1 没有「仅凭 token」的远程通道。信任判定在 manager 启动时以单条 `wslinfo --networking-mode` 轻量探测完成并施加短超时（BUG-982），探测失败即 fail-closed，不以完整网络诊断阻塞启动。WSL mirrored 与非 WSL 平台维持既有豁免。
 * **原生目录选择（IMP-051）**：`POST /api/pick-directory` **仅 loopback** 客户端可用（即使持有有效 token，局域网也 403 `loopback_required`），防止远程触发宿主机 GUI 对话框。
 
 ## 默认资源限制

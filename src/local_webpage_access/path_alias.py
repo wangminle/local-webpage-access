@@ -940,7 +940,8 @@ def _append_lwa_build_hint(
     守卫方案 B 指向应用侧改造（改源码 / 本地重建）；对 shared-static 且
     stack 检出 Vite 的实例，LWA 自身即可完成「构建期注入 base」——
     manifest ``buildEnv`` 或 ``entry.build`` 注入 + rebuild；
-    环境变量方式要求项目读取 VITE_BASE。仅提示，不改变拒绝判定；非 Vite 原样返回
+    环境变量方式要求项目读取 VITE_BASE / BASE_URL / PUBLIC_URL 之一
+    （BUG-984 起三个常见键同值注入）。仅提示，不改变拒绝判定；非 Vite 原样返回
     （错误文案零变化）。
 
     BUG-640：``buildBaseFromAlias`` 已开启时，构建期 ``effective_build_env()``

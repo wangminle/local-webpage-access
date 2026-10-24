@@ -95,6 +95,9 @@ _CHINA_PIP = "https://mirrors.aliyun.com/pypi/simple/"
 _CHINA_NPM = "https://registry.npmmirror.com"
 _CHINA_NODE_DIST = "https://mirrors.aliyun.com/nodejs-release"
 _CHINA_APT = "mirrors.aliyun.com"
+# BUG-988：alpine 的 apk 仓库镜像（替换 /etc/apk/repositories 的
+# dl-cdn.alpinelinux.org 主机段）；实测官方 CDN 慢网络下 39 包 30 分钟装不完。
+_CHINA_APK = "mirrors.aliyun.com"
 # issue #35：阿里主源失败后切清华，再回落官方。清华在国内大包场景实测更稳。
 _CHINA_APT_FALLBACKS = ("mirrors.tuna.tsinghua.edu.cn", "deb.debian.org")
 # issue #18：pip || 切源链——阿里（主源）→ 官方 PyPI → 腾讯云。
@@ -134,6 +137,9 @@ class BuildMirrors(BaseModel):
     aptFallbacks: list[str] | None = None
     aptRetries: int = Field(default=2, ge=0, le=20)
     aptTimeout: int = Field(default=30, ge=1, le=600)
+    # BUG-988：alpine apk 仓库镜像主机（如 mirrors.aliyun.com）；空 = 不替换
+    # /etc/apk/repositories。china 预置默认阿里，preset=none/enabled=false 不注入。
+    apkMirror: str | None = None
     # DEV-146（S3-07）：每个源候选从 update 到下载完成的总时间预算（秒）。
     # aptTimeout 只是连接/无数据超时，Retries 叠加多 IP 解析仍可拖到数分钟；
     # 预算到点即放弃当前源并 || 切下一个。0 = 不限（默认，渲染结果与旧版一致）。
@@ -166,6 +172,7 @@ class BuildMirrors(BaseModel):
                 aptRetries=self.aptRetries,
                 aptTimeout=self.aptTimeout,
                 aptBudget=self.aptBudget,
+                apkMirror=None,
             )
         fallbacks = (
             [u.rstrip("/") for u in self.pipFallbacks]
@@ -192,7 +199,124 @@ class BuildMirrors(BaseModel):
             aptRetries=self.aptRetries,
             aptTimeout=self.aptTimeout,
             aptBudget=self.aptBudget,
+            apkMirror=self.apkMirror or _CHINA_APK,
         )
+
+
+# BUG-968：构建容器访问宿主机回环代理时改用的宿主网关名（compose 注入
+# host-gateway 映射；Docker Desktop 原生解析该名）。
+HOST_GATEWAY_NAME = "host.docker.internal"
+
+
+class BuildProxy(BaseModel):
+    """工作区构建代理。只作用于容器内安装和宿主机前端安装。
+
+    ``enabled`` 为 false 或 ``url`` 为空时，构建保持原有直连/镜像源行为。
+    已运行容器的出站流量不使用这里的地址。基础镜像拉取由 Docker daemon
+    执行，不走这里的地址（需另配 daemon/Desktop 代理，BUG-971）。
+    """
+
+    enabled: bool = False
+    url: str = ""
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        from urllib.parse import urlparse
+
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if any(ch.isspace() for ch in text):
+            raise ValueError("代理地址不能包含空白")
+        parsed = urlparse(text)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(
+                "代理地址须以 http:// 或 https:// 开头。"
+                "默认构建里的 pip 没有 SOCKS 依赖，不能使用 socks5/socks5h"
+            )
+        if not parsed.hostname:
+            raise ValueError("代理地址缺少主机名")
+        # BUG-972：parsed.port 对非数字/越界端口抛 ValueError——不触发它，
+        # 非法端口会保存成功、随后构建在 redacted_url 处炸在 Docker 执行之前。
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("代理地址端口非法：须为 1-65535 的数字") from exc
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError(f"代理地址端口越界（须为 1-65535）：{port}")
+        return text
+
+    @model_validator(mode="after")
+    def _enabled_needs_url(self) -> BuildProxy:
+        if self.enabled and not self.url:
+            raise ValueError("启用构建代理时必须填写代理地址")
+        return self
+
+    def uses_loopback_host(self) -> bool:
+        """代理主机是否为宿主机回环（127.0.0.0/8、::1、localhost）。"""
+        if not self.url:
+            return False
+        from urllib.parse import urlparse
+
+        host = (urlparse(self.url).hostname or "").strip().lower()
+        if host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    def container_url(self) -> str:
+        """构建容器内使用的代理地址（BUG-968）。
+
+        构建容器里的 127.0.0.1 指向容器自身，宿主机回环代理必须改指
+        ``host.docker.internal``（compose 同时注入 host-gateway 映射）。
+        凭据、端口与其余部分原样保留；非回环地址不改动。
+        """
+        from urllib.parse import urlparse, urlunparse
+
+        if not self.url or not self.uses_loopback_host():
+            return self.url
+        parsed = urlparse(self.url)
+        userinfo = ""
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo += f":{parsed.password}"
+            userinfo += "@"
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunparse(parsed._replace(netloc=f"{userinfo}{HOST_GATEWAY_NAME}{port}"))
+
+    def proxy_env(self) -> dict[str, str]:
+        """构建子进程和镜像构建参数。未启用时返回空字典。"""
+        return self._proxy_env(self.url)
+
+    def container_proxy_env(self) -> dict[str, str]:
+        """镜像构建容器视角的代理变量（BUG-968：回环地址已改写）。"""
+        return self._proxy_env(self.container_url())
+
+    def _proxy_env(self, url: str) -> dict[str, str]:
+        if not self.enabled or not url:
+            return {}
+        bypass = "localhost,127.0.0.1,::1"
+        return {
+            "HTTP_PROXY": url,
+            "HTTPS_PROXY": url,
+            "http_proxy": url,
+            "https_proxy": url,
+            "NO_PROXY": bypass,
+            "no_proxy": bypass,
+        }
+
+    def redacted_url(self) -> str:
+        """日志用地址，去掉用户名和密码。"""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.url)
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{host}{port}"
 
 
 class AgentConfig(BaseModel):
@@ -238,6 +362,14 @@ class Config(BaseModel):
     # CHK-422：宿主前端/Node 构建单步超时（秒）。excalidraw 级 monorepo 首次
     # install 在 registry 抖动时 600s 不够；与容器构建 1800s 对齐。
     hostBuildTimeout: int = Field(default=1800, ge=60, le=7200)
+    # BUG-967（CHK-485 修订）：宿主 Node 不在项目 engines.node 范围时，默认
+    # 明确阻断宿主构建（不默认忽略 engines）；设为 true 是显式选择受控忽略
+    # （yarn 1 追加 --ignore-engines；pnpm 解除项目 engine-strict=true），
+    # 过旧 Node 缺真实 API 的风险由使用者承担。容器构建不受影响。
+    nodeEnginesIgnore: bool = False
+    # BUG-988：容器镜像构建超时（秒）。慢网络宿主（官方 apk CDN 极慢）或
+    # HedgeDoc 级大依赖项目 1800s 不够时可调高；与 hostBuildTimeout 解耦。
+    buildTimeout: int = Field(default=1800, ge=60, le=21600)
     # S3-01 / DEV-157：镜像版本留档——每个实例保留最近 N 个成功构建的镜像
     # 标签（lwa-<id>-app:b<build_id>）与生成物快照；超出的由部署成功后 GC 清理。
     # 正在使用的镜像与上一个可用版本永远不被 GC 删除。
@@ -248,6 +380,8 @@ class Config(BaseModel):
     defaultResourceLimits: ResourceLimits = Field(default_factory=ResourceLimits)
     staticRateLimit: StaticRateLimit = Field(default_factory=StaticRateLimit)
     buildMirrors: BuildMirrors = Field(default_factory=BuildMirrors)
+    # 构建代理：管理页「构建代理」写入。空或未启用时不改变构建网络。
+    buildProxy: BuildProxy = Field(default_factory=BuildProxy)
     lanIpStrategy: str = "auto"
     manualLanIp: str | None = None
     # ---- HTTPS 首版交付（2026-09-18 WBS / CHK-352）---------------------------
@@ -612,6 +746,14 @@ buildConcurrency: 1
 # 在 registry 抖动时 600s 不够，默认与容器构建对齐为 1800
 hostBuildTimeout: 1800
 
+# 宿主 Node 不在项目 engines.node 范围时：默认阻断宿主构建并提示兼容版本；
+# 设为 true 是显式选择受控忽略 engines（仅 yarn 1 / pnpm 可控），风险自担
+# nodeEnginesIgnore: false
+
+# 容器镜像构建超时（秒）。慢网络宿主或 HedgeDoc 级大依赖项目默认 1800s
+# 不够时可调高（配合 buildMirrors.apkMirror 加速 alpine apk 层）
+# buildTimeout: 1800
+
 # 镜像版本留档（S3-01）：每个实例保留最近 N 个成功构建的镜像与生成物快照，
 # 供 `lwa versions` / `lwa rollback` 使用；部署成功后自动 GC 超出版本
 # （正在使用的镜像与上一个可用版本永不删除）
@@ -632,6 +774,15 @@ staticRateLimit:
   enabled: false
   rps: 3        # 每客户端每秒平均请求数
   burst: 6      # 令牌桶容量（瞬时突发上限）
+
+# 构建代理。enabled: true 且 url 非空时，下一次镜像构建的容器内安装命令与
+# 宿主机前端安装走该代理。已运行的应用不使用它。指向宿主机回环（127.0.0.1 等）
+# 的地址在容器内自动改用 host.docker.internal，代理须允许宿主机网络连入
+# （如开启「允许局域网连接」）。基础镜像拉取由 Docker daemon 执行，不走该代理，
+# 需要时请在 daemon/Docker Desktop 配置代理或 registry-mirrors。
+buildProxy:
+  enabled: false
+  url: ""
 
 # 容器构建镜像源（BUG-200）：默认启用国内源；海外可设 enabled: false
 # issue #18：pip 默认阿里 → 官方 → 腾讯，每源 retries 3；pipFallbacks: [] 关闭切源
@@ -665,7 +816,9 @@ logLevel: INFO
 
 __all__ = [
     "BuildMirrors",
+    "BuildProxy",
     "Config",
+    "HOST_GATEWAY_NAME",
     "PortPool",
     "ResourceLimits",
     "StaticRateLimit",

@@ -2125,6 +2125,40 @@ def test_rescan_preserves_build_env(
     assert manifest.buildEnv == {"VITE_BASE": "/voiceprint/"}
 
 
+def test_rescan_preserves_external_lan_observation(
+    importer: Importer, workspace: Workspace, tmp_path: Path
+) -> None:
+    """同形态重扫不得丢掉 externalLanObservation；是否失效由读取时的指纹判断。"""
+    from local_webpage_access.importer import apply_detection_to_manifest
+    from local_webpage_access.scanner import Scanner
+
+    zip_path = _make_static_zip(tmp_path / "demo.zip")
+    r1 = importer.import_zip(zip_path)
+    iid = r1.instance_id
+    observation = {
+        "vantage": "lan-client",
+        "protocol": "http",
+        "evidence": "page",
+        "observedAt": "2026-10-22T08:00:00Z",
+        "fingerprint": "nat|172.22.148.94|10.180.105.74",
+        "statusCode": 200,
+        "url": "http://10.180.105.74:18000",
+    }
+    mpath = workspace.app_manifest_path(iid)
+    manifest = InstanceManifest.load(mpath)
+    manifest.network.externalLanObservation = observation
+    manifest.save(mpath)
+
+    detection = Scanner().detect(workspace.app_current(iid))
+    fresh = apply_detection_to_manifest(manifest, detection, workspace)
+    assert fresh.network.externalLanObservation is not None
+    assert fresh.network.externalLanObservation["url"] == observation["url"]
+    assert fresh.network.externalLanObservation["observedAt"] == observation["observedAt"]
+    assert fresh.network.externalLanObservation["fingerprint"] == observation["fingerprint"]
+    fresh.network.externalLanObservation["url"] = "http://10.180.105.74:1"
+    assert manifest.network.externalLanObservation["url"] == observation["url"]
+
+
 # ---- BUG-469：import --path-alias 不得绕过绝对 SPA 资源硬守卫 --------------
 
 

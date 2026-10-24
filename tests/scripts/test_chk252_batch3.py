@@ -451,6 +451,47 @@ def test_fingerprint_change_action_real_compose_change_runtime_recreate(workspac
     assert fields == ["runtimeConfigHash"]
 
 
+def test_compose_build_section_change_does_not_affect_runtime_fingerprint(workspace) -> None:
+    """BUG-976：仅 Compose build 段变化（如构建代理）不得改变运行指纹。
+
+    运行指纹排除 build 段，但端口/环境/卷等运行字段变化仍须改变指纹；
+    无法按 YAML 解析时退回原始字节（保守：任何变化都视为运行变化）。
+    """
+    from local_webpage_access.lifecycle import _compute_runtime_config_fingerprint
+
+    workspace.ensure_app_dirs("fp-build-only")
+    compose = workspace.app_compose_path("fp-build-only")
+    env = workspace.app_env_path("fp-build-only")
+    env.write_text("FOO=bar\n")
+    base = (
+        "services:\n"
+        "  app:\n"
+        "    build:\n"
+        "      context: ..\n"
+        "      args:\n"
+        '        HTTP_PROXY: "http://10.0.0.1:1080"\n'
+        "    image: img\n"
+        "    ports:\n"
+        '      - "18080:8000"\n'
+    )
+    compose.write_text(base)
+    h1 = _compute_runtime_config_fingerprint(compose, env)
+
+    compose.write_text(base.replace("http://10.0.0.1:1080", "http://10.0.0.2:2080"))
+    assert _compute_runtime_config_fingerprint(compose, env) == h1
+
+    compose.write_text(base.replace('"18080:8000"', '"18081:8000"'))
+    assert _compute_runtime_config_fingerprint(compose, env) != h1
+
+    compose.write_text(base + "    mem_limit: 256m\n")
+    assert _compute_runtime_config_fingerprint(compose, env) != h1
+
+    compose.write_text("services:\n  app:\n    build: [broken\n")
+    raw_hash = _compute_runtime_config_fingerprint(compose, env)
+    compose.write_text("services:\n  app:\n    build: [broken!\n")
+    assert _compute_runtime_config_fingerprint(compose, env) != raw_hash
+
+
 def _setup_recreate_instance(workspace, registry, instance_id: str) -> None:
     workspace.ensure_app_dirs(instance_id)
     compose = workspace.app_compose_path(instance_id)

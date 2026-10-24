@@ -435,3 +435,31 @@ def test_docker_error_summary_proxy_only_on_network_failures() -> None:
     )
     assert "docker.io" in net
     assert "代理" in net or "HTTP_PROXY" in net or "构建环境" in net
+
+
+def test_docker_error_summary_proxy_diagnosis_uses_effective_build_env() -> None:
+    """配置 buildProxy 时，构建失败诊断必须看构建实际生效的 proxy_env，
+    而不是进程 os.environ——否则会误报「构建环境未设置 HTTP_PROXY/HTTPS_PROXY」。"""
+    from local_webpage_access.docker_runtime import _error_summary_with_hint
+
+    summary = _error_summary_with_hint(
+        "apk add curl: i/o timeout",
+        proxy_env={
+            "HTTP_PROXY": "http://127.0.0.1:7890",
+            "HTTPS_PROXY": "http://127.0.0.1:7890",
+        },
+    )
+    assert "127.0.0.1:7890" in summary
+    assert "未设置 HTTP_PROXY/HTTPS_PROXY" not in summary
+
+
+def test_docker_error_summary_proxy_diagnosis_defaults_to_process_env(
+    monkeypatch,
+) -> None:
+    """未配置工作区代理（proxy_env=None）时保持现有提示行为：回退读进程环境。"""
+    from local_webpage_access.docker_runtime import _error_summary_with_hint
+
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    summary = _error_summary_with_hint("apk add curl: i/o timeout")
+    assert "未设置 HTTP_PROXY/HTTPS_PROXY" in summary

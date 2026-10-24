@@ -11,6 +11,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -38,6 +39,34 @@ EXPOSURE_CANDIDATE_UNVERIFIED = "candidate-unverified"
 EXPOSURE_EXTERNALLY_VERIFIED = "externally-verified"
 EXPOSURE_UNKNOWN = "unknown"
 
+# Get-NetFirewallHyperVVMCreator 中 WSL 的常用 VMCreatorId。Name 也可能就是该 GUID。
+_WSL_VM_CREATOR_ID = "40e0ac32-46a5-438a-a0b2-2b479e8f2e90"
+# 设置行带 Name 与 VMCreatorId；规则行带 VMCreatorId。解析时只保留 WSL，不取第一条。
+# BUG-989：默认查询读 PersistentStore，mirrored 下 DefaultInboundAction 常返回
+# NotConfigured，而实际生效的 ActiveStore 为 Block。先查生效策略，旧
+# PowerShell/旧 Windows 不支持 -PolicyStore 时回退默认查询并标注来源。
+def _hyperv_firewall_query(policy_store: str | None) -> str:
+    store_arg = f" -PolicyStore {policy_store}" if policy_store else ""
+    return (
+        f"Get-NetFirewallHyperVVMSetting{store_arg} -ErrorAction Stop | ForEach-Object {{ "
+        "$id = $null; "
+        "if ($_.PSObject.Properties.Name -contains 'VMCreatorId') { $id = $_.VMCreatorId }; "
+        "if (-not $id) { $id = $_.Name }; "
+        "'S|{0}|{1}|{2}' -f $_.Name, $id, $_.DefaultInboundAction }; "
+        f"Get-NetFirewallHyperVRule{store_arg} -ErrorAction Stop | ForEach-Object {{ "
+        "'R|{0}|{1}|{2}|{3}|{4}|{5}' -f $_.VMCreatorId, $_.DisplayName, $_.Direction, "
+        "$_.Action, $_.Protocol, (($_.LocalPorts | ForEach-Object { $_ }) -join ',') }"
+    )
+
+
+HYPERV_FIREWALL_QUERY = _hyperv_firewall_query(None)
+HYPERV_FIREWALL_QUERY_ACTIVE = _hyperv_firewall_query("ActiveStore")
+# (查询, 结果中标明的策略来源)。active 在前；persistent 为不支持 -PolicyStore 的回退。
+HYPERV_FIREWALL_QUERY_CANDIDATES = (
+    (HYPERV_FIREWALL_QUERY_ACTIVE, "active"),
+    (HYPERV_FIREWALL_QUERY, "persistent"),
+)
+
 VANTAGE_GUEST = "guest"
 VANTAGE_WINDOWS_HOST = "windows-host"
 VANTAGE_LAN_CLIENT = "lan-client"
@@ -49,6 +78,9 @@ _EVIDENCE = _EVIDENCE_SUCCESS | _EVIDENCE_FAILURE
 
 _CACHE_TTL_SEC = 45.0
 _CMD_TIMEOUT_SEC = 5.0
+# BUG-982：启动路径轻量探测的单独预算——start_manager 健康等待仅 15 秒，
+# 完整采集单条命令就允许等 5 秒；这里单命令短超时，慢 guest 下也不失控。
+_LIGHT_MODE_TIMEOUT_SEC = 3.0
 _WIN11_MIN_BUILD = 22000
 _WIN11_22H2_BUILD = 22621
 
@@ -130,12 +162,15 @@ class TcpListen:
 class HyperVFirewall:
     default_inbound: str | None = None
     vm_name: str | None = None
+    # BUG-989：策略来源（active=ActiveStore 生效策略 / persistent=默认持久存储回退）。
+    policy_store: str | None = None
     rules: list[tuple[str, str, str, str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "defaultInbound": self.default_inbound,
             "vmName": self.vm_name,
+            "policyStore": self.policy_store,
             "rules": [
                 {
                     "displayName": name,
@@ -447,19 +482,69 @@ def parse_firewall_profile_text(text: str | None) -> list[tuple[str, str]]:
     return rows
 
 
+def _norm_creator(value: str | None) -> str:
+    return (value or "").strip().strip("{}").lower()
+
+
+def _is_wsl_identity(*values: str | None) -> bool:
+    """Name 为 WSL，或 Name/VMCreatorId 为 WSL 的创建者 GUID。"""
+    for value in values:
+        token = (value or "").strip()
+        if not token:
+            continue
+        if token.lower() == "wsl":
+            return True
+        if _norm_creator(token) == _WSL_VM_CREATOR_ID:
+            return True
+    return False
+
+
 def parse_hyperv_firewall_text(text: str | None) -> HyperVFirewall:
-    result = HyperVFirewall()
+    """只保留 WSL 的 Hyper-V 防火墙设置和规则。
+
+    旧格式 ``S|Name|Inbound`` / ``R|Display|...`` 仍可读。新格式带 VMCreatorId。
+    ``P|source`` 行标明策略来源（BUG-989）。存在其他 Hyper-V 组件时不采用第
+    一条，也不把无标识的规则算到 WSL 上。
+    """
+    settings: list[tuple[str, str, str | None]] = []
+    rules: list[tuple[str, tuple[str, str, str, str, str]]] = []
+    policy_store: str | None = None
     for line in (text or "").splitlines():
         parts = [p.strip() for p in line.split("|")]
         if not parts:
             continue
         kind = parts[0].upper()
-        if kind == "S" and len(parts) >= 3:
-            if result.vm_name is None:
-                result.vm_name = parts[1] or None
-                result.default_inbound = parts[2] or None
+        if kind == "P" and len(parts) >= 2:
+            policy_store = parts[1] or None
+        elif kind == "S" and len(parts) >= 4:
+            settings.append((parts[1], parts[2], parts[3] or None))
+        elif kind == "S" and len(parts) >= 3:
+            settings.append((parts[1], "", parts[2] or None))
+        elif kind == "R" and len(parts) >= 7:
+            rules.append((parts[1], (parts[2], parts[3], parts[4], parts[5], parts[6])))
         elif kind == "R" and len(parts) >= 6:
-            result.rules.append((parts[1], parts[2], parts[3], parts[4], parts[5]))
+            rules.append(("", (parts[1], parts[2], parts[3], parts[4], parts[5])))
+    wsl_settings = [item for item in settings if _is_wsl_identity(item[0], item[1])]
+
+    def _rank(item: tuple[str, str, str | None]) -> int:
+        creator = _norm_creator(item[1])
+        name = _norm_creator(item[0])
+        if creator == _WSL_VM_CREATOR_ID or name == _WSL_VM_CREATOR_ID:
+            return 0
+        return 1
+
+    chosen = sorted(wsl_settings, key=_rank)[0] if wsl_settings else None
+    foreign = [item for item in settings if not _is_wsl_identity(item[0], item[1])]
+    result = HyperVFirewall(policy_store=policy_store)
+    if chosen is not None:
+        result.vm_name = chosen[0] or None
+        result.default_inbound = chosen[2]
+    for creator, fields in rules:
+        if creator:
+            if _is_wsl_identity(creator):
+                result.rules.append(fields)
+        elif chosen is not None and not foreign:
+            result.rules.append(fields)
     return result
 
 
@@ -472,8 +557,16 @@ def build_lan_observation(
     status_code: int | None = None,
     url: str | None = None,
     observed_at: str | None = None,
+    host_port: int | None = None,
+    route_host: str | None = None,
+    config: Config | None = None,
 ) -> ExternalLanObservation:
-    """受约束的外部观测：位置/协议/证据/时间齐全，且取值来自固定枚举。"""
+    """受约束的外部观测：位置/协议/证据/时间齐全，且取值来自固定枚举。
+
+    BUG-981：提供 ``config`` 时，观测指纹按实例入口（``host_port`` /
+    ``route_host`` 对应的端口）作用域化，与 :func:`describe_instance_access`
+    读取侧口径一致；整机无关监听变化不再使观测误失效。
+    """
     if vantage not in _VANTAGES:
         raise ValueError("vantage 必须是 guest / windows-host / lan-client")
     if protocol not in _PROTOCOLS:
@@ -486,13 +579,18 @@ def build_lan_observation(
         raise ValueError("缺少当前网络快照，无法记录外部观测")
     if url:
         _observation_url_identity(url, protocol)
+    relevant_ports: frozenset[int] | None = None
+    if config is not None:
+        relevant_ports = _observation_entry_ports(
+            route_host=route_host, host_port=host_port, config=config
+        )
     stamp = observed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return ExternalLanObservation(
         vantage=vantage,
         protocol=protocol,
         evidence=evidence,
         observed_at=stamp,
-        fingerprint=snapshot_fingerprint(snapshot),
+        fingerprint=snapshot_fingerprint(snapshot, relevant_ports),
         status_code=status_code,
         url=url or None,
     )
@@ -570,17 +668,62 @@ def exposure_after_network_change(
     return exposure
 
 
-def snapshot_fingerprint(snapshot: WslNetworkSnapshot | None) -> str:
+def _observation_entry_ports(
+    *, route_host: str | None, host_port: int | None, config: Config
+) -> frozenset[int]:
+    """BUG-981：实例观测指纹绑定的入口端口基集（别名入口端口 / 实例 hostPort）。"""
+    from local_webpage_access.ports import lan_entry_port
+
+    ports: set[int] = set()
+    if host_port:
+        ports.add(int(host_port))
+    if route_host:
+        entry_port = lan_entry_port(config)
+        if entry_port:
+            ports.add(int(entry_port))
+    return frozenset(ports)
+
+
+def snapshot_fingerprint(
+    snapshot: WslNetworkSnapshot | None,
+    relevant_ports: Collection[int] | None = None,
+) -> str:
+    """网络快照指纹。
+
+    BUG-981：提供 ``relevant_ports``（实例入口相关端口基集）时，portproxy 规则
+    与 TCP 监听只计入与该入口相关的部分——规则按 listen/connect 命中基集筛选，
+    监听再按命中规则的 listen/connect 端口一跳展开后的集合筛选。整台 Windows 上
+    无关服务/短命回环端口的增删不再使本实例的外部观测误失效；自身端口关闭、
+    相关规则改动仍会使指纹变化。采集能力状态（如 ``tcp_listen`` unknown↔
+    available）始终计入指纹，保留能力不可读时的保守降级。``relevant_ports=None``
+    保持整机口径（仅测试与无实例上下文的调用使用）。
+    """
     if snapshot is None:
         return "none"
+    if relevant_ports is None:
+        rules_src = list(snapshot.portproxy_rules)
+        listens_src = list(snapshot.tcp_listens)
+    else:
+        base = {int(p) for p in relevant_ports if p}
+        rules_src = [
+            r
+            for r in snapshot.portproxy_rules
+            if r.listen_port in base or r.connect_port in base
+        ]
+        expanded = set(base)
+        for r in rules_src:
+            expanded.add(r.listen_port)
+            expanded.add(r.connect_port)
+        listens_src = [item for item in snapshot.tcp_listens if item.port in expanded]
     rules = tuple(
         sorted(
             (r.listen_address, r.listen_port, r.connect_address, r.connect_port)
-            for r in snapshot.portproxy_rules
+            for r in rules_src
         )
     )
-    listens = tuple(sorted((item.address, item.port) for item in snapshot.tcp_listens))
+    listens = tuple(sorted((item.address, item.port) for item in listens_src))
     profiles = tuple(sorted(snapshot.firewall_profiles))
+    net_profiles = tuple(sorted(snapshot.network_profiles))
     hyperv = ""
     if snapshot.hyperv_firewall:
         hyperv = (
@@ -595,6 +738,7 @@ def snapshot_fingerprint(snapshot: WslNetworkSnapshot | None) -> str:
             repr(rules),
             f"listen:{_cap_status(snapshot, 'tcp_listen')}:{listens!r}",
             f"fw:{_cap_status(snapshot, 'firewall')}:{profiles!r}",
+            f"np:{_cap_status(snapshot, 'netprofile')}:{net_profiles!r}",
             f"hv:{_cap_status(snapshot, 'hyperv_firewall')}:{hyperv}",
         ]
     )
@@ -630,6 +774,47 @@ def collect_wsl_network_snapshot(
         with _cache_lock:
             _cache = (stamp, snap)
     return snap
+
+
+def probe_networking_mode_light(
+    *,
+    runner: Runner | None = None,
+    timeout: float | None = None,
+) -> str | None:
+    """BUG-982：仅探测网络模式的轻量入口（manager 启动路径专用）。
+
+    完整快照采集串行执行十余条 Windows 互操作命令、单条超时 5 秒，慢互操作
+    下总耗时可达 15 秒以上，会耗尽 start_manager 的启动健康等待预算
+    （受控复现：三条无关 Windows 诊断各 5 秒即 15.079 秒，且此时尚未监听）。
+    启动路径的回环信任判定只需要网络模式一个证据：单跑 ``wslinfo
+    --networking-mode``（guest 内置工具，不经 Windows 互操作）并施加短超时。
+    失败/超时/未识别返回 ``None``，由调用方 fail-closed——不得在未取得
+    证据时先启用回环豁免。不读不写完整快照缓存，避免与诊断口径互相污染。
+    """
+    from local_webpage_access.platform_support import _decode_wsl_cli_output
+
+    if timeout is None:
+        timeout = _LIGHT_MODE_TIMEOUT_SEC
+    try:
+        proc = (runner or subprocess.run)(
+            ["wslinfo", "--networking-mode"],
+            capture_output=True,
+            text=False,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+    stdout = getattr(proc, "stdout", None)
+    code = getattr(proc, "returncode", 1)
+    if stdout is None or code not in (0, None):
+        return None
+    try:
+        text = _decode_wsl_cli_output(stdout)
+    except UnicodeDecodeError:
+        return None
+    mode = parse_networking_mode_text(text)
+    return None if mode == MODE_UNKNOWN else mode
 
 
 def describe_instance_access(
@@ -698,7 +883,14 @@ def describe_instance_access(
     )
     observation_stale = False
     if observation is not None:
-        current_fp = snapshot_fingerprint(snapshot)
+        # BUG-981：读取侧指纹必须与 record_lan_observation 写入侧同口径——
+        # 按本实例入口端口作用域化，整机无关监听变化不使观测误失效。
+        current_fp = snapshot_fingerprint(
+            snapshot,
+            _observation_entry_ports(
+                route_host=route_host, host_port=host_port, config=config
+            ),
+        )
         entry_mismatch = not _observation_matches_current_entry(
             observation, host_lan_url
         )
@@ -929,13 +1121,9 @@ def _gather_outputs(runner: Runner, caps: dict[str, CapabilityStatus]) -> Intero
         "firewall",
         errors,
     )
-    hyperv_firewall_text = _run_powershell(
+    hyperv_firewall_text = _run_powershell_candidates(
         runner,
-        "Get-NetFirewallHyperVVMSetting -ErrorAction Stop | ForEach-Object { "
-        "'S|{0}|{1}' -f $_.Name, $_.DefaultInboundAction }; "
-        "Get-NetFirewallHyperVRule -ErrorAction Stop | ForEach-Object { "
-        "'R|{0}|{1}|{2}|{3}|{4}' -f $_.DisplayName, $_.Direction, $_.Action, "
-        "$_.Protocol, (($_.LocalPorts | ForEach-Object { $_ }) -join ',') }",
+        list(HYPERV_FIREWALL_QUERY_CANDIDATES),
         caps,
         "hyperv_firewall",
         errors,
@@ -1025,14 +1213,58 @@ def _run_powershell(
     name: str,
     errors: dict[str, str],
 ) -> str | None:
+    return _run_first(
+        runner, [tuple(_powershell_args(command))], caps, name, errors
+    )
+
+
+def _powershell_args(command: str) -> list[str]:
     ps = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-    args = [
+    return [
         ps,
         "-NoProfile",
         "-Command",
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + command,
     ]
-    return _run_first(runner, [tuple(args)], caps, name, errors)
+
+
+def _run_powershell_capture(
+    runner: Runner, command: str
+) -> tuple[bytes | str | None, str | None]:
+    return _run_capture(runner, _powershell_args(command))
+
+
+def _run_powershell_candidates(
+    runner: Runner,
+    candidates: list[tuple[str, str]],
+    caps: dict[str, CapabilityStatus],
+    name: str,
+    errors: dict[str, str],
+) -> str | None:
+    """依次尝试带来源标注的候选查询，首个成功者在输出前加 ``P|source`` 行。
+
+    BUG-989：Hyper-V 防火墙优先查生效策略（ActiveStore），旧 PowerShell/
+    旧 Windows 不支持 -PolicyStore 时回退默认查询并标注 persistent 来源。
+    全部失败记 unknown，不冒充可达。
+    """
+    from local_webpage_access.platform_support import _decode_wsl_cli_output
+
+    last_err = "unavailable"
+    for command, source in candidates:
+        text, err = _run_powershell_capture(runner, command)
+        if err:
+            last_err = err
+            continue
+        try:
+            decoded = _decode_wsl_cli_output(text)
+        except UnicodeDecodeError:
+            last_err = "decode-error"
+            continue
+        caps[name] = CapabilityStatus(name, "available", source=source)
+        return f"P|{source}\n" + decoded
+    errors[name] = last_err
+    caps[name] = CapabilityStatus(name, "unknown", reason=last_err, source="interop")
+    return None
 
 
 def _run_capture(runner: Runner, args: list[str]) -> tuple[bytes | str | None, str | None]:
@@ -1413,6 +1645,7 @@ __all__ = [
     "WslNetworkSnapshot",
     "InstanceAccessView",
     "reset_wsl_network_cache",
+    "probe_networking_mode_light",
     "classify_windows_product",
     "parse_windows_nt_version",
     "parse_networking_mode_text",

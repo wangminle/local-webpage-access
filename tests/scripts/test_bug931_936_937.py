@@ -622,3 +622,54 @@ def test_wsl_doctor_missing_entry_names_gateway_port_with_alias(doctor_env, monk
     gateway_port = lan_entry_port(config)
     assert gateway_port
     assert f"缺 :{gateway_port} 转发" in result.message
+
+
+def test_wsl_doctor_does_not_mix_observation_across_instances(doctor_env, monkeypatch) -> None:
+    """两个无别名实例各自验证后，不能拿甲的 URL 去对乙的端口。"""
+    from local_webpage_access.models import InstanceManifest
+    from local_webpage_access.wsl_network import InteropOutputs, build_lan_observation
+    from tests.scripts.test_doctor import _seed_static_for_doctor
+    from tests.scripts.test_wsl_network import (
+        YI14_NETIP,
+        YI14_NETROUTE,
+        YI14_WSL_VERSION,
+        _yi14_snapshot,
+    )
+
+    ws, config, reg = doctor_env
+    snap = _yi14_snapshot(
+        outputs=InteropOutputs(
+            wsl_version_text=YI14_WSL_VERSION,
+            wslinfo_text="nat\n",
+            netip_text=YI14_NETIP,
+            netroute_text=YI14_NETROUTE,
+            portproxy_text=(
+                "0.0.0.0            18000      127.0.0.1         18000\n"
+                "0.0.0.0            18001      127.0.0.1         18001\n"
+            ),
+        )
+    )
+    for iid, port in (("alpha", 18000), ("beta", 18001)):
+        _seed_static_for_doctor(ws, reg, iid, host_port=port)
+        path = ws.app_manifest_path(iid)
+        manifest = InstanceManifest.load(path)
+        manifest.network.externalLanObservation = build_lan_observation(
+            snapshot=snap,
+            vantage="lan-client",
+            protocol="http",
+            evidence="page",
+            status_code=200,
+            url=f"http://10.180.105.74:{port}",
+            # BUG-981：观测指纹按各实例入口端口作用域化，写读两侧同口径
+            host_port=port,
+            config=config,
+        ).to_dict()
+        manifest.save(path)
+        reg.upsert_from_manifest(manifest)
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: snap
+    )
+    result = check_wsl_lan_exposure(ws, config, reg)
+    assert "不匹配" not in result.message
+    assert "已记录独立局域网设备验证" in result.message
+    assert "exposure=externally-verified" in (result.detail or "")

@@ -477,18 +477,6 @@ def record_lan_observation(
     if not path.is_file():
         raise LwaError(f"实例 {instance_id} 的 manifest 不存在", code="INSTANCE_NOT_FOUND")
     snap = collect_wsl_network_snapshot()
-    try:
-        observation = build_lan_observation(
-            snapshot=snap,
-            vantage=vantage,
-            protocol=protocol,
-            evidence=evidence,
-            status_code=status_code,
-            url=url,
-            observed_at=observed_at,
-        )
-    except ValueError as exc:
-        raise LwaError(str(exc), code="LAN_OBSERVATION_INVALID") from exc
     from local_webpage_access.lifecycle import instance_lock
 
     with instance_lock(workspace, instance_id):
@@ -499,13 +487,31 @@ def record_lan_observation(
         manifest = InstanceManifest.load(path)
         if manifest.network is None:
             manifest.network = NetworkConfig()
+        route_host = (
+            manifest.network.routeHost if manifest.network.routeMode == "name" else None
+        )
+        try:
+            # BUG-981：观测指纹按本实例入口端口作用域化（与 describe 读取侧同口径），
+            # 须先读 manifest 取得 hostPort / 生效别名。
+            observation = build_lan_observation(
+                snapshot=snap,
+                vantage=vantage,
+                protocol=protocol,
+                evidence=evidence,
+                status_code=status_code,
+                url=url,
+                observed_at=observed_at,
+                host_port=manifest.network.hostPort,
+                route_host=route_host,
+                config=config,
+            )
+        except ValueError as exc:
+            raise LwaError(str(exc), code="LAN_OBSERVATION_INVALID") from exc
         manifest.network.externalLanObservation = observation.to_dict()
         view = describe_instance_access(
             snap,
             host_port=manifest.network.hostPort,
-            route_host=(
-                manifest.network.routeHost if manifest.network.routeMode == "name" else None
-            ),
+            route_host=route_host,
             config=config,
             observation=observation,
         )

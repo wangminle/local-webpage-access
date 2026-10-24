@@ -154,6 +154,8 @@ lwa restart <id>
 
 `.env.local` 不进 git（含密钥），由用户自行保管与备份。
 
+**修改或删除 `.env.local` 后，下一次 `lwa start` / `restart` / `recover` 会自动生效**（BUG-992）：运行配置指纹包含该文件的内容，变化会触发轻量 recreate（`up --force-recreate` 注入新环境，**不重建镜像、保留数据卷**）；文件未变化时不 recreate，容器保持不变。从 V0.9.13 及更早升级的存量实例首次运行会因运行指纹基线升级（v2→v3）一次性 recreate，属预期行为。
+
 ---
 
 ## 与端口、访问地址的关系

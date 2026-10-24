@@ -25,6 +25,7 @@ def _request(
     headers: dict[str, str] | None = None,
     method: str = "POST",
     query: str = "",
+    loopback_trusted: bool | None = None,
 ) -> Request:
     scope = {
         "type": "http",
@@ -41,6 +42,12 @@ def _request(
         "client": (host, 54321),
         "server": ("127.0.0.1", 17800),
     }
+    if loopback_trusted is not None:
+        from types import SimpleNamespace
+
+        scope["app"] = SimpleNamespace(
+            state=SimpleNamespace(loopback_identity_trusted=loopback_trusted)
+        )
     return Request(scope)
 
 
@@ -127,6 +134,55 @@ def test_dns_rebinding_host_rejected(tokened_workspace: Workspace) -> None:
             tokened_workspace,
         )
     assert exc.value.code == "permission_denied"
+
+
+# ---- BUG-983：回环身份不可信（WSL NAT）时不得认作本机 owner --------------------
+
+
+def test_untrusted_loopback_rejected_even_with_valid_token(
+    tokened_workspace: Workspace,
+) -> None:
+    """BUG-983：回环身份不可信时，回环 peer + 伪造回环 Host + 有效 token 仍拒。"""
+    from local_webpage_access.manager_api import read_token
+
+    from local_webpage_access.agent.auth import AgentAuthError, authenticate_local_owner
+
+    token = read_token(tokened_workspace)
+    assert token
+    with pytest.raises(AgentAuthError) as exc:
+        authenticate_local_owner(
+            _request(
+                headers={"Authorization": f"Bearer {token}", "Host": "127.0.0.1"},
+                loopback_trusted=False,
+            ),
+            tokened_workspace,
+        )
+    assert exc.value.code == "permission_denied"
+
+
+def test_untrusted_rejection_precedes_credential_check(
+    tokened_workspace: Workspace,
+) -> None:
+    """BUG-983：不可信回环属网络门禁（403 语义），先于凭据校验——无 token 同样拒。"""
+    from local_webpage_access.agent.auth import AgentAuthError, authenticate_local_owner
+
+    with pytest.raises(AgentAuthError) as exc:
+        authenticate_local_owner(_request(loopback_trusted=False), tokened_workspace)
+    assert exc.value.code == "permission_denied"
+
+
+def test_explicit_trusted_flag_keeps_m1_flow(tokened_workspace: Workspace) -> None:
+    """BUG-983：显式 trusted=True 时既有 M1 流程不变（与 manager 默认口径一致）。"""
+    from local_webpage_access.manager_api import read_token
+
+    from local_webpage_access.agent.auth import authenticate_local_owner
+
+    token = read_token(tokened_workspace)
+    principal = authenticate_local_owner(
+        _request(headers={"Authorization": f"Bearer {token}"}, loopback_trusted=True),
+        tokened_workspace,
+    )
+    assert principal.kind == "local_owner"
 
 
 def test_token_rotation_invalidates_old(tokened_workspace: Workspace) -> None:

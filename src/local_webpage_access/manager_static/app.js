@@ -610,6 +610,15 @@
           folderImport: { open: false, sourceDir: "", name: "", pathAlias: "", error: "", submitting: false, picking: false },
           // IMP-065：GitHub 源导入弹窗（不限 loopback，065.d）
           gitImport: { open: false, url: "", ref: "", subdir: "", name: "", pathAlias: "", error: "", submitting: false },
+          buildProxy: {
+            open: false,
+            enabled: false,
+            url: "",
+            draftEnabled: false,
+            draftUrl: "",
+            error: "",
+            submitting: false,
+          },
           pageview: { open: false, title: "", body: "", instanceId: null },
           // IMP-035：双阶段删除模态（step 1 选范围 → step 2 输 ID；needForce 再确认）
           removeDialog: {
@@ -834,7 +843,60 @@
             };
           }).catch(function (e) { self.noteLoadError(e); });
           this.refresh();
+          this.loadBuildProxy();
           this._timer = setIntervalFn(function () { self.refresh(); }, POLL_MS);
+        },
+        loadBuildProxy: function () {
+          var self = this;
+          apiFetch(this, "/api/build-proxy").then(function (data) {
+            self.buildProxy.enabled = !!data.enabled;
+            self.buildProxy.url = data.url || "";
+          }).catch(function () { /* 顶栏状态失败时保持关闭，打开弹窗会再读一次 */ });
+        },
+        openBuildProxy: function () {
+          var self = this;
+          this.buildProxy.error = "";
+          this.buildProxy.submitting = false;
+          apiFetch(this, "/api/build-proxy").then(function (data) {
+            self.buildProxy.enabled = !!data.enabled;
+            self.buildProxy.url = data.url || "";
+            self.buildProxy.draftEnabled = self.buildProxy.enabled;
+            self.buildProxy.draftUrl = self.buildProxy.url;
+            self.buildProxy.open = true;
+          }).catch(function (e) {
+            self.buildProxy.draftEnabled = self.buildProxy.enabled;
+            self.buildProxy.draftUrl = self.buildProxy.url;
+            self.buildProxy.error = e.message;
+            self.buildProxy.open = true;
+          });
+        },
+        closeBuildProxy: function () {
+          if (this.buildProxy.submitting) return;
+          this.buildProxy.open = false;
+          this.buildProxy.error = "";
+        },
+        saveBuildProxy: function () {
+          var self = this;
+          if (this.buildProxy.submitting) return;
+          this.buildProxy.error = "";
+          this.buildProxy.submitting = true;
+          apiFetch(this, "/api/build-proxy", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              enabled: !!this.buildProxy.draftEnabled,
+              url: (this.buildProxy.draftUrl || "").trim(),
+            }),
+          }).then(function (data) {
+            self.buildProxy.submitting = false;
+            self.buildProxy.enabled = !!data.enabled;
+            self.buildProxy.url = data.url || "";
+            self.buildProxy.open = false;
+            self.toast(data.enabled ? "构建代理已启用，下一次构建生效" : "构建代理已关闭");
+          }).catch(function (e) {
+            self.buildProxy.submitting = false;
+            self.buildProxy.error = e.message;
+          });
         },
 
         // ---- 刷新 ----
@@ -1715,6 +1777,7 @@
           }
           if (e.key !== "Escape") return;
           if (this.removeDialog.open) this.closeRemoveDialog();
+          else if (this.buildProxy.open) this.closeBuildProxy();
           else if (this.redundantDialog.open) this.closeRedundantDialog();
           else if (this.folderImport.open) this.closeFolderImport();
           else if (this.fallbackDialog.open) this.cancelFallback();
@@ -1786,6 +1849,7 @@
     '    <span class="version">{{ version }}</span>',
     "  </div>",
     '  <div class="topbar-actions">',
+    '    <button class="btn btn-ghost" type="button" :title="buildProxy.enabled ? \'构建代理已启用，下一次构建和前端安装会使用它\' : \'为镜像构建和宿主机前端安装配置代理\'" @click="openBuildProxy">{{ buildProxy.enabled ? "构建代理 · 开" : "构建代理" }}</button>',
     '    <button class="btn btn-ghost" title="立即刷新" aria-label="立即刷新" @click="refresh">↻ 刷新</button>',
     "  </div>",
     "</header>",
@@ -2007,6 +2071,21 @@
     '    <div class="pageview-body" v-html="pageview.body"></div>',
     "  </div></div>",
     // IMP-035：双阶段删除确认
+    '<div class="modal" :hidden="!buildProxy.open" role="dialog" aria-modal="true" aria-labelledby="build-proxy-title">',
+    '  <div class="modal-inner path-alias-box"><div class="modal-head">',
+    '    <h2 id="build-proxy-title">构建代理</h2><button class="modal-x" type="button" @click="closeBuildProxy" aria-label="关闭">×</button>',
+    "  </div>",
+    '    <p class="path-alias-hint">启用后，下一次镜像构建的容器内安装命令和宿主机前端安装会走这个地址；已经运行的应用不使用它。填本机回环地址（如 http://127.0.0.1:10808）时，容器内会改用 host.docker.internal 访问宿主机，代理需开启「允许局域网连接」。拉取基础镜像由 Docker daemon 执行，需要时请在 Docker 设置里单独配置代理。</p>',
+    '    <label class="remove-dialog-field"><input type="checkbox" v-model="buildProxy.draftEnabled" /> 启用</label>',
+    '    <label class="remove-dialog-field"><span>代理地址</span>',
+    '      <input type="text" placeholder="http://127.0.0.1:10808" autocomplete="off" spellcheck="false" v-model="buildProxy.draftUrl" @keydown.enter="saveBuildProxy" /></label>',
+    '    <p class="path-alias-error" :hidden="!buildProxy.error">{{ buildProxy.error }}</p>',
+    '    <div class="remove-dialog-actions">',
+    '      <button class="btn" type="button" :disabled="buildProxy.submitting" @click="closeBuildProxy">取消</button>',
+    '      <button class="btn btn-primary" type="button" :disabled="buildProxy.submitting" @click="saveBuildProxy">{{ buildProxy.submitting ? "保存中…" : "保存" }}</button>',
+    "    </div>",
+    "  </div>",
+    "</div>",
     '<div class="modal" :hidden="!removeDialog.open" role="dialog" aria-modal="true" aria-labelledby="remove-dialog-title">',
     '  <div class="modal-inner remove-dialog-box"><div class="modal-head">',
     '    <h2 id="remove-dialog-title">删除实例</h2>',

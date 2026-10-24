@@ -99,6 +99,34 @@ def test_lan_client_rejected_even_with_token(agent_env) -> None:
     assert resp.json()["error"]["code"] == "permission_denied"
 
 
+def test_bug983_untrusted_loopback_forwarded_request_rejected_with_token(
+    agent_env,
+) -> None:
+    """BUG-983：WSL NAT 回环转发形态（peer 回环 + 伪造回环 Host + 有效 token）须 403。
+
+    独立复核的 ASGI 复现：标记为 False 时同一请求在 manager 侧已判非本机，Agent
+    通道却仍 200 且主体 local_owner。修复后读/写入口一致拒绝；无 token 同样属
+    网络门禁 403（而非 401）；标记恢复可信后有效 token 正向路径不受影响。
+    """
+    _ws, _config, _reg, app, token = agent_env
+    app.state.loopback_identity_trusted = False
+    client = _client(app)
+    forged = {"host": "127.0.0.1", **_auth(token)}
+    for path in (f"{BASE}/capabilities", f"{BASE}/instances"):
+        resp = client.get(path, headers=forged)
+        assert resp.status_code == 403, path
+        assert resp.json()["error"]["code"] == "permission_denied"
+    plan = client.post(f"{BASE}/plans", headers=forged, json={})
+    assert plan.status_code == 403
+    assert plan.json()["error"]["code"] == "permission_denied"
+    anon = client.get(f"{BASE}/capabilities", headers={"host": "127.0.0.1"})
+    assert anon.status_code == 403
+    assert anon.json()["error"]["code"] == "permission_denied"
+    app.state.loopback_identity_trusted = True
+    ok = client.get(f"{BASE}/capabilities", headers=forged)
+    assert ok.status_code == 200
+
+
 def test_query_token_not_accepted(agent_env) -> None:
     """Agent 通道只收 Header 凭据，?token= 一律不收（防 URL 泄漏）。"""
     _ws, _config, _reg, app, token = agent_env

@@ -6,6 +6,9 @@ M1 权限模型（设计 §7.2/§7.3）：
 - Agent 通道**不继承**管理页的回环免 token，也不接受 ``?token=`` 便利通道：
   凭据只放 ``Authorization: Bearer`` 或 ``X-LWA-Token`` 头；
 - M1 网络门禁：非回环客户端一律 ``permission_denied``（远程主体属 M2）；
+- 回环身份须可信（BUG-983）：WSL NAT 下回环 peer 可能是 Windows 回环转发、
+  与本机不可区分，manager 启动时固化的 ``loopback_identity_trusted`` 为 False
+  时 Agent 通道整体暂停（``permission_denied``），有效 token 亦不例外；
 - token 每次请求读盘校验（复用 manager 的实现），轮换后旧凭据立即失效。
 
 ``server_directory`` 源必须落在管理员配置的 ``allowedSourceRoots`` 真实路径内
@@ -65,10 +68,26 @@ def _extract_agent_credentials(request: Request) -> str | None:
     return x_token or None
 
 
+def _loopback_identity_trusted(request: Request) -> bool:
+    """BUG-983：复用 manager 启动时固化的回环信任状态（``app.state``）。
+
+    WSL NAT 下回环 peer 可能来自 Windows portproxy → ``127.0.0.1`` 转发、与本机
+    连接不可区分（BUG-980）；Agent M1 的「本机 owner」判定必须与 manager 同口径，
+    否则携带有效管理 token 的转发请求会被认作 ``local_owner``，越过 M1 仅本机
+    的边界。缺少 ``app``（单元测试裸 Request）或未设置标记时按可信处理，与
+    manager 侧 ``getattr(..., True)`` 的默认一致。
+    """
+    app = request.scope.get("app")
+    state = getattr(app, "state", None)
+    return bool(getattr(state, "loopback_identity_trusted", True))
+
+
 def authenticate_local_owner(request: Request, workspace: Workspace) -> Principal:
     """认证本机 owner：网络门禁 + 凭据校验。
 
     - 非回环客户端（含 rebinding 场景的非常规 Host）→ ``permission_denied``；
+    - 回环身份不可信（WSL NAT / 探测失败，BUG-983）→ ``permission_denied``，
+      即便携带有效 token——M1 没有「仅凭 token」的远程通道（属 M2）；
     - 回环客户端必须携带有效管理 token → 失败 ``unauthenticated``。
     """
     from local_webpage_access.manager_api import (
@@ -83,6 +102,13 @@ def authenticate_local_owner(request: Request, workspace: Workspace) -> Principa
     if not is_local:
         raise AgentAuthError(
             "M1 阶段 Agent 通道仅允许本机接入；远程主体将在 M2 开放",
+            code="permission_denied",
+        )
+    if not _loopback_identity_trusted(request):
+        raise AgentAuthError(
+            "回环连接当前无法证明本机身份（WSL NAT 回环转发不可区分或网络模式探测失败），"
+            "Agent M1 通道暂停；管理 API 携带 token 仍可用。切换 WSL mirrored 网络或"
+            "在非 WSL 主机运行后重启 manager 可恢复",
             code="permission_denied",
         )
     candidate = _extract_agent_credentials(request)

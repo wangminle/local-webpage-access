@@ -36,6 +36,7 @@ from local_webpage_access.config import Config
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.registry import Registry
+from local_webpage_access.security import is_os_metadata_name
 from local_webpage_access.version_requirements import (
     MIN_CADDY_VERSION,
     MIN_COMPOSE_VERSION,
@@ -1603,7 +1604,34 @@ def _hyperv_summary(snap: Any) -> str:
     if hyperv is None:
         return ""
     inbound = hyperv.default_inbound or "-"
-    return f"defaultInbound={inbound}"
+    # BUG-989：标明采集的是生效策略（active）还是持久存储回退（persistent）。
+    store = getattr(hyperv, "policy_store", None)
+    suffix = f" store={store}" if store else ""
+    return f"defaultInbound={inbound}{suffix}"
+
+
+def _choose_wsl_exposure_view(views: list):
+    """在各自成组的实例视图里选一条汇总，不跨实例拼接端口和观测。"""
+    from local_webpage_access.wsl_network import (
+        EXPOSURE_CANDIDATE_UNVERIFIED,
+        EXPOSURE_ENTRY_MISSING,
+        EXPOSURE_EXTERNALLY_VERIFIED,
+    )
+
+    if not views:
+        return None
+    for view in views:
+        if view.observation_stale:
+            return view
+    for exposure in (
+        EXPOSURE_ENTRY_MISSING,
+        EXPOSURE_CANDIDATE_UNVERIFIED,
+        EXPOSURE_EXTERNALLY_VERIFIED,
+    ):
+        for view in views:
+            if view.lan_exposure == exposure:
+                return view
+    return views[0]
 
 
 def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
@@ -1630,9 +1658,7 @@ def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) ->
     if snap is None:
         return CheckResult("wsl_lan_exposure", STATUS_SKIP, "非 WSL，跳过 Windows 入口发现")
 
-    route_host = None
-    host_port = None
-    observation = None
+    views = []
     for row in registry.list_instances():
         manifest_path = ws.app_manifest_path(row["id"])
         if not manifest_path.is_file():
@@ -1644,21 +1670,31 @@ def check_wsl_lan_exposure(ws: Workspace, config: Config, registry: Registry) ->
         except Exception:  # noqa: BLE001
             continue
         net = manifest.network
-        if net and net.hostPort:
-            host_port = net.hostPort
+        host_port = net.hostPort if net and net.hostPort else None
+        route_host = None
         if net and net.routeMode == "name" and net.routeHost:
             route_host = net.routeHost
-            observation = observation_from_network(net)
-            break
-        if observation is None:
-            observation = observation_from_network(net)
-    view = describe_instance_access(
-        snap,
-        host_port=host_port,
-        route_host=route_host,
-        config=config,
-        observation=observation,
-    )
+        observation = observation_from_network(net)
+        if host_port is None and route_host is None and observation is None:
+            continue
+        views.append(
+            describe_instance_access(
+                snap,
+                host_port=host_port,
+                route_host=route_host,
+                config=config,
+                observation=observation,
+            )
+        )
+    view = _choose_wsl_exposure_view(views)
+    if view is None:
+        view = describe_instance_access(
+            snap,
+            host_port=None,
+            route_host=None,
+            config=config,
+            observation=None,
+        )
     details = [
         f"mode={snap.networking_mode}",
         f"windows={snap.windows_product or 'unknown'} {snap.windows_nt_version or ''}".rstrip(),
@@ -1875,12 +1911,17 @@ def check_database_url_alignment(ws: Workspace) -> CheckResult:
 
 
 def _nonempty_sqlite_files_in(data_dir: Path) -> list[Path]:
-    """issue #15：列目录下非空 SQLite 文件（排除 -wal/-shm 边车），与 compose 同口径。"""
+    """issue #15：列目录下非空 SQLite 文件（排除 -wal/-shm 边车），与 compose 同口径。
+
+    BUG-991：AppleDouble ``._*`` 元数据文件不参与盘点。
+    """
     if not data_dir.is_dir():
         return []
     out: list[Path] = []
     for entry in sorted(data_dir.iterdir()):
         if not entry.is_file():
+            continue
+        if is_os_metadata_name(entry.name):
             continue
         name = entry.name.lower()
         if name.endswith(("-wal", "-shm")):

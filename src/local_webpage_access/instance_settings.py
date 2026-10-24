@@ -27,7 +27,12 @@ def effective_build_env(manifest: InstanceManifest) -> dict[str, str]:
     result = dict(manifest.buildEnv or {})
     if manifest.buildBaseFromAlias:
         alias = _current_alias(manifest)
-        result["VITE_BASE"] = f"/{alias}/" if alias else "/"
+        base = f"/{alias}/" if alias else "/"
+        # BUG-985：前端项目的 base 环境变量键名不统一——部分 Vite 模板读
+        # VITE_BASE，IT-Tools 等读 BASE_URL，CRA 读 PUBLIC_URL；同值注入三个
+        # 常见键，项目实际读取的那个生效，未读取的键对构建无副作用。
+        for key in ("VITE_BASE", "BASE_URL", "PUBLIC_URL"):
+            result[key] = base
     for reserved in _BUILD_ENV_RESERVED_KEYS:
         result.pop(reserved, None)
     return result

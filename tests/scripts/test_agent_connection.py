@@ -132,3 +132,46 @@ def test_loopback_host_set_shared_between_cli_and_mcp_bridge() -> None:
 
     assert client_bridge._LOOPBACK_HOSTS is LOOPBACK_HOSTS
     assert LOOPBACK_HOSTS == frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+# ---- BUG-983：回环信任自检（与 manager 启动判定同口径）-----------------------------
+
+
+def test_connection_info_reports_loopback_identity_trusted_off_wsl(
+    workspace: Workspace, monkeypatch
+) -> None:
+    """BUG-983：非 WSL 平台回环恒可信，JSON 暴露 loopbackIdentityTrusted=true。"""
+    from local_webpage_access import manager_service
+
+    monkeypatch.setattr(manager_service, "_fetch_health", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.detect_platform", lambda: "macos"
+    )
+    result = _invoke(["connection-info", "--workspace", str(workspace.root), "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["manager"]["loopbackIdentityTrusted"] is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "trusted"), [("nat", False), ("mirrored", True), (None, False)]
+)
+def test_connection_info_loopback_identity_follows_wsl_mode(
+    workspace: Workspace, monkeypatch, mode, trusted
+) -> None:
+    """BUG-983：WSL 下仅 mirrored 可信；NAT 与探测失败均提示 Agent 通道暂停。"""
+    from local_webpage_access import manager_service
+
+    monkeypatch.setattr(manager_service, "_fetch_health", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "local_webpage_access.platform_detect.detect_platform", lambda: "wsl"
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.probe_networking_mode_light",
+        lambda **_k: mode,
+    )
+    result = _invoke(["connection-info", "--workspace", str(workspace.root), "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["manager"]["loopbackIdentityTrusted"] is trusted
+    text = _invoke(["connection-info", "--workspace", str(workspace.root)])
+    assert text.exit_code == 0, text.output
+    assert ("permission_denied" in text.stdout) is (not trusted)

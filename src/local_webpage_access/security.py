@@ -611,6 +611,17 @@ _STRIPPABLE_FILES: frozenset[str] = frozenset(
 )
 
 
+def is_os_metadata_name(name: str) -> bool:
+    """BUG-991：OS 元数据文件名判定（AppleDouble ``._*`` 与 ``.DS_Store``）。
+
+    macOS 写非原生卷时会为每个真实文件 alongside 生成 ``._<name>`` AppleDouble
+    文件（二进制、常以 NUL 字节开头），Finder 浏览产生 ``.DS_Store``。它们不是
+    项目文件，不得参与源码扫描 / SQLite 库盘点 / zip 打包剥离 / 内容指纹，
+    否则其内容会被当成真实代码或数据库（BUG-978 的同类残留）。
+    """
+    return name == ".DS_Store" or name.startswith("._")
+
+
 @dataclass(frozen=True)
 class ZipSanitizeResult:
     """zip 成员剥离分类结果（IMP-001）。
@@ -652,6 +663,9 @@ def _strip_rule_for(name: str) -> str | None:
         return last
     if last in _STRIPPABLE_FILES:
         return last
+    # BUG-991：AppleDouble ``._*`` 成员（任意层级）随 .DS_Store 一并剥离。
+    if last.startswith("._"):
+        return "._*"
     return None
 
 
@@ -659,7 +673,7 @@ def sanitize_zip_members(names: list[str], *, modes: list[int] | None = None) ->
     """按 IMP-001 规则把 zip 成员分成「保留 / 剥离」两类。
 
     * 被 **剥离** 的成员（``node_modules/``、``__pycache__/``、``.venv/``、
-      ``.git/``、``__MACOSX/``、``.DS_Store`` 等）不落盘、不参与后续
+      ``.git/``、``__MACOSX/``、``.DS_Store``、AppleDouble ``._*`` 等）不落盘、不参与后续
       ``audit_zip_members`` 审计 —— 包括其中的 symlink 成员（如
       ``node_modules/.bin/*``，本是 npm 正常产物，不应触发 zip_symlink 拒绝）；
     * 被 **保留** 的成员继续走 :func:`audit_zip_members` 与路径穿越校验：

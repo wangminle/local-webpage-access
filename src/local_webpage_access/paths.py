@@ -297,6 +297,9 @@ class Workspace:
     def app_env_path(self, instance_id: str) -> Path:
         return self.app_docker(instance_id) / ".env"
 
+    def app_env_local_path(self, instance_id: str) -> Path:
+        return self.app_docker(instance_id) / ".env.local"
+
     def app_manifest_path(self, instance_id: str) -> Path:
         return self.app_dir(instance_id) / "local-web.json"
 
