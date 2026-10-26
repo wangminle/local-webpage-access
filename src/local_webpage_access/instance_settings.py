@@ -68,12 +68,14 @@ def update_instance_settings(
         "redundancyAcknowledged",
         "systemDeps",
         "buildHooks",
+        "hostBuild",
+        "preSync",
         "extraVolumes",
     }
     if not changes or set(changes) - allowed:
         raise ValueError(
             "仅允许设置 buildEnv、buildBaseFromAlias、redundancyAcknowledged、"
-            "systemDeps、buildHooks、extraVolumes"
+            "systemDeps、buildHooks、hostBuild/preSync、extraVolumes"
         )
     for key in ("buildBaseFromAlias", "redundancyAcknowledged"):
         if key in changes and not isinstance(changes[key], bool):
@@ -121,6 +123,14 @@ def update_instance_settings(
             raise ValueError(
                 "systemDeps 仅支持 Python（Debian/apt）与 Node（Alpine/apk）容器"
             )
+        if set(changes) & {"hostBuild", "preSync"}:
+            from local_webpage_access.host_build import configured_host_build
+
+            command = configured_host_build(updated)
+            if command is None:
+                updated.hostBuildPending = False
+            elif command != configured_host_build(old):
+                updated.hostBuildPending = True
         updated.touch()
         updated.save(path)
         registry.add_event(instance_id, "config", "更新实例配置：" + "、".join(sorted(changes)))

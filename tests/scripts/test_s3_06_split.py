@@ -39,7 +39,7 @@ _POST_STAGES = (
 def _install_fakes(monkeypatch: pytest.MonkeyPatch, calls: list[str], *, fail_at: str | None,
                    exc: BaseException | None = None) -> object:
     manifest = SimpleNamespace(
-        runtime=SimpleNamespace(value="docker-compose"), container=SimpleNamespace()
+        runtime=SimpleNamespace(value="docker-compose"), container=SimpleNamespace(containerId=None)
     )
     ctx = SimpleNamespace(tag="ctx", outcome_settled=False)
     sentinel_result = object()

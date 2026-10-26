@@ -759,7 +759,9 @@ class AgentWorker:
             elif needs_rebuild:
                 self._advance(op_id, OperationPhase.build.value)
                 self._abort_if_cancelling(op_id)
-                rebuild_instance(self.workspace, self.config, self.registry, instance_id)
+                rebuild_instance(
+                    self.workspace, self.config, self.registry, instance_id, host_build=True
+                )
             elif needs_restart and was_running:
                 self._advance(op_id, OperationPhase.start.value)
                 self._abort_if_cancelling(op_id)

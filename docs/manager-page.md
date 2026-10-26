@@ -98,7 +98,7 @@ lwa manager off         # 停止
 | POST | `/api/pick-directory` | 在 **LWA 宿主机**打开原生目录选择器（IMP-051）；**仅 loopback** 客户端可用，成功返回 `{path}`；局域网即使有 token 也 403 `loopback_required` |
 | POST | `/api/instances/{id}/remove?purge=&force=` | 移除单个实例（IMP-019 / IMP-035）；默认仅清 registry（`purge=false`）；`purge=true` 删 `apps/<id>/`；非空 `data/` 且未 `force` 时返回 **409 `data_nonempty`**；成功体回显 `instanceId/action/purge/force` |
 | PATCH | `/api/instances/{id}/path-alias` | 设置或清除路径别名（IMP-006 / IMP-014 / IMP-022） |
-| PATCH | `/api/instances/{id}/settings` | **S3-05 / V0.9.4**：实例配置部分更新（buildEnv、buildBaseFromAlias、redundancyAcknowledged、systemDeps、buildHooks、extraVolumes）；未知字段 400；响应含 `extraVolumes`（容器实例，改后 `lwa restart` 生效） |
+| PATCH | `/api/instances/{id}/settings` | **S3-05 / V0.9.4**：实例配置部分更新（buildEnv、buildBaseFromAlias、redundancyAcknowledged、systemDeps、buildHooks、hostBuild/preSync、extraVolumes）；未知字段 400；响应含 `extraVolumes`（容器实例，改后 `lwa restart` 生效） |
 | GET | `/api/instances/{id}/pageviews?limit=` | 单实例浏览量详情：按天分布 + 最近命中 + `uniqueIpList`（IMP-024/026；page 级过滤见 IMP-025）；CLI：`lwa pageviews <id>` |
 | GET | `/api/pageviews` | 全部实例浏览量汇总（惰性摄入日志后返回，IMP-024；Caddy 无别名直连端口见 IMP-028）；CLI：`lwa pageviews` |
 | GET | `/api/redundant` | 冗余实例列表（同 `sourceZipHash` 分组中非最早者，IMP-019；每项附 `configLossReasons`，issue #31） |
@@ -207,6 +207,7 @@ Content-Type: application/json
   自动跳过（`skipped=true`），不 rebuild / restart。
 * 源目录不存在时返回错误（不会回退到 mount 模式）。
 * 与 CLI `lwa import --from-dir <path> --update <id>` 共用 `importer.update_from_dir` 代码路径。
+* 容器实例若配置了 `hostBuild` / `preSync`，更新触发的 rebuild 会先在 `apps/<id>/current/` 执行该宿主命令，再构建镜像（DEV-170 / issue #61 阶段二）。zip 与 GitHub 源更新端点同此行为。
 
 ### GitHub 源导入与更新（IMP-065）
 
@@ -492,7 +493,7 @@ Authorization: Bearer <token>
 经现有 API 鉴权的 `PATCH /api/instances/<id>/settings` 接受以下字段的部分更新，拒绝未知字段：
 
 ```json
-{"buildEnv":{"VITE_BASE":"/demo/"},"buildBaseFromAlias":false,"redundancyAcknowledged":true,"systemDeps":["ffmpeg"],"buildHooks":["apt-get update"],"extraVolumes":["/mnt/share:/data/share:ro"]}
+{"buildEnv":{"VITE_BASE":"/demo/"},"buildBaseFromAlias":false,"redundancyAcknowledged":true,"systemDeps":["ffmpeg"],"buildHooks":["apt-get update"],"hostBuild":"cd frontend && npm run build","preSync":null,"extraVolumes":["/mnt/share:/data/share:ro"]}
 ```
 
 `extraVolumes`（S3-05）为容器实例的额外 bind 挂载整组替换（`SRC:DST[:ro]` 字符串数组，非容器实例拒绝）；保存前执行与渲染相同的结构校验与安全审计，返回体含 `extraVolumes`。挂载变化在 `lwa restart` 时生效。

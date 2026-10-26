@@ -2164,11 +2164,15 @@ def test_update_endpoint_container_rebuild_when_running(
         zf.writestr("main.py", "app=2\n")
 
     with pytest.MonkeyPatch.context() as mp:
-        rebuilt: list[str] = []
+        rebuilt: list[tuple[str, bool]] = []
         restarted: list[str] = []
+
+        def _fake_rebuild(ws, cfg, reg, _iid, **kwargs):
+            # DEV-170：API 源码更新与 import --update 同口径，重建前执行宿主预构建。
+            rebuilt.append((_iid, bool(kwargs.get("host_build"))))
+
         mp.setattr(
-            "local_webpage_access.lifecycle.rebuild_instance",
-            lambda ws, cfg, reg, _iid: rebuilt.append(_iid),
+            "local_webpage_access.lifecycle.rebuild_instance", _fake_rebuild
         )
         mp.setattr(
             "local_webpage_access.lifecycle.restart_instance",
@@ -2184,7 +2188,7 @@ def test_update_endpoint_container_rebuild_when_running(
     assert body["rebuiltRuntime"] is True
     assert body["restarted"] is False
     assert body["needsRebuild"] is True
-    assert rebuilt == [iid]
+    assert rebuilt == [(iid, True)]
     assert restarted == []
 
 

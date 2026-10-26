@@ -1345,6 +1345,13 @@ def _compensate_build_first(
     if not rebuild_txn.restore_generated(workspace, iid):
         notes.append("缺少生成物快照，无法恢复 compose")
     else:
+        # BUG-998：与 _recreate_restore_previous 同理——本次失败可能是用户
+        # 改坏的 .env.local 导致的，拉起旧版本前先恢复 last-good 业务环境。
+        try:
+            if not rebuild_txn.restore_last_good_env(workspace, iid):
+                notes.append("无上次成功业务环境记录，沿用当前 .env.local")
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"恢复 last-good 业务环境失败：{exc}")
         try:
             rebuild_txn.restore_previous_image_tag(manifest)
             runtime.up(iid)
@@ -1498,6 +1505,10 @@ def host_container(
     DockerRuntime.ensure_available()
     runtime = DockerRuntime(workspace, registry)
 
+    # BUG-998：预检必须早于登记 BUILDING/失败收尾，拒绝时旧服务和身份不变。
+    if manifest.container.containerId is not None:
+        rebuild_txn.ensure_env_rollback_ready(workspace, manifest)
+
     ctx = _begin_container_deploy(workspace, config, registry, instance_id, manifest, runtime)
 
     try:
@@ -1540,13 +1551,24 @@ def _begin_container_deploy(
 ) -> _ContainerDeploy:
     """登记 build 行与操作态，返回各阶段共享的 :class:`_ContainerDeploy`。"""
     assert manifest.container is not None  # host_container 入口已校验
-    build_log = workspace.app_logs(instance_id) / "build.log"
-    build_id = registry.add_build(instance_id, status="running", log_path=str(build_log))
-    op_started_at = now_iso()
     operation_kind = "rebuild" if manifest.container.containerId is not None else "deploy"
     # S2-03：已在跑的实例重建走先建后换，旧容器服务期间构建；实例 status 不改为 BUILDING，
     # 构建进度只记 lastOperation（D4：实例状态反映实际服务，操作另记）。
     txn = _build_first_applies(runtime, manifest, operation_kind)
+    # BUG-998：业务环境变更必须可回滚；即使配置 stop-first，本轮也改走
+    # 先建后换以保留旧镜像与生成物。环境未变时仍保留显式 stop-first 顺序。
+    if (
+        not txn
+        and operation_kind == "rebuild"
+        and rebuild_txn.rebuild_strategy(manifest) == "stop-first"
+        and rebuild_txn.business_env_changed(workspace, instance_id)
+    ):
+        txn = bool(runtime.is_running(instance_id))
+        if txn:
+            log.info("实例 %s 业务环境已变更，本轮使用先建后换以保证可回滚", instance_id)
+    build_log = workspace.app_logs(instance_id) / "build.log"
+    build_id = registry.add_build(instance_id, status="running", log_path=str(build_log))
+    op_started_at = now_iso()
     if txn:
         registry.update_last_operation(
             instance_id,
@@ -1986,6 +2008,12 @@ def _finalize_container_deploy(
     except Exception:  # noqa: BLE001 - 指纹计算失败不阻塞部署成功
         log.debug("实例 %s 指纹计算失败（不阻塞部署）", instance_id)
 
+    # BUG-998：部署成功后记录业务环境 last-good 副本，供 recreate 补偿恢复
+    try:
+        rebuild_txn.save_last_good_env(workspace, instance_id)
+    except Exception:  # noqa: BLE001 - 记录失败不阻塞部署成功
+        log.debug("实例 %s last-good 业务环境记录失败（不阻塞部署）", instance_id)
+
     manifest.status = final_status
     manifest.lastError = None
     manifest.touch()
@@ -2228,6 +2256,11 @@ def recreate_container_runtime(
         )
     DockerRuntime.ensure_available()
     runtime = DockerRuntime(workspace, registry)
+    try:
+        rebuild_txn.ensure_env_rollback_ready(workspace, manifest, use_previous=True)
+    except Exception:
+        _restore_generated_for_txn(workspace, instance_id)
+        raise
     if not _can_recreate_container_without_rebuild(workspace, runtime, instance_id):
         log.info("实例 %s 无法 runtime recreate，回退完整重建", instance_id)
         return host_container(workspace, config, registry, instance_id)
@@ -2284,6 +2317,11 @@ def recreate_container_runtime(
     from local_webpage_access.lifecycle import _compute_deployment_fingerprints
 
     manifest.deploymentFingerprints = _compute_deployment_fingerprints(workspace, manifest)
+    # BUG-998：recreate 成功后推进业务环境 last-good 副本
+    try:
+        rebuild_txn.save_last_good_env(workspace, instance_id)
+    except Exception:  # noqa: BLE001 - 记录失败不阻塞 recreate 成功
+        log.debug("实例 %s last-good 业务环境记录失败（不阻塞 recreate）", instance_id)
     manifest.verificationSummary = {
         "overallStatus": overall,
         "livenessPassed": verification.get("liveness_passed", False),
@@ -2334,6 +2372,14 @@ def _recreate_restore_previous(
     if not rebuild_txn.restore_generated(workspace, iid):
         notes.append("缺少生成物快照，无法恢复旧 compose")
     elif host_port:
+        # BUG-998：生成物快照不含用户维护的 .env.local；本次 recreate 的失败
+        # 很可能正是它改坏导致的，补偿 up 前必须恢复 last-good 副本，否则
+        # 旧容器用同一个坏文件一样起不来。
+        try:
+            if not rebuild_txn.restore_last_good_env(workspace, iid):
+                notes.append("无上次成功业务环境记录，沿用当前 .env.local")
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"恢复 last-good 业务环境失败：{exc}")
         try:
             runtime.up(iid)
             restored = _wait_for_http(host_port)

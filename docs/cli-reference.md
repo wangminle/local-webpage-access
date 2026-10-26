@@ -48,7 +48,7 @@
 | `lwa start <ID>` / `lwa stop <ID>` / `lwa restart <ID>` | 启动、停止、重启 |
 | `lwa recover <ID>` | 尝试恢复实例，必要时先拉起网关 |
 | `lwa rebuild <ID>` | 通过构建队列强制重建当前工作区中的项目副本 |
-| `lwa rebuild <ID> --sync` | 先同步关联文件夹或 GitHub 源，再重建 |
+| `lwa rebuild <ID> --sync` | 先同步关联文件夹或 GitHub 源，再重建；容器实例若配置了 `hostBuild` / `preSync`，会在构建镜像前于 `current/` 执行一次宿主预构建 |
 | `lwa rebuild <ID> --force` | 确认继续执行会删除前端产物目录的旧 `buildHooks`（默认拒绝，见 issue #141） |
 | `lwa cancel-build <ID>` | 取消排队或进行中的构建，不删除缓存、镜像与数据 |
 | `lwa versions <ID>` | 查看留档的容器镜像版本 |
@@ -68,11 +68,12 @@
 | `--follow-alias-base` / `--no-follow-alias-base` | 让构建时的 `VITE_BASE` 跟随当前别名；项目需主动读取这个变量 |
 | `--system-deps 包名` / `--clear-system-deps` | 设置容器系统依赖；Python 使用 apt，Node 使用 apk，均在项目依赖安装之前执行 |
 | `--build-hook 命令` / `--clear-build-hooks` | 设置依赖安装后的构建钩子；安装原生编译工具优先用 `--system-deps` |
+| `--host-build 命令` / `--pre-sync 命令` / `--clear-host-build` | 设置容器实例的宿主预构建命令（两个名字互斥）；仅在 `rebuild --sync`、`import --update` 及管理 API 的源码更新端点自动重建时，于容器构建前在 `apps/<id>/current/` 执行。`--pre-sync` 是 issue #61 的同义名 |
 | `--extra-volume SRC:DST[:ro]` / `--clear-extra-volumes` | 设置额外 bind 挂载，源与容器目标均使用绝对路径，并经过安全审计 |
 | `--acknowledge-redundancy` / `--no-acknowledge-redundancy` | 标记或撤销有意保留的重复实例 |
 | `--kind <类型> --runtime <运行时>` | 确认 pending 实例形态；两项须一起使用，不能与其他配置项组合 |
 
-`--build-env`、`--system-deps`、`--build-hook`、`--extra-volume` 都是**整组替换**，可在一次命令中重复选项来传入完整列表。确认形态时，类型取 `node`、`python` 或 `static`，运行时取 `docker-compose` 或 `shared-static`；确认后仍需核对实际启动入口。
+`--build-env`、`--system-deps`、`--build-hook`、`--extra-volume` 都是**整组替换**（`--host-build` / `--pre-sync` 设置单个命令，二者互斥），可在一次命令中重复选项来传入完整列表。确认形态时，类型取 `node`、`python` 或 `static`，运行时取 `docker-compose` 或 `shared-static`；确认后仍需核对实际启动入口。
 
 工作区级端口池、镜像源、并发数等在 `local-web.yml` 配置。应用的 `buildHooks`、`preStart` 与持久化目录说明见[工作区文档](runtime-workspace.md)和[运维手册](operations-playbook.md)。
 

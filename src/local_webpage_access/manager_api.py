@@ -1815,7 +1815,14 @@ def _register_routes(app: FastAPI) -> None:
             from local_webpage_access.lifecycle import rebuild_instance
 
             rebuild_instance(
-                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+                ctx.workspace,
+                ctx.config,
+                ctx.registry,
+                instance_id,
+                **rev_kwargs,
+                # DEV-170：API 更新源码后与 import --update 同口径，先执行
+                # 用户配置的宿主预构建，再构建镜像。
+                host_build=True,
             )
             rebuilt_runtime = True
         elif result.needs_restart:
@@ -1895,7 +1902,14 @@ def _register_routes(app: FastAPI) -> None:
             from local_webpage_access.lifecycle import rebuild_instance
 
             rebuild_instance(
-                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+                ctx.workspace,
+                ctx.config,
+                ctx.registry,
+                instance_id,
+                **rev_kwargs,
+                # DEV-170：API 更新源码后与 import --update 同口径，先执行
+                # 用户配置的宿主预构建，再构建镜像。
+                host_build=True,
             )
             rebuilt_runtime = True
         elif result.needs_restart:
@@ -2115,7 +2129,14 @@ def _register_routes(app: FastAPI) -> None:
             from local_webpage_access.lifecycle import rebuild_instance
 
             rebuild_instance(
-                ctx.workspace, ctx.config, ctx.registry, instance_id, **rev_kwargs
+                ctx.workspace,
+                ctx.config,
+                ctx.registry,
+                instance_id,
+                **rev_kwargs,
+                # DEV-170：API 更新源码后与 import --update 同口径，先执行
+                # 用户配置的宿主预构建，再构建镜像。
+                host_build=True,
             )
             rebuilt_runtime = True
         elif result.needs_restart:

@@ -32,7 +32,7 @@ from local_webpage_access.registry.dao import Registry
 
 log = get_logger("rollback")
 
-GENERATED_FILES = rebuild_txn.GENERATED_FILES
+GENERATED_FILES = rebuild_txn.ALL_GENERATED_FILES
 
 #: 启动/构建命令中的迁移命令特征（小写子串匹配）。
 MIGRATION_KEYWORDS = ("alembic", "migrate", "prisma")
@@ -180,7 +180,7 @@ def select_rollback_target(
 
 
 def _read_generated(docker_dir: Path) -> dict[str, bytes | None]:
-    """内存暂存三件生成物（None=不存在），供回滚失败时无损恢复。"""
+    """内存暂存生成物及可选 helper（None=不存在），供回滚失败时无损恢复。"""
     out: dict[str, bytes | None] = {}
     for name in GENERATED_FILES:
         path = docker_dir / name

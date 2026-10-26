@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_webpage_access import lifecycle
+from local_webpage_access import lifecycle, rebuild_txn
 from local_webpage_access.models import InstanceManifest
 from tests.scripts.test_lifecycle import fake_runtime  # noqa: F401 — Docker 替身夹具
 from tests.scripts.test_s2_04_convergence import _baseline
@@ -90,6 +90,8 @@ def test_env_local_edit_recreates_without_image_rebuild(
     """端到端：修改 .env.local 后 start/restart/recover 走 up --force-recreate 注入
     新环境，不重建镜像；recreate 成功后基线推进到 v3，再次执行回到轻量路径。"""
     _baseline(workspace, registry, config)
+    # BUG-998：成功部署还需记录可恢复的旧环境（此处为「无业务文件」）。
+    rebuild_txn.save_last_good_env(workspace, "api")
     _env_local(workspace).write_text("CMD_DOMAIN=example.test:8080\n", encoding="utf-8")
 
     getattr(lifecycle, operation)(workspace, config, registry, "api")

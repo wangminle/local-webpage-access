@@ -257,6 +257,11 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
   `--sync` 复用 `import --update` 的既有更新管线（folder→`update_from_dir`、
   git→`update_from_git`），自带无变更短路；`--sync` 只支持 folder / git 源
   实例，zip / 无源实例会被拒绝（Exit 2）。
+- 若容器实例配置了 `hostBuild` / `preSync`（issue #61 阶段二），`rebuild --sync`
+  与 `import --update`、管理 API 源码更新端点触发的重建会在容器构建前先执行该宿主命令。cwd 是同步后的
+  `apps/<id>/current/`，环境叠加工作区代理、`buildEnv` 与别名 base，超时取
+  `hostBuildTimeout`，日志写实例 `logs/build.log`。预构建失败时旧容器尚未停止，
+  旧服务继续运行；普通 `rebuild` / `restart` / daemon 自愈不执行该命令。
 - `lwa doctor` 的 `source_freshness` 检查（WARN 级，纯离线）批量列出源码
   漂移 / 源目录丢失的 folder 源实例；git 源不触网，仅 SKIP 提示。
 
@@ -305,6 +310,8 @@ down 新容器 → 恢复 `.prev` 生成物 → `:prev` 重新打回 `:latest` �
 **逃生口**：低内存小主机若担心「新旧镜像并存」的磁盘/内存压力，可在实例
 manifest 的 `container` 段设置 `"rebuildStrategy": "stop-first"`，恢复旧的
 先停后建顺序（此时构建失败即没有旧版本可回退）。默认未设置为 `build-first`。
+若本次业务 `.env.local` 相比成功部署的恢复副本发生变化，为保证环境变更失败后
+仍能恢复服务，本轮自动采用先建后换；环境不变时继续使用配置的 stop-first 顺序。
 `docker/.prev/` 与 `:prev` 标签由下一轮重建自动覆盖，平时无需手动清理。
 
 ### 镜像版本留档与有限回滚（issue #51 远期，S3-01 / DEV-157，V0.9.4）

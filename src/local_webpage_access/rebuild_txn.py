@@ -24,6 +24,9 @@ from local_webpage_access.paths import Workspace
 
 # 影响镜像与运行形态的三件生成物；快照与恢复只处理这些文件。
 GENERATED_FILES: tuple[str, ...] = ("compose.yaml", "Dockerfile", ".env")
+# helper 只在 Django 静态配方命中时存在，不能变成所有历史快照的必需文件。
+OPTIONAL_GENERATED_FILES: tuple[str, ...] = ("lwa_static_wsgi.py",)
+ALL_GENERATED_FILES = GENERATED_FILES + OPTIONAL_GENERATED_FILES
 PREV_DIRNAME = ".prev"
 PREV_TAG = "prev"
 LATEST_TAG = "latest"
@@ -60,7 +63,7 @@ def snapshot_generated(workspace: Workspace, instance_id: str) -> Path:
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
         docker_dir = workspace.app_docker(instance_id)
-        for name in GENERATED_FILES:
+        for name in ALL_GENERATED_FILES:
             src = docker_dir / name
             if src.is_file():
                 shutil.copy2(src, staging / name)
@@ -84,7 +87,7 @@ def restore_generated(workspace: Workspace, instance_id: str) -> bool:
         return False
     docker_dir = workspace.app_docker(instance_id)
     docker_dir.mkdir(parents=True, exist_ok=True)
-    for name in GENERATED_FILES:
+    for name in ALL_GENERATED_FILES:
         src = source / name
         dst = docker_dir / name
         if src.is_file():
@@ -152,3 +155,118 @@ def restore_previous_image_tag(manifest: InstanceManifest) -> None:
     """补偿时把 ``:prev`` 重新打回 ``:latest``，让 ``compose up`` 使用旧镜像。"""
     repo = image_repo(manifest)
     tag_image(f"{repo}:{PREV_TAG}", f"{repo}:{LATEST_TAG}")
+
+
+# BUG-998：``.env.local`` 是用户维护的业务环境文件，不属于生成物，但 compose
+# 以 env_file 引用它。改坏后 recreate 的新 up 失败属预期，补偿 up 若仍读同一个
+# 坏文件则旧服务也无法恢复。因此在每次部署/recreate **成功**后记录一份
+# last-good 副本，补偿时用它覆盖现场。目录内 ``recorded`` 标记与副本分离——
+# 用户删除 ``.env.local`` 后成功运行过一次，副本不存在但语义是「该实例应无
+# 此文件」，恢复时必须把现场的文件删掉，而不是回退到更早的内容。
+LAST_GOOD_DIRNAME = ".env-good"
+_LAST_GOOD_ENV_NAME = ".env.local"
+_LAST_GOOD_RECORDED = "recorded"
+
+
+def _last_good_dir(workspace: Workspace, instance_id: str) -> Path:
+    return workspace.app_docker(instance_id) / LAST_GOOD_DIRNAME
+
+
+def business_env_changed(workspace: Workspace, instance_id: str) -> bool:
+    """比较当前业务环境与恢复副本，包含新增/删除语义。预检成功后调用。"""
+    current = workspace.app_env_local_path(instance_id)
+    previous = _last_good_dir(workspace, instance_id) / _LAST_GOOD_ENV_NAME
+    if current.is_file() != previous.is_file():
+        return True
+    return current.is_file() and current.read_bytes() != previous.read_bytes()
+
+
+def ensure_env_rollback_ready(
+    workspace: Workspace, manifest: InstanceManifest, *, use_previous: bool = False
+) -> None:
+    """停旧容器前确认业务环境可恢复；不能证明安全时保留旧容器。
+
+    旧实例可用 v3 指纹证明现场文件仍与成功部署一致，此时补记 last-good。
+    文件已变更（或旧指纹未覆盖业务环境）时不能把当前坏文件当成旧环境。
+    ``use_previous`` 用于收敛后的决策，读取重渲染前的生成物。
+    """
+    iid = manifest.id
+    if (_last_good_dir(workspace, iid) / _LAST_GOOD_RECORDED).is_file():
+        return
+    from local_webpage_access.lifecycle import (
+        _RUNTIME_CONFIG_HASH_VERSION,
+        _compute_runtime_config_fingerprint,
+    )
+
+    docker_dir = workspace.app_docker(iid)
+    previous = prev_dir(workspace, iid)
+    generated_dir = previous if use_previous and previous.is_dir() else docker_dir
+    env_local = workspace.app_env_local_path(iid)
+    stored = manifest.deploymentFingerprints or {}
+    if (
+        stored.get("runtimeConfigHashVersion") == _RUNTIME_CONFIG_HASH_VERSION
+        and stored.get("runtimeConfigHash") == _compute_runtime_config_fingerprint(
+            generated_dir / "compose.yaml", generated_dir / ".env", env_local
+        )
+    ):
+        save_last_good_env(workspace, iid)
+        return
+
+    compose = generated_dir / "compose.yaml"
+    references_env = compose.is_file() and ".env.local" in compose.read_text(encoding="utf-8")
+    if env_local.exists() or references_env:
+        raise HostingError(
+            f"实例 {iid} 缺少可恢复的旧业务环境记录，已中止替换并保留旧容器；"
+            "请先将 .env.local 恢复到上次成功部署的内容后重试。"
+            "旧版指纹无法校验时，请在维护窗口备份并迁移旧容器的运行环境",
+            instance_id=iid,
+        )
+    # 旧生成物没有业务环境引用，现场也没有文件：可确定旧环境为「无文件」。
+    save_last_good_env(workspace, iid)
+
+
+def save_last_good_env(workspace: Workspace, instance_id: str) -> None:
+    """部署/recreate 成功后记录当前业务环境文件为 last-good 副本。
+
+    先写 staging 目录再整体交换，中途失败不会留下半份记录（仿
+    :func:`snapshot_generated` 的 BUG-835 防护）。副本权限固定 0600——
+    业务环境可能含密钥。
+    """
+    target = _last_good_dir(workspace, instance_id)
+    staging = target.parent / f"{LAST_GOOD_DIRNAME}.staging-{os.getpid()}"
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, mode=0o700)
+        src = workspace.app_docker(instance_id) / _LAST_GOOD_ENV_NAME
+        if src.is_file():
+            dst = staging / _LAST_GOOD_ENV_NAME
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(src.read_bytes())
+        (staging / _LAST_GOOD_RECORDED).write_text("ok\n", encoding="utf-8")
+        shutil.rmtree(target, ignore_errors=True)
+        staging.rename(target)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def restore_last_good_env(workspace: Workspace, instance_id: str) -> bool:
+    """补偿路径恢复 last-good 业务环境；无记录时返回 False 且不改动现场。
+
+    有 ``recorded`` 标记时精确恢复记录时刻的状态：有副本则以 0600 写回
+    ``docker/.env.local``，无副本则删除现场的 ``.env.local``（记录时刻该
+    文件不存在）。
+    """
+    source = _last_good_dir(workspace, instance_id)
+    if not (source / _LAST_GOOD_RECORDED).is_file():
+        return False
+    dst = workspace.app_docker(instance_id) / _LAST_GOOD_ENV_NAME
+    src = source / _LAST_GOOD_ENV_NAME
+    if src.is_file():
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(src.read_bytes())
+    elif dst.exists():
+        dst.unlink()
+    return True

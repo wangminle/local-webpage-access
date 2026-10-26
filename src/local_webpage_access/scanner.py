@@ -1860,18 +1860,19 @@ def _flask_target_port(target: str) -> int:
     return 8000 if "create_app()" in target else 5000
 
 
-def _infer_django_wsgi_target(summary: FileSummary | None) -> tuple[str, str | None]:
-    """066.d：``manage.py`` 根 + 唯一 ``*/wsgi.py`` → ``<project>.wsgi:application``。
+def infer_django_wsgi_target(root: Path) -> tuple[str, str | None]:
+    """066.d / BUG-997：``manage.py`` 根 + 唯一 ``*/wsgi.py`` → ``<project>.wsgi:application``。
 
-    多个 wsgi.py 或缺失时返回 fallback 原因（不猜）。
+    多个 wsgi.py 或缺失时返回 fallback 原因（不猜）。Dockerfile 模板与 scanner
+    共用同一推断，避免「扫描出的启动入口」与「静态 WSGI 包装入口」各写一套。
     """
-    if summary is None or not (summary.root / "manage.py").is_file():
+    if not (root / "manage.py").is_file():
         return "", "未找到 manage.py，无法推断 Django WSGI 入口"
     modules: list[str] = []
-    for path in _walk(summary.root, max_depth=2):
+    for path in _walk(root, max_depth=2):
         if not path.is_file() or path.name != "wsgi.py":
             continue
-        rel = path.relative_to(summary.root)
+        rel = path.relative_to(root)
         if any(part in _WSGI_SKIP_DIRS for part in rel.parts[:-1]):
             continue
         text = _read_text_if_exists(path)
@@ -1882,6 +1883,12 @@ def _infer_django_wsgi_target(summary: FileSummary | None) -> tuple[str, str | N
     if not modules:
         return "", "未找到含 application 的 wsgi.py"
     return "", f"Django wsgi.py 存在多个候选（{'、'.join(modules)}），不猜测"
+
+
+def _infer_django_wsgi_target(summary: FileSummary | None) -> tuple[str, str | None]:
+    if summary is None:
+        return "", "未找到 manage.py，无法推断 Django WSGI 入口"
+    return infer_django_wsgi_target(summary.root)
 
 
 # 预检用单引号包裹整条 ``sh -c``。目标若含 ``()`` 等元字符，必须用双引号，

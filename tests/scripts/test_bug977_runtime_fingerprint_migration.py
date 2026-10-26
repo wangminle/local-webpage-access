@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from local_webpage_access import lifecycle
+from local_webpage_access import lifecycle, rebuild_txn
 from local_webpage_access.build_proxy import write_build_proxy
 from local_webpage_access.config import BuildProxy
 from local_webpage_access.models import InstanceManifest
@@ -75,6 +75,8 @@ def test_legacy_upgrade_converges_once_then_lightweight(
     workspace, registry, config, fake_runtime, operation  # noqa: F811
 ):
     _legacy_baseline(workspace, registry, config)
+    # BUG-998：真正执行替换需要可恢复环境；纯指纹决策仍不推进基线。
+    rebuild_txn.save_last_good_env(workspace, "api")
     write_build_proxy(workspace.config_path, BuildProxy(enabled=True, url="http://10.1.2.3:8080"))
 
     # 首次：一次轻量 force-recreate 收敛容器环境（up），不重建镜像（无 build）。

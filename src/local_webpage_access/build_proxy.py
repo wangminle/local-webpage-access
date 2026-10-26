@@ -11,13 +11,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import stat
+import time
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
 
+from local_webpage_access import file_lock
 from local_webpage_access.config import BuildProxy, Config
 from local_webpage_access.errors import ConfigError
 from local_webpage_access.paths import Workspace
@@ -155,11 +161,64 @@ def _validate_full_config(updated_text: str, checked: BuildProxy) -> None:
         )
 
 
+_SAVE_LOCK_TIMEOUT_S = 10.0
+_SAVE_LOCK_INTERVAL_S = 0.05
+
+
+@contextlib.contextmanager
+def _save_lock(path: Path) -> Iterator[None]:
+    """配置保存互斥：保护「读-改-校验-替换」全程（BUG-1000）。
+
+    锁文件与配置同目录、独立 inode，持锁期间不 unlink（见
+    :mod:`local_webpage_access.file_lock` 约定）。flock 按 open-file-description
+    互斥，同进程线程与跨进程由同一把锁覆盖。
+    """
+    lock_path = path.with_name(f".{path.name}.save-lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + _SAVE_LOCK_TIMEOUT_S
+        while True:
+            try:
+                file_lock.try_acquire_exclusive(fd)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ConfigError(
+                        "另一个配置保存操作进行中，请稍后重试"
+                    ) from None
+                time.sleep(_SAVE_LOCK_INTERVAL_S)
+        file_lock.ensure_lockable(fd)
+        try:
+            yield
+        finally:
+            file_lock.release_exclusive(fd)
+    finally:
+        os.close(fd)
+
+
 def _atomic_write(path: Path, content: str) -> None:
-    """临时文件 + ``os.replace``，崩溃不留半写配置。"""
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    """临时文件 + ``os.replace``，崩溃不留半写配置。
+
+    BUG-999：代理 URL 可能含凭据。目标权限最多保留 ``0o600`` 中的位，否则默认
+    ``0o600``；权限在 ``os.open`` 创建时一次落定，不存在「先 0644 再收紧」
+    的窗口。BUG-1000：临时名带 UUID，并发保存不再共用同一临时文件。
+    """
+    if path.is_file():
+        mode = stat.S_IMODE(path.stat().st_mode) & 0o600
+    else:
+        mode = 0o600
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def write_build_proxy(path: Path, proxy: BuildProxy) -> BuildProxy:
@@ -172,17 +231,18 @@ def write_build_proxy(path: Path, proxy: BuildProxy) -> BuildProxy:
     checked = BuildProxy.model_validate({"enabled": proxy.enabled, "url": proxy.url})
     block = render_block(checked)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.is_file():
-        _validate_full_config(block, checked)
-        _atomic_write(path, block)
-        return checked
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"读取配置失败，已中止写入：{exc}") from exc
-    updated = _replace_block(text, block)
-    if not updated.endswith("\n"):
-        updated += "\n"
-    _validate_full_config(updated, checked)
-    _atomic_write(path, updated)
+    with _save_lock(path):
+        if not path.is_file():
+            _validate_full_config(block, checked)
+            _atomic_write(path, block)
+            return checked
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(f"读取配置失败，已中止写入：{exc}") from exc
+        updated = _replace_block(text, block)
+        if not updated.endswith("\n"):
+            updated += "\n"
+        _validate_full_config(updated, checked)
+        _atomic_write(path, updated)
     return checked

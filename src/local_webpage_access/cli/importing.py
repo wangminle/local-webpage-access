@@ -545,7 +545,13 @@ def _do_update_from_git(
             fg=typer.colors.CYAN,
         )
         rebuild_instance(
-            ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+            ws,
+            config,
+            reg,
+            instance_id,
+            ignore_alias_guard=ignore_alias_guard,
+            # DEV-170：源码刚更新，容器重建前执行用户配置的宿主预构建。
+            host_build=True,
         )
         typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
     elif result.needs_restart:
@@ -715,7 +721,13 @@ def _do_update_from_dir(
             fg=typer.colors.CYAN,
         )
         rebuild_instance(
-            ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+            ws,
+            config,
+            reg,
+            instance_id,
+            ignore_alias_guard=ignore_alias_guard,
+            # DEV-170：源码刚更新，容器重建前执行用户配置的宿主预构建。
+            host_build=True,
         )
         typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
     elif result.needs_restart:
@@ -819,7 +831,13 @@ def _do_update(
             fg=typer.colors.CYAN,
         )
         rebuild_instance(
-            ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+            ws,
+            config,
+            reg,
+            instance_id,
+            ignore_alias_guard=ignore_alias_guard,
+            # DEV-170：源码刚更新，容器重建前执行用户配置的宿主预构建。
+            host_build=True,
         )
         typer.secho("  已 rebuild，端口不变", fg=typer.colors.GREEN)
     elif result.needs_restart:

@@ -827,7 +827,14 @@ class Importer:
         # 2. hash 未变化 → 跳过（dry-run 零写入：连事件也不记，CHK-239）。
         # BUG-787：pending（上次扫描未识别/无部署计划）实例不短路——内容虽未变，
         # 重扫可能因扫描器/计划生成器升级而识别成功（借 update 重获扫描结果）。
-        if new_hash == old_hash and old_manifest.status != Status.PENDING:
+        # BUG-1003：上次宿主预构建/重建未成功收口（hostBuildPending）同样不短路——
+        # 同一 zip 重新 import 或手动 start/rebuild 均可重试预构建，不能因
+        # 归档已导入就误认为新产物已经成功部署。
+        if (
+            new_hash == old_hash
+            and old_manifest.status != Status.PENDING
+            and not getattr(old_manifest, "hostBuildPending", False)
+        ):
             log.info("实例 %s 的 zip 未变化（sha256=%s），跳过更新", instance_id, new_hash[:12])
             if not dry_run:
                 self.registry.add_event(
@@ -1160,6 +1167,22 @@ class Importer:
                 # 汇入本函数）三条更新路径。
                 manifest.buildHooks = list(getattr(old_manifest, "buildHooks", None) or [])
                 manifest.preStart = getattr(old_manifest, "preStart", None)
+                # DEV-170：宿主预构建命令与 buildHooks 同族（用户显式配置）。
+                # 仅容器实例允许；跨形态切换时清空，避免留下无法执行的命令。
+                if manifest.runtime.value == "docker-compose":
+                    manifest.hostBuild = getattr(old_manifest, "hostBuild", None)
+                    manifest.preSync = getattr(old_manifest, "preSync", None)
+                    # BUG-1003：新源码哈希与待预构建标记必须一并提交；否则导入
+                    # 成功、进入 rebuild 前进程中断，同包更新仍会被新哈希短路。
+                    # 数据层不执行命令，只记录已配置命令需要在后续显式重建执行。
+                    manifest.hostBuildPending = bool(
+                        getattr(old_manifest, "hostBuildPending", False)
+                        or manifest.hostBuild or manifest.preSync
+                    )
+                else:
+                    manifest.hostBuild = None
+                    manifest.preSync = None
+                    manifest.hostBuildPending = False
                 # 保留端口登记：从旧 registry 行读 hostPort 写回 manifest，
                 # 避免 upsert_from_manifest 用 manifest 的空 hostPort 清零登记
                 # （hosting 重启时靠 static_sites/containers 表复用端口）
@@ -1565,17 +1588,19 @@ class Importer:
             and not switching_to_folder
             and not changing_source_dir
             and old_manifest.status != Status.PENDING
+            and not old_manifest.hostBuildPending
         ):
             log.info(
                 "实例 %s 的文件夹源内容未变化（指纹 %s），跳过更新",
                 instance_id,
                 new_sync_hash[:12],
             )
-            self.registry.add_event(
-                instance_id,
-                "update",
-                f"文件夹源内容未变化（指纹 {new_sync_hash[:12]}），跳过更新",
-            )
+            if not dry_run:
+                self.registry.add_event(
+                    instance_id,
+                    "update",
+                    f"文件夹源内容未变化（指纹 {new_sync_hash[:12]}），跳过更新",
+                )
             return UpdateResult(
                 instance_id=instance_id,
                 manifest=old_manifest,
@@ -1584,6 +1609,7 @@ class Importer:
                 zip_hash=new_sync_hash,
                 prev_hash=old_sync_hash,
                 skipped=True,
+                dry_run=dry_run,
                 was_running=old_manifest.desiredState == DesiredState.RUNNING,
                 needs_restart=False,
             )
@@ -1993,7 +2019,11 @@ class Importer:
                 remote_oid = None
 
             # 无变更短路（065.b / 065.16）：OID 相同 → 无需更新，不 clone 不 rebuild
-            if remote_oid is not None and remote_oid == stored_commit:
+            if (
+                remote_oid is not None
+                and remote_oid == stored_commit
+                and not old_manifest.hostBuildPending
+            ):
                 log.info(
                     "实例 %s 的 git 源无变更（%s %s @ %s），跳过更新",
                     instance_id,
@@ -2989,6 +3019,12 @@ def apply_detection_to_manifest(
     # _update_zip_locked）静默清空。list() 拷贝避免与旧 manifest 共享可变列表。
     fresh.buildHooks = list(getattr(manifest, "buildHooks", None) or [])
     fresh.preStart = getattr(manifest, "preStart", None)
+    # DEV-170：宿主预构建命令同样是用户显式配置；重扫/更新静默清空会让
+    # rebuild --sync 不再生前端产物。仅容器形态保留（跨形态切换时命令无意义）。
+    if fresh.runtime.value == "docker-compose":
+        fresh.hostBuild = getattr(manifest, "hostBuild", None)
+        fresh.preSync = getattr(manifest, "preSync", None)
+        fresh.hostBuildPending = bool(getattr(manifest, "hostBuildPending", False))
     fresh.systemDeps = list(getattr(manifest, "systemDeps", None) or [])
     fresh.desiredAlias = getattr(manifest, "desiredAlias", None)
     fresh.aliasLiveVerifiedAt = getattr(manifest, "aliasLiveVerifiedAt", None)

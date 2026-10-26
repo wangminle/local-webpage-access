@@ -366,6 +366,23 @@ def _refuse_pending_start(manifest: InstanceManifest) -> None:
     )
 
 
+def _has_pending_host_build(manifest: InstanceManifest) -> bool:
+    from local_webpage_access.host_build import configured_host_build
+
+    return bool(
+        manifest.runtime.value == "docker-compose"
+        and manifest.hostBuildPending
+        and configured_host_build(manifest)
+    )
+
+
+def _finish_host_build(workspace: Workspace, manifest: InstanceManifest) -> None:
+    """只有宿主预构建与容器重建均已成功，才清除持久化待处理标记。"""
+    if manifest.hostBuildPending:
+        manifest.hostBuildPending = False
+        manifest.save(workspace.app_manifest_path(manifest.id))
+
+
 def start_instance(
     workspace: Workspace,
     config: Config,
@@ -407,11 +424,29 @@ def start_instance(
         _ensure_revision_locked(registry, instance_id, expected_revision)
         manifest = _load(workspace, instance_id)
         _refuse_pending_start(manifest)
+        pending_host_build = _has_pending_host_build(manifest)
+        if pending_host_build and from_reconcile:
+            raise LifecycleError(
+                f"实例 {instance_id} 有待执行的宿主预构建，请手动 start 或 rebuild；"
+                "自动恢复不会执行用户宿主命令",
+                instance_id=instance_id,
+            )
+
+        host_call = host_instance
+        if pending_host_build:
+            def host_call(ws, cfg, reg, iid):
+                from local_webpage_access.host_build import run_host_build
+
+                run_host_build(ws, cfg, reg, manifest)
+                result = host_instance(ws, cfg, reg, iid)
+                _finish_host_build(ws, result)
+                return result
+
         if not from_reconcile:
             clear_circuit(manifest)
             with contextlib.suppress(Exception):
                 manifest.save(workspace.app_manifest_path(instance_id))
-        if _is_deployed_container(manifest):
+        if _is_deployed_container(manifest) and not pending_host_build:
             # C.R06 / CHK-252：指纹变化 → full rebuild / runtime recreate / 轻量 start
             # S2-04：决策前先按 manifest 收敛生成物（start/restart/recover 共用）
             action, changed_fields = _deployed_action(
@@ -434,7 +469,7 @@ def start_instance(
                     registry,
                     instance_id,
                     manifest,
-                    host_instance,
+                    host_call,
                     fallback_policy=fallback_policy,
                 )
             elif action == "runtime_recreate":
@@ -462,7 +497,7 @@ def start_instance(
                 registry,
                 instance_id,
                 manifest,
-                host_instance,
+                host_call,
                 fallback_policy=fallback_policy,
             )
         # BUG-084 / IMP-021：首次启动前设置的容器别名此时才拿到 hostPort，
@@ -543,6 +578,14 @@ def _try_host_with_fallback(
         VerificationResult,
     )
 
+    # BUG-998：拒绝不安全替换必须早于 attempt/fallback 的清理，避免预检
+    # 已保留的旧容器又被 _rollback_attempt down 掉。
+    existing_deployment = _is_deployed_container(manifest)
+    if existing_deployment:
+        from local_webpage_access import rebuild_txn
+
+        rebuild_txn.ensure_env_rollback_ready(workspace, manifest)
+
     # C.R04：Prepare 阶段快照--在 attempt 前捕获可恢复状态
     snapshot = _snapshot_attempt(workspace, registry, instance_id, manifest)
 
@@ -583,6 +626,11 @@ def _try_host_with_fallback(
     except (HostingError, DockerError) as exc:
         # C.R05：从异常 context 提取副作用记录
         exc_context = getattr(exc, "context", {}) or {}
+        if existing_deployment:
+            # BUG-998：已部署实例由内层重建事务负责补偿；首次部署的
+            # attempt 清理/候选降级不适用，不能 down 已恢复或尚未动过的旧容器。
+            # 在调用前记录此事实，不能读取可能已被内层清空的 containerId。
+            raise
         side_effect_records = exc_context.get("side_effect_records", [])
         side_effects_auto_recoverable = exc_context.get("side_effects_auto_recoverable", True)
 
@@ -970,11 +1018,16 @@ def _compute_config_fingerprint(
     对 compose.yaml + Dockerfile + .env 的内容做有序拼接哈希。
     """
     h = hashlib.sha256()
-    for label, path in [
+    files = [
         ("compose", compose_path),
         ("dockerfile", dockerfile_path),
         ("env", env_path),
-    ]:
+    ]
+    if isinstance(dockerfile_path, Path):
+        helper = dockerfile_path.with_name("lwa_static_wsgi.py")
+        if helper.is_file():
+            files.append(("static-wsgi", helper))
+    for label, path in files:
         h.update(label.encode("utf-8"))
         h.update(b"\0")
         if path and isinstance(path, Path) and path.is_file():
@@ -1003,6 +1056,14 @@ def _compute_build_config_fingerprint(
             h.update(b"<read-error>")
     else:
         h.update(b"<missing>")
+    if isinstance(dockerfile_path, Path):
+        helper = dockerfile_path.with_name("lwa_static_wsgi.py")
+        if helper.is_file():
+            h.update(b"static-wsgi\0")
+            try:
+                h.update(helper.read_bytes())
+            except OSError:
+                h.update(b"<read-error>")
     deps = [str(d).strip() for d in (system_deps or []) if str(d).strip()]
     if deps:
         h.update(b"systemDeps\0")
@@ -1321,6 +1382,7 @@ def _snapshot_attempt(
         ("compose.yaml", workspace.app_compose_path(instance_id)),
         ("Dockerfile", workspace.app_dockerfile_path(instance_id)),
         (".env", workspace.app_env_path(instance_id)),
+        ("lwa_static_wsgi.py", workspace.app_docker(instance_id) / "lwa_static_wsgi.py"),
         ("alias.conf", workspace.app_alias_config(instance_id)),
     ]:
         # 防御 MagicMock 测试环境：只处理真实 Path
@@ -1390,9 +1452,10 @@ def _restore_from_snapshot(
         "Dockerfile": workspace.app_dockerfile_path(instance_id),
         "compose.yaml": workspace.app_compose_path(instance_id),
         ".env": workspace.app_env_path(instance_id),
+        "lwa_static_wsgi.py": workspace.app_docker(instance_id) / "lwa_static_wsgi.py",
         "alias.conf": workspace.app_alias_config(instance_id),
     }
-    for name in ("Dockerfile", "compose.yaml", ".env", "alias.conf"):
+    for name in ("Dockerfile", "compose.yaml", ".env", "lwa_static_wsgi.py", "alias.conf"):
         path = file_paths[name]
         # 防御 MagicMock 测试环境：只处理真实 Path
         if not isinstance(path, Path):
@@ -2097,6 +2160,12 @@ def _restart_instance_locked(
 
     manifest = _load(workspace, instance_id)
     _refuse_pending_start(manifest)
+    if _has_pending_host_build(manifest):
+        raise LifecycleError(
+            f"实例 {instance_id} 有待执行的宿主预构建，请先手动 start 或 rebuild；"
+            "restart 不会执行用户宿主命令，也不会部署未完成的静态产物",
+            instance_id=instance_id,
+        )
     clear_circuit(manifest)
     with contextlib.suppress(Exception):
         manifest.save(workspace.app_manifest_path(instance_id))
@@ -2286,8 +2355,15 @@ def rebuild_instance(
     expected_revision: int | None = None,
     ignore_alias_guard: bool = False,
     force_hooks: bool = False,
+    host_build: bool | None = None,
 ) -> InstanceManifest:
     """重建实例（WBS-17.04）：强制重新构建。
+
+    ``host_build=True`` 强制执行已配置的宿主预构建；默认 ``None`` 时只消费
+    ``hostBuildPending``，供手动 start/rebuild 或管理页重建继续已授权的任务。
+    内部调用可传 ``False`` 显式禁用而保留待处理标记。预构建在
+    ``host_container`` 停旧容器之前，于 ``apps/<id>/current/`` 执行；
+    无待处理标记的普通 rebuild 不执行用户命令，daemon 自愈也不执行。
 
     * 容器：``compose down`` 旧容器 → 重新生成模板 → ``build`` → ``up``
       （由 :func:`host_container` 完成）；
@@ -2336,6 +2412,23 @@ def rebuild_instance(
                 manifest, workspace, force=force_hooks, registry=registry
             )
 
+        # BUG-1003：宿主预构建一旦被触发就先落盘 pending——预构建或随后的镜像
+        # 构建失败时标记保留，zip 同包 ``import --update`` 据此不再被
+        # sourceZipHash 短路，可直接重试。只有本次实际执行了预构建且重建成功
+        # 才清位；普通 rebuild（不跑预构建）成功也不清，产物缺口仍可见。
+        from local_webpage_access.host_build import configured_host_build
+
+        host_build_armed = bool(
+            is_container
+            and (host_build is True or (host_build is None and manifest.hostBuildPending))
+            and configured_host_build(manifest)
+        )
+        if host_build_armed and not manifest.hostBuildPending:
+            manifest.hostBuildPending = True
+            # 重试标记是执行用户命令的前置条件，写盘失败不得静默继续；
+            # 否则预构建失败后，同 ZIP 仍会被哈希短路，重新落入 BUG-1003。
+            manifest.save(workspace.app_manifest_path(instance_id))
+
         def _builder(iid: str) -> InstanceManifest:
             from local_webpage_access.build_sources import (
                 clear_build_owner,
@@ -2347,6 +2440,13 @@ def rebuild_instance(
             )
             try:
                 if is_container:
+                    # DEV-170：宿主预构建必须在 host_container 之前完成——后者
+                    # 内部会先 down 旧容器，失败就无法保旧。命令执行复用构建
+                    # 队列上下文（取消/超时/日志/进程树）。
+                    if host_build_armed:
+                        from local_webpage_access.host_build import run_host_build
+
+                        run_host_build(workspace, config, registry, manifest)
                     # host_container 内部会 down 旧容器再 build + up
                     return host_container(
                         workspace, config, registry, iid, force_hooks=force_hooks
@@ -2359,6 +2459,10 @@ def rebuild_instance(
 
         queue = get_build_queue(config, registry)
         manifest = queue.run(instance_id, _builder)
+        if host_build_armed:
+            # 预构建与镜像构建均已成功，立即收口；后续别名同步即使失败也不该
+            # 把实例留在「可重试预构建」状态。
+            _finish_host_build(workspace, manifest)
         alias_conf_path = workspace.app_alias_config(instance_id)
         alias_fragment_preexisting = alias_conf_path.is_file()
         # IMP-021：重建后端口可能漂移，同步别名片段（容器别名 reverse_proxy hostPort）。

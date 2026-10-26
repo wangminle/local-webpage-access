@@ -1,6 +1,6 @@
 # Agent 接入指南（Agent Guide）
 
-> **状态：本文描述 V0.9.14 当前实际可用的接入方式。**
+> **状态：本文描述 V0.9.15 当前实际可用的接入方式。**
 > V0.8.18 起提供 **M1 本机协作通道**：Agent 专用 HTTP API `GET/POST /api/agent/v1/*`（仅本机回环）、stdio MCP 适配器 `lwa mcp`、接入引导 `lwa agent connection-info`（见[第 9 节](#9-agent-专用通道m1-本机已落地)）。远程/LAN Agent 通道（M2）仍处规划阶段。管理页另有公开发现入口 `GET /llms.txt`、`GET /agent-info.json` 与 `GET /agent-guide`（即本指南精简版），可用来自动确认目标运行的是 LWA。
 
 **读者：** 代表用户操作 LWA 的 LLM Agent（本机或局域网），以及配置、监督这些 Agent 的人。
@@ -85,7 +85,7 @@ token 由 LWA 工作区管理员提供，存放于服务器工作区 `run/manage
 | `/api/instances/{id}/update` / `update-from-dir` / `update-from-git` | 更新既有实例 |
 | `/api/instances/{id}/start` / `stop` / `restart` / `rebuild` / `cancel-build` | 生命周期操作 |
 | `/api/instances/{id}/rollback` | 有限回滚到留档版本（S3-01 / V0.9.4；body `toBuildId`/`expectedRevision`/`confirm`，D8：不回滚 `data/`，preStart 含迁移须 `confirm=true` 否则 409 `rollback_needs_yes`） |
-| `/api/instances/{id}/settings` | 实例配置（buildEnv、buildBaseFromAlias、systemDeps、buildHooks、extraVolumes 等；extraVolumes 仅容器实例，改后 restart 生效） |
+| `/api/instances/{id}/settings` | 实例配置（buildEnv、buildBaseFromAlias、systemDeps、buildHooks、hostBuild/preSync、extraVolumes 等；hostBuild/preSync 与 extraVolumes 仅容器实例，extraVolumes 改后 restart 生效） |
 | `/api/instances/{id}/path-alias` | 路径别名 |
 | `/api/instances/{id}/remove` | 移除实例（破坏性，先向用户确认） |
 | `/api/access/refresh` / `/api/gateway/switch` | 访问地址刷新 / 网关切换 |

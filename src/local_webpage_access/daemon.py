@@ -146,7 +146,7 @@ def try_auto_start_after_import(
         return {"action": "pending", "note": note}
 
     try:
-        start_instance(workspace, config, registry, iid)
+        start_instance(workspace, config, registry, iid, from_reconcile=True)
         note = f"已自动启动（profile={profile}）"
         log.info("%s: %s → 自动启动（profile=%s）", log_prefix, iid, profile)
         return {"action": "started", "note": note}

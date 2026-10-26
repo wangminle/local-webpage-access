@@ -23,6 +23,7 @@ import json
 import posixpath
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from local_webpage_access.config import BuildMirrors, Config, default_config
@@ -120,10 +121,23 @@ def generate_dockerfile(
     source_dir = workspace.app_current(manifest.id)
     mirrors = (config or default_config()).buildMirrors.resolved()
 
+    django_static: DjangoStaticRecipe | None = None
     if manifest.kind == Kind.NODE:
         content = _render_node(manifest, internal_port, mirrors=mirrors, source_dir=source_dir)
     elif manifest.kind == Kind.PYTHON:
-        content = _render_python(manifest, internal_port, source_dir, mirrors=mirrors)
+        # BUG-997：Django 根 package.json 的前端构建 / collectstatic / 生产静态
+        # 托管配方。只在契约完整时启用（manage.py + STATIC_ROOT + npm 锁 +
+        # build 脚本），不猜测项目自定义输出目录。
+        django_static = _detect_django_static_recipe(
+            manifest, source_dir, copy_prefix=_copy_prefix(manifest)
+        )
+        content = _render_python(
+            manifest,
+            internal_port,
+            source_dir,
+            mirrors=mirrors,
+            django_static=django_static,
+        )
     else:
         # 容器实例只可能是 node/python；兜底用通用 shell 启动
         content = _render_generic(manifest, internal_port)
@@ -160,6 +174,9 @@ def generate_dockerfile(
         emit = log.warning if f.level == "warn" else log.info
         emit("Dockerfile 安全审计 [%s] %s", f.code, f.message)
 
+    # helper 与 Dockerfile 共用审计边界；切换为 Node/通用形态也须在审计
+    # 成功后才清理旧 helper，critical 拒绝时保留现有生成物。
+    _sync_django_static_helper(workspace, manifest.id, django_static)
     out_path.write_text(content, encoding="utf-8")
     # BUG-117：构建上下文是 apps/<id>/，.dockerignore 与 Dockerfile 一并生成。
     # BUG-128：有 build 步骤才排除 dist/build（构建会重生成）；否则保留预构建产物。
@@ -1027,16 +1044,10 @@ def _render_python(
     source_dir: Path | None = None,
     *,
     mirrors: BuildMirrors | None = None,
+    django_static: DjangoStaticRecipe | None = None,
 ) -> str:
     install = (manifest.entry.install or "").strip()
     start = (manifest.entry.start or _PYTHON_DEFAULT_START).strip()
-    header = _HEADER.format(
-        kind="python",
-        internal_port=internal_port,
-        install=install or "（零依赖，跳过依赖安装）",
-        start=start,
-        database=_database_label(manifest),
-    )
 
     cpfx = _copy_prefix(manifest)
     uses_uv = bool(install) and "uv sync" in install
@@ -1113,6 +1124,18 @@ def _render_python(
             f"COPY {cpfx}requirements.txt ./\n" + _pip_run(fallback, mirrors=mirrors) + "\n"
         )
 
+    # BUG-997：Django 静态包装接管 Gunicorn 目标（保留迁移等前置链原样）。
+    if django_static is not None and django_static.serve_static:
+        start = _rewrite_static_wsgi_target(start, django_static.wsgi_module)
+
+    header = _HEADER.format(
+        kind="python",
+        internal_port=internal_port,
+        install=install or "（零依赖，跳过依赖安装）",
+        start=start,
+        database=_database_label(manifest),
+    )
+
     # IMP-066（066.b）：CMD 使用 LWA 生成的 Gunicorn 生产命令时，平台分层补装
     # 运行时依赖（项目依赖声明 gunicorn 则尊重项目版本，不重复安装）；
     # uv 流程装进 uv venv（uv pip）。不回写用户 requirements/pyproject。
@@ -1137,15 +1160,26 @@ def _render_python(
     # 否则任意源码改动都会打掉 Node 下载层（约 30MB）与 npm 依赖层。
     node_toolchain = ""
     npm_block = ""
+    package_root = (
+        _django_build_root(source_dir, cpfx)
+        if django_static is not None
+        else source_dir
+    )
     frontend_pkg = _frontend_package_dir(source_dir)
-    if source_dir is not None and (
-        (source_dir / "package.json").is_file() or frontend_pkg
+    if package_root is not None and (
+        (package_root / "package.json").is_file() or frontend_pkg
     ):
         node_apt = _apt_body("ca-certificates curl xz-utils", mirrors)
         node_toolchain = _render_apt_run(node_apt, mirrors) + _render_node_tarball_run(mirrors)
-        if (source_dir / "package.json").is_file():
+        if (package_root / "package.json").is_file():
+            # BUG-997：Django 前端构建可能依赖 devDependencies（如 esbuild 之外的
+            # 构建插件）。配方命中时必须完整安装，构建后再 prune 掉 devDeps；
+            # 其他 Python 全栈项目保持原有的生产依赖安装，不扩大镜像。
             npm_install = _with_npm_registry(
-                "npm ci --omit=dev || npm install --omit=dev", mirrors
+                "npm ci || npm install"
+                if django_static is not None
+                else "npm ci --omit=dev || npm install --omit=dev",
+                mirrors,
             )
             if needs_early_full_copy:
                 npm_block = f"RUN {npm_install}\n"
@@ -1187,6 +1221,13 @@ def _render_python(
     frontend_build = _frontend_build_block(
         manifest, source_dir, mirrors=mirrors, copy_prefix=cpfx
     )
+    # BUG-997：静态配方在用户 buildHooks 之后执行——钩子可先改源码/产物，
+    # 再由平台统一 npm run build + collectstatic，最后 prune 掉 devDeps。
+    django_static_block = (
+        _django_static_block(django_static, mirrors=mirrors, uses_uv=uses_uv)
+        if django_static is not None
+        else _django_static_skip_note(manifest, source_dir, copy_prefix=cpfx)
+    )
 
     lines = [
         header,
@@ -1204,6 +1245,7 @@ def _render_python(
         frontend_build,
         sqlite_mkdir,
         hooks_block,
+        django_static_block,
         pythonpath_env,
         "ENV HOST=0.0.0.0",
         f"ENV PORT={internal_port}",
@@ -1391,6 +1433,365 @@ def _frontend_build_block(
         "fi"
     )
     return f"{copy_fe}WORKDIR {workdir}\nRUN {npm_build}\n{copy_dist}\nWORKDIR /app\n"
+
+
+# ---- BUG-997：Django + 根 package.json 静态资源配方 --------------------------
+
+@dataclass(frozen=True)
+class DjangoStaticRecipe:
+    """Django 项目前端构建 / collectstatic / 生产静态托管的已证明契约。
+
+    只有下列证据同时成立才会生成：``manage.py``、可从 ``manage.py`` 解析出的
+    settings 模块、该 settings 树里声明的 ``STATIC_ROOT``、根 ``package.json``
+    的 ``build`` 脚本、npm 锁文件（package-lock / npm-shrinkwrap）。缺任一项
+    都不猜，留注释并交 ``buildHooks`` 显式处理。
+    """
+
+    settings_module: str
+    wsgi_module: str
+    serve_static: bool
+
+
+_DJANGO_SETTINGS_SETDEFAULT_RE = re.compile(
+    r"""setdefault\(\s*["']DJANGO_SETTINGS_MODULE["']\s*,\s*["']([A-Za-z_][\w.]*)["']\s*\)"""
+)
+_DJANGO_SETTINGS_ASSIGN_RE = re.compile(
+    r"""DJANGO_SETTINGS_MODULE\s*=\s*["']([A-Za-z_][\w.]*)["']"""
+)
+_DJANGO_STATIC_ROOT_RE = re.compile(r"(?m)^\s*STATIC_ROOT\s*=")
+_SETTINGS_MAX_FILES = 40
+
+
+def _detect_django_static_recipe(
+    manifest: InstanceManifest,
+    source_dir: Path | None,
+    *,
+    copy_prefix: str,
+) -> DjangoStaticRecipe | None:
+    """返回完整契约对应的配方；项目不适用或契约不全时返回 ``None``。"""
+    recipe, _reason = _probe_django_static(manifest, source_dir, copy_prefix=copy_prefix)
+    return recipe
+
+
+def _django_static_skip_note(
+    manifest: InstanceManifest,
+    source_dir: Path | None,
+    *,
+    copy_prefix: str,
+) -> str:
+    """项目像「Django + 根前端构建」但契约不全时，在 Dockerfile 留可操作注释。"""
+    recipe, reason = _probe_django_static(manifest, source_dir, copy_prefix=copy_prefix)
+    if recipe is not None or not reason:
+        return ""
+    return (
+        "# BUG-997：Django 静态资源自动配方跳过：" + reason
+        + "。请用 manifest buildHooks 显式构建/收集，或补齐静态资源契约"
+        "（见 docs/known-limitations.md）。\n"
+    )
+
+
+def _django_build_root(source_dir: Path | None, copy_prefix: str) -> Path | None:
+    """镜像内业务源码根对应的宿主目录（与 COPY 前缀对齐）。"""
+    if source_dir is None:
+        return None
+    prefix = (copy_prefix or "current/").strip("/")
+    if prefix == "current":
+        root = source_dir
+    elif prefix.startswith("current/"):
+        root = source_dir / prefix[len("current/") :]
+    else:
+        return None
+    return root if root.is_dir() else None
+
+
+def _probe_django_static(
+    manifest: InstanceManifest,
+    source_dir: Path | None,
+    *,
+    copy_prefix: str,
+) -> tuple[DjangoStaticRecipe | None, str | None]:
+    """契约探测并区分「不适用」``(None, None)`` 与「契约不全」``(None, reason)``。"""
+    root = _django_build_root(source_dir, copy_prefix)
+    if root is None or not (root / "manage.py").is_file():
+        return None, None
+    pkg_path = root / "package.json"
+    if not pkg_path.is_file():
+        return None, None
+    try:
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "根 package.json 无法解析"
+    scripts = pkg.get("scripts") if isinstance(pkg, dict) else None
+    build_script = scripts.get("build") if isinstance(scripts, dict) else None
+    if not isinstance(build_script, str) or not build_script.strip():
+        # 没有前端 build 脚本：静态资源不需要预构建，保持原有行为不加注释。
+        return None, None
+    if (root / "pnpm-lock.yaml").is_file() or (root / "yarn.lock").is_file():
+        return None, "检测到 pnpm/yarn 锁文件（自动配方暂只支持 npm）"
+    if not (
+        (root / "package-lock.json").is_file()
+        or (root / "npm-shrinkwrap.json").is_file()
+    ):
+        return None, "根 package.json 有 build 脚本但缺少 package-lock.json/npm-shrinkwrap.json"
+
+    manage_py = _read_source_text(root / "manage.py")
+    settings_match = _DJANGO_SETTINGS_SETDEFAULT_RE.search(manage_py) or (
+        _DJANGO_SETTINGS_ASSIGN_RE.search(manage_py)
+    )
+    if settings_match is None:
+        return None, "无法从 manage.py 识别 DJANGO_SETTINGS_MODULE"
+    settings_module = settings_match.group(1)
+    settings_files = _settings_module_files(root, settings_module)
+    if not settings_files or not any(
+        _DJANGO_STATIC_ROOT_RE.search(_read_source_text(path)) for path in settings_files
+    ):
+        return None, f"settings 模块 {settings_module} 未声明 STATIC_ROOT"
+
+    from local_webpage_access.scanner import infer_django_wsgi_target
+
+    target, wsgi_reason = infer_django_wsgi_target(root)
+    if not target:
+        # BUG-1002：WSGI 入口不唯一/缺失时整体跳过——交付约定是「唯一 wsgi 才
+        # 启用」。此前只把 serve_static 置 False 却仍执行 npm run build 与
+        # collectstatic，既跑了本应保守跳过的构建，又留下无静态托管的半成品。
+        return None, f"{wsgi_reason or 'WSGI 入口无法唯一确定'}（整体跳过，不执行 npm build / collectstatic）"
+    wsgi_module = target.split(":", 1)[0]
+    serve_static = f"{wsgi_module}:application" in (manifest.entry.start or "")
+    return (
+        DjangoStaticRecipe(
+            settings_module=settings_module,
+            wsgi_module=wsgi_module,
+            serve_static=serve_static,
+        ),
+        None,
+    )
+
+
+_SETTINGS_STAR_IMPORT_RE = re.compile(
+    r"(?m)^\s*from\s+(\.[\w.]*|[A-Za-z_][\w.]*)\s+import\s+\*"
+)
+
+
+def _settings_module_files(root: Path, module: str) -> list[Path]:
+    """返回所选 settings 模块**实际可达**的文件。
+
+    不能把 ``settings/`` 目录下所有 ``*.py`` 都算进去：``prod.py`` 可能声明
+    ``STATIC_ROOT`` 但当前选择的是 ``dev`` 链，``collectstatic`` 仍会失败。
+    这里沿 ``from X import *`` 递归（Django 常见的 base/dev/prod 写法），
+    只接受该链上的文件。
+    """
+    files: list[Path] = []
+    seen: set[str] = set()
+    queue = [module]
+    while queue and len(files) < _SETTINGS_MAX_FILES:
+        name = queue.pop(0)
+        if name in seen:
+            continue
+        seen.add(name)
+        base = root.joinpath(*name.split("."))
+        module_file = base.with_suffix(".py")
+        init_file = base / "__init__.py"
+        path = module_file if module_file.is_file() else None
+        is_package = path is None and init_file.is_file()
+        if is_package:
+            path = init_file
+        if path is None:
+            continue
+        files.append(path)
+        text = _read_source_text(path)
+        anchor = name if is_package else name.rpartition(".")[0]
+        for target in _settings_star_import_targets(text, anchor):
+            if target not in seen:
+                queue.append(target)
+    return files
+
+
+def _settings_star_import_targets(text: str, anchor: str) -> list[str]:
+    """把 settings 文件里的星号导入解析成绝对模块名（尽力而为）。"""
+    targets: list[str] = []
+    for match in _SETTINGS_STAR_IMPORT_RE.finditer(text):
+        raw = match.group(1)
+        if not raw.startswith("."):
+            targets.append(raw)
+            continue
+        dots = len(raw) - len(raw.lstrip("."))
+        rest = raw.lstrip(".")
+        parts = anchor.split(".") if anchor else []
+        # 一个点表示当前包；``..`` 向上一级。
+        ascend = dots - 1
+        if ascend:
+            parts = parts[:-ascend] if ascend <= len(parts) else []
+        if rest:
+            parts = [*parts, *rest.split(".")]
+        if parts:
+            targets.append(".".join(parts))
+    return targets
+
+
+def _django_static_block(
+    recipe: DjangoStaticRecipe, *, mirrors: BuildMirrors | None, uses_uv: bool = False
+) -> str:
+    """Dockerfile 层：前端构建 → collectstatic → 静态 WSGI 包装 → 裁剪 devDeps。
+
+    BUG-997（复核重开）：uv 项目的依赖经 ``uv sync`` 装在项目 venv 里，镜像的
+    系统 ``python`` 没有 Django；collectstatic 必须用与 CMD 同一口径的
+    ``uv run --no-sync --no-dev`` 进入该 venv（本层位于项目本体 sync 之后）。
+    """
+    python_prefix = "uv run --no-sync --no-dev " if uses_uv else ""
+    lines = [
+        "# BUG-997：Django 静态资源配方（manage.py + STATIC_ROOT + npm 锁 + build 脚本均已证明）。",
+        f"RUN {_with_npm_registry('npm run build', mirrors)}",
+        "RUN DJANGO_SETTINGS_MODULE="
+        f"{recipe.settings_module} {python_prefix}python manage.py collectstatic --noinput",
+    ]
+    if recipe.serve_static:
+        lines.append("COPY docker/lwa_static_wsgi.py /app/lwa_static_wsgi.py")
+    lines.append("RUN npm prune --omit=dev")
+    return "\n".join(lines) + "\n"
+
+
+def _rewrite_static_wsgi_target(start: str, wsgi_module: str) -> str:
+    """把 Gunicorn 目标改为平台生成的静态包装模块；目标不在命令中则原样返回。"""
+    if not wsgi_module:
+        return start
+    # 只替换目标本身，不吃掉命令里已有的引号。曾用 ``["']?`` 包裹，结果把
+    # ``sh -c "... module:application"`` 的收尾双引号一并吞掉，生成的 CMD
+    # 少一个引号（字符串在 Dockerfile 中直接截断）。
+    pattern = re.compile(
+        rf"(?<![\w.]){re.escape(wsgi_module)}:application(?![\w.])"
+    )
+    if not pattern.search(start):
+        return start
+    return pattern.sub("lwa_static_wsgi:application", start)
+
+
+_DJANGO_STATIC_WSGI_TEMPLATE = '''\
+"""由 lwa 自动生成（BUG-997），请勿手动编辑。
+
+Django 的生产 WSGI 服务器（Gunicorn）不提供静态资源；本模块在原应用外
+增加 ``STATIC_ROOT`` 只读服务，URL 前缀与 Django ``STATIC_URL`` 一致。
+路径经 ``realpath`` 归一化并做目录包含校验，拒绝穿越与符号链接逃逸。
+"""
+
+from __future__ import annotations
+
+import importlib
+import mimetypes
+import os
+import posixpath
+import stat
+from email.utils import formatdate
+from urllib.parse import unquote, urlsplit
+from wsgiref.util import FileWrapper
+
+_APP_MODULE = __APP_MODULE__
+
+# 先加载项目自己的 WSGI 模块，确保 Django settings 与自定义初始化都已执行。
+_application = importlib.import_module(_APP_MODULE).application
+
+from django.conf import settings  # noqa: E402
+
+# BUG-1001：空/相对 STATIC_ROOT 不得先经 realpath——``os.path.realpath("")`` 会
+# 返回工作目录（/app），后面的「未配置则不托管」判断随之失效，/static/ 就能读到
+# 应用目录里的任意文件。先验证原始值非空且为绝对路径，再归一化；不合法时静态
+# 托管整体停用，请求原样交回 Django 应用。
+_STATIC_ROOT_RAW = str(getattr(settings, "STATIC_ROOT", "") or "").strip()
+_STATIC_ROOT = (
+    os.path.realpath(_STATIC_ROOT_RAW)
+    if _STATIC_ROOT_RAW and os.path.isabs(_STATIC_ROOT_RAW)
+    else ""
+)
+_STATIC_URL = str(getattr(settings, "STATIC_URL", "") or "").strip()
+try:
+    _STATIC_URL_PARTS = urlsplit(_STATIC_URL)
+except ValueError:
+    _STATIC_URL = ""
+else:
+    # 空值、外部 URL 与根路径不得接管动态路由；点段/重复斜杠归一化后
+    # 落到根路径的前缀也保守禁用，但不改写其他本地前缀的匹配口径。
+    if (
+        not _STATIC_URL
+        or _STATIC_URL_PARTS.scheme
+        or _STATIC_URL_PARTS.netloc
+        or _STATIC_URL.startswith("//")
+        or posixpath.normpath("/" + _STATIC_URL.lstrip("/")) == "/"
+    ):
+        _STATIC_URL = ""
+if _STATIC_URL:
+    if not _STATIC_URL.startswith("/"):
+        _STATIC_URL = "/" + _STATIC_URL
+    if not _STATIC_URL.endswith("/"):
+        _STATIC_URL += "/"
+
+
+def _static_file(path_info: str) -> tuple[str, os.stat_result] | None:
+    if not _STATIC_ROOT or not _STATIC_URL:
+        return None
+    if not path_info.startswith(_STATIC_URL):
+        return None
+    rel = unquote(path_info[len(_STATIC_URL) :])
+    if not rel or rel.endswith("/") or "\\x00" in rel:
+        return None
+    rel = rel.replace("\\\\", "/")
+    if rel.startswith("/"):
+        return None
+    normalized = posixpath.normpath(rel)
+    if normalized == ".." or normalized.startswith("../"):
+        return None
+    full = os.path.realpath(os.path.join(_STATIC_ROOT, normalized))
+    if full != _STATIC_ROOT and not full.startswith(_STATIC_ROOT + os.sep):
+        return None
+    try:
+        info = os.stat(full)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return full, info
+
+
+def application(environ, start_response):
+    method = environ.get("REQUEST_METHOD", "GET").upper()
+    if method not in ("GET", "HEAD"):
+        return _application(environ, start_response)
+    found = _static_file(environ.get("PATH_INFO", ""))
+    if found is None:
+        return _application(environ, start_response)
+    full, info = found
+    content_type = mimetypes.guess_type(full)[0] or "application/octet-stream"
+    headers = [
+        ("Content-Type", content_type),
+        ("Content-Length", str(info.st_size)),
+        ("Last-Modified", formatdate(info.st_mtime, usegmt=True)),
+    ]
+    start_response("200 OK", headers)
+    if method == "HEAD":
+        return [b""]
+    handle = open(full, "rb")
+    file_wrapper = environ.get("wsgi.file_wrapper")
+    if file_wrapper is not None:
+        return file_wrapper(handle, 8192)
+    return FileWrapper(handle, 8192)
+'''
+
+
+def _render_django_static_wsgi(wsgi_module: str) -> str:
+    return _DJANGO_STATIC_WSGI_TEMPLATE.replace(
+        "__APP_MODULE__", json.dumps(wsgi_module)
+    )
+
+
+def _sync_django_static_helper(
+    workspace: Workspace, instance_id: str, recipe: DjangoStaticRecipe | None
+) -> None:
+    """写入/清理 ``docker/lwa_static_wsgi.py``（生成物，不属于用户文件）。"""
+    path = workspace.app_docker(instance_id) / "lwa_static_wsgi.py"
+    if recipe is not None and recipe.serve_static and recipe.wsgi_module:
+        path.write_text(
+            _render_django_static_wsgi(recipe.wsgi_module), encoding="utf-8"
+        )
+    else:
+        path.unlink(missing_ok=True)
 
 
 def _uses_runtime_root_layout(manifest: InstanceManifest, source_dir: Path | None) -> bool:

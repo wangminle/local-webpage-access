@@ -345,9 +345,13 @@ def rebuild(
             if sync:
                 _sync_source_before_rebuild(ws, config, reg, instance_id)
             stale_warnings: list[str] = []
-            rebuild_kwargs: dict[str, object] = {}
+            rebuild_kwargs: dict[str, bool] = {}
             if force:
                 rebuild_kwargs["force_hooks"] = True
+            # DEV-170：只有显式 --sync 才执行用户配置的宿主预构建命令。
+            # 未开启时不传该关键字，保持既有调用方/测试桩签名不变。
+            if sync:
+                rebuild_kwargs["host_build"] = True
             manifest = rebuild_instance(
                 ws,
                 config,
@@ -398,7 +402,8 @@ def _sync_source_before_rebuild(ws: Any, config: Any, reg: Any, instance_id: str
     else:
         typer.secho(
             f"实例 {instance_id} 无上游源码（sourceKind={source_kind!r}），"
-            "--sync 仅支持 folder/git 源实例；zip 实例请用 lwa import --update 加新 zip。",
+            "--sync 仅支持 folder/git 源实例；zip 实例请用 lwa import --update 加新 zip"
+            "（上次宿主预构建失败时，同一 zip 重新 import 即可重试，不会被跳过）。",
             fg=typer.colors.RED,
             err=True,
         )
@@ -414,12 +419,24 @@ def _sync_source_before_rebuild(ws: Any, config: Any, reg: Any, instance_id: str
         check_frontend_artifacts_staleness,
     )
 
+    # DEV-170：已配置宿主预构建时，重建会先重新生成产物；不再打印「产物
+    # 可能陈旧」的告警造成误导，改为确认命令将会执行。
+    updated_manifest = InstanceManifest.load(manifest_path)
+    host_command = (
+        updated_manifest.hostBuild or updated_manifest.preSync or ""
+    ).strip()
     current_dir = ws.app_current(instance_id)
     if current_dir.is_dir():
-        verdict = check_frontend_artifacts_staleness(current_dir)
-        if verdict.level == LEVEL_SUSPECTED:
-            typer.secho(f"  #61 提示：{verdict.message}", fg=typer.colors.YELLOW)
-            typer.secho(f"  建议：{verdict.suggestion}", fg=typer.colors.YELLOW)
+        if host_command:
+            typer.secho(
+                f"  #61 宿主预构建已配置，重建前将在 current/ 执行：{host_command}",
+                fg=typer.colors.CYAN,
+            )
+        else:
+            verdict = check_frontend_artifacts_staleness(current_dir)
+            if verdict.level == LEVEL_SUSPECTED:
+                typer.secho(f"  #61 提示：{verdict.message}", fg=typer.colors.YELLOW)
+                typer.secho(f"  建议：{verdict.suggestion}", fg=typer.colors.YELLOW)
 
 
 def cancel_build(

@@ -983,6 +983,33 @@ V0.9.0 起在 **Caddy** 网关下设置 `gatewayTls: internal`，别名走 `http
 - 若迁前已 `docker compose down`：含 BUG-382 的版本用 `lwa start` 即可 `up -d`；旧版本可能需临时 `lwa rebuild`。
 - **V0.6.12 起裸 mv 防复发**：`lwa doctor` 的 `workspace_path_consistency` 会报告陈旧派生路径、落在旧工作区的 Caddy 引用、SQLite data mount 漂移；`gateway on` 启动前按当前工作区落盘主配置；容器 start 遇挂载漂移会 fail-safe 救援，`down` 失败或两侧数据冲突时中止并要求人工确认。**V0.6.13** 起：容器状态查询失败禁止当作「无容器」继续 start；registry 不可读时一致性检查 SKIP。修复入口：`relocate --verify` / `rebuild` / `recover` / `gateway on`。
 
+### 如何让前端产物在 `rebuild --sync` 前自动重新构建？
+
+后端服务托管前端编译产物的同仓项目，可配置宿主预构建（issue #61 阶段二）：
+
+```bash
+lwa configure demo --host-build "cd frontend && npm run build"
+lwa rebuild demo --sync
+```
+
+命令在同步后的 `apps/demo/current/` 源根执行，继承宿主 PATH，并注入工作区构建代理、
+实例 `buildEnv`、别名跟随的 `VITE_BASE` / `BASE_URL` / `PUBLIC_URL` 与工作区包缓存；
+超时取 `local-web.yml` 的 `hostBuildTimeout`，输出写入实例 `logs/build.log`。
+`rebuild --sync`、`import --update`、管理 API 与 Agent 源码更新触发的重建会执行该命令。
+配置或修改命令、更新源码后会留下待处理标记；手动 `lwa start <id>` 或 `lwa rebuild <id>`
+（包括管理页重建）也会先消费此标记，再构建容器，因此停止状态及 `--no-restart` 更新同样可继续。
+没有待处理标记的普通重建不执行宿主命令；`restart` 遇到标记会提示先 start/rebuild，
+daemon 自愈不执行命令，也不部署缺少预构建的产物。失败或超时发生在停旧容器前，旧服务继续运行。
+ZIP、folder、Git 均可通过同一更新入口重试相同内容，成功后清除标记并恢复去重。
+`--pre-sync` 是同一能力的备用字段名，与 `--host-build` 互斥；`--clear-host-build` 清除两者及待处理标记。
+命令仅在 docker-compose 容器实例上允许，且不允许换行/NUL。
+
+Django 项目若使用根目录 `package.json` + `manage.py` + `collectstatic`，当契约完整时
+镜像会自动构建、收集并在 Gunicorn 下托管静态资源（BUG-997；uv 项目的 collectstatic 经
+`uv run` 进入项目 venv）；契约不全（pnpm/yarn、缺 npm 锁、`STATIC_ROOT` 不在所选 settings
+导入链上、`wsgi.py` 多候选或缺失）会**整体跳过**构建与收集并在 Dockerfile 留注释，此时可用
+上面的 `hostBuild` 显式构建。
+
 ### 如何配置构建环境并让 base 跟随别名？
 
 使用 `lwa configure <id>` 查看配置；例如：

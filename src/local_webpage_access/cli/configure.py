@@ -41,6 +41,19 @@ def configure(
     clear_build_hooks: bool = typer.Option(
         False, "--clear-build-hooks", help="清空 buildHooks"
     ),
+    host_build: str | None = typer.Option(
+        None,
+        "--host-build",
+        help="DEV-170：宿主预构建命令，在 rebuild --sync 的容器构建前于 apps/<id>/current 源根执行（如 cd frontend && npm run build）",
+    ),
+    pre_sync: str | None = typer.Option(
+        None,
+        "--pre-sync",
+        help="hostBuild 的同义备用名（issue #61）；与 --host-build 互斥",
+    ),
+    clear_host_build: bool = typer.Option(
+        False, "--clear-host-build", help="清空 hostBuild / preSync 宿主预构建命令"
+    ),
     extra_volume: list[str] | None = typer.Option(
         None,
         "--extra-volume",
@@ -94,6 +107,17 @@ def configure(
             changes["buildHooks"] = build_hook
         if clear_build_hooks:
             changes["buildHooks"] = []
+        if host_build and pre_sync:
+            raise ValueError("--host-build 与 --pre-sync 互斥（同一能力的两个名字）")
+        if clear_host_build and (host_build or pre_sync):
+            raise ValueError("--host-build/--pre-sync 与 --clear-host-build 互斥")
+        if host_build is not None or pre_sync is not None:
+            # 两个字段互斥：设置其中一个时显式清空另一个，避免旧值残留触发校验。
+            changes["hostBuild"] = host_build if host_build is not None else None
+            changes["preSync"] = pre_sync if pre_sync is not None else None
+        if clear_host_build:
+            changes["hostBuild"] = None
+            changes["preSync"] = None
         if extra_volume and clear_extra_volumes:
             raise ValueError("--extra-volume 与 --clear-extra-volumes 互斥")
         if extra_volume:
@@ -154,6 +178,8 @@ def configure(
                                 "redundancyAcknowledged",
                                 "systemDeps",
                                 "buildHooks",
+                                "hostBuild",
+                                "preSync",
                             )
                         },
                         "extraVolumes": extra_volumes,

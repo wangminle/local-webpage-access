@@ -2558,6 +2558,7 @@ def test_rescan_preserves_build_hooks_and_prestart(
     manifest = InstanceManifest.load(mpath)
     manifest.buildHooks = ["chown -R 1000:1000 /app/runtime"]
     manifest.preStart = "echo hi"
+    manifest.hostBuild = "cd frontend && npm run build"
     manifest.systemDeps = ["ffmpeg"]
     manifest.desiredAlias = "funasr-workbench"
     manifest.aliasLiveVerifiedAt = "2026-09-15T15:23:00Z"
@@ -2573,6 +2574,7 @@ def test_rescan_preserves_build_hooks_and_prestart(
     )
     assert fresh.buildHooks == ["chown -R 1000:1000 /app/runtime"]
     assert fresh.preStart == "echo hi"
+    assert fresh.hostBuild == "cd frontend && npm run build"
     assert fresh.systemDeps == ["ffmpeg"]
     assert fresh.desiredAlias == "funasr-workbench"
     assert fresh.aliasLiveVerifiedFor == "funasr-workbench"
@@ -2594,6 +2596,7 @@ def test_update_preserves_build_hooks_and_prestart(
     manifest = InstanceManifest.load(mpath)
     manifest.buildHooks = ["chown -R 1000:1000 /app/runtime"]
     manifest.preStart = "echo hi"
+    manifest.hostBuild = "cd frontend && npm run build"
     manifest.save(mpath)
     registry.upsert_from_manifest(manifest)
 
@@ -2604,6 +2607,8 @@ def test_update_preserves_build_hooks_and_prestart(
     result = importer.update_zip(v2, iid, restart=False)
     assert result.manifest.buildHooks == ["chown -R 1000:1000 /app/runtime"]
     assert result.manifest.preStart == "echo hi"
+    assert result.manifest.hostBuild == "cd frontend && npm run build"
     reloaded = InstanceManifest.load(mpath)
     assert reloaded.buildHooks == ["chown -R 1000:1000 /app/runtime"]
     assert reloaded.preStart == "echo hi"
+    assert reloaded.hostBuild == "cd frontend && npm run build"

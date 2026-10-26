@@ -653,6 +653,18 @@ class InstanceManifest(BaseModel):
     # 使 CMD 变为 ``sh -c "<preStart> && exec <start>"``。均拒绝换行符（防注入）。
     buildHooks: list[str] = Field(default_factory=list)
     preStart: str | None = None
+    # DEV-170 / issue #61 阶段二：宿主预构建命令。在 ``lwa rebuild --sync``
+    # （以及 import --update 自动 rebuild）时、容器构建之前，于
+    # ``apps/<id>/current/`` 源根用宿主 shell 执行一次，使前端产物进入镜像。
+    # ``preSync`` 是 issue 中同义的备用名；两者互斥，只允许容器实例。
+    # 只由用户显式配置（configure / 管理 API），不从源码推导；拒绝换行。
+    hostBuild: str | None = None
+    preSync: str | None = None
+    # BUG-1003：宿主预构建「源码已更新或命令已触发，尚未随重建成功收口」的状态位。
+    # 与更新源码哈希一起置位；显式预构建入口兜底置位，重建成功后清位。若失败（预构建
+    # 或镜像构建），zip 同包 ``import --update`` 不再被 sourceZipHash 短路，
+    # 可直接重试——否则普通 rebuild 不跑预构建、zip 又不支持 --sync，无路可重试。
+    hostBuildPending: bool = False
     # issue #35：系统级 apt 包（如 ffmpeg）。渲染到 COPY current/ 之前，走
     # aptMirror / aptFallbacks / 重试；与 buildHooks 同属重扫保留清单。
     systemDeps: list[str] = Field(default_factory=list)
@@ -771,6 +783,23 @@ class InstanceManifest(BaseModel):
                 raise ValueError(f"buildHooks/preStart 不允许包含换行符：{item!r}")
         return v
 
+    @field_validator("hostBuild", "preSync")
+    @classmethod
+    def _check_host_build(cls, v: Any) -> Any:
+        """DEV-170：宿主预构建命令经 shell 执行，拒绝换行/NUL 并去掉首尾空白。
+
+        命令内容保持原样（允许 ``&&``、``cd``、环境变量前缀），但空字符串
+        视为未配置，避免执行空命令或写出难以辨认的 manifest。
+        """
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("hostBuild/preSync 必须是字符串命令")
+        if any(char in v for char in ("\n", "\r", "\x00")):
+            raise ValueError("hostBuild/preSync 不允许包含换行符或 NUL")
+        command = v.strip()
+        return command or None
+
     @field_validator("systemDeps")
     @classmethod
     def _check_system_deps(cls, v: Any) -> Any:
@@ -844,6 +873,13 @@ class InstanceManifest(BaseModel):
                 )
             if self.container is None:
                 raise ValueError("runtime=docker-compose 时必须有 container 配置")
+        if self.hostBuild and self.preSync:
+            raise ValueError("hostBuild 与 preSync 是同一能力的两个名字，只能配置一个")
+        if (self.hostBuild or self.preSync) and rt != Runtime.DOCKER_COMPOSE.value:
+            raise ValueError(
+                "hostBuild/preSync 仅支持 docker-compose 容器实例；"
+                "shared-static 前端构建请使用 entry.install / entry.build"
+            )
         return self
 
     @model_validator(mode="after")

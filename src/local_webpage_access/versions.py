@@ -64,7 +64,7 @@ def snapshot_config(workspace: Workspace, instance_id: str, build_id: int) -> Pa
         shutil.rmtree(target)
     target.mkdir(parents=True)
     docker_dir = workspace.app_docker(instance_id)
-    for name in GENERATED_FILES:
+    for name in rebuild_txn.ALL_GENERATED_FILES:
         src = docker_dir / name
         if src.is_file():
             shutil.copy2(src, target / name)
@@ -117,7 +117,16 @@ def read_migration_archive(
 def snapshot_complete(workspace: Workspace, instance_id: str, build_id: int) -> bool:
     """快照目录存在且三件生成物齐全（回滚要求快照可完整恢复现场）。"""
     snap = build_snapshot_dir(workspace, instance_id, build_id)
-    return snap.is_dir() and all((snap / name).is_file() for name in GENERATED_FILES)
+    if not snap.is_dir() or not all((snap / name).is_file() for name in GENERATED_FILES):
+        return False
+    try:
+        dockerfile = (snap / "Dockerfile").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return all(
+        name not in dockerfile or (snap / name).is_file()
+        for name in rebuild_txn.OPTIONAL_GENERATED_FILES
+    )
 
 
 def restore_config_snapshot(workspace: Workspace, instance_id: str, build_id: int) -> bool:
@@ -131,7 +140,7 @@ def restore_config_snapshot(workspace: Workspace, instance_id: str, build_id: in
         return False
     docker_dir = workspace.app_docker(instance_id)
     docker_dir.mkdir(parents=True, exist_ok=True)
-    for name in GENERATED_FILES:
+    for name in rebuild_txn.ALL_GENERATED_FILES:
         src = source / name
         dst = docker_dir / name
         if src.is_file():
