@@ -47,8 +47,9 @@
 | `lwa list` / `lwa status [ID]` | 查看实例列表、状态与端口；status 额外显示已配置的别名地址 |
 | `lwa start <ID>` / `lwa stop <ID>` / `lwa restart <ID>` | 启动、停止、重启 |
 | `lwa recover <ID>` | 尝试恢复实例，必要时先拉起网关 |
-| `lwa rebuild <ID>` | 通过构建队列强制重建当前工作区中的项目副本 |
+| `lwa rebuild <ID>` | 通过构建队列强制重建当前工作区中的项目副本；若有待处理的宿主预构建，先执行它再构建容器 |
 | `lwa rebuild <ID> --sync` | 先同步关联文件夹或 GitHub 源，再重建；容器实例若配置了 `hostBuild` / `preSync`，会在构建镜像前于 `current/` 执行一次宿主预构建 |
+| `lwa rebuild <ID> --sync --ignore-alias-guard` | 确认风险后，同时跳过源码同步前与重建后的别名守卫；folder/Git 同步均记录绕过审计。默认不跳过 |
 | `lwa rebuild <ID> --force` | 确认继续执行会删除前端产物目录的旧 `buildHooks`（默认拒绝，见 issue #141） |
 | `lwa cancel-build <ID>` | 取消排队或进行中的构建，不删除缓存、镜像与数据 |
 | `lwa versions <ID>` | 查看留档的容器镜像版本 |
@@ -68,7 +69,7 @@
 | `--follow-alias-base` / `--no-follow-alias-base` | 让构建时的 `VITE_BASE` 跟随当前别名；项目需主动读取这个变量 |
 | `--system-deps 包名` / `--clear-system-deps` | 设置容器系统依赖；Python 使用 apt，Node 使用 apk，均在项目依赖安装之前执行 |
 | `--build-hook 命令` / `--clear-build-hooks` | 设置依赖安装后的构建钩子；安装原生编译工具优先用 `--system-deps` |
-| `--host-build 命令` / `--pre-sync 命令` / `--clear-host-build` | 设置容器实例的宿主预构建命令（两个名字互斥）；仅在 `rebuild --sync`、`import --update` 及管理 API 的源码更新端点自动重建时，于容器构建前在 `apps/<id>/current/` 执行。`--pre-sync` 是 issue #61 的同义名 |
+| `--host-build 命令` / `--pre-sync 命令` / `--clear-host-build` | 设置容器实例的宿主预构建命令（两个名字互斥）；更新触发的重建会执行；配置变化产生待处理标记，手动 start/rebuild 也可继续执行，清空配置会清除标记。命令在容器构建前于 `apps/<id>/current/` 执行。`--pre-sync` 是 issue #61 的同义名 |
 | `--extra-volume SRC:DST[:ro]` / `--clear-extra-volumes` | 设置额外 bind 挂载，源与容器目标均使用绝对路径，并经过安全审计 |
 | `--acknowledge-redundancy` / `--no-acknowledge-redundancy` | 标记或撤销有意保留的重复实例 |
 | `--kind <类型> --runtime <运行时>` | 确认 pending 实例形态；两项须一起使用，不能与其他配置项组合 |

@@ -1331,9 +1331,14 @@ def _gunicorn_platform_block(
     from local_webpage_access.scanner import GUNICORN_PLATFORM_SPEC
 
     if uses_uv:
-        # uv venv 由 uv sync 创建；平台依赖装进同一 venv（不带走 --no-cache-dir
-        # 等 pip 专属旗标，避免与 uv CLI 不兼容）。
-        return f'RUN uv pip install "gunicorn{GUNICORN_PLATFORM_SPEC}"\n'
+        # uv venv 由 uv sync 创建；与项目依赖安装共用镜像回退链、超时和缓存。
+        return (
+            _pip_run(
+                f'uv pip install "gunicorn{GUNICORN_PLATFORM_SPEC}"',
+                mirrors=mirrors,
+            )
+            + "\n"
+        )
     return (
         _pip_run(
             f'pip install --no-cache-dir "gunicorn{GUNICORN_PLATFORM_SPEC}"',
@@ -1646,7 +1651,7 @@ def _django_static_block(
     ]
     if recipe.serve_static:
         lines.append("COPY docker/lwa_static_wsgi.py /app/lwa_static_wsgi.py")
-    lines.append("RUN npm prune --omit=dev")
+    lines.append("RUN npm prune --omit=dev --no-audit --no-fund")
     return "\n".join(lines) + "\n"
 
 

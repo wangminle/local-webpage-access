@@ -145,6 +145,20 @@ class UpdateResult:
     new_source_dir: str | None = None
 
 
+def _container_rebuild_pending(workspace: Workspace, manifest: InstanceManifest) -> bool:
+    """已导入源码是否尚未进入最后一次成功部署的容器镜像。"""
+    if manifest.runtime != Runtime.DOCKER_COMPOSE or manifest.container is None:
+        return False
+    if not manifest.container.containerId:
+        return False
+    deployed = (manifest.deploymentFingerprints or {}).get("sourceHash")
+    if not deployed:
+        return False
+    from local_webpage_access.lifecycle import _compute_source_fingerprint
+
+    return deployed != _compute_source_fingerprint(manifest.appPath)
+
+
 # ---- slug 工具 --------------------------------------------------------------
 
 
@@ -800,9 +814,6 @@ class Importer:
                 f"实例 {instance_id} 缺少 local-web.json，无法更新",
                 instance_id=instance_id,
             )
-        old_manifest = InstanceManifest.load(manifest_path)
-        old_hash = getattr(old_manifest, "sourceZipHash", None)
-        was_running = old_manifest.desiredState == DesiredState.RUNNING
         app_dir = self.ws.app_dir(instance_id)
         # CHK-353：hash 未变跳过路径同样受期望 revision 约束——过期计划拿到
         # revision_conflict 而不是"skipped"（锁外预检，与锁内复核之间存在
@@ -819,43 +830,57 @@ class Importer:
                     expected=int(expected_revision),
                     actual=pre_revision,
                 )
+
+        # 同包跳过也必须在实例锁内判断：另一路更新可能已换入源码，仍在构建镜像。
+        # 锁内重读成功部署指纹，只有当前源码确实已进入镜像才允许短路。
+        from local_webpage_access.lifecycle import instance_lock
+
+        with instance_lock(self.ws, instance_id):
+            old_manifest = InstanceManifest.load(manifest_path)
+            old_hash = getattr(old_manifest, "sourceZipHash", None)
+            was_running = old_manifest.desiredState == DesiredState.RUNNING
+            if expected_revision is not None:
+                locked_revision = self.registry.get_revision(instance_id)
+                if locked_revision is None or int(locked_revision) != int(expected_revision):
+                    raise ZipImportError(
+                        f"实例 {instance_id} revision 与期望不符"
+                        f"（期望 {expected_revision}，当前 {locked_revision}），"
+                        "更新被拒绝；请重新读取实例状态后再更新",
+                        code="revision_conflict",
+                        instance_id=instance_id,
+                        expected=expected_revision,
+                        actual=locked_revision,
+                    )
+            if (
+                new_hash == old_hash
+                and old_manifest.status != Status.PENDING
+                and not old_manifest.hostBuildPending
+                and not _container_rebuild_pending(self.ws, old_manifest)
+            ):
+                log.info("实例 %s 的 zip 未变化（sha256=%s），跳过更新", instance_id, new_hash[:12])
+                if not dry_run:
+                    self.registry.add_event(
+                        instance_id,
+                        "update",
+                        f"zip 未变化（sha256={new_hash[:12]}），跳过更新",
+                    )
+                return UpdateResult(
+                    instance_id=instance_id,
+                    manifest=old_manifest,
+                    detection=None,
+                    app_dir=app_dir,
+                    zip_hash=new_hash,
+                    prev_hash=old_hash,
+                    skipped=True,
+                    dry_run=dry_run,
+                    was_running=was_running,
+                    needs_restart=False,
+                )
+
         observed_revision = self.registry.get_revision(instance_id)
         # BUG-704：调用方锁定期望 revision 时，CAS 基准跟随该值（锁内已复核）；
         # 缺省沿用既有语义——以进入时读到的当前 revision 为基准。
         cas_base = expected_revision if expected_revision is not None else observed_revision
-
-        # 2. hash 未变化 → 跳过（dry-run 零写入：连事件也不记，CHK-239）。
-        # BUG-787：pending（上次扫描未识别/无部署计划）实例不短路——内容虽未变，
-        # 重扫可能因扫描器/计划生成器升级而识别成功（借 update 重获扫描结果）。
-        # BUG-1003：上次宿主预构建/重建未成功收口（hostBuildPending）同样不短路——
-        # 同一 zip 重新 import 或手动 start/rebuild 均可重试预构建，不能因
-        # 归档已导入就误认为新产物已经成功部署。
-        if (
-            new_hash == old_hash
-            and old_manifest.status != Status.PENDING
-            and not getattr(old_manifest, "hostBuildPending", False)
-        ):
-            log.info("实例 %s 的 zip 未变化（sha256=%s），跳过更新", instance_id, new_hash[:12])
-            if not dry_run:
-                self.registry.add_event(
-                    instance_id,
-                    "update",
-                    f"zip 未变化（sha256={new_hash[:12]}），跳过更新",
-                )
-            return UpdateResult(
-                instance_id=instance_id,
-                manifest=old_manifest,
-                detection=None,
-                app_dir=app_dir,
-                zip_hash=new_hash,
-                prev_hash=old_hash,
-                skipped=True,
-                # CHK-239：dry-run 模式下跳过也须回传 dry_run=True，否则
-                # git update 的写回段据 result.dry_run 误判会写盘/记事件
-                dry_run=dry_run,
-                was_running=was_running,
-                needs_restart=False,
-            )
 
         # 3. dry-run：解压到系统临时目录、扫描、报告，不写工作区
         if dry_run:
@@ -1015,7 +1040,9 @@ class Importer:
                             f"（别名 /{existing_alias}/）",
                         )
                     else:
-                        exempt = _alias_guard_build_env_exemption(old_manifest, existing_alias)
+                        exempt = _alias_guard_build_env_exemption(
+                            old_manifest, existing_alias, source_dir=staging
+                        )
                         if exempt is not None:
                             # BUG-862：构建型前端已注入 base 构建变量指向别名——守卫
                             # 扫的是源码 index.html（恒含 /src/main.*），扫它必然误拦。
@@ -1578,41 +1605,44 @@ class Importer:
             ) from exc
 
         new_sync_hash = compute_source_hash(source_dir)
-        old_sync_hash = getattr(old_manifest, "sourceSyncHash", None)
 
-        # 无变更短路（切源场景恒走全量更新：旧指纹属于另一源类型，不可比；
-        # BUG-787：pending 实例不短路——与 update_zip 的 zip 级跳过例外同语义，
-        # 借 update 重扫可能因扫描器/计划生成器升级而识别成功）。
-        if (
-            new_sync_hash == old_sync_hash
-            and not switching_to_folder
-            and not changing_source_dir
-            and old_manifest.status != Status.PENDING
-            and not old_manifest.hostBuildPending
-        ):
-            log.info(
-                "实例 %s 的文件夹源内容未变化（指纹 %s），跳过更新",
-                instance_id,
-                new_sync_hash[:12],
-            )
-            if not dry_run:
-                self.registry.add_event(
+        from local_webpage_access.lifecycle import instance_lock
+
+        with instance_lock(self.ws, instance_id):
+            old_manifest = InstanceManifest.load(manifest_path)
+            old_sync_hash = getattr(old_manifest, "sourceSyncHash", None)
+            # 切源恒走全量更新；同内容只有在预构建与镜像部署均已收口时才跳过。
+            if (
+                new_sync_hash == old_sync_hash
+                and not switching_to_folder
+                and not changing_source_dir
+                and old_manifest.status != Status.PENDING
+                and not old_manifest.hostBuildPending
+                and not _container_rebuild_pending(self.ws, old_manifest)
+            ):
+                log.info(
+                    "实例 %s 的文件夹源内容未变化（指纹 %s），跳过更新",
                     instance_id,
-                    "update",
-                    f"文件夹源内容未变化（指纹 {new_sync_hash[:12]}），跳过更新",
+                    new_sync_hash[:12],
                 )
-            return UpdateResult(
-                instance_id=instance_id,
-                manifest=old_manifest,
-                detection=None,
-                app_dir=self.ws.app_dir(instance_id),
-                zip_hash=new_sync_hash,
-                prev_hash=old_sync_hash,
-                skipped=True,
-                dry_run=dry_run,
-                was_running=old_manifest.desiredState == DesiredState.RUNNING,
-                needs_restart=False,
-            )
+                if not dry_run:
+                    self.registry.add_event(
+                        instance_id,
+                        "update",
+                        f"文件夹源内容未变化（指纹 {new_sync_hash[:12]}），跳过更新",
+                    )
+                return UpdateResult(
+                    instance_id=instance_id,
+                    manifest=old_manifest,
+                    detection=None,
+                    app_dir=self.ws.app_dir(instance_id),
+                    zip_hash=new_sync_hash,
+                    prev_hash=old_sync_hash,
+                    skipped=True,
+                    dry_run=dry_run,
+                    was_running=old_manifest.desiredState == DesiredState.RUNNING,
+                    needs_restart=False,
+                )
 
         log.info(
             "实例 %s 文件夹源有变更（指纹 %s -> %s）",
@@ -2006,7 +2036,14 @@ class Importer:
             if target is None:
                 target = git_source.parse_github_url(stored_url)
 
-            retargeted = ref is not None or subdir is not None
+            # 显式重复传入同一 ref/subdir 不是换源；仍应探测远端 OID 并走同提交短路。
+            retargeted = bool(
+                (ref is not None and ref != getattr(old_manifest, "sourceGitRef", None))
+                or (
+                    subdir is not None
+                    and subdir != getattr(old_manifest, "sourceGitSubdir", None)
+                )
+            )
             if stored_kind == "commit" and not retargeted:
                 remote_oid = stored_commit
             elif not retargeted:
@@ -2018,37 +2055,43 @@ class Importer:
             else:
                 remote_oid = None
 
-            # 无变更短路（065.b / 065.16）：OID 相同 → 无需更新，不 clone 不 rebuild
-            if (
-                remote_oid is not None
-                and remote_oid == stored_commit
-                and not old_manifest.hostBuildPending
-            ):
-                log.info(
-                    "实例 %s 的 git 源无变更（%s %s @ %s），跳过更新",
-                    instance_id,
-                    stored_kind,
-                    stored_ref,
-                    stored_commit[:12],
-                )
-                if not dry_run:
-                    self.registry.add_event(
+            from local_webpage_access.lifecycle import instance_lock
+
+            with instance_lock(self.ws, instance_id):
+                old_manifest = InstanceManifest.load(manifest_path)
+                current_commit = getattr(old_manifest, "sourceGitCommit", None)
+                # OID 相同且当前源码已部署才跳过；构建中的另一路更新会先释放实例锁。
+                if (
+                    remote_oid is not None
+                    and remote_oid == current_commit
+                    and not old_manifest.hostBuildPending
+                    and not _container_rebuild_pending(self.ws, old_manifest)
+                ):
+                    log.info(
+                        "实例 %s 的 git 源无变更（%s %s @ %s），跳过更新",
                         instance_id,
-                        "update",
-                        f"git 源无变更（{stored_kind} {stored_ref} @ {stored_commit[:12]}），跳过更新",
+                        stored_kind,
+                        stored_ref,
+                        current_commit[:12],
                     )
-                return UpdateResult(
-                    instance_id=instance_id,
-                    manifest=old_manifest,
-                    detection=None,
-                    app_dir=self.ws.app_dir(instance_id),
-                    zip_hash=stored_commit,
-                    prev_hash=stored_commit,
-                    skipped=True,
-                    dry_run=dry_run,
-                    was_running=old_manifest.desiredState == DesiredState.RUNNING,
-                    needs_restart=False,
-                )
+                    if not dry_run:
+                        self.registry.add_event(
+                            instance_id,
+                            "update",
+                            f"git 源无变更（{stored_kind} {stored_ref} @ {current_commit[:12]}），跳过更新",
+                        )
+                    return UpdateResult(
+                        instance_id=instance_id,
+                        manifest=old_manifest,
+                        detection=None,
+                        app_dir=self.ws.app_dir(instance_id),
+                        zip_hash=current_commit,
+                        prev_hash=current_commit,
+                        skipped=True,
+                        dry_run=dry_run,
+                        was_running=old_manifest.desiredState == DesiredState.RUNNING,
+                        needs_restart=False,
+                    )
 
             log.info(
                 "实例 %s 的 git 源有新提交（%s %s：%s -> %s）",
@@ -2532,7 +2575,9 @@ def _is_vite_source_entry(current_dir: Path, *, alias: str | None = None) -> boo
     )
 
 
-def _alias_guard_build_env_exemption(manifest: InstanceManifest, alias: str) -> str | None:
+def _alias_guard_build_env_exemption(
+    manifest: InstanceManifest, alias: str, *, source_dir: Path | None = None
+) -> str | None:
     """BUG-862：构建型前端已注入指向别名的 base 构建变量时，豁免更新路径别名守卫。
 
     更新路径守卫扫描的是**源码** index.html——构建型项目源码恒引用
@@ -2544,16 +2589,29 @@ def _alias_guard_build_env_exemption(manifest: InstanceManifest, alias: str) -> 
     通道 ``lwa configure --build-env`` 写入顶层 ``manifest.buildEnv``，
     ``buildBaseFromAlias=True`` 时按当前别名自动派生 ``VITE_BASE=/{alias}/``；
     不读 ``entry.buildEnv``（扩展字段，构建流程不消费）。
+    BUG-1013：Python 后端的 entry.build 为空，但可通过 hostBuild/preSync
+    构建前端。此路径还须验证待换入的源码是 Vite 源入口，不能仅凭配置了
+    宿主命令就放行含绝对 /assets/ 的预构建产物；重建后仍做别名活验证。
     返回命中依据（``KEY=value``），不豁免返回 None。
     """
     entry = getattr(manifest, "entry", None)
+    evidence = ""
     if entry is None or not getattr(entry, "build", None):
-        return None
+        from local_webpage_access.host_build import configured_host_build
+
+        if (
+            manifest.runtime != Runtime.DOCKER_COMPOSE
+            or not configured_host_build(manifest)
+            or source_dir is None
+            or not _is_vite_source_entry(source_dir, alias=alias)
+        ):
+            return None
+        evidence = "hostBuild/preSync + Vite 源入口，"
     from local_webpage_access.instance_settings import effective_build_env
 
     for key, value in effective_build_env(manifest).items():
         if value.strip() in {f"/{alias}", f"/{alias}/"}:
-            return f"{key}={value}"
+            return f"{evidence}{key}={value}"
     return None
 
 

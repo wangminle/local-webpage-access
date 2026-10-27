@@ -81,8 +81,11 @@ def _seed(workspace: Workspace, registry: Registry, manifest: InstanceManifest) 
 
 
 def _fake_host_container_ok(ws: Workspace, cfg, reg: Registry, iid: str, **_kw):
+    from local_webpage_access.lifecycle import _compute_deployment_fingerprints
+
     manifest = InstanceManifest.load(ws.app_manifest_path(iid))
     manifest.status = Status.RUNNING
+    manifest.deploymentFingerprints = _compute_deployment_fingerprints(ws, manifest)
     manifest.save(ws.app_manifest_path(iid))
     return manifest
 

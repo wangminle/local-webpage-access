@@ -142,7 +142,8 @@ def test_dockerfile_installs_gunicorn_for_factory_sh_c(workspace, tmp_path: Path
 
 
 def test_uv_prefixed_sh_c_gunicorn_still_installs(workspace) -> None:
-    """``uv run`` 前缀加在 ``sh -c 'gunicorn ...'`` 之外时，仍装进 uv venv。"""
+    """uv 平台补装与项目安装共用镜像回退链、超时和缓存。"""
+    from local_webpage_access.config import BuildMirrors, Config
     from local_webpage_access.models import EntryConfig
 
     manifest = make_container_manifest("demo")
@@ -157,9 +158,21 @@ def test_uv_prefixed_sh_c_gunicorn_still_installs(workspace) -> None:
         '[project]\nname = "demo"\nversion = "0.1.0"\n', encoding="utf-8"
     )
     (current / "uv.lock").write_text("", encoding="utf-8")
+    config = Config(
+        buildMirrors=BuildMirrors(
+            pip="https://primary.example/simple",
+            pipFallbacks=["https://fallback.example/simple"],
+            pipTimeout=17,
+        )
+    )
 
-    text = generate_dockerfile(manifest, workspace).read_text(encoding="utf-8")
-    assert 'uv pip install "gunicorn>=21,<23"' in text
+    text = generate_dockerfile(manifest, workspace, config=config).read_text(encoding="utf-8")
+    install = next(line for line in text.splitlines() if 'uv pip install "gunicorn' in line)
+    primary = "UV_HTTP_TIMEOUT=17 UV_DEFAULT_INDEX=https://primary.example/simple"
+    fallback = "UV_HTTP_TIMEOUT=17 UV_DEFAULT_INDEX=https://fallback.example/simple"
+    assert primary in install and fallback in install
+    assert install.index(primary) < install.index(fallback)
+    assert "target=/root/.cache/uv" in text
 
 
 def test_pyproject_prose_does_not_suppress_platform_gunicorn(workspace) -> None:

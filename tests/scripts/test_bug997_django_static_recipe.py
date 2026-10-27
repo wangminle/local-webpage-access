@@ -145,14 +145,14 @@ def test_recipe_builds_collects_and_serves_static(workspace: Workspace) -> None:
         "collectstatic --noinput" in content
     )
     assert "COPY docker/lwa_static_wsgi.py /app/lwa_static_wsgi.py" in content
-    assert "RUN npm prune --omit=dev" in content
+    assert "RUN npm prune --omit=dev --no-audit --no-fund" in content
 
     order = [
         content.index("RUN npm ci"),
         content.index("RUN npm run build"),
         content.index("python manage.py collectstatic --noinput"),
         content.index("COPY docker/lwa_static_wsgi.py"),
-        content.index("RUN npm prune --omit=dev"),
+        content.index("RUN npm prune --omit=dev --no-audit --no-fund"),
         content.index("CMD "),
     ]
     assert order == sorted(order)

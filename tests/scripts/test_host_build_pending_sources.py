@@ -155,6 +155,31 @@ def test_same_source_retries_after_real_host_build_failure(
     assert update().skipped is True
 
 
+def test_same_source_retries_plain_container_until_image_deploys(
+    source_instance, workspace
+):
+    from local_webpage_access.lifecycle import _compute_deployment_fingerprints
+
+    iid, update, advance = source_instance
+    manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
+    manifest.container.containerId = "running-container"
+    manifest.deploymentFingerprints = _compute_deployment_fingerprints(workspace, manifest)
+    manifest.save(workspace.app_manifest_path(iid))
+    advance()
+
+    first = update(restart=True)
+    assert first.skipped is False and first.needs_rebuild is True
+    pending = InstanceManifest.load(workspace.app_manifest_path(iid))
+    assert pending.hostBuildPending is False
+    retry = update(restart=True)
+    assert retry.skipped is False and retry.needs_rebuild is True
+
+    deployed = InstanceManifest.load(workspace.app_manifest_path(iid))
+    deployed.deploymentFingerprints = _compute_deployment_fingerprints(workspace, deployed)
+    deployed.save(workspace.app_manifest_path(iid))
+    assert update(restart=True).skipped is True
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_unchanged_source_without_pending_still_short_circuits(
     source_instance, workspace, registry, monkeypatch, dry_run

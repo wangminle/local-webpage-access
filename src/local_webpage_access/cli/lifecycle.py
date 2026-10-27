@@ -323,7 +323,7 @@ def rebuild(
     ignore_alias_guard: bool = typer.Option(
         False,
         "--ignore-alias-guard",
-        help="S2-05：跳过重建后的别名活验证守卫（记审计事件；用于已知风险场景）",
+        help="跳过重建后的别名活验证；与 --sync 合用也跳过同步前守卫（记审计事件）",
     ),
     force: bool = typer.Option(
         False,
@@ -343,7 +343,9 @@ def rebuild(
         manifest = None
         try:
             if sync:
-                _sync_source_before_rebuild(ws, config, reg, instance_id)
+                _sync_source_before_rebuild(
+                    ws, config, reg, instance_id, ignore_alias_guard=ignore_alias_guard
+                )
             stale_warnings: list[str] = []
             rebuild_kwargs: dict[str, bool] = {}
             if force:
@@ -376,13 +378,16 @@ def rebuild(
         raise typer.Exit(code=1)
 
 
-def _sync_source_before_rebuild(ws: Any, config: Any, reg: Any, instance_id: str) -> None:
+def _sync_source_before_rebuild(
+    ws: Any, config: Any, reg: Any, instance_id: str, *, ignore_alias_guard: bool = False
+) -> None:
     """issue #8：``lwa rebuild --sync`` 的前置源码同步。
 
     按 manifest 的 ``sourceKind`` 复用导入更新管线（与
     ``lwa import --from-dir/--from-git --update`` 同一路径，不重写）：
     folder → ``Importer.update_from_dir``；git → ``Importer.update_from_git``。
     更新管线自带无变更短路；这里 ``restart=False``，由随后的 rebuild 统一重建。
+    显式 ignore_alias_guard 同时传入更新管线，沿用其同步前守卫绕过审计。
     zip / 无源实例不支持 --sync，直接报错退出（exit 2）。
     """
     from local_webpage_access.importer import Importer
@@ -395,10 +400,16 @@ def _sync_source_before_rebuild(ws: Any, config: Any, reg: Any, instance_id: str
     importer = Importer(ws, config, reg)
     if source_kind == "folder":
         typer.secho(f"正在从关联源码目录同步：{instance_id} …", fg=typer.colors.CYAN)
-        result = importer.update_from_dir(instance_id, restart=False, keep_data=True, yes=True)
+        result = importer.update_from_dir(
+            instance_id, restart=False, keep_data=True, yes=True,
+            ignore_alias_guard=ignore_alias_guard,
+        )
     elif source_kind == "git":
         typer.secho(f"正在从 GitHub 远端同步：{instance_id} …", fg=typer.colors.CYAN)
-        result = importer.update_from_git(instance_id, restart=False, keep_data=True, yes=True)
+        result = importer.update_from_git(
+            instance_id, restart=False, keep_data=True, yes=True,
+            ignore_alias_guard=ignore_alias_guard,
+        )
     else:
         typer.secho(
             f"实例 {instance_id} 无上游源码（sourceKind={source_kind!r}），"

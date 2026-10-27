@@ -224,8 +224,8 @@ lwa import --from-git https://github.com/<owner>/<repo>
 lwa import --from-git https://github.com/<owner>/<repo> --ref dev --subdir frontend
 lwa import --from-git https://github.com/<owner>/<repo> --name "My App" --path-alias myapp
 
-# 从 GitHub 远端更新（ls-remote 无变更探测，远端 OID 未变则零操作跳过；
-# 按完整 commit SHA 钉版导入的实例不探测远端、始终报无变更，换版本须显式 --ref 并加 --allow-source-change）
+# 从 GitHub 远端更新（ls-remote 无变更探测，远端 OID 未变且当前源码已成功部署则零操作跳过；
+# 按完整 commit SHA 钉版导入的实例不探测远端，换版本须显式 --ref 并加 --allow-source-change）
 lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 ```
 
@@ -233,8 +233,9 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
 
 注意事项：
 - 一次性浅克隆进临时 staging（克隆超 180s 或源码 >2 GiB 拒绝导入），实例内不保留 `.git`。
-- `--update` 传入的仓库须与实例记录一致（Exit 2，git 实例换仓库请删实例重导）；git 源实例不能用 zip `--update` 更新；zip/folder 源实例传 `--from-git <url> --update` 可原地切换为 git 源（issue #28，换源不换实例：保留 id / 端口 / 别名 / data/）。
+- `--update` 传入的仓库须与实例记录一致（Exit 2，git 实例换仓库请删实例重导）；git 源实例不能用 zip `--update` 更新；zip/folder 源实例传 `--from-git <url> --update` 可原地切换为 git 源（issue #28，换源不换实例：保留 id / 端口 / 别名 / data/）。重复传入与已记录值完全相同的 `--ref` / `--subdir` 不算换源，仍会探测远端并在同 OID 时跳过克隆。
 - **导入/更新全程持有全局导入锁**（含 `ls-remote` 探测约 30s + 浅克隆最长 180s 的网络等待）。期间 `lwa update` 会等待导入空闲（最多 180s）再决定重启或跳过--慢网络下表现为 update 等待，属预期；确需立即升级可等导入完成后重跑 `lwa update`。
+- ZIP / folder / Git 容器实例若源码已换入、但镜像构建失败或中断，当前源码指纹会与最后成功部署指纹不同；排除故障后重跑同一更新命令即可重试，不会被同哈希 / 同 OID 去重。成功部署后恢复正常跳过；并发更新在判断跳过前会等待实例锁。
 - Agent 协作见 Skill `lwa-import-git`。
 
 ### rebuild 与源码陈旧检测（issue #8）
@@ -261,7 +262,7 @@ lwa import --from-git https://github.com/<owner>/<repo> --update my-app
   与 `import --update`、管理 API 源码更新端点触发的重建会在容器构建前先执行该宿主命令。cwd 是同步后的
   `apps/<id>/current/`，环境叠加工作区代理、`buildEnv` 与别名 base，超时取
   `hostBuildTimeout`，日志写实例 `logs/build.log`。预构建失败时旧容器尚未停止，
-  旧服务继续运行；普通 `rebuild` / `restart` / daemon 自愈不执行该命令。
+  旧服务继续运行。有待处理标记时，手动 start/rebuild 会先完成预构建，STOPPED 与 `--no-restart` 更新均可继续；配置清空时清除标记。无标记的普通重建与 daemon 自愈不执行命令；restart 遇到标记会提示先 start/rebuild。
 - `lwa doctor` 的 `source_freshness` 检查（WARN 级，纯离线）批量列出源码
   漂移 / 源目录丢失的 folder 源实例；git 源不触网，仅 SKIP 提示。
 
@@ -366,7 +367,8 @@ lwa rollback <id> [--to <build-id>] [--yes]
   Django 认 `manage.py` 根 + 唯一 `*/wsgi.py`。
 * **平台依赖分层**：生成 Gunicorn 命令且项目未声明 Gunicorn 时，Dockerfile 内
   分层安装平台选定的版本范围（`gunicorn>=21,<23`）；不回写用户的
-  requirements/pyproject。uv 项目装进 uv venv。
+  requirements/pyproject。uv 项目装进 uv venv，并与 `uv sync` 共用 pip 主源、
+  `pipFallbacks` 回退链、`UV_HTTP_TIMEOUT` 和缓存。
 * **fallback 警告**：无法唯一推断时保留 `flask run` / `manage.py runserver` 不
   阻断导入，但扫描备注（`[预检警告]`，入 manifest `preflightSummary`）与
   doctor `dev_server_fallback` 同源告警。

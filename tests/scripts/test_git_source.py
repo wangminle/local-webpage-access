@@ -853,6 +853,29 @@ class TestUpdateFromGit:
         manifest = InstanceManifest.load(workspace.app_manifest_path(iid))
         assert manifest.sourceGitCommit == git_env.head_oid()
 
+    def test_same_explicit_ref_and_subdir_still_probe_and_skip_clone(
+        self, git_env: GitEnv, importer: Importer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        git_env.push_commit("backend/index.html", "<html>backend</html>", "backend")
+        imported = importer.import_from_git(
+            "https://github.com/acme/mysite",
+            ref="trunk",
+            subdir="backend",
+            clone_url=str(git_env.remote),
+        )
+
+        def unexpected_clone(*args, **kwargs):
+            pytest.fail("相同 ref/subdir 不应被当成 retarget 强制重新克隆")
+
+        monkeypatch.setattr(git_source, "stage_git_clone", unexpected_clone)
+        result = importer.update_from_git(
+            imported.instance_id,
+            ref="trunk",
+            subdir="backend",
+            clone_url=str(git_env.remote),
+        )
+        assert result.skipped is True
+
     def test_update_with_new_commit_preserves_identity(
         self, git_env: GitEnv, importer: Importer, workspace: Workspace
     ) -> None:

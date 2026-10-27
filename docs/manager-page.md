@@ -204,10 +204,11 @@ Content-Type: application/json
 
 * 仅适用于 `sourceKind=folder` 的实例；zip 源实例返回 400。
 * 内容指纹（SHA256 of sorted file paths + contents）与 `sourceSyncHash` 一致时
-  自动跳过（`skipped=true`），不 rebuild / restart。
+  自动跳过（`skipped=true`），不 rebuild / restart；存在待处理预构建时不跳过，允许重试。
 * 源目录不存在时返回错误（不会回退到 mount 模式）。
 * 与 CLI `lwa import --from-dir <path> --update <id>` 共用 `importer.update_from_dir` 代码路径。
 * 容器实例若配置了 `hostBuild` / `preSync`，更新触发的 rebuild 会先在 `apps/<id>/current/` 执行该宿主命令，再构建镜像（DEV-170 / issue #61 阶段二）。zip 与 GitHub 源更新端点同此行为。
+* 配置或修改生效命令会置待处理标记，清空命令会清标记。源码更新失败后可重试同一 ZIP、文件夹或 Git 提交；停止状态或关闭自动重启时，可用管理页重建按钮消费该标记。
 
 ### GitHub 源导入与更新（IMP-065）
 
