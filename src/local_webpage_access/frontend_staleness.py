@@ -9,8 +9,8 @@
 - ``unknown``（无法判断）：预构建产物存在但前端源码不在导入树内（跨仓关联
   不明），或导入拷贝使两侧 mtime 不可区分；
 - ``confirmed``（确证陈旧）：需要**构建时记录的源码指纹**比对——当前部署
-  流程尚未记录该指纹，本级别为 #61 预构建机制落地后的预留通路，本轮不会
-  产出。
+  流程尚未记录该指纹，本级别为预留通路，当前不会产出。
+  hostBuild/preSync 已支持，但尚未向本检查提供构建期源码指纹。
 
 统一供扫描（DetectionResult.notes）、``lwa rebuild --sync`` 提示与
 ``lwa doctor``（``frontend_artifacts_staleness`` 检查）共用。

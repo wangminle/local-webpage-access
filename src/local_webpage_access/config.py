@@ -367,6 +367,10 @@ class Config(BaseModel):
     # （yarn 1 追加 --ignore-engines；pnpm 解除项目 engine-strict=true），
     # 过旧 Node 缺真实 API 的风险由使用者承担。容器构建不受影响。
     nodeEnginesIgnore: bool = False
+    # DEV-171：备选 Node 可执行文件绝对路径；仅在项目 engines 与默认 Node
+    # 失配时按项目选择最高兼容版本，不修改系统默认 Node。
+    # 候选文件名必须为 node，确保父目录前置后实际执行该文件。
+    nodeFallbackPaths: list[str] = Field(default_factory=list)
     # BUG-988：容器镜像构建超时（秒）。慢网络宿主（官方 apk CDN 极慢）或
     # HedgeDoc 级大依赖项目 1800s 不够时可调高；与 hostBuildTimeout 解耦。
     buildTimeout: int = Field(default=1800, ge=60, le=21600)
@@ -446,6 +450,22 @@ class Config(BaseModel):
         if v not in allowed:
             raise ValueError(f"lanIpStrategy 必须是 {allowed} 之一，得到 {v!r}")
         return v
+
+    @field_validator("nodeFallbackPaths")
+    @classmethod
+    def _validate_node_fallback_paths(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            item = value.strip()
+            if not item or any(char in item for char in "\0\r\n"):
+                raise ValueError("nodeFallbackPaths 不能包含空路径或换行/NUL")
+            if not Path(item).is_absolute():
+                raise ValueError(f"nodeFallbackPaths 必须是 Node 可执行文件的绝对路径：{item!r}")
+            if Path(item).name != "node":
+                raise ValueError(f"nodeFallbackPaths 的文件名必须为 node：{item!r}")
+            if item not in normalized:
+                normalized.append(item)
+        return normalized
 
     @field_validator("manualLanIp")
     @classmethod
@@ -749,6 +769,14 @@ hostBuildTimeout: 1800
 # 宿主 Node 不在项目 engines.node 范围时：默认阻断宿主构建并提示兼容版本；
 # 设为 true 是显式选择受控忽略 engines（仅 yarn 1 / pnpm 可控），风险自担
 # nodeEnginesIgnore: false
+
+# 备选 Node 可执行文件绝对路径（DEV-171）。默认 Node 与项目 engines.node
+# 失配时按项目选择最高兼容版本，并只修改该项目构建环境的 PATH；
+# 不修改系统默认 Node。无匹配时仍按上述阻断/显式忽略规则处理。
+# 候选文件名必须为 node，确保父目录前置后实际执行该文件。
+# nodeFallbackPaths:
+#   - /usr/local/opt/node@22/bin/node
+#   - /opt/homebrew/opt/node@20/bin/node
 
 # 容器镜像构建超时（秒）。慢网络宿主或 HedgeDoc 级大依赖项目默认 1800s
 # 不够时可调高（配合 buildMirrors.apkMirror 加速 alpine apk 层）

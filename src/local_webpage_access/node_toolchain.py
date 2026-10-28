@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -55,6 +56,12 @@ class NodeToolchain:
     dockerfile: Path | None
     notes: tuple[str, ...]
     engines_node: str | None = None
+
+
+@dataclass(frozen=True)
+class NodeSelection:
+    executable: Path
+    version: tuple[int, int, int]
 
 
 def inspect_node_toolchain(root: Path, *, workdir: Path | None = None) -> NodeToolchain:
@@ -330,18 +337,70 @@ def parse_node_version(text: str) -> tuple[int, int, int] | None:
     return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0))
 
 
-def host_node_version() -> tuple[int, int, int] | None:
-    """宿主 ``node --version``（timeout <=5s）；node 缺失或执行失败返回 None。"""
-    exe = shutil.which("node")
-    if not exe:
-        return None
+def _node_executable_version(executable: str | Path) -> tuple[int, int, int] | None:
     try:
         out = subprocess.run(
-            [exe, "--version"], capture_output=True, text=True, timeout=5
+            [str(executable), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    if out.returncode != 0:
+        return None
     return parse_node_version((out.stdout or "").strip())
+
+
+def host_node_version(*, path: str | None = None) -> tuple[int, int, int] | None:
+    """宿主 ``node --version``（timeout <=5s）；node 缺失或执行失败返回 None。"""
+    exe = shutil.which("node", path=path)
+    if not exe:
+        return None
+    return _node_executable_version(exe)
+
+
+def select_project_node(
+    work_dir: Path,
+    env: dict[str, str],
+    candidates: list[str],
+    *,
+    workspace_root: Path | None = None,
+) -> NodeSelection | None:
+    """默认 Node 与项目 engines 失配时，选择最高兼容备选并前置其 PATH。"""
+    engines = read_node_engines(work_dir)
+    if (
+        not engines
+        and workspace_root is not None
+        and workspace_root.resolve() != work_dir.resolve()
+    ):
+        engines = read_node_engines(workspace_root)
+    if not engines:
+        return None
+    host = host_node_version(path=env.get("PATH"))
+    if host is not None and node_version_in_range(engines, host) is not False:
+        return None
+    compatible: list[NodeSelection] = []
+    for candidate in candidates:
+        executable = Path(candidate)
+        if executable.name != "node":
+            raise ValueError(f"备选 Node 的文件名必须为 node，才能经 PATH 正确选中：{executable}")
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            continue
+        version = _node_executable_version(executable)
+        if version is not None and node_version_in_range(engines, version) is True:
+            compatible.append(NodeSelection(executable=executable, version=version))
+    if not compatible:
+        return None
+    selected = max(compatible, key=lambda item: (item.version, str(item.executable)))
+    existing_path = env.get("PATH") or ""
+    env["PATH"] = (
+        f"{selected.executable.parent}{os.pathsep}{existing_path}"
+        if existing_path
+        else str(selected.executable.parent)
+    )
+    return selected
 
 
 def _parse_partial_version(token: str) -> tuple[int | None, int | None, int | None] | None:
@@ -682,14 +741,16 @@ def _toolchain_notes(
             direction = engines_mismatch_direction(engines_node, host) or "不兼容"
             note += (
                 f"；宿主 Node {_fmt_version(host)} 不在该范围内（{direction}），"
-                "宿主构建将阻断，请改用兼容 Node 或显式设置 nodeEnginesIgnore: true"
-                "强制忽略（仅 yarn 1/pnpm 可控）；容器构建按 engines 自动选择镜像"
+                "请配置 nodeFallbackPaths 选择兼容备选；无兼容备选时宿主构建将阻断，"
+                "或显式设置 nodeEnginesIgnore: true 强制忽略（仅 yarn 1/pnpm 可控）；"
+                "容器构建按 engines 自动选择镜像"
             )
         notes.append(note)
     return tuple(notes)
 
 
 __all__ = [
+    "NodeSelection",
     "NodeToolchain",
     "describe_import_toolchain",
     "engines_mismatch_direction",
@@ -702,5 +763,6 @@ __all__ = [
     "pnpm_lockfile_fallback_version",
     "read_declared_package_manager",
     "read_node_engines",
+    "select_project_node",
     "workspace_contains",
 ]

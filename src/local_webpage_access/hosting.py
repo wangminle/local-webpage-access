@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import os
 import re
 import shutil
 import sqlite3
@@ -306,23 +308,27 @@ _COREPACK_MISSING_HINT = (
 )
 
 
-def _pm_path_version(pm: str) -> tuple[int, int, int] | None:
+def _pm_path_version(pm: str, *, path: str | None = None) -> tuple[int, int, int] | None:
     """PATH 中 ``pm --version`` 的版本（timeout <=5s）；缺失/失败返回 None。"""
     from local_webpage_access.node_toolchain import parse_node_version
 
-    exe = shutil.which(pm)
+    exe = shutil.which(pm, path=path)
     if not exe:
         return None
     try:
         out = subprocess.run(
-            [exe, "--version"], capture_output=True, text=True, timeout=5
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "PATH": path} if path is not None else None,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     return parse_node_version((out.stdout or "").strip())
 
 
-def _resolve_host_install_command(install: str, work_dir: Path) -> str:
+def _resolve_host_install_command(install: str, work_dir: Path, *, path: str | None = None) -> str:
     """宿主前端安装命令的工具链解析（BUG-860 / BUG-877 / BUG-966）。
 
     scanner 生成的 ``corepack enable && pnpm install --frozen-lockfile`` 原样在
@@ -363,13 +369,13 @@ def _resolve_host_install_command(install: str, work_dir: Path) -> str:
         pm = pinned.group(1).lower()
         version = pinned.group(2)
         rest = pinned.group(3).strip()
-        if shutil.which("corepack"):
+        if shutil.which("corepack", path=path):
             # 评审 P2：剥离全局 ``corepack enable``——系统 Corepack bin 目录
             # 普通用户不可写时创建/替换全局 shim 会 EACCES；免 enable 钉版直跑，
             # 下游裸 pnpm/yarn 由 BUG-902 工作区 shim 目录（追加进构建 PATH）兜底。
             return f"corepack {pm}@{version} {rest}"
-        if shutil.which(pm):
-            path_version = _pm_path_version(pm)
+        if shutil.which(pm, path=path):
+            path_version = _pm_path_version(pm, path=path)
             if path_version is not None and path_version[0] == _version_major(
                 version
             ):
@@ -395,10 +401,10 @@ def _resolve_host_install_command(install: str, work_dir: Path) -> str:
     pm = m.group(1).lower()
     rest = m.group(2).strip()
     declared = _read_declared_package_manager(work_dir)
-    corepack = shutil.which("corepack")
+    corepack = shutil.which("corepack", path=path)
     if declared and declared[0].lower() == pm and corepack:
         return f"corepack {pm}@{declared[1]} {rest}"
-    if shutil.which(pm):
+    if shutil.which(pm, path=path):
         if declared and declared[0].lower() == pm:
             # corepack 不可用但声明了版本：PATH 版本未必满足 lockfile，告警留痕
             log.warning(
@@ -433,6 +439,7 @@ def _apply_engines_compat(
     *,
     ignore_engines: bool = False,
     workspace_root: Path | None = None,
+    path: str | None = None,
 ) -> str | None:
     """宿主 Node 与 ``engines.node`` 失配时的处理（BUG-967，CHK-485 修订）。
 
@@ -469,7 +476,7 @@ def _apply_engines_compat(
         and workspace_root.resolve() != work_dir.resolve()
     ):
         engines = read_node_engines(workspace_root)
-    host = host_node_version()
+    host = host_node_version(path=path) if path is not None else host_node_version()
     if not engines or host is None:
         return install_cmd
     if node_version_in_range(engines, host) is not False:
@@ -480,15 +487,16 @@ def _apply_engines_compat(
         raise HostingError(
             f"宿主 Node {host_text} 不在项目声明的 engines.node 范围（{engines}）内"
             f"{f'（{direction}）' if direction else ''}，宿主构建已阻断。"
-            "请改用满足范围的 Node 版本（如经 nvm/fnm 安装），或在确认兼容风险后"
-            "于 local-web.yml 设置 nodeEnginesIgnore: true 强制忽略 engines"
+            "请安装满足范围的 Node 并在 local-web.yml 配置 nodeFallbackPaths，"
+            "或在确认兼容风险后设置 nodeEnginesIgnore: true 强制忽略 engines"
             "（受控忽略仅对 yarn 1 / pnpm 生效；容器构建不受影响，"
             "镜像已按 engines 自动选择）"
         )
     log.warning(
         "宿主 Node %s 不在项目声明的 engines.node 范围（%s）内%s；"
-        "nodeEnginesIgnore=true 已显式启用，安装时将受控忽略 engines（yarn 1）"
-        "或解除 engine-strict（pnpm），过旧 Node 缺少真实 API 的风险由使用者承担",
+        "nodeEnginesIgnore=true 已显式启用，允许继续；标准安装命令按包管理器"
+        "受控忽略 engines，自定义 hostBuild/preSync 命令保持原样，"
+        "Node 兼容风险由使用者承担",
         host_text,
         engines,
         f"（{direction}）" if direction else "",
@@ -523,7 +531,11 @@ def _apply_engines_compat(
 
 
 def _resolve_host_build_command(
-    build: str, work_dir: Path, *, pinned: tuple[str, str] | None = None
+    build: str,
+    work_dir: Path,
+    *,
+    pinned: tuple[str, str] | None = None,
+    path: str | None = None,
 ) -> str:
     """宿主前端构建命令的工具链解析（BUG-889，与 install 侧 BUG-860/877 同策）。
 
@@ -544,14 +556,19 @@ def _resolve_host_build_command(
     含 ``&&`` 的普通命令不会被改写）。
     """
     if "&&" not in build:
-        return _resolve_build_segment(build, work_dir, pinned=pinned)
+        return _resolve_build_segment(build, work_dir, pinned=pinned, path=path)
     return "&&".join(
-        _resolve_build_segment(part, work_dir, pinned=pinned) for part in build.split("&&")
+        _resolve_build_segment(part, work_dir, pinned=pinned, path=path)
+        for part in build.split("&&")
     )
 
 
 def _resolve_build_segment(
-    segment: str, work_dir: Path, *, pinned: tuple[str, str] | None = None
+    segment: str,
+    work_dir: Path,
+    *,
+    pinned: tuple[str, str] | None = None,
+    path: str | None = None,
 ) -> str:
     """单个构建分段的工具链解析（BUG-889/896；保留分段前后空白）。"""
     m = re.match(r"^(\s*)(pnpm|yarn)(\s+.*?)(\s*)$", segment, re.IGNORECASE)
@@ -562,7 +579,7 @@ def _resolve_build_segment(
     rest = m.group(3).strip()
     trail = m.group(4)
     declared = _read_declared_package_manager(work_dir)
-    corepack = shutil.which("corepack")
+    corepack = shutil.which("corepack", path=path)
     if declared and declared[0].lower() == pm and corepack:
         return f"{lead}corepack {pm}@{declared[1]} {rest}{trail}"
     if pinned and pinned[0] == pm and corepack:
@@ -570,7 +587,7 @@ def _resolve_build_segment(
         # packageManager 声明时，build 必须沿用同一钉版（评审 P1）——否则
         # install 用 corepack pnpm@8.15.9、build 却走 PATH 上的 pnpm 10。
         return f"{lead}corepack {pm}@{pinned[1]} {rest}{trail}"
-    if shutil.which(pm):
+    if shutil.which(pm, path=path):
         return segment
     if corepack:
         return f"{lead}corepack {pm} {rest}{trail}"
@@ -610,7 +627,7 @@ def _frontend_needs_pm_shims(
     return (work_dir / "yarn.lock").is_file() or (work_dir / "pnpm-lock.yaml").is_file()
 
 
-def _ensure_corepack_shim_dir(workspace: Workspace) -> str | None:
+def _ensure_corepack_shim_dir(workspace: Workspace, *, path: str | None = None) -> str | None:
     """生成（并复用）工作区内的 corepack yarn/pnpm shim 目录（BUG-902）。
 
     ``corepack enable --install-directory <dir> yarn pnpm`` 把 shim 写进
@@ -618,10 +635,13 @@ def _ensure_corepack_shim_dir(workspace: Workspace) -> str | None:
     corepack 按项目 ``packageManager`` 声明解析版本。corepack 不可用或 shim
     生成失败返回 ``None``——调用方按原链路执行，失败信息如实进 build.log。
     """
-    corepack = shutil.which("corepack")
+    corepack = shutil.which("corepack", path=path) if path is not None else shutil.which("corepack")
     if not corepack:
         return None
-    shim_dir = workspace.run / "corepack-shims"
+    corepack_key = hashlib.sha256(
+        str(Path(corepack).resolve()).encode("utf-8")
+    ).hexdigest()[:16]
+    shim_dir = workspace.run / "corepack-shims" / corepack_key
     if (shim_dir / "yarn").is_file() and (shim_dir / "pnpm").is_file():
         return str(shim_dir)
     try:
@@ -632,6 +652,7 @@ def _ensure_corepack_shim_dir(workspace: Workspace) -> str | None:
             text=True,
             timeout=60,
             check=False,
+            env={**os.environ, "PATH": path} if path is not None else None,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning(
@@ -722,30 +743,45 @@ def build_and_host_frontend(
             host_build_timeout,
             inject_pkg_cache_env,
         )
-        from local_webpage_access.node_toolchain import inspect_node_toolchain
+        from local_webpage_access.node_toolchain import inspect_node_toolchain, select_project_node
 
         tool = inspect_node_toolchain(current_dir, workdir=work_dir)
         build_env = inject_pkg_cache_env(build_env, workspace, tool.manager)
         build_timeout = host_build_timeout(config, monorepo=tool.workspaces)
+        selected_node = select_project_node(
+            work_dir,
+            build_env,
+            config.nodeFallbackPaths,
+            workspace_root=tool.workspace_root,
+        )
+        if selected_node is not None:
+            write_instance_log(
+                workspace.apps,
+                instance_id,
+                "build",
+                f"按项目 engines.node 选择备选 Node {'.'.join(map(str, selected_node.version))}"
+                f"（{selected_node.executable}）",
+            )
         # S2-08 / issue #59：前端构建路径也写阶段记录（与容器/静态同一记录器）。
         _record_stage(workspace, registry, instance_id, "host_start")
         # BUG-860/877/889：install 与 build 先各自完成宿主工具链解析，再统一
         # 决定是否补 shim——shim 判定需要看到两条已解析命令。
         install_cmd = (
-            _resolve_host_install_command(manifest.entry.install, work_dir)
+            _resolve_host_install_command(
+                manifest.entry.install, work_dir, path=build_env.get("PATH")
+            )
             if manifest.entry.install
             else None
         )
-        # BUG-967：宿主 Node 与 engines.node 失配（过新/过旧）——默认明确阻断
-        # （HostingError，建议兼容 Node）；仅工作区配置 nodeEnginesIgnore: true
-        # 显式选择时才受控忽略：yarn 1 追加 --ignore-engines；pnpm 仅在项目
-        # .npmrc 声明 engine-strict=true 时追加 --config.engine-strict=false。
-        install_cmd = _apply_engines_compat(
-            install_cmd,
-            work_dir,
-            ignore_engines=bool(getattr(config, "nodeEnginesIgnore", False)),
-            workspace_root=tool.workspace_root,
-        )
+        # 已选兼容备选时无需忽略 engines；无备选则保持 BUG-967 的阻断/显式忽略语义。
+        if selected_node is None:
+            install_cmd = _apply_engines_compat(
+                install_cmd,
+                work_dir,
+                ignore_engines=bool(getattr(config, "nodeEnginesIgnore", False)),
+                workspace_root=tool.workspace_root,
+                path=build_env.get("PATH"),
+            )
         # install 钉版（packageManager 声明或 pnpm-lock.yaml 旧锁兜底改写后的
         # ``corepack <pm>@<ver> install``）透传给 build 段——同一工程两条命令
         # 必须用同一工具链（评审 P1：仅锁文件兜底钉版时 build 段读不到声明）。
@@ -757,7 +793,12 @@ def build_and_host_frontend(
             if pin_m:
                 install_pin = (pin_m.group(1).lower(), pin_m.group(2))
         build_cmd = (
-            _resolve_host_build_command(manifest.entry.build, work_dir, pinned=install_pin)
+            _resolve_host_build_command(
+                manifest.entry.build,
+                work_dir,
+                pinned=install_pin,
+                path=build_env.get("PATH"),
+            )
             if manifest.entry.build
             else None
         )
@@ -768,7 +809,7 @@ def build_and_host_frontend(
         if _frontend_needs_pm_shims(
             work_dir, install_cmd, build_cmd, path=build_env.get("PATH")
         ):
-            shim_dir = _ensure_corepack_shim_dir(workspace)
+            shim_dir = _ensure_corepack_shim_dir(workspace, path=build_env.get("PATH"))
             if shim_dir:
                 existing_path = build_env.get("PATH") or ""
                 build_env["PATH"] = (

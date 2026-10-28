@@ -506,6 +506,10 @@ lwa cancel-build <id>          # 取消 queued / building
 
 ## 六、日常巡检清单
 
+旧容器实例升级后首次 start / restart / recover 可能因 v2→v3 运行配置指纹迁移而
+替换容器。维护窗口、业务环境恢复前置条件、重建回退与逐实例验收见
+[旧实例升级到 v3 运行配置指纹](runtime-workspace.md#旧实例升级到-v3-运行配置指纹)。
+
 ```bash
 lwa doctor               # 环境 + 实例健康（含 Caddy 探针）
 lwa status               # 全部实例状态
@@ -602,7 +606,7 @@ lwa access review --rebuild-if-needed  # 复核后对命中实例自动 rebuild
 - `database_url_alignment`（V0.8.8 / issue #15，WARN 级纯离线）——SQLite 实例 `docker/.env` 的 `DATABASE_URL` 指向缺失/空库但同目录存在其他非空库时提示疑似错位（数据仍在 `data/`，只是未被指向）；带引号/query 的 URL 与非 sqlite scheme 不误报。
 - `caddy_health` admin 归属诊断（V0.9.6 / BUG-794）——master 未运行时用 lsof 诊断登记 admin 端口的占用者（name/pid），被外部进程占用时 WARN 并给出针对性处置建议；缺 lsof 时如实标注「归属未确认」。不做自动换端口（admin 端口已渲染进主配置）。
 - `dev_server_fallback`（V0.9.6 / IMP-066，WARN 级）——容器实例仍以框架开发服务器（`flask run` / `manage.py runserver`，含 `./manage.py` 相对路径形态）启动时告警；判定谓词与扫描期 fallback 备注同源。
-- `frontend_artifacts_staleness`（V0.9.6 / #61 检查部分，WARN 级）——预构建 `static/` 产物时效性分级：同仓布局前端源码晚于产物记「疑似」（WARN + 重建建议）；前端源不在导入树内（跨仓）或 mtime 不可区分记「无法判断」（信息性汇总，不升 WARN）；确证需构建期源码指纹（#61 预构建落地后接入）。只告警不自动构建，与别名资源检查（base 配错）相互独立。
+- `frontend_artifacts_staleness`（V0.9.6 / #61 检查部分，WARN 级）——预构建 `static/` 产物时效性分级：同仓布局前端源码晚于产物记「疑似」（WARN + 重建建议）；前端源不在导入树内（跨仓）或 mtime 不可区分记「无法判断」（信息性汇总，不升 WARN）。`hostBuild` / `preSync` 已支持显式宿主预构建，但确证所需的构建期源码指纹尚未接入时效性检查。检查本身只告警不自动构建，与别名资源检查（base 配错）相互独立。
 - `build_hooks_artifact_conflict`（issue #141，WARN 级）——`buildHooks` 含对前端产物目录的 `rm -rf` / `rm -f`（#47 旧绕过）。模板已自行落位产物且不删除后端自有文件；建议 `lwa configure <id> --clear-build-hooks`。不擅自删钩子。
 - `node_toolchain`（V0.9.8 / BUG-860·877，WARN 级）——宿主前端构建（frontend-static 实例）依赖的 Node 工具链预检：node / corepack / pnpm / yarn 可达性与版本如实列出，缺失只影响宿主构建路径（纯静态 / 容器实例不受影响）。宿主构建按 `packageManager` 声明经 corepack 协商版本（如 `corepack pnpm@<ver>`），不再要求 `corepack enable`——macOS 无 sudo 写 `/usr/local/bin`、Ubuntu apt 版 node 无 corepack 均可工作；构建失败提示附 `apps/<id>/logs/build.log` 路径。
 

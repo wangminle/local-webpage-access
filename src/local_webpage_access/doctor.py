@@ -2935,7 +2935,8 @@ def check_frontend_artifacts_staleness(ws: Workspace, registry: Registry | None)
 
     ``suspected`` 升 WARN（同仓布局源码晚于产物）；``unknown``（跨仓/时间
     失真）以信息性说明汇总在结论里，不升 WARN。base 配错属别名资源检查，
-    与本检查相互独立。``confirmed`` 需构建期源码指纹（#61 预构建落地后接入）。
+    与本检查相互独立。hostBuild/preSync 已支持；``confirmed`` 所需的构建期
+    源码指纹尚未接入本检查。
     """
     if registry is None:
         return CheckResult(
@@ -2984,7 +2985,8 @@ def check_frontend_artifacts_staleness(ws: Workspace, registry: Registry | None)
             "frontend_artifacts_staleness",
             STATUS_OK,
             f"预构建产物时效性：{len(unknown)} 个实例无法判定（前端源码不在导入树内"
-            f"或 mtime 不可区分）：{preview}——确证需构建期源码指纹（#61 预构建规划中）",
+            f"或 mtime 不可区分）：{preview}——hostBuild/preSync 已支持；"
+            "确证所需的构建期源码指纹尚未接入时效性检查",
         )
     return CheckResult(
         "frontend_artifacts_staleness", STATUS_OK, "预构建前端产物时效性无异常"

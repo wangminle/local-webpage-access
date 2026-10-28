@@ -497,7 +497,8 @@ lwa rebuild <id>
 会分级提醒，但**只告警、不自动构建**：同一份源码里前端目录比 `backend/static/`
 类产物新 → 疑似陈旧（`lwa doctor` 的 `frontend_artifacts_staleness` WARN，`rebuild
 --sync` 后也会提示）；前端源码不在导入树内（跨仓）或时间不可区分 → 无法判断（信息
-性说明）；要「确证」需要构建期源码指纹，随 #61 的预构建机制后续接入。注意这与
+性说明）。`hostBuild` / `preSync` 已支持显式宿主预构建；时效性「确证」所需的
+构建期源码指纹尚未接入，配置预构建不代表 doctor 能确证产物新旧。注意这与
 「base 配错导致别名白屏」是两类问题——后者走别名资源检查。
 
 ### 实例识别为 pending
@@ -723,6 +724,25 @@ MOVE 不会执行，`--force-quiesce` 可显式越过。
 **例外**：manifest `container` 段设了 `"rebuildStrategy": "stop-first"` 的实例
 （低内存小主机的逃生口）恢复旧的先停后建顺序——此时构建失败没有旧版本可回退；
 首次部署（无旧容器）也谈不上回滚。
+
+### 宿主 Node 24 与项目要求的 18–22.x 不兼容
+
+优先给工作区配置备选 Node，而不是直接忽略 engines。`nodeFallbackPaths` 填 Node
+可执行文件的绝对路径，文件名必须为 `node`（不能写成同目录的 `node22`），例如：
+
+```yaml
+nodeFallbackPaths:
+  - /usr/local/opt/node@22/bin/node
+```
+
+LWA 会读取项目 `engines.node`：默认 Node 已兼容时保持不变；不兼容时选择版本最高
+且满足要求的备选，仅修改该项目 install、宿主 build 和 `hostBuild`/`preSync` 的
+`PATH`，不切换系统全局 Node。已知默认 Node 与 engines 失配且无兼容备选时，
+宿主前端构建和 `hostBuild` / `preSync` 均在执行前明确阻断。
+只有确认风险后才设置 `nodeEnginesIgnore: true`；找到兼容备选时不会使用该忽略开关。
+自定义 `hostBuild` / `preSync` shell 命令保持原样；需要忽略包管理器自身校验时，
+须在自定义命令中明确配置对应参数，LWA 不向多段 shell 命令末尾拼接安装参数。
+LWA 不自动安装 Node，容器内镜像版本仍独立按 engines 选择。
 
 ### 宿主前端构建「命令超时（1800s）」
 

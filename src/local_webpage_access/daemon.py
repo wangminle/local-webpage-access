@@ -572,6 +572,30 @@ def touch_lock_heartbeat(workspace: Workspace) -> None:
         return
 
 
+@contextlib.contextmanager
+def _heartbeat_refresh(heartbeat: Callable[[], None], interval: float) -> Iterator[None]:
+    """在耗时操作期间独立刷新 daemon 心跳，退出时等待线程结束。"""
+    if interval <= 0:
+        yield
+        return
+    stop = threading.Event()
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            try:
+                heartbeat()
+            except Exception:  # noqa: BLE001 — 心跳失败不中断 watcher
+                log.exception("daemon 心跳刷新失败")
+
+    thread = threading.Thread(target=_loop, name="lwa-daemon-hb", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+
+
 # ---- inbox 扫描与文件稳定性（WBS-21.05/06）--------------------------------
 
 
@@ -1300,19 +1324,12 @@ def run_watcher(
     capability_period = max(1.0, float(capability_refresh_interval))
     # issue #29：Docker 未就绪的连续探测次数，驱动短退避快探。
     capability_retry_streak = 0
-    hb_stop = threading.Event()
-    if heartbeat is not None and heartbeat_interval > 0:
-
-        def _hb_loop() -> None:
-            while not hb_stop.wait(heartbeat_interval):
-                try:
-                    heartbeat()
-                except Exception:  # noqa: BLE001 — 心跳失败不中断 watcher
-                    log.exception("daemon 心跳刷新失败")
-
-        hb_thread = threading.Thread(target=_hb_loop, name="lwa-daemon-hb", daemon=True)
-        hb_thread.start()
-    try:
+    heartbeat_context = (
+        _heartbeat_refresh(heartbeat, heartbeat_interval)
+        if heartbeat is not None
+        else contextlib.nullcontext()
+    )
+    with heartbeat_context:
         while not stop_event.is_set():
             # 每轮起始刷新心跳，让卡死可被 _lock_is_stale 探测
             if heartbeat is not None:
@@ -1430,9 +1447,6 @@ def run_watcher(
 
             if stop_event.wait(poll_interval):
                 break
-    finally:
-        # BUG-190：退出 watcher 时停后台心跳线程
-        hb_stop.set()
 
     log.info("daemon watcher 已停止")
 
@@ -1851,17 +1865,23 @@ def _main() -> int:
             _probe_daemon_capability(workspace, config)
             reg = Registry(workspace.db_path)
             reg.open()
+
+            def heartbeat() -> None:
+                touch_lock_heartbeat(workspace)
+
             try:
                 # DEV-042：启动即自愈一次——恢复上次退出/重启期间掉线的
                 # desired=running 实例（builtin 静态进程 + 容器）。
+                log.info("daemon 启动自愈开始")
                 try:
-                    recovered = reconcile(workspace, config, reg)
+                    with _heartbeat_refresh(heartbeat, LOCK_HEARTBEAT_TIMEOUT / 4):
+                        recovered = reconcile(workspace, config, reg)
                     if recovered:
                         log.info("daemon 启动自愈：恢复 %d 个实例 %s", len(recovered), recovered)
                 except Exception:  # noqa: BLE001 — 自愈失败不阻断 watcher
                     log.exception("daemon 启动 reconcile 失败")
-                # BUG-190：watcher 在 run_watcher 内部启动后台心跳线程，
-                # 持续刷新锁心跳（详见 run_watcher）。
+                finally:
+                    log.info("daemon 启动自愈结束")
                 stop_event = threading.Event()
                 with _graceful_stop_signals(stop_event):
                     run_watcher(
@@ -1870,7 +1890,7 @@ def _main() -> int:
                         reg,
                         stop_event=stop_event,
                         poll_interval=args.poll,
-                        heartbeat=lambda: touch_lock_heartbeat(workspace),
+                        heartbeat=heartbeat,
                         supervise=reconcile,
                         consistency_check=_run_consistency_patrol,
                     )

@@ -1273,15 +1273,18 @@ def test_capability_refresh_single_flight(manager_env: EnvBundle, monkeypatch) -
     assert results[1]["capabilities"]["caddyRuntime"] == "ready"
 
 
-def test_capability_probe_failure_keeps_disk_cache(manager_env: EnvBundle, monkeypatch) -> None:
+def test_capability_probe_failure_keeps_disk_cache(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
     """BUG-379：探测失败不覆盖磁盘快照，内存 overall 须降为 unknown。"""
     import time
 
     from local_webpage_access.capability import CapabilityReport, write_capability_cache
     import local_webpage_access.manager_api as api_mod
 
+    # 只启动被测 app，避免 manager_env 的另一条后台探测覆盖同一磁盘快照。
     write_capability_cache(
-        manager_env.workspace.root,
+        workspace.root,
         "manager",
         CapabilityReport(
             profile="full",
@@ -1291,7 +1294,7 @@ def test_capability_probe_failure_keeps_disk_cache(manager_env: EnvBundle, monke
             gateway_access="ready",
         ),
     )
-    cache_path = manager_env.workspace.root / "run" / "capability-manager.json"
+    cache_path = workspace.root / "run" / "capability-manager.json"
     before = cache_path.read_text(encoding="utf-8")
 
     def boom(**kwargs):  # noqa: ANN003
@@ -1302,10 +1305,10 @@ def test_capability_probe_failure_keeps_disk_cache(manager_env: EnvBundle, monke
     monkeypatch.setattr(api_mod, "_CAPABILITY_REFRESH_INTERVAL", 60.0)
 
     app = create_app(
-        manager_env.workspace,
-        manager_env.config,
-        manager_env.registry,
-        token=manager_env.token,
+        workspace,
+        config,
+        registry,
+        token=ensure_token(workspace),
     )
     with TestClient(app):
         deadline = time.monotonic() + 1.5

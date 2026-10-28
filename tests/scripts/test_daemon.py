@@ -1758,6 +1758,69 @@ def test_main_probes_capability_only_after_daemon_lock(workspace: Workspace, mon
     assert daemon_mod._main() == 0
 
 
+def test_main_heartbeat_covers_slow_startup_reconcile(workspace: Workspace, monkeypatch) -> None:
+    """BUG-1015：启动自愈超心跳阈值时仍应报告运行，退出后心跳停止。"""
+    import os
+
+    monkeypatch.delenv("LWA_OP_SOURCE", raising=False)
+    monkeypatch.setattr(daemon_mod, "LOCK_HEARTBEAT_TIMEOUT", 0.08)
+    monkeypatch.setattr(
+        daemon_mod.sys,
+        "argv",
+        ["lwa-daemon", "--workspace", str(workspace.root), "--poll", "0.01"],
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.platform_support.require_supported_platform",
+        lambda: None,
+    )
+    monkeypatch.setattr(daemon_mod, "_probe_daemon_capability", lambda *a, **k: None)
+
+    running_after_delay: list[bool] = []
+    duplicate_lock_results: list[bool] = []
+    existing_heartbeat_threads = {
+        thread.ident for thread in threading.enumerate() if thread.name == "lwa-daemon-hb"
+    }
+
+    def slow_reconcile(*args, **kwargs):
+        stale_heartbeat = f"{os.getpid()}\n{time.time() - 10:.3f}\n"
+        daemon_mod.lock_path(workspace).write_text(stale_heartbeat, encoding="utf-8")
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            current_heartbeat = daemon_mod.lock_path(workspace).read_text(encoding="utf-8")
+            if current_heartbeat != stale_heartbeat:
+                break
+            time.sleep(0.005)
+        running_after_delay.append(daemon_mod.is_running(workspace))
+        try:
+            with daemon_mod.daemon_lock(workspace):
+                pass
+        except daemon_mod._DaemonLockBusy:
+            duplicate_lock_results.append(True)
+        else:
+            duplicate_lock_results.append(False)
+        daemon_mod.write_state(
+            workspace,
+            daemon_mod.DaemonState(enabled=False, pid=os.getpid(), poll_interval=0.01),
+        )
+        return []
+
+    monkeypatch.setattr(daemon_mod, "reconcile", slow_reconcile)
+
+    assert daemon_mod._main() == 0
+    assert running_after_delay == [True]
+    assert duplicate_lock_results == [True]
+    assert not [
+        thread
+        for thread in threading.enumerate()
+        if thread.name == "lwa-daemon-hb"
+        and thread.is_alive()
+        and thread.ident not in existing_heartbeat_threads
+    ]
+    assert daemon_mod._lock_is_stale(
+        daemon_mod.lock_path(workspace), stale_after=0.02, now_ts=time.time() + 1
+    )
+
+
 def test_daemon_start_timeout_covers_slow_probe() -> None:
     """BUG-298：启动等待须覆盖 Docker capability 探测（可达 10s+）。"""
     assert daemon_mod.DAEMON_START_TIMEOUT >= 30.0

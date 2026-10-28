@@ -33,12 +33,12 @@ from local_webpage_access.build_sources import (
     timeout_hint,
 )
 from local_webpage_access.config import Config
-from local_webpage_access.errors import BuildError
-from local_webpage_access.hosting import run_command
+from local_webpage_access.errors import BuildError, HostingError, PathError
+from local_webpage_access.hosting import _apply_engines_compat, run_command
 from local_webpage_access.instance_settings import effective_build_env
 from local_webpage_access.logging import write_instance_log
 from local_webpage_access.models import InstanceManifest, Runtime
-from local_webpage_access.paths import Workspace
+from local_webpage_access.paths import Workspace, resolve_source_workdir
 from local_webpage_access.registry import Registry
 
 
@@ -98,19 +98,56 @@ def run_host_build(
         effective_build_env(manifest),
     )
 
+    node_work_dir = current_dir
+    if manifest.sourceSubdir:
+        try:
+            node_work_dir = resolve_source_workdir(current_dir, manifest.sourceSubdir)
+        except PathError as exc:
+            raise BuildError(str(exc), instance_id=manifest.id) from exc
+
     # 与宿主前端构建同口径：按项目锁文件识别包管理器，把缓存指到工作区
     # run/pkg-cache/，避免 rebuild/同步重建 current/ 后从零下载。
     tool = None
     try:
         from local_webpage_access.node_toolchain import inspect_node_toolchain
 
-        tool = inspect_node_toolchain(current_dir)
+        tool = inspect_node_toolchain(current_dir, workdir=node_work_dir)
         env = inject_pkg_cache_env(env, workspace, tool.manager)
     except Exception:  # noqa: BLE001 - 非 Node 项目或探测失败不应阻断自定义命令
         tool = None
     timeout = host_build_timeout(config, monorepo=bool(tool and tool.workspaces))
     log_path = workspace.app_logs(manifest.id) / "build.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    from local_webpage_access.node_toolchain import select_project_node
+
+    selected_node = select_project_node(
+        node_work_dir,
+        env,
+        config.nodeFallbackPaths,
+        workspace_root=tool.workspace_root if tool is not None else current_dir,
+    )
+    if selected_node is not None:
+        write_instance_log(
+            workspace.apps,
+            manifest.id,
+            "build",
+            f"宿主预构建按项目 engines.node 选择备选 Node "
+            f"{'.'.join(map(str, selected_node.version))}（{selected_node.executable}）",
+        )
+    else:
+        # 自定义 shell 命令可能包含多段安装/构建，不向其尾部追加包管理器参数。
+        # 用占位命令复用 engines 预检；显式忽略仅放行，原命令保持用户配置。
+        try:
+            _apply_engines_compat(
+                "hostBuild/preSync",
+                node_work_dir,
+                ignore_engines=config.nodeEnginesIgnore,
+                workspace_root=tool.workspace_root if tool is not None else current_dir,
+                path=env.get("PATH"),
+            )
+        except HostingError as exc:
+            raise BuildError(exc.message, instance_id=manifest.id) from exc
 
     if config.buildProxy.proxy_env():
         write_instance_log(

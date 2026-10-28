@@ -128,6 +128,9 @@ def test_doctor_check_unknown_is_informational_only(env) -> None:
 
     r = doc_check(ws, reg)
     assert r.status == "ok" and "无法判定" in r.message
+    assert "hostBuild/preSync 已支持" in r.message
+    assert "构建期源码指纹尚未接入" in r.message
+    assert "预构建规划中" not in r.message
 
 
 def test_scanner_notes_suspected_only(tmp_path: Path) -> None:
