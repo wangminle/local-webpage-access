@@ -49,6 +49,44 @@ def _css_rule(css: str, selector: str) -> str:
     return css[start : css.index("}", start)]
 
 
+def test_build_proxy_detection_fills_only_draft_and_preserves_it_when_empty() -> None:
+    _run(
+        f"""
+const assert = require("node:assert");
+const context = {{ window: {{ __LWA_TEST_HOOKS__: {{}} }}, console }};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let root;
+let result = {{url: "http://127.0.0.1:7890"}};
+let requests = [];
+context.window.LWA.createManagerApp(
+  {{createApp: component => {{ root = component; return {{}}; }}}},
+  {{fetch: (path, opts) => {{ requests.push([path, opts.method]); return Promise.resolve({{
+    ok: true, json: () => Promise.resolve(result)
+  }}); }}}}
+);
+const state = root.data();
+state.buildProxy.draftUrl = "http://old:8080";
+async function run() {{
+  root.methods.detectBuildProxy.call(state);
+  assert.strictEqual(state.buildProxy.detecting, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(state.buildProxy.draftUrl, "http://127.0.0.1:7890");
+  assert.strictEqual(state.buildProxy.draftEnabled, false);
+  assert.strictEqual(state.buildProxy.detecting, false);
+  result = {{url: ""}};
+  root.methods.detectBuildProxy.call(state);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(state.buildProxy.draftUrl, "http://127.0.0.1:7890");
+  assert.ok(state.buildProxy.error.includes("未检测到"));
+  assert.deepStrictEqual(requests.map(r => r[0]), ["/api/build-proxy/detect", "/api/build-proxy/detect"]);
+  assert.ok(requests.every(r => !r[1]));
+}}
+run().catch(e => {{ console.error(e); process.exitCode = 1; }});
+"""
+    )
+
+
 def test_instance_table_matches_v069_layout_except_two_line_name_clamp() -> None:
     """BUG-414：完整恢复 V0.6.9 列宽规则，仅保留名称两行省略。
 

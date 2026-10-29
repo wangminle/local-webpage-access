@@ -1142,6 +1142,15 @@ def _register_routes(app: FastAPI) -> None:
         proxy = load_config(ctx.workspace).buildProxy
         return {"enabled": proxy.enabled, "url": proxy.url}
 
+    @app.get("/api/build-proxy/detect", dependencies=[api], tags=["config"])
+    def detect_build_proxy() -> dict[str, Any]:
+        from local_webpage_access.build_proxy import detect_system_proxy
+
+        try:
+            return {"url": detect_system_proxy()}
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="读取系统代理失败，请手动填写") from exc
+
     @app.put("/api/build-proxy", dependencies=[api], tags=["config"])
     def put_build_proxy(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         from pydantic import ValidationError

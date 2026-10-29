@@ -320,6 +320,35 @@ def test_manager_dialog_api_persists_and_rejects_a_bad_url(
     assert app.state.config.buildProxy.enabled is True
 
 
+@pytest.mark.parametrize(
+    ("proxies", "expected"),
+    [
+        ({"http": "127.0.0.1:7890", "https": "http://other:8080"}, "http://127.0.0.1:7890"),
+        ({"http": "socks5://localhost:1080", "https": "http://localhost:7891"}, "http://localhost:7891"),
+        ({"http": "http://localhost:bad"}, ""),
+        ({"all": "socks5://localhost:1080"}, ""),
+        ({}, ""),
+    ],
+)
+def test_detect_system_build_proxy_without_saving(
+    workspace: Workspace, registry, monkeypatch, proxies: dict, expected: str
+) -> None:
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: proxies)
+    workspace.config_path.write_text(example_config_text(), encoding="utf-8")
+    before = workspace.config_path.read_text(encoding="utf-8")
+    token = ensure_token(workspace)
+    app = create_app(workspace, load_config(workspace), registry, token=token)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/build-proxy/detect", headers={"Authorization": f"Bearer {token}"}
+        )
+    assert response.status_code == 200
+    assert response.json() == {"url": expected}
+    assert workspace.config_path.read_text(encoding="utf-8") == before
+
+
 def test_manager_build_proxy_rejects_string_bool(workspace: Workspace, registry) -> None:
     """字符串 "false" 不得被 bool(...) 当成 True：严格解析，非 bool 直接 400。"""
     workspace.config_path.write_text(example_config_text(), encoding="utf-8")

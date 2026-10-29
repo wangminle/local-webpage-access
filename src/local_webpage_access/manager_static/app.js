@@ -618,6 +618,7 @@
             draftUrl: "",
             error: "",
             submitting: false,
+            detecting: false,
           },
           pageview: { open: false, title: "", body: "", instanceId: null },
           // IMP-035：双阶段删除模态（step 1 选范围 → step 2 输 ID；needForce 再确认）
@@ -871,13 +872,27 @@
           });
         },
         closeBuildProxy: function () {
-          if (this.buildProxy.submitting) return;
+          if (this.buildProxy.submitting || this.buildProxy.detecting) return;
           this.buildProxy.open = false;
           this.buildProxy.error = "";
         },
+        detectBuildProxy: function () {
+          var self = this;
+          if (this.buildProxy.detecting || this.buildProxy.submitting) return;
+          this.buildProxy.error = "";
+          this.buildProxy.detecting = true;
+          apiFetch(this, "/api/build-proxy/detect").then(function (data) {
+            if (data.url) self.buildProxy.draftUrl = data.url;
+            else self.buildProxy.error = "未检测到可用的 HTTP/HTTPS 代理，请手动填写";
+          }).catch(function (e) {
+            self.buildProxy.error = e.message;
+          }).finally(function () {
+            self.buildProxy.detecting = false;
+          });
+        },
         saveBuildProxy: function () {
           var self = this;
-          if (this.buildProxy.submitting) return;
+          if (this.buildProxy.submitting || this.buildProxy.detecting) return;
           this.buildProxy.error = "";
           this.buildProxy.submitting = true;
           apiFetch(this, "/api/build-proxy", {
@@ -2076,13 +2091,14 @@
     '    <h2 id="build-proxy-title">构建代理</h2><button class="modal-x" type="button" @click="closeBuildProxy" aria-label="关闭">×</button>',
     "  </div>",
     '    <p class="path-alias-hint">启用后，下一次镜像构建的容器内安装命令和宿主机前端安装会走这个地址；已经运行的应用不使用它。填本机回环地址（如 http://127.0.0.1:10808）时，容器内会改用 host.docker.internal 访问宿主机，代理需开启「允许局域网连接」。拉取基础镜像由 Docker daemon 执行，需要时请在 Docker 设置里单独配置代理。</p>',
-    '    <label class="remove-dialog-field"><input type="checkbox" v-model="buildProxy.draftEnabled" /> 启用</label>',
+    '    <label class="build-proxy-enable"><input type="checkbox" v-model="buildProxy.draftEnabled" /> <span>启用</span></label>',
     '    <label class="remove-dialog-field"><span>代理地址</span>',
-    '      <input type="text" placeholder="http://127.0.0.1:10808" autocomplete="off" spellcheck="false" v-model="buildProxy.draftUrl" @keydown.enter="saveBuildProxy" /></label>',
+    '      <input type="text" placeholder="http://127.0.0.1:10808" autocomplete="off" spellcheck="false" :disabled="buildProxy.detecting" v-model="buildProxy.draftUrl" @keydown.enter="saveBuildProxy" /></label>',
+    '    <button class="btn" type="button" :disabled="buildProxy.detecting || buildProxy.submitting" @click="detectBuildProxy">{{ buildProxy.detecting ? "检测中…" : "检测系统代理" }}</button>',
     '    <p class="path-alias-error" :hidden="!buildProxy.error">{{ buildProxy.error }}</p>',
     '    <div class="remove-dialog-actions">',
-    '      <button class="btn" type="button" :disabled="buildProxy.submitting" @click="closeBuildProxy">取消</button>',
-    '      <button class="btn btn-primary" type="button" :disabled="buildProxy.submitting" @click="saveBuildProxy">{{ buildProxy.submitting ? "保存中…" : "保存" }}</button>',
+    '      <button class="btn" type="button" :disabled="buildProxy.submitting || buildProxy.detecting" @click="closeBuildProxy">取消</button>',
+    '      <button class="btn btn-primary" type="button" :disabled="buildProxy.submitting || buildProxy.detecting" @click="saveBuildProxy">{{ buildProxy.submitting ? "保存中…" : "保存" }}</button>',
     "    </div>",
     "  </div>",
     "</div>",

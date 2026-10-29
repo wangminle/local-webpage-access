@@ -33,6 +33,26 @@ from local_webpage_access.paths import Workspace
 _BLOCK_START_RE = re.compile(r"^buildProxy:(?:\s|$)")
 
 
+def detect_system_proxy() -> str:
+    """读取管理服务宿主机的代理设置，返回构建支持的首个地址。"""
+    import urllib.request
+
+    from pydantic import ValidationError
+
+    proxies = urllib.request.getproxies()
+    for key in ("http", "https", "all"):
+        url = (proxies.get(key) or "").strip()
+        if not url:
+            continue
+        if "://" not in url:
+            url = "http://" + url
+        try:
+            return BuildProxy(url=url).url
+        except (ValidationError, ValueError):
+            continue
+    return ""
+
+
 def subprocess_env(config: Config) -> dict[str, str] | None:
     """``docker compose build`` 用的环境。未启用时返回 None，表示沿用父进程环境。"""
     extra = config.buildProxy.proxy_env()

@@ -1006,6 +1006,14 @@ table.instances td:first-child { padding-left: 16px; }
 .remove-option input {
   margin-top: 3px;
 }
+.build-proxy-enable {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  cursor: pointer;
+}
+.build-proxy-enable input { margin: 0; }
 .remove-dialog-field {
   display: flex;
   flex-direction: column;

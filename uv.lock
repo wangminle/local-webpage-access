@@ -592,7 +592,7 @@ wheels = [
 
 [[package]]
 name = "local-webpage-access"
-version = "0.9.17"
+version = "0.9.18"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
