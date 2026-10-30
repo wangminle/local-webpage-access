@@ -700,6 +700,8 @@ def create_app(
     from local_webpage_access.logging import setup_logging
     from local_webpage_access.version_info import bind_process_version
 
+    from local_webpage_access.tailscale_network import NetworkContextCache
+
     setup_logging(level=config.logLevel)  # type: ignore[arg-type]
     # BUG-451：应用构建时固定版本；/api/health 与 OpenAPI version 共用，不随
     # 长驻进程内后续 git/元数据变化「静默变版」。
@@ -769,6 +771,9 @@ def create_app(
         # BUG-379：启动后周期刷新完整能力；停止事件在 lifespan 退出时置位收尾。
         import time as _time
 
+        network_context = NetworkContextCache()
+        app.state.network_context = network_context
+        network_context.start()
         stop_event = _threading.Event()
         app.state.capability_stop_event = stop_event
 
@@ -871,6 +876,7 @@ def create_app(
         try:
             yield
         finally:
+            network_context.stop()
             agent_worker_stop.set()
             agent_worker_thread.join(timeout=2.0)
             stop_event.set()
@@ -886,6 +892,7 @@ def create_app(
         lifespan=_lifespan,
         # 统一错误响应由下方异常处理器实现
     )
+    app.state.network_context = NetworkContextCache()
     app.state.workspace = workspace
     app.state.config = config
     app.state.registry = registry
@@ -1037,6 +1044,11 @@ def _register_routes(app: FastAPI) -> None:
             config_profile=getattr(cfg, "profile", None),
         )
         return {"ok": True, **report.to_health_fragment()}
+
+    @app.get("/api/network-context", dependencies=[api], tags=["health"])
+    def get_network_context() -> JSONResponse:
+        """IMP-069：只读本机 Tailscale 快照；GET 不触发系统探测。"""
+        return JSONResponse(app.state.network_context.snapshot(), headers={"Cache-Control": "no-store"})
 
     # ---- 顶部统计（WBS-22.05/06）----
     @app.get("/api/stats", dependencies=[api], tags=["stats"])

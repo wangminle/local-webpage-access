@@ -31,6 +31,28 @@ lwa manager off         # 停止
 * 也可事后查阅 `run/manager-token.json`。重置：删除该文件后重启管理页。
 * 页眉使用 `manager_static/logo.svg`；浏览器标签栏图标为 `favicon.png`。
 
+## 局域网 / Tailscale 地址切换
+
+实例表头“访问地址”右侧的浅色开关默认显示“局域网”，点击可切换为“tailscale”。
+局域网模式沿用原有地址；Tailscale 模式将列表“端口”、路径别名及详情抽屉“打开路径入口”的主机地址替换为
+LWA 运行环境自身的 Tailscale IP，并隐藏“本机”回环链接。切回局域网会恢复原链接；
+抽屉已打开时也会随模式或组网地址更新，不额外请求详情。端口数字、映射、路径及原协议保持不变；IPv4 优先，也支持仅 IPv6 的组网地址。
+
+管理服务每次启动即在后台检查 Tailscale，之后每30秒检查一次；页面沿用15秒刷新读取缓存，
+点击开关本身不执行系统探测。正常前台页面通常在约47秒内反映状态变化。
+未发现可用组网时无法切换，点击鼠标上方会显示3秒提示：
+“lwa的运行环境中未发现tailscale组网”。键盘触发时提示位于开关上方。
+
+选中 Tailscale 后，新快照确认断开、注销或探测失败会自动回到局域网并提示一次；
+此后恢复需手动再次切换。缓存超过60秒仅标记过期，页面从后台恢复时会重新读取状态；
+过期或读取失败本身不判定为未组网，也不打断当前 Tailscale 选择。切换选择不跨页面保存。
+
+此开关仅更改管理页链接，不安装、启动或管理 Tailscale，也不修改监听、防火墙和网关配置。
+应在 **LWA 进程所在环境** 安装并连接 Tailscale；仅在 Windows 宿主机安装时，
+不能据此认定 WSL/容器内的 LWA 已组网。macOS 支持常规 CLI 和 `/Applications/Tailscale.app` 安装。
+组网可用不代表每个应用都已从另一节点验证可达；原有别名 `passed` 徽标不代表 Tailscale 远程验收。
+原有 HTTPS 链接保留 HTTPS，替换 IP 后可能受证书或网关绑定限制，需要另行验证；不会自动降级到 HTTP。
+
 ## 鉴权
 
 * 所有 `/api/*` 路由（`/api/health` 除外）默认要求请求头 `Authorization: Bearer <token>`（WBS-22.12）。
@@ -71,11 +93,16 @@ lwa manager off         # 停止
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查（无需 token；能力细节见上文鉴权说明） |
 | GET | `/api/capability` | 鉴权能力报告（`?refresh=true` 同步重探，IMP-033） |
+| GET | `/api/network-context` | 本机Tailscale状态缓存（遵循上文鉴权规则，`Cache-Control: no-store`）；返回可用性、自身IP、检查时间与剩余有效期，不返回peer信息、不触发即时探测。后台30秒更新，60秒过期，IMP-069 |
+| GET | `/api/build-proxy` | 读取构建代理当前配置，返回 `enabled` 和 `url` |
+| PUT | `/api/build-proxy` | 校验并保存构建代理配置；body为 `enabled`（布尔值）及 `url`，对后续构建生效 |
+| GET | `/api/build-proxy/detect` | 检测宿主系统代理，返回候选 `url`（无候选时为空字符串）；不自动启用或保存配置 |
 | GET | `/api/stats` | 顶部统计：实例计数、类型分布、数据库实例数、端口池、主机资源 |
 | POST | `/api/access/refresh` | 用当前 LAN IP 重算并落盘各实例 `lanUrl`/`routeUrl`（IMP-038/040） |
 | POST | `/api/gateway/switch` | 网关后端原子切换（body `{"backend":"caddy"|"builtin"}`，IMP-037） |
 | GET | `/api/instances` | 实例列表（先观测回写状态再取快照；含 `redundant` 布尔字段，IMP-019） |
 | GET | `/api/instances/{id}` | 实例详情：状态快照 + manifest + 构建/事件/资源记录。**V0.9.4（S3-01）**：响应新增 `versions` 字段（容器实例的版本留档负载；非容器为 `null`）——`retention`（保留数）、`versions[]`（`id/startedAt/finishedAt/status/imageRef/imageId/sourceHash/imagePresent/inUse`）、`diskUsageBytes`、`requiresConfirm`（preStart 含迁移命令时回滚需显式确认）、`scopeNote`（D8 范围说明） |
+| POST | `/api/instances/{id}/lan-observation` | 记录独立客户端的LAN观测；body含 `vantage`、`protocol`、`evidence`、`statusCode`及 `url`，按当前入口与网络指纹判定有效性；不代替实际远端探测，不自动配置系统网络 |
 | GET | `/api/instances/{id}/versions` | **S3-01 / V0.9.4**：版本留档列表（同详情 `versions` 负载；非容器实例 409 `not_container`） |
 | GET | `/api/instances/{id}/timeline?limit=` | **S3-04 / V0.9.4**：操作时间线（事件 / 构建 / 最近操作 `lastOperation` 合并，倒序，每条含 `source` 发起方；`limit` 1–200，默认 50）；CLI：`lwa logs <id> --timeline` |
 | GET | `/api/instances/{id}/logs?category=&tail=` | 日志内容（build/run/gateway/import/scan） |

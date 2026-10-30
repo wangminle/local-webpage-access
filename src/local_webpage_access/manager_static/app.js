@@ -34,6 +34,8 @@
       deps.URLSearchParams ||
       (typeof URLSearchParams !== "undefined" ? URLSearchParams : null);
 
+    var nowFn = deps.now || function () { return typeof performance !== "undefined" ? performance.now() : Date.now(); };
+
     // ---- token ----
 
     function isLocalhostAccess() {
@@ -264,9 +266,12 @@
       return html + "</dl>";
     }
 
-    function renderDetailHtml(data) {
+    function renderDetailHtml(data, addressMode, tailscaleIp) {
       var inst = data.instance || {};
       var manifest = data.manifest || {};
+      var routeUrl = addressMode === "tailscale"
+        ? LWA.tailscaleUrl(inst.routeUrl, tailscaleIp)
+        : inst.routeUrl;
       var html = "";
       html += section(
         "基本信息",
@@ -362,8 +367,8 @@
           '<p class="detail-hint">已启用 <code>/' +
             LWA.esc(inst.routeHost) +
             "/</code>" +
-            (inst.routeUrl
-              ? ' · <a href="' + LWA.esc(inst.routeUrl) +
+            (routeUrl
+              ? ' · <a href="' + LWA.esc(routeUrl) +
                 '" target="_blank" rel="noopener">打开路径入口</a>'
               : "") +
             "</p>" +
@@ -568,6 +573,10 @@
             host: {},
           },
           instances: [],
+          addressMode: "lan",
+          networkContext: { available: false, selectedIp: null },
+          networkExpiresAt: 0,
+          networkToast: { show: false, msg: "", x: 0, y: 0 },
           pageviewMap: {},
           filters: { search: "", status: "", form: "", pending: false, redundant: false },
           // BUG-289：非 401 的加载失败（5xx / 断网 / 非 JSON）也要可见，
@@ -765,7 +774,7 @@
           if (!rows.length) {
             return '<tr class="empty-row"><td colspan="13">没有匹配的实例</td></tr>';
           }
-          return rows.map(function (i) { return LWA.rowHtml(i, self.pageviewMap); }).join("");
+          return rows.map(function (i) { return LWA.rowHtml(i, self.pageviewMap, self.addressMode, (self.networkContext || {}).selectedIp); }).join("");
         },
         // issue #31：冗余实例明细（含 configLossReasons，来自 /api/instances），
         // 供批量删除弹窗列出 id / 名称 / 状态 / 跳过原因。
@@ -788,6 +797,82 @@
         },
       },
       methods: {
+        // ---- IMP-069：地址模式仅消费缓存；点击不触发系统探测 ----
+        networkAvailable: function () {
+          return this.networkContext.available && this.networkContext.selectedIp && nowFn() < this.networkExpiresAt;
+        },
+        showNetworkToast: function (event) {
+          var el = event && event.currentTarget;
+          if (!el && doc && doc.querySelector) el = doc.querySelector(".address-toggle");
+          var rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : {left: 180, top: 160, width: 0};
+          var mouse = event && event.detail > 0;
+          var x = mouse ? event.clientX : rect.left + rect.width / 2;
+          var y = mouse ? event.clientY : rect.top;
+          var viewport = doc && doc.documentElement;
+          var width = (viewport && viewport.clientWidth) || 800;
+          var height = (viewport && viewport.clientHeight) || 600;
+          var half = Math.min(160, (width - 24) / 2);
+          this.networkToast = {
+            show: true, msg: "lwa的运行环境中未发现tailscale组网",
+            x: Math.max(half + 12, Math.min(x, width - half - 12)),
+            y: Math.max(80, Math.min(y - 12, height - 12))
+          };
+          if (this._networkToastTimer) clearTimeoutFn(this._networkToastTimer);
+          var self = this;
+          this._networkToastTimer = setTimeoutFn(function () { self.networkToast.show = false; }, 3000);
+        },
+        toggleAddressMode: function (event) {
+          if (this.addressMode === "tailscale") {
+            this.addressMode = "lan";
+            this.refreshDetailAddressMode();
+            return;
+          }
+          if (!this.networkAvailable()) { this.showNetworkToast(event); return; }
+          this.addressMode = "tailscale";
+          this.networkToast.show = false;
+          this.refreshDetailAddressMode();
+        },
+        refreshDetailAddressMode: function () {
+          if (!this._detailData) return;
+          this.drawer.body = renderDetailHtml(
+            this._detailData, this.addressMode, (this.networkContext || {}).selectedIp
+          );
+        },
+        acceptNetworkContext: function (data, elapsedMs) {
+          if (this._networkExpiryTimer) clearTimeoutFn(this._networkExpiryTimer);
+          var ttl = Math.max(0, Math.min(60, Number(data && data.validForSeconds) || 0) * 1000 - (elapsedMs || 0));
+          var available = !!(data && data.available && data.selectedIp && ttl > 0);
+          this.networkContext = Object.assign({}, data, {available: available});
+          this.networkExpiresAt = nowFn() + ttl;
+          if (!available && this.addressMode === "tailscale" && !(data && data.state === "stale")) {
+            this.addressMode = "lan";
+            this.showNetworkToast();
+          }
+          var self = this;
+          if (available) this._networkExpiryTimer = setTimeoutFn(function () {
+            self.acceptNetworkContext({available: false, state: "stale"});
+          }, ttl);
+          this.refreshDetailAddressMode();
+        },
+        loadNetworkContext: function () {
+          var self = this;
+          var request = (this._networkReq || 0) + 1;
+          this._networkReq = request;
+          var started = nowFn();
+          return apiFetch(this, "/api/network-context").then(function (data) {
+            if (self._networkReq === request) self.acceptNetworkContext(data, nowFn() - started);
+          }).catch(function () {
+            // 请求失败或缓存过期都不证明 Tailscale 已消失，等待新快照再判定。
+            if (self._networkReq === request && !self.networkAvailable()) {
+              self.acceptNetworkContext({available: false, state: "stale"});
+            }
+          });
+        },
+        onNetworkVisibility: function () {
+          if (doc && doc.hidden) return;
+          return this.loadNetworkContext();
+        },
+
         // ---- token ----
         requireToken: function () {
           if (isLocalhostAccess()) {
@@ -917,6 +1002,7 @@
         // ---- 刷新 ----
         refresh: function () {
           var self = this;
+          this.loadNetworkContext();
           // 评审-组9#4：三个并行请求跨轮次乱序时旧响应可覆盖新数据；
           // 与详情/浏览量一致加递增令牌，只应用最新一轮的响应。
           var myReq = (this._refreshReq = (this._refreshReq || 0) + 1);
@@ -1364,7 +1450,9 @@
               var inst = data.instance || {};
               self._detailData = data; // S3-01：版本面板回滚按钮需要 requiresConfirm
               self.drawer.title = inst.name || inst.id || "实例详情";
-              self.drawer.body = renderDetailHtml(data);
+              self.drawer.body = renderDetailHtml(
+                data, self.addressMode, (self.networkContext || {}).selectedIp
+              );
               self.drawer.open = true;
             })
             .catch(function (e) {
@@ -1821,13 +1909,18 @@
       mounted: function () {
         this.requireToken();
         if (doc) {
+          doc.addEventListener("visibilitychange", this.onNetworkVisibility);
           doc.addEventListener("keydown", this.onKeydown);
           doc.addEventListener("click", closeIpListsOnOutsideClick);
         }
       },
       unmounted: function () {
         if (this._timer) clearIntervalFn(this._timer);
+        if (this._networkExpiryTimer) clearTimeoutFn(this._networkExpiryTimer);
+        if (this._networkToastTimer) clearTimeoutFn(this._networkToastTimer);
+        this._networkReq = (this._networkReq || 0) + 1;
         if (doc) {
+          doc.removeEventListener("visibilitychange", this.onNetworkVisibility);
           doc.removeEventListener("keydown", this.onKeydown);
           doc.removeEventListener("click", closeIpListsOnOutsideClick);
         }
@@ -1935,12 +2028,13 @@
     '    <table class="instances">',
     "      <thead><tr>",
     "        <th>名称</th><th>状态</th><th>期望</th><th>形态</th><th>族</th><th>运行层</th>",
-    '        <th>技术栈</th><th>访问地址</th><th>端口</th><th>资源</th><th>浏览量</th><th>更新时间</th><th class="col-ops">操作</th>',
+    '        <th>技术栈</th><th>访问地址 <button class="address-toggle" type="button" role="switch" :aria-checked="String(addressMode === \'tailscale\')" aria-label="使用 Tailscale 访问地址" @click="toggleAddressMode($event)"><span class="address-toggle-track" aria-hidden="true"></span><span class="address-toggle-label">{{ addressMode === \'tailscale\' ? "tailscale" : "局域网" }}</span></button></th><th>端口</th><th>资源</th><th>浏览量</th><th>更新时间</th><th class="col-ops">操作</th>',
     "      </tr></thead>",
     '      <tbody v-html="tbodyHtml" @click="onTableClick"></tbody>',
     "    </table>",
     "  </div>",
     "</section></main>",
+    '<div class="network-toast" role="status" aria-live="polite" :hidden="!networkToast.show" :style="{left: networkToast.x + \'px\', top: networkToast.y + \'px\'}">{{ networkToast.msg }}</div>',
     // 详情抽屉
     '<aside class="drawer" :hidden="!drawer.open" :aria-hidden="String(!drawer.open)">',
     '  <div class="drawer-head"><h2>{{ drawer.title || "实例详情" }}</h2>',

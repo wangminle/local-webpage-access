@@ -918,6 +918,10 @@ const ctx = Object.assign({{}}, state, {{
   noteLoadError: capturedRoot.methods.noteLoadError,
   // ADJ-056：bootstrap 会调用 loadBuildProxy，测试 ctx 必须同步绑定
   loadBuildProxy: capturedRoot.methods.loadBuildProxy,
+  loadNetworkContext: capturedRoot.methods.loadNetworkContext,
+  networkAvailable: capturedRoot.methods.networkAvailable,
+  acceptNetworkContext: capturedRoot.methods.acceptNetworkContext,
+  refreshDetailAddressMode: capturedRoot.methods.refreshDetailAddressMode,
   openDetail: function () {{}},
 }});
 
@@ -1367,4 +1371,147 @@ assert.strictEqual(root.computed.redundantDeletableCount.call(ctx),0);
 assert.ok(root.template.includes('更新时间'));
 assert.ok(root.template.includes('acknowledgeRedundant(i.id)'));
 assert.ok(root.template.includes('!redundantDeletableCount'));
+""")
+
+
+def test_tailscale_urls_preserve_parts_and_hide_local_links():
+    _run(f"""
+const assert = require('node:assert/strict');
+const context = {{window: {{}}, URL, console}};
+vm.runInNewContext({_load_helpers_body()}, context);
+const L = context.window.LWA;
+const instance = {{lanUrl: 'http://192.168.1.10:18002/a?q=1#x',
+  hostLanUrl: 'http://192.168.1.11:18002/', localhostUrl: 'http://127.0.0.1:18002/',
+  routeUrl: 'https://192.168.1.10:8443/books/?q=2', routeHost:'books', aliasGuardResult:'passed'}};
+const original = JSON.stringify(instance);
+const lan = L.urlHtml(instance);
+const html = L.urlHtml(instance, 'tailscale', '100.101.102.103');
+assert.ok(html.includes('http://100.101.102.103:18002/a?q=1#x'));
+assert.ok(html.includes('https://100.101.102.103:8443/books/?q=2'));
+assert.ok(!html.includes('127.0.0.1'));
+assert.ok(!html.includes('192.168.1.11'));
+assert.ok(!html.includes('>本机<'));
+assert.ok(html.includes('passed'));
+assert.strictEqual(JSON.stringify(instance), original);
+assert.strictEqual(L.urlHtml(instance, 'lan'), lan);
+assert.ok(L.urlHtml(instance, 'tailscale', 'fd7a:115c:a1e0::1').includes('http://[fd7a:115c:a1e0::1]:18002/'));
+assert.ok(!L.urlHtml({{localhostUrl: instance.localhostUrl}}, 'tailscale', '100.1.1.1').includes('href='));
+""")
+
+
+def test_tailscale_toggle_cache_toast_expiry_and_recovery():
+    _run(f"""
+const assert = require('node:assert/strict');
+const context = {{window: {{}}, URL, console}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let root, timers = new Map(), nextId=0;
+context.window.LWA.createManagerApp({{createApp: r => {{root=r;return {{}};}}}}, {{
+  setTimeout: (fn, delay) => {{timers.set(++nextId, {{fn,delay}});return nextId;}},
+  clearTimeout: id => timers.delete(id),
+  document: {{documentElement: {{clientWidth:800,clientHeight:600}}}}
+}});
+const state=root.data(); Object.assign(state, root.methods);
+assert.equal(state.addressMode, 'lan');
+state.toggleAddressMode({{detail:1,clientX:200,clientY:300}});
+assert.equal(state.addressMode, 'lan');
+assert.equal(state.networkToast.msg, 'lwa的运行环境中未发现tailscale组网');
+assert.equal(state.networkToast.x,200);
+assert.ok(state.networkToast.y < 300);
+assert.ok([...timers.values()].some(t => t.delay === 3000));
+state.acceptNetworkContext({{available:true,selectedIp:'100.1.1.1',validForSeconds:60}});
+state.toggleAddressMode({{detail:1,clientX:200,clientY:300}});
+assert.equal(state.addressMode,'tailscale');
+state.toggleAddressMode(); assert.equal(state.addressMode,'lan');
+state.toggleAddressMode(); assert.equal(state.addressMode,'tailscale');
+state.acceptNetworkContext({{available:false,validForSeconds:60}});
+assert.equal(state.addressMode,'lan');
+state.acceptNetworkContext({{available:true,selectedIp:'100.1.1.2',validForSeconds:1}});
+assert.equal(state.addressMode,'lan'); // 手动选择不因快照恢复被抢占
+state.toggleAddressMode(); assert.equal(state.addressMode,'tailscale');
+[...timers.values()].find(t=>t.delay===1000).fn();
+assert.equal(state.addressMode,'tailscale');
+assert.equal(state.networkContext.available,false);
+assert.equal(state.networkToast.show,false);
+state.acceptNetworkContext({{available:true,selectedIp:'100.1.1.2',validForSeconds:60}});
+assert.equal(state.addressMode,'tailscale');
+assert.equal(state.networkContext.available,true);
+assert.ok(root.template.includes('role="switch"'));
+""")
+
+
+def test_network_context_ignores_out_of_order_responses_and_clicks_never_fetch():
+    _run(f"""
+const assert = require('node:assert/strict');
+const context = {{window: {{}}, URL, console}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let root, now=0, pending=[], requests=0;
+context.window.LWA.createManagerApp({{createApp: r => {{root=r;return {{}};}}}}, {{
+  now:()=>now, setTimeout:()=>1, clearTimeout:()=>{{}},
+  fetch:()=>{{requests++;return new Promise(resolve=>pending.push(resolve));}}
+}});
+const s=root.data(); Object.assign(s,root.methods);
+const reply = data => ({{ok:true,json:()=>Promise.resolve(data)}});
+async function run() {{
+  const first=s.loadNetworkContext(), second=s.loadNetworkContext();
+  pending[1](reply({{available:true, selectedIp:'100.1.1.2',validForSeconds:60}}));
+  await second;
+  pending[0](reply({{available:false}})); await first;
+  assert.equal(s.networkContext.selectedIp,'100.1.1.2');
+  s.toggleAddressMode(); assert.equal(s.addressMode,'tailscale');
+  s.toggleAddressMode(); s.toggleAddressMode();
+  assert.equal(requests,2);
+  now=60001;
+  const visible=s.onNetworkVisibility();
+  assert.equal(s.addressMode,'tailscale');
+  assert.equal(s.networkToast.show,false);
+  assert.equal(requests,3);
+  pending[2](reply({{available:true,selectedIp:'100.1.1.2',validForSeconds:60}}));
+  await visible;
+  assert.equal(s.addressMode,'tailscale');
+  assert.equal(s.networkContext.available,true);
+  assert.equal(s.networkToast.show,false);
+  now=120002;
+  const unavailable=s.onNetworkVisibility();
+  pending[3](reply({{available:false,state:'not_running',validForSeconds:60}}));
+  await unavailable;
+  assert.equal(s.addressMode,'lan');
+  assert.equal(s.networkToast.show,true);
+}}
+run().catch(e=>{{console.error(e);process.exitCode=1;}});
+""")
+
+
+def test_detail_route_link_follows_tailscale_mode_without_refetch():
+    _run(f"""
+const assert = require('node:assert/strict');
+const context = {{window: {{}}, URL, console}};
+vm.runInNewContext({_load_helpers_body()}, context);
+vm.runInNewContext({_load_app_body()}, context);
+let root, requests=0;
+const detail={{instance:{{id:'demo',name:'Demo',routeHost:'books',
+  routeUrl:'https://192.168.1.10:8443/books/?q=2'}}, manifest:{{}}}};
+context.window.LWA.createManagerApp({{createApp: r => {{root=r;return {{}};}}}}, {{
+  now:()=>0, setTimeout:()=>1, clearTimeout:()=>{{}},
+  fetch:()=>{{requests++;return Promise.resolve({{ok:true,json:()=>Promise.resolve(detail)}});}}
+}});
+const s=root.data(); Object.assign(s,root.methods);
+async function run() {{
+  s.acceptNetworkContext({{available:true,selectedIp:'100.101.102.103',validForSeconds:60}});
+  s.openDetail('demo');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(s.drawer.body.includes('href="https://192.168.1.10:8443/books/?q=2"'));
+  s.toggleAddressMode();
+  assert.ok(s.drawer.body.includes('href="https://100.101.102.103:8443/books/?q=2"'));
+  assert.ok(!s.drawer.body.includes('href="https://192.168.1.10:8443/books/?q=2"'));
+  assert.equal(requests,1);
+  s.acceptNetworkContext({{available:true,selectedIp:'fd7a:115c:a1e0::1',validForSeconds:60}});
+  assert.ok(s.drawer.body.includes('href="https://[fd7a:115c:a1e0::1]:8443/books/?q=2"'));
+  assert.equal(requests,1);
+  s.toggleAddressMode();
+  assert.ok(s.drawer.body.includes('href="https://192.168.1.10:8443/books/?q=2"'));
+  assert.equal(requests,1);
+}}
+run().catch(e=>{{console.error(e);process.exitCode=1;}});
 """)

@@ -500,11 +500,12 @@ def _is_wsl_identity(*values: str | None) -> bool:
 
 
 def parse_hyperv_firewall_text(text: str | None) -> HyperVFirewall:
-    """只保留 WSL 的 Hyper-V 防火墙设置和规则。
+    """保留 WSL 设置，以及 WSL 专属和全局适用的 Hyper-V 规则。
 
     旧格式 ``S|Name|Inbound`` / ``R|Display|...`` 仍可读。新格式带 VMCreatorId。
     ``P|source`` 行标明策略来源（BUG-989）。存在其他 Hyper-V 组件时不采用第
-    一条，也不把无标识的规则算到 WSL 上。
+    一条，也不把无标识的规则算到 WSL 上。显式 ``Any`` creator 的规则
+    同样适用于 WSL，包含 AllowHostPolicyMerge 合并的 Windows 入站规则。
     """
     settings: list[tuple[str, str, str | None]] = []
     rules: list[tuple[str, tuple[str, str, str, str, str]]] = []
@@ -541,7 +542,11 @@ def parse_hyperv_firewall_text(text: str | None) -> HyperVFirewall:
         result.default_inbound = chosen[2]
     for creator, fields in rules:
         if creator:
-            if _is_wsl_identity(creator):
+            # BUG-1016：合并的宿主规则使用 Any，不是 WSL GUID；遗漏它们会使
+            # 入站放行撤销后的指纹不变，继续误报 externally-verified。
+            if _is_wsl_identity(creator) or (
+                chosen is not None and _norm_creator(creator) == "any"
+            ):
                 result.rules.append(fields)
         elif chosen is not None and not foreign:
             result.rules.append(fields)
@@ -684,25 +689,51 @@ def _observation_entry_ports(
     return frozenset(ports)
 
 
+def _hyperv_rule_matches_ports(
+    rule: tuple[str, str, str, str, str], relevant_ports: Collection[int]
+) -> bool:
+    ports = {int(port) for port in relevant_ports if port}
+    if not ports:
+        return False
+    # 实例入口为HTTP(S)/TCP；UDP和ICMP即使端口为Any也不影响此入口。
+    # 空协议属于采集未知，保守保留；256是Windows的Any协议值。
+    if rule[3].strip().lower() not in {"", "tcp", "6", "any", "256"}:
+        return False
+    local_ports = rule[4].strip()
+    if not local_ports or local_ports.lower() == "any":
+        return True
+    for item in local_ports.split(","):
+        token = item.strip()
+        if token.isdigit() and int(token) in ports:
+            return True
+        match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", token)
+        if match and any(int(match.group(1)) <= port <= int(match.group(2)) for port in ports):
+            return True
+    return False
+
+
 def snapshot_fingerprint(
     snapshot: WslNetworkSnapshot | None,
     relevant_ports: Collection[int] | None = None,
 ) -> str:
     """网络快照指纹。
 
-    BUG-981：提供 ``relevant_ports``（实例入口相关端口基集）时，portproxy 规则
-    与 TCP 监听只计入与该入口相关的部分——规则按 listen/connect 命中基集筛选，
-    监听再按命中规则的 listen/connect 端口一跳展开后的集合筛选。整台 Windows 上
-    无关服务/短命回环端口的增删不再使本实例的外部观测误失效；自身端口关闭、
-    相关规则改动仍会使指纹变化。采集能力状态（如 ``tcp_listen`` unknown↔
-    available）始终计入指纹，保留能力不可读时的保守降级。``relevant_ports=None``
-    保持整机口径（仅测试与无实例上下文的调用使用）。
+    BUG-981：提供 ``relevant_ports``（实例入口相关端口基集）时，portproxy 规则、
+    TCP 监听与 Hyper-V 规则只计入与该入口相关的部分——转发按 listen/connect
+    命中基集筛选，监听和 Hyper-V 规则再按展开后的端口集合筛选。整台 Windows 上
+    无关服务/短命回环端口及无关防火墙规则的增删不再使本实例的外部观测误失效；
+    自身端口关闭、相关规则改动仍会使指纹变化。采集能力状态（如 ``tcp_listen``
+    unknown↔available）始终计入指纹，保留能力不可读时的保守降级。
+    ``relevant_ports=None`` 保持整机口径（仅测试与无实例上下文的调用使用）。
     """
     if snapshot is None:
         return "none"
     if relevant_ports is None:
         rules_src = list(snapshot.portproxy_rules)
         listens_src = list(snapshot.tcp_listens)
+        hyperv_rules_src = (
+            list(snapshot.hyperv_firewall.rules) if snapshot.hyperv_firewall else []
+        )
     else:
         base = {int(p) for p in relevant_ports if p}
         rules_src = [
@@ -715,6 +746,11 @@ def snapshot_fingerprint(
             expanded.add(r.listen_port)
             expanded.add(r.connect_port)
         listens_src = [item for item in snapshot.tcp_listens if item.port in expanded]
+        hyperv_rules_src = [
+            rule
+            for rule in (snapshot.hyperv_firewall.rules if snapshot.hyperv_firewall else [])
+            if _hyperv_rule_matches_ports(rule, expanded)
+        ]
     rules = tuple(
         sorted(
             (r.listen_address, r.listen_port, r.connect_address, r.connect_port)
@@ -728,7 +764,7 @@ def snapshot_fingerprint(
     if snapshot.hyperv_firewall:
         hyperv = (
             f"{snapshot.hyperv_firewall.default_inbound}|"
-            f"{tuple(sorted(snapshot.hyperv_firewall.rules))}"
+            f"{tuple(sorted(hyperv_rules_src))}"
         )
     return "|".join(
         [

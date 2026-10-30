@@ -9,7 +9,7 @@
 **分项完成与剩余待办（未完成项需相应真实环境）：**
 
 1. [x] N10-3 修复后独立 LAN 本轮范围：10-28 同一 0.9.17 wheel 的 HTTP/HTTPS 资源、CA/IP 身份、Host/XFF/token/Agent 边界、明文收敛、无关监听观测保持及入口撤销后失效均通过；CHK-511，见 §4.10。
-2. [ ] M11-3 独立 LAN 正向：定位实际 Windows/Hyper-V 入站阻断，取得物理设备的资源/TLS/鉴权与明文旁路证据。
+2. [x] M11-3 独立 LAN 正向：10-29～30独立Dell HTTP20/HTTPS28通过；限定来源Windows规则经Hyper-V策略合并即恢复可达，撤销与专属服务清理已核对。BUG-1016观测假绿已修复，修复后转换以实采快照回放及新鲜负向验证；见本轮成果，不外推其他组合/宿主恢复。
 3. [ ] N10-2、N11-2、N11-3、M11-2、X10-M、X-UNK，以及 Ubuntu 24.04 WSL 最小用例。
 4. [ ] 真实退化：权限不足、interop 关闭、未知模式、错误映射/端口冲突/异端口、多网卡/VPN、非登录 SSH PATH。
 5. [ ] 维护窗口内的休眠、WSL 重开、guest 地址变化、Windows 重启/自启及规则/证书/观测刷新。
@@ -213,6 +213,12 @@ CHK-511：yi14-wsl-debian 本轮实采 Windows10 Build19045.6456、WSL2 / 包3.0
 
 本分项完成不代表M11独立LAN、其他版本/真实退化、宿主恢复、最终全应用三机或HTTPS完整浏览器/IPv6矩阵完成，PLN-054仍进行中。
 
+### 4.11 2026-10-29～30 M11 独立 Dell LAN 收尾
+
+CHK-521：Win11 Build28020.3292 / WSL包3.0.4.0 / Debian13 mirrored，当前0.9.18工作树冻结副本；独立Dell物理WLAN的HTTP20/HTTPS28、资源正文、CA/IP身份、token/伪造头及Agent边界与明文旁路通过。用户限定来源Windows规则经AllowHostPolicyMerge进入Hyper-V生效策略即可恢复可达，无需另加Hyper-V规则；未断言唯一WFP过滤器。
+
+用户撤销后三条规则与合并规则消失，Dell不可达而guest28项健康；再停止隔离服务，原监听/PID、规则、默认策略和portproxy恢复。撤销时发现BUG-1016：解析器遗漏Any creator规则，历史观测假绿；已修复，以本轮实际规则快照回放验证“已验证→候选/stale”，并在新鲜WSL负向读数确认旧观测失效。修复版未重新开放LAN正向；原失败和修复验证分开留证。详见[成果](../2-achievement/2026-10-29-Win11-mirrored-Dell独立LAN续验.md)。其他组合、宿主恢复、最终三机和HTTPS浏览器/IPv6完整清单不因此完成。
+
 ## 5. 每组验收的内容与分层
 
 1. 最小静态页、相对 CSS/JS，从 WSL 内、Windows 本机和另一台 LAN 设备分别读取，核对业务内容，不能只用 TCP 成功或 HTTP 200 判定。
@@ -243,7 +249,7 @@ CHK-511：yi14-wsl-debian 本轮实采 Windows10 Build19045.6456、WSL2 / 包3.0
 - [x] 2026-10-23 N10-3：管理员提供临时入口后，独立Mac的HTTP/HTTPS资源、浏览器交互及代表SQLite容器数据读取通过；manager/容器进程恢复分项通过。整体验收因新发现BUG-980鉴权与BUG-981观测缺口继续未完成，修复后须同路径复验。
 - [x] 2026-10-22 N10-3 本机 HTTPS：隔离工作区启用 internal CA，补齐 WSL/Windows localhost 内容、按 Windows IP 校验的无 SNI 本机连接、显式 CA/不信任反向验证、非回环鉴权及明文收敛；测试进程恢复与清理已留证。
 - [x] N10-3 实际 LAN 转发入口 HTTPS（首次）：2026-10-23 经临时入口，独立设备校验 Windows 入口 IP、显式 CA 与不信任反向通过（§4.5）；本机 connect-to 验证不能代替该入口，已由此条取代。修复后复验并入上一条未完成项。
-- [ ] M11-3 正向 LAN：只读定位 Windows/Hyper-V 入站链路的超时原因；用户/管理员完成必要网络处置后，复测独立设备 HTTP/HTTPS、资源内容与管理鉴权。当前不得改写为“已外部验证”。
+- [x] M11-3 正向 LAN：CHK-521已完成独立Dell资源、TLS/CA/IP身份、鉴权、明文旁路与限定规则Add/Remove对照。首次观测已达externally-verified；撤销时发现BUG-1016并修复，以实采规则回放验证正确失效，实机新鲜负向stale=true。修复版未重开LAN正向，原始错误与修复验证分开留证，详见[本轮成果](../2-achievement/2026-10-29-Win11-mirrored-Dell独立LAN续验.md)。
 - [ ] 两台的恢复场景：分别补休眠、WSL 关闭重开、地址变化、Windows 重启与自启；N10-3 的一次手动拉起观察不替代完整恢复矩阵。
 - [ ] 容器与 Eval 整体收口：两 WSL 已有 V0.9.16 五步基础断言及持久化增量，Win11 Linkding 六资源/书签/restart 专项已完成（§4.9）；完整业务/版本/失败恢复、三机最终快照仍按 Eval 逐项确认。CHK-439 最低版本专项保持待办。
 
@@ -294,3 +300,5 @@ CHK-511：yi14-wsl-debian 本轮实采 Windows10 Build19045.6456、WSL2 / 包3.0
 - [WSL 网络配置及模式回退](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
 - [Windows 系统版本号](https://learn.microsoft.com/en-us/windows/win32/sysinfo/operating-system-version)
 - [Windows Build 与运行时 API 能力](https://learn.microsoft.com/en-us/windows/apps/get-started/versioning-overview)
+
+2026-10-30最终收尾补记：BUG-1016现有修复经旧逻辑3项预期失败/修复后4项通过、实采Windows规则5项回放、独立审查及101项WSL回归验证；当前工作区全门禁4755通过/23跳过。结合CHK-521原有真实LAN正向、撤销负向和清理证据，原第2项/N2对应范围完成收尾。未重新开放LAN做修复版新一轮正向，不外推其他组合/宿主恢复、统一快照三机或完整HTTPS/IPv6；PLN-054保持进行中，原顺序仍待12组。详见2026-10-29-Win11-mirrored-Dell独立LAN续验.md末节。

@@ -1350,6 +1350,116 @@ def test_hyperv_query_emits_wsl_creator_identity() -> None:
     assert "VMCreatorId" in query
 
 
+def test_hyperv_merged_host_rule_revocation_invalidates_mirrored_observation() -> None:
+    """BUG-1016：Windows 合并规则撤销后，真实 LAN 成功不能继续当作当前可达。"""
+    wsl_id = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
+    setting = f"P|active\nS|WSL|{wsl_id}|Block\n"
+    merged = "R|Any|Scoped-Windows-entry|Inbound|Allow|TCP|29543\n"
+
+    def snapshot(rules: str):
+        return _yi14_snapshot(
+            guest_ip="10.180.105.74",
+            outputs=InteropOutputs(
+                **{**YI14_OUTPUTS.__dict__, "wslinfo_text": "mirrored\n",
+                   "portproxy_text": "", "hyperv_firewall_text": setting + rules}
+            ),
+        )
+
+    before, after = snapshot(merged), snapshot("")
+    config = Config(gatewayTls="internal", gatewayTlsPort=29543)
+    observation = wn.build_lan_observation(
+        snapshot=before, vantage="lan-client", protocol="https",
+        evidence="content-match", status_code=200,
+        url="https://10.180.105.74:29543/hello-lwa/",
+        host_port=29510, route_host="hello-lwa", config=config,
+    )
+    same = describe_instance_access(
+        before, host_port=29510, route_host="hello-lwa", config=config,
+        observation=observation,
+    )
+    removed = describe_instance_access(
+        after, host_port=29510, route_host="hello-lwa", config=config,
+        observation=observation,
+    )
+    assert same.lan_exposure == EXPOSURE_EXTERNALLY_VERIFIED
+    assert same.observation_stale is False
+    assert removed.lan_exposure == EXPOSURE_CANDIDATE_UNVERIFIED
+    assert removed.observation_stale is True
+    assert removed.observation == observation
+
+
+def test_scoped_fingerprint_filters_hyperv_rules_by_entry_ports() -> None:
+    wsl_id = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
+    setting = f"P|active\nS|WSL|{wsl_id}|Block\n"
+    relevant_rule = "R|Any|Scoped-Windows-entry|Inbound|Allow|TCP|29543\n"
+    wildcard_rule = "R|Any|All-ports-policy|Inbound|Allow|TCP|Any\n"
+
+    def snapshot(rules: str):
+        return _yi14_snapshot(
+            guest_ip="10.180.105.74",
+            outputs=InteropOutputs(
+                **{**YI14_OUTPUTS.__dict__, "wslinfo_text": "mirrored\n",
+                   "portproxy_text": "", "hyperv_firewall_text": setting + rules}
+            ),
+        )
+
+    common = relevant_rule + wildcard_rule
+    before = snapshot(
+        common
+        + "R|Any|SMB|Inbound|Allow|TCP|445\n"
+        + "R|Any|ICMP|Inbound|Allow|ICMPv4|3,11\n"
+    )
+    unrelated_churn = snapshot(
+        common
+        + "R|Any|HTTP|Inbound|Allow|TCP|80\n"
+        + "R|Any|mDNS|Inbound|Allow|UDP|5353\n"
+    )
+    relevant = frozenset({29510, 29543})
+    assert snapshot_fingerprint(before, relevant) == snapshot_fingerprint(
+        unrelated_churn, relevant
+    )
+    assert snapshot_fingerprint(before) != snapshot_fingerprint(unrelated_churn)
+
+    without_entry = snapshot(wildcard_rule)
+    without_wildcard = snapshot(relevant_rule)
+    assert snapshot_fingerprint(before, relevant) != snapshot_fingerprint(
+        without_entry, relevant
+    )
+    assert snapshot_fingerprint(before, relevant) != snapshot_fingerprint(
+        without_wildcard, relevant
+    )
+    assert wn._hyperv_rule_matches_ports(
+        ("Range", "Inbound", "Allow", "TCP", "29500-29600"), relevant
+    )
+    assert not wn._hyperv_rule_matches_ports(
+        ("Other", "Inbound", "Allow", "TCP", "80,445"), relevant
+    )
+
+
+@pytest.mark.parametrize("creator", ["Any", "ANY"])
+def test_hyperv_global_rules_apply_to_wsl_without_accepting_other_vm_rules(creator) -> None:
+    wsl_id = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
+    other_id = "{11111111-2222-3333-4444-555555555555}"
+    parsed = wn.parse_hyperv_firewall_text(
+        f"S|Other|{other_id}|Allow\nS|WSL|{wsl_id}|Block\n"
+        f"R|{creator}|Merged|Inbound|Allow|TCP|29543\n"
+        f"R|{other_id}|Foreign|Inbound|Allow|TCP|29543\n"
+        "R|Unidentified|Inbound|Allow|TCP|29543\n"
+    )
+    assert parsed.default_inbound == "Block"
+    assert parsed.rules == [("Merged", "Inbound", "Allow", "TCP", "29543")]
+
+
+def test_hyperv_any_rule_does_not_supply_missing_wsl_setting() -> None:
+    parsed = wn.parse_hyperv_firewall_text(
+        "S|Other|{11111111-2222-3333-4444-555555555555}|Allow\n"
+        "R|Any|Merged|Inbound|Allow|TCP|29543\n"
+    )
+    assert parsed.vm_name is None
+    assert parsed.default_inbound is None
+    assert parsed.rules == []
+
+
 # ---- BUG-989：采集生效策略（ActiveStore），回退默认存储并标明来源 -------------
 
 
@@ -1652,3 +1762,25 @@ def test_light_probe_does_not_touch_snapshot_cache() -> None:
     reset_wsl_network_cache()
     wn.probe_networking_mode_light(runner=lambda *_a, **_k: _Proc(b"nat\n"))
     assert wn._cache is None
+
+
+@pytest.mark.parametrize("protocol", ["ICMPv4", "ICMPv6", "1", "58", "UDP", "17"])
+@pytest.mark.parametrize("local_ports", ["Any", "29543"])
+def test_scoped_fingerprint_ignores_non_tcp_hyperv_churn(protocol, local_ports):
+    """HTTP入口不因ICMP或UDP规则（含Any端口）的增删丢失外部验证。"""
+    wsl_id = "{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}"
+    setting = f"P|active\nS|WSL|{wsl_id}|Block\n"
+    entry = "R|Any|Scoped-entry|Inbound|Allow|TCP|29543\n"
+
+    def snapshot(extra):
+        return _yi14_snapshot(outputs=InteropOutputs(
+            **{**YI14_OUTPUTS.__dict__, "wslinfo_text": "mirrored\n",
+               "portproxy_text": "", "hyperv_firewall_text": setting + entry + extra}
+        ))
+
+    before = snapshot(f"R|Any|Unrelated|Inbound|Allow|{protocol}|{local_ports}\n")
+    after = snapshot("")
+    relevant = frozenset({29510, 29543})
+    assert snapshot_fingerprint(before, relevant) == snapshot_fingerprint(after, relevant)
+    # 无实例上下文的整机诊断仍保留全部规则。
+    assert snapshot_fingerprint(before) != snapshot_fingerprint(after)

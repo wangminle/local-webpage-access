@@ -201,7 +201,25 @@
   // 访问地址两行排版：第一行「端口 · 本机」，第二行路径别名。配合 style.css
   // 的 .url-line 块级布局，列宽取两行中较宽者（端口/本机行为下限，最长别名
   // 为上限），省下的宽度让给名称列。
-  LWA.urlHtml = function (i) {
+  LWA.tailscaleUrl = function (value, ip) {
+    if (!value || !ip) return "";
+    try {
+      var url = new URL(value);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+      url.hostname = ip.indexOf(":") >= 0 ? "[" + ip + "]" : ip;
+      return url.href;
+    } catch (_) { return ""; }
+  };
+
+  LWA.urlHtml = function (i, mode, tailscaleIp) {
+    if (mode === "tailscale") {
+      // 派生显示对象，不修改后端实例地址；此模式下隐藏本机与LAN候选。
+      i = Object.assign({}, i, {
+        lanUrl: LWA.tailscaleUrl(i.lanUrl, tailscaleIp),
+        routeUrl: LWA.tailscaleUrl(i.routeUrl, tailscaleIp),
+        localhostUrl: "", hostLanUrl: "", lanReachability: "tailscale"
+      });
+    }
     var primary = [];
     if (i.lanUrl) {
       var hostOnly = i.lanReachability === "windows-host";
@@ -211,7 +229,7 @@
           '" target="_blank" rel="noopener" title="' +
           (hostOnly
             ? "WSL 内部地址，仅 Windows 宿主可达，不是局域网"
-            : "宿主端口访问（LAN IP）") +
+            : (mode === "tailscale" ? "Tailscale 端口访问" : "宿主端口访问（LAN IP）")) +
           '">' +
           (hostOnly ? "宿主" : "端口") +
           "</a>"
@@ -492,7 +510,7 @@
 
   // ---- 整行 HTML（Vue 组件用 v-html 渲染，保证与原生版本输出一致）----
 
-  LWA.rowHtml = function (i, pageviewMap) {
+  LWA.rowHtml = function (i, pageviewMap, addressMode, tailscaleIp) {
     var classes = [];
     if (i.status === "failed") classes.push("row-failed");
     else if (i.status === "pending") classes.push("row-pending");
@@ -522,7 +540,7 @@
       "<td>" + LWA.esc(i.kind || "—") + "</td>" +
       '<td class="cell-muted">' + LWA.esc(i.runtime || "—") + "</td>" +
       "<td>" + LWA.stackHtml(i.stack, i.database) + "</td>" +
-      '<td class="cell-url">' + LWA.urlHtml(i) + "</td>" +
+      '<td class="cell-url">' + LWA.urlHtml(i, addressMode, tailscaleIp) + "</td>" +
       "<td>" + LWA.portHtml(i) + "</td>" +
       '<td class="cell-muted">' + LWA.resourceHtml(i) + "</td>" +
       "<td>" + LWA.pageviewHtml(i, pageviewMap) + "</td>" +

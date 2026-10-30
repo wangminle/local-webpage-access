@@ -3889,3 +3889,32 @@ def test_health_matches_workspace_carries_workspace_token(
         is True
     )
     assert captured["token"] == manager_env.token
+
+
+def test_network_context_is_authenticated_cached_and_read_only(manager_env, monkeypatch):
+    from local_webpage_access import tailscale_network
+
+    env = manager_env
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return {"available": True, "selectedIp": "100.101.102.103", "state": "Running"}
+
+    monkeypatch.setattr(tailscale_network, "probe_tailscale", probe)
+    # 未鉴权远端不可读；只返回缓存，不触发系统命令。
+    assert env.client.get("/api/network-context").status_code == 401
+    response = env.client.get("/api/network-context", headers=env.auth_headers())
+    assert response.status_code == 200
+    cache = env.app.state.network_context
+    # 等待启动时的真实探测退出，避免与手动更新争用单飞锁。
+    assert cache._refresh_lock.acquire(timeout=3)
+    cache._refresh_lock.release()
+    cache.refresh()
+    count = len(calls)
+    for _ in range(3):
+        result = env.client.get("/api/network-context", headers=env.auth_headers())
+        assert result.json()["selectedIp"] == "100.101.102.103"
+        assert result.headers["cache-control"] == "no-store"
+    assert len(calls) == count
+    assert cache.thread.is_alive()
