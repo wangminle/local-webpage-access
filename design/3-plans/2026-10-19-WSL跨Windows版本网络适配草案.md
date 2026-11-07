@@ -1,6 +1,6 @@
 # WSL 跨 Windows 版本网络适配：需求与验收草案
 
-## 当前完成度核对（2026-10-28，N10 修复后独立 LAN 复验收尾）
+## 当前完成度核对（2026-10-30，Ubuntu 最小静态分项收尾）
 
 **PLN-054 继续进行中，整案不归档。** 产品核心与网络诊断修复已有交付；此前 10-27 两台 Debian / WSL2 使用同一 V0.9.16 提交 `11027c1` 执行十一项目五步复验，8 个可启动样本在各机最终记录支持既定断言（含配置和补测），3 个为能力边界。不能将此合并为所有网络、浏览器和恢复要求通过。
 
@@ -10,7 +10,7 @@
 
 1. [x] N10-3 修复后独立 LAN 本轮范围：10-28 同一 0.9.17 wheel 的 HTTP/HTTPS 资源、CA/IP 身份、Host/XFF/token/Agent 边界、明文收敛、无关监听观测保持及入口撤销后失效均通过；CHK-511，见 §4.10。
 2. [x] M11-3 独立 LAN 正向：10-29～30独立Dell HTTP20/HTTPS28通过；限定来源Windows规则经Hyper-V策略合并即恢复可达，撤销与专属服务清理已核对。BUG-1016观测假绿已修复，修复后转换以实采快照回放及新鲜负向验证；见本轮成果，不外推其他组合/宿主恢复。
-3. [ ] N10-2、N11-2、N11-3、M11-2、X10-M、X-UNK，以及 Ubuntu 24.04 WSL 最小用例。
+3. [ ] 其余组合 N10-2、N11-2、N11-3、M11-2、X10-M、X-UNK；Ubuntu 24.04 WSL 最小用例已由 CHK-525 完成（Win10/包3.0.4.0/NAT），不新增其他版本/模式组合的通过证据。
 4. [ ] 真实退化：权限不足、interop 关闭、未知模式、错误映射/端口冲突/异端口、多网卡/VPN、非登录 SSH PATH。
 5. [ ] 维护窗口内的休眠、WSL 重开、guest 地址变化、Windows 重启/自启及规则/证书/观测刷新。
 6. [x] Win11 Linkding（BUG-997）修复后六资源、固定书签及 restart 的本机分项；不替代独立 LAN。
@@ -19,7 +19,7 @@
 
 10-28 已新增 Win10 NAT 修复后独立 Mac LAN 正向、安全边界及撤销清理闭环；未新增宿主恢复测试。两台应用复验、本机网络与独立 LAN 证据分批记录。
 
-创建日期：2026-10-19。验证结果汇总更新至：**2026-10-28**（应用五步实机批次仍为 10-27 V0.9.16；新增 N10 独立 LAN 使用 `11027c1` 加当前 0.9.17 工作树，宿主恢复未新增）。
+创建日期：2026-10-19。验证结果汇总更新至：**2026-10-30**（应用五步批次仍为10-27 V0.9.16；N10独立LAN使用0.9.17分项快照，M11独立LAN另列；新增Ubuntu最小静态冻结0.9.19 / `8e8c6ae`，宿主恢复未新增）。
 
 第一、二批核心适配及 §3.5 所列补充能力已有实现与回归，第三批主要组合与真实恢复尚未完整验收；已有两台 Debian 实机的部分证据：**N10-3（Win10 + NAT，历史包3.0.3.0；10-28本轮实采3.0.4.0）**与 **M11-3（Win11 + WSL 包 3.0.4.0 + mirrored）**。两台均为 **WSL2 架构**，软件包 3.x 不表示 WSL3 架构。Win10 已补 portproxy 解码实测、真实 Docker 与样本部署；Win11 已补本机 HTTP/HTTPS、鉴权及独立物理 LAN 客户端负向实测。
 
@@ -302,3 +302,23 @@ CHK-521：Win11 Build28020.3292 / WSL包3.0.4.0 / Debian13 mirrored，当前0.9.
 - [Windows Build 与运行时 API 能力](https://learn.microsoft.com/en-us/windows/apps/get-started/versioning-overview)
 
 2026-10-30最终收尾补记：BUG-1016现有修复经旧逻辑3项预期失败/修复后4项通过、实采Windows规则5项回放、独立审查及101项WSL回归验证；当前工作区全门禁4755通过/23跳过。结合CHK-521原有真实LAN正向、撤销负向和清理证据，原第2项/N2对应范围完成收尾。未重新开放LAN做修复版新一轮正向，不外推其他组合/宿主恢复、统一快照三机或完整HTTPS/IPv6；PLN-054保持进行中，原顺序仍待12组。详见2026-10-29-Win11-mirrored-Dell独立LAN续验.md末节。
+
+
+### 2026-10-30 Ubuntu24.04 WSL最小用例进度
+
+用户启动yi14-wsl-ubuntu，实采Ubuntu24.04.5/Win10 Build19045.6456/WSL2包3.0.4.0/NAT。独立冻结0.9.19提交8e8c6ae，在专属目录准备Python3.13与Caddy并经真实LWA导入/启动；guest与Windows本机共24项HTTP资源内容/直达/别名/管理鉴权及Agent边界通过。Ubuntu用例仍进行中：独立Mac LAN待管理员Add，HTTPS、Remove后的入口/服务对照及最终清理尚未完成，不勾选第3项或Ubuntu分项通过。未改Windows网络/系统Python，未运行Docker或全量Eval。见[阶段记录](../2-achievement/2026-10-30-Ubuntu24.04-WSL最小静态验收.md)。
+
+
+2026-10-30按用户“先自主执行、稍后统一辅助”续验：CHK-525在Ubuntu完成guest/Windows本机24项HTTP、33项TLS（正常重启后整组33项复跑）、浏览器隧道功能验证及阶段清理。实例/manager/gateway正常重启保持端口/别名/CA；无sudo/Windows网络改动，无本轮规则和运行测试服务。独立物理LAN正向/入口撤销仍待管理员Add/Remove窗口；已有HTTPS仅本机层，不能将Ubuntu三层用例标完成，也不代表宿主恢复或原第3项整体通过。完整结果及人工步骤见[阶段记录](../2-achievement/2026-10-30-Ubuntu24.04-WSL最小静态验收.md)。
+
+
+2026-10-30用户管理员Add后续验：CHK-525补齐独立物理Mac LAN的HTTP23项、浏览器0→3与TLS32项，CLI及HTTPS管理API外部观测均externally-verified/stale=false。现已请求管理员Remove，保持guest服务运行以核对撤销后的LAN失效/guest健康及观测失效；最终清理尚未做，Ubuntu分项仍进行中，原第3项整体不关闭。详见同日Ubuntu成果最新阶段。
+
+
+### 2026-10-30 Ubuntu 最小静态分项最终收尾
+
+- [x] **Ubuntu24.04 WSL 最小静态用例（CHK-525）**：冻结0.9.19 / `8e8c6ae`，Ubuntu24.04.5 / Win10 Build19045.6456 / WSL2包3.0.4.0 / NAT。guest/Windows本机HTTP24项、HTTPS33项及正常服务重启后33项复跑通过；独立物理Mac HTTP23项、HTTPS32项、真实浏览器及CLI/HTTPS API外部观测通过。
+
+用户管理员Remove后，Mac三个临时入口均不可达而guest四项仍200；产品由externally-verified/stale=false改为entry-missing/stale=true，保留历史观测。随后实例/网关/manager停止、7测试端口释放，本轮Windows映射/防火墙/归属文件清除，原两SSH映射、原监听、系统Python与默认工作区指针保持。证据脱敏导出并校验，具体失败边界及摘要见[成果](../2-achievement/2026-10-30-Ubuntu24.04-WSL最小静态验收.md)。
+
+本节更新前述阶段性的“待Add/Remove”状态。仅Ubuntu发行版最小用例完成；不外推其他Windows/包版本/模式组合、真实退化/宿主恢复、统一三机业务或完整浏览器HTTPS/IPv6。原第3/4项与PLN-054继续进行中。

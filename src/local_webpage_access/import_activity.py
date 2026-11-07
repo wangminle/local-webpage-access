@@ -54,24 +54,31 @@ def import_activity_lock(
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             deadline = time.monotonic() + timeout
             fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-            ensure_lockable(fd)
-            while True:
-                try:
-                    try_acquire_exclusive(fd)
-                    write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
-                    file_acquired = True
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        with contextlib.suppress(OSError):
-                            os.close(fd)
-                        raise LwaError(
-                            f"导入活动锁被占用，等待超时（{timeout:g}s）",
-                            code="IMPORT_BUSY",
-                        )
-                    time.sleep(0.05)
-            _local.fd = fd
-            _local.file_acquired = file_acquired
+            try:
+                ensure_lockable(fd)
+                while True:
+                    try:
+                        try_acquire_exclusive(fd)
+                        write_lock_payload(fd, f"{os.getpid()}\n{time.time():.3f}\n".encode())
+                        file_acquired = True
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise LwaError(
+                                f"导入活动锁被占用，等待超时（{timeout:g}s）",
+                                code="IMPORT_BUSY",
+                            )
+                        time.sleep(0.05)
+                _local.fd = fd
+                _local.file_acquired = file_acquired
+            except Exception:
+                if file_acquired:
+                    release_exclusive(fd)
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                _local.fd = None
+                _local.file_acquired = False
+                raise
         _local.depth = depth + 1
         try:
             yield

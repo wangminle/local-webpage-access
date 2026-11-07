@@ -240,6 +240,13 @@ def maybe_throttled_lan_refresh(
     global _inflight, _last_refresh_mono, _last_resolved_lan_ip
 
     if config.lanIpStrategy == "manual" and not force:
+        # 手工策略不自动改写 manifest，但在线 Caddy 的 TLS 主机集合（如 Tailscale
+        # 晚于网关上线、地址变化）仍须自愈；该同步幂等，网关关闭时不会被拉起。
+        manual_ip = cached_resolve_lan_ip(config)
+        if manual_ip:
+            from local_webpage_access.access import sync_caddy_tls_bind
+
+            sync_caddy_tls_bind(workspace, config, manual_ip)
         return None
 
     lan_ip = cached_resolve_lan_ip(config)

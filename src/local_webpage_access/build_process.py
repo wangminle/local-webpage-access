@@ -188,10 +188,11 @@ def kill_process_tree(
                 continue
         # killpg 未能确认终止（含 PermissionError break）：兜底单点 kill
     except Exception:  # noqa: BLE001 — best-effort
-        try:
-            proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
+        pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def kill_pid_tree_if_matches(

@@ -124,7 +124,7 @@ swap=4GB
 * **不纳管外部既有站点**：已在机上的 nginx+systemd、独立进程、非本工作区 Caddy 等，**不能** `adopt` / 登记进 lwa 生命周期。`lwa autostart` 只监管 **本工作区** 的 manager/daemon/gateway；要把旧站纳入 lwa，须改为 zip 导入并由 lwa 重新部署（静态走网关，全栈走 Compose）。与 Full Profile「禁止静默复用系统 caddy.service / 外部 `:2019`」一致。
 * **静态网关**：默认 Caddy 优先；Default 档无 Caddy 时可降级内置 `http.server`。
   Full Profile 要求可用的 LWA 托管 Caddy（见上）。`staticGateway=nginx` 为历史无效值（IMP-067 收敛）：新配置仅接受 `caddy | builtin`，旧 YAML 加载时自动按 builtin 兼容（单进程一次警告），`lwa update` 会备份后持久迁移为 builtin。
-* **HTTPS**：V0.9.0 起 Caddy 可用 `gatewayTls: internal` 打开传输加密（内嵌 CA，别名 `:8443`、管理面 `:9443`；详见 [https.md](https.md)）。**builtin 网关无 TLS**；Let's Encrypt / 公网 ACME / 自定义域名证书自动化仍不在范围内。客户端须 `lwa ca export` 后手动信任根证书，禁止点穿告警。
+* **HTTPS**：V0.9.0 起 Caddy 可用 `gatewayTls: internal` 打开传输加密（内嵌 CA，别名 `:8443`、管理面 `:9443`；详见 [https.md](https.md)）；本机在线的 Tailscale IPv4/IPv6 地址亦已纳入证书与网关监听覆盖（BUG-1025）。**builtin 网关无 TLS**；Let's Encrypt / 公网 ACME / 自定义域名证书自动化仍不在范围内。客户端须 `lwa ca export` 后手动信任根证书，禁止点穿告警；Tailscale 网络加密不可替代浏览器证书校验。
 * **自定义域名**：不支持。通过 `IP:端口` 访问。
 * **WebSocket**：静态网关路径不做专门代理；容器路径依赖 Docker 端口映射，原则上可用但未专项测试。
 * **数据持久化**：仅自动 bind mount `data/` 目录（V0.9.9 起 Flask `instance_path` 下的 SQLite 额外自动挂载 `data/instance:<instance 基目录>`，按 Flask 未安装包的真实语义与顶层包并列，默认容器侧为 `/app/instance`；V0.9.10 起源码以字面量自定义 `instance_path`（如 `Flask(__name__, instance_path='/data')`）时挂载点跟随该字面量，路径无法从源码安全证明时不自动挂载并告警，请用 `container.extraVolumes` 显式配置；重建前自动救出旧容器内该目录的数据，同名文件保留宿主版本）。其他路径（如日志、上传目录）需用户在项目内处理。
@@ -197,12 +197,12 @@ swap=4GB
 
 * **自动备份**：不提供。备份需用户自行打包工作区（见 [FAQ](faq.md#如何备份)）。
 * **registry 迁移**：SQLite 单文件，可整体复制；但跨架构/跨 Docker 版本时不保证容器配置兼容。
-* **历史版本**：一个实例一份 `current/`，不支持多版本切换或回滚到旧构建产物。
+* **历史版本与回滚（S3-01 / DEV-157，V0.9.4 起）**：源码目录一个实例一份 `current/`；容器实例支持保留构建镜像与生成配置留档（`lwa versions <id>` / `lwa rollback <id>` / 管理页「版本」面板），但**不回滚 `data/` 业务数据**（如 SQLite），也不支持跨实例多版本并行共存。静态实例无容器镜像留档。
 
 ## CLI 与自动化
 
 * **批量操作**：无通用批量 start/stop；需借助 shell 循环或管理页 API。**例外**：`lwa remove --redundant` 与管理页「批量删除冗余」可按 zip 指纹批量清理冗余实例（IMP-012 / IMP-019）。携带独立配置（路径别名 / buildEnv）的冗余实例默认跳过，需 `--allow-config-loss` 才会删除（issue #31）。
-* **滚动更新**：不支持蓝绿/滚动发布，`rebuild` 是停机重建。
+* **更新停机时间**：不支持多实例蓝绿部署或零停机滚动发布。运行中容器的 `rebuild` 默认采用「先建后换」（构建并验证新容器通过后再停用并替换旧版本，失败时提供恢复与补偿），但切换瞬间仍有短暂连接中断；静态实例重建在端口复用时同样存在服务短暂交接。
 * **CI/CD 集成**：无原生 webhook 触发器；可通过 inbox/ + daemon 或 API 自行实现。
 
 ## 大模型 Skills

@@ -2058,6 +2058,7 @@ def check_port_contention(
             entry_ports.add(int(config.gatewayPlainPort))
     elif config.staticGatewayPort is not None:
         entry_ports.add(int(config.staticGatewayPort))
+    entry_port: int | None = None
     for entry_port in sorted(entry_ports):
         entry_listeners = _list_listeners(int(entry_port))
         if entry_listeners:

@@ -2389,3 +2389,46 @@ def test_path_alias_lock_does_not_steal_live_holder_by_age(workspace, monkeypatc
                 pass
     finally:
         os.close(fd)
+
+
+def test_snapshot_read_failure_preserves_preexisting_file(workspace, registry, monkeypatch) -> None:
+    from local_webpage_access.lifecycle import _restore_from_snapshot, _snapshot_attempt
+    from local_webpage_access.models import (
+        DesiredState,
+        InstanceManifest,
+        Kind,
+        ResourceProfile,
+        Runtime,
+        ServingMode,
+        Status,
+    )
+
+    iid = "demo"
+    workspace.ensure_app_dirs(iid)
+    manifest = InstanceManifest(
+        id=iid,
+        name=iid,
+        version="1",
+        kind=Kind.STATIC,
+        runtime=Runtime.SHARED_STATIC,
+        servingMode=ServingMode.SHARED_STATIC,
+        resourceProfile=ResourceProfile.TINY,
+        status=Status.RUNNING,
+        desiredState=DesiredState.RUNNING,
+    )
+    env_path = workspace.app_env_path(iid)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("SECRET=old", encoding="utf-8")
+    original_read = Path.read_text
+
+    def fail_env_read(self, *args, **kwargs):
+        if self == env_path:
+            raise PermissionError("read denied")
+        return original_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_env_read)
+    snapshot = _snapshot_attempt(workspace, registry, iid, manifest)
+    monkeypatch.undo()
+    _restored, residuals = _restore_from_snapshot(workspace, registry, iid, manifest, snapshot)
+    assert env_path.read_text(encoding="utf-8") == "SECRET=old"
+    assert any("快照读取失败" in item for item in residuals)

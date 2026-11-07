@@ -236,10 +236,10 @@ def test_frontend_rebuild_failure_keeps_serving_state(
 # ---- G2 / G3 / BUG-834/835：重建事务的补偿边界与快照新鲜度 --------------------
 
 
-def test_frontend_sync_failure_does_not_claim_old_version_is_serving(
+def test_frontend_sync_failure_preserves_old_version(
     workspace, registry, config, monkeypatch
 ) -> None:
-    """复制中途失败、public 已清空时，必须如实报告部署失败。"""
+    """复制中途失败时旧 public 保持完整，旧版本继续服务。"""
     _seed_frontend_instance(workspace, registry, "spa")
     manifest = hosting._load_manifest(workspace, "spa")
     manifest.status = Status.RUNNING
@@ -260,10 +260,10 @@ def test_frontend_sync_failure_does_not_claim_old_version_is_serving(
     with pytest.raises(OSError, match="disk full during sync"):
         hosting.build_and_host_frontend(workspace, config, registry, "spa")
 
-    assert not list(public.iterdir())
-    assert registry.get_instance("spa")["status"] == Status.FAILED.value
-    assert hosting._load_manifest(workspace, "spa").status == Status.FAILED
-    assert not any(
+    assert (public / "index.html").read_text(encoding="utf-8") == "old"
+    assert registry.get_instance("spa")["status"] == Status.RUNNING.value
+    assert hosting._load_manifest(workspace, "spa").status == Status.RUNNING
+    assert any(
         "旧版本仍在服务" in (event.get("message") or "")
         for event in registry.list_events("spa")
     )

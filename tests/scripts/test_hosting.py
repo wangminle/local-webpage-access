@@ -195,6 +195,23 @@ def test_sync_dir_copies_and_clears(tmp_path: Path) -> None:
     assert not (dst / "old.txt").exists()
 
 
+def test_sync_dir_copy_failure_preserves_previous_public_tree(tmp_path: Path, monkeypatch) -> None:
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    (src / "new.txt").write_text("new", encoding="utf-8")
+    (dst / "old.txt").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(
+        "local_webpage_access.hosting.shutil.copy2",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    with pytest.raises(OSError, match="disk full"):
+        sync_dir(src, dst)
+    assert (dst / "old.txt").read_text(encoding="utf-8") == "old"
+    assert not (dst / "new.txt").exists()
+
+
 def test_sync_static_to_public_skips_engineering_files(tmp_path: Path) -> None:
     current = tmp_path / "current"
     public = tmp_path / "public"
@@ -206,6 +223,32 @@ def test_sync_static_to_public_skips_engineering_files(tmp_path: Path) -> None:
     assert (public / "index.html").exists()
     assert not (public / "package.json").exists()
     assert not (public / "node_modules").exists()
+
+
+def test_build_cancel_restores_previous_observed_status(workspace, registry, config, monkeypatch) -> None:
+    from local_webpage_access.errors import BuildCancelled
+    from local_webpage_access.models import InstanceManifest
+
+    _seed_frontend_instance(workspace, registry, "spa")
+    registry.update_status("spa", Status.RUNNING.value)
+    public = workspace.app_public("spa")
+    public.mkdir(parents=True, exist_ok=True)
+    (public / "index.html").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(
+        "local_webpage_access.instance_settings.effective_build_env",
+        lambda manifest: (_ for _ in ()).throw(BuildCancelled("cancelled")),
+    )
+    with pytest.raises(BuildCancelled):
+        build_and_host_frontend(workspace, config, registry, "spa")
+    assert registry.get_instance("spa")["status"] == Status.RUNNING.value
+    assert InstanceManifest.load(workspace.app_manifest_path("spa")).status != Status.BUILDING
+
+
+def test_flask_empty_db_condition_quotes_shell_path() -> None:
+    from local_webpage_access.scanner import _flask_empty_db_condition
+
+    condition = _flask_empty_db_condition("/tmp/path with space/app.db")
+    assert "'/tmp/path with space/app.db'" in condition
 
 
 # ---- run_command ----------------------------------------------------------

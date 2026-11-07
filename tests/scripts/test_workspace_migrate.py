@@ -526,12 +526,15 @@ def test_regenerate_clears_capability_only(ws_root: Path, monkeypatch: pytest.Mo
     (ws.run / "capability-daemon.json").write_text("{}", encoding="utf-8")
 
     repaired: list[bool] = []
+    repair_kwargs: list[dict] = []
     synced: list[bool] = []
 
-    monkeypatch.setattr(
-        "local_webpage_access.autostart.repair",
-        lambda *a, **k: (MagicMock(), repaired.append(True) or []),
-    )
+    def fake_repair(*args, **kwargs):
+        repaired.append(True)
+        repair_kwargs.append(kwargs)
+        return MagicMock(), []
+
+    monkeypatch.setattr("local_webpage_access.autostart.repair", fake_repair)
 
     class FakeGW:
         def __init__(self, *a, **k) -> None:
@@ -544,14 +547,19 @@ def test_regenerate_clears_capability_only(ws_root: Path, monkeypatch: pytest.Mo
 
     from local_webpage_access.config import load_config
 
+    previous_root = ws_root.parent / "before-move"
     actions = wm.regenerate_after_move(
         ws,
         load_config(ws),
-        snapshot=wm.MigrateSnapshot(autostart_installed=["daemon", "manager"]),
+        snapshot=wm.MigrateSnapshot(
+            autostart_installed=["daemon", "manager"],
+            workspace_root=str(previous_root),
+        ),
     )
     assert processed.is_file()
     assert not (ws.run / "capability-daemon.json").exists()
     assert repaired and synced
+    assert repair_kwargs[0]["moved_from"] == previous_root
     assert "autostart_repair" in actions
     assert "caddy_sync_main" in actions
 
@@ -734,6 +742,14 @@ def test_run_migrate_dry_run_no_move(ws_root: Path, tmp_path: Path) -> None:
     assert ws_root.is_dir()
     assert not new.exists()
     assert "move" in result.planned_actions
+
+
+def test_run_migrate_clears_rollback_callback(ws_root: Path, tmp_path: Path, monkeypatch) -> None:
+    _patch_migrate_side_effects(monkeypatch)
+    wm._rollback_lock_moved_cb.clear()
+    result = wm.run_migrate(ws_root, tmp_path / "new-ws", yes=True)
+    assert result.ok, result.error
+    assert wm._rollback_lock_moved_cb == []
 
 
 def test_run_migrate_happy_path(

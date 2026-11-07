@@ -33,10 +33,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import ipaddress
+import os
 import secrets
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -267,6 +270,35 @@ def should_rotate_token(
     return elapsed.total_seconds() >= hours * 3600
 
 
+@contextmanager
+def _token_rotation_lock(workspace: Workspace):
+    from local_webpage_access.file_lock import (
+        ensure_lockable,
+        release_exclusive,
+        try_acquire_exclusive,
+    )
+
+    path = workspace.run / "manager-token.rotate.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        ensure_lockable(fd)
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                try_acquire_exclusive(fd)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("等待管理页 token 轮换锁超时") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        release_exclusive(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 def maybe_rotate_token(
     workspace: Workspace,
     *,
@@ -281,28 +313,29 @@ def maybe_rotate_token(
 
     ``now`` 用于测试注入；默认取当前时间。
     """
-    meta = read_token_metadata(workspace)
-    current_token = meta["token"]
-    created_at = meta["createdAt"]
-    now_str = now or _now_iso()
+    with _token_rotation_lock(workspace):
+        meta = read_token_metadata(workspace)
+        current_token = meta["token"]
+        created_at = meta["createdAt"]
+        now_str = now or _now_iso()
 
-    # token 不存在 -> 颁发
-    if not current_token:
-        new_token = ensure_token(workspace)
-        return {"rotated": True, "token": new_token, "createdAt": _now_iso()}
+        # token 不存在 -> 颁发
+        if not current_token:
+            new_token = ensure_token(workspace)
+            return {"rotated": True, "token": new_token, "createdAt": _now_iso()}
 
-    # createdAt 缺失 -> 补写但不换 token（避免旧文件触发无谓轮换）
-    if not created_at:
-        _write_token(workspace, current_token)
-        return {"rotated": False, "token": current_token, "createdAt": _now_iso()}
+        # createdAt 缺失 -> 补写但不换 token（避免旧文件触发无谓轮换）
+        if not created_at:
+            _write_token(workspace, current_token)
+            return {"rotated": False, "token": current_token, "createdAt": _now_iso()}
 
-    # 到期检查
-    if should_rotate_token(created_at, now=now_str, hours=hours):
-        new_token = rotate_token(workspace)
-        log.info("管理页 token 已自动轮换（上次颁发：%s）", created_at)
-        return {"rotated": True, "token": new_token, "createdAt": _now_iso()}
+        # 到期检查
+        if should_rotate_token(created_at, now=now_str, hours=hours):
+            new_token = rotate_token(workspace)
+            log.info("管理页 token 已自动轮换（上次颁发：%s）", created_at)
+            return {"rotated": True, "token": new_token, "createdAt": _now_iso()}
 
-    return {"rotated": False, "token": current_token, "createdAt": created_at}
+        return {"rotated": False, "token": current_token, "createdAt": created_at}
 
 
 def _verify_token(workspace: Workspace, candidate: str | None) -> bool:

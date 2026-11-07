@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -83,23 +82,33 @@ def test_queue_timeout_keeps_running_instance_serving(workspace, registry, confi
     q = BuildQueue(config, registry, concurrency=1)
 
     release = threading.Event()
+    started = threading.Event()
+    errors: list[BaseException] = []
 
     def blocking_builder(iid):
+        started.set()
         release.wait(2.0)
         return iid
 
     def queued_builder(iid):
         return iid
 
-    t1 = threading.Thread(target=q.run, args=("api", blocking_builder))
+    def run_api() -> None:
+        try:
+            q.run("api", blocking_builder)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t1 = threading.Thread(target=run_api)
     t1.start()
-    time.sleep(0.05)  # 让 api 抢到槽位
+    assert started.wait(timeout=2.0)
 
     with pytest.raises(LifecycleError, match="排队超时"):
         q.run("api2", queued_builder, wait_timeout=0.2)
 
     release.set()
     t1.join()
+    assert not errors
 
     row = registry.get_instance("api2")
     assert row["status"] == Status.RUNNING.value  # 观测态未被操作污染

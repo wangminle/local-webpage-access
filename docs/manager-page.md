@@ -51,7 +51,7 @@ LWA 运行环境自身的 Tailscale IP，并隐藏“本机”回环链接。切
 应在 **LWA 进程所在环境** 安装并连接 Tailscale；仅在 Windows 宿主机安装时，
 不能据此认定 WSL/容器内的 LWA 已组网。macOS 支持常规 CLI 和 `/Applications/Tailscale.app` 安装。
 组网可用不代表每个应用都已从另一节点验证可达；原有别名 `passed` 徽标不代表 Tailscale 远程验收。
-原有 HTTPS 链接保留 HTTPS，替换 IP 后可能受证书或网关绑定限制，需要另行验证；不会自动降级到 HTTP。
+原有 HTTPS 链接保留 HTTPS；网关已自动将在线 Tailscale IPv4/IPv6 纳入 TLS 主机与证书签发集合（覆盖别名 :8443 与管理面 :9443，BUG-1025），但客户端仍须信任工作区根证书，跨节点连通性需另行验证；不会自动降级到 HTTP。
 
 ## 鉴权
 

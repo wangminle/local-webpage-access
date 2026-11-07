@@ -303,7 +303,6 @@ def _parse_ts_string(text: str) -> str | None:
         num = int(t)
         num_float = num / 1000.0 if num > 10**12 else float(num)  # 毫秒→秒
         return _unix_to_iso(num_float)
-        return _unix_to_iso(num)
     try:
         dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
     except ValueError:

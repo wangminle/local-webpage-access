@@ -530,6 +530,86 @@ def _apply_engines_compat(
     return install_cmd
 
 
+def _split_shell_and_segments(command: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    in_backticks = False
+    substitutions: list[tuple[str | None, int]] = []
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if in_backticks:
+            # BUG-1024：反引号替换的内部引号、$() 和 && 不改变外层状态；
+            # 转义的反引号（含旧式嵌套替换）也不能提前结束当前替换。
+            current.append(char)
+            if char == "\\" and index + 1 < len(command):
+                current.append(command[index + 1])
+                index += 2
+                continue
+            if char == "`":
+                in_backticks = False
+            index += 1
+            continue
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            current.append(char)
+            escaped = True
+            index += 1
+            continue
+        if char == "`" and quote != "'":
+            in_backticks = True
+            current.append(char)
+            index += 1
+            continue
+        if char in ("'", '"'):
+            current.append(char)
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            index += 1
+            continue
+        if quote != "'":
+            if char == "$" and index + 1 < len(command) and command[index + 1] == "(":
+                substitutions.append((quote, 0))
+                quote = None
+                current.append(char)
+                current.append("(")
+                index += 2
+                continue
+            if substitutions and quote is None:
+                outer_quote, paren_depth = substitutions[-1]
+                if char == "(":
+                    substitutions[-1] = (outer_quote, paren_depth + 1)
+                elif char == ")":
+                    if paren_depth:
+                        substitutions[-1] = (outer_quote, paren_depth - 1)
+                    else:
+                        substitutions.pop()
+                        quote = outer_quote
+        if (
+            char == "&"
+            and index + 1 < len(command)
+            and command[index + 1] == "&"
+            and quote is None
+            and not substitutions
+        ):
+            parts.append("".join(current))
+            current = []
+            index += 2
+            continue
+        current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return parts
+
+
 def _resolve_host_build_command(
     build: str,
     work_dir: Path,
@@ -559,7 +639,7 @@ def _resolve_host_build_command(
         return _resolve_build_segment(build, work_dir, pinned=pinned, path=path)
     return "&&".join(
         _resolve_build_segment(part, work_dir, pinned=pinned, path=path)
-        for part in build.split("&&")
+        for part in _split_shell_and_segments(build)
     )
 
 
@@ -705,15 +785,16 @@ def build_and_host_frontend(
     )
     content_sync_started = False
 
-    registry.update_status(instance_id, Status.BUILDING.value)
-    build_id = registry.add_build(
-        instance_id,
-        status="running",
-        log_path=str(build_log),
-    )
+    build_id: int | None = None
     op_started_at = now_iso()  # S2-02 / D4：操作态 startedAt
 
     try:
+        build_id = registry.add_build(
+            instance_id,
+            status="running",
+            log_path=str(build_log),
+        )
+        registry.update_status(instance_id, Status.BUILDING.value)
         # DEV-132：实例级构建环境变量（manifest.buildEnv，如 VITE_BASE）注入
         # 安装/构建命令。subprocess env 是整体替换语义——须以 os.environ 为底
         # 合并，否则 npm/node 失去 PATH 而找不到可执行文件。
@@ -891,9 +972,9 @@ def build_and_host_frontend(
                 f"构建完成但未找到产物目录（dist/build/out）：{current_dir}",
                 instance_id=instance_id,
             )
-        # sync_dir 先清空旧产物；中途复制失败也不能再声明旧版本可用。
-        content_sync_started = True
+        # sync_dir 只有完整复制并切换成功才算产物替换；失败时旧版本仍在服务。
         sync_dir(dist, public_dir)
+        content_sync_started = True
         _record_stage(workspace, registry, instance_id, "sync_done")
         registry.finish_build(build_id, status="success")
         registry.add_event(instance_id, "build", f"构建成功，产物来自 {dist.name}/")
@@ -927,11 +1008,15 @@ def build_and_host_frontend(
         log.info("前端实例 %s 构建并启动", instance_id)
         return manifest
     except BuildCancelled as exc:
-        registry.finish_build(
-            build_id,
-            status="cancelled",
-            error_summary=str(exc)[:500],
-        )
+        if build_id is not None:
+            registry.finish_build(
+                build_id,
+                status="cancelled",
+                error_summary=str(exc)[:500],
+            )
+        if prior_row is not None:
+            previous_status = str(prior_row.get("status") or Status.STOPPED.value)
+            registry.update_status(instance_id, previous_status)
         # S2-02 / D4：取消是操作态——旧产物仍在服务，实例 status 保留观测值。
         registry.update_last_operation(
             instance_id,
@@ -953,11 +1038,12 @@ def build_and_host_frontend(
         raise
     except Exception as exc:
         # WBS-11.11/12/13：构建失败标记 + 写表 + 上下文
-        registry.finish_build(
-            build_id,
-            status="failed",
-            error_summary=str(exc)[:500],
-        )
+        if build_id is not None:
+            registry.finish_build(
+                build_id,
+                status="failed",
+                error_summary=str(exc)[:500],
+            )
         if was_serving and not content_sync_started:
             # BUG-833 / S2-02 / D4：旧产物未被替换且仍在服务——实例 status 保留
             # 观测值（running，含把 BUILDING 恢复为运行），失败只进操作态与
@@ -1416,27 +1502,41 @@ def _compensate_build_first(
         "rollbackNotes": notes,
     }
     if restored:
-        manifest.container.containerId = _safe(lambda: runtime.container_id(iid))
-        manifest.container.imageId = _safe(lambda: runtime.image_id(iid))
-        manifest.container.hostPort = host_port
-        manifest.status = Status.RUNNING
-        manifest.lastError = None
-        manifest.lastOperation = operation
-        manifest.touch()
-        manifest.save(workspace.app_manifest_path(iid))
-        registry.upsert_from_manifest(manifest)
-        registry.update_status(iid, Status.RUNNING.value, desired_state=DesiredState.RUNNING.value)
-        registry.update_last_operation(iid, operation)
-        registry.update_last_error(iid, failure)
-        registry.add_event(
-            iid,
-            "lifecycle_stage",
-            f"重建失败，已回滚到旧版本并恢复服务：{failure[:200]}",
-        )
-        raise HostingError(
-            f"实例 {iid} 重建失败，已回滚到旧版本并恢复服务：{reason}",
-            instance_id=iid,
-        ) from reason
+        container_id = None
+        for _attempt in range(20):
+            container_id = _safe(lambda: runtime.container_id(iid))
+            if container_id:
+                break
+            time.sleep(0.5)
+        image_id = _safe(lambda: runtime.image_id(iid))
+        if not container_id:
+            notes.append("旧版本恢复后无法确认新容器 ID；需要重新部署以恢复托管")
+            operation["rollback"] = "restored-untracked"
+            operation["rollbackNotes"] = notes
+            restored = False
+        else:
+            manifest.container.containerId = container_id
+            if image_id:
+                manifest.container.imageId = image_id
+            manifest.container.hostPort = host_port
+            manifest.status = Status.RUNNING
+            manifest.lastError = None
+            manifest.lastOperation = operation
+            manifest.touch()
+            manifest.save(workspace.app_manifest_path(iid))
+            registry.upsert_from_manifest(manifest)
+            registry.update_status(iid, Status.RUNNING.value, desired_state=DesiredState.RUNNING.value)
+            registry.update_last_operation(iid, operation)
+            registry.update_last_error(iid, failure)
+            registry.add_event(
+                iid,
+                "lifecycle_stage",
+                f"重建失败，已回滚到旧版本并恢复服务：{failure[:200]}",
+            )
+            raise HostingError(
+                f"实例 {iid} 重建失败，已回滚到旧版本并恢复服务：{reason}",
+                instance_id=iid,
+            ) from reason
 
     residual = HostingError(
         f"重建失败且回滚未完成：{reason}；" + "；".join(notes),
@@ -3560,37 +3660,70 @@ def sync_static_to_public(current_dir: Path, public_dir: Path) -> None:
     sync_dir(current_dir, public_dir, skip=_STATIC_SKIP)
 
 
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _replace_path(staging: Path, dst: Path) -> None:
+    from uuid import uuid4
+
+    backup = dst.with_name(f".{dst.name}.bak-{uuid4().hex}")
+    try:
+        if dst.exists():
+            os.replace(dst, backup)
+        os.replace(staging, dst)
+    except Exception:
+        if backup.exists() and not dst.exists():
+            os.replace(backup, dst)
+        raise
+    else:
+        if backup.exists():
+            with contextlib.suppress(OSError):
+                _remove_path(backup)
+
+
 def sync_dir(
     src: Path,
     dst: Path,
     *,
     skip: set[str] | None = None,
 ) -> None:
-    """把 src/ 的内容整体复制到 dst/（先清空 dst）。"""
+    """先完整复制到临时目录，再切换；失败时保留原 dst。"""
+    from uuid import uuid4
+
     skip = skip or set()
-    # 评审-组2：dst 被外部破坏成普通文件时 rmtree 抛 NotADirectoryError，无自愈
-    if dst.is_dir():
-        shutil.rmtree(dst)
-    elif dst.exists():
-        dst.unlink()
-    dst.mkdir(parents=True)
-    for item in src.iterdir():
-        if item.name in skip:
-            continue
-        _copy_item(item, dst / item.name)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    staging = dst.with_name(f".{dst.name}.new-{uuid4().hex}")
+    try:
+        staging.mkdir()
+        for item in src.iterdir():
+            if item.name in skip:
+                continue
+            _copy_item(item, staging / item.name)
+        _replace_path(staging, dst)
+    finally:
+        if staging.exists():
+            _remove_path(staging)
 
 
 def _copy_item(src: Path, dst: Path) -> None:
-    """复制单个文件/目录到 ``dst``，覆盖同名项。"""
-    if dst.exists():
-        if dst.is_dir():
-            shutil.rmtree(dst)
+    """复制单个文件/目录到临时路径后替换，复制失败不删除原目标。"""
+    from uuid import uuid4
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    staging = dst.with_name(f".{dst.name}.new-{uuid4().hex}")
+    try:
+        if src.is_dir():
+            shutil.copytree(src, staging)
         else:
-            dst.unlink()
-    if src.is_dir():
-        shutil.copytree(src, dst)
-    else:
-        shutil.copy2(src, dst)
+            shutil.copy2(src, staging)
+        _replace_path(staging, dst)
+    finally:
+        if staging.exists():
+            _remove_path(staging)
 
 
 def _promote_to_root(src: Path, public_dir: Path) -> None:

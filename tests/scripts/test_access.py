@@ -133,6 +133,52 @@ def test_refresh_rewrites_lanurl_on_drift(workspace, registry, config, monkeypat
     assert saved.static.hostPort == 21000
 
 
+def test_refresh_serializes_with_instance_settings_writer(workspace, registry, config, monkeypatch):
+    from local_webpage_access.lifecycle import instance_lock
+
+    manifest = _seed_static(workspace, registry, "demo", host_port=21000)
+    manifest.buildEnv = {"OLD": "1"}
+    manifest.save(workspace.app_manifest_path("demo"))
+    original_load = InstanceManifest.load
+    read_event = threading.Event()
+    finish_event = threading.Event()
+    writer_started = threading.Event()
+    blocked = threading.Event()
+
+    def slow_load(path):
+        loaded = original_load(path)
+        if threading.current_thread().name == "refresh" and not blocked.is_set():
+            blocked.set()
+            read_event.set()
+            finish_event.wait(5)
+        return loaded
+
+    def write_latest():
+        writer_started.set()
+        with instance_lock(workspace, "demo"):
+            latest = original_load(workspace.app_manifest_path("demo"))
+            latest.buildEnv = {"NEW": "1"}
+            latest.save(workspace.app_manifest_path("demo"))
+
+    monkeypatch.setattr(InstanceManifest, "load", slow_load)
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    refresh = threading.Thread(
+        target=refresh_network_entries,
+        args=(workspace, config, registry),
+        name="refresh",
+    )
+    refresh.start()
+    assert read_event.wait(2)
+    writer = threading.Thread(target=write_latest, name="settings-writer")
+    writer.start()
+    assert writer_started.wait(1)
+    finish_event.set()
+    refresh.join(timeout=3)
+    writer.join(timeout=3)
+    assert not refresh.is_alive() and not writer.is_alive()
+    assert InstanceManifest.load(workspace.app_manifest_path("demo")).buildEnv == {"NEW": "1"}
+
+
 def test_refresh_preserves_path_alias_and_routeurl(workspace, registry, config, monkeypatch):
     """刷新保留 pathAlias，并按当前 LAN IP 重算 routeUrl。"""
     _seed_static(
@@ -1203,7 +1249,7 @@ def test_stop_all_builtin_clears_live_and_dead(workspace, config, monkeypatch):
     stopped = []
     monkeypatch.setattr(gateway, "_read_pid", lambda iid: {"live": 111, "dead": 222}.get(iid))
     monkeypatch.setattr(gateway, "_pid_alive", lambda pid: pid == 111)  # live 存活，dead 已死
-    monkeypatch.setattr(gateway, "_stop_builtin", lambda iid: stopped.append(iid))
+    monkeypatch.setattr(gateway, "_stop_builtin", lambda iid: stopped.append(iid) or True)
     monkeypatch.setattr(gateway, "_clear_stale_static_pid", lambda iid: None)
     # 无 pid-less 孤儿
     monkeypatch.setattr(gateway, "_enumerate_workspace_builtin_pids", lambda: [])

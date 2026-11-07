@@ -72,7 +72,7 @@ def test_docker_scripts_default_registry_mirrors_nonempty(path: Path) -> None:
     assert "LWA_DOCKER_REGISTRY_MIRRORS:-" in text or "LWA_DOCKER_REGISTRY_MIRRORS-" in text
     assert "跳过 registry-mirrors" in text or "跳过 ~/.docker/daemon.json" in text
     # 跳过条件应是 none，而非默认空
-    assert '== "none"' in text or "none" in text
+    assert '== "none"' in text
 
 
 def test_macos_script_uses_desktop_cask() -> None:
@@ -129,7 +129,7 @@ def test_linux_script_supports_debian_family_without_ubuntu_spoof() -> None:
     assert "/linux/debian" in text or "linux/${family}" in text or "linux/${family}" in text
     assert "bookworm" in text
     # 不得在 Debian 分支写死 ubuntu apt 路径伪装
-    assert "不得" in text or "严禁" in text or "debian" in text.lower()
+    assert "严禁把 Debian 伪装成 Ubuntu 代号" in text
 
 
 def test_linux_script_rejects_debian_sid_and_ubuntu_non_lts() -> None:

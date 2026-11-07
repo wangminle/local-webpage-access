@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -103,6 +104,28 @@ def _script_platform(plat: str | None = None) -> str:
     raise FileNotFoundError(f"当前平台 {p} 无内置安装脚本（本期仅 macOS / Linux / WSL）")
 
 
+def _verified_cached_script(path: Path, digest: str) -> Path | None:
+    import hashlib
+
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                return None
+            data = os.read(fd, 16 * 1024 * 1024)
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+    return path if hashlib.sha256(data).hexdigest() == digest else None
+
+
 def resolve_install_script(kind: InstallKind, plat: str | None = None) -> Path:
     """定位打包内脚本；失败时回退到 importlib.resources。"""
     script_plat = _script_platform(plat)
@@ -113,14 +136,49 @@ def resolve_install_script(kind: InstallKind, plat: str | None = None) -> Path:
     if here.is_file():
         return here
 
-    # 2) importlib.resources（部分安装布局）
+    # 2) importlib.resources（部分安装布局）。临时提取路径不能越过 as_file 生命周期，
+    # 因而按内容哈希复制到稳定缓存，后续调用复用且不会混用不同版本的脚本。
     try:
         candidate = resources.files("local_webpage_access").joinpath("scripts", name)
         if candidate.is_file():
+            import hashlib
+
             with resources.as_file(candidate) as real:
                 path = Path(real)
                 if path.is_file():
-                    return path
+                    data = path.read_bytes()
+                    digest = hashlib.sha256(data).hexdigest()
+                    cache = (
+                        Path.home()
+                        / ".cache"
+                        / "lwa"
+                        / "install-scripts"
+                        / f"{name}.{digest}"
+                    )
+                    cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    os.chmod(cache.parent, 0o700)
+                    cached = _verified_cached_script(cache, digest)
+                    if cached is not None:
+                        return cached
+                    tmp = cache.with_name(
+                        f".{cache.name}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+                    )
+                    fd = os.open(
+                        tmp,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                        0o700,
+                    )
+                    try:
+                        with os.fdopen(fd, "wb") as handle:
+                            handle.write(data)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.replace(tmp, cache)
+                    finally:
+                        tmp.unlink(missing_ok=True)
+                    verified = _verified_cached_script(cache, digest)
+                    if verified is not None:
+                        return verified
     except (FileNotFoundError, ModuleNotFoundError, TypeError, AttributeError, OSError):
         pass
 

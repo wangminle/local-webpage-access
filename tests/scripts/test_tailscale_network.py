@@ -190,3 +190,18 @@ def test_macos_gui_cli_discovery(monkeypatch):
     )
     monkeypatch.setattr(ts.os, "access", lambda *a: True)
     assert ts.find_tailscale() == "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+
+def test_running_but_control_plane_offline_is_uncertain_for_gateway(monkeypatch):
+    data = {"BackendState": "Running", "Self": {"Online": False}, "TailscaleIPs": ["100.1.1.1"]}
+    monkeypatch.setattr(ts, "find_tailscale", lambda: "tailscale")
+    monkeypatch.setattr(
+        ts.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, json.dumps(data), ""),
+    )
+    snap = ts.probe_tailscale()
+    assert snap["available"] is False
+    assert snap["selectedIp"] is None
+    assert snap["reason"] == "control_offline"
+    assert snap["reason"] in ts.UNCERTAIN_PROBE_REASONS

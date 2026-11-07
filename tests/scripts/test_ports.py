@@ -441,3 +441,27 @@ def test_detect_local_ips_includes_tailscale_output(monkeypatch) -> None:
     assert "100.64.0.5" in ips
     assert is_local_ip("100.64.0.5", ips)
     assert not is_local_ip("100.64.0.99", ips)  # 同 tailnet 其他节点不是本机
+
+
+def test_tailscale_ips_use_discovered_cli_not_bare_path(monkeypatch) -> None:
+    """服务 PATH 无 tailscale 时（macOS GUI 安装），仍须经 find_tailscale 取本机 tailnet 地址。"""
+    import subprocess
+
+    import local_webpage_access.ports as ports
+    from local_webpage_access import tailscale_network as ts
+
+    gui = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    monkeypatch.setattr(ts, "find_tailscale", lambda: gui)
+    seen: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        seen.append(cmd)
+        out = "100.64.0.5\n" if cmd[-1] == "-4" else "fd7a:115c:a1e0::5\n"
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(ports.subprocess, "run", run)
+    assert ports._tailscale_ips() == {"100.64.0.5", "fd7a:115c:a1e0::5"}
+    assert all(cmd[0] == gui for cmd in seen)
+
+    monkeypatch.setattr(ts, "find_tailscale", lambda: None)
+    assert ports._tailscale_ips() == set()

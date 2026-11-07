@@ -272,7 +272,7 @@ class TestImportFromDir:
     def test_name_defaults_to_dir_name(self, importer: Importer, source_dir: Path) -> None:
         result = importer.import_from_dir(source_dir)
         # import_zip 用 name 参数，slug 后可能不同，但应该包含目录名
-        assert source_dir.name.lower() in result.instance_id.lower() or result.instance_id
+        assert source_dir.name.lower() in result.instance_id.lower()
 
     def test_custom_name(self, importer: Importer, source_dir: Path) -> None:
         result = importer.import_from_dir(source_dir, name="custom-app")

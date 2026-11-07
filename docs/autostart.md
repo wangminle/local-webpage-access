@@ -195,6 +195,9 @@ KeepAlive/Restart 立刻拉回，`off` 形同未生效。
 改用监督器原语重启（macOS `launchctl kickstart -k` / Linux `systemctl --user restart`），由
 监督器全程保证单一进程，避免"stop 杀掉后被 KeepAlive/Restart 立刻拉回、再与新 spawn 的
 detached 进程抢锁"产生重复 watcher/manager；单元未在管时退回 stop→start。
+若 launchd 已退出但仍遗留旧 manager 持有单实例锁，两次协调重启后版本仍不一致时，
+会核对状态 PID 与单元当前 PID；确认旧进程已脱离监管后，经内部停止原语清理并交 launchd
+重新拉起，保留 enabled 意图。单元不可读、PID 相同或归属不明时不会停止进程。
 `lwa services restart`（V0.8.16，issue #33）走同一协调路径重启 manager/daemon/gateway
 三服务并保留自启意图，用于无代码更新、仅让运行中服务加载当前代码的场景。
 

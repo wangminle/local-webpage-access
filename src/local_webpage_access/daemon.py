@@ -276,11 +276,10 @@ def write_state(workspace: Workspace, state: DaemonState) -> None:
 
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
+    from local_webpage_access.atomic_io import atomic_write_text
+
     payload = fill_missing_bind_version(state, path)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def clear_state(workspace: Workspace) -> None:
@@ -708,11 +707,10 @@ def save_processed_set(workspace: Workspace, items: list[str] | set[str]) -> Non
             else:
                 seen.add(key)
             ordered.append(key)
+    from local_webpage_access.atomic_io import atomic_write_text
+
     pruned = ordered[-PROCESSED_SET_MAX:]
-    path.write_text(
-        json.dumps(pruned, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(pruned, ensure_ascii=False, indent=2) + "\n")
 
 
 def processed_key(path: Path) -> str:

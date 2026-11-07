@@ -111,10 +111,17 @@ def _normalize_ip(value: str) -> str | None:
 def _tailscale_ips() -> set[str]:
     """尽力获取本机 Tailscale 地址（命令缺失/超时/异常均返回空集）。"""
     result: set[str] = set()
+    # 与 tailscale_network 探测共用 CLI 发现：服务 PATH 缺失时仍能找到 macOS GUI /
+    # Windows 常规安装，否则本机自己的 tailnet 地址会被浏览量统计误判为外部访客。
+    from local_webpage_access.tailscale_network import find_tailscale
+
+    executable = find_tailscale()
+    if not executable:
+        return result
     for family in ("-4", "-6"):
         try:
-            proc = subprocess.run(  # noqa: S603, S607 — PATH 查找 tailscale，失败即降级
-                ["tailscale", "ip", family],
+            proc = subprocess.run(  # noqa: S603 — 路径来自 find_tailscale，失败即降级
+                [executable, "ip", family],
                 capture_output=True,
                 text=True,
                 timeout=1.5,

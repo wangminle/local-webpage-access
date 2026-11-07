@@ -1357,6 +1357,183 @@ def test_update_failure_after_current_swap_rolls_back(
     assert workspace.app_original_zip(iid).read_bytes() == v1.read_bytes()
 
 
+def test_update_rollback_failure_preserves_old_current_backup(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    iid = importer.import_zip(v1).instance_id
+    original_body = (workspace.app_current(iid) / "index.html").read_text()
+    from local_webpage_access import importer as importer_mod
+    from local_webpage_access.models import InstanceManifest
+
+    original_hash = InstanceManifest.load(workspace.app_manifest_path(iid)).sourceZipHash
+    original_save = importer_mod.InstanceManifest.save
+
+    def fail_update_manifest_save(self, path):
+        if self.sourceZipHash != original_hash:
+            raise OSError("manifest write boom")
+        return original_save(self, path)
+
+    original_replace = importer_mod.os.replace
+
+    def fail_rollback_replace(src, dst):
+        if str(src).endswith("current.old") and str(dst).endswith("current"):
+            raise OSError("rollback rename boom")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(importer_mod.InstanceManifest, "save", fail_update_manifest_save)
+    monkeypatch.setattr(importer_mod.os, "replace", fail_rollback_replace)
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(ZipImportError, match="manifest write boom"):
+        importer.update_zip(v2, iid, restart=False)
+
+    backup = workspace.app_current(iid).parent / "current.old"
+    assert (backup / "index.html").read_text() == original_body
+
+
+def test_update_no_keep_data_failure_restores_data_backup(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path, monkeypatch
+) -> None:
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    iid = importer.import_zip(v1).instance_id
+    data_dir = workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.db").write_bytes(b"old-data")
+    monkeypatch.setattr(
+        registry,
+        "upsert_resources",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("registry boom")),
+    )
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(ZipImportError, match="registry boom"):
+        importer.update_zip(v2, iid, restart=False, keep_data=False)
+    assert (data_dir / "app.db").read_bytes() == b"old-data"
+
+
+@pytest.mark.parametrize("failure_point", ["upsert_resources", "add_event", "backup_rename"])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, ZipImportError])
+def test_update_no_keep_data_interrupt_restores_data(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path,
+    monkeypatch, failure_point, error_type,
+) -> None:
+    """更新提交前中断须恢复旧数据/源码/元数据，并原样抛出异常。"""
+    from local_webpage_access import importer as importer_mod
+
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    iid = importer.import_zip(v1).instance_id
+    data_dir = workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.db").write_bytes(b"old-data")
+    original_body = (workspace.app_current(iid) / "index.html").read_bytes()
+    original_manifest = workspace.app_manifest_path(iid).read_bytes()
+    failure = error_type("update interrupted")
+    if failure_point == "backup_rename":
+        original_replace = importer_mod.os.replace
+
+        def interrupt_after_backup(src, dst):
+            original_replace(src, dst)
+            if Path(src) == data_dir:
+                raise failure
+
+        monkeypatch.setattr(importer_mod.os, "replace", interrupt_after_backup)
+    else:
+        original_operation = getattr(registry, failure_point)
+        interrupted = False
+
+        def interrupt_once(*args, **kwargs):
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                assert list(data_dir.iterdir()) == []
+                raise failure
+            return original_operation(*args, **kwargs)
+
+        monkeypatch.setattr(registry, failure_point, interrupt_once)
+
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(error_type) as caught:
+        importer.update_zip(v2, iid, restart=False, keep_data=False)
+
+    assert caught.value is failure
+    assert (data_dir / "app.db").read_bytes() == b"old-data"
+    assert list(data_dir.parent.glob(f"{data_dir.name}.bak-*")) == []
+    assert (workspace.app_current(iid) / "index.html").read_bytes() == original_body
+    assert workspace.app_manifest_path(iid).read_bytes() == original_manifest
+    assert workspace.app_original_zip(iid).read_bytes() == v1.read_bytes()
+
+
+@pytest.mark.parametrize("recovery_error", [OSError, KeyboardInterrupt])
+@pytest.mark.parametrize("recovery_point", ["data", "current"])
+def test_update_no_keep_data_interrupt_preserves_data_when_recovery_fails(
+    importer: Importer, workspace: Workspace, registry: Registry, tmp_path: Path,
+    monkeypatch, recovery_error, recovery_point,
+) -> None:
+    """恢复再次失败/中断时，旧数据仍可恢复，且不掩盖最初的中断。"""
+    from local_webpage_access import importer as importer_mod
+
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    iid = importer.import_zip(v1).instance_id
+    data_dir = workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.db").write_bytes(b"old-data")
+    failure = KeyboardInterrupt("update interrupted")
+
+    def interrupt_update(*args, **kwargs):
+        raise failure
+
+    original_replace = importer_mod.os.replace
+
+    def fail_recovery(src, dst):
+        if (
+            recovery_point == "data" and Path(src).name.startswith(f"{data_dir.name}.bak-")
+        ) or (recovery_point == "current" and Path(src).name == "current.old"):
+            raise recovery_error("recovery failed")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(registry, "upsert_resources", interrupt_update)
+    monkeypatch.setattr(importer_mod.os, "replace", fail_recovery)
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(KeyboardInterrupt) as caught:
+        importer.update_zip(v2, iid, restart=False, keep_data=False)
+
+    assert caught.value is failure
+    if recovery_point == "data":
+        backups = list(data_dir.parent.glob(f"{data_dir.name}.bak-*"))
+        assert len(backups) == 1
+        assert (backups[0] / "app.db").read_bytes() == b"old-data"
+    else:
+        assert (data_dir / "app.db").read_bytes() == b"old-data"
+        old_current = workspace.app_current(iid).with_name("current.old")
+        assert (old_current / "index.html").is_file()
+
+
+def test_update_no_keep_data_backup_rename_failure_preserves_original_data(
+    importer: Importer, workspace: Workspace, tmp_path: Path, monkeypatch
+) -> None:
+    v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
+    iid = importer.import_zip(v1).instance_id
+    data_dir = workspace.app_data(iid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "app.db").write_bytes(b"old-data")
+
+    from local_webpage_access import importer as importer_mod
+
+    original_replace = importer_mod.os.replace
+
+    def fail_data_backup(src, dst):
+        if Path(src) == data_dir and ".bak-" in Path(dst).name:
+            raise OSError("backup rename boom")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(importer_mod.os, "replace", fail_data_backup)
+    v2 = _make_static_zip(tmp_path / "demo-v2.zip", "v2")
+    with pytest.raises(ZipImportError, match="backup rename boom"):
+        importer.update_zip(v2, iid, restart=False, keep_data=False)
+
+    assert (data_dir / "app.db").read_bytes() == b"old-data"
+    assert list(data_dir.parent.glob(f"{data_dir.name}.bak-*")) == []
+
+
 def test_update_preserves_data(importer: Importer, workspace: Workspace, tmp_path: Path) -> None:
     """keep_data=True（默认）：data/ 内文件在更新后仍在。"""
     v1 = _make_static_zip(tmp_path / "demo.zip", "v1")
@@ -1394,6 +1571,7 @@ def test_update_no_keep_data_clears_data(
     resources = registry.get_resources(iid)
     assert resources is not None
     assert resources["data_size_bytes"] == 0
+    assert list(data_dir.parent.glob(f"{data_dir.name}.bak-*")) == []
 
 
 def test_update_keep_data_false_preserves_data_when_registry_sync_fails(

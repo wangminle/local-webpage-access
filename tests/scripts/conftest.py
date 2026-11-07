@@ -56,6 +56,20 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:
 # ---- 通用夹具 --------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_host_tailscale(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """TLS 渲染不依赖开发机的真实 tailnet；探测模块自身的测试独立模拟 CLI。"""
+    from local_webpage_access import tailscale_network
+
+    monkeypatch.setattr(tailscale_network, "_tls_snapshot", None)
+    monkeypatch.setattr(tailscale_network, "_tls_checked_at", None)
+    if request.module.__name__.endswith("test_tailscale_network"):
+        return
+    monkeypatch.setattr(
+        tailscale_network, "probe_tailscale", lambda: tailscale_network._unavailable("not_installed")
+    )
+
+
 @pytest.fixture()
 def workspace_root(tmp_path: Path) -> Path:
     """返回一个空的工作区根目录。"""

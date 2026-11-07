@@ -1373,6 +1373,7 @@ def _snapshot_attempt(
             "capabilityContract": getattr(manifest, "capabilityContract", None),
         },
         "files": {},
+        "unreadableFiles": [],
         # BUG-510：捕获 attempt 前实例登记的端口，供回滚精确释放“本轮新分配”端口。
         "ports": _instance_ports_safe(registry, instance_id),
     }
@@ -1392,6 +1393,7 @@ def _snapshot_attempt(
             try:
                 snapshot["files"][name] = path.read_text(encoding="utf-8")
             except Exception as exc:  # noqa: BLE001
+                snapshot["unreadableFiles"].append(name)
                 log.debug("实例 %s 快照文件 %s 失败：%s", instance_id, name, exc)
 
     return snapshot
@@ -1460,7 +1462,9 @@ def _restore_from_snapshot(
         # 防御 MagicMock 测试环境：只处理真实 Path
         if not isinstance(path, Path):
             continue
-        if name in files:
+        if name in snapshot.get("unreadableFiles", []):
+            residuals.append(f"file:{name}（快照读取失败，未恢复）")
+        elif name in files:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(files[name], encoding="utf-8")
@@ -1469,7 +1473,7 @@ def _restore_from_snapshot(
                 log.warning("实例 %s 恢复文件 %s 失败：%s", instance_id, name, exc)
                 residuals.append(f"file:{name}（恢复失败：{exc}）")
         else:
-            # 原始无此文件，若本次 attempt 创建了则删除
+            # 仅当快照能证明文件原本不存在时才删除本次生成物；读取失败必须保留现场。
             if path.is_file():
                 try:
                     path.unlink()
@@ -3434,7 +3438,7 @@ def _observe_static_status(
     if pid_path.is_file():
         try:
             pid = int(pid_path.read_text(encoding="utf-8").strip())
-        except ValueError:
+        except (ValueError, OSError):
             pid = None
         if pid is not None:
             pid_alive = gateway._pid_alive(pid)

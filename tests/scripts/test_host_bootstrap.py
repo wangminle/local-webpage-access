@@ -54,6 +54,52 @@ def test_resolve_install_script_wsl_uses_linux() -> None:
     assert resolve_install_script("docker", "wsl").name == "install-docker-linux.sh"
 
 
+def test_resolve_install_script_outlives_temporary_resource(tmp_path: Path, monkeypatch) -> None:
+    import contextlib
+    from local_webpage_access import host_bootstrap
+
+    extracted = tmp_path / "scripts" / "install-docker-linux.sh"
+    extracted.parent.mkdir(parents=True)
+    extracted.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+
+    @contextlib.contextmanager
+    def temporary_resource(_candidate):
+        extracted.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        yield extracted
+        extracted.unlink()
+
+    base_path = type(host_bootstrap.Path())
+
+    class ResourcePath(base_path):
+        def is_file(self) -> bool:
+            if str(self).endswith("local_webpage_access/scripts/install-docker-linux.sh"):
+                return False
+            return super().is_file()
+
+    monkeypatch.setattr(host_bootstrap, "Path", ResourcePath)
+    monkeypatch.setattr(host_bootstrap.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(
+        host_bootstrap.resources,
+        "files",
+        lambda _package: tmp_path,
+    )
+    monkeypatch.setattr(host_bootstrap.resources, "as_file", temporary_resource)
+    path = host_bootstrap.resolve_install_script("docker", "linux")
+    assert path.is_file()
+    assert path.read_text(encoding="utf-8") == "#!/bin/sh\necho ok\n"
+    path.write_text("poisoned", encoding="utf-8")
+    extracted.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    repaired = host_bootstrap.resolve_install_script("docker", "linux")
+    assert repaired.read_text(encoding="utf-8") == "#!/bin/sh\necho ok\n"
+    assert repaired.parent.stat().st_mode & 0o777 == 0o700
+    repaired.chmod(0o666)
+    repaired.write_text("poisoned-world", encoding="utf-8")
+    extracted.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    repaired_mode = host_bootstrap.resolve_install_script("docker", "linux")
+    assert repaired_mode.read_text(encoding="utf-8") == "#!/bin/sh\necho ok\n"
+    assert repaired_mode.stat().st_mode & 0o077 == 0
+
+
 def test_resolve_profile_default_when_neither() -> None:
     assert resolve_profile(default=False, full=False) == "default"
 

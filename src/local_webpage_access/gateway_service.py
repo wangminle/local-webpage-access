@@ -153,11 +153,10 @@ def write_state(workspace: Workspace, state: GatewayState) -> None:
 
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
+    from local_webpage_access.atomic_io import atomic_write_text
+
     payload = fill_missing_bind_version(state, path)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _read_caddy_pid(gateway: StaticGateway) -> int | None:
@@ -488,13 +487,14 @@ def start_gateway(
                 # issue #4：监督器接管后 gateway.json 可能仍停在旧裸进程记录
                 # （旧 pid），不刷新会让中断时长估算/2019 冲突检查按陈旧记录虚报。
                 # 检测到 live pid 与记录不一致 -> 刷新为当前 master 的事实。
+                previous_pid = state.pid
                 state.pid = pid
                 state.started_at = now_iso()
                 state.port = config.staticGatewayPort
                 write_state(workspace, state)
                 log.info(
                     "网关服务态陈旧（json pid=%s，live pid=%s），已刷新",
-                    state.pid,
+                    previous_pid,
                     pid,
                 )
             else:
@@ -709,16 +709,14 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
     gateway = StaticGateway(workspace, config)
     backend = gateway.detect_backend()
     if backend != "caddy":
-        # 先清服务态，避免 status 误报 enabled
         state = read_state(workspace)
-        if state is not None:
-            state.enabled = False
-            state.pid = None
-            # IMP-064.06：用户级 off 重置失败观测。
-            clear_start_failures(state)
-            write_state(workspace, state)
         # BUG-077：backend 非 caddy 但 admin 仍在线 → 仍有残留 master，需关停
         if not gateway._admin_alive():
+            if state is not None:
+                state.enabled = False
+                state.pid = None
+                clear_start_failures(state)
+                write_state(workspace, state)
             try:
                 from local_webpage_access.capability import clear_capability_cache
 
@@ -733,6 +731,12 @@ def stop_gateway(workspace: Workspace, config: Config) -> bool:
             _admin_port(workspace),
         )
         stopped = gateway.caddy_stop()
+        if state is not None:
+            state.enabled = False
+            if stopped:
+                state.pid = None
+            clear_start_failures(state)
+            write_state(workspace, state)
         if stopped:
             try:
                 from local_webpage_access.capability import clear_capability_cache

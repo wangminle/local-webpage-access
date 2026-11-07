@@ -294,12 +294,13 @@ class AutostartBackend:
         raise NotImplementedError
 
     def write_unit(self, name: str, content: str | bytes) -> Path:
+        from local_webpage_access.atomic_io import atomic_write_bytes, atomic_write_text
+
         path = self.unit_path(name)
-        path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, bytes):
-            path.write_bytes(content)
+            atomic_write_bytes(path, content)
         else:
-            path.write_text(content, encoding="utf-8")
+            atomic_write_text(path, content)
         return path
 
     def is_legacy(self, name: str) -> bool:
@@ -438,8 +439,12 @@ class MacLaunchdBackend(AutostartBackend):
                 ["launchctl", "bootout", target], res.returncode, res.stdout or "", res.stderr or ""
             ),
         ]
-        # bootout 对未加载单元非零可忽略；必须 disable 成功且最终未启用（BUG-152）。
-        ok = dis.returncode == 0 and not self.is_enabled(name, runner)
+        # bootout 对未加载单元非零可忽略；必须 disable 成功且最终未启用、未加载。
+        ok = (
+            dis.returncode == 0
+            and not self.is_enabled(name, runner)
+            and not self.is_loaded(name, runner)
+        )
         return outcomes, ok
 
     def restart(self, name: str, runner: SubprocessRunner) -> tuple[list[CmdOutcome], bool]:
@@ -527,6 +532,21 @@ class MacLaunchdBackend(AutostartBackend):
         res = runner(["launchctl", "print", self._target(name)], capture_output=True)
         m = re.search(r"pid\s*=\s*(\d+)", res.stdout or "")
         return int(m.group(1)) if m else None
+
+    def loaded_main_pid(self, name: str, runner: SubprocessRunner) -> tuple[bool, int | None]:
+        """单次 ``launchctl print`` 同时判定加载态与主 PID。
+
+        返回 ``(loaded, pid)``：``print`` 非零退出 → ``(False, None)``（未加载或不可读，
+        调用方不得据此推断 PID）；成功但输出无 pid → ``(True, None)``。两个字段来自
+        同一份输出，避免两次探测之间状态变化或第二次失败被误当作「无 PID」。
+        """
+        import re
+
+        res = runner(["launchctl", "print", self._target(name)], capture_output=True)
+        if res.returncode != 0:
+            return False, None
+        m = re.search(r"pid\s*=\s*(\d+)", res.stdout or "")
+        return True, int(m.group(1)) if m else None
 
 
 class SystemdUserBackend(AutostartBackend):
@@ -744,11 +764,12 @@ def _manifest_path(ws: Workspace) -> Path:
 def write_manifest(ws: Workspace, services: list[str]) -> None:
     import json
 
+    from local_webpage_access.atomic_io import atomic_write_text
+
     p = _manifest_path(ws)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
+    atomic_write_text(
+        p,
         json.dumps({"version": 1, "services": list(services)}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
 
 
@@ -783,20 +804,22 @@ def installed_services(ws: Workspace, backend: AutostartBackend | None = None) -
     return [s for s in ALL_SERVICES if backend.unit_path(s).is_file()]
 
 
-def unit_points_to_workspace(
-    backend: AutostartBackend, name: str, ws_root: Path
-) -> bool:
-    """磁盘单元是否指向 ``ws_root`` 工作区（BUG-879）。
+def owned_services(ws: Workspace, backend: AutostartBackend | None = None) -> list[str]:
+    """批量变更允许操作的服务：磁盘单元必须明确指向当前工作区。"""
+    if backend is None:
+        backend = select_backend()
+    return [
+        name
+        for name in installed_services(ws, backend)
+        if unit_points_to_workspace(backend, name, ws.root)
+    ]
 
-    单元名是用户级全局的（``lwa-daemon.service`` 等），多工作区共存时磁盘上
-    的单元可能属于另一个工作区；仅凭文件存在性会把别家单元误报为本工作区
-    「已安装」。以单元内容的 ``WorkingDirectory`` 为准（两种后端生成时必写），
-    读不到/解析不出一律返回 False（保守按「指向别处」处理，引导会重新安装）。
-    """
+
+def unit_workspace_ownership(
+    backend: AutostartBackend, name: str, ws_root: Path
+) -> Ownership:
+    """区分明确属于其他工作区与无法解析的旧版/损坏单元。"""
     path = backend.unit_path(name)
-    # BUG-890：两侧统一 resolve——macOS 下 /var 与 /private/var、软链工作区根
-    # 会让一边 resolve 一边不 resolve 的比较恒为 False（与同文件
-    # _check_unit_identity 的 Path(...).resolve() == Path(...).resolve() 对齐）。
     ws_resolved = Path(ws_root).resolve()
     try:
         if path.suffix == ".plist":
@@ -804,16 +827,32 @@ def unit_points_to_workspace(
 
             data = plistlib.loads(path.read_bytes())
             workdir = data.get("WorkingDirectory")
-            return bool(workdir) and Path(str(workdir)).resolve() == ws_resolved
+            if not workdir:
+                return Ownership.UNKNOWN
+            return (
+                Ownership.OURS
+                if Path(str(workdir)).resolve() == ws_resolved
+                else Ownership.FOREIGN
+            )
         text = path.read_text(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
-        return False
+        return Ownership.UNKNOWN
     for line in text.splitlines():
         if line.startswith("WorkingDirectory="):
-            # systemd 转义：% → %%
             value = line.split("=", 1)[1].strip().replace("%%", "%")
-            return Path(value).resolve() == ws_resolved
-    return False
+            return (
+                Ownership.OURS
+                if Path(value).resolve() == ws_resolved
+                else Ownership.FOREIGN
+            )
+    return Ownership.UNKNOWN
+
+
+def unit_points_to_workspace(
+    backend: AutostartBackend, name: str, ws_root: Path
+) -> bool:
+    """仅明确指向本工作区才返回真；未知单元在普通操作中保持保守拒绝。"""
+    return unit_workspace_ownership(backend, name, ws_root) is Ownership.OURS
 
 
 def _install_render_kwargs(
@@ -956,6 +995,9 @@ def install(
     linger: bool | None = None,
     python_exe: str | None = None,
     preserve_installed: bool = False,
+    allow_foreign_overwrite: bool = False,
+    allow_unknown_units: bool = False,
+    moved_from: Path | None = None,
     runner: SubprocessRunner = _default_runner,
 ) -> InstallResult:
     """生成（并可选启用）自启动单元。
@@ -995,15 +1037,44 @@ def install(
             )
         ) from exc
     backend = select_backend(plat)
+    installed = installed_services(ws, backend)
+    ownerships = {
+        name: unit_workspace_ownership(backend, name, ws.root) for name in installed
+    }
+    rebindable = {
+        name
+        for name, ownership in ownerships.items()
+        if ownership is Ownership.FOREIGN
+        and moved_from is not None
+        and unit_workspace_ownership(backend, name, moved_from) is Ownership.OURS
+    }
+    foreign = [
+        name
+        for name, ownership in ownerships.items()
+        if (ownership is Ownership.FOREIGN and name not in rebindable)
+        or (ownership is Ownership.UNKNOWN and not allow_unknown_units)
+    ]
+    if foreign and not allow_foreign_overwrite:
+        raise AutostartError(
+            "检测到其他工作区的自启动单元（"
+            + "、".join(foreign)
+            + "），已停止安装以避免覆盖或停用其服务；请先核对单元归属并处理原工作区"
+        )
     # IMP-061：with_caddy=None → caddy 在用即纳入；linger=None → 默认尝试
     # （None=False 会把"缺省尝试"折叠成 False，故用 is not False 判定）
     effective_with_caddy = resolve_with_caddy(config, with_caddy)
     effective_linger = linger is not False
     target_services = select_services(config, with_caddy=effective_with_caddy)
     services = list(target_services)
+    permitted_installed = [
+        name
+        for name in installed
+        if ownerships[name] is Ownership.OURS
+        or (ownerships[name] is Ownership.UNKNOWN and allow_unknown_units)
+        or name in rebindable
+    ]
     if preserve_installed:
-        prev = installed_services(ws, backend)
-        services = [s for s in ALL_SERVICES if s in set(services) | set(prev)]
+        services = [s for s in ALL_SERVICES if s in set(services) | set(permitted_installed)]
     py = python_exe or sys.executable
     caddy_dir = _resolve_caddy_dir() if config.staticGateway == "caddy" else None
     ws_root = ws.root
@@ -1012,7 +1083,7 @@ def install(
     legacy_detected: list[str] = []
     # 缩减服务集合时差量卸载被移除的单元，避免 manifest 外孤儿（BUG-163）。
     # preserve_installed 时 services 已含 prev，orphans 为空。
-    prev_installed = installed_services(ws, backend)
+    prev_installed = permitted_installed
     orphans = [s for s in prev_installed if s not in services]
     orphan_outcomes: list[CmdOutcome] = []
     orphan_ok = True
@@ -1178,7 +1249,7 @@ def enable(
     避免全局 enable 顺带启用原本停用的其他单元。
     """
     backend = select_backend()
-    installed = installed_services(ws, backend)
+    installed = owned_services(ws, backend)
     selected, scope_error = _resolve_scope(installed, services, action="enable")
     if scope_error is not None:
         return scope_error
@@ -1222,7 +1293,7 @@ def disable(
     BUG-647：``services`` 提供时只停用指定服务，保留其他服务的原启用状态。
     """
     backend = select_backend()
-    installed = installed_services(ws, backend)
+    installed = owned_services(ws, backend)
     selected, scope_error = _resolve_scope(installed, services, action="disable")
     if scope_error is not None:
         return scope_error
@@ -1248,7 +1319,7 @@ def uninstall(
     仅在全部单元卸载成功后才清 manifest；失败时保留可重试状态（BUG-158）。
     """
     backend = select_backend()
-    services = installed_services(ws, backend)
+    services = owned_services(ws, backend)
     outcomes: list[CmdOutcome] = []
     all_ok = True
     for name in services:
@@ -1336,6 +1407,51 @@ def coordinated_disable(
         ),
         ok=False,
     )
+
+
+def manager_lock_holder_is_orphaned(
+    ws: Workspace, *, runner: SubprocessRunner = _default_runner
+) -> bool:
+    """BUG-1018：确认 manager 状态持有者已脱离本工作区 launchd 当前实例。
+
+    仅在 launchctl 能读取单元、状态 PID 存活且命令行属于本工作区时返回真；
+    当前实例 PID 相同、单元不可读、PID 复用或其他平台均返回假，不能把
+    探测失败当成可停止的孤儿进程。实际终止仍由 ``stop_manager_internal``
+    再校验工作区进程身份。
+    """
+    try:
+        backend = select_backend()
+    except AutostartError:
+        return False
+    if backend.platform != PLATFORM_MACOS or not backend.unit_path("manager").is_file():
+        return False
+    if not unit_points_to_workspace(backend, "manager", ws.root):
+        return False
+    from local_webpage_access.manager_service import (
+        _manager_pid_matches,
+        is_pid_alive,
+        read_state,
+    )
+
+    state = read_state(ws)
+    holder_pid = state.pid if state is not None and state.enabled else None
+    if (
+        holder_pid is None
+        or not is_pid_alive(holder_pid)
+        or not _manager_pid_matches(holder_pid, ws)
+    ):
+        return False
+    loaded_main_pid = getattr(backend, "loaded_main_pid", None)
+    if loaded_main_pid is None:
+        return False
+    try:
+        # 单次探测取加载态与 PID：不可读/第二次探测失败不得被当成「无 PID」。
+        loaded, supervised_pid = loaded_main_pid("manager", runner)
+    except Exception:  # noqa: BLE001
+        return False
+    if not loaded:
+        return False
+    return supervised_pid != holder_pid
 
 
 def coordinated_restart(
@@ -1566,6 +1682,9 @@ def maybe_offer_autostart_install(
                 + ("/gateway" if config.staticGateway == "caddy" else "")
                 + "，机器重启后自动恢复）？[y/N] "
             )
+            foreign_warning = next((m for m in result.messages if m.startswith("警告：")), None)
+            if foreign_warning:
+                prompt = foreign_warning + "。" + prompt
             if confirm is not None:
                 do_install = confirm(prompt)
             else:
@@ -1582,7 +1701,15 @@ def maybe_offer_autostart_install(
         return result
 
     result.messages.append(f"执行：{cmd}")
-    install_result = install(ws, config, with_caddy=None, enable=True, linger=None, runner=runner)
+    install_result = install(
+        ws,
+        config,
+        with_caddy=None,
+        enable=True,
+        linger=None,
+        allow_foreign_overwrite=True,
+        runner=runner,
+    )
     result.attempted = True
     result.ok = install_result.enable_ok
     result.services = install_result.services
@@ -2460,6 +2587,7 @@ def repair(
     *,
     with_caddy: bool | None = None,
     python_exe: str | None = None,
+    moved_from: Path | None = None,
     runner: SubprocessRunner = _default_runner,
 ) -> tuple[InstallResult, list[str]]:
     """修复：重写失效路径、迁移旧启动器单元、重新 enable。返回 (结果, 修复说明)。
@@ -2486,6 +2614,8 @@ def repair(
         with_caddy=effective_with_caddy,
         enable=True,
         preserve_installed=True,
+        allow_unknown_units=True,
+        moved_from=moved_from,
         python_exe=python_exe,
         runner=runner,
     )

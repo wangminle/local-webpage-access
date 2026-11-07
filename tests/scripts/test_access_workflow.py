@@ -196,6 +196,28 @@ def test_manual_strategy_does_not_auto_refresh(env, monkeypatch) -> None:
     assert calls["n"] == 0
 
 
+def test_manual_strategy_still_heals_caddy_tls_hosts(env, monkeypatch) -> None:
+    """手工策略不写 manifest，但在线 Caddy 的 TLS 主机（如晚到的 Tailscale）仍须同步。"""
+    from local_webpage_access import access_workflow as aw
+
+    ws, cfg, reg = env
+    cfg.lanIpStrategy = "manual"
+    cfg.manualLanIp = "192.168.9.9"
+    aw.reset_lan_refresh_throttle_state()
+    synced: list[str | None] = []
+    monkeypatch.setattr(
+        "local_webpage_access.access.sync_caddy_tls_bind",
+        lambda workspace, config, lan_ip: synced.append(lan_ip) or (False, None),
+    )
+    monkeypatch.setattr(
+        aw,
+        "refresh_network_entries",
+        lambda *a, **k: pytest.fail("手工策略不应自动改写 manifest"),
+    )
+    assert aw.maybe_throttled_lan_refresh(ws, cfg, reg) is None
+    assert synced == ["192.168.9.9"]
+
+
 # ---- DEV-114：access review 防抖重试 ------------------------------------------
 
 

@@ -1216,7 +1216,27 @@ def _set_instance_path_alias_locked(
             _stamp_alias_guard(manifest, "skipped(实例未运行)")
         elif html_verified:
             _stamp_alias_guard(manifest, "passed")
-    manifest.save(mpath)
+    try:
+        manifest.save(mpath)
+    except Exception:
+        # 仅当本次确实改动并 reload 过网关时才回滚；否则（实例未运行、非 Caddy 等）
+        # 回滚会 reload_all() 拉起原本关闭的 Caddy，或凭空生成片段，改变服务状态。
+        if gateway_reloaded:
+            # best-effort：回滚自身的 OSError 等不得掩盖原始保存失败。
+            try:
+                _rollback_alias_after_failed_live_verify(
+                    workspace,
+                    config,
+                    instance_id,
+                    previous_alias=current,
+                    host_port=host_port,
+                    runtime=runtime.value,
+                    had_fragment=had_fragment,
+                    previous_fragment=previous_fragment,
+                )
+            except Exception as rollback_exc:  # noqa: BLE001
+                log.warning("manifest 保存失败后的别名回滚也失败：%s", rollback_exc)
+        raise
 
     # 持久化别名到对应子表：静态站点 / 容器实例（IMP-014 容器别名落 containers 表）
     if runtime == Runtime.DOCKER_COMPOSE and manifest.container is not None:

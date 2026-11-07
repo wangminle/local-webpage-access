@@ -559,32 +559,41 @@ def refresh_network_entries(
         if not manifest_path.is_file():
             report.skipped.append(iid)
             continue
+        from local_webpage_access.errors import LifecycleError
+        from local_webpage_access.lifecycle import instance_lock
+
         try:
-            manifest = InstanceManifest.load(manifest_path)
-        except Exception as exc:  # noqa: BLE001 — 单个 manifest 损坏不阻断整体刷新
-            log.warning("刷新地址：实例 %s manifest 读取失败，跳过：%s", iid, exc)
-            report.skipped.append(iid)
-            continue
-        host_port, path_alias, internal_port = _extract_host_port_alias(manifest, for_review=False)
-        if host_port is None:
-            report.skipped.append(iid)
-            continue
-        old_lan = manifest.network.lanUrl if manifest.network else None
-        old_host = _url_host(old_lan)
-        entry = build_network_entry(
-            config,
-            host_port,
-            internal_port=internal_port,
-            path_alias=path_alias,
-            lan_ip=lan_ip,
-        )
-        # BUG-365：NetworkConfig(extra=allow) 的附加字段须保留，不可 **entry 重建抹掉。
-        manifest.network = merge_network_entry(manifest.network, entry)
-        manifest.touch()
-        try:
-            manifest.save(manifest_path)
-        except OSError as exc:
-            log.warning("刷新地址：实例 %s manifest 写入失败：%s", iid, exc)
+            with instance_lock(workspace, iid, timeout=0):
+                try:
+                    manifest = InstanceManifest.load(manifest_path)
+                except Exception as exc:  # noqa: BLE001 — 单个 manifest 损坏不阻断整体刷新
+                    log.warning("刷新地址：实例 %s manifest 读取失败，跳过：%s", iid, exc)
+                    report.skipped.append(iid)
+                    continue
+                host_port, path_alias, internal_port = _extract_host_port_alias(manifest, for_review=False)
+                if host_port is None:
+                    report.skipped.append(iid)
+                    continue
+                old_lan = manifest.network.lanUrl if manifest.network else None
+                old_host = _url_host(old_lan)
+                entry = build_network_entry(
+                    config,
+                    host_port,
+                    internal_port=internal_port,
+                    path_alias=path_alias,
+                    lan_ip=lan_ip,
+                )
+                # BUG-365：NetworkConfig(extra=allow) 的附加字段须保留，不可 **entry 重建抹掉。
+                manifest.network = merge_network_entry(manifest.network, entry)
+                manifest.touch()
+                try:
+                    manifest.save(manifest_path)
+                except OSError as exc:
+                    log.warning("刷新地址：实例 %s manifest 写入失败：%s", iid, exc)
+                    report.skipped.append(iid)
+                    continue
+        except LifecycleError as exc:
+            log.warning("刷新地址：实例 %s 正被其他操作占用，跳过本次刷新：%s", iid, exc)
             report.skipped.append(iid)
             continue
         new_lan = entry["lanUrl"]
@@ -622,8 +631,20 @@ _CADDY_HTTPS_BIND = re.compile(r"https://(\[[^\]]+\]|[^,\s/:]+):(\d+)")
 _LOOPBACK_HTTPS_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
 
 
-def caddyfile_tls_bind_stale(text: str, lan_ip: str, ports: set[int]) -> bool:
-    """主 Caddyfile 的 HTTPS 站点是否还没绑到当前 LAN IP。
+def caddyfile_tls_hosts(text: str, ports: set[int]) -> dict[int, set[str]]:
+    """读取指定 HTTPS 端口的主机名（IPv6 保留 URL 方括号）。"""
+    hosts_by_port: dict[int, set[str]] = {}
+    for host, port_s in _CADDY_HTTPS_BIND.findall(text):
+        port = int(port_s)
+        if port in ports:
+            hosts_by_port.setdefault(port, set()).add(host)
+    return hosts_by_port
+
+
+def caddyfile_tls_bind_stale(
+    text: str, lan_ip: str | None, ports: set[int], *, extra_hosts: list[str] | None = None
+) -> bool:
+    """主 Caddyfile 的 HTTPS 主机集合是否与当前入口地址不符。
 
     只看 ``ports`` 里的端口（别名入口与管理面），并且**逐端口**判断：某个端口
     已经出现当前 LAN IP，不能抵消另一个端口仍只绑回环或仍绑旧 IP。没有任何
@@ -632,19 +653,14 @@ def caddyfile_tls_bind_stale(text: str, lan_ip: str, ports: set[int]) -> bool:
     """
     from local_webpage_access.ports import format_http_host
 
-    expected = format_http_host(lan_ip)
-    hosts_by_port: dict[int, set[str]] = {}
-    for host, port_s in _CADDY_HTTPS_BIND.findall(text):
-        try:
-            port = int(port_s)
-        except ValueError:
-            continue
-        if port not in ports:
-            continue
-        hosts_by_port.setdefault(port, set()).add(host)
+    expected = {format_http_host(host) for host in (extra_hosts or [])}
+    if lan_ip:
+        expected.add(format_http_host(lan_ip))
+    expected -= _LOOPBACK_HTTPS_HOSTS
+    hosts_by_port = caddyfile_tls_hosts(text, ports)
     for hosts in hosts_by_port.values():
         lan_hosts = hosts - _LOOPBACK_HTTPS_HOSTS
-        if expected not in lan_hosts or any(host != expected for host in lan_hosts):
+        if lan_hosts != expected:
             return True
     return False
 
@@ -652,7 +668,7 @@ def caddyfile_tls_bind_stale(text: str, lan_ip: str, ports: set[int]) -> bool:
 def sync_caddy_tls_bind(
     workspace: Workspace, config: Config, lan_ip: str | None
 ) -> tuple[bool, str | None]:
-    """issue #44：在线 Caddy 的 TLS 站点仍绑旧 LAN IP 时重写主配置并 reload。
+    """同步在线 Caddy 的 LAN、WSL 额外入口和 Tailscale TLS 地址集合。
 
     返回 ``(是否已 reload, 失败说明)``。TLS 未开启、Caddy 未在跑、绑定已是当前
     IP 时返回 ``(False, None)``——不调用 ``reload_all``，因此不会把用户关掉的
@@ -678,25 +694,26 @@ def sync_caddy_tls_bind(
             log.warning("读取主 Caddyfile 失败，跳过 TLS 绑定同步：%s", exc)
             return False, str(exc)
         ports = {int(config.gatewayTlsPort), int(config.managerTlsPort)}
-        if not caddyfile_tls_bind_stale(text, lan_ip, ports):
+        hosts, _foreign = gateway._tls_hosts(lan_ip=lan_ip)
+        if not caddyfile_tls_bind_stale(text, lan_ip, ports, extra_hosts=hosts):
             return False, None
         if not gateway._admin_alive():
-            log.info("LAN IP 已变但 Caddy 未在线，跳过 reload（不拉起已关闭的网关）")
+            log.info("TLS 入口地址已变但 Caddy 未在线，跳过 reload（不拉起已关闭的网关）")
             return False, None
         gateway.reload_all()
     except GatewayError as exc:
         log.warning(
-            "LAN IP 漂移后重载 Caddy 失败（manifest 已更新，可手动 lwa gateway on）：%s",
+            "TLS 入口地址变化后重载 Caddy 失败（可手动 lwa gateway on）：%s",
             exc,
         )
         return False, str(exc)
     except Exception as exc:  # noqa: BLE001 — 探测或 reload 失败不得推翻已落盘的地址刷新
         log.warning(
-            "LAN IP 漂移后重载 Caddy 失败（manifest 已更新，可手动 lwa gateway on）：%s",
+            "TLS 入口地址变化后重载 Caddy 失败（可手动 lwa gateway on）：%s",
             exc,
         )
         return False, str(exc)
-    log.info("LAN IP 漂移后已重载 Caddy（TLS 站点绑定 %s）", lan_ip)
+    log.info("入口地址变化后已重载 Caddy（TLS 主机 %s）", ", ".join(hosts))
     return True, None
 
 

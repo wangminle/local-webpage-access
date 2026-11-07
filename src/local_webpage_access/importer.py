@@ -966,6 +966,15 @@ class Importer:
                 None,
             )
             current_swapped = False
+            preserve_old_current = False
+            data_backup = None
+            update_committed = False
+
+            # 上次回滚失败可能只留下 current.old。重试先恢复它，绝不能把唯一旧源码
+            # 当普通暂存残留删除。
+            if not current_dir.exists() and old_current.exists():
+                os.replace(old_current, current_dir)
+                log.warning("检测到上次回滚残留，已先恢复 current/ 后继续更新：%s", instance_id)
 
             # 清理可能残留的暂存区
             for stale in (staging, old_current):
@@ -1244,9 +1253,15 @@ class Importer:
                 )
                 # BUG-348：registry 主同步成功后才执行不可逆数据清空；此前异常可完整回滚。
                 if not keep_data:
+                    from uuid import uuid4
+
                     persistent_data = self.ws.app_data(instance_id)
                     if persistent_data.exists():
-                        shutil.rmtree(persistent_data, ignore_errors=True)
+                        # 先登记备份路径，rename 完成后立即中断也能找回旧数据。
+                        data_backup = persistent_data.with_name(
+                            f"{persistent_data.name}.bak-{uuid4().hex}"
+                        )
+                        os.replace(persistent_data, data_backup)
                     persistent_data.mkdir(parents=True, exist_ok=True)
                 self.registry.upsert_resources(
                     instance_id,
@@ -1270,32 +1285,49 @@ class Importer:
                         f"更新剥离冗余成员 {len(sanitized.stripped_names)} 项"
                         f"（含 symlink {sanitized.stripped_symlink_count}）：{parts}",
                     )
-            except ZipImportError:
-                # 已是规范错误（形态变化 / zip 非法等），原样抛出；finally 清理暂存区
-                raise
-            except Exception as exc:
+                update_committed = True
+            except BaseException as exc:
+                # Ctrl-C/SystemExit 也必须恢复；先救数据，避免其他回滚失败阻断恢复。
+                # 未提交的备份默认保留，只有恢复成功才清除引用。
+                if data_backup is not None and data_backup.exists():
+                    try:
+                        shutil.rmtree(persistent_data, ignore_errors=True)
+                        os.replace(data_backup, persistent_data)
+                        data_backup = None
+                    except BaseException as data_exc:
+                        log.error("恢复实例 %s 的数据备份失败：%s", instance_id, data_exc)
                 if current_swapped:
-                    self._rollback_swapped_current(
-                        instance_id=instance_id,
-                        current_dir=current_dir,
-                        old_current=old_current,
-                        manifest_path=manifest_path,
-                        manifest_snapshot=manifest_snapshot,
-                        old_manifest=old_manifest,
-                        old_host_port=old_host_port,
-                        old_port_rows=old_port_rows,
-                        orig_zip=orig_zip,
-                        orig_zip_bak=orig_zip.with_suffix(".zip.bak"),
-                        old_resources=old_resources,
-                    )
+                    preserve_old_current = True
+                    try:
+                        preserve_old_current = not self._rollback_swapped_current(
+                            instance_id=instance_id,
+                            current_dir=current_dir,
+                            old_current=old_current,
+                            manifest_path=manifest_path,
+                            manifest_snapshot=manifest_snapshot,
+                            old_manifest=old_manifest,
+                            old_host_port=old_host_port,
+                            old_port_rows=old_port_rows,
+                            orig_zip=orig_zip,
+                            orig_zip_bak=orig_zip.with_suffix(".zip.bak"),
+                            old_resources=old_resources,
+                        )
+                    except BaseException as rollback_exc:
+                        # 回滚再次中断也保留旧副本，并继续抛出最初的异常。
+                        log.error("回滚实例 %s 失败：%s", instance_id, rollback_exc)
                 # 失败时清理暂存区；current/ 已通过原子换入保护未被破坏
                 # （换入前异常 current/ 原封未动；换入后异常也已回滚）
                 log.error("更新实例 %s 失败：%s", instance_id, exc)
+                if not isinstance(exc, Exception) or isinstance(exc, ZipImportError):
+                    raise
                 raise ZipImportError(f"更新失败：{exc}", instance_id=instance_id) from exc
             finally:
-                for stale in (staging, old_current):
-                    if stale.exists():
-                        shutil.rmtree(stale, ignore_errors=True)
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+                if old_current.exists() and not preserve_old_current:
+                    shutil.rmtree(old_current, ignore_errors=True)
+                if data_backup is not None and update_committed:
+                    shutil.rmtree(data_backup, ignore_errors=True)
 
         # 容器必须 rebuild 镜像；静态/前端只需 restart 同步 public。
         is_container = manifest is not None and manifest.runtime.value == "docker-compose"
@@ -2265,24 +2297,28 @@ class Importer:
         orig_zip: Path,
         orig_zip_bak: Path,
         old_resources: dict[str, object] | None,
-    ) -> None:
-        """在 current/ 已换入后恢复旧源码与关键元数据（BUG-056 / BUG-323）。"""
+    ) -> bool:
+        """恢复旧源码与关键元数据；任一恢复失败时返回 False 并保留旧副本。"""
+        succeeded = True
         try:
             shutil.rmtree(current_dir, ignore_errors=True)
             if old_current.exists():
                 os.replace(str(old_current), str(current_dir))
         except OSError as rollback_exc:
+            succeeded = False
             log.error("回滚实例 %s 的 current/ 失败：%s", instance_id, rollback_exc)
 
         try:
             manifest_path.write_bytes(manifest_snapshot)
         except OSError as rollback_exc:
+            succeeded = False
             log.error("回滚实例 %s 的 manifest 失败：%s", instance_id, rollback_exc)
 
         try:
             if orig_zip_bak.is_file():
                 shutil.copy2(orig_zip_bak, orig_zip)
         except OSError as rollback_exc:
+            succeeded = False
             log.error("回滚实例 %s 的 original.zip 失败：%s", instance_id, rollback_exc)
 
         try:
@@ -2343,7 +2379,9 @@ class Importer:
                     last_cpu_percent=old_resources.get("last_cpu_percent"),  # type: ignore[arg-type]
                 )
         except Exception as rollback_exc:  # noqa: BLE001 — 回滚失败应记录原始错误继续抛出
+            succeeded = False
             log.error("回滚实例 %s 的 registry 失败：%s", instance_id, rollback_exc)
+        return succeeded
 
     # ---- id 冲突处理 --------------------------------------------------------
 

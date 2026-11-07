@@ -1707,8 +1707,9 @@ def _python_start_command(
                 # BUG-978：0 字节空库/无表库允许安全重初始化（可自愈），真库跳过。
                 checks = [_flask_empty_db_condition(db_path)]
                 # 可选配置文件一旦存在，默认 DATABASE 就不再是已证明的最终值。
-                checks.extend(f"[ ! -e {path} ]" for path in config_paths)
-                cmd = f"sh -c 'if {' && '.join(checks)}; then {init_cmd}; fi && exec {cmd}'"
+                checks.extend(f"[ ! -e {shlex.quote(path)} ]" for path in config_paths)
+                script = f"if {' && '.join(checks)}; then {init_cmd}; fi && exec {cmd}"
+                cmd = f"sh -c {shlex.quote(script)}"
             return cmd
         if "gunicorn" in matched:
             # 066.a：已声明生产服务器优先——入口不可证明时沿用既有 app:app 形态。
@@ -2227,13 +2228,14 @@ def _flask_empty_db_condition(db_path: str) -> str:
     真库与无法解析的文件一律按非空处理，保护已有数据不被教程命令清空。
     探测经容器内 python 执行；python 缺失时按非空处理（退化为旧守卫行为）。
     """
+    quoted_db_path = shlex.quote(db_path)
     probe = (
         '"$(command -v python || command -v python3)" -c "'
         "import sqlite3,sys;"
         "sys.exit(0 if sqlite3.connect(sys.argv[1]).execute(sys.argv[2]).fetchone()[0]==0 else 1)"
-        f'" {db_path} "select count(*) from sqlite_master"'
+        f'" {quoted_db_path} "select count(*) from sqlite_master"'
     )
-    return f"{{ [ ! -f {db_path} ] || [ ! -s {db_path} ] || {probe}; }}"
+    return f"{{ [ ! -f {quoted_db_path} ] || [ ! -s {quoted_db_path} ] || {probe}; }}"
 
 
 def _flask_init_db_spec(

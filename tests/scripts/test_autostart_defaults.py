@@ -207,12 +207,20 @@ def test_offer_confirm_installs_over_other_workspace_units(ws_env, monkeypatch) 
     other_root = root.parent / "ws-b"
     init_workspace(other_root)
     ws_b = Workspace(other_root)
+    prompts: list[str] = []
+
+    def confirm(prompt: str) -> bool:
+        prompts.append(prompt)
+        return True
+
     result = asm.maybe_offer_autostart_install(
-        ws_b, config, confirm=lambda prompt: True, runner=runner
+        ws_b, config, confirm=confirm, runner=runner
     )
 
     assert result.attempted is True
     assert result.ok is True
+    assert prompts and "指向其他工作区" in prompts[0]
+    assert "覆盖同名单元" in prompts[0]
     assert any("指向其他工作区" in m for m in result.messages)
     backend = asm.select_backend(asm.PLATFORM_LINUX)
     assert asm.unit_points_to_workspace(backend, "daemon", ws_b.root)

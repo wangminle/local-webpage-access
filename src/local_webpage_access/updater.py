@@ -866,6 +866,24 @@ def restart_manager(ws: Workspace, config: Config, *, reconcile: bool = True) ->
             coordinated_autostart_restart(ws, "manager")
             ok, actual = verify_manager_version(config)
         if not ok:
+            from local_webpage_access.autostart import manager_lock_holder_is_orphaned
+
+            if manager_lock_holder_is_orphaned(ws):
+                if not stop_manager_internal(ws):
+                    raise RuntimeError(
+                        "管理页旧进程已脱离 launchd 监管，但内部停止失败；"
+                        + _off_on_recovery_hint("manager")
+                    )
+                note, _ok, managed = coordinated_autostart_start(ws, "manager")
+                if not managed:
+                    raise RuntimeError(
+                        "已停止脱离 launchd 监管的旧管理页，但自启动单元未能接管拉起；"
+                        + _off_on_recovery_hint("manager")
+                    )
+                ok, actual = verify_manager_version(config)
+                if ok:
+                    note = f"已清理脱离 launchd 监管的旧管理页；{note or '已通过自启动拉起'}"
+        if not ok:
             raise RuntimeError(
                 f"管理页自启动重启后版本不一致：期望 {display_version()}，"
                 f"实际 {actual or '未知'}；{_off_on_recovery_hint('manager')}"

@@ -85,6 +85,7 @@ class MigrateSnapshot:
     restore_instance_ids: list[str] = field(default_factory=list)
     desired_states: dict[str, str] = field(default_factory=dict)
     autostart_installed: list[str] = field(default_factory=list)
+    workspace_root: str = ""
     #: 迁前正在跑的控制面（daemon/manager/gateway）；未装自启时 restore 据此拉回（BUG-395）
     control_plane_running: list[str] = field(default_factory=list)
     pageview_hits: dict[str, int] = field(default_factory=dict)
@@ -99,6 +100,7 @@ class MigrateSnapshot:
             restore_instance_ids=list(data.get("restore_instance_ids") or []),
             desired_states=dict(data.get("desired_states") or {}),
             autostart_installed=list(data.get("autostart_installed") or []),
+            workspace_root=str(data.get("workspace_root") or ""),
             control_plane_running=list(data.get("control_plane_running") or []),
             pageview_hits={str(k): int(v) for k, v in (data.get("pageview_hits") or {}).items()},
             captured_at=str(data.get("captured_at") or ""),
@@ -497,6 +499,7 @@ def capture_snapshot(
         restore_instance_ids=restore,
         desired_states=desired,
         autostart_installed=installed,
+        workspace_root=str(workspace.root.resolve()),
         control_plane_running=control_plane,
         pageview_hits=pageview_hits,
         captured_at=now_iso(),
@@ -960,6 +963,7 @@ def regenerate_after_move(
     config: Config,
     *,
     snapshot: MigrateSnapshot | None = None,
+    moved_from: Path | None = None,
 ) -> list[str]:
     actions: list[str] = []
     # capability 缓存
@@ -974,6 +978,8 @@ def regenerate_after_move(
             actions.append(f"rm:{name}")
 
     installed = list((snapshot or MigrateSnapshot()).autostart_installed)
+    if moved_from is None and snapshot is not None and snapshot.workspace_root:
+        moved_from = Path(snapshot.workspace_root)
     if installed:
         try:
             from local_webpage_access import autostart as asm
@@ -983,6 +989,7 @@ def regenerate_after_move(
                 workspace,
                 config,
                 with_caddy="gateway" in installed,
+                moved_from=moved_from,
             )
             actions.append("autostart_repair")
         except Exception as exc:  # noqa: BLE001
@@ -1016,7 +1023,17 @@ def restore_instances(
 
         if snapshot.autostart_installed:
             with contextlib.suppress(Exception):
-                asm.enable(workspace, config)
+                # BUG-1023：repair 会保留并停用配置已关闭的旧单元；全局 enable
+                # 会把它们重新加载。只恢复快照中仍获配置允许、且明确自有的单元。
+                targets = set(asm.select_services(
+                    config, with_caddy="gateway" in snapshot.autostart_installed
+                ))
+                services = [
+                    name for name in asm.owned_services(workspace)
+                    if name in targets and name in snapshot.autostart_installed
+                ]
+                if services:
+                    asm.enable(workspace, config, services=services)
         else:
             # 未装自启：按迁前控制面运行态拉回 detached 进程（BUG-395）
             for name in snapshot.control_plane_running:
@@ -1248,16 +1265,23 @@ def run_migrate(
     lock_ws = ws if ws.root.exists() else Workspace(old_r)
     with migrate_lock(lock_ws) as lock_holder:
         # 评审-组6：rollback 把目录搬回 OLD 后，锁释放路径也要跟回 OLD
-        _rollback_lock_moved_cb.append(lambda old_ws: lock_holder.__setitem__(0, lock_path(Workspace(old_ws))))
-        return _run_migrate_locked(
-            old_r,
-            new_r,
-            preflight=preflight,
-            resume=resume,
-            snapshot_out=snapshot_out,
-            lock_holder=lock_holder,
-            force_quiesce=force_quiesce,
-        )
+        def callback(old_ws):
+            lock_holder.__setitem__(0, lock_path(Workspace(old_ws)))
+
+        _rollback_lock_moved_cb.append(callback)
+        try:
+            return _run_migrate_locked(
+                old_r,
+                new_r,
+                preflight=preflight,
+                resume=resume,
+                snapshot_out=snapshot_out,
+                lock_holder=lock_holder,
+                force_quiesce=force_quiesce,
+            )
+        finally:
+            with contextlib.suppress(ValueError):
+                _rollback_lock_moved_cb.remove(callback)
 
 
 def _run_migrate_locked(
@@ -1446,7 +1470,9 @@ def _run_migrate_locked(
 
         # REGENERATE
         if phase == MigratePhase.REGENERATE.value:
-            actions = regenerate_after_move(ws, config, snapshot=snapshot)
+            actions = regenerate_after_move(
+                ws, config, snapshot=snapshot, moved_from=old_r
+            )
             _save(MigratePhase.REGENERATE.value, regenerate_actions=actions)
             phase = MigratePhase.RESTORE.value
 
@@ -1621,7 +1647,9 @@ def _rollback_migrate(old: Path, new: Path, *, force_quiesce: bool = False) -> M
 
         config = load_config(ws)
         try:
-            regen = regenerate_after_move(ws, config, snapshot=snap)
+            regen = regenerate_after_move(
+                ws, config, snapshot=snap, moved_from=j_new
+            )
             notes.append(f"regenerate: {', '.join(regen) or 'ok'}")
         except Exception as exc:  # noqa: BLE001
             log.warning("回滚 regenerate 失败：%s", exc)

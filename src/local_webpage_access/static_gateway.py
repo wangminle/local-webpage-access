@@ -13,6 +13,7 @@ V1 静态托管的两条路径：
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
@@ -22,6 +23,7 @@ import secrets
 import shutil
 import signal
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -42,6 +44,7 @@ from local_webpage_access.admin_port import (
     ensure_admin_port,
     read_admin_port,
 )
+from local_webpage_access.atomic_io import atomic_write_bytes, atomic_write_text
 from local_webpage_access.config import Config, tls_enabled
 from local_webpage_access.daemon import pid_cmdline_contains
 from local_webpage_access.errors import GatewayError
@@ -398,6 +401,107 @@ def _entry_cert_current(workspace: Workspace, sans: Sequence[str], root_fp: str 
     return not_after - datetime.now(timezone.utc) >= _ENTRY_CERT_RENEW_BEFORE
 
 
+_ENTRY_CERT_FILES = frozenset({"key.pem", "cert.pem", "meta.json"})
+_ENTRY_CERT_JOURNAL = ".certificate-transaction.json"
+_entry_tls_state = threading.local()
+
+
+def _sync_entry_directory(directory: Path) -> None:
+    """先持久化组内变更，再删除恢复日志作为提交点。"""
+    if os.name == "nt":
+        # Windows 不支持以普通文件描述符 fsync 目录；进程退出恢复仍依赖日志。
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _recover_entry_certificate_files(directory: Path) -> bool:
+    """持签发锁调用；完整恢复旧一代，成功前不消耗日志，可反复重试。"""
+    journal = directory / _ENTRY_CERT_JOURNAL
+    try:
+        record = json.loads(journal.read_bytes())
+    except FileNotFoundError:
+        return False
+    except ValueError as exc:
+        raise _OpensslError("入口证书恢复日志损坏，拒绝复用或覆盖证书") from exc
+    originals: dict[str, tuple[bytes, int] | None] = {}
+    try:
+        if record["version"] != 1 or set(record["files"]) != _ENTRY_CERT_FILES:
+            raise ValueError("unexpected certificate transaction")
+        # 所有记录校验完毕后才开始修改，日志不能指定证书目录以外的路径。
+        for name, previous in record["files"].items():
+            if previous is None:
+                originals[name] = None
+            else:
+                mode = previous["mode"]
+                if not isinstance(mode, int) or not 0 <= mode <= 0o777:
+                    raise ValueError("invalid certificate mode")
+                originals[name] = (base64.b64decode(previous["data"], validate=True), mode)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise _OpensslError("入口证书恢复日志无效，拒绝复用或覆盖证书") from exc
+    for name, previous in originals.items():
+        destination = directory / name
+        if previous is None:
+            destination.unlink(missing_ok=True)
+        else:
+            content, mode = previous
+            atomic_write_bytes(destination, content)
+            destination.chmod(mode)
+    _sync_entry_directory(directory)
+    journal.unlink()
+    _sync_entry_directory(directory)
+    log.warning("已恢复中断的入口证书事务：%s", directory)
+    return True
+
+
+def _replace_entry_certificate_files(replacements: list[tuple[Path, Path]]) -> None:
+    """持签发锁调用；删除持久化旧版本日志是三文件换入的唯一提交点。"""
+    if not replacements:
+        raise ValueError("入口证书替换集合不能为空")
+    directory = replacements[0][1].parent
+    if (
+        len(replacements) != len(_ENTRY_CERT_FILES)
+        or {destination.name for _, destination in replacements} != _ENTRY_CERT_FILES
+        or any(destination.parent != directory for _, destination in replacements)
+    ):
+        raise ValueError("入口证书替换必须包含同目录的 key/cert/meta")
+    _recover_entry_certificate_files(directory)
+    originals = {}
+    for source, destination in replacements:
+        try:
+            content = destination.read_bytes()
+            mode = stat.S_IMODE(destination.stat().st_mode) & 0o777
+            originals[destination.name] = {
+                "data": base64.b64encode(content).decode("ascii"), "mode": mode,
+            }
+        except FileNotFoundError:
+            originals[destination.name] = None
+        # 新文件也须先落盘；只刷目录不足以保证证书内容持久化。
+        # Windows 的 FlushFileBuffers 要求句柄具有写权限。
+        with source.open("r+b") as handle:
+            os.fsync(handle.fileno())
+    journal = directory / _ENTRY_CERT_JOURNAL
+    try:
+        # 0600 日志自包含完整旧内容，签发临时目录被清理也不影响恢复。
+        atomic_write_text(journal, json.dumps({"version": 1, "files": originals}))
+        _sync_entry_directory(directory)
+        for source, destination in replacements:
+            os.replace(source, destination)
+        _sync_entry_directory(directory)
+        journal.unlink()
+        _sync_entry_directory(directory)
+    except BaseException:
+        try:
+            _recover_entry_certificate_files(directory)
+        except BaseException as recovery_exc:
+            # 恢复失败/再次中断仍留日志，下一次持锁重试，不能掩盖最初异常。
+            log.error("恢复入口证书失败，保留事务日志：%s", recovery_exc)
+        raise
+
+
 def _sign_entry_leaf(
     workspace: Workspace, binary: str, root_crt: Path, sans: Sequence[str], root_fp: str | None
 ) -> None:
@@ -467,16 +571,24 @@ def _sign_entry_leaf(
             + "\n",
             encoding="utf-8",
         )
-        # 先换密钥再换证书，最后落签发记录：任一步失败都不会留下自洽的半成品
-        os.replace(key_tmp, key_path)
-        os.replace(crt_tmp, cert_path)
-        os.replace(meta_tmp, entry_tls_meta_path(workspace))
+        _replace_entry_certificate_files(
+            [
+                (key_tmp, key_path),
+                (crt_tmp, cert_path),
+                (meta_tmp, entry_tls_meta_path(workspace)),
+            ]
+        )
 
 
 @contextmanager
 def _entry_tls_lock(workspace: Workspace) -> Iterator[None]:
-    """并发渲染互斥：两次签发交叉替换 cert/key 会让 Caddy 读到不配对的密钥。"""
+    """签发与 Caddy 读证书共用跨进程锁；同线程渲染/签发允许重入。"""
     directory = entry_tls_dir(workspace)
+    identity = directory.resolve()
+    held = getattr(_entry_tls_state, "held", frozenset())
+    if identity in held:
+        yield
+        return
     directory.mkdir(parents=True, exist_ok=True)
     _chmod_quiet(directory, 0o700)
     fd = os.open(str(directory / ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
@@ -491,9 +603,11 @@ def _entry_tls_lock(workspace: Workspace) -> Iterator[None]:
                 if time.monotonic() >= deadline:
                     raise _OpensslError("等待入口证书签发锁超时") from None
                 time.sleep(0.05)
+        _entry_tls_state.held = held | {identity}
         try:
             yield
         finally:
+            _entry_tls_state.held = held
             release_exclusive(fd)
     finally:
         os.close(fd)
@@ -512,18 +626,21 @@ def ensure_entry_tls_cert(workspace: Workspace, sans: Sequence[str]) -> EntryTls
     复用。openssl 缺失或签发失败返回 ``None`` 并告警——调用方退回逐地址
     ``tls internal``，网关仍可启动，只是 BUG-944 的场景不被覆盖。
     """
-    binary = _openssl_binary()
-    if binary is None:
-        log.warning(
-            "BUG-944：未找到 openssl，无法为多地址 TLS 入口签发多 SAN 证书，退回逐地址"
-            " tls internal——按 Windows 入口 IP 访问的无 SNI 客户端证书校验可能失败；"
-            "请安装 openssl 后执行 lwa gateway on 重新渲染",
-        )
-        return None
     names = list(dict.fromkeys(sans))
     renewed = False
     try:
         with _entry_tls_lock(workspace):
+            # 先恢复再读 meta，避免混合代文件被有效的旧 meta 误判为可复用。
+            # 此步骤无需 openssl，工具缺失也不能留下已知的半提交状态。
+            renewed = _recover_entry_certificate_files(entry_tls_dir(workspace))
+            binary = _openssl_binary()
+            if binary is None:
+                log.warning(
+                    "BUG-944：未找到 openssl，无法为多地址 TLS 入口签发多 SAN 证书，退回逐地址"
+                    " tls internal——按 Windows 入口 IP 访问的无 SNI 客户端证书校验可能失败；"
+                    "请安装 openssl 后执行 lwa gateway on 重新渲染",
+                )
+                return None
             root = _ensure_workspace_root_ca(workspace, binary)
             root_fp = caddy_root_cert_fingerprint(workspace)
             if not _entry_cert_current(workspace, names, root_fp):
@@ -1303,6 +1420,15 @@ class StaticGateway:
             # BUG-131：reload 属于可软失败路径，交给 _sync_main_config 记 WARN；
             # caddy_start 仍直接拒绝，避免测试触碰生产 admin。
             return False, str(exc)
+        try:
+            with _entry_tls_lock(self.ws):
+                if _recover_entry_certificate_files(entry_tls_dir(self.ws)):
+                    self._entry_cert_renewed = True
+                return self._reload_once_with_entry_tls_locked()
+        except (_OpensslError, OSError) as exc:
+            return False, f"入口证书恢复失败，取消 Caddy reload：{exc}"
+
+    def _reload_once_with_entry_tls_locked(self) -> tuple[bool, str]:
         cmd = [
             "caddy",
             "reload",
@@ -1491,10 +1617,11 @@ class StaticGateway:
             lines.extend(self._tls_blocks(aliases))
         return "\n".join(lines) + "\n"
 
-    def _tls_hosts(self) -> tuple[list[str], bool]:
+    def _tls_hosts(self, *, lan_ip: str | None = None) -> tuple[list[str], bool]:
         """D4：TLS 入口地址（原始 IP，即证书 SAN）与是否含不属于本机的地址。
 
-        回环 + 当前 LAN IP；LAN IP 解析失败时仅保留回环（本机仍可验收），并告警
+        回环 + 当前 LAN IP + 在线本机 Tailscale IPv4/IPv6；LAN IP 解析失败时仍保留
+        回环及 Tailscale 地址，并告警
         提示配置 ``lanIpStrategy: manual``。WSL NAT 下额外纳入 Windows 局域网 IP：
         该地址不属于 guest，Caddy 须 ``bind 0.0.0.0`` 而不能去绑定它；同时它也是
         BUG-944 的触发条件——无 SNI 连接按本地地址选证书永远选不到它，所以这种
@@ -1503,13 +1630,14 @@ class StaticGateway:
         from local_webpage_access.ports import resolve_lan_ip
 
         hosts = ["127.0.0.1"]
-        lan_ip = resolve_lan_ip(self.config)
+        if lan_ip is None:
+            lan_ip = resolve_lan_ip(self.config)
         if lan_ip:
             if lan_ip not in hosts:
                 hosts.append(lan_ip)
         else:
             log.warning(
-                "gatewayTls=internal 但无法解析 LAN IP——TLS 站点仅覆盖 127.0.0.1，"
+                "gatewayTls=internal 但无法解析 LAN IP——TLS 站点缺少 LAN 地址，"
                 "局域网客户端无法访问；请在 local-web.yml 配置 lanIpStrategy: manual"
                 " + manualLanIp 后重启网关",
             )
@@ -1518,6 +1646,32 @@ class StaticGateway:
         if extra and extra not in hosts:
             hosts.append(extra)
             foreign = True
+        from local_webpage_access.tailscale_network import (
+            UNCERTAIN_PROBE_REASONS,
+            cached_tls_snapshot,
+        )
+
+        snapshot = cached_tls_snapshot()
+        if snapshot.get("reason") in UNCERTAIN_PROBE_REASONS:
+            # 未知不等于断开：保留磁盘中原有名称，但仍加入本轮可信 LAN 地址。
+            # 同步判断和实际渲染共用此集合，避免超时期间掉入口或反复 reload。
+            from local_webpage_access.access import caddyfile_tls_hosts
+
+            try:
+                previous = self.main_config_path().read_text(encoding="utf-8")
+            except OSError:
+                previous = ""
+            ports = {int(self.config.gatewayTlsPort), int(self.config.managerTlsPort)}
+            for names in caddyfile_tls_hosts(previous, ports).values():
+                for name in sorted(names):
+                    ip = name.strip("[]")
+                    if ip not in hosts:
+                        hosts.append(ip)
+        if snapshot.get("available"):
+            for field in ("ipv4", "ipv6"):
+                ip = snapshot.get(field)
+                if ip and ip not in hosts:
+                    hosts.append(ip)
         return hosts, foreign
 
     @staticmethod
@@ -1565,12 +1719,13 @@ class StaticGateway:
         tls_port = self.config.gatewayTlsPort
         hosts, bind_all = self._tls_hosts()
         tls_directive = self._tls_directive(hosts, bind_all)
+        bind_directive = "bind 0.0.0.0 [::]" if any(":" in h for h in hosts) else "bind 0.0.0.0"
         if aliases:
             lines.append("")
             lines.append(f"# HTTPS 别名统一入口（W04，端口 {tls_port}，Caddy internal CA）")
             lines.append(f"{self._tls_addresses(hosts, tls_port)} {{")
             if bind_all:
-                lines.append("\tbind 0.0.0.0")
+                lines.append(f"\t{bind_directive}")
             lines.append(f"\t{tls_directive}")
             access_log = self.ws.logs / "static-access.log"
             access_log.parent.mkdir(parents=True, exist_ok=True)
@@ -1598,7 +1753,7 @@ class StaticGateway:
         )
         lines.append(f"{self._tls_addresses(hosts, manager_tls)} {{")
         if bind_all:
-            lines.append("\tbind 0.0.0.0")
+            lines.append(f"\t{bind_directive}")
         lines.append(f"\t{tls_directive}")
         lines.append(f"\treverse_proxy 127.0.0.1:{manager_port}")
         lines.append("}")
@@ -1675,6 +1830,16 @@ class StaticGateway:
         start 的 pingback 噪音无诊断价值）。
         """
         _refuse_caddy_admin_in_pytest("start")
+        try:
+            with _entry_tls_lock(self.ws):
+                if _recover_entry_certificate_files(entry_tls_dir(self.ws)):
+                    self._entry_cert_renewed = True
+                return self._caddy_start_with_entry_tls_locked()
+        except (_OpensslError, OSError) as exc:
+            log.error("入口证书恢复失败，取消 Caddy start：%s", exc)
+            return False
+
+    def _caddy_start_with_entry_tls_locked(self) -> bool:
         # BUG-783：分配本工作区独立 admin 端口（幂等；未分配过则登记落盘）。
         assigned = ensure_admin_port(self.ws)
         # 迁移（平滑升级）：旧 master 仍监听 legacy :2019 且确属本工作区时，
@@ -2365,9 +2530,9 @@ class StaticGateway:
                 self._clear_stale_static_pid(iid)
                 continue
             log.info("切换后端：停止残留 builtin 静态服务 %s（pid=%d）", iid, pid)
-            self._stop_builtin(iid)
-            stopped.append(iid)
-            seen_pids.add(pid)
+            if self._stop_builtin(iid):
+                stopped.append(iid)
+                seen_pids.add(pid)
         # 途径 2：枚举 workspace http.server（补 pid-less 孤儿）
         for pid, iid in self._enumerate_workspace_builtin_pids():
             if pid in seen_pids:
@@ -2506,7 +2671,17 @@ class StaticGateway:
             # 否则会锁住 gateway.log（Windows 下导致实例目录/gateway.log 无法删除，BUG-006）。
             log_fh.close()
         self._procs[instance_id] = proc
-        self._write_pid(instance_id, proc.pid)
+        try:
+            self._write_pid(instance_id, proc.pid)
+        except Exception:
+            stopped = self._kill_process(
+                proc.pid,
+                proc=proc,
+                expected_path=root,
+            )
+            if stopped:
+                self._procs.pop(instance_id, None)
+            raise
         write_instance_log(
             self.ws.apps,
             instance_id,
@@ -2514,18 +2689,19 @@ class StaticGateway:
             f"启动内置静态服务 pid={proc.pid} port={host_port} root={root}",
         )
 
-    def _stop_builtin(self, instance_id: str) -> None:
+    def _stop_builtin(self, instance_id: str) -> bool:
         proc = self._procs.pop(instance_id, None)
         # BUG-125：有 Popen 句柄时信任句柄 PID，不让陈旧/被篡改的 pidfile
         # 把终止目标引向无关进程；无句柄的跨实例停止才读取 pidfile 并验身份。
         pid = proc.pid if proc is not None else self._read_pid(instance_id)
         if pid is None:
-            return
-        if self._kill_process(
+            return True
+        stopped = self._kill_process(
             pid,
             proc=proc,
             expected_path=self.ws.app_public(instance_id),
-        ):
+        )
+        if stopped:
             self._clear_pid(instance_id)
         else:
             # kill 失败：保留 PID 文件，便于重试或人工排查（BUG-015）。
@@ -2541,6 +2717,7 @@ class StaticGateway:
             "gateway",
             f"停止内置静态服务 pid={pid}",
         )
+        return stopped
 
     def _kill_process(
         self,

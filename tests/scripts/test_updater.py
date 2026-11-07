@@ -665,6 +665,85 @@ def test_manager_restart_retries_then_fails_on_version_mismatch(
     assert report.step("doctor").status == "ok"
 
 
+def test_manager_restart_stops_orphaned_holder_and_recovers_via_launchd(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    calls = {"restart": 0, "stop": 0, "start": 0, "detached": 0}
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: calls.__setitem__("restart", calls["restart"] + 1)
+        or (None, True, True),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_start",
+        lambda ws, name: calls.__setitem__("start", calls["start"] + 1)
+        or ("已通过自启动单元拉起 manager", True, True),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.autostart.manager_lock_holder_is_orphaned", lambda ws: True
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.stop_manager_internal",
+        lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.start_manager",
+        lambda *a, **k: calls.__setitem__("detached", calls["detached"] + 1) or 999,
+    )
+    versions = iter([(False, "V0.9.18"), (False, "V0.9.18"), (True, "V0.9.19")])
+    monkeypatch.setattr(
+        "local_webpage_access.updater.verify_manager_version", lambda *a, **k: next(versions)
+    )
+
+    report = run_update(workspace, config, registry, options=_opts(restart_manager=True))
+
+    step = report.step("restartManager")
+    assert step is not None and step.status == "ok"
+    assert "脱离 launchd 监管" in step.message
+    assert "V0.9.19" in step.message
+    assert calls == {"restart": 2, "stop": 1, "start": 1, "detached": 0}
+
+
+def test_manager_restart_does_not_stop_holder_when_orphan_status_unconfirmed(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    calls = {"restart": 0, "stop": 0, "start": 0, "detached": 0}
+    monkeypatch.setattr("local_webpage_access.manager_service.is_running", lambda ws, cfg: True)
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_restart",
+        lambda ws, name: calls.__setitem__("restart", calls["restart"] + 1)
+        or (None, True, True),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.cli._common.coordinated_autostart_start",
+        lambda ws, name: calls.__setitem__("start", calls["start"] + 1)
+        or (None, True, True),
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.autostart.manager_lock_holder_is_orphaned", lambda ws: False
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.stop_manager_internal",
+        lambda ws: calls.__setitem__("stop", calls["stop"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.start_manager",
+        lambda *a, **k: calls.__setitem__("detached", calls["detached"] + 1) or 999,
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.updater.verify_manager_version",
+        lambda *a, **k: (False, "V0.9.18"),
+    )
+
+    report = run_update(workspace, config, registry, options=_opts(restart_manager=True))
+
+    step = report.step("restartManager")
+    assert step is not None and step.status == "failed"
+    assert "版本不一致" in step.message
+    assert calls == {"restart": 2, "stop": 0, "start": 0, "detached": 0}
+
+
 def test_off_on_recovery_hint_preserves_autostart() -> None:
     """BUG-643/647：恢复指引优先协调重启（保留自启），且只恢复目标服务的自启单元。"""
     from local_webpage_access.updater import _off_on_recovery_hint

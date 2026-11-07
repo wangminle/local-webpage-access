@@ -376,6 +376,61 @@ def test_coordinated_disable_no_unit(tmp_path, monkeypatch) -> None:
 # ---- coordinated_restart（BUG-191）-----------------------------------------
 
 
+def test_manager_lock_holder_orphan_detection_requires_readable_launchd_state(
+    tmp_path, monkeypatch
+) -> None:
+    root, ws, _config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    backend.write_unit(
+        "manager", backend.render("manager", python_exe="/py", workspace_root=root)
+    )
+    from local_webpage_access.manager_service import ManagerState, write_state
+
+    write_state(ws, ManagerState(enabled=True, pid=2697))
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service.is_pid_alive", lambda pid: pid == 2697
+    )
+    monkeypatch.setattr(
+        "local_webpage_access.manager_service._manager_pid_matches",
+        lambda pid, workspace: pid == 2697 and workspace == ws,
+    )
+    current = {"returncode": 0, "stdout": "state = exited\nruns = 6\n"}
+
+    def runner(cmd, **kwargs):
+        return CompletedProcess(
+            args=cmd,
+            returncode=current["returncode"],
+            stdout=current["stdout"],
+            stderr="",
+        )
+
+    assert asm.manager_lock_holder_is_orphaned(ws, runner=runner) is True
+    current["stdout"] = "pid = 2697\nstate = running\n"
+    assert asm.manager_lock_holder_is_orphaned(ws, runner=runner) is False
+    current.update(returncode=1, stdout="")
+    assert asm.manager_lock_holder_is_orphaned(ws, runner=runner) is False
+
+    # 回归：先成功、后失败的两次探测序列，不得把读取失败当作「无 PID」判孤儿。
+    calls = {"n": 0}
+
+    def flaky_runner(cmd, **kwargs):
+        calls["n"] += 1
+        ok = calls["n"] == 1
+        return CompletedProcess(
+            args=cmd,
+            returncode=0 if ok else 1,
+            stdout="state = exited\n" if ok else "",
+            stderr="",
+        )
+
+    assert asm.manager_lock_holder_is_orphaned(ws, runner=flaky_runner) is True
+    assert calls["n"] == 1  # 加载态与 PID 来自同一次 launchctl print
+    calls["n"] = 1  # 下一次调用（n=2）失败 → 视为未知，非孤儿
+    assert asm.manager_lock_holder_is_orphaned(ws, runner=flaky_runner) is False
+
+
 def test_coordinated_restart_managed_when_loaded(tmp_path, monkeypatch) -> None:
     """BUG-191：单元已加载/启用时 coordinated_restart 交监督器重启，managed=True。"""
     root, ws, _config = _make_ws(tmp_path)
@@ -1527,6 +1582,75 @@ def test_repair_does_not_enable_config_disabled_gateway(tmp_path, monkeypatch) -
     ), joined
 
 
+def test_repair_preserves_unknown_gateway_and_disables_it(tmp_path, monkeypatch) -> None:
+    root, ws, _ = _make_ws(tmp_path)
+    from local_webpage_access.config import Config
+
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    asm.install(ws, Config(staticGateway="caddy"), with_caddy=True, enable=False)
+    backend = asm.MacLaunchdBackend()
+    gateway = backend.unit_path("gateway")
+    raw = plistlib.loads(gateway.read_bytes())
+    del raw["WorkingDirectory"]
+    gateway.write_bytes(plistlib.dumps(raw, fmt=plistlib.FMT_XML, sort_keys=False))
+
+    record: list[list[str]] = []
+    result, _actions = asm.repair(
+        ws,
+        Config(staticGateway="builtin"),
+        with_caddy=False,
+        python_exe=sys.executable,
+        runner=_fake_runner(record),
+    )
+
+    assert "gateway" in result.services
+    fixed = plistlib.loads(gateway.read_bytes())
+    assert fixed["WorkingDirectory"] == str(root)
+    joined = [" ".join(command) for command in record]
+    assert any(
+        "gateway" in command and ("bootout" in command or "disable" in command)
+        for command in joined
+    ), joined
+
+
+def test_workspace_move_rebinds_only_units_from_snapshot_root(tmp_path, monkeypatch) -> None:
+    old_root, old_ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    asm.install(old_ws, config, with_caddy=False, enable=False)
+    backend = asm.MacLaunchdBackend()
+    daemon = backend.unit_path("daemon")
+    original = daemon.read_bytes()
+    new_root = tmp_path / "moved-ws"
+    old_root.rename(new_root)
+    new_ws = asm.Workspace(new_root)
+
+    with pytest.raises(asm.AutostartError, match="其他工作区"):
+        asm.repair(
+            new_ws,
+            config,
+            with_caddy=False,
+            moved_from=tmp_path / "unrelated-old-root",
+            runner=_fake_runner([]),
+        )
+    assert daemon.read_bytes() == original
+
+    record: list[list[str]] = []
+    result, _actions = asm.repair(
+        new_ws,
+        config,
+        with_caddy=False,
+        moved_from=old_root,
+        python_exe=sys.executable,
+        runner=_fake_runner(record),
+    )
+    assert result.enable_ok is True
+    fixed = plistlib.loads(daemon.read_bytes())
+    assert fixed["WorkingDirectory"] == str(new_root)
+    assert asm.enable(new_ws, config, runner=_fake_runner(record)).success is True
+
+
 def test_check_unit_path_rejects_useless_path(tmp_path, monkeypatch) -> None:
     """PATH=/definitely/missing 不得判 OK（BUG-164）。"""
     import plistlib
@@ -1804,6 +1928,33 @@ def test_cli_autostart_enable_passes_service_scope(monkeypatch, capsys) -> None:
     assert "manager" in out
     cli_asm.autostart_enable(service=None)
     assert captured["services"] is None
+
+
+def test_batch_autostart_operations_reject_foreign_workspace_units(tmp_path, monkeypatch) -> None:
+    root, ws, config = _make_ws(tmp_path)
+    monkeypatch.setattr(asm, "detect_platform", lambda: "macos")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    backend = asm.MacLaunchdBackend()
+    other = tmp_path / "other-workspace"
+    other.mkdir()
+    backend.write_unit(
+        "daemon", backend.render("daemon", python_exe="/py", workspace_root=other)
+    )
+    unit = backend.unit_path("daemon")
+    original = unit.read_bytes()
+    calls: list[str] = []
+    monkeypatch.setattr(backend, "uninstall", lambda name, runner: calls.append(name) or ([], True))
+    monkeypatch.setattr(backend, "enable", lambda name, runner: calls.append(name) or ([], True))
+    monkeypatch.setattr(backend, "disable", lambda name, runner: calls.append(name) or ([], True))
+
+    assert asm.owned_services(ws, backend) == []
+    assert asm.uninstall(ws, config).success is True
+    assert asm.enable(ws, config).success is False
+    assert asm.disable(ws, config).success is True
+    assert calls == []
+    with pytest.raises(asm.AutostartError, match="其他工作区"):
+        asm.install(ws, config)
+    assert unit.read_bytes() == original
 
 
 # ---- BUG-890：unit_points_to_workspace resolve 对齐 + coordinated_* 跨工作区守卫 ----

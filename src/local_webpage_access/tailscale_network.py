@@ -18,6 +18,19 @@ from typing import Any
 REFRESH_SECONDS = 30
 STALE_SECONDS = 60
 PROBE_TIMEOUT_SECONDS = 2
+UNCERTAIN_PROBE_REASONS = frozenset(
+    {
+        "timeout",
+        "probe_failed",
+        "command_failed",
+        "invalid_status",
+        "invalid_addresses",
+        "control_offline",
+    }
+)
+_tls_probe_lock = threading.Lock()
+_tls_snapshot: dict[str, Any] | None = None
+_tls_checked_at: float | None = None
 
 
 def find_tailscale() -> str | None:
@@ -70,8 +83,12 @@ def probe_tailscale() -> dict[str, Any]:
             return _unavailable("unknown", "invalid_status")
         state = data.get("BackendState")
         own = data.get("Self")
-        if state != "Running" or not isinstance(own, dict) or own.get("Online") is not True:
+        if state != "Running" or not isinstance(own, dict):
             return _unavailable(str(state or "unknown"), "not_connected")
+        if own.get("Online") is not True:
+            # 后端 Running 但控制面暂时断开：数据面可能仍可达，属瞬时抖动；
+            # 网关侧按「未知」处理，避免抖动期间摘掉 Tailscale TLS 主机并 reload。
+            return _unavailable("Running", "control_offline")
         addresses = data.get("TailscaleIPs") or own.get("TailscaleIPs") or []
         if not isinstance(addresses, list):
             return _unavailable("unknown", "invalid_addresses")
@@ -101,6 +118,26 @@ def probe_tailscale() -> dict[str, Any]:
         return _unavailable("unavailable", "timeout")
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
         return _unavailable("unknown", "probe_failed")
+
+
+def cached_tls_snapshot() -> dict[str, Any]:
+    """TLS 入口同步的 30 秒单飞快照；未知保留最近可信地址，明确离线才清除。
+
+    这份缓存只服务网关配置，不供管理页显示；UI 仍遵守 NetworkContextCache
+    的新鲜度规则。复制返回值，避免调用方改写共享快照。
+    """
+    global _tls_snapshot, _tls_checked_at
+    with _tls_probe_lock:
+        now = time.monotonic()
+        if _tls_checked_at is not None and now - _tls_checked_at < REFRESH_SECONDS:
+            return dict(_tls_snapshot or {})
+        data = probe_tailscale()
+        if data.get("reason") in UNCERTAIN_PROBE_REASONS and _tls_snapshot:
+            if _tls_snapshot.get("available"):
+                data = {**_tls_snapshot, "state": data.get("state"), "reason": data["reason"]}
+        _tls_snapshot = dict(data)
+        _tls_checked_at = time.monotonic()
+        return dict(data)
 
 
 class NetworkContextCache:

@@ -1,6 +1,6 @@
 # HTTPS 传输加密（gatewayTls）
 
-> 适用版本：V0.9.19（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
+> 适用版本：V0.10.0（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
 > 目标：保护 LAN 管理凭据与应用登录的传输安全——明文只存在于回环。
 
 ## 1. 支持矩阵
@@ -39,6 +39,11 @@ lwa doctor                # gateway_tls 检查项：根证书/https 验证/明�
 
 - 实例别名：`https://<LAN-IP>:8443/<alias>/`
 - 管理页：`https://<LAN-IP>:9443/`（独立端口 = 独立 origin；本机仍可 `http://127.0.0.1:17800/` 直连）
+
+本机 Tailscale 在线时，网关也覆盖该节点的 Tailscale IPv4/IPv6：可使用
+`https://<Tailscale-IP>:8443/<alias>/`，IPv6 地址需放在方括号内。管理面使用
+9443 端口，沿用同一工作区 CA 和远程鉴权规则。客户端仍需信任工作区根证书；
+Tailscale 网络加密不会代替浏览器对 HTTPS 证书的校验。
 
 ## 3. 客户端信任（必做）
 
@@ -79,6 +84,18 @@ curl / Agent 客户端：`curl --cacert lwa-root-ca.crt https://…`；Python：
 
 ## 7. LAN IP 变化与运维
 
+Tailscale HTTPS 主机同步覆盖别名和管理面两个端口。已有配置首次补齐时执行
+`lwa access refresh`，无需重建业务实例。网关使用 30 秒进程内探测缓存并串行合并
+并发探测；地址变化或明确断开后，在下一次地址刷新中更新配置，无变化时不重载。
+自动刷新沿用现有 `lanIpStrategy: auto` 的管理页/daemon 检查；手工 LAN 策略不会自动
+改写实例地址（需显式执行 `lwa access refresh`），但管理页/daemon 周期检查仍会按
+`manualLanIp` 同步在线 Caddy 的 TLS 主机集合（含晚于网关上线的 Tailscale 地址），
+网关关闭时不会被拉起。LAN 探测失败或 Tailscale
+探测超时、权限/命令错误、后端 Running 但控制面暂时离线时，保留既有 TLS 名称；后者仍允许加入当前已确认的
+LAN 地址，待探测恢复后再清理过期名称。
+首次启动无 LAN 地址时仍可生成已探测到的 Tailscale 入口。这里的本机状态检测
+不证明其他 tailnet 节点已获 ACL/防火墙访问权限，实际访问应由另一节点验证。
+
 证书 SAN 覆盖签发时的 LAN IP。WSL NAT 下还会纳入 Windows 物理网卡 IP；该地址不属于 guest，Caddy 对这些额外名称使用 `bind 0.0.0.0`，不会尝试绑定 Windows IP。`lanIpStrategy: auto` 时，地址刷新（管理页列表节流、daemon 周期检查或 `lwa access refresh`）若发现主 Caddyfile 的 8443/9443 仍绑旧 IP 或只剩回环，且 Caddy 已在线，会按当前 LAN IP 重写并 reload；两个端口分别判断，不会因为别名入口已更新就放过管理面。网关处于关闭状态时不会被这次检查重新拉起，下次 `lwa gateway on` 会按当前 IP 重写。reload 失败时 manifest 已更新，可再执行 `lwa gateway on`。固定 IP 环境建议 `lanIpStrategy: manual` + `manualLanIp`。WSL 上 `manualLanIp` 只作为局域网候选，不会把 guest `lanUrl` 改成 Windows 地址。
 
 **WSL NAT 的单张多 SAN 证书**：浏览器 / curl / Python 按 IP 字面量访问时不发送 SNI，Caddy 对无 SNI 连接按**连接的本地地址**选证书；经 Windows portproxy 到达 guest 的连接本地地址只会是 guest 或回环，若回环、guest、Windows IP 各签一张证书，客户端按 Windows IP 校验时永远拿到的是另一张（BUG-944）。因此只要入口地址里含有不属于 guest 的地址，LWA 就用工作区 CA 根（`run/caddy-data/caddy/pki/authorities/local/root.{crt,key}`，与 `lwa ca export` 同一根；全新工作区由 LWA 先行生成，Caddy 之后沿用）直签一张覆盖全部入口地址的叶证书，写到 `run/tls/entry/`（私钥 0600），Caddyfile 用 `tls <cert> <key>` 引用。guest IP 漂移、根证书变化或剩余有效期不足 400 天时在下一次渲染重签，并以 `caddy reload --force` 让 Caddy 重新读文件。签发依赖 guest 内的 `openssl`（Debian/Ubuntu 默认带有）；缺失或签发失败时退回逐地址 `tls internal` 并在网关日志以 `BUG-944` 字样告警——此时本机与 guest 地址仍正常，只有按 Windows IP 访问的 HTTPS 会报证书名称不匹配。非 WSL 主机（回环与 LAN IP 都是本机地址）不受影响，仍按地址逐张签发。
@@ -90,6 +107,8 @@ curl / Agent 客户端：`curl --cacert lwa-root-ca.crt https://…`；Python：
 3. 明文拒绝：`http://<ip>:8080`（默认关）、`http://<ip>:17800`（回环化）不可达；
 4. 无旁路：`instanceBindHost=127.0.0.1` 时 LAN 扫描仅剩 SSH 与 8443/9443（以实际扫描为准）；
 5. `lwa services restart` 后 TLS 入口恢复；证书目录损坏时 gateway 启动显式报错不降级。
+
+证书更新中断后，下一次证书渲染、Caddy 启动或 reload 会先恢复完整的旧证书组，再判断是否重签；恢复后 reload 会强制重新读取证书。若恢复失败，将保留恢复记录并取消本次启动或 reload，避免加载不配对的证书和私钥。请检查工作区磁盘空间、读写权限及网关日志后重试；不要手动删除 `run/tls/entry/` 中的恢复记录。
 
 ## 8. 远程 Agent 状态
 
