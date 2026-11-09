@@ -841,7 +841,7 @@ def test_check_caddy_health_warn_on_stale_pid(env, monkeypatch) -> None:
 # ---- IMP-020：master 在线时的站点/入口可达性探测 -----------------------------
 
 
-def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None, lan_url=None):
+def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None, lan_url=None, route_url=None):
     """落一个 enabled 静态实例到 registry，供 check_caddy_health 站点探测。"""
     from local_webpage_access.models import (
         DesiredState,
@@ -866,6 +866,8 @@ def _seed_static_for_doctor(ws, reg, iid, *, host_port, alias=None, lan_url=None
         network.routeHost = alias
     if lan_url:
         network.lanUrl = lan_url
+    if route_url:
+        network.routeUrl = route_url
     m = InstanceManifest(
         id=iid,
         name=iid,
@@ -1009,6 +1011,81 @@ def test_check_lan_url_stale_ok_when_current(env, monkeypatch) -> None:
     """lanUrl host 与当前 LAN IP 一致 → OK。"""
     ws, config, reg = env
     _seed_static_for_doctor(ws, reg, "demo", host_port=18000, lan_url="http://192.168.1.50:18000")
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    monkeypatch.setattr(
+        "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: None
+    )
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status == STATUS_OK
+
+
+def test_check_lan_url_stale_warns_when_only_route_url_is_benchmark(env, monkeypatch) -> None:
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws,
+        reg,
+        "demo",
+        host_port=18000,
+        alias="demo",
+        lan_url="http://192.168.1.50:18000",
+        route_url="http://198.18.0.1:8080/demo/",
+    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status == STATUS_WARN
+    assert "routeUrl" in (r.detail or "")
+    assert "198.18.0.1" in (r.detail or "")
+    assert "refresh" in (r.suggestion or "")
+
+
+def test_check_lan_url_stale_warns_when_both_urls_are_benchmark(env, monkeypatch) -> None:
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws,
+        reg,
+        "demo",
+        host_port=18000,
+        alias="demo",
+        lan_url="http://198.18.0.1:18000",
+        route_url="http://198.18.0.1:8080/demo/",
+    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status == STATUS_WARN
+    assert "lanUrl" in (r.detail or "")
+    assert "routeUrl" in (r.detail or "")
+
+
+def test_check_lan_url_stale_reports_known_bad_url_without_current_candidate(env, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws, reg, "demo", host_port=18000, lan_url="http://198.18.0.1:18000"
+    )
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: None)
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_resolution",
+        lambda cfg: SimpleNamespace(reason="no_candidates", probe_address=None),
+    )
+    r = check_lan_url_stale(ws, config, reg)
+    assert r.status == STATUS_WARN
+    assert "基准测试" in r.message
+    assert "lan show" in (r.suggestion or "")
+    assert "lan set" in (r.suggestion or "")
+
+
+def test_check_lan_url_stale_ok_when_both_urls_match_current(env, monkeypatch) -> None:
+    ws, config, reg = env
+    _seed_static_for_doctor(
+        ws,
+        reg,
+        "demo",
+        host_port=18000,
+        alias="demo",
+        lan_url="http://192.168.1.50:18000",
+        route_url="http://192.168.1.50:8080/demo/",
+    )
     monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: "192.168.1.50")
     monkeypatch.setattr(
         "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda **_k: None

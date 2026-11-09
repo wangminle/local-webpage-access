@@ -94,6 +94,7 @@ Run these inside the workspace, or prefix a command with `lwa --workspace /absol
 | Stop / start / restart | `lwa stop my-site` / `lwa start my-site` / `lwa restart my-site` |
 | Update a zip-based app | `lwa import /absolute/path/new.zip --update my-site` |
 | Sync a linked folder/GitHub source and rebuild | `lwa rebuild my-site --sync` |
+| Inspect or change the LAN address policy | `lwa access lan show` / `lwa access lan set <IP>` / `lwa access lan auto` |
 | Read logs / diagnose problems | `lwa logs my-site` / `lwa doctor my-site` |
 | Review retained container versions / roll back | `lwa versions my-site` / `lwa rollback my-site` |
 | Watch the workspace inbox / install autostart | `lwa daemon on` / `lwa autostart install` |
@@ -227,6 +228,7 @@ lwa manager on
 | 停止 / 启动 / 重启 | `lwa stop my-site` / `lwa start my-site` / `lwa restart my-site` |
 | 更新 zip 源应用 | `lwa import /absolute/path/new.zip --update my-site` |
 | 同步关联文件夹或 GitHub 源并重建 | `lwa rebuild my-site --sync` |
+| 查看或切换 LAN 地址策略 | `lwa access lan show` / `lwa access lan set <IP>` / `lwa access lan auto` |
 | 查看日志 / 诊断问题 | `lwa logs my-site` / `lwa doctor my-site` |
 | 查看留档容器版本 / 回滚 | `lwa versions my-site` / `lwa rollback my-site` |
 | 监听工作区 inbox / 安装自启 | `lwa daemon on` / `lwa autostart install` |

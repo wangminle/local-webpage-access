@@ -885,6 +885,10 @@ curl -X POST http://127.0.0.1:17800/api/instances/<id>/update-from-dir \
 * **诊断**：`lwa doctor --json` 含 `currentLanIp` / `driftedInstanceIds`；深度探活用 `lwa doctor --access` 或 `lwa access review`（与 update report 同源）。
 * **`lanIpStrategy=manual`**：不会自动改写落盘；请确认 `manualLanIp` 仍正确。
 
+### 透明代理开启后，LAN 地址如何选择
+
+运行 `lwa access lan show` 查看当前策略和候选接口。自动模式优先选择有线，再选 Wi-Fi，同类按接口顺序。系统接口枚举不可用时，UDP 源地址只作为诊断线索。没有可信候选时，`lwa access refresh` 会跳过写盘。需要固定工作区地址时，用 `lwa access lan set <IP>`，恢复默认时用 `lwa access lan auto`。
+
 ### WSL 里 `lwa status` / 管理页地址打不开（手机/其他电脑超时）
 
 这通常不是服务没起，而是 **NAT 下的 guest 地址只有 Windows 本机能打开**。WSL 软件包 2.x 和 3.x 都一样；Windows 10 没有 mirrored，Windows 11 也要实际启用才算。

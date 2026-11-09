@@ -347,3 +347,16 @@ def test_control_plane_blip_keeps_tailscale_tls_hosts(workspace, monkeypatch):
     calls = _online(monkeypatch)
     assert sync_caddy_tls_bind(workspace, _config(), LAN) == (False, None)
     assert calls == []
+
+
+def test_control_plane_blip_does_not_keep_old_benchmark_host(workspace, monkeypatch):
+    from local_webpage_access import tailscale_network as ts
+
+    monkeypatch.setattr(
+        ts, "probe_tailscale", lambda: ts._unavailable("Running", "control_offline")
+    )
+    previous_hosts = ["127.0.0.1", LAN, TS4, "198.18.0.1"]
+    _main(workspace, {8443: previous_hosts, 9443: previous_hosts})
+    hosts, _ = StaticGateway(workspace, _config())._tls_hosts(lan_ip=LAN)
+    assert TS4 in hosts
+    assert "198.18.0.1" not in hosts

@@ -708,6 +708,7 @@ def _apply_manifest_alias(
             host_port,
             internal_port=internal_port,
             path_alias=alias,
+            previous=manifest.network,
         )
         manifest.network = merge_network_entry(manifest.network, entry)
         return

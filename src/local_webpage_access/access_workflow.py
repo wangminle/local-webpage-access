@@ -10,18 +10,20 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 from local_webpage_access.access import (
     AccessReviewReport,
     RefreshReport,
+    _extract_host_port_alias,
     refresh_network_entries,
     review_access,
 )
 from local_webpage_access.config import Config
+from local_webpage_access.lan_network import lan_url_host
+from local_webpage_access.lan_policy import config_with_latest_lan_policy
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
-from local_webpage_access.ports import resolve_lan_ip
+from local_webpage_access.ports import lan_entry_port, resolve_lan_ip
 from local_webpage_access.registry import Registry
 
 log = get_logger("access_workflow")
@@ -41,7 +43,7 @@ _throttle_lock = threading.Lock()
 _inflight = False
 _last_refresh_mono: float = 0.0
 _last_resolved_lan_ip: str | None = None
-_lan_ip_cache: tuple[float, str | None] | None = None
+_lan_ip_cache: tuple[float, tuple[str, str | None], str | None] | None = None
 
 
 @dataclass
@@ -84,12 +86,60 @@ def cached_resolve_lan_ip(config: Config, *, ttl: float = _LAN_IP_CACHE_TTL) -> 
     """进程内短 TTL 缓存的 :func:`resolve_lan_ip`。"""
     global _lan_ip_cache
     now = time.monotonic()
+    policy = (config.lanIpStrategy, config.manualLanIp)
     cached = _lan_ip_cache
-    if cached is not None and (now - cached[0]) <= ttl:
-        return cached[1]
+    if cached is not None and cached[1] == policy and (now - cached[0]) <= ttl:
+        return cached[2]
     ip = resolve_lan_ip(config)
-    _lan_ip_cache = (now, ip)
+    _lan_ip_cache = (now, policy, ip)
     return ip
+
+
+DEFAULT_ACCESS_LOCK_TIMEOUT = 10.0
+DEFAULT_ACCESS_LOCK_POLL_INTERVAL = 0.5
+
+
+def refresh_with_lock_retry(
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    *,
+    timeout: float = DEFAULT_ACCESS_LOCK_TIMEOUT,
+    poll_interval: float = DEFAULT_ACCESS_LOCK_POLL_INTERVAL,
+) -> RefreshReport:
+    """只重试锁竞争实例，并在总等待上限后保留部分完成结果。"""
+    config = config_with_latest_lan_policy(workspace, config)
+    report = refresh_network_entries(workspace, config, registry)
+    if not report.lock_skipped or not report.lan_ip:
+        return report
+    started = time.monotonic()
+    deadline = started + timeout
+    other_skipped = dict.fromkeys(iid for iid in report.skipped if iid not in report.lock_skipped)
+    while report.lock_skipped:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+        if time.monotonic() >= deadline:
+            break
+        if config_with_latest_lan_policy(workspace, config) is not config:
+            report.lan_reason = "policy_changed"
+            break
+        retry = refresh_network_entries(
+            workspace, config, registry, instance_ids=set(report.lock_skipped), lan_ip=report.lan_ip,
+        )
+        report.lock_retries += 1
+        report.refreshed.extend(retry.refreshed)
+        report.lock_skipped = retry.lock_skipped
+        other_skipped.update(dict.fromkeys(iid for iid in retry.skipped if iid not in retry.lock_skipped))
+        report.skipped = [*other_skipped, *retry.lock_skipped]
+        log.info(
+            "访问地址锁竞争重试第 %d 次：仍占用=%s",
+            report.lock_retries,
+            ", ".join(report.lock_skipped) or "无",
+        )
+    report.lock_waited = time.monotonic() - started
+    return report
 
 
 def run_access_pass(
@@ -99,6 +149,8 @@ def run_access_pass(
     *,
     review: bool = True,
     dry_run: bool = False,
+    refresh_lock_timeout: float = 0.0,
+    refresh_lock_poll_interval: float = DEFAULT_ACCESS_LOCK_POLL_INTERVAL,
 ) -> AccessPassResult:
     """执行 access refresh，可选轻量 review（update / gateway / doctor 共用）。
 
@@ -109,7 +161,16 @@ def run_access_pass(
 
     result = AccessPassResult()
     try:
-        result.refresh = refresh_network_entries(workspace, config, registry)
+        if refresh_lock_timeout > 0:
+            result.refresh = refresh_with_lock_retry(
+                workspace,
+                config,
+                registry,
+                timeout=refresh_lock_timeout,
+                poll_interval=refresh_lock_poll_interval,
+            )
+        else:
+            result.refresh = refresh_network_entries(workspace, config, registry)
     except Exception as exc:  # noqa: BLE001 — 单步失败不阻断后续 review
         result.refresh_error = str(exc)
         log.warning("access refresh 失败：%s", exc)
@@ -202,8 +263,10 @@ def review_access_with_debounce(
     return result
 
 
-def _persisted_lan_hosts_differ(workspace: Workspace, registry: Registry, lan_ip: str) -> bool:
-    """任一实例落盘 lanUrl host 与 ``lan_ip`` 不一致则视为漂移。"""
+def _persisted_lan_hosts_differ(
+    workspace: Workspace, registry: Registry, lan_ip: str, *, config: Config | None = None,
+) -> bool:
+    """地址异常或当前可生成的入口缺失时，需要刷新。"""
     from local_webpage_access.models import InstanceManifest
 
     for row in registry.list_instances():
@@ -214,12 +277,16 @@ def _persisted_lan_hosts_differ(workspace: Workspace, registry: Registry, lan_ip
             manifest = InstanceManifest.load(path)
         except Exception:  # noqa: BLE001
             continue
-        lan_url = manifest.network.lanUrl if manifest.network else None
-        if not lan_url:
-            continue
-        host = urlparse(lan_url).hostname
-        if host and host not in (lan_ip, "127.0.0.1"):
-            return True
+        network = manifest.network
+        lan_url = network.lanUrl if network else None
+        route_url = network.routeUrl if network else None
+        if config is not None and (not lan_url or not route_url):
+            port, alias, _ = _extract_host_port_alias(manifest, for_review=False)
+            if port is not None and (not lan_url or (alias and lan_entry_port(config) and not route_url)):
+                return True
+        for url in (lan_url, route_url):
+            if url and lan_url_host(url) not in (lan_ip, "127.0.0.1", "::1", "localhost"):
+                return True
     return False
 
 
@@ -239,6 +306,7 @@ def maybe_throttled_lan_refresh(
     """
     global _inflight, _last_refresh_mono, _last_resolved_lan_ip
 
+    config = config_with_latest_lan_policy(workspace, config)
     if config.lanIpStrategy == "manual" and not force:
         # 手工策略不自动改写 manifest，但在线 Caddy 的 TLS 主机集合（如 Tailscale
         # 晚于网关上线、地址变化）仍须自愈；该同步幂等，网关关闭时不会被拉起。
@@ -259,7 +327,7 @@ def maybe_throttled_lan_refresh(
         if not drifted:
             if _last_resolved_lan_ip is not None and _last_resolved_lan_ip != lan_ip:
                 drifted = True
-            elif _persisted_lan_hosts_differ(workspace, registry, lan_ip):
+            elif _persisted_lan_hosts_differ(workspace, registry, lan_ip, config=config):
                 drifted = True
         if not drifted:
             _last_resolved_lan_ip = lan_ip
@@ -299,10 +367,13 @@ __all__ = [
     "AccessPassResult",
     "ACCESS_REVIEW_DEBOUNCE_DELAYS",
     "DebouncedReviewResult",
+    "DEFAULT_ACCESS_LOCK_POLL_INTERVAL",
+    "DEFAULT_ACCESS_LOCK_TIMEOUT",
     "DEFAULT_LAN_REFRESH_INTERVAL",
     "cached_resolve_lan_ip",
     "maybe_throttled_lan_refresh",
     "refresh_network_entries",
+    "refresh_with_lock_retry",
     "reset_lan_refresh_throttle_state",
     "review_access",
     "review_access_with_debounce",

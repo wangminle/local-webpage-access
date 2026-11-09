@@ -1476,51 +1476,69 @@ def check_workspace_path_consistency(
 
 
 def check_lan_url_stale(ws: Workspace, config: Config, registry: Registry) -> CheckResult:
-    """建议 F / G1：检测实例 lanUrl 是否指向失效（漂移）的 LAN IP。
-
-    换 Wi-Fi / DHCP 续约后本机 LAN IP 变化，但各实例 ``local-web.json`` 的
-    ``lanUrl`` 仅在 start/enable 时写入，不会自愈 → 管理页链接失效。本检查比对
-    各实例 lanUrl host 与当前 :func:`resolve_lan_ip`（及 127.0.0.1），漂移则 WARN，
-    提示 ``lwa access refresh``。
-    """
-    from local_webpage_access.ports import resolve_lan_ip
+    """同时核查实例 ``lanUrl`` 与 ``routeUrl`` 的地址来源和漂移。"""
+    from local_webpage_access.lan_network import is_benchmark_ip
+    from local_webpage_access.ports import (
+        lan_reason_text,
+        resolve_lan_ip,
+        resolve_lan_resolution,
+    )
 
     lan_ip = resolve_lan_ip(config)
+    entries, skipped = _collect_lan_url_hosts(ws, registry)
+    manual_bad = config.lanIpStrategy == "manual" and is_benchmark_ip(config.manualLanIp)
+    known_bad = [item for item in entries if item[2] is None or is_benchmark_ip(item[2])]
+    if manual_bad or known_bad:
+        detail = ", ".join(
+            f"{iid}({label}={host or 'URL 格式无效'})" for iid, label, host in known_bad[:8]
+        )
+        return CheckResult(
+            "lan_url_stale",
+            STATUS_WARN,
+            "LAN 入口存在无效 URL 或基准测试地址"
+            + ("（手工 LAN IP 位于基准测试网段）" if manual_bad else ""),
+            detail="异常入口：" + detail if detail else None,
+            suggestion=(
+                "运行 `lwa access lan show` 查看候选，使用 `lwa access lan set <IP>` 设置可信地址"
+                if manual_bad or lan_ip is None
+                else "运行 `lwa access refresh` 用当前 LAN IP 刷新访问地址"
+            ),
+        )
     if lan_ip is None:
-        # BUG-358：无法解析本机 LAN IP 时不得静默 OK（有 lanUrl 则无法确认是否仍有效）
-        has_lan_url = False
-        for row in registry.list_instances():
-            manifest_path = ws.app_manifest_path(row["id"])
-            if not manifest_path.is_file():
-                continue
-            try:
-                from local_webpage_access.models import InstanceManifest
-
-                manifest = InstanceManifest.load(manifest_path)
-            except Exception:  # noqa: BLE001
-                continue
-            if manifest.network and manifest.network.lanUrl:
-                has_lan_url = True
-                break
-        if has_lan_url:
+        resolution = resolve_lan_resolution(config)
+        reason = lan_reason_text(resolution.reason, resolution.probe_address)
+        if entries:
+            detail = ", ".join(f"{iid}({label}={host})" for iid, label, host in entries[:8])
             return CheckResult(
                 "lan_url_stale",
                 STATUS_WARN,
-                "无法解析当前 LAN IP，不能确认实例 lanUrl 是否仍有效",
-                suggestion="检查网络后重试；恢复后运行 `lwa access refresh`",
+                "无法解析当前 LAN IP，不能确认实例 lanUrl/routeUrl 是否仍有效"
+                + (f"（{reason}）" if reason else ""),
+                detail="待复核入口：" + detail,
+                suggestion=(
+                    "运行 `lwa access lan show` 查看候选；自动选择不可用时，"
+                    "用 `lwa access lan set <IP>` 设置可信地址"
+                ),
             )
         return CheckResult(
             "lan_url_stale",
             STATUS_SKIP,
-            "无法解析当前 LAN IP，且无实例 lanUrl 需核对",
+            "无法解析当前 LAN IP，且无实例 lanUrl/routeUrl 需核对"
+            + (f"（{reason}）" if reason else ""),
         )
-    drifted_ids, skipped = _collect_lan_drifted_ids(ws, registry, lan_ip)
-    drifted = [f"{iid}({host})" for iid, host in drifted_ids]
-    if drifted:
+    drifted_ids = [
+        item for item in entries
+        if item[2] and item[2] not in (lan_ip, "127.0.0.1", "::1", "localhost")
+    ]
+    if drifted_ids:
+        drifted = [
+            f"{iid}({label}={host})" for iid, label, host in drifted_ids
+        ]
         return CheckResult(
             "lan_url_stale",
             STATUS_WARN,
-            f"{len(drifted)} 个实例的 lanUrl 指向非当前 LAN IP（{lan_ip}）",
+            f"{len({item[0] for item in drifted_ids})} 个实例的 lanUrl/routeUrl "
+            f"指向非当前 LAN IP（{lan_ip}）",
             detail="漂移实例：" + ", ".join(drifted[:8]),
             suggestion="运行 `lwa access refresh` 用当前 LAN IP 刷新所有实例访问地址",
         )
@@ -1541,19 +1559,26 @@ def check_lan_url_stale(ws: Workspace, config: Config, registry: Registry) -> Ch
             "不是局域网入口",
             suggestion="查看 wsl_lan_exposure；LWA 不会自动修改 Windows 网络",
         )
+    if not entries:
+        return CheckResult(
+            "lan_url_stale",
+            STATUS_SKIP,
+            f"当前 LAN IP 为 {lan_ip}，尚无已登记的实例 LAN 入口可核对",
+        )
     return CheckResult(
         "lan_url_stale",
         STATUS_OK,
-        f"实例 lanUrl 与当前 LAN IP（{lan_ip or '127.0.0.1'}）一致"
+        f"已登记的实例 lanUrl/routeUrl 与当前 LAN IP（{lan_ip}）一致"
         + ("" if not skipped else f"（{skipped} 个 manifest 跳过）"),
     )
 
 
-def _collect_lan_drifted_ids(
-    ws: Workspace, registry: Registry, lan_ip: str | None
-) -> tuple[list[tuple[str, str]], int]:
-    """返回 ([(instance_id, host), ...], skipped_count)。"""
-    drifted: list[tuple[str, str]] = []
+def _collect_lan_url_hosts(
+    ws: Workspace, registry: Registry
+) -> tuple[list[tuple[str, str, str | None]], int]:
+    from local_webpage_access.lan_network import lan_url_host
+
+    entries: list[tuple[str, str, str | None]] = []
     skipped = 0
     for row in registry.list_instances():
         iid = row["id"]
@@ -1567,12 +1592,26 @@ def _collect_lan_drifted_ids(
         except Exception:  # noqa: BLE001
             skipped += 1
             continue
-        lan_url = manifest.network.lanUrl if manifest.network else None
-        if not lan_url:
+        if not manifest.network:
             continue
-        host = _url_host(lan_url)
-        if lan_ip and host and host not in (lan_ip, "127.0.0.1"):
-            drifted.append((iid, host))
+        for label, url in (
+            ("lanUrl", manifest.network.lanUrl),
+            ("routeUrl", manifest.network.routeUrl),
+        ):
+            if url:
+                entries.append((iid, label, lan_url_host(url)))
+    return entries, skipped
+
+
+def _collect_lan_drifted_ids(
+    ws: Workspace, registry: Registry, lan_ip: str | None
+) -> tuple[list[tuple[str, str]], int]:
+    """返回 ([(instance_id, host), ...], skipped_count)，包含两个 URL。"""
+    entries, skipped = _collect_lan_url_hosts(ws, registry)
+    drifted = [
+        (iid, host) for iid, _label, host in entries
+        if lan_ip and host and host not in (lan_ip, "127.0.0.1", "::1", "localhost")
+    ]
     return drifted, skipped
 
 
@@ -2098,13 +2137,6 @@ def check_port_contention(
         STATUS_OK,
         f"关键端口（:{admin_port}{f'/:{entry_port}' if entry_port else ''}）监听者符合预期",
     )
-
-
-def _url_host(url: str) -> str | None:
-    """从 URL 提取 host（供 lan_url_stale 比对）。"""
-    from urllib.parse import urlparse
-
-    return urlparse(url).hostname
 
 
 def check_disk_space(ws: Workspace, *, min_gb: float = 1.0) -> CheckResult:
@@ -3117,7 +3149,7 @@ def run_doctor(
             drifted_pairs, _skipped = _collect_lan_drifted_ids(
                 ws, caddy_probe_registry, report.current_lan_ip
             )
-            report.drifted_instance_ids = [iid for iid, _host in drifted_pairs]
+            report.drifted_instance_ids = list(dict.fromkeys(iid for iid, _host in drifted_pairs))
 
         report.checks = [
             check_python_version(),

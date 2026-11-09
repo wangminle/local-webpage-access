@@ -2003,6 +2003,7 @@ def _commit_verifying_state(ctx: _ContainerDeploy) -> None:
         ctx.host_port,
         internal_port=manifest.container.internalPort,
         path_alias=_container_path_alias(manifest),
+        previous=manifest.network,
     )
     manifest.network = merge_network_entry(manifest.network, entry)
 
@@ -2300,6 +2301,7 @@ def start_container(
         host_port,
         internal_port=manifest.container.internalPort,
         path_alias=_container_path_alias(manifest),
+        previous=manifest.network,
     )
     manifest.network = merge_network_entry(manifest.network, entry)
 
@@ -3536,7 +3538,7 @@ def _enable_static(
     )
     # BUG-422：防御性一致化派生路径（含 gatewayConfigPath / appPath）
     _refresh_manifest_workspace_paths(workspace, manifest)
-    entry = build_network_entry(config, host_port, path_alias=path_alias)
+    entry = build_network_entry(config, host_port, path_alias=path_alias, previous=manifest.network)
     manifest.network = merge_network_entry(manifest.network, entry)
     registry.set_static_enabled(instance_id, True)
     return manifest

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from local_webpage_access.config import Config
-from local_webpage_access.errors import DataNonemptyError, LifecycleError, LwaError
+from local_webpage_access.errors import DataNonemptyError, InstanceLockBusyError, LifecycleError, LwaError
 from local_webpage_access.file_lock import (
     ensure_lockable,
     release_exclusive,
@@ -214,7 +214,7 @@ def instance_lock(
     validate_instance_id(instance_id)
     tlock = _get_thread_lock(instance_id)
     if not tlock.acquire(timeout=timeout):
-        raise LifecycleError(
+        raise InstanceLockBusyError(
             _lock_timeout_message(
                 instance_id, workspace.run / f"lifecycle-{instance_id}.lock", timeout
             ),
@@ -237,7 +237,7 @@ def instance_lock(
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise LifecycleError(
+                    raise InstanceLockBusyError(
                         _lock_timeout_message(instance_id, lock_path, timeout),
                         instance_id=instance_id,
                     )

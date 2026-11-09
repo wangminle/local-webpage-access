@@ -93,6 +93,7 @@ swap=4GB
   3. Windows **自身 NIC IP** —— 只记录现场结果，**不作为最终 LAN 结论**（本机自测假阴性暂缺充分官方证据，只能写作观察）；
   4. **另一台物理机/手机**访问 `http://<共享 LAN IP>:<port>` —— 最终 LAN 验收。
 * 换网 / DHCP 后 LAN IP 可能变：执行 `lwa access refresh` 与 `lwa access review`（见 [运维手册](operations-playbook.md#72-访问地址刷新g1--imp-038--imp-040)）。`gatewayTls: internal` 且 Caddy 已在线时，刷新会重载仍绑旧 IP 的 TLS 站点（V0.9.1）。可选 mirrored 网络模式见 [开机自启 · WSL 网络](autostart.md#wsl-网络可选-mirrored)。
+* 系统接口枚举命令缺失、失败或超时时，UDP 源地址仅用于诊断。自动刷新保留落盘链接。可运行 `lwa access lan show` 查看原因，再用 `lwa access lan set <IP>` 指定可用于该工作区的地址。
 * **代理**：WSL `autoProxy=true` 便于发行版访问互联网依赖源；LWA **内部**健康/access/Caddy admin 探针走直连，不依赖用户 `unset http_proxy`。人工 `curl` 仍可能受代理影响。
 
 ### PATH / interop（可选精简）

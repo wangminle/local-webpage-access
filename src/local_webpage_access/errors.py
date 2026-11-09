@@ -176,6 +176,10 @@ class LifecycleError(LwaError):
     code = "LIFECYCLE_ERROR"
 
 
+class InstanceLockBusyError(LifecycleError):
+    """等待实例生命周期锁超时。"""
+
+
 class DataNonemptyError(LifecycleError):
     """purge 时 data/ 非空且未 force（IMP-035）。
 

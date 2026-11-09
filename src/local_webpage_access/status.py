@@ -765,8 +765,7 @@ def _resolve_network_urls(
     不盲信落盘 ``manifest.network.lanUrl``；``manual`` 用配置 IP 合成。
     探测失败时回退落盘（若有）或 ``None``，``localhostUrl`` 仍由 hostPort 保证。
     """
-    from urllib.parse import urlparse
-
+    from local_webpage_access.lan_network import is_benchmark_ip, lan_url_host
     from local_webpage_access.ports import (
         build_lan_url,
         build_route_url,
@@ -794,7 +793,7 @@ def _resolve_network_urls(
     }
 
     manifest_path = workspace.app_manifest_path(instance_id)
-    persisted_lan: str | None = None
+    persisted_lan_url: str | None = None
     route_host: str | None = None
     persisted_route: str | None = None
     route_mode_name = False
@@ -808,8 +807,7 @@ def _resolve_network_urls(
             manifest = None
         if manifest and manifest.network:
             net = manifest.network
-            if net.lanUrl:
-                persisted_lan = urlparse(net.lanUrl).hostname
+            persisted_lan_url = net.lanUrl
             if net.routeMode == "name":
                 route_mode_name = True
                 route_host = net.routeHost
@@ -818,6 +816,8 @@ def _resolve_network_urls(
             if isinstance(raw_obs, dict):
                 observation = raw_obs
 
+    persisted_lan = lan_url_host(persisted_lan_url)
+    persisted_route_ip = lan_url_host(persisted_route)
     if not host_port:
         # 无端口时仍返回路径别名元数据（停服实例 PATCH path-alias 依赖 routeHost）
         empty["route_host"] = route_host if route_mode_name else None
@@ -827,7 +827,12 @@ def _resolve_network_urls(
 
     from local_webpage_access.ports import lan_entry_port
 
+    bad_lan = bool(persisted_lan_url and (not persisted_lan or is_benchmark_ip(persisted_lan)))
+    bad_route = bool(persisted_route and (not persisted_route_ip or is_benchmark_ip(persisted_route_ip)))
     current_ip = resolve_lan_ip(config)
+    bad_current = is_benchmark_ip(current_ip)
+    if bad_current:
+        current_ip = None
     source = "manual" if config.lanIpStrategy == "manual" else "live"
     overlay = _wsl_access_overlay(
         config,
@@ -852,17 +857,19 @@ def _resolve_network_urls(
     else:
         # 探测失败：保留落盘，避免用错误结果污染展示
         source = "manifest"
-        lan_url = _resolve_lan_url(workspace, instance_id, host_port)
-        route_url = persisted_route if route_mode_name else None
+        lan_url = None if bad_lan else persisted_lan_url
+        route_url = persisted_route if route_mode_name and not bad_route else None
         current_ip = None
 
     # 评审-组7：IPv6 zone-id（fe80::1%eth0）与 IPv4-mapped（::ffff:1.2.3.4）
     # 先归一化再比较，否则恒 stale；非法/主机名形式保持原比较语义。
     from local_webpage_access.ports import _normalize_ip
 
-    _pl = _normalize_ip(persisted_lan or "") or persisted_lan
-    _ci = _normalize_ip(current_ip or "") or current_ip
-    stale = bool(persisted_lan and current_ip and _pl not in (_ci, "127.0.0.1"))
+    current_host = _normalize_ip(current_ip or "") or current_ip
+    stale = bad_current or bad_lan or bad_route or any(
+        (_normalize_ip(host) or host) not in (current_host, "127.0.0.1", "::1", "localhost")
+        for host in (persisted_lan, persisted_route_ip) if host
+    )
     result = {
         "lan_url": lan_url,
         "route_host": route_host if route_mode_name else None,

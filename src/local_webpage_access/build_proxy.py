@@ -16,15 +16,13 @@ import json
 import os
 import re
 import stat
-import time
 import uuid
-from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
 
-from local_webpage_access import file_lock
 from local_webpage_access.config import BuildProxy, Config
+from local_webpage_access.config_edit import config_save_lock
 from local_webpage_access.errors import ConfigError
 from local_webpage_access.paths import Workspace
 
@@ -181,41 +179,6 @@ def _validate_full_config(updated_text: str, checked: BuildProxy) -> None:
         )
 
 
-_SAVE_LOCK_TIMEOUT_S = 10.0
-_SAVE_LOCK_INTERVAL_S = 0.05
-
-
-@contextlib.contextmanager
-def _save_lock(path: Path) -> Iterator[None]:
-    """配置保存互斥：保护「读-改-校验-替换」全程（BUG-1000）。
-
-    锁文件与配置同目录、独立 inode，持锁期间不 unlink（见
-    :mod:`local_webpage_access.file_lock` 约定）。flock 按 open-file-description
-    互斥，同进程线程与跨进程由同一把锁覆盖。
-    """
-    lock_path = path.with_name(f".{path.name}.save-lock")
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        deadline = time.monotonic() + _SAVE_LOCK_TIMEOUT_S
-        while True:
-            try:
-                file_lock.try_acquire_exclusive(fd)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise ConfigError(
-                        "另一个配置保存操作进行中，请稍后重试"
-                    ) from None
-                time.sleep(_SAVE_LOCK_INTERVAL_S)
-        file_lock.ensure_lockable(fd)
-        try:
-            yield
-        finally:
-            file_lock.release_exclusive(fd)
-    finally:
-        os.close(fd)
-
-
 def _atomic_write(path: Path, content: str) -> None:
     """临时文件 + ``os.replace``，崩溃不留半写配置。
 
@@ -251,7 +214,7 @@ def write_build_proxy(path: Path, proxy: BuildProxy) -> BuildProxy:
     checked = BuildProxy.model_validate({"enabled": proxy.enabled, "url": proxy.url})
     block = render_block(checked)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _save_lock(path):
+    with config_save_lock(path):
         if not path.is_file():
             _validate_full_config(block, checked)
             _atomic_write(path, block)

@@ -11,12 +11,106 @@
 
 from __future__ import annotations
 
+import ipaddress
+
 import typer
 
 from local_webpage_access.cli._common import log, open_workspace_registry
 from local_webpage_access.errors import LwaError
 
 app = typer.Typer(help="访问地址刷新与可用性复核（G1/G2/G5/G6）")
+lan_app = typer.Typer(help="查看或修改当前工作区的 LAN 地址策略", no_args_is_help=True)
+app.add_typer(lan_app, name="lan")
+
+
+@lan_app.command("show")
+def lan_show() -> None:
+    """查看当前策略、选中地址和自动候选。"""
+    from local_webpage_access.config import load_config
+    from local_webpage_access.lan_network import lan_candidates
+    from local_webpage_access.paths import require_workspace
+    from local_webpage_access.ports import (
+        lan_reason_text,
+        resolve_lan_ip,
+        resolve_lan_resolution,
+    )
+
+    try:
+        config = load_config(require_workspace())
+    except LwaError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    lan_ip = resolve_lan_ip(config)
+    typer.echo(f"LAN 策略：{config.lanIpStrategy}")
+    typer.echo(f"当前 LAN IP：{lan_ip or '(无)'}")
+    candidates = lan_candidates()
+    if candidates is None:
+        typer.echo("系统接口枚举不可用")
+    elif not candidates:
+        typer.echo("无可用自动候选")
+    else:
+        typer.echo("自动候选（按优先级）：")
+        for candidate in candidates:
+            typer.echo(f"  {candidate.interface}  {candidate.medium}  {candidate.address}")
+    if lan_ip is None:
+        resolution = resolve_lan_resolution(config)
+        reason = lan_reason_text(resolution.reason, resolution.probe_address)
+        if reason:
+            typer.secho(f"自动地址状态：{reason}", fg=typer.colors.YELLOW)
+        typer.echo("可运行 lwa access lan set <IP> 固定可信地址；已有链接已保留，需复核。")
+
+
+@lan_app.command("set")
+def lan_set(address: str = typer.Argument(..., help="固定使用的 LAN IP 地址")) -> None:
+    """固定 LAN 地址并刷新实例入口。"""
+    from local_webpage_access.lan_network import usable_lan_address
+
+    if not usable_lan_address(address):
+        raise typer.BadParameter("请输入可发布的 IPv4 或 IPv6 地址")
+    _apply_lan_policy(str(ipaddress.ip_address(address)))
+
+
+@lan_app.command("auto")
+def lan_auto() -> None:
+    """恢复自动选择并刷新实例入口。"""
+    _apply_lan_policy(None)
+
+
+def _apply_lan_policy(address: str | None) -> None:
+    from local_webpage_access.access import refresh_network_entries
+    from local_webpage_access.lan_policy import write_lan_policy
+
+    try:
+        workspace, _, registry = open_workspace_registry()
+        try:
+            config = write_lan_policy(workspace, address)
+            typer.echo(f"已保存 LAN 策略：{config.lanIpStrategy}")
+            report = refresh_network_entries(workspace, config, registry)
+        finally:
+            registry.close()
+    except LwaError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"当前 LAN IP：{report.lan_ip or '(无)'}")
+    typer.echo(f"已刷新 {len(report.refreshed)} 个实例")
+    if report.lan_ip is None:
+        from local_webpage_access.ports import lan_reason_text
+
+        reason = lan_reason_text(report.lan_reason, report.lan_probe_address)
+        typer.secho(
+            f"未选到可用 LAN IP，已保留现有地址。{reason or ''}",
+            fg=typer.colors.YELLOW,
+        )
+    elif report.skipped:
+        typer.secho(
+            f"以下实例本次未刷新：{', '.join(report.skipped)}。可运行 lwa access refresh 重试。",
+            fg=typer.colors.YELLOW,
+        )
+    if report.caddy_reload_error:
+        typer.secho(f"Caddy TLS 入口同步失败：{report.caddy_reload_error}", fg=typer.colors.YELLOW)
+    elif report.caddy_reloaded:
+        typer.echo("已同步在线 Caddy 的 TLS 入口。")
+
 
 
 @app.command("refresh")
@@ -36,6 +130,14 @@ def access_refresh() -> None:
             reg.close()
         typer.secho("访问地址刷新完成", fg=typer.colors.GREEN)
         typer.echo(f"  当前 LAN IP：{report.lan_ip or '(无)'}")
+        if report.lan_ip is None:
+            from local_webpage_access.ports import lan_reason_text
+
+            reason = lan_reason_text(report.lan_reason, report.lan_probe_address)
+            typer.secho(
+                f"  {reason or '未解析到 LAN IP'}；已保留现有地址，未同步在线 Caddy",
+                fg=typer.colors.YELLOW,
+            )
         typer.echo(
             f"  刷新实例：{len(report.refreshed)} 个（其中 {report.drifted_count} 个地址漂移）"
         )

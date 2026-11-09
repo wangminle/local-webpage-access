@@ -963,7 +963,9 @@ def _effective_host_lan_ip(snapshot: WslNetworkSnapshot, config: Config) -> str 
     """发现的 Windows 局域网 IP；读不到时才用用户提供的 manualLanIp 作候选。"""
     if snapshot.host_lan_ip:
         return snapshot.host_lan_ip
-    if config.lanIpStrategy == "manual" and config.manualLanIp:
+    from local_webpage_access.lan_network import is_benchmark_ip
+
+    if config.lanIpStrategy == "manual" and not is_benchmark_ip(config.manualLanIp):
         if config.manualLanIp != snapshot.guest_ip:
             return config.manualLanIp
     return None

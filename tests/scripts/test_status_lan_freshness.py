@@ -381,3 +381,20 @@ def test_record_lan_observation_does_not_clobber_concurrent_build_env(
     assert saved.buildEnv == {"VITE_BASE": "/hello-lwa/"}
     assert saved.network.externalLanObservation is not None
     assert saved.network.externalLanObservation["vantage"] == "lan-client"
+
+
+def test_status_hides_old_benchmark_urls_without_a_current_ip(ws_reg, monkeypatch):
+    ws, reg = ws_reg
+    _seed(
+        ws,
+        reg,
+        lan_url="http://198.18.0.1:21000",
+        route_host="demo",
+        route_url="http://198.18.0.1:8080/demo/",
+    )
+    monkeypatch.setattr("local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda: None)
+    monkeypatch.setattr("local_webpage_access.ports.resolve_lan_ip", lambda cfg: None)
+    snap = instance_status(ws, Config(), reg, "demo")
+    assert snap.lan_url is None
+    assert snap.route_url is None
+    assert snap.lan_address_stale is True

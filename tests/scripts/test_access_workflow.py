@@ -20,6 +20,7 @@ def _seed(
     *,
     host_port: int = 21000,
     lan_url: str,
+    route_url: str | None = None,
 ):
     from local_webpage_access.models import (
         DesiredState,
@@ -45,7 +46,7 @@ def _seed(
         status=Status.RUNNING,
         desiredState=DesiredState.RUNNING,
         static=StaticConfig(root="public", hostPort=host_port, enabled=True),
-        network=NetworkConfig(hostPort=host_port, lanUrl=lan_url),
+        network=NetworkConfig(hostPort=host_port, lanUrl=lan_url, routeUrl=route_url),
     )
     manifest.save(workspace.app_manifest_path(iid))
     registry.upsert_from_manifest(manifest)
@@ -99,6 +100,19 @@ def test_throttled_refresh_writes_once_within_window(env, monkeypatch) -> None:
     r2 = aw.maybe_throttled_lan_refresh(ws, cfg, reg, min_interval=60.0)
     assert r2 is None
     assert calls["n"] == 1
+
+
+def test_persisted_route_url_drift_triggers_background_refresh(env) -> None:
+    from local_webpage_access.access_workflow import _persisted_lan_hosts_differ
+
+    ws, _cfg, reg = env
+    _seed(
+        ws,
+        reg,
+        lan_url="http://192.168.1.50:21000",
+        route_url="http://198.18.0.1:8080/demo/",
+    )
+    assert _persisted_lan_hosts_differ(ws, reg, "192.168.1.50") is True
 
 
 def test_throttled_refresh_single_flight(env, monkeypatch) -> None:

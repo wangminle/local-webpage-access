@@ -83,7 +83,9 @@
 | 命令 | 用途 |
 | --- | --- |
 | `lwa alias set <ID> <别名>` / `lwa alias clear <ID>` | 设置或清除路径别名；设置需要 Caddy，并经过路径兼容性检查 |
-| `lwa access refresh` | 换网或 IP 变化后刷新访问地址 |
+| `lwa access lan show` | 查看当前工作区的 LAN 策略、选中地址、候选接口与降级原因 |
+| `lwa access lan set <IP>` / `lwa access lan auto` | 固定工作区 LAN IP 或恢复自动选址，并刷新实例入口 |
+| `lwa access refresh` | 换网或 IP 变化后刷新访问地址。没有可信地址时保留现有入口并报告原因 |
 | `lwa access review [--json] [--rebuild-if-needed]` | 复核实际访问入口、资源和 API 路径 |
 | `lwa access record-observation <ID> --vantage <lan-client/windows-host/guest> --protocol <http/https> --evidence <证据> [--status N] [--url URL]` | 记录一次来自独立设备的外部观测（LWA 不自行跨设备探测）；成功观测仅在协议/端口/路径与当前入口一致且网络指纹未变时升格为已验证 |
 | `lwa gateway on` / `lwa gateway off` / `lwa gateway status` | 管理工作区的 Caddy 网关 |

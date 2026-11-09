@@ -355,7 +355,7 @@ POST /api/access/refresh
 Authorization: Bearer <token>
 ```
 
-立即用当前 LAN IP 重算并落盘各实例 `lanUrl`/`routeUrl`（与 `lwa access refresh` 同源）。管理页在 `lanAddressStale` 时会提示并可一键调用。已记录的外部观测不会被这次刷新删掉；网络指纹或入口协议/主机/端口/路径变了会在读时标为失效。
+立即用当前 LAN IP 重算并落盘各实例 `lanUrl`/`routeUrl`（与 `lwa access refresh` 同源）。 无可信地址时保留已有 manifest，响应包含 `lanReason` 和 `lanProbeAddress` 供诊断。管理页在 `lanAddressStale` 时会提示并可一键调用。已记录的外部观测不会被这次刷新删掉；网络指纹或入口协议/主机/端口/路径变了会在读时标为失效。
 
 ### 记录外部观测
 

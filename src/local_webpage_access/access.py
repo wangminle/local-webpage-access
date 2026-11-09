@@ -29,13 +29,14 @@ from dataclasses import dataclass, field
 from functools import partial
 from html.parser import HTMLParser
 from typing import Any, Callable
-from urllib.parse import urljoin, urlparse, urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import LwaError
 from local_webpage_access.logging import get_logger
 from local_webpage_access.paths import Workspace
 from local_webpage_access.ports import entry_scheme as _entry_scheme_of
+from local_webpage_access.lan_network import is_benchmark_ip, lan_url_host, parse_lan_url
 from local_webpage_access.ports import lan_entry_port, resolve_lan_ip
 from local_webpage_access.probe import mark_probe_url, urlopen_direct
 from local_webpage_access.registry import Registry
@@ -323,8 +324,13 @@ class RefreshReport:
     """地址刷新汇总。"""
 
     lan_ip: str | None = None
+    lan_reason: str | None = None
+    lan_probe_address: str | None = None
     refreshed: list[RefreshedInstance] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    lock_skipped: list[str] = field(default_factory=list)
+    lock_retries: int = 0
+    lock_waited: float = 0.0
     # issue #44：TLS 站点块仍绑旧 LAN IP 时是否已重载在线 Caddy。
     caddy_reloaded: bool = False
     caddy_reload_error: str | None = None
@@ -336,6 +342,8 @@ class RefreshReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "lanIp": self.lan_ip,
+            "lanReason": self.lan_reason,
+            "lanProbeAddress": self.lan_probe_address,
             "driftedCount": self.drifted_count,
             "refreshed": [
                 {
@@ -349,20 +357,15 @@ class RefreshReport:
                 for r in self.refreshed
             ],
             "skipped": self.skipped,
+            "lockSkipped": self.lock_skipped,
+            "lockRetries": self.lock_retries,
+            "lockWaited": round(self.lock_waited, 3),
             "caddyReloaded": self.caddy_reloaded,
             "caddyReloadError": self.caddy_reload_error,
         }
 
 
 # ---- LAN URL 刷新（G1）-----------------------------------------------------
-
-
-def _url_host(url: str | None) -> str | None:
-    """从 URL 中提取 host 部分（用于漂移比对）。"""
-    if not url:
-        return None
-    parsed = urlparse(url)
-    return parsed.hostname
 
 
 def _extract_host_port(manifest: Any) -> tuple[int | None, int | None]:
@@ -526,9 +529,16 @@ def record_lan_observation(
 
 
 def refresh_network_entries(
-    workspace: Workspace, config: Config, registry: Registry
+    workspace: Workspace,
+    config: Config,
+    registry: Registry,
+    *,
+    instance_ids: set[str] | None = None,
+    lan_ip: str | None = None,
 ) -> RefreshReport:
-    """用当前 LAN IP 重算所有实例的 ``network.lanUrl``/``routeUrl``（G1）。
+    """用当前 LAN IP 重算实例的 ``network.lanUrl``/``routeUrl``（G1）。
+
+    锁竞争重试使用 ``instance_ids`` 限定范围，并复用首轮 ``lan_ip`` 与网关同步结果。
 
     对每个有 ``hostPort`` 的实例：以当前 :func:`resolve_lan_ip` 重建
     :func:`build_network_entry`（保留 hostPort/internalPort/**生效中的** pathAlias），
@@ -545,13 +555,22 @@ def refresh_network_entries(
     from local_webpage_access.models import InstanceManifest, merge_network_entry
     from local_webpage_access.ports import build_network_entry
 
-    lan_ip = resolve_lan_ip(config)
+    if lan_ip is None:
+        lan_ip = resolve_lan_ip(config)
     report = RefreshReport(lan_ip=lan_ip)
     rows = registry.list_instances()
+    if instance_ids is not None:
+        rows = [row for row in rows if str(row["id"]) in instance_ids]
     if lan_ip is None:
+        from local_webpage_access.ports import lan_reason_text, resolve_lan_resolution
+
+        resolution = resolve_lan_resolution(config)
+        report.lan_reason = resolution.reason
+        report.lan_probe_address = resolution.probe_address
         # BUG-325：临时探测失败时保留最后一次可信 URL，不能把所有地址写成 None。
         report.skipped.extend(str(row["id"]) for row in rows)
-        log.warning("刷新访问地址：未解析到 LAN IP，保留现有地址并跳过写盘")
+        reason = lan_reason_text(resolution.reason, resolution.probe_address)
+        log.warning("刷新访问地址：%s；保留现有地址并跳过写盘", reason or "未解析到 LAN IP")
         return report
     for row in rows:
         iid = row["id"]
@@ -559,7 +578,7 @@ def refresh_network_entries(
         if not manifest_path.is_file():
             report.skipped.append(iid)
             continue
-        from local_webpage_access.errors import LifecycleError
+        from local_webpage_access.errors import InstanceLockBusyError, LifecycleError
         from local_webpage_access.lifecycle import instance_lock
 
         try:
@@ -575,7 +594,7 @@ def refresh_network_entries(
                     report.skipped.append(iid)
                     continue
                 old_lan = manifest.network.lanUrl if manifest.network else None
-                old_host = _url_host(old_lan)
+                old_host = lan_url_host(old_lan)
                 entry = build_network_entry(
                     config,
                     host_port,
@@ -592,12 +611,17 @@ def refresh_network_entries(
                     log.warning("刷新地址：实例 %s manifest 写入失败：%s", iid, exc)
                     report.skipped.append(iid)
                     continue
-        except LifecycleError as exc:
+        except InstanceLockBusyError as exc:
             log.warning("刷新地址：实例 %s 正被其他操作占用，跳过本次刷新：%s", iid, exc)
+            report.skipped.append(iid)
+            report.lock_skipped.append(iid)
+            continue
+        except LifecycleError as exc:
+            log.warning("刷新地址：实例 %s 更新失败，跳过：%s", iid, exc)
             report.skipped.append(iid)
             continue
         new_lan = entry["lanUrl"]
-        new_host = _url_host(new_lan)
+        new_host = lan_url_host(new_lan)
         report.refreshed.append(
             RefreshedInstance(
                 instance_id=iid,
@@ -621,9 +645,8 @@ def refresh_network_entries(
         len(report.refreshed),
         report.drifted_count,
     )
-    reloaded, reload_error = sync_caddy_tls_bind(workspace, config, lan_ip)
-    report.caddy_reloaded = reloaded
-    report.caddy_reload_error = reload_error
+    if instance_ids is None:
+        report.caddy_reloaded, report.caddy_reload_error = sync_caddy_tls_bind(workspace, config, lan_ip)
     return report
 
 
@@ -1458,15 +1481,33 @@ def _review_instance(
         _fill_port_listener(rep, host_port)
         return rep
 
-    # 2. LAN URL 探活 + 漂移检测。
-    if rep.lan_url:
-        lan_host = _url_host(rep.lan_url)
-        if lan_ip and lan_host and lan_host not in (lan_ip, "127.0.0.1"):
-            rep.lan_url_stale = True
+    # 2. 两个外部 URL 的地址来源与漂移判断；本机探活不代表独立客户端可达。
+    for label, url in (("lanUrl", rep.lan_url), ("routeUrl", rep.route_url)):
+        host = lan_url_host(url)
+        if not url:
+            continue
+        if not host:
+            rep.findings.append(f"{label} 格式无效，请运行 `lwa access refresh` 更新")
+        elif is_benchmark_ip(host):
             rep.findings.append(
-                f"lanUrl host={lan_host} 与当前 LAN IP={lan_ip} 不一致（地址漂移，"
+                f"{label} 指向基准测试网段，不能作为 LAN 入口。"
+                "请检查 `lwa access lan show`，选定可用地址后刷新。"
+            )
+        elif host not in ("127.0.0.1", "::1", "localhost") and not lan_ip:
+            rep.findings.append(
+                f"{label} host={host} 的当前来源无法确认；本机探活不能替代 LAN 客户端验证。"
+                "请运行 `lwa access lan show` 查看候选或设置手工地址。"
+            )
+        elif lan_ip and host not in (lan_ip, "127.0.0.1", "::1", "localhost"):
+            rep.findings.append(
+                f"{label} host={host} 与当前 LAN IP={lan_ip} 不一致（地址漂移，"
                 "运行 `lwa access refresh` 刷新）"
             )
+        else:
+            continue
+        if label == "lanUrl":
+            rep.lan_url_stale = True
+    if lan_url_host(rep.lan_url):
         rep.lan_probe = _http_get(rep.lan_url, ssl_context=entry_ctx)
         if not rep.lan_probe.ok and not rep.lan_url_stale:
             rep.findings.append(
@@ -1480,7 +1521,7 @@ def _review_instance(
 
     entry_port = lan_entry_port(config)
     entry_scheme_now = entry_scheme(config)
-    route_target = rep.route_url
+    route_target = rep.route_url if lan_url_host(rep.route_url) else None
     if not route_target and path_alias and entry_port is not None:
         route_target = f"{entry_scheme_now}://127.0.0.1:{entry_port}/{path_alias}/"
     if route_target and path_alias:
@@ -1630,8 +1671,8 @@ def _alias_for_instance(report: AccessReviewReport, instance_id: str) -> str | N
             if rep.path_alias:
                 return rep.path_alias
             if rep.route_url:
-                path = urlparse(rep.route_url).path.strip("/")
-                if path:
+                parsed = parse_lan_url(rep.route_url)
+                if parsed and (path := parsed.path.strip("/")):
                     return path.split("/")[0]
             return None
     return None

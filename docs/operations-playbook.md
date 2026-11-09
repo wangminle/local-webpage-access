@@ -482,7 +482,7 @@ lwa autostart status [--json]           # 单元 + 进程 + 运行模式（syste
 要点：
 
 - **停服**：先 `lwa autostart disable`，再 `lwa daemon/manager/gateway off`（`off` 已内置 `coordinated_disable`）。
-- **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长（V0.8.2 起按 live 证据估算：存活 pidfile / systemd `InactiveEnterTimestamp`，陈旧 `run/*.json` 不采信、不确定不虚报）；enabled=false 跳过。均不与 KeepAlive 抢锁。重启后先**等待服务就绪**（`waitReady`，最多约 30s）再进入 access/doctor 收尾，超时降级 warning 并提示稍后 `lwa doctor` 复核（V0.8.2 / issue #5）。
+- **升级重启/拉起**：`lwa update` 对自有服务走三态 reconcile（IMP-059）——运行中交 `coordinated_restart`（监督器 `kickstart -k` / `systemctl restart`）；enabled 但意外未运行交 `coordinated_start` 拉起并标注中断时长（V0.8.2 起按 live 证据估算：存活 pidfile / systemd `InactiveEnterTimestamp`，陈旧 `run/*.json` 不采信、不确定不虚报）；enabled=false 跳过。均不与 KeepAlive 抢锁。重启后先**等待服务就绪**（`waitReady`，最多约 30s）再进入 access/doctor 收尾，超时降级 warning 并提示稍后 `lwa doctor` 复核（V0.8.2 / issue #5）。访问地址刷新遇到实例锁时，只重试被锁实例，每 0.5s 轮询、总等待最多 10s；最终仍占用时 `accessRefresh` 为 warning，报告「部分完成」及实例列表，不再静默报 ok。
 - **daemon 自愈**（DEV-042）：watcher 启动时与每 60s 执行 `reconcile()`，恢复 `desired=running` 但状态偏离的实例。Caddy 后端且网关被显式 `lwa gateway off` 时跳过 caddy 静态。V0.8.8（issue #16）起自愈起止与 `lifecycle_stage` 阶段会镜像一份到 `logs/lwa.log`（完整日志仍在 `logs/daemon.log`）；V0.9.3（issue #59 / S2-08）起镜像按操作来源区分，行首带 `source=`（`source=daemon` / `source=manager` / `source=agent`）——manager 与 Agent 通道触发的部署阶段同样落主日志，CLI 触发的本就在 `lwa.log` 不重复镜像——构建失败后盯主日志即可看到"自动恢复开始 / 已自动重试并恢复"，不再表现为静默恢复。
 - **Linux**：systemd user + 建议 `enable-linger`；**WSL** 另需 Windows 登录任务唤醒发行版；**Windows 原生不支持**自启（见 [autostart.md](autostart.md)）。
 
@@ -562,7 +562,17 @@ lwa doctor --access  # 诊断同时复用 access review
 
 DHCP 换网后管理页「端口」链接会**读时合成**当前 IP（无需先 refresh）；落盘由管理页列表旁路 / daemon reconcile **节流**自愈。`lwa gateway on` 与 `lwa update` 也会刷新。doctor 的 `lan_url_stale` 检查会告警漂移；`--json` 含 `currentLanIp` / `driftedInstanceIds`。WSL NAT 下该「当前 IP」是仅宿主可达的 guest 地址（链接文案显示为「宿主」），refresh 只刷新 guest 地址落盘、不能替代 Windows 侧转发——局域网入口判断见 §7.5 的 `wsl_lan_exposure`。
 
-`lanIpStrategy=manual` 时不自动覆盖落盘。AI 协作流程见 Skill `lwa-review-access-urls`。
+自动模式优先选择连接可用且已取得 IPv4 的有线接口，其次是 Wi-Fi。同类按接口顺序选择，例如 `eth0` 优先于 `eth1`，即使 `eth1` 的 IP 数值更小。接口枚举会排除隧道和 `198.18.0.0/15` 基准测试网段。系统接口枚举不可用或输出无法解析时，UDP 源地址只作为诊断线索；即使它属于 RFC 1918 或 `100.64.0.0/10`，没有接口证据也不会写成自动 LAN 地址。此时刷新会保留已有 manifest 和运行中的 Caddy 配置，`lan show`、`access refresh` 与 `doctor` 会区分「无候选」和「来源未验证」；可用手工策略固定可信地址。只从本机探活成功表示本机可访问，跨设备可达性由对应客户端验证。
+
+```bash
+lwa access lan show               # 查看当前策略、选中地址及按优先级排列的候选
+lwa access lan set 192.168.1.50   # 为当前工作区固定 LAN IP 并刷新实例入口
+lwa access lan auto               # 恢复自动选择并刷新实例入口
+```
+
+临时无法确认 LAN 地址时，实例启动或重建会保留与当前端口、别名和协议匹配的合法旧入口，管理页会标为待复核。doctor 和 access review 会报告格式无效的入口。旧配置若手工固定了 benchmark 地址，需先改成可用于局域网的地址再刷新。
+
+固定地址写入 `local-web.yml` 的 `lanIpStrategy: manual` 和 `manualLanIp`。请填写当前网络中可用于该工作区的地址。换网后可重新设置或切回自动。切换策略后，管理页和 daemon 会读取新策略。若命令提示有实例本次未刷新，可在实例操作结束后执行 `lwa access refresh`。AI 协作流程见 Skill `lwa-review-access-urls`。
 
 ### 7.3 访问可用性复核（G2/G5）
 

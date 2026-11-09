@@ -1018,7 +1018,10 @@ def reconcile(
     下一轮 reconcile 重新 spawn。
     """
     from local_webpage_access.access_workflow import maybe_throttled_lan_refresh
+    from local_webpage_access.lan_policy import config_with_latest_lan_policy
     from local_webpage_access.lifecycle import observe_status, start_instance
+
+    config = config_with_latest_lan_policy(workspace, config)
 
     # IMP-040 R4：无管理页时也周期自愈落盘 lanUrl（与列表旁路共用节流 helper）
     try:

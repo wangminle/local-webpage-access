@@ -15,11 +15,19 @@ from __future__ import annotations
 import ipaddress
 import socket
 import subprocess
+from dataclasses import dataclass
 from typing import Iterable
 
 from local_webpage_access.config import Config
 from local_webpage_access.errors import PortError
+from local_webpage_access.lan_network import (
+    is_benchmark_ip,
+    lan_candidates,
+    parse_lan_url,
+    usable_lan_address,
+)
 from local_webpage_access.logging import get_logger
+from local_webpage_access.models import NetworkConfig
 from local_webpage_access.registry import Registry
 
 log = get_logger("ports")
@@ -69,23 +77,71 @@ def is_port_listening(port: int, *, host: str = "127.0.0.1", timeout: float = 0.
         sock.close()
 
 
-def detect_lan_ip() -> str | None:
-    """推断本机局域网 IP。
+@dataclass(frozen=True)
+class LanResolution:
+    """LAN 地址选择结果；没有可信地址时也保留可解释的来源与原因。"""
 
-    通过 UDP socket "连接" 一个外部地址来获知出口网卡的本地地址，
-    不真正发送数据包。离线或多网卡时可能返回 ``None``。
-    """
+    ip: str | None = None
+    interface: str | None = None
+    source: str = "none"
+    reason: str | None = None
+    probe_address: str | None = None
+
+
+def _udp_source_address() -> str | None:
     for target in _PROBE_TARGETS:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.connect((target, 80))
-            ip = sock.getsockname()[0]
-            if ip and not ip.startswith("127."):
-                return ip
+            address = sock.getsockname()[0]
+            if usable_lan_address(address):
+                return address
         except OSError:
             continue
         finally:
             sock.close()
+    return None
+
+
+def detect_lan_resolution() -> LanResolution:
+    """按接口证据选择地址；UDP 源地址在枚举失败时仅作诊断线索。"""
+    candidates = lan_candidates()
+    if candidates is not None:
+        if candidates:
+            selected = candidates[0]
+            return LanResolution(
+                ip=selected.address,
+                interface=selected.interface,
+                source="interface",
+            )
+        return LanResolution(source="auto", reason="no_candidates")
+    probe_address = _udp_source_address()
+    if probe_address:
+        return LanResolution(
+            source="udp",
+            reason="source_unverified",
+            probe_address=probe_address,
+        )
+    return LanResolution(source="none", reason="enumeration_unavailable")
+
+
+def detect_lan_ip() -> str | None:
+    """按有线、Wi-Fi 和接口顺序选择可发布的 LAN IPv4。"""
+    return detect_lan_resolution().ip
+
+
+def lan_reason_text(reason: str | None, probe_address: str | None = None) -> str | None:
+    if reason == "manual_benchmark":
+        return "手工 LAN IP 位于基准测试网段，请设置可用于局域网的地址"
+    if reason == "no_candidates":
+        return "系统接口枚举成功，但没有可发布的 LAN 候选"
+    if reason == "source_unverified":
+        return (
+            f"系统接口枚举不可用；UDP 源地址 {probe_address or '(未知)'} 的接口来源未验证，"
+            "不能作为自动 LAN 地址"
+        )
+    if reason == "enumeration_unavailable":
+        return "系统接口枚举不可用，且未获得可验证的 UDP 来源"
     return None
 
 
@@ -184,10 +240,19 @@ def is_local_ip(ip: str, local_ips: set[str] | None = None) -> bool:
     return n in local_ips
 
 
+def resolve_lan_resolution(config: Config) -> LanResolution:
+    """根据配置策略返回地址、来源和不可发布原因。"""
+    if config.lanIpStrategy == "manual":
+        if is_benchmark_ip(config.manualLanIp):
+            return LanResolution(source="manual", reason="manual_benchmark")
+        return LanResolution(ip=config.manualLanIp, source="manual")
+    return detect_lan_resolution()
+
+
 def resolve_lan_ip(config: Config) -> str | None:
     """根据配置策略解析局域网 IP（auto 或 manual）。"""
     if config.lanIpStrategy == "manual":
-        return config.manualLanIp
+        return resolve_lan_resolution(config).ip
     return detect_lan_ip()
 
 
@@ -365,6 +430,20 @@ class PortAllocator:
         self.registry.release_instance_ports(instance_id)
 
 
+def _keep_lan_url(
+    url: str | None, *, scheme: str, port: int | None, path: str,
+) -> str | None:
+    parsed = parse_lan_url(url)
+    if (
+        port is not None and parsed is not None
+        and not is_benchmark_ip(parsed.hostname)
+        and parsed.scheme == scheme and (parsed.port or (443 if scheme == "https" else 80)) == port
+        and (parsed.path or "/") == path
+    ):
+        return url
+    return None
+
+
 def build_network_entry(
     config: Config,
     host_port: int,
@@ -372,41 +451,34 @@ def build_network_entry(
     internal_port: int | None = None,
     lan_ip: str | None = None,
     path_alias: str | None = None,
+    previous: NetworkConfig | None = None,
 ) -> dict:
-    """构造 ``local-web.json`` 的 ``network`` 字段。
+    """构造访问入口，探测失败时可保留仍匹配端口和别名的旧 URL。
 
-    对应 WBS-06.07~09。``path_alias`` 非 ``None`` 时（IMP-006）写入
-    ``routeMode="name"`` + ``routeHost=<alias>`` + ``routeUrl``（统一入口 URL）。
-
-    HTTPS 首版交付（W07）：``routeUrl`` 按 TLS 入口合成（https + tlsPort）；
-    ``lanUrl`` 保持 ``http://<ip>:<hostPort>`` 直连语义（BUG-713：实例直连口
-    始终是明文 HTTP——TLS 只覆盖网关入口，合成 https 会让 access review 恒
-    误报探活失败）；``host`` 记录 ``instanceBindHost`` 实际绑定。
+    直连实例仍用 HTTP；路径别名采用当前网关协议和端口。
     """
     if lan_ip is None:
         lan_ip = resolve_lan_ip(config)
-    bind_host = getattr(config, "instanceBindHost", "0.0.0.0") or "0.0.0.0"
     entry_port = lan_entry_port(config)
-    if path_alias is not None:
-        route_url = build_route_url(lan_ip, entry_port, path_alias, config=config)
-        return {
-            "host": bind_host,
-            "internalPort": internal_port,
-            "hostPort": host_port,
-            "routeMode": "name",
-            "routeHost": path_alias,
-            "routeUrl": route_url,
-            "lanUrl": build_lan_url(lan_ip, host_port),
-            "healthUrl": build_health_url(host_port),
-        }
+    lan_url = build_lan_url(lan_ip, host_port)
+    route_url = (
+        build_route_url(lan_ip, entry_port, path_alias, config=config)
+        if path_alias is not None else None
+    )
+    if lan_ip is None and previous is not None:
+        lan_url = _keep_lan_url(previous.lanUrl, scheme="http", port=host_port, path="/")
+        if path_alias is not None:
+            route_url = _keep_lan_url(
+                previous.routeUrl, scheme=entry_scheme(config), port=entry_port, path=f"/{path_alias}/"
+            )
     return {
-        "host": bind_host,
+        "host": getattr(config, "instanceBindHost", "0.0.0.0") or "0.0.0.0",
         "internalPort": internal_port,
         "hostPort": host_port,
-        "routeMode": "port",
-        "routeHost": None,
-        "routeUrl": None,
-        "lanUrl": build_lan_url(lan_ip, host_port),
+        "routeMode": "name" if path_alias is not None else "port",
+        "routeHost": path_alias,
+        "routeUrl": route_url,
+        "lanUrl": lan_url,
         "healthUrl": build_health_url(host_port),
     }
 

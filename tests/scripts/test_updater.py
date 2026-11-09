@@ -1253,6 +1253,76 @@ def test_access_refresh_failure_separate_from_pip(
     assert report.step("accessReview") is not None
 
 
+def test_access_refresh_retries_only_locked_instances_until_released(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    from local_webpage_access import access_workflow as aw
+    from local_webpage_access.access import RefreshReport, RefreshedInstance
+
+    calls: list[set[str] | None] = []
+
+    def fake_refresh(ws, cfg, reg, instance_ids=None, *, lan_ip=None):
+        assert lan_ip == ("192.168.1.50" if instance_ids is not None else None)
+        calls.append(set(instance_ids) if instance_ids is not None else None)
+        if instance_ids is None:
+            result = RefreshReport(lan_ip="192.168.1.50", skipped=["noport", "busy"])
+            result.lock_skipped = ["busy"]
+            return result
+        return RefreshReport(
+            lan_ip="192.168.1.50",
+            refreshed=[RefreshedInstance(instance_id="busy", new_host="192.168.1.50")],
+        )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(aw, "refresh_network_entries", fake_refresh)
+    monkeypatch.setattr(aw.time, "sleep", lambda seconds: sleeps.append(seconds))
+    report = run_update(
+        workspace, config, registry, options=_opts(review_access=False)
+    )
+
+    step = report.step("accessRefresh")
+    assert step is not None and step.status == "ok"
+    assert calls == [None, {"busy"}]
+    assert sleeps == [0.5]
+    assert step.extra["accessRefresh"]["lockSkipped"] == []
+    assert step.extra["accessRefresh"]["lockRetries"] == 1
+    assert step.extra["accessRefresh"]["skipped"] == ["noport"]
+
+
+def test_access_refresh_reports_partial_when_instance_lock_persists(
+    workspace: Workspace, config: Config, registry: Registry, monkeypatch
+) -> None:
+    from local_webpage_access import access_workflow as aw
+    from local_webpage_access.access import RefreshReport
+
+    calls: list[set[str] | None] = []
+    clock = {"now": 0.0}
+
+    def fake_refresh(ws, cfg, reg, instance_ids=None, *, lan_ip=None):
+        assert lan_ip == ("192.168.1.50" if instance_ids is not None else None)
+        calls.append(set(instance_ids) if instance_ids is not None else None)
+        result = RefreshReport(lan_ip="192.168.1.50", skipped=["busy"])
+        result.lock_skipped = ["busy"]
+        return result
+
+    monkeypatch.setattr(aw, "refresh_network_entries", fake_refresh)
+    monkeypatch.setattr(aw.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        aw.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds)
+    )
+    report = run_update(
+        workspace, config, registry, options=_opts(review_access=False)
+    )
+
+    step = report.step("accessRefresh")
+    assert step is not None and step.status == "warning"
+    assert "部分完成" in step.message and "busy" in step.message
+    assert calls[0] is None
+    assert all(call == {"busy"} for call in calls[1:])
+    assert step.extra["accessRefresh"]["lockSkipped"] == ["busy"]
+    assert step.extra["accessRefresh"]["lockWaited"] <= 10.0
+
+
 def test_no_review_access_skips_review_step(
     workspace: Workspace, config: Config, registry: Registry, monkeypatch
 ) -> None:

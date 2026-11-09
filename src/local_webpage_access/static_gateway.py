@@ -1627,12 +1627,13 @@ class StaticGateway:
         BUG-944 的触发条件——无 SNI 连接按本地地址选证书永远选不到它，所以这种
         情况下全部地址要落在同一张证书上（见 :func:`ensure_entry_tls_cert`）。
         """
+        from local_webpage_access.lan_network import is_benchmark_ip
         from local_webpage_access.ports import resolve_lan_ip
 
         hosts = ["127.0.0.1"]
         if lan_ip is None:
             lan_ip = resolve_lan_ip(self.config)
-        if lan_ip:
+        if lan_ip and not is_benchmark_ip(lan_ip):
             if lan_ip not in hosts:
                 hosts.append(lan_ip)
         else:
@@ -1643,7 +1644,7 @@ class StaticGateway:
             )
         extra = self._wsl_tls_extra_ip()
         foreign = False
-        if extra and extra not in hosts:
+        if extra and extra not in hosts and not is_benchmark_ip(extra):
             hosts.append(extra)
             foreign = True
         from local_webpage_access.tailscale_network import (
@@ -1665,7 +1666,7 @@ class StaticGateway:
             for names in caddyfile_tls_hosts(previous, ports).values():
                 for name in sorted(names):
                     ip = name.strip("[]")
-                    if ip not in hosts:
+                    if ip not in hosts and not is_benchmark_ip(ip):
                         hosts.append(ip)
         if snapshot.get("available"):
             for field in ("ipv4", "ipv6"):

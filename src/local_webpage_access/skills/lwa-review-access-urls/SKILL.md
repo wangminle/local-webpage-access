@@ -25,10 +25,14 @@ description: >-
 
 | 操作 | 默认 | 说明 |
 | --- | --- | --- |
+| `lwa access lan show` | **只读** | 查看当前选中的 LAN IP、策略和候选网卡 |
+| `lwa access lan set <IP>` / `lwa access lan auto` | 写盘 | 按用户要求固定工作区 LAN IP 或恢复自动，随后刷新入口 |
 | `lwa access refresh` | 写盘 | 重写 `lanUrl`/`routeUrl`；`gatewayTls: internal` 且 Caddy 已在线时，还会重载仍绑旧 IP 的 8443/9443。不 rebuild、不改业务代码。关掉的网关不会被拉起 |
 | `lwa access review` | **只读** | HTTP 探活 + SPA 别名资源错位检测（空 200 / 404 / 错误 MIME）；不改文件 |
 | `lwa doctor --access` | 只读复核 | 复用同一套 `review_access()`，不另写探测 |
 | `--rebuild-if-needed` | **显式才写** | 仅对 IMP-023 命中实例 rebuild；**必须**经用户确认 |
+
+多网卡下先运行 `lwa access lan show`。自动策略优先有线、其次 Wi-Fi，同类按接口顺序。用户指定地址时用 `lwa access lan set <IP>`，恢复默认用 `lwa access lan auto`。接口枚举不可用时，UDP 源地址仅供诊断，不能作为自动 LAN 地址；「无候选」与「来源未验证」都不会清空旧链接或重载在线 Caddy。`lanUrl` 与 `routeUrl` 必须一起核查，本机 HTTP 200 不代表独立 LAN 客户端可达。
 
 禁止把 DHCP / LAN IP 漂移解读为必须 rebuild。只有 IMP-023（绝对路径子资源相对带前缀错位：空 200 / 404 / 错误 MIME）才建议重建。
 

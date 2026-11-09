@@ -409,8 +409,10 @@ class _Ctx:
     """请求级别的共享上下文（从 ``app.state`` 取）。"""
 
     def __init__(self, app: FastAPI) -> None:
+        from local_webpage_access.lan_policy import config_with_latest_lan_policy
+
         self.workspace: Workspace = app.state.workspace
-        self.config: Config = app.state.config
+        self.config = config_with_latest_lan_policy(self.workspace, app.state.config)
         self.registry: Registry = app.state.registry
 
     @classmethod

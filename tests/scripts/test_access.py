@@ -344,6 +344,22 @@ def test_refresh_skips_instance_without_hostport(workspace, registry, config, mo
 
     report = refresh_network_entries(workspace, config, registry)
     assert "noport" in report.skipped
+    assert report.lock_skipped == []
+
+
+def test_refresh_classifies_real_instance_lock_contention(
+    workspace, registry, config, monkeypatch
+):
+    from local_webpage_access.lifecycle import instance_lock
+
+    _seed_static(workspace, registry, "busy", host_port=21000)
+    monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: "192.168.1.50")
+    with instance_lock(workspace, "busy"):
+        report = refresh_network_entries(workspace, config, registry)
+
+    assert report.skipped == ["busy"]
+    assert report.lock_skipped == ["busy"]
+    assert report.to_dict()["lockSkipped"] == ["busy"]
 
 
 def _tls_config(config):
@@ -544,11 +560,19 @@ def test_refresh_skips_write_when_lan_ip_unavailable(
     )
     from local_webpage_access.models import InstanceManifest
 
+    from types import SimpleNamespace
+
     monkeypatch.setattr("local_webpage_access.access.resolve_lan_ip", lambda cfg: None)
+    monkeypatch.setattr(
+        "local_webpage_access.ports.resolve_lan_resolution",
+        lambda cfg: SimpleNamespace(reason="source_unverified", probe_address="172.19.0.1"),
+    )
 
     report = refresh_network_entries(workspace, config, registry)
 
     assert report.lan_ip is None
+    assert report.lan_reason == "source_unverified"
+    assert report.to_dict()["lanProbeAddress"] == "172.19.0.1"
     assert report.refreshed == []
     assert "demo" in report.skipped
     saved = InstanceManifest.load(workspace.app_manifest_path("demo"))
@@ -1886,3 +1910,20 @@ def test_review_no_api_project_default_probes_no_false_positive(
     rep = report.instances[0]
     assert rep.has_api_mismatch is False
     assert rep.status == "ok"
+
+
+def test_review_warns_about_benchmark_urls_even_when_local_http_works(
+    workspace, registry, config, monkeypatch
+):
+    _seed_static(
+        workspace,
+        registry,
+        "demo",
+        lan_url="http://198.18.0.1:21000",
+        route_host="demo",
+        route_url="http://198.18.0.1:8080/demo/",
+    )
+    monkeypatch.setattr(access_mod, "resolve_lan_ip", lambda cfg: None)
+    monkeypatch.setattr(access_mod, "_http_get", lambda url, **kwargs: _probe_ok(url))
+    monkeypatch.setattr(access_mod, "_fetch_text", lambda *a, **kw: None)
+    assert review_access(workspace, config, registry).overall == "warn"

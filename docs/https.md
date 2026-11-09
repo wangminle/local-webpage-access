@@ -1,6 +1,6 @@
 # HTTPS 传输加密（gatewayTls）
 
-> 适用版本：V0.10.0（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
+> 适用版本：V0.10.1（HTTPS 自 V0.9.0 起；V0.9.1 起 LAN IP 漂移会重载在线 Caddy 的 TLS 站点绑定）。
 > 目标：保护 LAN 管理凭据与应用登录的传输安全——明文只存在于回环。
 
 ## 1. 支持矩阵
@@ -90,9 +90,9 @@ Tailscale HTTPS 主机同步覆盖别名和管理面两个端口。已有配置�
 自动刷新沿用现有 `lanIpStrategy: auto` 的管理页/daemon 检查；手工 LAN 策略不会自动
 改写实例地址（需显式执行 `lwa access refresh`），但管理页/daemon 周期检查仍会按
 `manualLanIp` 同步在线 Caddy 的 TLS 主机集合（含晚于网关上线的 Tailscale 地址），
-网关关闭时不会被拉起。LAN 探测失败或 Tailscale
-探测超时、权限/命令错误、后端 Running 但控制面暂时离线时，保留既有 TLS 名称；后者仍允许加入当前已确认的
-LAN 地址，待探测恢复后再清理过期名称。
+网关关闭时不会被拉起。LAN 探测失败时，地址刷新保留现有 manifest 和在线 Caddy 配置。
+Tailscale 探测超时、权限或命令错误、控制面暂时离线时，重算 TLS 主机集合仍会保留旧名称，
+排除遗留的 benchmark 地址，并可加入当前已确认的 LAN 地址。
 首次启动无 LAN 地址时仍可生成已探测到的 Tailscale 入口。这里的本机状态检测
 不证明其他 tailnet 节点已获 ACL/防火墙访问权限，实际访问应由另一节点验证。
 

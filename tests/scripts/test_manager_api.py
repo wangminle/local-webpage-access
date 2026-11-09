@@ -3165,14 +3165,15 @@ def test_list_instances_throttles_refresh_write(manager_env: EnvBundle, monkeypa
 
 def test_manual_strategy_list_does_not_auto_refresh(manager_env: EnvBundle, monkeypatch) -> None:
     from local_webpage_access import access_workflow as aw
+    from local_webpage_access.lan_policy import write_lan_policy
     from local_webpage_access.models import InstanceManifest
 
     # 本用例模拟原生 LAN，避免宿主 WSL 快照覆盖手动 IP。
     monkeypatch.setattr(
         "local_webpage_access.wsl_network.collect_wsl_network_snapshot", lambda: None
     )
-    manager_env.config.lanIpStrategy = "manual"
-    manager_env.config.manualLanIp = "192.168.9.9"
+    assert manager_env.config.lanIpStrategy == "auto"
+    write_lan_policy(manager_env.workspace, "192.168.9.9")
     iid = manager_env.instance_id
     path = manager_env.workspace.app_manifest_path(iid)
     manifest = InstanceManifest.load(path)

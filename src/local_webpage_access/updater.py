@@ -1443,7 +1443,11 @@ def _run_runtime_phase(
         report.steps.append(_check_single_caddy_master(workspace, config))
 
     # ---- 9.5 IMP-038：后台重启后再 refresh；review 单独走防抖（DEV-114）----
-    from local_webpage_access.access_workflow import review_access_with_debounce, run_access_pass
+    from local_webpage_access.access_workflow import (
+        DEFAULT_ACCESS_LOCK_TIMEOUT,
+        review_access_with_debounce,
+        run_access_pass,
+    )
 
     access = run_access_pass(
         workspace,
@@ -1451,18 +1455,30 @@ def _run_runtime_phase(
         registry,
         review=False,
         dry_run=False,
+        refresh_lock_timeout=DEFAULT_ACCESS_LOCK_TIMEOUT,
     )
     if access.refresh_error:
         report.steps.append(StepResult("accessRefresh", "failed", access.refresh_error))
     elif access.refresh is not None:
+        refreshed = access.refresh
+        message = (
+            f"LAN IP={refreshed.lan_ip or '(无)'}，"
+            f"刷新 {len(refreshed.refreshed)}，漂移 {refreshed.drifted_count}"
+        )
+        if refreshed.lock_retries:
+            message += f"，锁重试 {refreshed.lock_retries} 次/{refreshed.lock_waited:.1f}s"
+        if refreshed.lock_skipped:
+            reason = "LAN 策略已变化，待刷新" if refreshed.lan_reason == "policy_changed" else "仍被占用"
+            message += (
+                f"；部分完成，{reason}：" + ", ".join(refreshed.lock_skipped)
+                + "；请在实例操作结束后运行 lwa access refresh"
+            )
         report.steps.append(
             StepResult(
                 "accessRefresh",
-                "ok",
-                f"LAN IP={access.refresh.lan_ip or '(无)'}，"
-                f"刷新 {len(access.refresh.refreshed)}，"
-                f"漂移 {access.refresh.drifted_count}",
-                extra={"accessRefresh": access.refresh.to_dict()},
+                "warning" if refreshed.lock_skipped else "ok",
+                message,
+                extra={"accessRefresh": refreshed.to_dict()},
             )
         )
     else:
